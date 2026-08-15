@@ -84,6 +84,10 @@ pub struct WorkflowLaunchSpec {
     pub args: Option<Value>,
     /// Resume a prior run by its `wf_…` id.
     pub resume_from_run_id: Option<String>,
+    /// Internal host pin for an explicit resume. Tool-driven launches leave
+    /// this unset and resolve the current session at launch time; mobile UI
+    /// resumes set it so a concurrent session switch cannot retarget the run.
+    pub session_uuid: Option<String>,
 }
 
 /// The result of a successful launch.
@@ -223,6 +227,70 @@ where
     Err(WorkflowLaunchError(
         "Must provide script, name, or scriptPath".into(),
     ))
+}
+
+/// Apply the configured local-app workflow model as a DEFAULT for
+/// `local-app-build`. An explicit `args.model` wins and is never overwritten.
+pub fn apply_local_app_build_default_model(
+    cwd: &Path,
+    workflow_name: Option<&str>,
+    args: &mut Option<Value>,
+) -> Result<(), WorkflowLaunchError> {
+    if workflow_name != Some("local-app-build") {
+        return Ok(());
+    }
+    // `args.model` is the call-site authority. Do not even read app metadata
+    // when it is present: a stale or malformed `.lingxi/app.json` must not
+    // make an otherwise self-contained explicit launch fail.
+    if args
+        .as_ref()
+        .and_then(Value::as_object)
+        .is_some_and(|object| object.contains_key("model"))
+    {
+        return Ok(());
+    }
+    let path = cwd.join(".lingxi").join("app.json");
+    let metadata = match std::fs::read_to_string(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(WorkflowLaunchError(format!(
+                "cannot read app workflow model from '{}': {error}",
+                path.display()
+            )))
+        }
+    };
+    let metadata: Value = serde_json::from_str(&metadata).map_err(|error| {
+        WorkflowLaunchError(format!(
+            "cannot parse app workflow model from '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let Some(model) = metadata
+        .pointer("/app/workflowModel")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    else {
+        return Ok(());
+    };
+    let object = match args {
+        Some(Value::Object(object)) => object,
+        None => {
+            *args = Some(Value::Object(serde_json::Map::new()));
+            args.as_mut()
+                .and_then(Value::as_object_mut)
+                .expect("new object")
+        }
+        Some(_) => {
+            return Err(WorkflowLaunchError(
+                "local-app-build args must be an object so the configured model can be applied"
+                    .to_string(),
+            ))
+        }
+    };
+    object.insert("model".to_string(), Value::String(model.to_string()));
+    Ok(())
 }
 
 // ── Save dynamic workflow (claude-code `eya` / `uQ_`, dialog mode:"save") ─────
@@ -519,6 +587,7 @@ impl WorkflowTool {
             script_path: s("scriptPath"),
             args: input.get("args").cloned(),
             resume_from_run_id: s("resumeFromRunId"),
+            session_uuid: None,
         }
     }
 
@@ -1039,6 +1108,54 @@ mod tests {
     fn workflow_listing_always_includes_builtin_names() {
         let names = WorkflowTool::list_available_workflow_names().expect("built-ins");
         assert!(names.split(", ").any(|name| name == "deep-research"));
+    }
+
+    #[test]
+    fn explicit_local_app_model_bypasses_malformed_app_metadata() {
+        let cwd = unique_temp_path("explicit-model-malformed-metadata");
+        std::fs::create_dir_all(cwd.join(".lingxi")).expect("create app metadata dir");
+        std::fs::write(cwd.join(".lingxi/app.json"), b"{not-json")
+            .expect("write malformed app metadata");
+        let mut args = Some(serde_json::json!({
+            "model": "deepseek::deepseek-chat",
+            "app_id": "demo"
+        }));
+
+        apply_local_app_build_default_model(&cwd, Some("local-app-build"), &mut args)
+            .expect("an explicit model must not parse app metadata");
+
+        assert_eq!(
+            args,
+            Some(serde_json::json!({
+                "model": "deepseek::deepseek-chat",
+                "app_id": "demo"
+            }))
+        );
+        let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn local_app_metadata_model_remains_the_default_without_an_explicit_model() {
+        let cwd = unique_temp_path("metadata-default-model");
+        std::fs::create_dir_all(cwd.join(".lingxi")).expect("create app metadata dir");
+        std::fs::write(
+            cwd.join(".lingxi/app.json"),
+            br#"{"app":{"workflowModel":"deepseek::deepseek-chat"}}"#,
+        )
+        .expect("write app metadata");
+        let mut args = Some(serde_json::json!({"app_id": "demo"}));
+
+        apply_local_app_build_default_model(&cwd, Some("local-app-build"), &mut args)
+            .expect("metadata default applies");
+
+        assert_eq!(
+            args,
+            Some(serde_json::json!({
+                "app_id": "demo",
+                "model": "deepseek::deepseek-chat"
+            }))
+        );
+        let _ = std::fs::remove_dir_all(cwd);
     }
 
     #[test]

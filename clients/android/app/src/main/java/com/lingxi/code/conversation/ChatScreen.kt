@@ -131,6 +131,8 @@ fun ChatScreen(
     onAnswerQuestion: (requestId: ULong, answers: Map<String, String>) -> Unit = { _, _ -> },
     /** Dismiss the pending questionnaire card. */
     onCancelQuestion: (requestId: ULong) -> Unit = {},
+    /** Resume a paused workflow directly from the execution card. */
+    onResumeWorkflow: (String) -> Unit = {},
     /**
      * Expand / collapse one tool call's result body or diff, by tool-use id.
      * The expanded set lives in [ChatState] (not row-local state) because every
@@ -218,25 +220,18 @@ fun ChatScreen(
                 state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
             }
             state.statusLine?.let { StatusRow(text = it) }
-            // Agent work stays pinned with Tasks/Todos until asynchronous
-            // coordinator workers also report idle. Only then does its outcome
-            // move into the transcript after the assistant message.
-            agentRunForBottomPanel(state)?.let { run ->
-                AgentRunTimeline(
-                    state = run,
-                    modifier = Modifier
-                        .padding(horizontal = 14.dp)
-                        .padding(bottom = 6.dp),
-                    expandedToolCalls = state.expandedToolCalls,
-                    onToggleToolCall = onToggleToolCall,
-                )
-            }
-            // The model-managed plan stays closest to the composer — the same
-            // slot the terminal pins it in.
-            PlanTasksPanel(
-                tasks = state.planTasks,
-                expanded = state.planExpanded,
-                onToggleExpanded = onTogglePlan,
+            ExecutionStatusPanel(
+                tasks = state.backgroundTasks.values.toList(),
+                workflows = state.workflowRuns.values.toList(),
+                agents = state.sessionAgents,
+                planTasks = state.planTasks,
+                planExpanded = state.planExpanded,
+                onTogglePlan = onTogglePlan,
+                onResumeWorkflow = onResumeWorkflow,
+                resumeState = state.workflowResumeState,
+                agentRun = agentRunForBottomPanel(state),
+                expandedToolCalls = state.expandedToolCalls,
+                onToggleToolCall = onToggleToolCall,
             )
             flowModePanel?.invoke()
             Composer(

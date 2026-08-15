@@ -1084,6 +1084,7 @@ impl CommandRouter for EngineCommandRouter {
                         sink.emit(ClientEvent::TaskStatusChanged {
                             task_id: rec.task_id,
                             status: client_adapter::lowering::lower_task_status(&rec.status),
+                            origin_session_id: None,
                         })
                         .await;
                     }
@@ -1095,6 +1096,18 @@ impl CommandRouter for EngineCommandRouter {
                         .await;
                     }
                 }
+            }
+
+            // Workflow resume is a mobile/local-app host capability. The
+            // desktop bridge has no workflow launcher bound into this router;
+            // surface that fact as a protocol error instead of silently
+            // dropping the command in the catch-all below.
+            ClientCommand::ResumeWorkflow { .. } => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "resume_workflow is unavailable on this bridge".to_string(),
+                })
+                .await;
             }
 
             // ── Handled elsewhere / not routed by this seam ──────────────────
@@ -1141,6 +1154,7 @@ fn command_source_string(source: CommandSource) -> &'static str {
 fn task_status_wire(status: TaskStatusDto) -> String {
     match status {
         TaskStatusDto::Running => "running",
+        TaskStatusDto::Paused => "paused",
         TaskStatusDto::Completed => "completed",
         TaskStatusDto::Failed => "failed",
         // The DTO's user-stop variant maps to the registry's terminal "killed".

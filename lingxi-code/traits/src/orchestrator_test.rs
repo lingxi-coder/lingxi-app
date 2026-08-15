@@ -624,6 +624,59 @@ mod parse_model_ref_tests {
 }
 
 #[cfg(test)]
+mod reasoning_controls_tests {
+    use super::{
+        reasoning_control_spec_for_model, validated_reasoning_selection_for_model,
+        ReasoningSelection,
+    };
+
+    #[test]
+    fn unknown_models_are_auto_only() {
+        let spec = reasoning_control_spec_for_model("future-model", Some("openai"));
+        assert_eq!(spec.available, vec![ReasoningSelection::Automatic]);
+        assert_eq!(
+            validated_reasoning_selection_for_model(
+                &ReasoningSelection::Level { id: "high".into() },
+                "future-model",
+                Some("openai"),
+            ),
+            ReasoningSelection::Automatic
+        );
+    }
+
+    #[test]
+    fn forced_reasoning_models_report_effective_provider_default() {
+        let spec = reasoning_control_spec_for_model("deepseek-reasoner", Some("deepseek"));
+        assert!(spec.forced);
+        assert!(!spec.modifiable);
+        assert_eq!(spec.provider_default, ReasoningSelection::Enabled);
+        assert_eq!(
+            validated_reasoning_selection_for_model(
+                &ReasoningSelection::Automatic,
+                "deepseek-reasoner",
+                Some("deepseek"),
+            ),
+            ReasoningSelection::Enabled
+        );
+    }
+
+    #[test]
+    fn gemini_25_exposes_budget_bounds_without_inventing_levels() {
+        let spec = reasoning_control_spec_for_model("gemini-2.5-flash", Some("gemini"));
+        assert_eq!(
+            spec.available,
+            vec![ReasoningSelection::Automatic, ReasoningSelection::Disabled]
+        );
+        let range = spec.budget_range.expect("Gemini 2.5 budget range");
+        assert_eq!((range.min_tokens, range.max_tokens), (0, 24_576));
+        assert!(spec
+            .available
+            .iter()
+            .all(|selection| { !matches!(selection, ReasoningSelection::Level { .. }) }));
+    }
+}
+
+#[cfg(test)]
 mod curated_model_tests {
     use super::{
         curated_model_names, curated_model_refs, is_curated_model, qualified_model_ref,

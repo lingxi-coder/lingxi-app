@@ -13,6 +13,8 @@ pub enum TaskStatus {
     Pending,
     /// Currently executing.
     Running,
+    /// Checkpointed and waiting for an explicit resume.
+    Paused,
     /// Finished successfully.
     Completed,
     /// Finished with an error.
@@ -267,6 +269,11 @@ pub struct LocalWorkflowTaskState {
     /// Shared base fields.
     #[serde(flatten)]
     pub base: TaskStateBase,
+    /// Session that owns this workflow row. Mobile uses this to keep TaskList
+    /// and `/workflows` scoped to the live session while desktop leaves the
+    /// registry unfiltered.
+    #[serde(default)]
+    pub session_uuid: Option<String>,
     /// Workflow identifier.
     pub workflow_id: String,
     /// The model-authored workflow script source (carried for resume).
@@ -284,6 +291,12 @@ pub struct LocalWorkflowTaskState {
     /// `resumeFromRunId` that names a still-running workflow.
     #[serde(default)]
     pub run_id: Option<String>,
+    /// Persisted script path used to explicitly resume an adopted workflow.
+    #[serde(default)]
+    pub script_path: Option<String>,
+    /// Directory containing this run's append-only `journal.jsonl`.
+    #[serde(default)]
+    pub transcript_dir: Option<PathBuf>,
     /// Index of the currently-executing step.
     pub current_step: usize,
 }

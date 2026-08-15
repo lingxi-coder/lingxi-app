@@ -41,6 +41,7 @@
     <!-- New: background task transition notices. -->
     <string name="chat_task_status_pending">后台任务 %1$s 已排队</string>
     <string name="chat_task_status_running">后台任务 %1$s 运行中</string>
+    <string name="chat_task_status_paused">后台任务 %1$s 已暂停</string>
     <string name="chat_task_status_completed">后台任务 %1$s 已完成</string>
     <string name="chat_task_status_failed">后台任务 %1$s 已失败</string>
     <string name="chat_task_status_cancelled">后台任务 %1$s 已取消</string>

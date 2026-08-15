@@ -51,11 +51,11 @@ pub use events::{
 };
 pub use manifest::{
     load_manifest, save_manifest, AppLayout, AppManifest, DataCollectionSchema, DataFieldKind,
-    DataFieldSchema, DeviceContext, DeviceInsets, DeviceViewport,
+    DataFieldSchema, DeviceContext, DeviceInsets, DeviceViewport, WORKSPACE_SETTINGS_LOCAL_FILE,
 };
 pub use permissions::{
-    load_permissions, save_permissions, AppCapability, AppPermissions, PermissionDecision,
-    SessionPermissions,
+    load_permissions, save_permissions, save_workspace_permission_settings, AppCapability,
+    AppPermissions, PermissionDecision, SessionPermissions, LOCAL_APP_WORKSPACE_PERMISSION_RULES,
 };
 pub use service::AppService;
 pub use state::{runtime_transition_allowed, AppState};

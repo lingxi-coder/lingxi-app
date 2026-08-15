@@ -1,5 +1,18 @@
 import SwiftUI
 
+private extension ConversationAgentSummary {
+    var modelDisplayLabel: String? {
+        guard let model = model?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !model.isEmpty else { return nil }
+        let reference = modelProfile
+            .flatMap { $0.isEmpty ? nil : "\($0)/\(model)" }
+            ?? model
+        let item = ModelDisplay.item(for: reference)
+        guard item.providerId != "other" else { return item.shortName }
+        return "\(ModelDisplay.providerName(for: item.providerId)) · \(item.shortName)"
+    }
+}
+
 /// A compact, always-visible status surface for the currently selected agent.
 ///
 /// The dock deliberately keeps its collapsed footprint to a single row so the
@@ -137,15 +150,18 @@ struct AgentStatusDock<Details: View>: View {
     }
 
     private var displayActivity: String {
+        let activity: String
         if let latestActivity, !latestActivity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return latestActivity
+            activity = latestActivity
+        } else if let latest = selectedAgent?.latestActivity,
+                  !latest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            activity = latest
+        } else {
+            activity = selectedAgent.map { AgentStatusPresentation(rawValue: $0.status).label }
+                ?? String(localized: "chat_agent_status_idle")
         }
-        if let activity = selectedAgent?.latestActivity,
-           !activity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return activity
-        }
-        return selectedAgent.map { AgentStatusPresentation(rawValue: $0.status).label }
-            ?? String(localized: "chat_agent_status_idle")
+        guard let model = selectedAgent?.modelDisplayLabel else { return activity }
+        return "\(activity) · \(model)"
     }
 
     private var statusColor: Color {
@@ -172,6 +188,7 @@ private struct AgentPickerSheet: View {
                         nil,
                         name: mainAgent?.name ?? String(localized: "chat_agent_main"),
                         type: mainAgent?.agentType,
+                        model: mainAgent?.modelDisplayLabel,
                         status: mainAgent?.status ?? "idle",
                         activity: mainAgent?.latestActivity
                     )
@@ -217,6 +234,7 @@ private struct AgentPickerSheet: View {
             agent.id,
             name: agent.name,
             type: agent.agentType,
+            model: agent.modelDisplayLabel,
             status: agent.status,
             activity: agent.latestActivity
         )
@@ -226,6 +244,7 @@ private struct AgentPickerSheet: View {
         _ id: String?,
         name: String,
         type: String?,
+        model: String?,
         status: String,
         activity: String?
     ) -> some View {
@@ -247,7 +266,11 @@ private struct AgentPickerSheet: View {
                                 .foregroundStyle(t.text4)
                         }
                     }
-                    Text(activityText(activity, fallback: AgentStatusPresentation(rawValue: status).label))
+                    Text(activityText(
+                        activity,
+                        fallback: AgentStatusPresentation(rawValue: status).label,
+                        model: model
+                    ))
                         .font(.system(size: 11.5))
                         .foregroundStyle(t.text3)
                         .lineLimit(1)
@@ -274,11 +297,13 @@ private struct AgentPickerSheet: View {
         AgentStatusPresentation(rawValue: status).color(using: t)
     }
 
-    private func activityText(_ activity: String?, fallback: String) -> String {
-        guard let activity else { return fallback }
-        let value = activity.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? fallback : value
+    private func activityText(_ activity: String?, fallback: String, model: String?) -> String {
+        let value = activity?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let status = value.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+        guard let model else { return status }
+        return "\(status) · \(model)"
     }
+
 }
 
 enum AgentStatusPresentation: Equatable {

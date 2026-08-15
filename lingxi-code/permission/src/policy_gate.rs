@@ -41,8 +41,9 @@
 use crate::classifier::{classify_tool_call, reason_allows_classifier, AutoModeClassifierVerdict};
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{
-    MatchedAskRule, PermissionCheckContext, PermissionDecision, PermissionDecisionSource,
-    PermissionGate, PermissionOutcome, PermissionResolution, PromptDefault,
+    MatchedAskRule, PermissionAbort, PermissionCheckContext, PermissionDecision,
+    PermissionDecisionSource, PermissionGate, PermissionOutcome, PermissionResolution,
+    PromptDefault,
 };
 use crate::mode::PermissionMode;
 use crate::policy::PermissionPolicy;
@@ -72,6 +73,15 @@ pub struct LiveModelContext {
 /// the value cannot be read without blocking (a contended session lock), so the
 /// caller fails OPEN rather than stall the control request.
 pub type LiveModelProvider = Arc<dyn Fn() -> Option<LiveModelContext> + Send + Sync>;
+
+/// Result of the optional auto-mode classifier pass. The interactive breaker
+/// fallback carries its rewritten reason forward to the prompt transport;
+/// keeping it in this value avoids a shared mutable side-channel.
+enum AutoModeClassifierResult {
+    NoDecision,
+    Classified(PermissionResult),
+    PromptFallback { decision_reason: String },
+}
 
 #[derive(Debug, Clone)]
 struct LivePermissionState {
@@ -225,6 +235,27 @@ impl PolicyPermissionGate {
         !crate::auto_gate::model_supports_auto_mode(&context.model, &context.provider)
     }
 
+    /// `One()` — the live reason auto mode is unavailable, in the oracle's
+    /// user-facing precedence. Shared by the session-wide mode switch and the
+    /// per-MCP-server auto pin so neither control surface can bypass the other.
+    fn auto_mode_denial_reason(&self) -> Option<crate::auto_gate::AutoGateDenialReason> {
+        if self.policy.auto_mode_disabled {
+            Some(crate::auto_gate::AutoGateDenialReason::Settings)
+        } else if self
+            .policy
+            .denial_tracking
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_circuit_broken()
+        {
+            Some(crate::auto_gate::AutoGateDenialReason::CircuitBreaker)
+        } else if self.live_model_unsupported_for_auto() {
+            Some(crate::auto_gate::AutoGateDenialReason::Model)
+        } else {
+            None
+        }
+    }
+
     /// Authorize under the LIVE mode: the `set_permission_mode` override when
     /// set, else the policy's boot mode. Shared by every non-plan check path so a
     /// runtime mode change takes effect everywhere at once.
@@ -263,8 +294,17 @@ impl PolicyPermissionGate {
     }
 
     fn effective_authorize(&self, name: &str, input: &Value) -> (PermissionMode, PermissionResult) {
+        self.effective_authorize_with_lease(name, input, None)
+    }
+
+    fn effective_authorize_with_lease(
+        &self,
+        name: &str,
+        input: &Value,
+        workspace_lease_token: Option<u64>,
+    ) -> (PermissionMode, PermissionResult) {
         let mode = self.effective_mode_for_tool(name);
-        (mode, self.authorize_with_live_state(name, input, mode))
+        (mode, self.authorize_with_live_state(name, input, mode, workspace_lease_token))
     }
 
     /// claude-code `_pt` — the RULE + SAFETY verdict for a call, with **NO MODE
@@ -308,7 +348,7 @@ impl PolicyPermissionGate {
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
-        let (mode, verdict) = self.rule_or_safety_verdict(name, input);
+        let (mode, verdict) = self.rule_or_safety_verdict(name, input, ctx.workspace_lease_token);
         match verdict {
             Some(PermissionResult::Deny {
                 reason,
@@ -396,9 +436,15 @@ impl PolicyPermissionGate {
         &self,
         name: &str,
         input: &Value,
+        workspace_lease_token: Option<u64>,
     ) -> (PermissionMode, Option<PermissionResult>) {
         let mode = self.effective_mode_for_tool(name);
-        let result = self.authorize_with_live_state(name, input, PermissionMode::Default);
+        let result = self.authorize_with_live_state(
+            name,
+            input,
+            PermissionMode::Default,
+            workspace_lease_token,
+        );
         let verdict = match &result {
             // Deny rules + the tool's own `checkPermissions` denies. (A
             // mode-sourced deny cannot occur here: `deny_with_mode` is reachable
@@ -444,8 +490,14 @@ impl PolicyPermissionGate {
         name: &str,
         input: &Value,
         mode: PermissionMode,
+        workspace_lease_token: Option<u64>,
     ) -> PermissionResult {
-        self.live_policy().authorize_with_mode(name, input, mode)
+        self.live_policy().authorize_with_mode_and_workspace_lease(
+            name,
+            input,
+            mode,
+            workspace_lease_token,
+        )
     }
 
     fn live_policy(&self) -> PermissionPolicy {
@@ -506,10 +558,20 @@ impl PolicyPermissionGate {
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
             PermissionResult::Ask { ref reason, .. } => {
-                if let Some(classified) =
-                    self.auto_mode_classifier_result(mode, reason, name, input)
-                {
-                    return self.classified_result_to_decision(classified, name);
+                match self.auto_mode_classifier_result(mode, reason, name, input, false) {
+                    Ok(AutoModeClassifierResult::Classified(classified)) => {
+                        return self.classified_result_to_decision(classified, name);
+                    }
+                    Ok(AutoModeClassifierResult::NoDecision)
+                    | Ok(AutoModeClassifierResult::PromptFallback { .. }) => {}
+                    Err(abort) => {
+                        // `false` above makes this unreachable; retain a
+                        // fail-closed mapping for custom/future classifiers on
+                        // this legacy two-valued surface.
+                        return PermissionDecision::Deny {
+                            reason: abort.message,
+                        };
+                    }
                 }
                 if read_only_default_auto_allows(name, reason) {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
@@ -543,7 +605,7 @@ impl PolicyPermissionGate {
         name: &str,
         input: &Value,
         ctx: &PermissionCheckContext,
-    ) -> PermissionOutcome {
+    ) -> Result<PermissionOutcome, PermissionAbort> {
         match result {
             // A policy-rule allow may itself carry a rewritten input — surface it
             // (previously dropped at the `PermissionDecision::Allow` boundary). The
@@ -552,11 +614,11 @@ impl PolicyPermissionGate {
             // `permission_updates` is always empty on this path.
             PermissionResult::Allow { updated_input, .. } => {
                 self.record_auto_mode_non_deny(mode);
-                PermissionOutcome::Allow {
+                Ok(PermissionOutcome::Allow {
                     updated_input,
                     permission_updates: Vec::new(),
                     decision_classification: None,
-                }
+                })
             }
             PermissionResult::Deny {
                 reason,
@@ -574,7 +636,7 @@ impl PolicyPermissionGate {
                 self.inner
                     .on_permission_denied(name, ctx, drt, dr.as_deref(), &message)
                     .await;
-                PermissionOutcome::Deny { reason: message }
+                Ok(PermissionOutcome::Deny { reason: message })
             }
             PermissionResult::Ask {
                 ref reason,
@@ -591,20 +653,32 @@ impl PolicyPermissionGate {
                 // (`DenyOnAskGate`) — the same outcome as CC's floor. Without this,
                 // Auto mode re-allows the tool, the 2.1.207 regression 211/215
                 // removed.
-                if !ctx.hook_ask_floor {
-                    if let Some(classified) =
-                        self.auto_mode_classifier_result(mode, reason, name, input)
-                    {
-                        return self.classified_result_to_outcome(classified, name);
+                let fallback_decision_reason = if !ctx.hook_ask_floor {
+                    match self.auto_mode_classifier_result(
+                        mode,
+                        reason,
+                        name,
+                        input,
+                        ctx.is_non_interactive_session,
+                    )? {
+                        AutoModeClassifierResult::Classified(classified) => {
+                            return Ok(self.classified_result_to_outcome(classified, name));
+                        }
+                        AutoModeClassifierResult::PromptFallback { decision_reason } => {
+                            Some(decision_reason)
+                        }
+                        AutoModeClassifierResult::NoDecision => None,
                     }
-                }
+                } else {
+                    None
+                };
                 if read_only_default_auto_allows(name, reason) {
                     self.record_auto_mode_non_deny(mode);
-                    PermissionOutcome::Allow {
+                    Ok(PermissionOutcome::Allow {
                         updated_input: None,
                         permission_updates: Vec::new(),
                         decision_classification: None,
-                    }
+                    })
                 } else {
                     // Delegate to the inner transport WITH the context so a stdio
                     // `can_use_tool` request carries the real tool_use_id and its
@@ -616,8 +690,19 @@ impl PolicyPermissionGate {
                     // The turn loop builds the ctx with only `tool_use_id`; we add
                     // the reason without touching the unit `PermissionResolution::Ask`.
                     let mut ctx2 = ctx.clone();
-                    ctx2.decision_reason = serialize_decision_reason(reason);
-                    ctx2.decision_reason_type = decision_reason_type(reason).map(str::to_string);
+                    let breaker_fallback = fallback_decision_reason.is_some();
+                    if ctx2.decision_reason.is_none() {
+                        ctx2.decision_reason = fallback_decision_reason
+                            .clone()
+                            .or_else(|| serialize_decision_reason(reason));
+                    }
+                    if ctx2.decision_reason_type.is_none() {
+                        ctx2.decision_reason_type = if breaker_fallback {
+                            Some("classifier".to_string())
+                        } else {
+                            decision_reason_type(reason).map(str::to_string)
+                        };
+                    }
                     // These two fields are functions of the authoritative
                     // decision reason. Clear any stale caller value when the
                     // reason does not support it instead of emitting metadata
@@ -649,7 +734,7 @@ impl PolicyPermissionGate {
                             self.apply_permission_updates(permission_updates);
                         }
                     }
-                    outcome
+                    Ok(outcome)
                 }
             }
         }
@@ -657,7 +742,9 @@ impl PolicyPermissionGate {
 
     /// Like [`Self::decide`] but WITHOUT consulting the inner prompt transport:
     /// returns a [`PermissionResolution`] that carries the deny SOURCE and, for a
-    /// would-be prompt, an [`PermissionResolution::Ask`] instead of resolving it.
+    /// would-be prompt, an [`PermissionResolution::Ask`] (or
+    /// [`PermissionResolution::AskWithContext`] when the classifier breaker
+    /// rewrites the reason) instead of resolving it.
     /// The turn loop uses this to fire the source-gated permission hooks
     /// (`PermissionRequest` on `Ask`, `PermissionDenied` on a classifier `Deny`)
     /// before delegating to the transport. See [`PermissionGate::resolve_detailed`].
@@ -667,16 +754,17 @@ impl PolicyPermissionGate {
         result: PermissionResult,
         name: &str,
         input: &Value,
-    ) -> PermissionResolution {
+        is_non_interactive_session: bool,
+    ) -> Result<PermissionResolution, PermissionAbort> {
         match result {
-            PermissionResult::Allow { ref reason, .. } => PermissionResolution::Allow {
+            PermissionResult::Allow { ref reason, .. } => Ok(PermissionResolution::Allow {
                 rule_source: rule_settings_source(reason),
-            },
+            }),
             PermissionResult::Deny {
                 reason,
                 explanation,
                 ..
-            } => PermissionResolution::Deny {
+            } => Ok(PermissionResolution::Deny {
                 source: map_decision_source(&reason),
                 rule_source: rule_settings_source(&reason),
                 // GATE-SYSMSG-01: pre-compute the system-message discriminants from
@@ -693,22 +781,41 @@ impl PolicyPermissionGate {
                 // top-level-image path stays dormant — byte-identical to before.
                 behavior_ask: false,
                 content_blocks: Vec::new(),
-            },
+            }),
             PermissionResult::Ask { ref reason, .. } => {
-                if let Some(classified) =
-                    self.auto_mode_classifier_result(mode, reason, name, input)
-                {
-                    return self.resolve_with_mode(mode, classified, name, input);
+                match self.auto_mode_classifier_result(
+                    mode,
+                    reason,
+                    name,
+                    input,
+                    is_non_interactive_session,
+                )? {
+                    AutoModeClassifierResult::Classified(classified) => {
+                        return self.resolve_with_mode(
+                            mode,
+                            classified,
+                            name,
+                            input,
+                            is_non_interactive_session,
+                        );
+                    }
+                    AutoModeClassifierResult::PromptFallback { decision_reason } => {
+                        return Ok(PermissionResolution::AskWithContext {
+                            decision_reason_type: Some("classifier".to_string()),
+                            decision_reason: Some(decision_reason),
+                        });
+                    }
+                    AutoModeClassifierResult::NoDecision => {}
                 }
                 if read_only_default_auto_allows(name, reason) {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
                     // auto-allowed, no prompt. No rule matched, so no scope.
-                    PermissionResolution::Allow { rule_source: None }
+                    Ok(PermissionResolution::Allow { rule_source: None })
                 } else {
                     // A would-be prompt (a mutating tool, OR an explicit `ask`
                     // rule on a read-only tool): the turn loop fires
                     // PermissionRequest before this is delegated to the transport.
-                    PermissionResolution::Ask
+                    Ok(PermissionResolution::Ask)
                 }
             }
         }
@@ -720,12 +827,13 @@ impl PolicyPermissionGate {
         reason: &PermissionDecisionReason,
         name: &str,
         input: &Value,
-    ) -> Option<PermissionResult> {
+        is_non_interactive_session: bool,
+    ) -> Result<AutoModeClassifierResult, PermissionAbort> {
         if mode != PermissionMode::Auto
             || !crate::classifier::is_classifier_permissions_enabled()
             || !reason_allows_classifier(reason)
         {
-            return None;
+            return Ok(AutoModeClassifierResult::NoDecision);
         }
         {
             let tracking = self
@@ -734,21 +842,23 @@ impl PolicyPermissionGate {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if tracking.is_circuit_broken() {
-                return None;
+                return Ok(AutoModeClassifierResult::NoDecision);
             }
         }
         match classify_tool_call(name, input) {
             AutoModeClassifierVerdict::Allow { score, .. } => {
                 self.record_auto_mode_non_deny(mode);
-                Some(PermissionResult::Allow {
-                    reason: PermissionDecisionReason::ClassifierApproved {
-                        classifier: ClassifierKind::Transcript,
-                        score,
+                Ok(AutoModeClassifierResult::Classified(
+                    PermissionResult::Allow {
+                        reason: PermissionDecisionReason::ClassifierApproved {
+                            classifier: ClassifierKind::Transcript,
+                            score,
+                        },
+                        updated_input: None,
+                        update_destination: None,
+                        metadata: PermissionMetadata::default(),
                     },
-                    updated_input: None,
-                    update_destination: None,
-                    metadata: PermissionMetadata::default(),
-                })
+                ))
             }
             AutoModeClassifierVerdict::Deny { score, reason, .. } => {
                 let mut tracking = self
@@ -757,34 +867,41 @@ impl PolicyPermissionGate {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 tracking.record_auto_deny();
-                // (PERM-AUTO-07, partial) Consume the breaker trip so it is no
-                // longer silently swallowed: log the fallback warn line, then
-                // fall back to prompting (return None → the caller resolves to
-                // Ask). FULL fidelity — threading real `shouldAvoidPermissionPrompts`
-                // to abort headless runs, emitting DENIAL_LIMIT_EVENT, and carrying
-                // `trip.decision_reason(...)` onto the Ask — needs a telemetry +
-                // headless seam in the gate (documented follow-up in
-                // denial_tracking.rs), so `headless` stays `false` here for now.
-                if let Some(trip) = tracking.trip(false) {
+                if let Some(trip) = tracking.trip(is_non_interactive_session) {
                     telemetry::emit_auto_mode_denial_limit_exceeded(
                         trip.mode_tag(),
                         trip.consecutive_denials,
                         trip.total_denials,
                         name,
                     );
+                    if trip.headless {
+                        return Err(PermissionAbort {
+                            message:
+                                crate::denial_tracking::DenialBreakerTrip::HEADLESS_ABORT_MESSAGE
+                                    .to_string(),
+                        });
+                    }
                     tracing::warn!(target: "permission", "{}", trip.fallback_warn_line());
-                    return None;
+                    return Ok(AutoModeClassifierResult::PromptFallback {
+                        // Claude's breaker receives the classifier's own
+                        // human-readable blocked-action reason (`q.reason`),
+                        // not a synthesized tool-name prefix.
+                        decision_reason: trip.decision_reason(&reason),
+                    });
                 }
-                Some(PermissionResult::Deny {
-                    reason: PermissionDecisionReason::ClassifierRejected {
-                        classifier: ClassifierKind::Transcript,
-                        score,
+                Ok(AutoModeClassifierResult::Classified(
+                    PermissionResult::Deny {
+                        reason: PermissionDecisionReason::ClassifierRejected {
+                            classifier: ClassifierKind::Transcript,
+                            score,
+                            reason: reason.clone(),
+                        },
+                        explanation: Some(format!("Auto mode classifier blocked action: {reason}")),
+                        metadata: PermissionMetadata::default(),
                     },
-                    explanation: Some(format!("Auto mode classifier blocked action: {reason}")),
-                    metadata: PermissionMetadata::default(),
-                })
+                ))
             }
-            AutoModeClassifierVerdict::Pass { .. } => None,
+            AutoModeClassifierVerdict::Pass { .. } => Ok(AutoModeClassifierResult::NoDecision),
         }
     }
 
@@ -1081,14 +1198,31 @@ impl PermissionGate for PolicyPermissionGate {
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
+        match self.check_with_context_or_abort(name, input, ctx).await {
+            Ok(outcome) => outcome,
+            Err(abort) => PermissionOutcome::Deny {
+                reason: abort.message,
+            },
+        }
+    }
+
+    async fn check_with_context_or_abort(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> Result<PermissionOutcome, PermissionAbort> {
         // A PER-CALL mode override (a spawned subagent's clamped spawn mode,
         // claude-code 2.1.207 `ve` → the child's `toolPermissionContext.mode`)
         // authorizes THIS call under that mode; else the live/boot mode. Only this
         // dispatch seam reads it, so the shared gate's mode is never mutated (the
         // parent's own checks are unaffected).
         let (mode, result) = match ctx.mode_override.as_deref().and_then(parse_settable_mode) {
-            Some(m) => (m, self.authorize_with_live_state(name, input, m)),
-            None => self.effective_authorize(name, input),
+            Some(m) => (
+                m,
+                self.authorize_with_live_state(name, input, m, ctx.workspace_lease_token),
+            ),
+            None => self.effective_authorize_with_lease(name, input, ctx.workspace_lease_token),
         };
         self.decide_outcome_with_context(mode, result, name, input, ctx)
             .await
@@ -1192,7 +1326,7 @@ impl PermissionGate for PolicyPermissionGate {
         name: &str,
         input: &Value,
     ) -> PermissionDecision {
-        let (mode, verdict) = self.rule_or_safety_verdict(name, input);
+        let (mode, verdict) = self.rule_or_safety_verdict(name, input, None);
         match verdict {
             Some(PermissionResult::Deny {
                 reason,
@@ -1251,7 +1385,7 @@ impl PermissionGate for PolicyPermissionGate {
     async fn check_in_plan_mode(&self, name: &str, input: &Value) -> PermissionDecision {
         self.decide(
             PermissionMode::Plan,
-            self.authorize_with_live_state(name, input, PermissionMode::Plan),
+            self.authorize_with_live_state(name, input, PermissionMode::Plan, None),
             name,
             input,
         )
@@ -1263,7 +1397,28 @@ impl PermissionGate for PolicyPermissionGate {
         // so the turn loop can read the decision source (and an about-to-ask) and
         // fire PermissionRequest / PermissionDenied before the prompt resolves.
         let (mode, result) = self.effective_authorize(name, input);
-        self.resolve_with_mode(mode, result, name, input)
+        match self.resolve_with_mode(mode, result, name, input, false) {
+            Ok(resolution) => resolution,
+            Err(abort) => PermissionResolution::Deny {
+                reason: abort.message,
+                source: PermissionDecisionSource::Unspecified,
+                rule_source: None,
+                decision_reason_type: None,
+                decision_reason: None,
+                behavior_ask: false,
+                content_blocks: Vec::new(),
+            },
+        }
+    }
+
+    async fn resolve_detailed_or_abort(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> Result<PermissionResolution, PermissionAbort> {
+        let (mode, result) = self.effective_authorize_with_lease(name, input, ctx.workspace_lease_token);
+        self.resolve_with_mode(mode, result, name, input, ctx.is_non_interactive_session)
     }
 
     /// Surface the wrapped policy's TOOL-WIDE deny-rule names so the orchestrator
@@ -1341,22 +1496,7 @@ impl PermissionGate for PolicyPermissionGate {
             // `Nle`: reject `auto` when `!P0()`. Report `One()`'s reason in the
             // binary's precedence (settings → circuit-breaker → model), rendering
             // the byte-exact `Cannot set permission mode to auto: <Jce(reason)>`.
-            let reason = if self.policy.auto_mode_disabled {
-                Some(crate::auto_gate::AutoGateDenialReason::Settings)
-            } else if self
-                .policy
-                .denial_tracking
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_circuit_broken()
-            {
-                Some(crate::auto_gate::AutoGateDenialReason::CircuitBreaker)
-            } else if self.live_model_unsupported_for_auto() {
-                Some(crate::auto_gate::AutoGateDenialReason::Model)
-            } else {
-                None
-            };
-            if let Some(reason) = reason {
+            if let Some(reason) = self.auto_mode_denial_reason() {
                 return Err(crate::auto_gate::cannot_set_auto_message(reason));
             }
         }
@@ -1387,6 +1527,16 @@ impl PermissionGate for PolicyPermissionGate {
                 Ok(())
             }
             Some("auto") => {
+                // `set_mcp_permission_mode_override` applies the same `_k()` /
+                // `Zse()` availability gate as the session-wide auto switch.
+                // A disabled auto mode must not be reintroduced through a
+                // server pin; the control response uses this byte-exact text.
+                if let Some(reason) = self.auto_mode_denial_reason() {
+                    return Err(format!(
+                        "Cannot pin MCP server '{server_name}' to auto: {}",
+                        reason.message()
+                    ));
+                }
                 overrides.insert(normalized, PermissionMode::Auto);
                 Ok(())
             }
@@ -1520,10 +1670,7 @@ fn matched_ask_rule(_reason: &PermissionDecisionReason) -> Option<MatchedAskRule
 /// `rule`/`mode`/`subcommandResults`/`permissionPromptTool` reasons (the common
 /// ask cases — an SDK host parses `decision_reason_type` for those, not the
 /// text), and the reason STRING for `hook`/`asyncAgent`/`sandboxOverride`/
-/// `workingDir`/`safetyCheck`/`other` (+ `classifier` only behind the
-/// `BASH_CLASSIFIER`/`TRANSCRIPT_CLASSIFIER` feature flags, which are `false` in
-/// the external build — so `ClassifierApproved`/`ClassifierRejected` map to
-/// `None` here, matching the gated-off posture used elsewhere in this crate).
+/// `workingDir`/`safetyCheck`/`other`/`classifier`.
 ///
 /// Field-shape notes vs claude-code:
 /// - [`PermissionDecisionReason::HookOverride`] carries `reason: Option<String>`
@@ -1548,14 +1695,14 @@ fn serialize_decision_reason(reason: &PermissionDecisionReason) -> Option<String
         | PermissionDecisionReason::SafetyCheck { reason, .. }
         | PermissionDecisionReason::Other { reason } => Some(reason.clone()),
         // sandboxOverride: enum reason, no faithful string rendering → None
-        // (see fn doc); classifier only behind a feature flag that is off in the
-        // external build → None.
+        // (see fn doc). Classifier denials preserve the classifier's own
+        // human-readable reason, as `createCanUseTool` does in claude-code.
         PermissionDecisionReason::SandboxOverride { .. }
         | PermissionDecisionReason::ClassifierApproved { .. }
-        | PermissionDecisionReason::ClassifierRejected { .. }
         | PermissionDecisionReason::DenialLimitExceeded
         | PermissionDecisionReason::AutoModeFallback
         | PermissionDecisionReason::BypassPermissions => None,
+        PermissionDecisionReason::ClassifierRejected { reason, .. } => Some(reason.clone()),
     }
 }
 
@@ -1590,19 +1737,17 @@ pub(crate) fn decision_reason_type(reason: &PermissionDecisionReason) -> Option<
 /// their reason; `rule`/`mode`/`subcommandResults`/`permissionPromptTool` return
 /// `None` (byte-faithful to `oin`).
 ///
-/// Divergence: the oracle also returns `e.reason` for `classifier` and
-/// `sandboxOverride`, but the port's `ClassifierApproved`/`ClassifierRejected`
-/// carry no free-text reason (only `classifier` + `score`) and `SandboxOverride`
-/// carries a structured [`SandboxOverrideReason`] rather than the oracle's plain
-/// string. Both return `None` here — `decision_reason` is an OPTIONAL frame field,
-/// so this only OMITS the text for those two rare deny kinds (never changes the
-/// deny itself), while `decision_reason_type` is still emitted.
+/// The oracle also returns `e.reason` for `classifier` and `sandboxOverride`.
+/// Classifier denials retain that text; `SandboxOverride` still carries a
+/// structured [`SandboxOverrideReason`] rather than the oracle's plain string,
+/// so that allow-side reason remains omitted here.
 pub(crate) fn sysmsg_decision_reason(reason: &PermissionDecisionReason) -> Option<String> {
     match reason {
         PermissionDecisionReason::HookOverride { reason, .. } => reason.clone(),
         PermissionDecisionReason::AsyncAgent { reason } => Some(reason.clone()),
         PermissionDecisionReason::WorkingDirectory { reason } => Some(reason.clone()),
         PermissionDecisionReason::SafetyCheck { reason, .. } => Some(reason.clone()),
+        PermissionDecisionReason::ClassifierRejected { reason, .. } => Some(reason.clone()),
         PermissionDecisionReason::Other { reason } => Some(reason.clone()),
         _ => None,
     }
@@ -1684,13 +1829,14 @@ mod gate_sysmsg_test {
             }),
             None
         );
-        // classifier → None (documented divergence: no free-text reason stored).
+        // classifier → the classifier's own free-text reason.
         assert_eq!(
             sysmsg_decision_reason(&PermissionDecisionReason::ClassifierRejected {
                 classifier: crate::ClassifierKind::Bash,
                 score: 0.9,
+                reason: "blocked".into(),
             }),
-            None
+            Some("blocked".to_string())
         );
     }
 

@@ -43,6 +43,7 @@ object SettingsRoutes {
 
     // 隐私与安全 (A6)
     const val PRIVACY = "settings/privacy"
+    const val PERMISSION_MODE = "settings/permission-mode"
     const val OPEN_SOURCE = "settings/open-source"
 
     fun providerList(kind: String) = "settings/providers/$kind"
@@ -67,6 +68,7 @@ object SettingsTitles {
     val NOTIFICATIONS = R.string.settings_notifications
     val INPUT = R.string.settings_keyboard_input
     val PRIVACY = R.string.settings_data_privacy
+    val PERMISSION_MODE = R.string.settings_permission_mode_title
     val OPEN_SOURCE = R.string.settings_title_open_source
     val SKILLS = R.string.settings_title_skills
     val MCP = R.string.settings_mcp_servers

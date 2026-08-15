@@ -34,6 +34,7 @@ class ToolCallStateTest {
     fun toolHeaderDto_lowersEveryField_includingTheCountedShellVerb() {
         val header = ToolHeaderDto(
             verb = ToolVerbDto.SHELL,
+            icon = null,
             label = "Running shell command",
             primary = null,
             qualifier = null,

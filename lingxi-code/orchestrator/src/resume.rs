@@ -81,6 +81,7 @@ impl ReplayedSession {
             },
             model_profile: self.state.model_profile.clone(),
             effort: self.runtime_metadata.effort.clone(),
+            reasoning_selection: self.runtime_metadata.reasoning_selection.clone(),
             main_thread_agent_type: self.runtime_metadata.main_thread_agent_type.clone(),
             main_thread_agent_definition: self
                 .runtime_metadata
@@ -119,6 +120,8 @@ impl ReplayedSession {
 pub struct ResumeRuntimeMetadata {
     /// Last real assistant response's top-level `effort` value.
     pub effort: Option<String>,
+    /// Structured reasoning selection persisted by newer runtimes.
+    pub reasoning_selection: Option<traits::ReasoningSelection>,
     /// Persisted main-thread agent name, when the session selected one.
     pub main_thread_agent_type: Option<String>,
     /// Integrity-checked immutable resolved agent definition, when available.
@@ -461,6 +464,20 @@ fn is_compact_boundary(message: &JsonlMessage) -> bool {
 /// from the number of completed assistant iterations between adjacent
 /// boundaries and after the latest boundary.
 fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
+    let reasoning_selection = messages.iter().rev().find_map(|m| {
+        (m.message_type == "assistant"
+            && !m
+                .extra
+                .get("isApiErrorMessage")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false))
+            .then(|| {
+                m.extra
+                    .get("reasoningSelection")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+            })
+            .flatten()
+    });
     let effort = messages.iter().rev().find_map(|m| {
         if m.message_type != "assistant"
             || m.extra
@@ -535,6 +552,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
 
     ResumeRuntimeMetadata {
         effort,
+        reasoning_selection,
         main_thread_agent_type: None,
         main_thread_agent_definition: None,
         cumulative_dropped_tokens,

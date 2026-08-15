@@ -51,6 +51,14 @@ pub enum OrchestratorError {
         budget_nano_usd: u64,
     },
 
+    /// Permission policy terminated a prompt-avoiding agent instead of
+    /// returning a recoverable tool denial.
+    #[error("{message}")]
+    PermissionAbort {
+        /// Byte-exact terminal message from the permission gate.
+        message: String,
+    },
+
     /// The model API call failed (transport, rate-limit, context overflow,
     /// etc). Wraps `llm_client::LlmError` — the live path flows through
     /// `ProviderApiAdapter → DefaultLlmClient`.
@@ -218,6 +226,17 @@ mod tests {
             budget_nano_usd: 1_500_000_000,
         };
         assert_eq!(err2.to_string(), "Reached maximum budget ($1.5)");
+    }
+
+    #[test]
+    fn permission_abort_display_is_message_verbatim() {
+        let err = OrchestratorError::PermissionAbort {
+            message: "Agent aborted: too many classifier denials in headless mode".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Agent aborted: too many classifier denials in headless mode"
+        );
     }
 
     #[test]

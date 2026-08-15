@@ -28,7 +28,7 @@ use crate::error::AppError;
 use crate::events::{AppEvent, AppEventObserver};
 use crate::ids;
 use crate::manifest::{save_manifest, AppLayout, AppManifest};
-use crate::permissions::{save_permissions, AppPermissions};
+use crate::permissions::{save_permissions, save_workspace_permission_settings, AppPermissions};
 use crate::state::AppState;
 use crate::storage;
 use crate::types::{
@@ -67,6 +67,8 @@ pub const MAX_NAME_BYTES: usize = 200;
 /// [`MAX_NAME_BYTES`] — the brief is prose the agent reads for context, not a
 /// label.
 pub const MAX_BRIEF_BYTES: usize = 4_000;
+/// Maximum provider-qualified workflow model reference length in bytes.
+pub const MAX_WORKFLOW_MODEL_BYTES: usize = 512;
 /// Maximum `conversation_id` length in bytes.
 pub const MAX_CONVERSATION_ID_BYTES: usize = 128;
 /// Maximum text value length in bytes (also the runtime `last_error` cap).
@@ -594,9 +596,11 @@ impl AppService {
         let layout = AppLayout::new(self.root.clone(), app_id.to_string())?;
         let label = label.to_string();
         let now = self.now_ms();
-        let checkpoint =
-            Self::run_blocking(move || AppCheckpointStore::new(&layout).create(kind, &label, now))
-                .await?;
+        let checkpoint = Self::run_blocking(move || {
+            let _build_lock = storage::lock_app_build(layout.root(), layout.app_id())?;
+            AppCheckpointStore::new(&layout).create(kind, &label, now)
+        })
+        .await?;
         Self::spawn_emission(
             Arc::clone(&self.observer),
             order,
@@ -630,6 +634,7 @@ impl AppService {
         let checkpoint_id = checkpoint_id.to_string();
         let now = self.now_ms();
         let safety = Self::run_blocking(move || {
+            let _build_lock = storage::lock_app_build(layout.root(), layout.app_id())?;
             AppCheckpointStore::new(&layout).restore(&checkpoint_id, now)
         })
         .await?;
@@ -676,6 +681,19 @@ impl AppService {
         conversation_id: Option<String>,
         git_enabled: bool,
     ) -> Result<AppRecord, AppError> {
+        self.create_app_with_git_and_workflow_model(name, brief, conversation_id, git_enabled, None)
+            .await
+    }
+
+    /// Create a new app with explicit Git and app-build model choices.
+    pub async fn create_app_with_git_and_workflow_model(
+        &self,
+        name: Option<&str>,
+        brief: &str,
+        conversation_id: Option<String>,
+        git_enabled: bool,
+        workflow_model: Option<&str>,
+    ) -> Result<AppRecord, AppError> {
         let trimmed_brief = brief.trim();
         if trimmed_brief.is_empty() {
             return Err(AppError::InvalidRequest(
@@ -700,6 +718,14 @@ impl AppService {
                 MAX_CONVERSATION_ID_BYTES,
             )?;
         }
+        let workflow_model = workflow_model
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(|model| {
+                ensure_within("workflow model", model.len(), MAX_WORKFLOW_MODEL_BYTES)?;
+                Ok::<_, AppError>(model.to_string())
+            })
+            .transpose()?;
         let brief = trimmed_brief.to_string();
         let order = self.acquire_emit_order().await;
         // After the queue join, for commit-order-monotonic timestamps (see
@@ -716,8 +742,9 @@ impl AppService {
         let completion = tokio::spawn(async move {
             let persisted = Self::run_blocking(move || {
                 let id = Self::mint_app_id(&root, &existing_ids)?;
-                let app =
+                let mut app =
                     AppState::create_with_git(id, name, brief, conversation_id, git_enabled, now);
+                app.record.workflow_model = workflow_model;
                 // Per-app files first; the index entry is the commit point.
                 storage::save_app_files(&root, &app)?;
                 let layout = AppLayout::new(root.clone(), app.record.id.clone())?;
@@ -726,6 +753,7 @@ impl AppService {
                     AppManifest::for_new_app(app.record.id.clone(), app.record.name.clone());
                 save_manifest(&layout, &manifest)?;
                 save_permissions(&layout, &AppPermissions::default())?;
+                save_workspace_permission_settings(&layout)?;
                 let mut records = existing_records;
                 records.push(app.record.clone());
                 storage::save_index_preserving(&root, &records, &known)?;
@@ -976,6 +1004,19 @@ mod tests {
         assert_eq!(
             record.workspace_rel,
             format!("apps/{}/workspace", record.id)
+        );
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                dir.path()
+                    .join(&record.workspace_rel)
+                    .join(".lingxi/settings.local.json"),
+            )
+            .expect("create writes workspace-local permission settings"),
+        )
+        .expect("workspace-local permission settings are valid JSON");
+        assert_eq!(
+            settings["permissions"]["allow"],
+            serde_json::json!(["Read(./**)", "Edit(./**)"])
         );
         assert!(ids::is_valid_app_id(&record.id));
         assert_eq!(h.service.list_apps().await, vec![record.clone()]);
@@ -1498,6 +1539,54 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_app_persists_workflow_model_in_app_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app_with_git_and_workflow_model(
+                Some("Habits"),
+                "Track daily habits",
+                None,
+                true,
+                Some("deepseek/deepseek-v4-flash"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            record.workflow_model.as_deref(),
+            Some("deepseek/deepseek-v4-flash")
+        );
+
+        let metadata = std::fs::read_to_string(
+            dir.path()
+                .join(&record.workspace_rel)
+                .join(".lingxi/app.json"),
+        )
+        .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(
+            metadata
+                .pointer("/app/workflowModel")
+                .and_then(serde_json::Value::as_str),
+            Some("deepseek/deepseek-v4-flash")
+        );
+
+        drop(h);
+        let reloaded = harness(dir.path()).await;
+        assert_eq!(
+            reloaded
+                .service
+                .record(&record.id)
+                .await
+                .unwrap()
+                .workflow_model
+                .as_deref(),
+            Some("deepseek/deepseek-v4-flash")
+        );
     }
 
     /// Direct coverage for `brief`'s validation (empty-after-trim rejected,

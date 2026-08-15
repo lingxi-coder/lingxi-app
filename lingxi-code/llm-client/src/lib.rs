@@ -27,6 +27,7 @@ pub mod protocol;
 pub mod provider_settings;
 #[allow(missing_docs)]
 pub mod providers;
+pub mod reasoning_controls;
 pub mod redaction;
 pub mod registry;
 pub mod retry;
@@ -93,6 +94,10 @@ pub use provider_settings::{
 pub use providers::{
     AnthropicMessagesCodec, AzureOpenAiCodec, BedrockClaudeCodec, FoundryClaudeCodec, GeminiCodec,
     GeminiFile, OpenAiChatCodec, OpenAiResponsesCodec, VertexClaudeCodec, VertexGeminiCodec,
+};
+pub use reasoning_controls::{
+    apply_reasoning_selection, reasoning_control_spec, ReasoningControlSpec, ReasoningSelection,
+    ReasoningTarget, TokenBudgetRange,
 };
 pub use redaction::Redactor;
 pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};

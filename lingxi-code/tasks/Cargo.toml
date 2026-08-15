@@ -13,6 +13,7 @@ engine = { path = "../engine" }
 agent = { path = "../agent" }
 hooks = { path = "../hooks" }
 workflow = { path = "../workflow" }
+permission = { path = "../permission" }
 telemetry = { path = "../telemetry" }
 serde.workspace = true
 serde_json.workspace = true

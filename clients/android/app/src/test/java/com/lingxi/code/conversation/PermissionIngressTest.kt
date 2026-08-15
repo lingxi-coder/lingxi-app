@@ -4,7 +4,6 @@ import com.lingxi.code.bindings.PermissionKindDto
 import com.lingxi.code.bindings.PermissionRequest
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
 class PermissionIngressTest {
@@ -16,50 +15,58 @@ class PermissionIngressTest {
             defaultAllow = false,
         ),
         worker = null,
+        owner = null,
     )
 
     @Test
-    fun failedCancellationRestoresOriginalPromptButRejectsLateCallback() {
+    fun backgroundPermissionIsPublishedWithoutAMainTurn() {
         val permissions = MutableStateFlow<PermissionPromptState?>(null)
         val ingress = PermissionIngress(permissions)
         val original = request(1uL, "pwd")
 
-        ingress.beginTurn()
         ingress.publish(original)
-        val snapshot = ingress.beginCancellation()
-        ingress.publish(request(2uL, "late"))
 
-        assertNull(permissions.value)
-        ingress.restoreAfterFailedCancellation(snapshot)
         assertEquals(permissionRequestToPrompt(original), permissions.value)
     }
 
     @Test
-    fun terminalEventPreventsFailedCancellationFromRestoringPrompt() {
+    fun cancellingMainTurnDoesNotClearAChildPermission() {
         val permissions = MutableStateFlow<PermissionPromptState?>(null)
         val ingress = PermissionIngress(permissions)
+        val child = request(3uL, "npm test")
 
-        ingress.beginTurn()
-        ingress.publish(request(3uL, "pwd"))
+        ingress.publish(child)
         val snapshot = ingress.beginCancellation()
         ingress.endTurn()
         ingress.restoreAfterFailedCancellation(snapshot)
 
-        assertNull(permissions.value)
+        assertEquals(permissionRequestToPrompt(child), permissions.value)
     }
 
     @Test
-    fun oldCancellationCannotMutateNewTurnGeneration() {
+    fun resolvingHeadAdvancesToTheNextWorkerPermission() {
         val permissions = MutableStateFlow<PermissionPromptState?>(null)
         val ingress = PermissionIngress(permissions)
-        val current = request(5uL, "whoami")
+        val first = request(4uL, "pwd")
+        val second = request(5uL, "whoami")
 
-        ingress.beginTurn()
-        ingress.publish(request(4uL, "pwd"))
-        val oldSnapshot = ingress.beginCancellation()
-        ingress.beginTurn()
+        ingress.publish(first)
+        ingress.publish(second)
+        assertEquals(permissionRequestToPrompt(first), permissions.value)
+
+        ingress.resolve(first.requestId)
+
+        assertEquals(permissionRequestToPrompt(second), permissions.value)
+    }
+
+    @Test
+    fun unrelatedResolutionDoesNotClearTheVisiblePermission() {
+        val permissions = MutableStateFlow<PermissionPromptState?>(null)
+        val ingress = PermissionIngress(permissions)
+        val current = request(6uL, "whoami")
+
         ingress.publish(current)
-        ingress.restoreAfterFailedCancellation(oldSnapshot)
+        ingress.resolve(99uL)
 
         assertEquals(permissionRequestToPrompt(current), permissions.value)
     }

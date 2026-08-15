@@ -355,6 +355,7 @@ async fn budget_stop_matches_claude_background_agent_filter() {
         .spawn(
             TaskType::LocalWorkflow,
             TaskSpawnInput::LocalWorkflow {
+                session_uuid: None,
                 workflow_id: "budget-workflow".into(),
                 script: "return true".into(),
                 resume_from_run_id: None,
@@ -1805,11 +1806,14 @@ async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
                 creator_teammate_name: None,
                 creator_team_name: None,
             },
+            session_uuid: None,
             workflow_id: String::new(),
             script: String::new(),
             resume_from_run_id: None,
             args: None,
             run_id: run_id.map(str::to_string),
+            script_path: None,
+            transcript_dir: None,
             current_step: 0,
         })
     };
@@ -1819,6 +1823,9 @@ async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
         .await;
     registry
         .insert_state_for_test(mk("w-done", TaskStatus::Completed, Some("wf_bbb")))
+        .await;
+    registry
+        .insert_state_for_test(mk("w-paused", TaskStatus::Paused, Some("wf_ccc")))
         .await;
 
     // A running workflow with the matching run id is found (resume blocked).
@@ -1834,10 +1841,266 @@ async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
         registry.find_running_workflow_by_run_id("wf_bbb").await,
         None
     );
+    // A checkpoint adopted after restart is PAUSED, not still running. It must
+    // remain visible while allowing an explicit Workflow(resumeFromRunId).
+    assert_eq!(
+        registry.find_running_workflow_by_run_id("wf_ccc").await,
+        None
+    );
     // Unknown id → None.
     assert_eq!(
         registry.find_running_workflow_by_run_id("wf_zzz").await,
         None
+    );
+}
+
+#[tokio::test]
+async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
+    use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
+
+    let (_d, registry) = make_registry();
+    let mk = |id: &str, app_id: &str, status: TaskStatus| {
+        TaskState::LocalWorkflow(LocalWorkflowTaskState {
+            base: TaskStateBase {
+                id: id.into(),
+                task_type: TaskType::LocalWorkflow,
+                status,
+                description: "local app build".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+            },
+            session_uuid: None,
+            workflow_id: "local-app-build".into(),
+            script: String::new(),
+            resume_from_run_id: None,
+            args: Some(serde_json::json!({"app_id": app_id}).to_string()),
+            run_id: Some(format!("wf_{id}")),
+            script_path: None,
+            transcript_dir: None,
+            current_step: 0,
+        })
+    };
+
+    registry
+        .insert_state_for_test(mk("w-app-a1", "app-a", TaskStatus::Running))
+        .await;
+    registry
+        .insert_state_for_test(mk("w-app-b1", "app-b", TaskStatus::Paused))
+        .await;
+    registry
+        .insert_state_for_test(mk("w-app-a2", "app-a", TaskStatus::Completed))
+        .await;
+
+    assert_eq!(
+        registry
+            .find_nonterminal_local_app_workflows("app-a")
+            .await,
+        vec!["w-app-a1"]
+    );
+    assert_eq!(
+        registry
+            .find_nonterminal_local_app_workflows("app-b")
+            .await,
+        vec!["w-app-b1"]
+    );
+}
+
+#[tokio::test]
+async fn adopted_workflow_is_registered_as_paused_and_keeps_resume_metadata() {
+    let (_d, registry) = make_registry();
+    let started = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_234);
+
+    registry
+        .register_adopted_workflow(crate::registry::AdoptedWorkflow {
+            task_id: "wabc12345".into(),
+            session_uuid: Some("session-1".into()),
+            workflow_id: "local-app-build".into(),
+            run_id: "wf_abcdef".into(),
+            script_path: "/workspace/.lingxi/workflows/build.js".into(),
+            args: Some(r#"{"app_id":"demo"}"#.into()),
+            transcript_dir: "/sessions/s1/subagents/workflows/wf_abcdef".into(),
+            description: "Build local app".into(),
+            start_time: started,
+        })
+        .await
+        .expect("adopt workflow");
+
+    let state = registry.get("wabc12345").await.expect("adopted state");
+    let crate::state::TaskState::LocalWorkflow(workflow) = state else {
+        panic!("expected local workflow")
+    };
+    assert_eq!(workflow.base.status, TaskStatus::Paused);
+    assert!(
+        workflow.base.notified,
+        "adopted workflow must not emit stale completion"
+    );
+    assert_eq!(workflow.run_id.as_deref(), Some("wf_abcdef"));
+    assert_eq!(
+        workflow.script_path.as_deref(),
+        Some("/workspace/.lingxi/workflows/build.js")
+    );
+    assert_eq!(
+        workflow.transcript_dir.as_deref(),
+        Some(std::path::Path::new(
+            "/sessions/s1/subagents/workflows/wf_abcdef"
+        ))
+    );
+    assert_eq!(workflow.session_uuid.as_deref(), Some("session-1"));
+}
+
+#[tokio::test]
+async fn register_adopted_workflow_does_not_replace_existing_live_task_with_same_task_id() {
+    use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
+    let (_d, registry) = make_registry();
+    let live = TaskState::LocalWorkflow(LocalWorkflowTaskState {
+        base: TaskStateBase {
+            id: "wabc12345".into(),
+            task_type: TaskType::LocalWorkflow,
+            status: TaskStatus::Running,
+            description: "live".into(),
+            tool_use_id: None,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from("/tmp/wabc12345.output"),
+            output_offset: 0,
+            notified: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+        },
+        session_uuid: Some("session-live".into()),
+        workflow_id: "live-workflow".into(),
+        script: String::new(),
+        resume_from_run_id: None,
+        args: None,
+        run_id: Some("wf_live".into()),
+        script_path: None,
+        transcript_dir: None,
+        current_step: 0,
+    });
+    registry.insert_state_for_test(live).await;
+
+    let err = registry
+        .register_adopted_workflow(crate::registry::AdoptedWorkflow {
+            task_id: "wabc12345".into(),
+            session_uuid: Some("session-restored".into()),
+            workflow_id: "restored-workflow".into(),
+            run_id: "wf_restored".into(),
+            script_path: "/workspace/build.js".into(),
+            args: None,
+            transcript_dir: "/sessions/s1/subagents/workflows/wf_restored".into(),
+            description: "restored".into(),
+            start_time: SystemTime::now(),
+        })
+        .await
+        .expect_err("live workflow must not be replaced by adoption");
+    assert!(
+        err.to_string()
+            .contains("live task wabc12345 already exists"),
+        "{err}"
+    );
+
+    let state = registry.get("wabc12345").await.expect("live state remains");
+    let TaskState::LocalWorkflow(workflow) = state else {
+        panic!("expected local workflow");
+    };
+    assert_eq!(workflow.run_id.as_deref(), Some("wf_live"));
+    assert_eq!(workflow.session_uuid.as_deref(), Some("session-live"));
+}
+
+#[tokio::test]
+async fn workflow_run_id_reservation_and_paused_cleanup_respect_liveness_and_session() {
+    use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
+    let (_d, registry) = make_registry();
+    let mk = |id: &str, session_uuid: &str, status: TaskStatus, run_id: &str| {
+        TaskState::LocalWorkflow(LocalWorkflowTaskState {
+            base: TaskStateBase {
+                id: id.into(),
+                task_type: TaskType::LocalWorkflow,
+                status,
+                description: "wf".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+            },
+            session_uuid: Some(session_uuid.into()),
+            workflow_id: String::new(),
+            script: String::new(),
+            resume_from_run_id: None,
+            args: None,
+            run_id: Some(run_id.to_string()),
+            script_path: None,
+            transcript_dir: None,
+            current_step: 0,
+        })
+    };
+    registry
+        .insert_state_for_test(mk(
+            "wpending1",
+            "session-a",
+            TaskStatus::Pending,
+            "wf_pending",
+        ))
+        .await;
+    registry
+        .insert_state_for_test(mk(
+            "wpaused01",
+            "session-a",
+            TaskStatus::Paused,
+            "wf_paused",
+        ))
+        .await;
+    registry
+        .insert_state_for_test(mk(
+            "wpaused02",
+            "session-b",
+            TaskStatus::Paused,
+            "wf_paused",
+        ))
+        .await;
+
+    let pending_err = registry
+        .try_reserve_workflow_run_id("wf_pending")
+        .await
+        .expect_err("pending run id blocks duplicate launch");
+    assert!(pending_err.to_string().contains("wf_pending"));
+
+    let reservation = registry
+        .try_reserve_workflow_run_id("wf_paused")
+        .await
+        .expect("paused run id stays resumable");
+    let launching_err = registry
+        .try_reserve_workflow_run_id("wf_paused")
+        .await
+        .expect_err("second launch must see the reservation");
+    assert!(launching_err.to_string().contains("already launching"));
+    drop(reservation);
+    let reopened_reservation = registry
+        .try_reserve_workflow_run_id("wf_paused")
+        .await
+        .expect("reservation release reopens the paused run id");
+    drop(reopened_reservation);
+
+    registry
+        .remove_paused_workflow_by_run_id("session-a", "wf_paused")
+        .await;
+    assert!(registry.get("wpaused01").await.is_none());
+    assert!(
+        registry.get("wpaused02").await.is_some(),
+        "resuming session-a must not delete session-b's paused checkpoint"
     );
 }
 

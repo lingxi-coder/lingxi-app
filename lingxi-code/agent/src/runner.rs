@@ -21,9 +21,14 @@
 //!   callers that haven't wired an API client yet.
 
 use crate::context::SubagentContext;
+use futures::StreamExt;
+use llm_client::{LlmError, LlmEvent};
 use protocol::AgentId;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use traits::WorkflowQueryWatchdog;
 
 /// Events emitted by [`run_subagent`] back to the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +119,77 @@ fn completed_result_text(result: &serde_json::Value) -> Option<String> {
 /// `totalDurationMs`).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn workflow_watchdog_timeout_error(phase: &str, timeout: Duration) -> LlmError {
+    LlmError::TransportTimeout {
+        message: format!(
+            "workflow model query stalled while {phase} for {}ms",
+            timeout.as_millis()
+        ),
+    }
+}
+
+fn is_workflow_watchdog_timeout(error: &LlmError) -> bool {
+    matches!(
+        error,
+        LlmError::TransportTimeout { message }
+            if message.starts_with("workflow model query stalled while ")
+    )
+}
+
+/// Apply the workflow watchdog to one model-query phase. This helper is used
+/// only for stream establishment; tool execution is deliberately outside every
+/// call site, so a slow tool cannot consume the model-query idle budget.
+async fn await_workflow_query_phase<T, F>(
+    future: F,
+    watchdog: Option<WorkflowQueryWatchdog>,
+    phase: &'static str,
+) -> Result<T, LlmError>
+where
+    F: Future<Output = Result<T, LlmError>>,
+{
+    let Some(policy) = watchdog else {
+        return future.await;
+    };
+    let timeout = Duration::from_millis(policy.stall_timeout_ms);
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => Err(workflow_watchdog_timeout_error(phase, timeout)),
+    }
+}
+
+/// Wrap a response stream with a per-event idle timeout. Every successful
+/// `next()` starts a fresh timeout, so total stream lifetime is unbounded while
+/// progress continues. The wrapper yields one typed timeout error then closes.
+fn with_workflow_stream_watchdog(
+    stream: futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>,
+    watchdog: Option<WorkflowQueryWatchdog>,
+) -> futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>> {
+    let Some(policy) = watchdog else {
+        return stream;
+    };
+    let timeout = Duration::from_millis(policy.stall_timeout_ms);
+    futures::stream::unfold(
+        (stream, false),
+        move |(mut stream, terminated)| async move {
+            if terminated {
+                return None;
+            }
+            match tokio::time::timeout(timeout, stream.next()).await {
+                Ok(Some(event)) => Some((event, (stream, false))),
+                Ok(None) => None,
+                Err(_) => Some((
+                    Err(workflow_watchdog_timeout_error(
+                        "waiting for the next response event",
+                        timeout,
+                    )),
+                    (stream, true),
+                )),
+            }
+        },
+    )
+    .boxed()
 }
 
 /// Subagent state-machine loop.
@@ -754,6 +830,21 @@ async fn emit_message(
         .await;
 }
 
+async fn emit_progress(
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    agent_id: AgentId,
+    tool_use_count: u64,
+    token_count: u64,
+) {
+    let _ = out_tx
+        .send(SubagentEvent::Progress {
+            agent_id,
+            tool_use_count: u32::try_from(tool_use_count).unwrap_or(u32::MAX),
+            token_count,
+        })
+        .await;
+}
+
 async fn flush_transcript(
     transcript: Option<&crate::transcript::AgentTranscriptWriter>,
     history: &[protocol::ConversationMessage],
@@ -996,6 +1087,8 @@ async fn run_subagent_loop(
         .with_metadata(
             ctx.agent_name.clone(),
             Some(ctx.agent_definition.agent_type.clone()),
+            Some(resolve_model(&ctx)),
+            ctx.model_profile.clone(),
         )
     });
     // Mark a child as live before its first round-trip. A persistent child may
@@ -1013,6 +1106,20 @@ async fn run_subagent_loop(
     } else {
         0
     };
+
+    // A fresh child's task is already real input before the provider answers.
+    // Persist that seed now, rather than at the first turn boundary, so a
+    // stalled first request still has an inspectable transcript. Publish the
+    // caller-supplied prompt through the same typed message stream as later
+    // turns; mobile clients can then render it immediately even when a
+    // transcript load races this first append. Restored agents skip both paths
+    // because their seed is already durable and replayable.
+    if ctx.resumed_history.is_none() {
+        flush_transcript(transcript.as_ref(), &history, &mut transcript_written).await;
+        for message in &ctx.prompt_messages {
+            emit_message(&out_tx, agent_id, message).await;
+        }
+    }
 
     let max_turns = ctx.agent_definition.max_turns;
 
@@ -1128,6 +1235,8 @@ async fn run_subagent_loop(
             // `api_call` is built, because the in-flight future immutably
             // borrows `history` inside the select.
             let mut wake_message: Option<String> = None;
+            let watchdog = api_client.workflow_query_watchdog();
+            let mut watchdog_retry_count = 0_u32;
             let response = loop {
                 // (M9) A wake message injected below rides into the next
                 // round-trip as a user turn (mirrors the persist-park path,
@@ -1136,6 +1245,12 @@ async fn run_subagent_loop(
                     history.push(ConversationMessage::user(MessageId::new(), content));
                 }
                 let api_call = async {
+                    let current_model = model.clone();
+                    tracing::debug!(
+                        agent_id = %agent_id,
+                        model = %current_model,
+                        event = "query_started"
+                    );
                     // Provider routing (dual-LLM dual-PROVIDER): thread the
                     // per-spawn `model_profile` as the api client's `profile` so the
                     // round-trip targets the candidate's resolved provider. `None`
@@ -1149,82 +1264,154 @@ async fn run_subagent_loop(
                     // partial (empty vec); a mid-stream error yields whatever
                     // blocks were finalized.
                     let profile = ctx.model_profile.as_deref();
-                    let stream = if let Some(forced) = force_structured_tool {
-                        api_client
-                            .messages_create_stream_forced_in(
-                                &model,
-                                profile,
-                                system.as_deref(),
-                                history.clone(),
-                                tool_schemas.clone(),
-                                Some(forced),
-                                effort_wire.clone(),
-                            )
-                            .await
-                            .map_err(|e| (Vec::new(), e))?
-                    } else {
-                        api_client
-                            .messages_create_stream_in(
-                                &model,
-                                profile,
-                                system.as_deref(),
-                                history.clone(),
-                                tool_schemas.clone(),
-                                effort_wire.clone(),
-                            )
-                            .await
-                            .map_err(|e| (Vec::new(), e))?
-                    };
-                    crate::accumulator::accumulate_stream_salvaging(stream).await
-                };
-                if !event_channel_open {
-                    break api_call.await;
-                }
-                tokio::select! {
-                    biased;
-                    ev = event_rx.recv() => {
-                        match ev {
-                            Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
-                                emit_killed(
-                                    &out_tx,
-                                    transcript.as_ref(),
-                                    &history,
-                                    &mut transcript_written,
-                                    agent_id,
+                    let open_stream = async {
+                        if let Some(forced) = force_structured_tool {
+                            api_client
+                                .messages_create_stream_forced_in(
+                                    &current_model,
+                                    profile,
+                                    system.as_deref(),
+                                    history.clone(),
+                                    tool_schemas.clone(),
+                                    Some(forced),
+                                    effort_wire.clone(),
                                 )
-                                .await;
+                                .await
+                        } else {
+                            api_client
+                                .messages_create_stream_in(
+                                    &current_model,
+                                    profile,
+                                    system.as_deref(),
+                                    history.clone(),
+                                    tool_schemas.clone(),
+                                    effort_wire.clone(),
+                                )
+                                .await
+                        }
+                    };
+                    let stream = await_workflow_query_phase(
+                        open_stream,
+                        watchdog,
+                        "opening the response stream",
+                    )
+                    .await
+                    .map_err(|e| (Vec::new(), e))?;
+                    tracing::debug!(
+                        agent_id = %agent_id,
+                        model = %current_model,
+                        event = "stream_opened"
+                    );
+                    let stream = with_workflow_stream_watchdog(stream, watchdog);
+                    let mut first_event_seen = false;
+                    let stream = stream.inspect({
+                        let out_tx = out_tx.clone();
+                        let current_agent_id = agent_id;
+                        move |event| {
+                            if first_event_seen || event.is_err() {
                                 return;
                             }
-                            // (M9 cc2.1.198 wake-on-message) messaging a stuck
-                            // persistent teammate wakes it: drop the in-flight
-                            // future, append the message to history (above), and
-                            // re-issue the round-trip NOW — previously this fell
-                            // into the catch-all below and silently DISCARDED the
-                            // text. Persistent (teammate) runners only; one-shot
-                            // subagents keep the legacy drop-and-retry semantics.
-                            Some(engine::Event::UserMessage { content, .. })
-                                if ctx.persistent =>
-                            {
-                                wake_message = Some(content);
-                                continue;
-                            }
-                            // Non-termination event: drop the in-flight API future
-                            // and retry the round-trip on the next iteration.
-                            Some(_) => continue,
-                            // Channel closed: stop racing it from now on.
-                            None => {
-                                event_channel_open = false;
-                                continue;
+                            first_event_seen = true;
+                            tracing::debug!(
+                                agent_id = %current_agent_id,
+                                model = %current_model,
+                                event = "first_event"
+                            );
+                            // Preserve stream order: a detached send can arrive
+                            // after the response's terminal event. This beacon is
+                            // best-effort, so a synchronous try_send is sufficient.
+                            let _ = out_tx.try_send(SubagentEvent::Progress {
+                                agent_id: current_agent_id,
+                                tool_use_count: u32::try_from(total_tool_use_count)
+                                    .unwrap_or(u32::MAX),
+                                token_count: 0,
+                            });
+                        }
+                    });
+                    crate::accumulator::accumulate_stream_salvaging(Box::pin(stream)).await
+                };
+                let attempt_result = if !event_channel_open {
+                    api_call.await
+                } else {
+                    tokio::select! {
+                        biased;
+                        ev = event_rx.recv() => {
+                            match ev {
+                                Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
+                                    emit_killed(
+                                        &out_tx,
+                                        transcript.as_ref(),
+                                        &history,
+                                        &mut transcript_written,
+                                        agent_id,
+                                    )
+                                    .await;
+                                    return;
+                                }
+                                // (M9 cc2.1.198 wake-on-message) messaging a stuck
+                                // persistent teammate wakes it: drop the in-flight
+                                // future, append the message to history (above), and
+                                // re-issue the round-trip NOW — previously this fell
+                                // into the catch-all below and silently DISCARDED the
+                                // text. Persistent (teammate) runners only; one-shot
+                                // subagents keep the legacy drop-and-retry semantics.
+                                Some(engine::Event::UserMessage { content, .. })
+                                    if ctx.persistent =>
+                                {
+                                    wake_message = Some(content);
+                                    continue;
+                                }
+                                // Non-termination event: drop the in-flight API future
+                                // and retry the round-trip on the next iteration.
+                                Some(_) => continue,
+                                // Channel closed: stop racing it from now on.
+                                None => {
+                                    event_channel_open = false;
+                                    continue;
+                                }
                             }
                         }
+                        resp = api_call => resp,
                     }
-                    resp = api_call => break resp,
+                };
+
+                if let Err((_partial_blocks, error)) = &attempt_result {
+                    if is_workflow_watchdog_timeout(error)
+                        && watchdog.is_some_and(|policy| watchdog_retry_count < policy.max_retries)
+                    {
+                        watchdog_retry_count = watchdog_retry_count.saturating_add(1);
+                        let model_attempt = watchdog_retry_count.saturating_add(1);
+                        let reason = error.to_string();
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            attempt = model_attempt,
+                            reason = %reason,
+                            event = "query_retry"
+                        );
+                        api_client
+                            .observe_workflow_query_retry(agent_id, model_attempt, reason)
+                            .await;
+                        continue;
+                    }
                 }
+                break attempt_result;
             };
 
             let response = match response {
                 Ok(r) => r,
                 Err((partial_blocks, e)) => {
+                    if is_workflow_watchdog_timeout(&e) {
+                        emit_failed(
+                            &out_tx,
+                            transcript.as_ref(),
+                            &history,
+                            &mut transcript_written,
+                            agent_id,
+                            format!("subagent workflow query timeout: {e}"),
+                        )
+                        .await;
+                        return;
+                    }
                     // CC 2.1.207 subagent `api_error_partial` recovery
                     // (`Wyd`/`wTy`): when the round-trip is cut off by an API
                     // TERMINATION whose kind is in `CTy`
@@ -1298,6 +1485,18 @@ async fn run_subagent_loop(
             // (claude `getTokenCountFromUsage` reads the LAST assistant usage — so
             // overwrite, never accumulate, to stay byte-faithful).
             last_usage = response.usage.clone();
+            emit_progress(
+                &out_tx,
+                agent_id,
+                total_tool_use_count,
+                last_usage
+                    .billable_tokens
+                    .input
+                    .saturating_add(last_usage.billable_tokens.cache_write)
+                    .saturating_add(last_usage.billable_tokens.cache_read)
+                    .saturating_add(last_usage.billable_tokens.output),
+            )
+            .await;
             // Track the assistant-message count (claude `agentMessages.length`) and
             // the FINAL turn's provider request id (claude
             // `lastAssistantMessage.requestId`). One assistant turn per round-trip;
@@ -1483,6 +1682,7 @@ async fn run_subagent_loop(
                         // into that field; the definition's model is already the concrete
                         // Explicit id resolved at spawn time.
                         parent_model: Some(resolve_model(&ctx)),
+                        parent_model_profile: ctx.model_profile.clone(),
                         // This subagent's EFFECTIVE permission mode (claude-code
                         // 2.1.207 Agent `mode` → the child's
                         // `toolPermissionContext.mode`, `wKe`/`ve`): threaded into
@@ -1505,6 +1705,18 @@ async fn run_subagent_loop(
                                 provider_tool_use_id: provider_id.clone(),
                                 content_blocks: None,
                             });
+                        }
+                        Err(traits::tool_invoker::ToolInvokerError::Abort(error)) => {
+                            emit_failed(
+                                &out_tx,
+                                transcript.as_ref(),
+                                &history,
+                                &mut transcript_written,
+                                agent_id,
+                                error,
+                            )
+                            .await;
+                            return;
                         }
                         Err(e) => {
                             tool_results.push(ContentBlock::ToolResult {

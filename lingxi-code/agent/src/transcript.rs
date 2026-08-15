@@ -36,6 +36,12 @@ pub struct TranscriptEntry {
     /// row exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    /// Concrete provider-local model used by this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider profile paired with [`Self::model`], when pinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_profile: Option<String>,
 }
 
 /// Appends [`TranscriptEntry`] lines to a per-agent transcript file.
@@ -48,6 +54,8 @@ pub struct AgentTranscriptWriter {
     fs: Arc<dyn FileSystem>,
     agent_name: Option<String>,
     agent_type: Option<String>,
+    model: Option<String>,
+    model_profile: Option<String>,
 }
 
 impl AgentTranscriptWriter {
@@ -60,15 +68,25 @@ impl AgentTranscriptWriter {
             fs,
             agent_name: None,
             agent_type: None,
+            model: None,
+            model_profile: None,
         }
     }
 
     /// Attach display metadata that is copied onto each entry. This remains a
     /// builder so existing minimal/test callers can keep the old constructor.
     #[must_use]
-    pub fn with_metadata(mut self, agent_name: Option<String>, agent_type: Option<String>) -> Self {
+    pub fn with_metadata(
+        mut self,
+        agent_name: Option<String>,
+        agent_type: Option<String>,
+        model: Option<String>,
+        model_profile: Option<String>,
+    ) -> Self {
         self.agent_name = agent_name;
         self.agent_type = agent_type;
+        self.model = model;
+        self.model_profile = model_profile;
         self
     }
 
@@ -82,6 +100,8 @@ impl AgentTranscriptWriter {
             error: None,
             agent_name: self.agent_name.clone(),
             agent_type: self.agent_type.clone(),
+            model: self.model.clone(),
+            model_profile: self.model_profile.clone(),
         };
         self.append_entry(&entry).await
     }
@@ -107,6 +127,8 @@ impl AgentTranscriptWriter {
             error: error.map(str::to_string),
             agent_name: self.agent_name.clone(),
             agent_type: self.agent_type.clone(),
+            model: self.model.clone(),
+            model_profile: self.model_profile.clone(),
         };
         self.append_entry(&entry).await
     }

@@ -71,6 +71,58 @@ pub enum RestoreOutcome {
     Failed(String),
 }
 
+struct RestoredTranscript {
+    history: Vec<protocol::ConversationMessage>,
+    /// Concrete model/profile recorded by the runner. `None` means a legacy
+    /// transcript, in which case the parked launch row remains the fallback.
+    resolved_selection: Option<(String, Option<String>)>,
+}
+
+async fn read_restored_transcript(
+    subagents_dir: &std::path::Path,
+    agent_id: &str,
+) -> RestoredTranscript {
+    let path = session::forked_skill::agent_transcript_path(subagents_dir, agent_id);
+    let Ok(text) = tokio::fs::read_to_string(path).await else {
+        return RestoredTranscript {
+            history: Vec::new(),
+            resolved_selection: None,
+        };
+    };
+    let mut history = Vec::new();
+    let mut resolved_selection = None;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(model) = value
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            let profile = value
+                .get("model_profile")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|profile| !profile.is_empty())
+                .map(str::to_string);
+            resolved_selection = Some((model.to_string(), profile));
+        }
+        if let Some(message) = value
+            .get("message")
+            .cloned()
+            .and_then(|message| serde_json::from_value(message).ok())
+        {
+            history.push(message);
+        }
+    }
+    RestoredTranscript {
+        history,
+        resolved_selection,
+    }
+}
+
 /// Rebuild every restorable parked agent found under `subagents_dir`.
 ///
 /// Returns one outcome per row, in the deterministic order
@@ -100,20 +152,27 @@ pub async fn restore_parked_agents(
             out.push((id, RestoreOutcome::Refused(refusal)));
             continue;
         }
-        let history =
-            session::agent_rows::read_transcript_messages(subagents_dir, &id.to_string()).await;
-        if history.is_empty() {
+        let transcript = read_restored_transcript(subagents_dir, &id.to_string()).await;
+        if transcript.history.is_empty() {
             out.push((id, RestoreOutcome::EmptyTranscript));
             continue;
         }
         let mut request = row.request.clone();
+        // New transcripts persist the actual wire selection after definition,
+        // inheritance, policy and provider routing have resolved. Pin that exact
+        // pair on cold resume; a legacy transcript has no metadata and therefore
+        // keeps the parked row's launch model/profile unchanged.
+        if let Some((model, profile)) = transcript.resolved_selection {
+            request.model = Some(model);
+            request.model_profile = profile;
+        }
         // The recovered conversation REPLACES the seeding — prompt, fork
         // context and preload alike. Re-sending the original prompt would make
         // the agent redo work its own transcript already records, and reusing
         // `fork_context_messages` (a PREFIX the runner adds ahead of the prompt
         // and the `SubagentStart` preload) would additionally re-fire start
         // hooks for a run that began in another process.
-        request.resumed_history = Some(history);
+        request.resumed_history = Some(transcript.history);
         request.prompt = String::new();
         match spawner.restore_async(id, request, inherit.clone()).await {
             Ok(launch) => out.push((id, RestoreOutcome::Restored(launch.agent_id))),
@@ -353,6 +412,64 @@ mod tests {
         assert_eq!(req.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(req.cwd.as_deref(), Some("/repo"));
         assert_eq!(req.depth, 1);
+    }
+
+    #[tokio::test]
+    async fn restore_pins_the_resolved_transcript_model_and_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = protocol::AgentId::new();
+        write_row(
+            dir.path(),
+            &ParkedAgentRow {
+                task_id: "a00000001".into(),
+                agent_id: id,
+                description: "research".into(),
+                request: request(),
+            },
+        )
+        .await
+        .unwrap();
+        let message = protocol::ConversationMessage::user(
+            protocol::MessageId::new(),
+            "already completed setup".to_string(),
+        );
+        let entry = serde_json::json!({
+            "agent_id": id.to_string(),
+            "timestamp": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "message": message,
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek"
+        });
+        tokio::fs::write(
+            session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()),
+            format!("{}\n", serde_json::to_string(&entry).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let spawner = RecordingSpawner::default();
+        let outcomes = restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit()).await;
+
+        assert_eq!(outcomes[0].1, RestoreOutcome::Restored(id));
+        let seen = spawner.seen.lock().unwrap();
+        let restored = seen.first().expect("restored request");
+        assert_eq!(restored.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(restored.model_profile.as_deref(), Some("deepseek"));
+    }
+
+    #[tokio::test]
+    async fn legacy_transcript_keeps_the_parked_row_model_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = protocol::AgentId::new();
+        seed(dir.path(), id, &["legacy message"]).await;
+
+        let spawner = RecordingSpawner::default();
+        restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit()).await;
+
+        let seen = spawner.seen.lock().unwrap();
+        let restored = seen.first().expect("restored request");
+        assert_eq!(restored.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(restored.model_profile, None);
     }
 
     /// The forked-skill gate is consulted on its COLD path and its refusal is

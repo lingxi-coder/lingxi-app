@@ -75,6 +75,19 @@ impl OpenAiChatCodec {
         }
     }
 
+    fn kimi_thinking_mode(&self, request: &LlmRequest) -> Option<&'static str> {
+        if !self.is_kimi_profile()
+            || !matches!(request.model.as_str(), "kimi-k2.6" | "k2.6")
+        {
+            return None;
+        }
+        match request.effort.as_ref().and_then(Value::as_str) {
+            Some("disabled" | "off" | "none") => Some("disabled"),
+            Some("enabled" | "on") => Some("enabled"),
+            _ => None,
+        }
+    }
+
     fn deepseek_legacy_model(&self, model: &str) -> Option<(&'static str, &'static str)> {
         let endpoint = self.base_url.trim_end_matches('/');
         if endpoint != "https://api.deepseek.com" && endpoint != "https://api.deepseek.com/v1" {
@@ -83,6 +96,18 @@ impl OpenAiChatCodec {
         match model {
             "deepseek-chat" => Some(("deepseek-v4-flash", "disabled")),
             "deepseek-reasoner" => Some(("deepseek-v4-flash", "enabled")),
+            _ => None,
+        }
+    }
+
+    fn deepseek_reasoning(&self, request: &LlmRequest) -> Option<(&'static str, Option<&str>)> {
+        if !self.is_deepseek_profile() || matches!(request.model.as_str(), "deepseek-chat" | "deepseek-reasoner") {
+            return None;
+        }
+        match request.effort.as_ref().and_then(Value::as_str) {
+            Some("disabled" | "off" | "none") => Some(("disabled", None)),
+            Some("high") => Some(("enabled", Some("high"))),
+            Some("max") => Some(("enabled", Some("max"))),
             _ => None,
         }
     }
@@ -135,6 +160,12 @@ impl WireCodec for OpenAiChatCodec {
                 serde_json::json!({"type": thinking_type}),
             );
         }
+        if let Some((thinking_type, effort)) = self.deepseek_reasoning(request) {
+            body.insert("thinking".to_string(), serde_json::json!({"type": thinking_type}));
+            if let Some(effort) = effort {
+                body.insert("reasoning_effort".to_string(), Value::String(effort.to_string()));
+            }
+        }
 
         if request.stream {
             body.insert("stream".to_string(), Value::Bool(true));
@@ -153,6 +184,12 @@ impl WireCodec for OpenAiChatCodec {
             body.insert(
                 "reasoning_effort".to_string(),
                 Value::String(effort.to_string()),
+            );
+        }
+        if let Some(thinking_type) = self.kimi_thinking_mode(request) {
+            body.insert(
+                "thinking".to_string(),
+                serde_json::json!({"type": thinking_type}),
             );
         }
         if !request.stop_sequences.is_empty() {
@@ -1181,6 +1218,18 @@ mod tests {
             encoded.body_json.get("reasoning_effort").is_none(),
             "K2.7 Code uses its fixed thinking mode, not K3 reasoning_effort"
         );
+    }
+
+    #[test]
+    fn kimi_k26_toggle_is_encoded_as_thinking_mode() {
+        let codec = OpenAiChatCodec::new("https://proxy.example/v1").with_profile_name("kimi");
+        for (configured, expected) in [("enabled", "enabled"), ("disabled", "disabled")] {
+            let mut request = LlmRequest::new("kimi-k2.6");
+            request.effort = Some(Value::String(configured.to_string()));
+            let encoded = codec.encode_request(&request).expect("encode Kimi K2.6");
+            assert_eq!(encoded.body_json["thinking"]["type"], expected);
+            assert!(encoded.body_json.get("reasoning_effort").is_none());
+        }
     }
 
     #[test]

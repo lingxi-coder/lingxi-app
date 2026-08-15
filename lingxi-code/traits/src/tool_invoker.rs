@@ -90,6 +90,10 @@ pub struct SubagentInvocationContext {
     /// `AgentTool.tsx:418` `toolUseContext.options.mainLoopModel`). `None` for the
     /// main thread / legacy call sites (⇒ the invoker keeps its placeholder model).
     pub parent_model: Option<String>,
+    /// Provider profile paired with [`Self::parent_model`]. Nested Agent calls
+    /// must inherit both values; carrying only the wire id is ambiguous when
+    /// multiple configured providers expose the same model.
+    pub parent_model_profile: Option<String>,
     /// The dispatching subagent's EFFECTIVE permission mode as a WIRE string
     /// (claude-code 2.1.207 Agent `mode` → the child's
     /// `toolPermissionContext.mode`, `wKe`/`ve`). `Some("plan")` ⇒ the dispatch
@@ -110,6 +114,12 @@ pub enum ToolInvokerError {
     /// The tool surfaced an invalid input.
     #[error("ToolInvoker: invalid input: {0}")]
     InvalidInput(String),
+    /// Permission policy terminated the owning prompt-avoiding agent.
+    ///
+    /// Unlike an ordinary denial, callers must not convert this into a
+    /// recoverable `tool_result` and continue the model loop.
+    #[error("{0}")]
+    Abort(String),
     /// Any other internal failure.
     #[error("ToolInvoker: internal error: {0}")]
     Internal(String),
@@ -127,7 +137,7 @@ impl ToolInvokerError {
     pub fn model_facing_message(&self) -> String {
         match self {
             Self::NotFound(name) => format!("tool '{name}' not found"),
-            Self::InvalidInput(s) | Self::Internal(s) => s.clone(),
+            Self::InvalidInput(s) | Self::Abort(s) | Self::Internal(s) => s.clone(),
         }
     }
 }
@@ -145,6 +155,19 @@ pub trait ToolInvoker: Send + Sync + Any {
         input: Value,
         ctx: SubagentInvocationContext,
     ) -> Result<Value, ToolInvokerError>;
+
+    /// Invoke with an ephemeral workspace lease. Implementations that do not
+    /// participate in lease-aware permission enforcement retain the legacy
+    /// behavior by delegating to [`Self::invoke`].
+    async fn invoke_with_workspace_lease(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+        _workspace_lease_token: Option<u64>,
+    ) -> Result<Value, ToolInvokerError> {
+        self.invoke(name, input, ctx).await
+    }
 
     /// Cast to `&dyn Any` for downcast-based test introspection.
     /// Default impl works for all `Sized + 'static` implementors.

@@ -50,6 +50,28 @@ fn encode_request_sets_content_type_header_only() {
     assert_eq!(provider_request.headers.len(), 1);
 }
 
+#[test]
+fn automatic_reasoning_omits_provider_override() {
+    let provider_request = codec()
+        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .unwrap();
+
+    assert!(provider_request.body_json.get("reasoning").is_none());
+}
+
+#[test]
+fn disabled_reasoning_encodes_explicit_none_effort() {
+    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
+    request.effort = Some(serde_json::json!("none"));
+
+    let provider_request = codec().encode_request(&request).unwrap();
+
+    assert_eq!(
+        provider_request.body_json["reasoning"],
+        serde_json::json!({"effort": "none"})
+    );
+}
+
 // ── instructions ──────────────────────────────────────────────────────────────
 
 #[test]

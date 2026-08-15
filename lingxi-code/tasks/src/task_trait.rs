@@ -103,6 +103,10 @@ pub enum TaskSpawnInput {
     },
     /// Spawn a local workflow.
     LocalWorkflow {
+        /// Session that owns this workflow row. Mobile uses it to scope
+        /// workflow listings to the active session; desktop leaves the filter
+        /// unset so behavior stays unchanged.
+        session_uuid: Option<String>,
         /// Workflow identifier.
         workflow_id: String,
         /// The model-authored workflow script source (JavaScript) to execute.

@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 
 @testable import LingxiCode
 
@@ -175,7 +176,8 @@ import XCTest
                 stopReason: "end_turn",
                 message: MessageDto(role: "assistant", blocks: [.text(text: "完成")])
             ))
-            source.applyForTesting(.taskStatusChanged(taskId: "late-task", status: .completed))
+            source.applyForTesting(.taskStatusChanged(
+                taskId: "late-task", status: .completed, originSessionId: nil))
             source.applyForTesting(
                 .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
 
@@ -369,6 +371,7 @@ import XCTest
                     inputJson: #"{"command":"pwd"}"#,
                     header: nil
                 ))
+            source.expectSessionResumeForTesting("new-session")
             source.applyForTesting(.sessionResumed(sessionId: "new-session", messages: []))
             source.applyForTesting(
                 .toolUseResult(
@@ -535,7 +538,7 @@ import XCTest
             XCTAssertEqual(cancelAttempts, 2, "Stop must become retryable after a Cancel submission failure")
         }
 
-        func testCancellationFailureRestoresParkedPermission() async {
+        func testCancellationFailureKeepsQueuedPermission() async {
             enum CancelFailure: Error { case rejected }
 
             let source = makeSource()
@@ -560,6 +563,315 @@ import XCTest
             XCTAssertFalse(source.model.isCancelling)
             XCTAssertTrue(source.model.streaming)
             XCTAssertEqual(source.model.pendingPermissions, [permission])
+        }
+
+        func testCancellationFailureDoesNotRestoreResolvedPermission() async {
+            enum CancelFailure: Error { case rejected }
+
+            let source = makeSource()
+            let permission = PendingPermission(request: PermissionRequest(
+                requestId: 97,
+                kind: .toolUseConfirm(
+                    toolName: "Shell",
+                    toolInputJson: #"{"command":"pwd"}"#,
+                    defaultAllow: false
+                ),
+                worker: WorkerInfoDto(name: "design", color: "design", team: nil)
+            ))
+            var releaseCancellation: CheckedContinuation<Void, Never>?
+            source.setCommandSubmitterForTesting { command in
+                guard case .cancel = command else { return }
+                await withCheckedContinuation { continuation in
+                    releaseCancellation = continuation
+                }
+                throw CancelFailure.rejected
+            }
+            source.beginTurnForTesting(turnId: 50, sessionId: "session-a")
+            source.model.pendingPermissions = [permission]
+
+            source.cancel()
+            await flushTasks()
+            source.model.pendingPermissions = []
+            releaseCancellation?.resume()
+            releaseCancellation = nil
+            await flushTasks(8)
+
+            XCTAssertTrue(source.model.pendingPermissions.isEmpty)
+        }
+
+        func testCancelForTestingKeepsBackgroundPermissionQueued() {
+            let source = makeSource()
+            let permission = PendingPermission(request: PermissionRequest(
+                requestId: 94,
+                kind: .toolUseConfirm(
+                    toolName: "Shell",
+                    toolInputJson: #"{"command":"ls -la"}"#,
+                    defaultAllow: false
+                ),
+                worker: WorkerInfoDto(name: "review", color: "review", team: nil)
+            ))
+            source.beginTurnForTesting(turnId: 48, sessionId: "session-a")
+            source.model.pendingPermissions = [permission]
+
+            source.cancelForTesting()
+
+            XCTAssertTrue(source.model.isCancelling)
+            XCTAssertEqual(source.model.statusLine, String(localized: "chat_stopping"))
+            XCTAssertEqual(source.model.pendingPermissions, [permission])
+        }
+
+        func testResumeSessionKeepsVisibleTranscriptAndBackgroundPermissionUntilReplay() async {
+            let permission = PendingPermission(request: PermissionRequest(
+                requestId: 95,
+                kind: .toolUseConfirm(
+                    toolName: "Shell",
+                    toolInputJson: #"{"command":"pwd"}"#,
+                    defaultAllow: false
+                ),
+                worker: WorkerInfoDto(name: "design", color: "design", team: nil)
+            ))
+
+            let resumedSource = makeSource()
+            var resumedCommands: [ClientCommand] = []
+            resumedSource.setCommandSubmitterForTesting { command in
+                await MainActor.run { resumedCommands.append(command) }
+            }
+            let resumedMessage = Message(role: .user, text: "keep transcript behavior")
+            resumedSource.model.messages = [resumedMessage]
+            resumedSource.model.items = [.message(resumedMessage)]
+            resumedSource.model.pendingPermissions = [permission]
+
+            resumedSource.resumeSession("session-b")
+            await waitForSubmittedCommands(1, commands: resumedCommands)
+
+            XCTAssertEqual(resumedSource.model.messages, [resumedMessage])
+            XCTAssertEqual(resumedSource.model.items, [.message(resumedMessage)])
+            XCTAssertEqual(resumedSource.model.pendingPermissions, [permission])
+            XCTAssertFalse(resumedSource.model.isNew)
+            resumedSource.applyForTesting(.sessionResumed(sessionId: "session-b", messages: []))
+            XCTAssertTrue(resumedSource.model.messages.isEmpty)
+            XCTAssertTrue(resumedSource.model.items.isEmpty)
+            XCTAssertEqual(resumedSource.model.pendingPermissions, [permission])
+            XCTAssertEqual(resumedSource.model.activeSessionId, "session-b")
+        }
+
+        func testVisibleActiveSessionResumeIsNoOpAcrossLifecycleReentry() async {
+            let source = makeSource()
+            var commands: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in
+                await MainActor.run { commands.append(command) }
+            }
+            let visibleMessage = Message(role: .ai, text: "still visible")
+            source.model.activeSessionId = "session-a"
+            source.model.messages = [visibleMessage]
+            source.model.items = [.message(visibleMessage)]
+
+            source.resumeSession("session-a")
+            await flushTasks(8)
+
+            XCTAssertTrue(commands.isEmpty)
+            XCTAssertFalse(source.model.sessionTransitionPending)
+            XCTAssertEqual(source.model.messages, [visibleMessage])
+            XCTAssertEqual(source.model.items, [.message(visibleMessage)])
+        }
+
+        func testEmptyUnconfirmedActiveSessionStillRequestsProcessRestoreReplay() async {
+            let source = makeSource()
+            var commands: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in
+                await MainActor.run { commands.append(command) }
+            }
+            source.model.activeSessionId = "session-a"
+            source.model.isNew = true
+
+            source.resumeSession("session-a")
+            await waitForSubmittedCommands(1, commands: commands)
+
+            XCTAssertEqual(commands.count, 1)
+            guard let command = commands.first else { return }
+            guard case let .resumeSession(sessionId, cwd) = command else {
+                return XCTFail("process restoration must still request transcript replay")
+            }
+            XCTAssertEqual(sessionId, "session-a")
+            XCTAssertNil(cwd)
+            XCTAssertTrue(source.model.sessionTransitionPending)
+        }
+
+        func testPausedTaskDoesNotHoldBackgroundExecutionLease() {
+            let source = makeSource()
+            source.model.backgroundTasks = [BackgroundTaskSnapshot(
+                id: "workflow-paused",
+                descriptionText: "Paused workflow",
+                status: .paused
+            )]
+
+            XCTAssertFalse(source.model.requiresBackgroundExecution)
+
+            source.model.backgroundTasks[0].status = .pending
+            XCTAssertTrue(source.model.requiresBackgroundExecution)
+            source.model.backgroundTasks[0].status = .running
+            XCTAssertTrue(source.model.requiresBackgroundExecution)
+        }
+
+        func testPermissionPresentationRequiresForegroundAttachedPresenter() {
+            XCTAssertFalse(PermissionPromptPresentationPolicy.canPresent(
+                sceneActivationState: .background,
+                presenterIsAttached: true
+            ))
+            XCTAssertFalse(PermissionPromptPresentationPolicy.canPresent(
+                sceneActivationState: .foregroundActive,
+                presenterIsAttached: false
+            ))
+            XCTAssertTrue(PermissionPromptPresentationPolicy.canPresent(
+                sceneActivationState: .foregroundActive,
+                presenterIsAttached: true
+            ))
+        }
+
+        func testBackgroundWorkerPermissionSurfacesAfterMainTurnEnds() async {
+            let source = makeSource()
+            let request = PermissionRequest(
+                requestId: 92,
+                kind: .toolUseConfirm(
+                    toolName: "Shell",
+                    toolInputJson: #"{"command":"ls -la"}"#,
+                    defaultAllow: false
+                ),
+                worker: WorkerInfoDto(name: "design", color: "design", team: nil)
+            )
+
+            await EnginePermissionSink(source: source).onRequest(request: request)
+
+            XCTAssertFalse(source.model.streaming)
+            XCTAssertEqual(source.model.pendingPermissions, [PendingPermission(request: request)])
+        }
+
+        func testAuthoritativePermissionResolutionRemovesOnlyMatchingPrompt() {
+            let source = makeSource()
+            let first = PendingPermission(request: PermissionRequest(
+                requestId: 201,
+                kind: .toolUseConfirm(
+                    toolName: "Shell",
+                    toolInputJson: #"{"command":"pwd"}"#,
+                    defaultAllow: false
+                ),
+                worker: nil
+            ))
+            let second = PendingPermission(request: PermissionRequest(
+                requestId: 202,
+                kind: .toolUseConfirm(
+                    toolName: "Write",
+                    toolInputJson: #"{"path":"notes.md"}"#,
+                    defaultAllow: false
+                ),
+                worker: nil
+            ))
+            source.model.pendingPermissions = [first, second]
+
+            source.applyForTesting(.permissionRequestResolved(
+                requestId: first.requestId,
+                resolution: .expired
+            ))
+
+            XCTAssertEqual(source.model.pendingPermissions, [second])
+        }
+
+        func testFailedPermissionResponseRestoresQueuedRequest() async {
+            enum SubmitFailure: Error { case rejected }
+
+            let source = makeSource()
+            let permission = PendingPermission(request: PermissionRequest(
+                requestId: 98,
+                kind: .toolUseConfirm(
+                    toolName: "Shell",
+                    toolInputJson: #"{"command":"pwd"}"#,
+                    defaultAllow: false
+                ),
+                worker: WorkerInfoDto(name: "design", color: "design", team: nil)
+            ))
+            source.setCommandSubmitterForTesting { _ in
+                throw SubmitFailure.rejected
+            }
+            source.model.pendingPermissions = [permission]
+
+            source.approvePermission(permission.requestId, .allowOnce)
+            XCTAssertTrue(source.model.pendingPermissions.isEmpty)
+            await flushTasks(8)
+
+            XCTAssertEqual(source.model.pendingPermissions, [permission])
+            XCTAssertEqual(source.model.error?.kind, .host)
+        }
+
+        func testTerminalTurnErrorKeepsBackgroundPermissionQueued() {
+            let source = makeSource()
+            let permission = PendingPermission(request: PermissionRequest(
+                requestId: 96,
+                kind: .toolUseConfirm(
+                    toolName: "Shell",
+                    toolInputJson: #"{"command":"whoami"}"#,
+                    defaultAllow: false
+                ),
+                worker: WorkerInfoDto(name: "review", color: "review", team: nil)
+            ))
+            source.beginTurnForTesting(turnId: 49, sessionId: "session-a")
+            source.model.pendingPermissions = [permission]
+
+            source.applyForTesting(.error(kind: .internal, message: "boom"))
+
+            XCTAssertEqual(source.model.pendingPermissions, [permission])
+            XCTAssertEqual(source.model.error?.kind, .internal)
+        }
+
+        func testPermissionPromptPresentsAboveCurrentModal() async throws {
+            guard let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState == .foregroundActive })
+            else {
+                throw XCTSkip("No foreground window scene")
+            }
+
+            let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+            let source = makeSource()
+            let host = UIHostingController(rootView: EnginePermissionPromptHost(
+                model: source.model,
+                onApprove: { _, _ in },
+                onDeny: { _ in }
+            ))
+            let window = UIWindow(windowScene: scene)
+            window.rootViewController = host
+            window.makeKeyAndVisible()
+            let animationsWereEnabled = UIView.areAnimationsEnabled
+            UIView.setAnimationsEnabled(false)
+            defer {
+                host.dismiss(animated: false)
+                window.isHidden = true
+                previousKeyWindow?.makeKey()
+                UIView.setAnimationsEnabled(animationsWereEnabled)
+            }
+
+            let existingModal = UIViewController()
+            existingModal.modalPresentationStyle = .fullScreen
+            host.present(existingModal, animated: false)
+
+            source.model.pendingPermissions = [PendingPermission(request: PermissionRequest(
+                requestId: 93,
+                kind: .toolUseConfirm(
+                    toolName: "Shell",
+                    toolInputJson: #"{"command":"pwd"}"#,
+                    defaultAllow: false
+                ),
+                worker: WorkerInfoDto(name: "design", color: "design", team: nil)
+            ))]
+
+            for _ in 0..<50 where existingModal.presentedViewController == nil {
+                await Task.yield()
+            }
+
+            XCTAssertNotNil(existingModal.presentedViewController)
+            XCTAssertEqual(
+                existingModal.presentedViewController?.modalPresentationStyle,
+                .overFullScreen
+            )
         }
 
         func testTerminalBeforeFailedCancellationClearsStoppingStatus() async {
@@ -941,6 +1253,7 @@ import XCTest
             ]))
             source.model.expandedToolCalls = ["edit-1"]
 
+            source.expectSessionResumeForTesting("session-z")
             source.applyForTesting(.sessionResumed(sessionId: "session-z", messages: []))
 
             XCTAssertTrue(source.model.planTasks.isEmpty,

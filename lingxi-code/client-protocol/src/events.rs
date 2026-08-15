@@ -16,6 +16,7 @@
 //! (decision §0.4).
 
 use crate::ask_user_question::AskUserQuestionRequestDto;
+use crate::controls::ConversationControlsDto;
 use crate::listings::{
     AgentDto, AuthStateDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
     MemoryEntryDto, SessionAgentSummaryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto,
@@ -26,6 +27,7 @@ use crate::local_apps::{
     AppRuntimeStateDto, AppSessionRowDto, AppWorkflowStateDto,
 };
 use crate::message::MessageDto;
+use crate::permission::PermissionResolutionDto;
 use serde::{Deserialize, Serialize};
 
 /// Outbound events the engine streams to a client.
@@ -39,152 +41,99 @@ use serde::{Deserialize, Serialize};
 /// §0.9) and round-trip only.
 // Boxing the app payload would change the generated Swift/Kotlin protocol API.
 #[allow(clippy::large_enum_variant)]
+// UniFFI 0.28 stores an enum's variant/field documentation in the same
+// fixed-size metadata buffer as its wire schema. Keep this high-cardinality
+// envelope undocumented at the derive site; the payload DTOs and protocol
+// snapshots remain the source of API documentation without risking a build
+// failure when an additive event is introduced.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ClientEvent {
-    /// A terminal/protocol error surfaced to the client. The FIRST variant
-    /// (F1-01); every later DTO inherits its serde conventions.
     Error {
-        /// Coarse error class for client-side branching.
         kind: ErrorKindDto,
-        /// Human-readable error message.
         message: String,
     },
 
-    /// A non-terminal diagnostic intended for the user. Unlike [`Self::Error`],
-    /// this does not end the turn or mark the connection failed. The
-    /// `is_error` flag only controls presentation severity.
     SystemNotice {
-        /// Sanitized, human-readable notice text.
         message: String,
-        /// Whether clients should render the notice with error severity.
         is_error: bool,
     },
 
-    /// An interactive `AskUserQuestion` questionnaire is waiting for the
-    /// client. The answer is returned through
-    /// [`ClientCommand::AnswerAskUserQuestion`](crate::commands::ClientCommand::AnswerAskUserQuestion).
     AskUserQuestion {
-        /// Correlated request payload.
         request: AskUserQuestionRequestDto,
     },
 
-    /// A previously-emitted interactive `AskUserQuestion` prompt is no longer
-    /// pending on the engine side (answered, cancelled, or auto-continued).
-    /// Clients should drop any local UI for `request_id` and stop replaying it
-    /// on reload.
     AskUserQuestionResolved {
-        /// Correlator with the earlier [`Self::AskUserQuestion`] payload.
         request_id: u64,
     },
 
+    PermissionRequestResolved {
+        request_id: u64,
+        resolution: PermissionResolutionDto,
+    },
+
     // ── Live-turn streaming events (F1-03) ────────────────────────────────
-    /// Plain assistant text. 1:1 `OutputStream::emit_text`.
     TextDelta {
-        /// The text payload emitted.
         text: String,
     },
 
-    /// A tool invocation about to dispatch. 1:1 `emit_tool_call`; the
-    /// `serde_json::Value` input is lowered to a JSON String (`input_json`,
-    /// decision §0.4).
     ToolUseStarted {
-        /// Stable id echoed in the matching [`ClientEvent::ToolUseResult`].
         id: String,
-        /// Name of the tool being invoked.
         tool: String,
-        /// Tool input as a JSON String.
         input_json: String,
-        /// Pre-derived header. Absent on an older engine.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         header: Option<crate::tool_display::ToolHeaderDto>,
     },
 
-    /// Periodic heartbeat for a still-running tool call. Additive over
-    /// [`ClientEvent::ToolUseStarted`] / [`ClientEvent::ToolUseResult`]: long
-    /// tool executions can now surface liveness without inventing a second
-    /// result event shape.
     ToolHeartbeat {
-        /// Correlator with the matching [`ClientEvent::ToolUseStarted`].
         id: String,
-        /// Name of the tool still running.
         tool: String,
-        /// Milliseconds elapsed since the tool dispatch began.
         elapsed_ms: u64,
     },
 
-    /// A tool result returning to the conversation. 1:1 `emit_tool_result`;
-    /// fires in COMPLETION order — clients key by `id`.
     ToolUseResult {
-        /// Correlator with the matching [`ClientEvent::ToolUseStarted`].
         id: String,
-        /// Name of the tool that returned.
         tool: String,
-        /// Tool result as a JSON String.
         result_json: String,
-        /// Whether the tool reported failure.
         is_error: bool,
-        /// Pre-derived `⎿` block. Absent on an older engine.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display: Option<crate::tool_display::ToolResultDisplayDto>,
     },
 
-    /// The assistant message boundary. SYNTHESIZED by the adapter — there is no
-    /// engine message-boundary event. Carries the reproduced [`MessageDto`].
     MessageComplete {
-        /// Stop reason reported by the model (e.g. `"end_turn"`), if known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<String>,
-        /// The completed message block set, if reconstructable.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<MessageDto>,
     },
 
-    /// Adapter-synthesized on `SendPrompt` receipt — the engine never emits a
-    /// turn-start event.
     TurnStarted {
-        /// Optional client-supplied turn correlator.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<u64>,
     },
 
-    /// End-of-turn marker. 1:1 `emit_end_turn`.
     TurnEnded {
-        /// How the turn ended.
         outcome: TurnOutcomeDto,
-        /// Stop reason reported by the model, if known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<String>,
-        /// Cumulative cost snapshot at end of turn.
         cost: CostDto,
     },
 
-    /// A cumulative cost update — the [`CostSnapshot`](traits) lowered
-    /// (`Duration` → secs). Mirrors the `/cost` render fields.
     CostUpdate {
-        /// Cumulative cost in USD.
         total_usd: f64,
-        /// Cumulative input tokens across all turns.
         input_tokens: u64,
-        /// Cumulative output tokens across all turns.
         output_tokens: u64,
-        /// Cumulative successful API calls.
         api_calls: u32,
-        /// Elapsed session time in whole seconds.
         session_duration_secs: u64,
-        /// Pre-formatted display string (e.g. `"$0.0123"`).
         formatted: String,
     },
 
-    /// A compaction finished. 1:1 `emit_compaction_completed`.
     CompactionCompleted {
-        /// Message count BEFORE compaction.
         messages_before: u32,
-        /// Message count AFTER compaction.
         messages_after: u32,
-        /// UX estimate of bytes freed.
         bytes_saved: u64,
     },
 
@@ -194,240 +143,133 @@ pub enum ClientEvent {
     // payload structs live in `crate::listings`. Name reconciliation (plan
     // line 149): the design spec §4.1 says `AgentList`, but the WIRE name is
     // `Agents`.
-    /// Session lifecycle: a session began on this connection. Carries the
-    /// `session_id` as a CONNECTION ATTRIBUTE (decision §0.5) — it travels on
-    /// this event, never as a per-live-command param.
     SessionStarted {
-        /// The session id now driving the connection's orchestrator.
         session_id: String,
     },
 
-    /// Session lifecycle: the current session ended (unit-style marker).
     SessionEnded,
 
-    /// Session lifecycle: a prior session was resumed on this connection.
-    /// Carries the resumed `session_id` (a connection attribute, decision §0.5)
-    /// AND the full restored transcript as `messages` (OLDEST-FIRST) so the
-    /// client renders the rehydrated conversation atomically — the live
-    /// `ResumeSession` path hot-restores the on-disk session into the running
-    /// orchestrator, so the next turn continues with full prior context.
-    ///
-    /// `messages` is REQUIRED (always present, may be empty for a zero-message
-    /// session) — it is the lowered [`MessageDto`] scrollback the host produces
-    /// from the replayed history via `client_adapter::lowering::lower_transcript`.
-    /// This is an ADDITIVE field on an existing variant (no new enum variant, no
-    /// renamed/retyped leaf), so it does NOT change the event COUNT and does NOT
-    /// require a `CLIENT_PROTOCOL_VERSION` major bump (decision §0.10).
     SessionResumed {
-        /// The session id resumed onto the connection's orchestrator.
         session_id: String,
-        /// The full restored transcript, OLDEST-FIRST. Always present (may be
-        /// empty). Carries the rehydrated conversation so the client renders it
-        /// atomically on resume.
         messages: Vec<MessageDto>,
     },
 
-    /// Session-scoped agent roster. The list always includes the parent
-    /// conversation as `agent_id = "main"`; child rows are discovered from
-    /// the session's subagent transcript directory.
     SessionAgentList {
-        /// Active connection session id.
         session_id: String,
-        /// Agent rows ordered by most recently updated first.
         agents: Vec<SessionAgentSummaryDto>,
     },
 
-    /// Full transcript for one session agent, oldest-first.
     SessionAgentTranscript {
-        /// Active connection session id.
         session_id: String,
-        /// Agent instance whose messages are returned.
         agent_id: String,
-        /// Lowered transcript messages.
         messages: Vec<MessageDto>,
-        /// Exclusive next visible-message index for this transcript snapshot.
         next_message_index: u64,
-        /// Monotonic valid-record watermark for stale-snapshot fencing.
         revision: u64,
     },
 
-    /// Push update for a session-agent summary. This is emitted by mobile
-    /// hosts when an agent's persisted transcript/status changes.
     SessionAgentUpdated {
-        /// Active connection session id.
         session_id: String,
-        /// Updated summary.
         agent: SessionAgentSummaryDto,
     },
 
-    /// Push update for one newly persisted agent message.
     SessionAgentMessage {
-        /// Active connection session id.
         session_id: String,
-        /// Agent instance that produced the message.
         agent_id: String,
-        /// Stable per-agent visible-message index (lifecycle records excluded).
         message_index: u64,
-        /// Newly persisted message.
         message: MessageDto,
     },
 
-    /// The resumable-session catalog (`/resume` / session picker). Maps
-    /// `SessionMetadata`; rows carry `.path` directly (plan line 152).
     SessionList {
-        /// One row per resumable session, newest-first.
         sessions: Vec<SessionRowDto>,
     },
 
-    /// The curated available-model catalog + active model (`/model` no-arg
-    /// list). When provider identity is known, entries use the stable
-    /// `provider/model` reference accepted by [`ClientCommand::SetModel`].
     ModelList {
-        /// Latest/common model references the orchestrator will accept via
-        /// `SetModel`; clients group the qualified references by provider.
         models: Vec<String>,
-        /// The currently active model reference.
         current: String,
     },
 
-    /// The active model changed (1:1 with a successful `SetModel` /
-    /// `switch_model`).
     ModelChanged {
-        /// The model reference now active for subsequent turns.
         model: String,
     },
 
-    /// The live permission mode changed after a successful
-    /// [`SetPermissionMode`](crate::commands::ClientCommand::SetPermissionMode)
-    /// command. Clients use this acknowledgement as the source of truth rather
-    /// than optimistically changing their local selector.
     PermissionModeChanged {
-        /// Active permission-mode wire id.
         mode: String,
     },
 
-    /// Non-secret result of a provider-credential list/set/delete operation.
-    /// The configured ids are the authoritative snapshot from the same secure
-    /// store used by CLI and TUI; secret values never cross this response path.
     ProviderCredentialStatus {
-        /// Correlator copied from the triggering credential command.
         operation_id: u64,
-        /// Provider ids whose secure-store entries currently exist.
         configured_provider_ids: Vec<String>,
-        /// Provider ids whose state could not be read. Clients must preserve
-        /// their last known state for these ids instead of treating them as
-        /// disconnected.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unavailable_provider_ids: Vec<String>,
-        /// Whether the active storage backend encrypts persisted values.
         storage_encrypted: bool,
-        /// Sanitized storage failure, if the operation could not complete.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
 
-    /// The MCP server listing (`/mcp`). Maps `McpServerInfo`.
     McpServers {
-        /// One entry per configured MCP server.
         servers: Vec<McpServerDto>,
     },
 
-    /// The hook listing (`/hooks`). Maps `HookInfo`.
     Hooks {
-        /// One entry per registered hook (built-in + user).
         hooks: Vec<HookDto>,
     },
 
-    /// The subagent listing (`/agents`). Maps `AgentInfo`. WIRE name `Agents`
-    /// (reconciled from spec §4.1 `AgentList`, plan line 149).
     Agents {
-        /// One entry per registered subagent.
         agents: Vec<AgentDto>,
     },
 
-    /// Slash-command catalog.
     SlashCommandCatalog {
-        /// Registered commands.
         commands: Vec<SlashCommandDto>,
     },
 
-    /// Result for a locally handled slash command.
     SlashCommandResult {
-        /// Optional originating turn id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<u64>,
-        /// Display text.
         display: String,
-        /// Whether the command failed.
         #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
     },
 
-    /// The LINGXI.md memory listing (`/memory`). Maps `protocol::MemoryEntry`.
     MemoryEntries {
-        /// One entry per loaded memory file, in tier order.
         entries: Vec<MemoryEntryDto>,
     },
 
-    /// The `/status` panel snapshot. Maps `StatusSnapshot` (traits shape
-    /// canonical; status-line fields appended OPTIONAL, plan line 155).
     StatusSnapshot {
-        /// The full status snapshot.
         snapshot: StatusSnapshotDto,
     },
 
-    /// Read-only effective settings + per-field provenance (`/config` view).
-    /// Both payloads are JSON **Strings** on the wire (decision §0.4).
     SettingsSnapshot {
-        /// The merged effective settings, as a JSON String.
         effective_json: String,
-        /// Per-field provenance (which layer set each value), as a JSON String.
         provenance_json: String,
     },
 
-    /// The auth state (`/login` / `/logout` / `/status`). Maps
-    /// `Option<LoginInfo>`.
     AuthState {
-        /// Signed-out, or a signed-in user.
         state: AuthStateDto,
     },
 
-    /// The `/doctor` diagnostic report. Maps `DoctorReport`.
     DoctorReport {
-        /// The aggregated check results + summary.
         report: DoctorReportDto,
     },
 
-    /// One task row (`/tasks`). Maps `TaskRecord`.
     TaskRow {
-        /// The task row.
         task: TaskRowDto,
     },
 
-    /// A chunk of a task's accumulated stdout/stderr spool. Maps
-    /// `TaskOutputChunk`.
     TaskOutputChunk {
-        /// 9-char task id.
         task_id: String,
-        /// Spooled content for this chunk.
         content: String,
-        /// Total line count of the spool.
         total_lines: u64,
-        /// `true` when the surfaced content was truncated by a limit.
         truncated: bool,
     },
 
-    /// A push event when a task transitions state.
     TaskStatusChanged {
-        /// 9-char task id.
         task_id: String,
-        /// The new task status.
         status: TaskStatusDto,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_session_id: Option<String>,
     },
 
-    /// Slash-command catalog changed in place.
     CommandsChanged {
-        /// Updated command snapshot.
         commands: Vec<SlashCommandDto>,
     },
 
@@ -437,150 +279,81 @@ pub enum ClientEvent {
     // docstring into a fixed-capacity per-item metadata buffer, and the
     // `ClientEvent` enum is near that cap. Full semantics live on the
     // `crate::local_apps` DTOs and the matching `ClientCommand` variants.
-    /// The local-app record set changed (created / deleted / listed).
     AppsChanged {
-        /// The full app record set.
         apps: Vec<AppRecordDto>,
     },
 
-    /// Extensible local-app event envelope.
     AppEvent {
-        /// Strongly typed local-app payload.
         event: AppEventDto,
     },
 
-    /// The app's workflow state changed (`draft` / `ready`).
     AppWorkflowChanged {
-        /// App whose workflow moved.
         app_id: String,
-        /// The new workflow state.
         state: AppWorkflowStateDto,
-        /// Optional detail (e.g. a failure summary). Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
 
-    /// The app's runtime (dev-server) state record changed.
     AppRuntimeChanged {
-        /// App whose runtime moved.
         app_id: String,
-        /// The new runtime state.
         state: AppRuntimeStateDto,
-        /// Extended runtime mode, URL, suspension and recovery state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<AppRuntimeDetailsDto>,
-        /// Last runtime failure, if any. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_error: Option<String>,
     },
 
-    /// One page of an app's workspace-scoped session catalog — the reply to
-    /// [`ListAppSessions`](crate::commands::ClientCommand::ListAppSessions).
-    /// The app's pinned init session (when it falls inside this page) is
-    /// marked with [`AppSessionKindDto::Init`](crate::local_apps::AppSessionKindDto::Init);
-    /// clients list it first.
     AppSessionsChanged {
-        /// App the catalog belongs to.
         app_id: String,
-        /// The requested page, modified-descending.
         sessions: Vec<AppSessionRowDto>,
-        /// Offset of the NEXT page, or `None` on the last page.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_offset: Option<u64>,
     },
 
-    /// A restorable checkpoint was recorded (git wiring is phase 5).
     AppCheckpointCreated {
-        /// App the checkpoint belongs to.
         app_id: String,
-        /// The recorded checkpoint.
         checkpoint: AppCheckpointDto,
     },
 
-    /// A local-app command failed with a typed code (incl. the phase-1
-    /// `not_yet_available` honesty path for runtime/checkpoint commands).
     AppOperationFailed {
-        /// The addressed app, when one was addressed. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app_id: Option<String>,
-        /// Stable machine-readable failure code.
         code: AppErrorCodeDto,
-        /// Human-readable failure message.
         message: String,
     },
 
     // ── Live thinking/usage (§0.7 follow-up) + reserved (§0.9) ────────────
-    /// Coordinator/team status. **LIVE-FED** (§0.9 coordinator-activation):
-    /// a coordinator-mode desktop session constructs one `TeamRegistry` per
-    /// `build()` and a `CoordinatorStatusSink` pushes the current
-    /// `active_worker_count` on each worker status transition via
-    /// `OutputStream::emit_coordinator_status` → `AdapterOutputStream`. The
-    /// reserved→live flip is a feed-status change only: the DTO is
-    /// byte-identical, so no `CLIENT_PROTOCOL_VERSION` bump. Default
-    /// (non-coordinator) sessions never source it, so `active_workers` stays `0`.
     CoordinatorStatus {
-        /// Number of active (non-terminal) workers in the coordinator's team.
         active_workers: u32,
-        /// Optional team name. Skipped from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         team: Option<String>,
     },
 
-    /// One per-worker roster row (T18). The PULL analog of
-    /// [`Self::CoordinatorStatus`]'s scalar: the bridge `spawn_coordinator_poll`
-    /// (T19) emits ONE of these per worker on a
-    /// [`ListingKindDto::Coordinator`](crate::commands::ListingKindDto::Coordinator)
-    /// refresh, exactly mirroring [`Self::TaskRow`] / [`TaskRowDto`]. Lowers 1:1
-    /// onto the TUI `WorkerRow`.
     CoordinatorWorker {
-        /// The roster row payload.
         worker: CoordinatorWorkerDto,
     },
 
-    /// Streaming thinking delta. **LIVE-FED** (§0.7 follow-up): `event_router`
-    /// emits one per `ContentDelta::ThinkingDelta` SSE chunk via
-    /// `OutputStream::emit_thinking` → `AdapterOutputStream`. The `signature`
-    /// arrives on the completed block, not per-delta, so it is `None` on the
-    /// live stream.
     ThinkingDelta {
-        /// The reasoning text delta.
         thinking: String,
-        /// Optional cryptographic signature attesting to the trace.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
 
-    /// Incremental token-usage update. **LIVE-FED** (§0.7 follow-up):
-    /// `event_router` emits it from the `MessageStart` / `MessageDelta` usage
-    /// fields via `OutputStream::emit_usage` → `AdapterOutputStream`.
     UsageUpdate {
-        /// Input tokens in the latest API call.
         input_tokens: u64,
-        /// Output tokens in the latest API call.
         output_tokens: u64,
-        /// Cache-read tokens in the latest API call.
         cache_read_tokens: u64,
-        /// Cache-creation tokens in the latest API call.
         cache_creation_tokens: u64,
     },
 
-    /// A user-visible attachment surfaced during a turn (oracle `k$o`'s
-    /// records, rendered as the "Listed directory …" family).
     Attachment {
-        /// Which attachment this is.
         attachment: AttachmentDto,
     },
 
-    /// The live API retry/backoff status: a request failed with a retry-worthy
-    /// error and is sleeping before the next attempt.
     ApiRetry {
-        /// User-facing error text.
         message: String,
-        /// 1-based attempt number about to be retried.
         attempt: u32,
-        /// Configured retry cap.
         max_retries: u32,
-        /// Backoff before the next attempt, in ms.
         delay_ms: u64,
     },
 
@@ -588,10 +361,21 @@ pub enum ClientEvent {
     // UniFFI lowers this enum by 1-based ORDINAL, so inserting a variant
     // anywhere but the end silently shifts every later one and both mobile
     // clients mis-decode every event — with no compile error anywhere.
-    /// The model-managed plan changed. Full-list replace; `[]` clears it.
     PlanUpdated {
-        /// The complete ordered plan.
         tasks: Vec<crate::tool_display::PlanTaskDto>,
+    },
+
+    /// A paused workflow was replaced by a newly launched resumed run.
+    WorkflowResumed {
+        previous_task_id: String,
+        task: TaskRowDto,
+        run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_session_id: Option<String>,
+    },
+
+    ConversationControlsChanged {
+        controls: ConversationControlsDto,
     },
 }
 

@@ -16,6 +16,7 @@ import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.AppEventDto
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.ReplyEvent
+import com.lingxi.code.model.EngineModelState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -42,8 +43,10 @@ class LocalAppsViewModelTest {
         private val events = MutableSharedFlow<ClientEvent>(extraBufferCapacity = 32)
         val commands = mutableListOf<ClientCommand>()
         var commandFailure: Throwable? = null
+        val models = MutableStateFlow(EngineModelState())
 
         override val clientEvents: Flow<ClientEvent> = events.asSharedFlow()
+        override val modelState = models
 
         override suspend fun submitClientCommand(command: ClientCommand) {
             commandFailure?.let { throw it }
@@ -109,6 +112,78 @@ class LocalAppsViewModelTest {
                     "derives one from the brief itself when name is empty",
                 sent.name.isEmpty(),
             )
+            assertNull("null means the workflow follows the current conversation", sent.workflowModel)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `create app forwards an explicit provider-qualified workflow model`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource().apply {
+                models.value = EngineModelState(
+                    available = listOf("deepseek/deepseek-v3.2", "anthropic/claude-sonnet-4-6"),
+                    active = "deepseek/deepseek-v3.2",
+                )
+            }
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            assertEquals(
+                source.models.value.available,
+                viewModel.uiState.value.workflowModels.map { it.id },
+            )
+            assertEquals(
+                "deepseek/deepseek-v3.2",
+                viewModel.uiState.value.currentWorkflowModelId,
+            )
+
+            viewModel.onAction(
+                LocalAppsAction.CreateFromBrief(
+                    brief = "一个小游戏",
+                    workflowModel = "anthropic/claude-sonnet-4-6",
+                ),
+            )
+            runCurrent()
+
+            val sent = source.commands.filterIsInstance<ClientCommand.CreateApp>().single()
+            assertEquals("anthropic/claude-sonnet-4-6", sent.workflowModel)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `create app rejects an explicit model that is not in the live catalog`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource().apply {
+                models.value = EngineModelState(
+                    available = listOf("deepseek/deepseek-v3.2"),
+                    active = "deepseek/deepseek-v3.2",
+                )
+            }
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            viewModel.onAction(
+                LocalAppsAction.CreateFromBrief(
+                    brief = "一个小游戏",
+                    workflowModel = "anthropic/removed-model",
+                ),
+            )
+            runCurrent()
+
+            assertTrue(source.commands.none { it is ClientCommand.CreateApp })
+            assertTrue(viewModel.uiState.value.error?.isNotBlank() == true)
         } finally {
             Dispatchers.resetMain()
         }

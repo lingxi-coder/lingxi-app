@@ -3,6 +3,7 @@ use crate::{
     ProviderRequest, ProviderResponse, RawStreamFrame, StreamDecoder, ToolDeclaration, Usage,
     WireCodec,
 };
+use crate::reasoning_controls::{request_reasoning_intent, RequestReasoningIntent};
 
 use base64::Engine;
 use serde_json::Value;
@@ -82,18 +83,8 @@ impl WireCodec for GeminiCodec {
                 ),
             );
         }
-        if let Some(reasoning) = &request.reasoning {
-            // Gemini only consumes a numeric budget. `Adaptive` never reaches this
-            // codec (only the Anthropic/firstParty path emits it); map it to `0`,
-            // Gemini's "let the model decide" dynamic-thinking value.
-            let budget = match reasoning {
-                crate::ReasoningConfig::Enabled { budget_tokens } => *budget_tokens,
-                crate::ReasoningConfig::Adaptive => 0,
-            };
-            generation_config.insert(
-                "thinkingConfig".to_string(),
-                serde_json::json!({"thinkingBudget": budget}),
-            );
+        if let Some(thinking_config) = gemini_thinking_config(request) {
+            generation_config.insert("thinkingConfig".to_string(), thinking_config);
         }
         if !generation_config.is_empty() {
             body.insert(
@@ -130,6 +121,24 @@ impl WireCodec for GeminiCodec {
 
     fn clone_box(&self) -> Box<dyn WireCodec> {
         Box::new(self.clone())
+    }
+}
+
+fn gemini_thinking_config(request: &LlmRequest) -> Option<Value> {
+    match request_reasoning_intent(request) {
+        RequestReasoningIntent::Automatic => None,
+        RequestReasoningIntent::LegacyAdaptive => None,
+        RequestReasoningIntent::Disabled => {
+            Some(serde_json::json!({"thinkingBudget": 0}))
+        }
+        RequestReasoningIntent::LegacyBudget(tokens)
+        | RequestReasoningIntent::EffortBudget(tokens) => {
+            Some(serde_json::json!({"thinkingBudget": tokens}))
+        }
+        RequestReasoningIntent::Level(level) => {
+            Some(serde_json::json!({"thinkingLevel": level}))
+        }
+        RequestReasoningIntent::Enabled => Some(serde_json::json!({"thinkingBudget": -1})),
     }
 }
 

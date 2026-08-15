@@ -92,6 +92,39 @@ struct ConversationError: Identifiable, Equatable {
     let message: String
 }
 
+// MARK: - Conversation controls projection
+
+/// A small SwiftUI projection of the engine-owned controls DTO. Keeping this
+/// projection provider-neutral lets the mock source compile without UniFFI while
+/// preserving budgets, disabled reasons, and dynamic permission availability.
+struct ConversationReasoningOption: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let isBudget: Bool
+    let persistable: Bool
+}
+
+struct ConversationPermissionOption: Identifiable, Equatable {
+    let id: String
+    let available: Bool
+    let disabledReason: String?
+}
+
+struct ConversationControlsState: Equatable {
+    let qualifiedModel: String
+    let requestedPermission: String
+    let effectivePermission: String
+    let permissionOptions: [ConversationPermissionOption]
+    let requestedReasoning: String
+    let effectiveReasoning: String
+    let reasoningOptions: [ConversationReasoningOption]
+    let budgetRange: ClosedRange<UInt64>?
+    let providerDefault: String
+    let forcedReasoning: Bool
+    let editable: Bool
+    let disabledReason: String?
+}
+
 /// How the last turn ended, surfaced distinctly to the UI (PR-4 item 3). A clean
 /// `EndTurn` leaves this `nil`; `MaxTurns` / `Cancelled` set a notice the chat
 /// view shows so the two non-clean outcomes aren't silently treated as a normal
@@ -150,8 +183,9 @@ struct ConversationTurnSpeechUpdate: Equatable, Sendable {
     /// The engine's adapter gate emits a `PermissionRequest` whenever a tool needs
     /// approval (e.g. a Write/Bash invocation) and parks the turn on a oneshot until
     /// the user answers. On mobile that request used to vanish into a no-op sink, so
-    /// the turn hung forever; now the sink forwards it here and the chat view renders
-    /// a prompt. The user's choice resolves the park by submitting
+    /// the turn hung forever; now the sink forwards it here and the app root presents
+    /// a prompt above whichever screen is active. The user's choice resolves the
+    /// park by submitting
     /// `ClientCommand.approvePermission` / `denyPermission` (correlated by
     /// `requestId`) back through the `MobileEngineHandle`.
     ///
@@ -200,6 +234,8 @@ struct ConversationAgentSummary: Identifiable, Equatable, Sendable {
     let id: String
     let name: String
     let agentType: String
+    let model: String?
+    let modelProfile: String?
     var status: String
     var latestActivity: String?
     var updatedAtMs: UInt64
@@ -208,6 +244,8 @@ struct ConversationAgentSummary: Identifiable, Equatable, Sendable {
         id: String,
         name: String,
         agentType: String,
+        model: String? = nil,
+        modelProfile: String? = nil,
         status: String,
         latestActivity: String? = nil,
         updatedAtMs: UInt64 = 0
@@ -215,6 +253,8 @@ struct ConversationAgentSummary: Identifiable, Equatable, Sendable {
         self.id = id
         self.name = name
         self.agentType = agentType
+        self.model = model
+        self.modelProfile = modelProfile
         self.status = status
         self.latestActivity = latestActivity
         self.updatedAtMs = updatedAtMs
@@ -353,6 +393,22 @@ final class ConversationModel: ObservableObject {
     @Published var availableModels: [String] = []
     /// The active model id the engine reports (`ModelList.current` / `ModelChanged.model`).
     @Published var activeModelId: String = ""
+    /// The effective permission mode reported by the engine after applying
+    /// model/provider/killswitch safety gates. This may differ from the
+    /// persisted user preference (for example, `auto` can downgrade to
+    /// `default`).
+    @Published var effectivePermissionMode: String = "auto"
+    @Published var controls: ConversationControlsState?
+    /// Engine-authoritative conversation controls. These remain provider
+    /// neutral so the composer never guesses which effort values are valid.
+    @Published var requestedPermissionMode: String = "auto"
+    @Published var reasoningSelection: String = "automatic"
+    @Published var reasoningOptions: [String] = []
+    @Published var reasoningOptionDetails: [ConversationReasoningOption] = []
+    @Published var permissionOptions: [ConversationPermissionOption] = []
+    @Published var reasoningDisabledReason: String?
+    @Published var controlsPending: Bool = false
+    @Published var controlsError: String?
     // ── Out-of-band session state (real history) ───────────────────────────────
     // `ListSessions` / `SessionList` are NOT part of a text turn, so — exactly
     // like `ModelList` above — they ride a SEPARATE session-state path here,
@@ -426,6 +482,9 @@ final class ConversationModel: ObservableObject {
     /// source and starts empty. Drives the pinned tasks panel above the
     /// composer.
     @Published var backgroundTasks: [BackgroundTaskSnapshot] = []
+    /// Direct workflow resume feedback. Kept separate from task status so a
+    /// rejected resume can be retried without mutating the paused row.
+    @Published var workflowResumeState: WorkflowResumeState = .idle
     /// The model's own working plan (TodoWrite / Task checklist), replaced
     /// WHOLESALE on every `PlanUpdated` — the engine emits the complete ordered
     /// list and an empty list clears it. Drives `PlanTasksPanel`, pinned closest
@@ -441,7 +500,9 @@ final class ConversationModel: ObservableObject {
     #if canImport(engine_mobileFFI)
         /// FIFO queue of engine-parked permission requests (SHIP-BLOCKER #3). The
         /// chat view renders the head (`first`) as a modal prompt; answering it pops
-        /// the head and reveals the next. Empty between requests / on the mock
+        /// the head and reveals the next. Engine-scoped: main-turn cancellation
+        /// and transcript/session resets do not clear it; only explicit resolution
+        /// or real engine/gate teardown does. Empty between requests / on the mock
         /// (which never asks for permission).
         @Published var pendingPermissions: [PendingPermission] = []
     #endif
@@ -454,16 +515,27 @@ final class ConversationModel: ObservableObject {
         self.agentSummaries = [.main]
         self.selectedAgentID = Self.mainAgentID
         self.agentTranscripts = [:]
+        self.reasoningOptionDetails = [
+            ConversationReasoningOption(id: "automatic", title: "Auto", isBudget: false, persistable: true)
+        ]
+        self.reasoningOptions = ["automatic"]
+        self.permissionOptions = [
+            "default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"
+        ].map { ConversationPermissionOption(id: $0, available: $0 != "bypassPermissions", disabledReason: $0 == "bypassPermissions" ? "not_yet_available" : nil) }
     }
 
     /// Replace the agent roster while retaining the selected row when it is
     /// still present.  A missing selection safely falls back to the main
     /// agent, which is also what session transitions use.
     func replaceAgentSummaries(_ summaries: [ConversationAgentSummary]) {
+        let currentByID = Dictionary(uniqueKeysWithValues: agentSummaries.map { ($0.id, $0) })
         var merged: [ConversationAgentSummary] = [
             agentSummaries.first(where: { $0.id == Self.mainAgentID }) ?? .main
         ]
         for summary in summaries.map(Self.normalizedAgentSummaryForSource) {
+            let summary = currentByID[summary.id].map {
+                Self.mergeAgentSummary(current: $0, incoming: summary)
+            } ?? summary
             if let index = merged.firstIndex(where: { $0.id == summary.id }) {
                 merged[index] = summary
             } else {
@@ -479,12 +551,58 @@ final class ConversationModel: ObservableObject {
         }
     }
 
+    private static func mergeAgentSummary(
+        current: ConversationAgentSummary,
+        incoming: ConversationAgentSummary
+    ) -> ConversationAgentSummary {
+        let incomingIsCurrent = incoming.updatedAtMs >= current.updatedAtMs
+        let currentIsTerminal = ["completed", "failed", "killed", "cancelled"]
+            .contains(current.status.lowercased())
+        let incomingIsTerminal = ["completed", "failed", "killed", "cancelled"]
+            .contains(incoming.status.lowercased())
+        let name = incomingIsCurrent
+            ? (incoming.name.isEmpty ? current.name : incoming.name)
+            : (current.name.isEmpty ? incoming.name : current.name)
+        let agentType = incomingIsCurrent
+            ? (incoming.agentType.isEmpty ? current.agentType : incoming.agentType)
+            : (current.agentType.isEmpty ? incoming.agentType : current.agentType)
+        let model = incomingIsCurrent
+            ? (incoming.model.flatMap { $0.isEmpty ? nil : $0 } ?? current.model)
+            : (current.model.flatMap { $0.isEmpty ? nil : $0 } ?? incoming.model)
+        let modelProfile = incomingIsCurrent
+            ? (incoming.modelProfile.flatMap { $0.isEmpty ? nil : $0 } ?? current.modelProfile)
+            : (current.modelProfile.flatMap { $0.isEmpty ? nil : $0 } ?? incoming.modelProfile)
+        let status = if currentIsTerminal && !incomingIsTerminal {
+            current.status
+        } else if incomingIsCurrent {
+            incoming.status
+        } else {
+            current.status
+        }
+        let latestActivity = incomingIsCurrent
+            ? (incoming.latestActivity.flatMap { $0.isEmpty ? nil : $0 } ?? current.latestActivity)
+            : current.latestActivity
+
+        return ConversationAgentSummary(
+            id: current.id,
+            name: name,
+            agentType: agentType,
+            model: model,
+            modelProfile: modelProfile,
+            status: status,
+            latestActivity: latestActivity,
+            updatedAtMs: max(current.updatedAtMs, incoming.updatedAtMs)
+        )
+    }
+
     static func normalizedAgentSummaryForSource(_ summary: ConversationAgentSummary) -> ConversationAgentSummary {
         guard summary.id == Self.mainAgentID else { return summary }
         return ConversationAgentSummary(
             id: Self.mainAgentID,
             name: ConversationAgentSummary.main.name,
             agentType: summary.agentType,
+            model: summary.model,
+            modelProfile: summary.modelProfile,
             status: summary.status,
             latestActivity: summary.latestActivity,
             updatedAtMs: summary.updatedAtMs
@@ -494,7 +612,7 @@ final class ConversationModel: ObservableObject {
     func upsertAgentSummary(_ summary: ConversationAgentSummary) {
         var next = agentSummaries
         if let index = next.firstIndex(where: { $0.id == summary.id }) {
-            next[index] = summary
+            next[index] = Self.mergeAgentSummary(current: next[index], incoming: summary)
         } else {
             next.append(summary)
         }
@@ -507,6 +625,8 @@ final class ConversationModel: ObservableObject {
             id: Self.mainAgentID,
             name: current.name,
             agentType: current.agentType,
+            model: current.model,
+            modelProfile: current.modelProfile,
             status: status,
             latestActivity: latestActivity,
             updatedAtMs: UInt64(Date().timeIntervalSince1970 * 1_000)
@@ -653,7 +773,7 @@ final class ConversationModel: ObservableObject {
         backgroundTasks: [BackgroundTaskSnapshot],
         items: [ConversationRenderItem]
     ) -> Bool {
-        if streaming || backgroundTasks.contains(where: { !$0.status.isTerminal }) {
+        if streaming || backgroundTasks.contains(where: { $0.status.requiresExecutionLease }) {
             return true
         }
         return items.contains { item in
@@ -697,6 +817,13 @@ protocol ConversationSource: AnyObject {
     /// confirming `ModelChanged`; the mock just swaps the chip. `id` is a real
     /// engine model id when `model.availableModels` is populated.
     func setModel(_ id: String)
+    /// Change the permission mode through the same engine coordinator used by
+    /// Settings. The string is the wire mode (default/acceptEdits/plan/auto/
+    /// dontAsk/bypassPermissions).
+    func setPermissionMode(_ mode: String)
+    /// Change provider-aware reasoning selection. `automatic` deliberately
+    /// means no user override; other values are validated by the engine.
+    func setReasoningSelection(_ selection: String)
     /// Switch the active conversation to `session` (the iOS analog of Android's
     /// `ChatViewModel.openSession`). MUST cancel any in-flight turn and reset the
     /// streaming bookkeeping FIRST so a turn that completes after the switch can't
@@ -742,6 +869,8 @@ protocol ConversationSource: AnyObject {
     /// Refresh the current session's agent roster.  The command is out of band
     /// from the active turn and is safe to call whenever the agent picker opens.
     func listSessionAgents()
+    /// Resume a paused local workflow directly from its task row.
+    func resumeWorkflow(_ taskID: String)
     /// Select one agent for the message list.  Child agents are read-only on
     /// iOS; selecting the main agent restores the composer.
     func selectAgent(_ id: String)
@@ -797,6 +926,7 @@ extension ConversationSource {
     func resumeSession(_ uuid: String, emptySessionTitle: String?) {}
     func refreshMcpServers() {}
     func listSessionAgents() {}
+    func resumeWorkflow(_ taskID: String) {}
     func selectAgent(_ id: String) {
         guard model.agentSummaries.contains(where: { $0.id == id }) else { return }
         model.markAgentTranscriptLoading(id)
@@ -1208,6 +1338,15 @@ final class MockConversationSource: ConversationSource {
         }
     }
 
+    func setPermissionMode(_ mode: String) {
+        model.requestedPermissionMode = mode
+        model.effectivePermissionMode = mode
+    }
+
+    func setReasoningSelection(_ selection: String) {
+        model.reasoningSelection = selection
+    }
+
     /// Switch sessions: drop the in-flight canned reply (bump the token so its
     /// timer no-ops when it fires) and reset the conversation to the new session's
     /// default transcript. Without the token bump a reply scheduled for the OLD
@@ -1383,6 +1522,11 @@ final class MockConversationSource: ConversationSource {
         }
 
         private var pendingSessionTransition: PendingSessionTransition?
+        /// True only after this source observed the engine's authoritative
+        /// SessionStarted/SessionResumed confirmation. Unlike `model.isNew`, it
+        /// distinguishes a confirmed empty session from a newly recreated source
+        /// that still needs transcript replay.
+        private var hasConfirmedSessionState = false
 
         private struct TurnPrompt: Equatable {
             let text: String
@@ -1393,7 +1537,6 @@ final class MockConversationSource: ConversationSource {
             let id: UInt64
             let turnId: UInt64
             let epoch: UInt64
-            let pendingPermissions: [PendingPermission]
             let task: Task<Void, Error>
         }
 
@@ -1453,7 +1596,6 @@ final class MockConversationSource: ConversationSource {
             _ = operationForCancelling(turnId: turnId)
             model.isCancelling = true
             model.statusLine = String(localized: "chat_stopping")
-            model.pendingPermissions = []
         }
 
         private func submitSessionTransition(
@@ -1622,16 +1764,20 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
-        /// Shared transcript reset used by new/resume/open-session after any old
+        /// Shared transition reset used by new/resume/open-session after any old
         /// turn has safely released its engine slot. Incrementing the epoch also
-        /// makes late transport delivery harmless. `isNew` drives the empty-state
-        /// versus a placeholder transcript.
+        /// makes late transport delivery harmless. A new session clears the
+        /// committed transcript immediately; a resume keeps it visible until the
+        /// authoritative `SessionResumed` replay replaces it.
         private func resetTranscriptForSessionSwitch(isNew: Bool) {
             invalidateTurnContext()
+            hasConfirmedSessionState = false
             model.clearAgentState()
-            model.messages = []
-            model.items = model.messages.map(ConversationRenderItem.message)
-            model.messageDetails = [:]
+            if isNew {
+                model.messages = []
+                model.items = []
+                model.messageDetails = [:]
+            }
             model.streaming = false
             model.isCancelling = false
             model.slashCommandPending = false
@@ -1640,9 +1786,6 @@ final class MockConversationSource: ConversationSource {
             model.statusLine = nil
             model.error = nil
             model.notice = nil
-            // A pending permission belongs to the turn we're abandoning — drop it
-            // so a stale prompt can't leak into the session we're switching to.
-            model.pendingPermissions = []
             // Same for a pending questionnaire: its request id is scoped to
             // the abandoned session/connection. If the target session still
             // has one pending, the broker replays it after the switch.
@@ -1651,6 +1794,8 @@ final class MockConversationSource: ConversationSource {
             // dropping; the next `PlanUpdated` re-establishes a plan.
             model.planTasks = []
             model.expandedToolCalls = []
+            model.backgroundTasks = []
+            model.workflowResumeState = .idle
         }
 
         private func invalidateTurnContext() {
@@ -1997,8 +2142,8 @@ final class MockConversationSource: ConversationSource {
 
         private func acceptTurnEvent(_ event: ClientEvent) -> Bool {
             switch event {
-            case .askUserQuestion, .askUserQuestionResolved, .taskStatusChanged, .taskRow,
-                 .planUpdated, .coordinatorStatus:
+            case .askUserQuestion, .askUserQuestionResolved, .permissionRequestResolved,
+                 .taskStatusChanged, .taskRow, .workflowResumed, .planUpdated, .coordinatorStatus:
                 // Deliberately OUTSIDE the turn gate: the engine's broker
                 // replays a still-pending AskUserQuestion (and resolves it)
                 // after a foreground re-connect, a background task's status
@@ -2046,7 +2191,6 @@ final class MockConversationSource: ConversationSource {
                 id: operationID,
                 turnId: turnId,
                 epoch: epoch,
-                pendingPermissions: model.pendingPermissions,
                 task: task
             )
             cancellationOperation = operation
@@ -2071,9 +2215,6 @@ final class MockConversationSource: ConversationSource {
                     // the original turn live so Stop can be retried safely.
                     model.streaming = true
                     model.statusLine = nil
-                    if model.pendingPermissions.isEmpty {
-                        model.pendingPermissions = operation.pendingPermissions
-                    }
                     model.error = ConversationError(kind: .host, message: String(localized: "chat_cancel_failed \(error)"))
                 } else if model.statusLine == String(localized: "chat_stopping") {
                     model.statusLine = nil
@@ -2237,7 +2378,6 @@ final class MockConversationSource: ConversationSource {
             )
             model.isCancelling = true
             model.statusLine = String(localized: "chat_stopping")
-            model.pendingPermissions = []
             do {
                 try await operation.task.value
                 finishCancellation(operation, error: nil)
@@ -2258,6 +2398,29 @@ final class MockConversationSource: ConversationSource {
 
         func submitEngineCommand(_ command: ClientCommand) async throws {
             try await submitCommand(command)
+        }
+
+        func resumeWorkflow(_ taskID: String) {
+            guard !taskID.isEmpty,
+                  model.backgroundTasks.contains(where: { $0.id == taskID && $0.canResume })
+            else { return }
+            model.workflowResumeState = .resuming(taskID: taskID)
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.submitCommand(.resumeWorkflow(taskId: taskID))
+                } catch {
+                    self.model.workflowResumeState = .failed(
+                        taskID: taskID,
+                        message: String(describing: error)
+                    )
+                }
+            }
+        }
+
+        func handleForeground() {
+            refreshBackgroundTasks()
+            listSessionAgents()
         }
 
         func testProviderConnection(
@@ -2456,6 +2619,7 @@ final class MockConversationSource: ConversationSource {
                 // Bootstrap listings are part of construction: never publish a
                 // handle that failed halfway through initialization.
                 try await handle.submit(command: .listModels)
+                try await handle.submit(command: .getConversationControls)
                 try await handle.submit(
                     command: .listSessions(limit: EngineConversationSource.completeSessionListLimit)
                 )
@@ -2576,7 +2740,9 @@ final class MockConversationSource: ConversationSource {
         private func upsertBackgroundTask(
             id: String,
             description: String?,
-            status: BackgroundTaskSnapshot.Status
+            status: BackgroundTaskSnapshot.Status,
+            canResume: Bool = false,
+            startedAtMs: UInt64? = nil
         ) {
             if let index = model.backgroundTasks.firstIndex(where: { $0.id == id }) {
                 if !(model.backgroundTasks[index].status.isTerminal && !status.isTerminal) {
@@ -2585,13 +2751,297 @@ final class MockConversationSource: ConversationSource {
                 if let description, !description.isEmpty {
                     model.backgroundTasks[index].descriptionText = description
                 }
+                model.backgroundTasks[index].canResume = canResume || model.backgroundTasks[index].canResume
+                model.backgroundTasks[index].startedAtMs = startedAtMs ?? model.backgroundTasks[index].startedAtMs
             } else {
                 model.backgroundTasks.append(BackgroundTaskSnapshot(
                     id: id,
                     descriptionText: description ?? "",
-                    status: status
+                    status: status,
+                    canResume: canResume,
+                    startedAtMs: startedAtMs,
+                    workflow: nil
                 ))
             }
+        }
+
+        private func upsertWorkflowProgress(
+            taskId: String,
+            runId: String,
+            progress: ConversationWorkflowProgressPayload
+        ) {
+            let known = model.backgroundTasks.contains { $0.id == taskId }
+            let nowMs = Self.currentWallClockMs()
+
+            if let index = model.backgroundTasks.firstIndex(where: { $0.id == taskId }) {
+                var task = model.backgroundTasks[index]
+                if task.status.isTerminal,
+                   progress.kind == .workflowAgent,
+                   !(progress.state?.isTerminal ?? false) {
+                    return
+                }
+                if !task.status.isTerminal {
+                    task.status = .running
+                }
+                task.workflow = Self.updatedWorkflowRun(
+                    taskId: taskId,
+                    existing: task.workflow,
+                    runId: runId,
+                    progress: progress,
+                    nowMs: nowMs
+                )
+                model.backgroundTasks[index] = task
+            } else {
+                model.backgroundTasks.append(BackgroundTaskSnapshot(
+                    id: taskId,
+                    descriptionText: "",
+                    status: .running,
+                    workflow: Self.updatedWorkflowRun(
+                        taskId: taskId,
+                        existing: nil,
+                        runId: runId,
+                        progress: progress,
+                        nowMs: nowMs
+                    )
+                ))
+            }
+
+            if !known {
+                refreshBackgroundTasks()
+            }
+        }
+
+        private static func currentWallClockMs() -> UInt64 {
+            UInt64(Date().timeIntervalSince1970 * 1_000)
+        }
+
+        private static func updatedWorkflowRun(
+            taskId: String,
+            existing: ConversationWorkflowRunSnapshot?,
+            runId: String,
+            progress: ConversationWorkflowProgressPayload,
+            nowMs: UInt64
+        ) -> ConversationWorkflowRunSnapshot {
+            var run = existing?.runId == runId
+                ? (existing ?? ConversationWorkflowRunSnapshot(taskId: taskId, runId: runId))
+                : ConversationWorkflowRunSnapshot(taskId: taskId, runId: runId)
+            run.lastUpdatedAtMs = max(run.lastUpdatedAtMs ?? 0, workflowEventMoment(progress, nowMs: nowMs))
+
+            switch progress.kind {
+            case .workflowPhase:
+                upsertWorkflowPhase(&run, progress: progress, nowMs: nowMs)
+            case .workflowLog:
+                appendWorkflowLog(&run, progress: progress, nowMs: nowMs)
+            case .workflowAgent:
+                upsertWorkflowAgent(&run, progress: progress, nowMs: nowMs)
+            }
+            return run
+        }
+
+        private static func upsertWorkflowPhase(
+            _ run: inout ConversationWorkflowRunSnapshot,
+            progress: ConversationWorkflowProgressPayload,
+            nowMs: UInt64
+        ) {
+            let title = progress.phaseTitle ?? progress.title ?? progress.label ?? progress.message ?? "Phase"
+            let id = workflowPhaseID(
+                index: progress.phaseIndex,
+                title: title
+            )
+            let updatedAtMs = workflowEventMoment(progress, nowMs: nowMs)
+            if let index = run.phases.firstIndex(where: { $0.id == id }) {
+                run.phases[index].index = run.phases[index].index ?? progress.phaseIndex
+                if !title.isEmpty { run.phases[index].title = title }
+                if let label = progress.label, !label.isEmpty { run.phases[index].label = label }
+                if let message = progress.message, !message.isEmpty { run.phases[index].message = message }
+                run.phases[index].updatedAtMs = max(run.phases[index].updatedAtMs ?? 0, updatedAtMs)
+            } else {
+                run.phases.append(ConversationWorkflowPhaseSnapshot(
+                    id: id,
+                    index: progress.phaseIndex,
+                    title: title,
+                    label: progress.label,
+                    message: progress.message,
+                    updatedAtMs: updatedAtMs
+                ))
+            }
+        }
+
+        private static func appendWorkflowLog(
+            _ run: inout ConversationWorkflowRunSnapshot,
+            progress: ConversationWorkflowProgressPayload,
+            nowMs: UInt64
+        ) {
+            let updatedAtMs = workflowEventMoment(progress, nowMs: nowMs)
+            let id = workflowLogID(progress: progress, nowMs: nowMs)
+            if run.logs.contains(where: { $0.id == id }) {
+                return
+            }
+            run.logs.append(ConversationWorkflowLogSnapshot(
+                id: id,
+                phaseIndex: progress.phaseIndex,
+                phaseTitle: progress.phaseTitle,
+                label: progress.label,
+                message: progress.message ?? progress.title,
+                updatedAtMs: updatedAtMs
+            ))
+            if run.logs.count > 24 {
+                run.logs.removeFirst(run.logs.count - 24)
+            }
+            if progress.phaseIndex != nil || progress.phaseTitle != nil {
+                upsertWorkflowPhase(&run, progress: progress, nowMs: nowMs)
+            }
+        }
+
+        private static func upsertWorkflowAgent(
+            _ run: inout ConversationWorkflowRunSnapshot,
+            progress: ConversationWorkflowProgressPayload,
+            nowMs: UInt64
+        ) {
+            let resolvedIndex = progress.index ?? UInt64(run.agents.count)
+            let incoming = ConversationWorkflowAgentSnapshot(
+                id: "workflow-agent-\(resolvedIndex)",
+                index: resolvedIndex,
+                title: progress.title,
+                message: progress.message,
+                label: progress.label,
+                phaseIndex: progress.phaseIndex,
+                phaseTitle: progress.phaseTitle,
+                agentId: progress.agentId,
+                agentType: progress.agentType,
+                model: progress.model,
+                fallbackModel: progress.fallbackModel,
+                state: progress.state ?? .progress,
+                error: progress.error,
+                toolUseId: progress.toolUseId,
+                startedAtMs: progress.startedAtMs,
+                queuedAtMs: progress.queuedAtMs,
+                lastProgressAtMs: progress.lastProgressAtMs ?? workflowEventMoment(progress, nowMs: nowMs),
+                attempt: progress.attempt,
+                lastAttemptReason: progress.lastAttemptReason,
+                tokens: progress.tokens,
+                toolCalls: progress.toolCalls,
+                lastToolName: progress.lastToolName,
+                lastToolSummary: progress.lastToolSummary,
+                promptPreview: progress.promptPreview
+            )
+
+            if let index = run.agents.firstIndex(where: { $0.index == resolvedIndex }) {
+                run.agents[index] = mergeWorkflowAgent(
+                    current: run.agents[index],
+                    incoming: incoming,
+                    nowMs: nowMs
+                )
+            } else {
+                run.agents.append(incoming)
+            }
+
+            if progress.phaseIndex != nil || progress.phaseTitle != nil {
+                upsertWorkflowPhase(&run, progress: progress, nowMs: nowMs)
+            }
+        }
+
+        private static func mergeWorkflowAgent(
+            current: ConversationWorkflowAgentSnapshot,
+            incoming: ConversationWorkflowAgentSnapshot,
+            nowMs: UInt64
+        ) -> ConversationWorkflowAgentSnapshot {
+            // Once a child is terminal, no later start/progress payload may
+            // mutate either its state or its final metadata. This also closes
+            // the window where an out-of-order beacon could inflate counters
+            // while the row still displayed as done/error.
+            if current.state.isTerminal && !incoming.state.isTerminal {
+                return current
+            }
+
+            var merged = current
+            let currentMoment = workflowAgentMoment(current, nowMs: nowMs)
+            let incomingMoment = workflowAgentMoment(incoming, nowMs: nowMs)
+            let shouldAdvanceState: Bool
+            if current.state.isTerminal {
+                // Terminal is sticky. A later progress/start beacon must never
+                // reopen a finished child; a newer terminal may still refine it.
+                shouldAdvanceState = incoming.state.isTerminal && incomingMoment >= currentMoment
+            } else {
+                // A terminal always wins. Otherwise use event time to reject an
+                // out-of-order start/progress update.
+                shouldAdvanceState = incoming.state.isTerminal || incomingMoment >= currentMoment
+            }
+
+            if shouldAdvanceState {
+                merged.state = incoming.state
+            }
+            merged.lastProgressAtMs = max(current.lastProgressAtMs ?? 0, incoming.lastProgressAtMs ?? 0)
+            if shouldAdvanceState {
+                merged.error = incoming.error ?? merged.error
+            }
+
+            merged.title = incoming.title ?? merged.title
+            merged.message = shouldAdvanceState ? (incoming.message ?? merged.message) : merged.message
+            merged.label = incoming.label ?? merged.label
+            merged.phaseIndex = merged.phaseIndex ?? incoming.phaseIndex
+            if let phaseIndex = incoming.phaseIndex, phaseIndex >= (merged.phaseIndex ?? 0) {
+                merged.phaseIndex = phaseIndex
+            }
+            merged.phaseTitle = incoming.phaseTitle ?? merged.phaseTitle
+            merged.agentId = incoming.agentId ?? merged.agentId
+            merged.agentType = incoming.agentType ?? merged.agentType
+            merged.model = incoming.model ?? merged.model
+            merged.fallbackModel = incoming.fallbackModel ?? merged.fallbackModel
+            merged.toolUseId = incoming.toolUseId ?? merged.toolUseId
+            merged.startedAtMs = merged.startedAtMs ?? incoming.startedAtMs
+            merged.queuedAtMs = merged.queuedAtMs ?? incoming.queuedAtMs
+            if let attempt = incoming.attempt, attempt >= (merged.attempt ?? 0) {
+                merged.attempt = attempt
+                merged.lastAttemptReason = incoming.lastAttemptReason ?? merged.lastAttemptReason
+            }
+            if let tokens = incoming.tokens, tokens >= (merged.tokens ?? 0) {
+                merged.tokens = tokens
+            }
+            if let toolCalls = incoming.toolCalls, toolCalls >= (merged.toolCalls ?? 0) {
+                merged.toolCalls = toolCalls
+            }
+            merged.lastToolName = incoming.lastToolName ?? merged.lastToolName
+            merged.lastToolSummary = incoming.lastToolSummary ?? merged.lastToolSummary
+            merged.promptPreview = incoming.promptPreview ?? merged.promptPreview
+            if shouldAdvanceState, let error = incoming.error, !error.isEmpty {
+                merged.error = error
+            }
+            return merged
+        }
+
+        private static func workflowPhaseID(index: UInt32?, title: String?) -> String {
+            if let index {
+                return "phase-\(index)"
+            }
+            return "phase-\((title ?? "phase").lowercased())"
+        }
+
+        private static func workflowLogID(
+            progress: ConversationWorkflowProgressPayload,
+            nowMs: UInt64
+        ) -> String {
+            let moment = progress.lastProgressAtMs ?? nowMs
+            return [
+                progress.phaseIndex.map(String.init) ?? "phase",
+                progress.label ?? "",
+                progress.message ?? progress.title ?? "",
+                String(moment),
+            ].joined(separator: "|")
+        }
+
+        private static func workflowEventMoment(
+            _ progress: ConversationWorkflowProgressPayload,
+            nowMs: UInt64
+        ) -> UInt64 {
+            progress.lastProgressAtMs ?? progress.startedAtMs ?? progress.queuedAtMs ?? nowMs
+        }
+
+        private static func workflowAgentMoment(
+            _ agent: ConversationWorkflowAgentSnapshot,
+            nowMs: UInt64
+        ) -> UInt64 {
+            agent.lastProgressAtMs ?? agent.startedAtMs ?? agent.queuedAtMs ?? nowMs
         }
 
         private static func backgroundTaskStatus(
@@ -2600,6 +3050,7 @@ final class MockConversationSource: ConversationSource {
             switch status {
             case .pending: return .pending
             case .running: return .running
+            case .paused: return .paused
             case .completed: return .completed
             case .failed: return .failed
             case .cancelled: return .cancelled
@@ -2692,6 +3143,8 @@ final class MockConversationSource: ConversationSource {
                     ? ConversationAgentSummary.main.name
                     : dto.name,
                 agentType: dto.agentType,
+                model: dto.model,
+                modelProfile: dto.modelProfile,
                 status: dto.status,
                 latestActivity: dto.agentId == ConversationModel.mainAgentID
                     ? nil
@@ -3027,6 +3480,8 @@ final class MockConversationSource: ConversationSource {
                 id: summary.id,
                 name: summary.name,
                 agentType: summary.agentType,
+                model: summary.model,
+                modelProfile: summary.modelProfile,
                 status: status,
                 latestActivity: activity ?? summary.latestActivity,
                 updatedAtMs: UInt64(Date().timeIntervalSince1970 * 1_000)
@@ -3038,6 +3493,116 @@ final class MockConversationSource: ConversationSource {
             Task { [handle] in
                 try? await handle.submit(command: .listSessionAgents)
             }
+        }
+
+        private static func workflowProgressPayload(
+            from progress: WorkflowProgressDto
+        ) -> ConversationWorkflowProgressPayload? {
+            guard let kind = ConversationWorkflowProgressKind(rawValue: progress.kind) else {
+                return nil
+            }
+            return ConversationWorkflowProgressPayload(
+                kind: kind,
+                index: progress.index,
+                title: progress.title,
+                message: progress.message,
+                label: progress.label,
+                phaseIndex: progress.phaseIndex,
+                phaseTitle: progress.phaseTitle,
+                agentId: progress.agentId,
+                agentType: progress.agentType,
+                model: progress.model,
+                fallbackModel: progress.fallbackModel,
+                state: progress.state.flatMap(ConversationWorkflowAgentState.init(rawValue:)),
+                error: progress.error,
+                toolUseId: progress.toolUseId,
+                startedAtMs: progress.startedAtMs,
+                queuedAtMs: progress.queuedAtMs,
+                lastProgressAtMs: progress.lastProgressAtMs,
+                attempt: progress.attempt,
+                lastAttemptReason: progress.lastAttemptReason,
+                tokens: progress.tokens,
+                toolCalls: progress.toolCalls,
+                lastToolName: progress.lastToolName,
+                lastToolSummary: progress.lastToolSummary,
+                promptPreview: progress.promptPreview
+            )
+        }
+
+        fileprivate func applyWorkflowProgress(
+            originSessionId: String,
+            taskId: String,
+            runId: String,
+            progress: WorkflowProgressDto
+        ) {
+            guard !originSessionId.isEmpty,
+                  originSessionId == model.activeSessionId,
+                  !model.sessionTransitionPending
+            else { return }
+            guard let payload = Self.workflowProgressPayload(from: progress) else { return }
+            upsertWorkflowProgress(taskId: taskId, runId: runId, progress: payload)
+        }
+
+        private static func reasoningID(_ selection: ReasoningSelectionDto) -> String {
+            switch selection {
+            case .automatic: return "automatic"
+            case .disabled: return "disabled"
+            case .enabled: return "enabled"
+            case let .level(id): return id
+            case let .tokenBudget(tokens): return "budget:\(tokens)"
+            }
+        }
+
+        private static func controlsState(from dto: ConversationControlsDto) -> ConversationControlsState {
+            let reasoningOptions = dto.reasoning.spec.options.map { option in
+                let id = reasoningID(option.selection)
+                return ConversationReasoningOption(
+                    id: id,
+                    title: id.hasPrefix("budget:") ? "Token budget" : (id == "automatic" ? "Auto" : id.capitalized),
+                    isBudget: id.hasPrefix("budget:"),
+                    persistable: option.persistable
+                )
+            }
+            let budget = dto.reasoning.spec.budgetRange.map {
+                ClosedRange(uncheckedBounds: (lower: $0.minTokens, upper: $0.maxTokens))
+            }
+            return ConversationControlsState(
+                qualifiedModel: dto.qualifiedModel,
+                requestedPermission: dto.permission.requested,
+                effectivePermission: dto.permission.effective,
+                permissionOptions: dto.permission.options.map {
+                    ConversationPermissionOption(
+                        id: $0.mode,
+                        available: $0.available,
+                        disabledReason: $0.disabledReason?.code
+                    )
+                },
+                requestedReasoning: reasoningID(dto.reasoning.requested),
+                effectiveReasoning: reasoningID(dto.reasoning.effective),
+                reasoningOptions: reasoningOptions,
+                budgetRange: budget,
+                providerDefault: reasoningID(dto.reasoning.spec.providerDefault),
+                forcedReasoning: dto.reasoning.spec.forcedReasoning,
+                editable: dto.reasoning.spec.editable,
+                disabledReason: dto.reasoning.spec.disabledReason?.code
+            )
+        }
+
+        private func applyControlsSnapshot(_ dto: ConversationControlsDto) {
+            guard model.activeModelId.isEmpty || model.activeModelId == dto.qualifiedModel else {
+                return
+            }
+            let snapshot = Self.controlsState(from: dto)
+            model.controls = snapshot
+            model.requestedPermissionMode = snapshot.requestedPermission
+            model.effectivePermissionMode = snapshot.effectivePermission
+            model.reasoningSelection = snapshot.effectiveReasoning
+            model.reasoningOptions = snapshot.reasoningOptions.map(\.id)
+            model.reasoningOptionDetails = snapshot.reasoningOptions
+            model.reasoningDisabledReason = snapshot.disabledReason
+            model.permissionOptions = snapshot.permissionOptions
+            model.controlsPending = false
+            model.controlsError = nil
         }
 
         /// Map one inbound `ClientEvent` onto the published state.
@@ -3137,6 +3702,13 @@ final class MockConversationSource: ConversationSource {
                 guard acceptTurnEvent(event) else { return }
                 model.pendingQuestions.removeAll { $0.requestId == requestId }
 
+            case let .permissionRequestResolved(requestId, _):
+                // The engine is authoritative: cancellation and expiry can
+                // resolve a request without a local button tap. Idempotently
+                // remove the correlated prompt so a stale modal cannot survive.
+                guard acceptTurnEvent(event) else { return }
+                model.pendingPermissions.removeAll { $0.requestId == requestId }
+
             case let .taskRow(task):
                 // A `TaskList` reply row (out-of-band, allowlisted). Rows
                 // both seed the panel at bootstrap and backfill the
@@ -3146,9 +3718,30 @@ final class MockConversationSource: ConversationSource {
                     upsertBackgroundTask(
                         id: task.taskId,
                         description: task.description,
-                        status: mapped
+                        status: mapped,
+                        canResume: task.canResume,
+                        startedAtMs: task.startedAtMs
                     )
                 }
+
+            case let .workflowResumed(previousTaskId, task, runId, originSessionId):
+                guard acceptTurnEvent(event) else { return }
+                if let originSessionId {
+                    guard originSessionId == model.activeSessionId,
+                          !model.sessionTransitionPending else { return }
+                }
+                model.backgroundTasks.removeAll { $0.id == previousTaskId }
+                if let mapped = Self.backgroundTaskStatus(task.status) {
+                    upsertBackgroundTask(
+                        id: task.taskId,
+                        description: task.description,
+                        status: mapped,
+                        canResume: task.canResume,
+                        startedAtMs: task.startedAtMs
+                    )
+                }
+                model.workflowResumeState = .succeeded(taskID: task.taskId)
+                model.statusLine = String(localized: "chat_workflow_resumed \(runId)")
 
             case let .planUpdated(tasks):
                 // The model's working plan. FULL-LIST replace — an empty list
@@ -3159,10 +3752,16 @@ final class MockConversationSource: ConversationSource {
                 guard acceptTurnEvent(event) else { return }
                 model.planTasks = tasks.map(Self.planTask(from:))
 
-            case let .taskStatusChanged(taskId, status):
+            case let .taskStatusChanged(taskId, status, originSessionId):
                 // Allowlisted through the turn gate: a background task
                 // normally finishes after its spawning turn already ended.
                 guard acceptTurnEvent(event) else { return }
+                if let originSessionId {
+                    guard !originSessionId.isEmpty,
+                          originSessionId == model.activeSessionId,
+                          !model.sessionTransitionPending
+                    else { return }
+                }
                 if let mapped = Self.backgroundTaskStatus(status) {
                     let known = model.backgroundTasks.contains { $0.id == taskId }
                     upsertBackgroundTask(id: taskId, description: nil, status: mapped)
@@ -3178,7 +3777,7 @@ final class MockConversationSource: ConversationSource {
                 case .completed: text = String(localized: "chat_task_completed \(taskId)")
                 case .failed: text = String(localized: "chat_task_failed \(taskId)")
                 case .cancelled: text = String(localized: "chat_task_cancelled \(taskId)")
-                case .pending, .running: text = nil
+                case .pending, .running, .paused: text = nil
                 @unknown default: text = nil
                 }
                 if let text {
@@ -3486,6 +4085,9 @@ final class MockConversationSource: ConversationSource {
                     "turn error turn=\(self.currentTurnId ?? 0, privacy: .public) kind=\(String(describing: kind), privacy: .public) accepted=\(accepted, privacy: .public) message=\(message, privacy: .private(mask: .hash))"
                 )
                 guard accepted else { return }
+                if case let .resuming(taskID) = model.workflowResumeState {
+                    model.workflowResumeState = .failed(taskID: taskID, message: message)
+                }
                 // PR-4 item 4: a terminal error is a persistent, kind-aware banner.
                 finishActiveRun(.failed)
                 model.updateMainAgent(status: "failed", latestActivity: message)
@@ -3501,6 +4103,17 @@ final class MockConversationSource: ConversationSource {
             case let .modelChanged(model: newModel):
                 // The engine confirmed a switch (1:1 with a successful `SetModel`).
                 applyActiveModel(newModel)
+
+            case let .conversationControlsChanged(controls):
+                applyControlsSnapshot(controls)
+
+            case let .permissionModeChanged(mode: mode):
+                // The engine is authoritative: auto may be downgraded by the
+                // active model/provider/killswitch gate, and a rejected live
+                // change must never leave the settings page claiming success.
+                model.effectivePermissionMode = mode
+                // The following controls snapshot carries the requested value;
+                // do not infer it from this legacy effective-only event.
 
             case let .sessionList(sessions):
                 // Out-of-band session catalog: map each lowered `SessionRowDto`
@@ -3562,20 +4175,28 @@ final class MockConversationSource: ConversationSource {
                 // case; this confirms + adopts the engine-assigned id.
                 let isSwitch = !sessionId.isEmpty && sessionId != model.activeSessionId
                 let confirmedNewSession = pendingSessionTransition == .new
-                model.activeSessionId = sessionId
-                model.clearAgentState()
-                if case let .resume(targetID) = pendingSessionTransition,
-                   targetID != sessionId {
-                    // A bootstrap SessionStarted can be delivered after the host
-                    // has already requested ResumeSession. It is not confirmation
-                    // of that restore and must not unlock catalog replacement.
-                } else {
-                    setPendingSessionTransition(nil)
+                let hadVisibleTranscript = !model.items.isEmpty || !model.messages.isEmpty
+                // Resume is confirmed only by SessionResumed, because that event
+                // atomically carries the replacement transcript. A bootstrap
+                // SessionStarted must neither rebind the visible rows nor unblock
+                // the composer while that replay is pending.
+                if case .resume = pendingSessionTransition {
+                    return
                 }
-                if isSwitch && !model.streaming {
+                // With no explicit NewSession transition, a different id is a
+                // delayed/bootstrap event. Keep both the visible transcript and
+                // its owning session id together instead of publishing mismatched
+                // state (rows from A while commands target B).
+                if isSwitch && hadVisibleTranscript && !confirmedNewSession {
+                    return
+                }
+                if isSwitch && !model.streaming
+                    && (confirmedNewSession || !hadVisibleTranscript) {
                     resetTranscriptForSessionSwitch(isNew: true)
-                    model.activeSessionId = sessionId
                 }
+                model.activeSessionId = sessionId
+                hasConfirmedSessionState = true
+                setPendingSessionTransition(nil)
                 if confirmedNewSession {
                     model.sessionRefreshRevision &+= 1
                 }
@@ -3592,13 +4213,11 @@ final class MockConversationSource: ConversationSource {
                 // placeholder transcript `resumeSession` left in place and append
                 // each restored message as a completed bubble — the out-of-band
                 // session-state sibling of `SessionList` / `SessionStarted`.
-                if let pendingSessionTransition {
-                    guard case let .resume(targetID) = pendingSessionTransition,
-                          targetID == sessionId else { return }
-                }
+                guard pendingSessionTransition == .resume(sessionId) else { return }
                 invalidateTurnContext()
                 model.clearAgentState()
                 model.activeSessionId = sessionId
+                hasConfirmedSessionState = true
                 setPendingSessionTransition(nil)
                 // BUG FIX: a restored message is NOT one render row. In the
                 // Anthropic protocol a `tool_result` block lives in the USER
@@ -3617,7 +4236,9 @@ final class MockConversationSource: ConversationSource {
                 model.items = restored.items
                 model.messageDetails = restored.details
                 model.expandedToolCalls = []
+                model.backgroundTasks = []
                 model.planTasks = []
+                model.workflowResumeState = .idle
                 model.isNew = messages.isEmpty
                 model.streaming = false
                 model.turnCompletion = nil
@@ -3628,12 +4249,16 @@ final class MockConversationSource: ConversationSource {
                 // immediately include that preserved UUID.
                 model.sessionRefreshRevision &+= 1
                 refreshSessionAgentsAfterTransition()
+                refreshBackgroundTasks()
 
             case .sessionEnded:
                 // The current session ended (e.g. cleared). Drop the active id;
                 // the next `SessionStarted`/`SessionResumed` re-establishes one.
                 model.activeSessionId = ""
+                hasConfirmedSessionState = false
                 model.clearAgentState()
+                model.backgroundTasks = []
+                model.workflowResumeState = .idle
                 setPendingSessionTransition(nil)
                 invalidateTurnContext()
                 model.turnCompletion = nil
@@ -3682,6 +4307,34 @@ final class MockConversationSource: ConversationSource {
         /// path still goes through `apply` directly.
         func applyForTesting(_ event: ClientEvent) {
             apply(event)
+        }
+
+        /// Establish the same correlation guard as a submitted ResumeSession
+        /// without constructing an engine handle. Restored-transcript tests use
+        /// this before injecting the authoritative SessionResumed reply.
+        func expectSessionResumeForTesting(_ sessionID: String) {
+            _ = beginSessionTransition(.resume(sessionID))
+        }
+
+        func applyWorkflowProgressForTesting(
+            taskId: String,
+            runId: String,
+            progress: ConversationWorkflowProgressPayload
+        ) {
+            upsertWorkflowProgress(taskId: taskId, runId: runId, progress: progress)
+        }
+
+        func applyWorkflowProgressForTesting(
+            originSessionId: String,
+            taskId: String,
+            runId: String,
+            progress: ConversationWorkflowProgressPayload
+        ) {
+            guard !originSessionId.isEmpty,
+                  originSessionId == model.activeSessionId,
+                  !model.sessionTransitionPending
+            else { return }
+            upsertWorkflowProgress(taskId: taskId, runId: runId, progress: progress)
         }
 
         private func applySlashCommandCatalog(_ commands: [SlashCommandDto]) {
@@ -3736,7 +4389,6 @@ final class MockConversationSource: ConversationSource {
             guard model.streaming, currentTurnId != nil else { return }
             model.isCancelling = true
             model.statusLine = String(localized: "chat_stopping")
-            model.pendingPermissions = []
         }
 
         func setCommandSubmitterForTesting(_ submitter: ((ClientCommand) async throws -> Void)?) {
@@ -4464,10 +5116,10 @@ final class MockConversationSource: ConversationSource {
             model.streaming = false
             model.statusLine = nil
             publishActiveTurnCompletion(.failed)
-            // A terminal error tears down the turn — its parked permission (if any)
-            // can never be answered now, so drop the prompt rather than leave it
-            // stranded.
-            model.pendingPermissions = []
+            // Permission requests are engine-scoped, not owned by this main turn.
+            // A background workflow can still be parked after the visible turn
+            // fails, so only an explicit approve/deny (or engine teardown) may
+            // remove its request from the queue.
             clearTurnPointers(keepEpoch: false)
             if settledTurn {
                 requestSessionCatalogRefreshAfterSettledTurn()
@@ -4517,6 +5169,55 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
+        func setPermissionMode(_ mode: String) {
+            let previous = model.requestedPermissionMode
+            model.requestedPermissionMode = mode
+            model.controlsPending = true
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let handle = try await self.ensureHandle()
+                    try await handle.submit(command: .setPermissionMode(mode: mode))
+                    self.model.controlsPending = false
+                } catch {
+                    self.model.requestedPermissionMode = previous
+                    self.model.controlsPending = false
+                    self.model.controlsError = error.localizedDescription
+                }
+            }
+        }
+
+        func setReasoningSelection(_ selection: String) {
+            guard !model.controlsPending else { return }
+            let previous = model.controls
+            model.controlsPending = true
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let handle = try await self.ensureHandle()
+                    try await handle.submit(command: .setReasoningSelection(
+                        selection: Self.reasoningSelectionDto(selection)
+                    ))
+                } catch {
+                    self.model.controls = previous
+                    self.model.controlsPending = false
+                    self.model.controlsError = error.localizedDescription
+                }
+            }
+        }
+
+        private static func reasoningSelectionDto(_ value: String) -> ReasoningSelectionDto {
+            switch value {
+            case "automatic": return .automatic
+            case "disabled": return .disabled
+            case "enabled": return .enabled
+            case let budget where budget.hasPrefix("budget:"):
+                let tokens = UInt64(budget.dropFirst("budget:".count)) ?? 0
+                return .tokenBudget(tokens: tokens)
+            default: return .level(id: value)
+            }
+        }
+
         // MARK: session + lifecycle
 
         /// Switch the active conversation to another session (iOS analog of
@@ -4538,10 +5239,17 @@ final class MockConversationSource: ConversationSource {
         /// and confirms with `SessionResumed{session_id, messages}`, which
         /// re-adopts the id AND replaces the placeholder with the real restored
         /// conversation (oldest-first) so the next turn continues with full prior
-        /// context visible. Re-requesting the active id is intentional: process
-        /// restoration still needs the engine to replay its transcript.
+        /// context visible. An already-presented active session is a no-op (for
+        /// example when SwiftUI restarts a lifecycle task after dismissing an
+        /// overlay). Process restoration still re-requests the active id when the
+        /// model has no committed transcript to display.
         func resumeSession(_ uuid: String, emptySessionTitle: String?) {
             guard !uuid.isEmpty else { return }
+            if uuid == model.activeSessionId,
+               pendingSessionTransition == nil,
+               (!model.items.isEmpty || !model.messages.isEmpty || hasConfirmedSessionState) {
+                return
+            }
             let turnIdToCancel = inFlightTurnForSessionSwitch()
             model.sessionRestoreRecovery = nil
             model.sessionTransitionFailure = nil
@@ -4568,12 +5276,11 @@ final class MockConversationSource: ConversationSource {
 
         /// Enqueue one outbound permission request (called on the main actor by the
         /// sink). De-dupes by `requestId` so a re-delivered request can't stack two
-        /// prompts. The chat view renders the head of the queue.
+        /// prompts. Requests are engine-scoped: a background workflow worker can
+        /// ask after the main conversation turn has ended, so main-turn streaming
+        /// and cancellation state must not decide whether the request is retained.
         fileprivate func enqueuePermission(_ request: PermissionRequest) {
-            guard model.streaming,
-                  !model.isCancelling,
-                  currentTurnId != nil,
-                  !model.pendingPermissions.contains(where: { $0.requestId == request.requestId })
+            guard !model.pendingPermissions.contains(where: { $0.requestId == request.requestId })
             else { return }
             model.pendingPermissions.append(PendingPermission(request: request))
         }
@@ -4591,15 +5298,24 @@ final class MockConversationSource: ConversationSource {
 
         /// Shared resolution path: optimistically pop the prompt (the gate's oneshot
         /// fires from the submitted command) and submit the resolving command on the
-        /// engine runtime. A submit failure surfaces as a host error banner.
+        /// engine runtime. If delivery fails, restore the exact request at its prior
+        /// queue position so the still-parked engine gate remains actionable.
         private func resolve(_ requestId: UInt64, command: ClientCommand) {
-            model.pendingPermissions.removeAll { $0.requestId == requestId }
+            let removedIndex = model.pendingPermissions.firstIndex { $0.requestId == requestId }
+            let removedPermission = removedIndex.map { model.pendingPermissions.remove(at: $0) }
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    let handle = try await self.ensureHandle()
-                    try await handle.submit(command: command)
+                    try await self.submitCommand(command)
                 } catch {
+                    if let removedPermission,
+                       !self.model.pendingPermissions.contains(where: {
+                           $0.requestId == removedPermission.requestId
+                       })
+                    {
+                        let index = min(removedIndex ?? 0, self.model.pendingPermissions.count)
+                        self.model.pendingPermissions.insert(removedPermission, at: index)
+                    }
                     self.fail(.host, String(localized: "chat_permission_response_failed \(error)"))
                 }
             }
@@ -4609,8 +5325,9 @@ final class MockConversationSource: ConversationSource {
     /// Swift implementation of the `IosPermissionSink` UniFFI callback interface
     /// (SHIP-BLOCKER #3). Rust calls `onRequest(_:)` on the engine's runtime when a
     /// tool needs approval; we hop to the main actor and enqueue the request so the
-    /// chat view can prompt. Returns promptly — the engine's turn parks on its own
-    /// oneshot and is resolved later by `ApprovePermission` / `DenyPermission`.
+    /// app-level presenter can prompt. Returns promptly — the engine's turn parks
+    /// on its own oneshot and is resolved later by `ApprovePermission` /
+    /// `DenyPermission`.
     final class EnginePermissionSink: IosPermissionSink {
         private weak var source: EngineConversationSource?
 
@@ -4640,6 +5357,30 @@ final class MockConversationSource: ConversationSource {
                 source?.apply(event)
             }
         }
+
+        func onWorkflowProgress(
+            originSessionId: String,
+            taskId: String,
+            runId: String,
+            progress: WorkflowProgressDto
+        ) async {
+            await MainActor.run { [weak source] in
+                source?.applyWorkflowProgress(
+                    originSessionId: originSessionId,
+                    taskId: taskId,
+                    runId: runId,
+                    progress: progress
+                )
+            }
+        }
+
+        /// Compatibility with an older generated callback. It intentionally
+        /// drops unscoped progress rather than reintroducing cross-session rows.
+        func onWorkflowProgress(
+            taskId _: String,
+            runId _: String,
+            progress _: WorkflowProgressDto
+        ) async {}
     }
 
 #endif

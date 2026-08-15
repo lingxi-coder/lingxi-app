@@ -7,7 +7,7 @@ enum SettingsPage: Hashable {
     case providerPicker(ProviderKindBox)
     case providerEdit(ProviderKindBox, String)
     case voice, linuxRuntime, knowledge, memory, workflows
-    case appearance, language, notifications, input, appIntegration, privacy
+    case appearance, language, notifications, input, appIntegration, privacy, permissionMode
     case skills, skillDetail(String)
     case mcpList, mcpEdit(String)
     case dream
@@ -42,6 +42,7 @@ struct SettingsHost: View {
     let mcpRepository: MCPConfigurationRepository = .shared
     /// Promote the runtime's PTY surface to the app-owned full-screen route.
     var openTerminal: () -> Void = {}
+    var onPermissionModeChanged: (String) async throws -> Void = { _ in }
     let onClose: () -> Void
 
     /// Settings deep links and in-sheet navigation share the app-owned typed
@@ -60,6 +61,19 @@ struct SettingsHost: View {
     /// Replaces the top two pages (used by the picker → edit flow).
     func replaceTopTwo(with pages: [SettingsPage]) {
         navigation.replaceSettingsTail(removing: 2, with: pages)
+    }
+
+    func applyPermissionMode(_ mode: String) {
+        let previous = store.permissionMode
+        let previousEffective = store.effectivePermissionMode
+        guard store.setPermissionMode(mode) else { return }
+        Task { @MainActor in
+            do {
+                try await onPermissionModeChanged(mode)
+            } catch {
+                store.restorePermissionMode(previous, effectiveMode: previousEffective, error: error.localizedDescription)
+            }
+        }
     }
 
     var body: some View {
@@ -87,6 +101,11 @@ struct SettingsHost: View {
             store.skillsLoaded = convo.skillsLoaded
             onRefreshMcp()
             onRefreshSkills()
+            store.effectivePermissionMode = convo.effectivePermissionMode
+            store.permissionModeError = nil
+        }
+        .onChange(of: convo.effectivePermissionMode) { _, mode in
+            store.effectivePermissionMode = mode
         }
         .onChange(of: convo.mcpServers) { _, servers in
             syncMcpServers(servers)
@@ -280,6 +299,7 @@ struct SettingsHost: View {
         case .input: return String(localized: "settings_keyboard_input")
         case .appIntegration: return String(localized: "settings_app_integration")
         case .privacy: return String(localized: "settings_data_privacy")
+        case .permissionMode: return "权限模式"
         case .skills: return "Skills"
         case .skillDetail(let id): return store.skills.first(where: { $0.id == id })?.name ?? "Skill"
         case .mcpList: return String(localized: "settings_mcp_servers")

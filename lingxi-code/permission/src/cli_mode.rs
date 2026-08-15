@@ -161,6 +161,7 @@ pub fn initial_permission_mode_from_cli(
     // Modes in order of priority (TS `orderedModes`).
     let mut ordered: Vec<PermissionMode> = Vec::new();
     let mut notification: Option<String> = None;
+    let mut bypass_was_blocked = false;
 
     // MODE-BG-DISCLAIMER-02: in a background session that never accepted the
     // Bypass Permissions disclaimer, a requested `bypassPermissions` (from the
@@ -210,11 +211,23 @@ pub fn initial_permission_mode_from_cli(
         if mode == PermissionMode::BypassPermissions && settings.bypass_disabled {
             // TS: skip this mode, carry the notice forward.
             notification = Some("Bypass permissions mode was disabled by settings".to_string());
+            bypass_was_blocked = true;
             continue;
         }
         return (mode, notification);
     }
-    (PermissionMode::Default, notification)
+    // Auto is the built-in fallback for a fresh session. An explicitly
+    // configured project/local `defaultMode: auto` remains untrusted and is
+    // rejected above rather than being resurrected by this fallback.
+    let fallback = if bypass_was_blocked
+        || (settings.default_mode == Some(PermissionMode::Auto)
+        && !settings.auto_default_from_trusted
+        ) {
+        PermissionMode::Default
+    } else {
+        PermissionMode::Auto
+    };
+    (fallback, notification)
 }
 
 #[cfg(test)]
@@ -366,10 +379,10 @@ mod tests {
     }
 
     #[test]
-    fn no_inputs_is_default_no_notice() {
+    fn no_inputs_is_auto_no_notice() {
         let (mode, notice) =
             initial_permission_mode_from_cli(None, false, None, false, &no_settings());
-        assert_eq!(mode, PermissionMode::Default);
+        assert_eq!(mode, PermissionMode::Auto);
         assert!(notice.is_none());
     }
 

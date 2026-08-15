@@ -16,8 +16,32 @@
 //! (`tool_input_json`), and `PromptDefault` is collapsed to `default_allow: bool`.
 
 use client_protocol::permission::{
-    PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto, WorkerInfoDto,
+    PermissionKindDto, PermissionOwnerDto, PermissionRequest, PermissionResolved,
+    PermissionResponseDto, WorkerInfoDto,
 };
+
+#[test]
+fn permission_request_carries_owner_scope() {
+    let request = PermissionRequest {
+        request_id: 42,
+        kind: PermissionKindDto::ToolUseConfirm {
+            tool_name: "Bash".into(),
+            tool_input_json: "{}".into(),
+            default_allow: false,
+        },
+        worker: None,
+        owner: Some(PermissionOwnerDto {
+            session_id: Some("session-a".into()),
+            turn_id: Some(7),
+            worker_name: None,
+        }),
+    };
+
+    let value = serde_json::to_value(request).expect("serialize permission request");
+    assert_eq!(value["owner"]["session_id"], "session-a");
+    assert_eq!(value["owner"]["turn_id"], 7);
+    assert!(value["owner"].get("worker_name").is_none());
+}
 
 /// `ToolUseConfirm` — the ONE live-sourced kind. Carries the tool name, the
 /// tool input lowered to a JSON **String** (§0.4), and the collapsed
@@ -145,6 +169,7 @@ fn permission_request_round_trips() {
             default_allow: false,
         },
         worker: None,
+        owner: None,
     };
     let json = serde_json::to_value(&req).expect("serialize PermissionRequest");
     assert_eq!(json["request_id"], 42);
@@ -164,6 +189,7 @@ fn worker_is_optional_and_defaults_none() {
         request_id: 1,
         kind: PermissionKindDto::BypassPermissionsMode,
         worker: None,
+        owner: None,
     };
     let json = serde_json::to_value(&req).expect("serialize PermissionRequest no-worker");
     assert!(
@@ -191,6 +217,7 @@ fn worker_is_optional_and_defaults_none() {
             color: "cyan".to_string(),
             team: Some("alpha".to_string()),
         }),
+        owner: None,
     };
     let json_w =
         serde_json::to_value(&req_with_worker).expect("serialize PermissionRequest worker");

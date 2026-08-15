@@ -3168,6 +3168,32 @@ mod pre_tool_hook_tests {
         }
     }
 
+    struct AbortGate {
+        saw_non_interactive: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl PermissionGate for AbortGate {
+        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+            panic!("abort-aware dispatch must not call the legacy check method")
+        }
+
+        async fn resolve_detailed_or_abort(
+            &self,
+            _name: &str,
+            _input: &serde_json::Value,
+            ctx: &traits::permission_gate::PermissionCheckContext,
+        ) -> Result<PermissionResolution, traits::permission_gate::PermissionAbort> {
+            self.saw_non_interactive.store(
+                ctx.is_non_interactive_session,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            Err(traits::permission_gate::PermissionAbort {
+                message: "Agent aborted: too many classifier denials in headless mode".into(),
+            })
+        }
+    }
+
     /// Gate that denies with a configurable SOURCE from `resolve_detailed` (and
     /// denies on `check`), to assert PermissionDenied fires only on a classifier
     /// deny.
@@ -3528,6 +3554,33 @@ mod pre_tool_hook_tests {
             } => (content.as_str(), *is_error),
             other => panic!("expected ToolResult, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn headless_permission_abort_propagates_without_tool_result() {
+        let gate = Arc::new(AbortGate {
+            saw_non_interactive: std::sync::atomic::AtomicBool::new(false),
+        });
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            gate.clone(),
+            vec![],
+        );
+
+        let error = match dispatch_tool_uses_tracked(&orch, &uses(), None).await {
+            Ok(_) => panic!("permission abort must terminate dispatch"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            crate::OrchestratorError::PermissionAbort { ref message }
+                if message == "Agent aborted: too many classifier denials in headless mode"
+        ));
+        assert!(crate::turn_loop::is_carveout_propagated(&error));
+        assert!(gate
+            .saw_non_interactive
+            .load(std::sync::atomic::Ordering::SeqCst));
     }
 
     // ----- SKILLEXEC.3 (Part A): tool-injected new_messages -----------------

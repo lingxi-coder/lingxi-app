@@ -9,6 +9,11 @@
 //! `serde_json::Value` (governing decision §0.4): every tool payload here is a
 //! JSON **String** (`input_json`/`result_json`).
 
+use client_protocol::controls::{
+    ControlDisabledReasonDto, ConversationControlsDto, PermissionControlStateDto,
+    PermissionModeOptionDto, ReasoningControlSpecDto, ReasoningControlStateDto, ReasoningOptionDto,
+    ReasoningSelectionDto,
+};
 use client_protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client_protocol::listings::SessionAgentSummaryDto;
 use client_protocol::local_apps::{
@@ -18,7 +23,20 @@ use client_protocol::local_apps::{
     AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
+use client_protocol::permission::PermissionResolutionDto;
 use client_protocol::tool_display::{ToolHeaderDto, ToolVerbDto};
+
+#[test]
+fn permission_request_resolution_is_authoritative_event() {
+    let event = ClientEvent::PermissionRequestResolved {
+        request_id: 9,
+        resolution: PermissionResolutionDto::Expired,
+    };
+    let value = serde_json::to_value(event).expect("serialize permission resolution");
+    assert_eq!(value["type"], "permission_request_resolved");
+    assert_eq!(value["request_id"], 9);
+    assert_eq!(value["resolution"], "expired");
+}
 
 #[test]
 fn tool_header_icon_is_optional_for_older_wire_payloads() {
@@ -38,6 +56,8 @@ fn session_agent_events_round_trip() {
         agent_id: "agent:00000000-0000-0000-0000-000000000001".into(),
         name: "researcher".into(),
         agent_type: "explorer".into(),
+        model: Some("deepseek-v4-flash".into()),
+        model_profile: Some("deepseek".into()),
         status: "running".into(),
         latest_activity: Some("Reading protocol files".into()),
         updated_at_ms: Some(1_750_000_000_000),
@@ -79,6 +99,72 @@ fn session_agent_events_round_trip() {
         let back: ClientEvent = serde_json::from_value(json).expect("deserialize event");
         assert_eq!(back, event);
     }
+}
+
+#[test]
+fn conversation_controls_changed_round_trips() {
+    let event = ClientEvent::ConversationControlsChanged {
+        controls: ConversationControlsDto {
+            qualified_model: "openai/gpt-5".into(),
+            permission: PermissionControlStateDto {
+                requested: "auto".into(),
+                effective: "acceptEdits".into(),
+                options: vec![
+                    PermissionModeOptionDto {
+                        mode: "acceptEdits".into(),
+                        available: true,
+                        disabled_reason: None,
+                    },
+                    PermissionModeOptionDto {
+                        mode: "bypassPermissions".into(),
+                        available: false,
+                        disabled_reason: Some(ControlDisabledReasonDto {
+                            code: "not_yet_available".into(),
+                            message: Some("Mobile host does not expose bypass".into()),
+                        }),
+                    },
+                ],
+            },
+            reasoning: ReasoningControlStateDto {
+                requested: ReasoningSelectionDto::Automatic,
+                effective: ReasoningSelectionDto::Level {
+                    id: "medium".into(),
+                },
+                spec: ReasoningControlSpecDto {
+                    options: vec![
+                        ReasoningOptionDto {
+                            selection: ReasoningSelectionDto::Automatic,
+                            persistable: true,
+                        },
+                        ReasoningOptionDto {
+                            selection: ReasoningSelectionDto::Level {
+                                id: "medium".into(),
+                            },
+                            persistable: true,
+                        },
+                    ],
+                    budget_range: None,
+                    provider_default: ReasoningSelectionDto::Level {
+                        id: "medium".into(),
+                    },
+                    forced_reasoning: false,
+                    editable: true,
+                    disabled_reason: None,
+                },
+            },
+        },
+    };
+    let json = serde_json::to_value(&event).expect("serialize ConversationControlsChanged");
+    assert_eq!(json["type"], "conversation_controls_changed");
+    assert_eq!(json["controls"]["qualified_model"], "openai/gpt-5");
+    assert_eq!(json["controls"]["permission"]["requested"], "auto");
+    assert_eq!(
+        json["controls"]["reasoning"]["requested"]["type"],
+        "automatic"
+    );
+    let back: ClientEvent =
+        serde_json::from_value(json).expect("deserialize ConversationControlsChanged");
+    assert_eq!(back, event);
 }
 
 #[test]

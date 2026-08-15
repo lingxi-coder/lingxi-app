@@ -1151,7 +1151,10 @@ impl ApiService {
             // `!xs && rhn(u) ? temperatureOverride ?? 1 : void 0`). The default
             // opus-4-8 (and 4-7/fable-5/mythos-5/unknowns) are NOT in `rhn` → the
             // field is omitted. The Anthropic codec emits temperature on Some only.
-            req.temperature = if !has_thinking && model_sends_temperature(model) {
+            req.temperature = if !has_thinking
+                && !matches!(thinking, crate::model::thinking::ThinkingConfig::Automatic)
+                && model_sends_temperature(model)
+            {
                 Some(1.0)
             } else {
                 None
@@ -3027,6 +3030,7 @@ impl ApiService {
                 Ok(p) => p,
                 Err(e) => return Err(e),
             };
+            tracing::debug!(model = %req.model, event = "request_prepared");
             self.inject_stream_headers(&mut prepared, &request_id, dispatch);
             // Captured before the move below — the dispatch degradation check
             // in the Err arm needs to know whether THIS attempt carried the
@@ -3085,6 +3089,11 @@ impl ApiService {
                     }
                 }
                 Ok((prepared, streaming)) => {
+                    tracing::debug!(
+                        model = %req.model,
+                        event = "stream_opened",
+                        status = streaming.status
+                    );
                     // Connect-phase status ≥ 400: drain and decode as error.
                     if streaming.status >= 400 {
                         let response_headers = streaming.headers;

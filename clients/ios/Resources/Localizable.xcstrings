@@ -1464,6 +1464,142 @@
         }
       }
     },
+    "chat_background_service_channel": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "活动对话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "進行中的對話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Active conversation"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "実行中の会話"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "진행 중인 대화"
+          }
+        }
+      }
+    },
+    "chat_background_service_channel_description": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "让进行中的对话在后台继续运行"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "讓進行中的對話在背景繼續執行"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keeps the active conversation running in the background"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "実行中の会話をバックグラウンドで継続します"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "진행 중인 대화를 백그라운드에서 계속 실행합니다"
+          }
+        }
+      }
+    },
+    "chat_background_service_text": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对话正在后台继续"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "對話正在背景繼續"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your conversation is continuing in the background"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話はバックグラウンドで続行中です"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화가 백그라운드에서 계속 진행 중입니다"
+          }
+        }
+      }
+    },
+    "chat_background_service_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀正在处理"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靈犀正在處理"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lingxi is working"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀が処理中です"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀가 작업 중입니다"
+          }
+        }
+      }
+    },
     "chat_cancel_failed %@": {
       "localizations": {
         "zh-Hans": {
@@ -5272,6 +5408,40 @@
         }
       }
     },
+    "chat_run_status_finished": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已结束"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已結束"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finished"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "終了"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "종료됨"
+          }
+        }
+      }
+    },
     "chat_run_status_running": {
       "localizations": {
         "zh-Hans": {
@@ -5336,6 +5506,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "도구 실행 중"
+          }
+        }
+      }
+    },
+    "chat_run_tools_windowed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "还有 %1$d 个较早的工具调用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "另有 %1$d 個較早的工具呼叫"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d earlier tool calls"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "以前のツール呼び出し %1$d 件"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 도구 호출 %1$d개"
           }
         }
       }
@@ -6392,6 +6596,148 @@
             "value": "%lld개 작업 (%lld 완료 · %lld 진행 중 · %lld 대기)"
           }
         }
+      }
+    },
+    "chat_tasks_summary_detail %lld %lld %lld %lld %lld %lld %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 个任务（%lld 成功 · %lld 运行中 · %lld 排队中 · %lld 失败 · %lld 暂停 · %lld 取消）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 個任務（%lld 成功 · %lld 執行中 · %lld 排隊中 · %lld 失敗 · %lld 暫停 · %lld 取消）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld tasks (%lld succeeded, %lld running, %lld queued, %lld failed, %lld paused, %lld cancelled)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 件のタスク（%lld 成功 · %lld 実行中 · %lld 待機中 · %lld 失敗 · %lld 一時停止 · %lld キャンセル）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 작업 (%lld 성공 · %lld 실행 중 · %lld 대기 중 · %lld 실패 · %lld 일시 중지 · %lld 취소)"
+          }
+        }
+      }
+    },
+    "chat_workflow_activity": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "活动" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "活動" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Activity" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "アクティビティ" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "활동" } }
+      }
+    },
+    "chat_workflow_agent_cached": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已缓存" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "已快取" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Cached" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "キャッシュ済み" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "캐시됨" } }
+      }
+    },
+    "chat_workflow_agent_fallback %llu": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "Agent %llu" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "Agent %llu" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Agent %llu" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Agent %llu" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Agent %llu" } }
+      }
+    },
+    "chat_workflow_agents_done %lld %lld": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%lld/%lld 完成" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "%lld/%lld 完成" } },
+        "en": { "stringUnit": { "state": "translated", "value": "%lld/%lld done" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "%lld/%lld 完了" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "%lld/%lld 완료" } }
+      }
+    },
+    "chat_workflow_agents_failed %lld": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%lld 失败" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "%lld 失敗" } },
+        "en": { "stringUnit": { "state": "translated", "value": "%lld failed" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "%lld 失敗" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "%lld 실패" } }
+      }
+    },
+    "chat_workflow_agents_queued %lld": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%lld 排队中" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "%lld 排隊中" } },
+        "en": { "stringUnit": { "state": "translated", "value": "%lld queued" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "%lld 待機中" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "%lld 대기 중" } }
+      }
+    },
+    "chat_workflow_agents_running %lld": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%lld 运行中" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "%lld 執行中" } },
+        "en": { "stringUnit": { "state": "translated", "value": "%lld running" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "%lld 実行中" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "%lld 실행 중" } }
+      }
+    },
+    "chat_workflow_retry %u": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "第 %u 次重试" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "第 %u 次重試" } },
+        "en": { "stringUnit": { "state": "translated", "value": "retry %u" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "再試行 %u" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "재시도 %u" } }
+      }
+    },
+    "chat_workflow_retry_reason %u %@": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "第 %u 次重试：%@" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "第 %u 次重試：%@" } },
+        "en": { "stringUnit": { "state": "translated", "value": "retry %u: %@" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "再試行 %u：%@" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "재시도 %u: %@" } }
+      }
+    },
+    "chat_workflow_title": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "工作流" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "工作流程" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Workflow" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ワークフロー" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "워크플로" } }
+      }
+    },
+    "chat_workflow_tokens %llu": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%llu token" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "%llu token" } },
+        "en": { "stringUnit": { "state": "translated", "value": "%llu tok" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "%llu token" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "%llu token" } }
+      }
+    },
+    "chat_workflow_tools %llu": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%llu 个工具" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "%llu 個工具" } },
+        "en": { "stringUnit": { "state": "translated", "value": "%llu tools" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "%llu ツール" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "%llu개 도구" } }
       }
     },
     "chat_team_active_agents %@ %u": {
@@ -18906,6 +19252,176 @@
         }
       }
     },
+    "local_apps_create_model_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认继承当前会话；选择其他模型会固定整个构建工作流。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "預設繼承目前對話；選擇其他模型會固定整個建置工作流程。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "By default the workflow inherits the current conversation. Selecting another model pins it for the entire build."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デフォルトでは現在の会話を継承します。別のモデルを選ぶとビルド全体で固定されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기본적으로 현재 대화 모델을 상속합니다. 다른 모델을 선택하면 전체 빌드 워크플로에 고정됩니다."
+          }
+        }
+      }
+    },
+    "local_apps_create_model_follow_current": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跟随当前会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跟隨目前對話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Follow current conversation"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在の会話に従う"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "현재 대화 따르기"
+          }
+        }
+      }
+    },
+    "local_apps_create_model_follow_current_value %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@（跟随当前会话）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@（跟隨目前對話）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ (follow current conversation)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@（現在の会話に従う）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ (현재 대화 따르기)"
+          }
+        }
+      }
+    },
+    "local_apps_create_model_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workflow 模型"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workflow 模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workflow model"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workflow モデル"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workflow 모델"
+          }
+        }
+      }
+    },
+    "local_apps_create_model_section": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "构建模型"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "建置模型"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Build model"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ビルドモデル"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "빌드 모델"
+          }
+        }
+      }
+    },
     "local_apps_create_name_hint": {
       "localizations": {
         "zh-Hans": {
@@ -21622,6 +22138,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "create-local-app 스킬로 이 앱 생성을 시작하세요.\n\n소개: %@\n\n먼저 질문으로 요구 사항을 확인해 주세요."
+          }
+        }
+      }
+    },
+    "local_apps_init_model_override %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\n\n构建模型覆盖：%@\n调用 local-app-build 时，必须将此完整值作为 args.model 原样传递。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\n\n建置模型覆寫：%@\n呼叫 local-app-build 時，必須將此完整值作為 args.model 原樣傳遞。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\n\nBuild model override: %@\nWhen invoking local-app-build, pass this complete value unchanged as args.model."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\n\nビルドモデルのオーバーライド：%@\nlocal-app-build の呼び出し時、この完全な値を args.model としてそのまま渡してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\n\n빌드 모델 재정의: %@\nlocal-app-build를 호출할 때 이 전체 값을 args.model로 그대로 전달하세요."
           }
         }
       }
@@ -48550,6 +49100,176 @@
           "stringUnit": {
             "state": "translated",
             "value": "灵犀가 제공하는 동작 보기"
+          }
+        }
+      }
+    },
+    "settings_skill_bundled_accessibility_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检查语义、键盘、触控、对比度和动态字体"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "檢查語意、鍵盤、觸控、對比度和動態字體"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checks semantics, keyboard access, touch targets, contrast, and dynamic type"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "セマンティクス、キーボード操作、タッチターゲット、コントラスト、動的文字サイズを確認"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시맨틱, 키보드 접근, 터치 대상, 대비, 동적 글꼴을 점검"
+          }
+        }
+      }
+    },
+    "settings_skill_bundled_create_local_app_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "编排设计、依赖、生成、构建和验证本地应用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "編排設計、依賴、生成、建置和驗證本地應用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Orchestrates the design, dependencies, generation, build, and verification of a local app"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルアプリの設計、依存関係、生成、ビルド、検証を一貫して進行"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "로컬 앱의 설계, 의존성, 생성, 빌드, 검증을 통합 진행"
+          }
+        }
+      }
+    },
+    "settings_skill_bundled_frontend_design_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "为目标平台和 form factor 设计原生前端方向"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "為目標平台和 form factor 設計原生前端方向"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Designs a native frontend direction for the target platform and form factor"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "対象プラットフォームとフォームファクターに合わせてネイティブフロントエンドの方向性を設計"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대상 플랫폼과 폼 팩터에 맞는 네이티브 프런트엔드 방향을 설계"
+          }
+        }
+      }
+    },
+    "settings_skill_bundled_frontend_qa_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "用 Browser 与原生 WebView 验证界面和交互"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "用 Browser 與原生 WebView 驗證介面和互動"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Validates UI and interactions with Browser and the native WebView"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browser とネイティブ WebView で UI と操作を検証"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browser와 네이티브 WebView로 UI와 상호작용을 검증"
+          }
+        }
+      }
+    },
+    "settings_skill_bundled_react_best_practices_desc": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检查 React 状态、效果、性能和完整状态"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "檢查 React 狀態、效果、效能和完整狀態"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checks React state, effects, performance, and complete UI states"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "React の状態、エフェクト、パフォーマンス、UI 状態の網羅性を確認"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "React 상태, 이펙트, 성능, 전체 UI 상태를 점검"
           }
         }
       }

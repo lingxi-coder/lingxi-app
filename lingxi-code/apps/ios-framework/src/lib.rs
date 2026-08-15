@@ -1544,6 +1544,17 @@ pub trait IosEventListener: Send + Sync {
     /// Swift host. Implementations enqueue onto the UI's event stream and return
     /// promptly — they must not block the engine turn loop.
     async fn on_event(&self, event: client_protocol::events::ClientEvent);
+
+    /// Deliver one structured workflow/subagent progress update without
+    /// reconstructing live state from transcript events.
+    async fn on_workflow_progress(
+        &self,
+        _origin_session_id: String,
+        _task_id: String,
+        _run_id: String,
+        _progress: client_protocol::listings::WorkflowProgressDto,
+    ) {
+    }
 }
 
 /// Adapts the crate-local [`IosEventListener`] callback interface to the shared
@@ -1560,6 +1571,18 @@ struct IosListenerBridge {
 impl ClientEventListener for IosListenerBridge {
     async fn on_event(&self, event: client_protocol::events::ClientEvent) {
         self.inner.on_event(event).await;
+    }
+
+    async fn on_workflow_progress(
+        &self,
+        origin_session_id: String,
+        task_id: String,
+        run_id: String,
+        progress: client_protocol::listings::WorkflowProgressDto,
+    ) {
+        self.inner
+            .on_workflow_progress(origin_session_id, task_id, run_id, progress)
+            .await;
     }
 }
 

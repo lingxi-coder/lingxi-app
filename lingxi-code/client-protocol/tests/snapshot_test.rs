@@ -46,6 +46,11 @@ use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
     TccStateDto,
 };
+use client_protocol::controls::{
+    ControlDisabledReasonDto, ConversationControlsDto, PermissionControlStateDto,
+    PermissionModeOptionDto, ReasoningBudgetRangeDto, ReasoningControlSpecDto,
+    ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
+};
 use client_protocol::error::ClientError;
 use client_protocol::events::{AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
 use client_protocol::listings::{
@@ -65,7 +70,8 @@ use client_protocol::local_apps::{
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::{
-    PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto, WorkerInfoDto,
+    PermissionKindDto, PermissionRequest, PermissionResolutionDto, PermissionResolved,
+    PermissionResponseDto, WorkerInfoDto,
 };
 use client_protocol::tool_display::{
     CodeSegmentDto, DiffLineKindDto, DiffRowDto, HeadlineKindDto, PlanTaskDto, PlanTaskStateDto,
@@ -213,6 +219,15 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/workflow_resumed.json",
+            ClientEvent::WorkflowResumed {
+                previous_task_id: "w12345678".to_string(),
+                task: canonical_task_row(),
+                run_id: "wf_abcdef".to_string(),
+                origin_session_id: Some("session-1".to_string()),
+            },
+        ),
+        (
             "event/tool_heartbeat.json",
             ClientEvent::ToolHeartbeat {
                 id: "toolu_01".to_string(),
@@ -335,6 +350,8 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     agent_id: "main".to_string(),
                     name: "Main agent".to_string(),
                     agent_type: "main".to_string(),
+                    model: Some("deepseek-v4-flash".to_string()),
+                    model_profile: Some("deepseek".to_string()),
                     status: "running".to_string(),
                     latest_activity: Some("Working on the selected conversation".to_string()),
                     updated_at_ms: Some(1_750_000_000_000),
@@ -359,6 +376,8 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
                     name: "Researcher".to_string(),
                     agent_type: "general-purpose".to_string(),
+                    model: Some("deepseek-v4-flash".to_string()),
+                    model_profile: Some("deepseek".to_string()),
                     status: "completed".to_string(),
                     latest_activity: Some("Finished source review".to_string()),
                     updated_at_ms: Some(1_750_000_000_123),
@@ -406,6 +425,12 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/permission_mode_changed.json",
             ClientEvent::PermissionModeChanged {
                 mode: "acceptEdits".to_string(),
+            },
+        ),
+        (
+            "event/conversation_controls_changed.json",
+            ClientEvent::ConversationControlsChanged {
+                controls: canonical_conversation_controls(),
             },
         ),
         (
@@ -540,6 +565,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::TaskStatusChanged {
                 task_id: "b12345678".to_string(),
                 status: TaskStatusDto::Running,
+                origin_session_id: None,
             },
         ),
         (
@@ -730,6 +756,13 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::AskUserQuestionResolved { request_id: 9 },
         ),
         (
+            "event/permission_request_resolved.json",
+            ClientEvent::PermissionRequestResolved {
+                request_id: 10,
+                resolution: PermissionResolutionDto::Expired,
+            },
+        ),
+        (
             "event/commands_changed.json",
             ClientEvent::CommandsChanged {
                 commands: vec![SlashCommandDto {
@@ -837,6 +870,16 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         ),
         ("command/list_models.json", ClientCommand::ListModels),
         (
+            "command/get_conversation_controls.json",
+            ClientCommand::GetConversationControls,
+        ),
+        (
+            "command/set_reasoning_selection.json",
+            ClientCommand::SetReasoningSelection {
+                selection: ReasoningSelectionDto::TokenBudget { tokens: 2048 },
+            },
+        ),
+        (
             "command/run_slash_command.json",
             ClientCommand::RunSlashCommand {
                 raw: "/model opus".to_string(),
@@ -900,6 +943,12 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 task_id: "b12345678".to_string(),
             },
         ),
+        (
+            "command/resume_workflow.json",
+            ClientCommand::ResumeWorkflow {
+                task_id: "w12345678".to_string(),
+            },
+        ),
         ("command/list_apps.json", ClientCommand::ListApps),
         (
             "command/get_app_details.json",
@@ -914,6 +963,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 origin: AppCreateOriginDto::Chat,
                 brief: "Track daily habits with streaks".to_string(),
                 git_enabled: true,
+                workflow_model: Some("deepseek/deepseek-v4-flash".to_string()),
                 conversation_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
             },
         ),
@@ -1125,6 +1175,7 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                     default_allow: false,
                 },
                 worker: None,
+                owner: None,
             },
         ),
         (
@@ -1135,6 +1186,7 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                     plan: "1. read files\n2. edit".to_string(),
                 },
                 worker: None,
+                owner: None,
             },
         ),
         (
@@ -1143,6 +1195,7 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                 request_id: 9,
                 kind: PermissionKindDto::BypassPermissionsMode,
                 worker: None,
+                owner: None,
             },
         ),
         (
@@ -1159,6 +1212,7 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                     color: "cyan".to_string(),
                     team: None,
                 }),
+                owner: None,
             },
         ),
     ]
@@ -1322,6 +1376,83 @@ fn canonical_status() -> StatusSnapshotDto {
     }
 }
 
+fn canonical_conversation_controls() -> ConversationControlsDto {
+    ConversationControlsDto {
+        qualified_model: "gemini/gemini-2.5-pro".to_string(),
+        permission: PermissionControlStateDto {
+            requested: "auto".to_string(),
+            effective: "acceptEdits".to_string(),
+            options: vec![
+                PermissionModeOptionDto {
+                    mode: "default".to_string(),
+                    available: true,
+                    disabled_reason: None,
+                },
+                PermissionModeOptionDto {
+                    mode: "acceptEdits".to_string(),
+                    available: true,
+                    disabled_reason: None,
+                },
+                PermissionModeOptionDto {
+                    mode: "plan".to_string(),
+                    available: true,
+                    disabled_reason: None,
+                },
+                PermissionModeOptionDto {
+                    mode: "auto".to_string(),
+                    available: true,
+                    disabled_reason: None,
+                },
+                PermissionModeOptionDto {
+                    mode: "dontAsk".to_string(),
+                    available: true,
+                    disabled_reason: None,
+                },
+                PermissionModeOptionDto {
+                    mode: "bypassPermissions".to_string(),
+                    available: false,
+                    disabled_reason: Some(ControlDisabledReasonDto {
+                        code: "not_yet_available".to_string(),
+                        message: Some("Bypass permissions is not available on iOS".to_string()),
+                    }),
+                },
+            ],
+        },
+        reasoning: ReasoningControlStateDto {
+            requested: ReasoningSelectionDto::TokenBudget { tokens: 2048 },
+            effective: ReasoningSelectionDto::TokenBudget { tokens: 2048 },
+            spec: ReasoningControlSpecDto {
+                options: vec![
+                    ReasoningOptionDto {
+                        selection: ReasoningSelectionDto::Automatic,
+                        persistable: true,
+                    },
+                    ReasoningOptionDto {
+                        selection: ReasoningSelectionDto::Disabled,
+                        persistable: true,
+                    },
+                    ReasoningOptionDto {
+                        selection: ReasoningSelectionDto::Enabled,
+                        persistable: false,
+                    },
+                    ReasoningOptionDto {
+                        selection: ReasoningSelectionDto::TokenBudget { tokens: 2048 },
+                        persistable: true,
+                    },
+                ],
+                budget_range: Some(ReasoningBudgetRangeDto {
+                    min_tokens: 128,
+                    max_tokens: 8192,
+                }),
+                provider_default: ReasoningSelectionDto::Enabled,
+                forced_reasoning: false,
+                editable: true,
+                disabled_reason: None,
+            },
+        },
+    }
+}
+
 fn canonical_doctor() -> DoctorReportDto {
     DoctorReportDto {
         checks: vec![
@@ -1350,6 +1481,8 @@ fn canonical_task_row() -> TaskRowDto {
         task_type: "bash".to_string(),
         status: TaskStatusDto::Running,
         description: "run the test suite".to_string(),
+        can_resume: false,
+        started_at_ms: None,
     }
 }
 

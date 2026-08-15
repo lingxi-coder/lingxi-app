@@ -45,6 +45,11 @@ use client_adapter::{
 use client_protocol::commands::{
     ClientCommand, ListingKindDto as ProtocolListingKind, ProviderCredentialSecretDto,
 };
+use client_protocol::controls::{
+    ConversationControlsDto, ControlDisabledReasonDto, PermissionControlStateDto,
+    PermissionModeOptionDto, ReasoningBudgetRangeDto, ReasoningControlSpecDto,
+    ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
+};
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
 use client_protocol::listings::{SessionAgentSummaryDto, SlashCommandDto};
@@ -84,6 +89,7 @@ use tokio_util::sync::CancellationToken;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::BuiltinToolContext;
 use tool_api::SessionCwd;
+use tool_workflow::WorkflowLauncher as _;
 use traits::http::{
     HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
     WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
@@ -420,6 +426,8 @@ pub struct MobileRuntime {
     /// never `None`: F3-05's `submit(ApprovePermission/DenyPermission)` calls
     /// [`AdapterPermissionGate::resolve`] on it to satisfy a parked `check()`.
     pub permission_gate: Arc<AdapterPermissionGate>,
+    /// User-requested permission mode before model/provider auto resolution.
+    pub requested_permission_mode: Arc<StdMutex<String>>,
     /// The registered foreign event listener. Held so F3-04's handle can own /
     /// re-surface it; the adapter already feeds it via a [`ListenerSink`].
     pub listener: Arc<dyn ClientEventListener>,
@@ -492,6 +500,19 @@ pub struct MobileRuntime {
     /// family (`TaskList`/`TaskOutput`/`TaskStop`), and the per-turn
     /// `<task-notification>` drain.
     pub(crate) task_registry: Arc<tasks::registry::TaskRegistry>,
+    /// Active app-scoped workflow leases. Delete checks this registry before
+    /// removing an app directory so a build cannot continue against a path
+    /// that has already been committed for deletion.
+    pub(crate) workspace_leases: Arc<permission::WorkspacePermissionLeaseRegistry>,
+    /// Durable workflow handoff store used to adopt interrupted runs as paused
+    /// when their owning session is resumed after a process restart.
+    pub(crate) workflow_checkpoints: Arc<crate::workflow_support::MobileWorkflowCheckpointStore>,
+    /// Status/progress sink shared by the registered workflow handler and its
+    /// launcher so events buffered during task registration can be flushed.
+    pub(crate) workflow_status_sink: Arc<crate::workflow_support::MobileWorkflowStatusSink>,
+    /// The same launcher used by the Workflow tool. Keeping one instance here
+    /// makes explicit UI resume use the identical validation/checkpoint path.
+    pub(crate) workflow_launcher: Arc<crate::workflow_support::MobileWorkflowLauncher>,
     /// v3 Phase 3: the live current-session uuid the local-apps MCP `create`
     /// reads as the app's origin conversation. Updated by
     /// `retarget_session_writer` on every session change.
@@ -505,6 +526,88 @@ struct SlashAuthoritySnapshot {
     permission_mode: String,
     auth: client_protocol::listings::AuthStateDto,
     catalog: Vec<SlashCommandDto>,
+}
+
+fn lower_reasoning_selection(selection: &traits::ReasoningSelection) -> ReasoningSelectionDto {
+    match selection {
+        traits::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
+        traits::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
+        traits::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
+        traits::ReasoningSelection::Level { id } => {
+            ReasoningSelectionDto::Level { id: id.clone() }
+        }
+        traits::ReasoningSelection::TokenBudget { tokens } => {
+            ReasoningSelectionDto::TokenBudget { tokens: *tokens }
+        }
+    }
+}
+
+fn decode_reasoning_selection(selection: ReasoningSelectionDto) -> traits::ReasoningSelection {
+    match selection {
+        ReasoningSelectionDto::Automatic => traits::ReasoningSelection::Automatic,
+        ReasoningSelectionDto::Disabled => traits::ReasoningSelection::Disabled,
+        ReasoningSelectionDto::Enabled => traits::ReasoningSelection::Enabled,
+        ReasoningSelectionDto::Level { id } => traits::ReasoningSelection::Level { id },
+        ReasoningSelectionDto::TokenBudget { tokens } => {
+            traits::ReasoningSelection::TokenBudget { tokens }
+        }
+        _ => traits::ReasoningSelection::Automatic,
+    }
+}
+
+fn lower_controls(
+    controls: traits::ConversationControls,
+    requested_permission: String,
+) -> ConversationControlsDto {
+    let spec = controls.reasoning_spec;
+    let options = spec
+        .available
+        .iter()
+        .cloned()
+        .map(|selection| ReasoningOptionDto {
+            persistable: spec.selections_persistable
+                && !matches!(selection, traits::ReasoningSelection::Level { ref id } if id == "max"),
+            selection: lower_reasoning_selection(&selection),
+        })
+        .collect();
+    ConversationControlsDto {
+        qualified_model: controls.model_reference,
+        permission: PermissionControlStateDto {
+            requested: requested_permission,
+            effective: controls.permission.effective,
+            options: controls
+                .permission
+                .modes
+                .into_iter()
+                .map(|mode| PermissionModeOptionDto {
+                    mode: mode.mode,
+                    available: mode.available,
+                    disabled_reason: mode.disabled_reason.map(|code| ControlDisabledReasonDto {
+                        code,
+                        message: None,
+                    }),
+                })
+                .collect(),
+        },
+        reasoning: ReasoningControlStateDto {
+            requested: lower_reasoning_selection(&controls.requested_reasoning_selection),
+            effective: lower_reasoning_selection(&controls.effective_reasoning_selection),
+            spec: ReasoningControlSpecDto {
+                options,
+                budget_range: spec.budget_range.map(|range| ReasoningBudgetRangeDto {
+                    min_tokens: range.min_tokens as u64,
+                    max_tokens: range.max_tokens as u64,
+                }),
+                provider_default: lower_reasoning_selection(&spec.provider_default),
+                forced_reasoning: spec.forced,
+                editable: spec.modifiable,
+                disabled_reason: spec.disabled_reason.map(|code| ControlDisabledReasonDto {
+                    code,
+                    message: None,
+                }),
+            },
+        },
+    }
 }
 
 /// Non-secret result of testing one provider endpoint from the mobile engine.
@@ -1847,36 +1950,6 @@ fn apply_mobile_profile_allowlist(
     });
 }
 
-/// A [`PermissionRequestSink`] that records `request_id → tool_name` and then
-/// forwards each request verbatim to the foreign sink (plan F3-05).
-///
-/// The mobile analog of bridge-server's `FramePermissionSink`: the inbound
-/// `ApprovePermission`/`DenyPermission` command carries only a `request_id`, but
-/// [`AdapterPermissionGate::resolve`] needs the tool name to append an
-/// `AllowAlways` session rule. This wrapper captures the name as the request goes
-/// out, so [`MobileEngineHandle::submit`] can look it back up on resolve. It
-/// wraps (not replaces) the foreign listener-backed sink so the host still
-/// receives every request.
-struct RecordingPermissionSink {
-    inner: Arc<dyn PermissionRequestSink>,
-    tool_names: Arc<Mutex<HashMap<u64, String>>>,
-}
-
-#[async_trait]
-impl PermissionRequestSink for RecordingPermissionSink {
-    async fn emit_request(&self, request: PermissionRequestDto) {
-        // Record the tool name (only `ToolUseConfirm` has one — the reserved
-        // kinds are never live-sourced in the foundation, decision §0.6).
-        if let PermissionKindDto::ToolUseConfirm { tool_name, .. } = &request.kind {
-            self.tool_names
-                .lock()
-                .await
-                .insert(request.request_id, tool_name.clone());
-        }
-        self.inner.emit_request(request).await;
-    }
-}
-
 // Phase 2a-mobile: the multi-provider client config / chains / credential
 // sources / pricing catalog are now assembled by `provider_config::assemble`
 // (which owns the byte-equivalent Anthropic profile + the builtin catalog
@@ -2388,6 +2461,9 @@ async fn build_mobile_inner_with_ask(
     let auth: Arc<dyn AuthHandle> = anthropic_oauth_handle.clone();
 
     // (4) Orchestrator config from `cfg` (was a host env/arg read).
+    let persisted_reasoning_selection = command_core::effort::load_reasoning_default_selection_at(
+        &cfg.lingxi_home.join("settings.json"),
+    );
     let mut orch_cfg = OrchestratorConfig::default();
     // TPM-C: use the bare id produced by parse_model_ref (strips a profile/
     // prefix when present, passes through unchanged for bare ids).
@@ -2428,7 +2504,9 @@ async fn build_mobile_inner_with_ask(
     // (3c) No `.with_persist` on mobile: a device session has no project
     // `.lingxi/settings.local.json` convention to write back to, so AllowAlways
     // stays session-only here (the desktop transport gate persists; this does not).
-    let adapter_gate = Arc::new(AdapterPermissionGate::new(permission_sink));
+    let adapter_gate =
+        Arc::new(AdapterPermissionGate::new(permission_sink).with_event_sink(event_sink.clone()));
+    adapter_gate.set_session_id(Some(main_session_uuid.clone()));
     // Wrap the adapter gate with a local `PolicyPermissionGate` so the CORE
     // allow/deny/ask/defaultMode semantics bind on mobile too — claude-code
     // enforces ONE core policy on every host, not "the remote client is the
@@ -2474,9 +2552,18 @@ async fn build_mobile_inner_with_ask(
     let mut live_model_provider_cell: Option<
         Arc<std::sync::OnceLock<permission::LiveModelProvider>>,
     > = None;
+    // Published after settings + the auto availability gate resolve.  The
+    // value is reused by subagent/workflow composition and the tool context
+    // so every surface reports the same effective mode.
+    let mut resolved_permission_mode = PermissionMode::Auto;
+    let mut requested_permission_mode = PermissionMode::Auto.wire_str().to_string();
+    let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
     let perms: Arc<dyn PermissionGate> = {
         let mut rules = Vec::new();
-        let mut mode = PermissionMode::Default;
+        // Auto is the built-in default.  `apply_auto_mode_gate` below retains
+        // the existing safety downgrade for unsupported models/providers or
+        // disabled auto mode.
+        let mut mode = PermissionMode::Auto;
         // Audit fix (#1): the project/enterprise bypassPermissions KILLSWITCH
         // (`disableBypassPermissionsMode`), sticky across tiers — mirrors desktop
         // (engine-desktop sets `policy.bypass_killswitch_active`). Without it a
@@ -2517,7 +2604,20 @@ async fn build_mobile_inner_with_ask(
                     ),
                 }
                 if let Some(m) = permission::default_mode_from_settings_json(&raw) {
-                    mode = m; // local settings read last → its defaultMode wins
+                    // Repo-controlled project/local settings may select a
+                    // restrictive mode, but cannot promote a session into
+                    // classifier-driven auto mode.  User settings are the
+                    // trusted mobile tier for that promotion.
+                    if m != PermissionMode::Auto
+                        || source == permission::PermissionRuleSource::UserSettings
+                    {
+                        mode = m; // local settings read last → scalar modes win
+                    } else {
+                        tracing::warn!(
+                            source = ?source,
+                            "settings defaultMode \"auto\" ignored in an untrusted project/local tier"
+                        );
+                    }
                 }
                 if permission::bypass_permissions_disabled_from_settings_json(&raw) {
                     bypass_disabled = true; // sticky: any tier disabling wins
@@ -2570,6 +2670,7 @@ async fn build_mobile_inner_with_ask(
             home: std::env::var_os("HOME").map(std::path::PathBuf::from),
             lingxi_home: cfg.lingxi_home.clone(),
         };
+        requested_permission_mode = mode.wire_str().to_string();
         // Auto-mode availability gate — claude-code `xms` mode-load downgrade:
         // a resolved `auto` mode downgrades to `default` when unavailable (the
         // `disableAutoMode` killswitch or an auto-unsupported boot model). Local
@@ -2587,9 +2688,11 @@ async fn build_mobile_inner_with_ask(
             );
             mode = gated;
         }
+        resolved_permission_mode = mode;
         let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
             .with_roots(roots)
-            .with_working_dirs(additional_working_dirs);
+            .with_working_dirs(additional_working_dirs)
+            .with_workspace_leases(workspace_leases.clone());
         // Audit fix (#1): honor the bypassPermissions killswitch resolved above.
         policy.bypass_killswitch_active = bypass_disabled;
         // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
@@ -2868,6 +2971,7 @@ async fn build_mobile_inner_with_ask(
         cwd.clone(),
         std::path::PathBuf::new(),
     )));
+    task_registry_inner.set_workflow_session_filter(Some(main_session_uuid.clone()));
 
     // (b) The subagent pool + spawner (adapted from engine-desktop; no
     // worktree/LSP/coordinator seams on mobile). The spawner's set-once cells
@@ -2888,6 +2992,12 @@ async fn build_mobile_inner_with_ask(
         &cwd.to_string_lossy(),
         &main_session_uuid,
     );
+
+    let workflow_checkpoints =
+        Arc::new(crate::workflow_support::MobileWorkflowCheckpointStore::new(
+            cfg.lingxi_home.clone(),
+            cwd.clone(),
+        ));
     let subagent_transcript_home = cfg.lingxi_home.clone();
     let subagent_transcript_cwd = cwd.to_string_lossy().into_owned();
     let subagent_active_session = active_session_uuid.clone();
@@ -2904,13 +3014,17 @@ async fn build_mobile_inner_with_ask(
         mobile_runtime_environment.as_ref(),
         mobile_workspace_cwd_provider.clone(),
     );
+    let session_agent_observer = Arc::new(MobileSessionAgentObserver::new(
+        event_sink.clone(),
+        active_session_uuid.clone(),
+    ));
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
         .with_api_client(provider_adapter.clone() as Arc<dyn agent::SubagentApiClient>)
         .with_session_interactive(interactive_launch)
         .with_default_model(agent::model_resolution::resolve_user_specified_model(
             &orch_cfg.model,
         ))
-        .with_permission_mode(PermissionMode::Default)
+        .with_permission_mode(resolved_permission_mode)
         .with_model_setting(orch_cfg.model.clone())
         .with_hook_context(
             subagent_hook_session_id,
@@ -2919,6 +3033,7 @@ async fn build_mobile_inner_with_ask(
         )
         .with_subagents_dir_provider(subagents_dir_provider)
         .with_transcript_fs(fs.clone())
+        .with_spawn_observer(session_agent_observer)
         .with_subagent_env_renderer(subagent_env_renderer);
     if let Some(environment) = mobile_runtime_environment.clone() {
         subagent_spawner_concrete = subagent_spawner_concrete
@@ -2928,6 +3043,10 @@ async fn build_mobile_inner_with_ask(
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
     let subagent_hook_executor_cell = subagent_spawner_concrete.hook_executor_handle();
+    let subagent_default_model_selection_provider_cell =
+        subagent_spawner_concrete.default_model_selection_provider_handle();
+    let subagent_provider_first_party_resolver_cell =
+        subagent_spawner_concrete.provider_first_party_resolver_handle();
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
     let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
@@ -2955,9 +3074,12 @@ async fn build_mobile_inner_with_ask(
     // forever and the client never sees its terminal state. The output-pool
     // cells are published after the orchestrator is built.
     let local_workflow_invoker = Arc::new(crate::workflow_support::DeferredToolInvoker::new());
-    let local_workflow_status_sink = Arc::new(
-        crate::workflow_support::MobileWorkflowStatusSink::new(event_sink.clone()),
-    );
+    let local_workflow_status_sink =
+        Arc::new(crate::workflow_support::MobileWorkflowStatusSink::new(
+            listener.clone(),
+            workflow_checkpoints.clone(),
+            active_session_uuid.clone(),
+        ));
     let local_workflow_output_pool: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
         Arc::new(std::sync::OnceLock::new());
     let local_workflow_turn_baseline: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
@@ -2972,8 +3094,14 @@ async fn build_mobile_inner_with_ask(
                 task_registry_inner.output_manager.clone(),
             )
             .with_token_budget(orch_cfg.token_budget)
+            .with_workflow_progress_sink(local_workflow_status_sink.clone()
+                as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
             .with_output_pool_cell(local_workflow_output_pool.clone())
             .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
+            .with_workspace_permission_leases(
+                workspace_leases.clone(),
+                mobile_apps_data_root(&cfg),
+            )
             .with_status_sink(
                 local_workflow_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
             ),
@@ -3019,7 +3147,7 @@ async fn build_mobile_inner_with_ask(
         // legacy wrap can only express `--unshare-net`/`--share-net`, never the
         // domain/proxy enforcement the desktop runtime provides).
         sandbox_runner: tool_api::default_sandbox_runner(),
-        permission_mode: PermissionMode::Default,
+        permission_mode: resolved_permission_mode,
         // (#3 shell-expansion) Share the SAME boot policy the model-facing gate
         // enforces as the base for embedded `!`cmd`` bodies in prompt commands.
         // Always `Some` here (the `perms` block above is unconditional).
@@ -3155,19 +3283,20 @@ async fn build_mobile_inner_with_ask(
     // `disableWorkflows` policy is absent (false) and the size guideline is
     // the default; `LINGXI_DISABLE_WORKFLOWS` still works via
     // `workflows_enabled`.
-    {
-        let workflow_launcher: Arc<dyn tool_workflow::WorkflowLauncher> =
-            Arc::new(crate::workflow_support::MobileWorkflowLauncher {
+    let workflow_launcher = Arc::new(crate::workflow_support::MobileWorkflowLauncher {
                 registry: task_registry.clone(),
                 cwd: cwd.clone(),
                 lingxi_home: cfg.lingxi_home.clone(),
                 session_uuid: active_session_uuid.clone(),
-            });
+                checkpoints: workflow_checkpoints.clone(),
+                status_sink: local_workflow_status_sink.clone(),
+    });
+    {
         traits::session_flags::set_dynamic_workflows_enabled(tool_workflow::workflows_enabled(
             false,
         ));
         tools.register_builtin(Arc::new(tool_workflow::WorkflowTool::new(Some(
-            workflow_launcher,
+            workflow_launcher.clone() as Arc<dyn tool_workflow::WorkflowLauncher>,
         ))));
     }
     let live_mcp_tool_ctx = tool_ctx.clone();
@@ -3263,6 +3392,13 @@ async fn build_mobile_inner_with_ask(
         agent::builtins::builtin_agent_definitions(),
     )));
     let _ = subagent_hook_executor_cell.set(hooks.clone());
+    let profile_first_party = profile_auto_mode_provider
+        .iter()
+        .map(|(profile, provider)| (profile.clone(), provider == "firstParty"))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let _ = subagent_provider_first_party_resolver_cell.set(Arc::new(move |profile| {
+        profile_first_party.get(profile).copied()
+    }));
     // Skill-preload cell deliberately left unfilled: it serves a subagent's
     // frontmatter `skills:` preload (desktop wires `AgentSkillLoader` over the
     // shared command registry), and no mobile-reachable agent definition —
@@ -3386,6 +3522,13 @@ async fn build_mobile_inner_with_ask(
     // `.with_session_cwd(session_cwd)`; inert today — see the binding note
     // above).
     .with_session_cwd(session_cwd);
+    if let Some(selection) = persisted_reasoning_selection {
+        orch_inner.initialize_reasoning_selection_for_model(
+            &default_model_id,
+            default_model_profile.as_deref(),
+            selection,
+        );
+    }
     // PathAtlas S3: prompt probes (memory hierarchy, git status, file tree)
     // must read the HOST directory backing the guest session cwd while the
     // env block displays the guest path itself. Live table: external mounts
@@ -3431,6 +3574,44 @@ async fn build_mobile_inner_with_ask(
     // (desktop (9014) mirror).
     let _ = local_workflow_output_pool.set(orch.output_token_pool());
     let _ = local_workflow_turn_baseline.set(orch.turn_start_output_baseline());
+    {
+        let session = orch.session();
+        let selection_model_provider_profiles = model_provider_profiles.clone();
+        let selection_profile_auto_mode_provider = profile_auto_mode_provider.clone();
+        let last_selection = Arc::new(std::sync::Mutex::new(session.try_lock().ok().map(
+            |state| {
+                agent::DefaultModelSelection {
+                    model: state.model.clone(),
+                    model_profile: state.model_profile.clone(),
+                    provider_first_party: state
+                        .model_profile
+                        .as_ref()
+                        .or_else(|| selection_model_provider_profiles.get(&state.model))
+                        .and_then(|profile| selection_profile_auto_mode_provider.get(profile))
+                        .map_or(true, |provider| provider == "firstParty"),
+                }
+            },
+        )));
+        let _ = subagent_default_model_selection_provider_cell.set(Arc::new(move || {
+            if let Ok(state) = session.try_lock() {
+                let selection = agent::DefaultModelSelection {
+                    model: state.model.clone(),
+                    model_profile: state.model_profile.clone(),
+                    provider_first_party: state
+                        .model_profile
+                        .as_ref()
+                        .or_else(|| selection_model_provider_profiles.get(&state.model))
+                        .and_then(|profile| selection_profile_auto_mode_provider.get(profile))
+                        .map_or(true, |provider| provider == "firstParty"),
+                };
+                if let Ok(mut cached) = last_selection.lock() {
+                    *cached = Some(selection.clone());
+                }
+                return Some(selection);
+            }
+            last_selection.lock().ok().and_then(|cached| cached.clone())
+        }));
+    }
 
     // Fill the hook-attachment sink's cell now that the orchestrator (and its
     // JSONL writer) exists. The sink holds a `Weak`, so this does not create an
@@ -3560,6 +3741,17 @@ async fn build_mobile_inner_with_ask(
         }
     }
     orch.fire_instructions_loaded().await;
+    // Publish the effective boot mode as an authoritative event. Auto may be
+    // downgraded to Default by the model/provider/killswitch gate, so clients
+    // must not infer the effective value from their persisted preference.
+    let initial_permission_mode = orch
+        .permission_mode()
+        .unwrap_or_else(|| PermissionMode::Auto.wire_str().to_string());
+    event_sink
+        .emit(ClientEvent::PermissionModeChanged {
+            mode: initial_permission_mode,
+        })
+        .await;
 
     Ok(MobileRuntime {
         orchestrator: orch,
@@ -3568,6 +3760,7 @@ async fn build_mobile_inner_with_ask(
         auth,
         oauth,
         permission_gate: adapter_gate,
+        requested_permission_mode: Arc::new(StdMutex::new(requested_permission_mode)),
         listener,
         event_sink,
         message_output,
@@ -3581,6 +3774,10 @@ async fn build_mobile_inner_with_ask(
         local_apps_mcp,
         local_apps_llm,
         task_registry,
+        workspace_leases,
+        workflow_checkpoints,
+        workflow_status_sink: local_workflow_status_sink,
+        workflow_launcher,
         active_session_uuid,
     })
 }
@@ -3660,12 +3857,6 @@ pub struct MobileEngineHandle {
     /// `submit(SendPrompt)` and fired by `submit(Cancel)`. `None` when no turn is
     /// active. One connection ⇒ one in-flight turn (§0.5), so a single slot.
     active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
-    /// `request_id → tool_name` recorded as each permission request is emitted, so
-    /// an inbound `ApprovePermission`/`DenyPermission` (which carries only the
-    /// `request_id`) can supply the tool name back to
-    /// [`AdapterPermissionGate::resolve`] (needed for the `AllowAlways` rule
-    /// append). The mobile analog of bridge-server's `FramePermissionSink` map.
-    tool_names: Arc<Mutex<HashMap<u64, String>>>,
     /// Correlates interactive `AskUserQuestion` events with inbound answers.
     ask_user_question_broker: Arc<client_adapter::BridgeAskUserQuestionBroker>,
     /// Number of builtin mobile skills assembled (the M8 smoke signal, retained
@@ -3737,35 +3928,6 @@ impl Drop for MobileEngineHandle {
         // Drop the strong observer after unregistering its weak fanout entry.
         self.app_domain_observer.take();
     }
-}
-
-/// State owned exclusively by the transcript watcher task.
-///
-/// Do not capture `MobileEngineHandle` (even through a `Weak`) here: the
-/// watcher must not keep the runtime/FFI owner in its future or repeatedly
-/// upgrade it across poll/sleep boundaries.  The task only needs these cloned
-/// session inputs and the shared orchestrator/sink.
-struct SessionAgentPump {
-    orchestrator: Arc<ConversationOrchestrator>,
-    event_sink: Arc<dyn client_adapter::ClientEventSink>,
-    lingxi_home: std::path::PathBuf,
-    session_cwd: String,
-    ready_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    session_lifecycle_rx: tokio::sync::watch::Receiver<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionAgentPollResult {
-    /// The directory was scanned successfully and the connection baseline is
-    /// now valid (including an empty or not-yet-created directory).
-    Success,
-    /// A transient filesystem failure prevented a complete scan. The caller
-    /// must retry without publishing readiness or dropping offsets.
-    Retry,
-}
-
-fn should_signal_session_agent_ready(first_poll: bool, result: SessionAgentPollResult) -> bool {
-    first_poll && result == SessionAgentPollResult::Success
 }
 
 /// Count valid append-only JSONL message records in a transcript prefix. This
@@ -3851,95 +4013,23 @@ async fn find_session_agent_transcript_path(
         .find(|path| session_agent_id_from_path(path).as_deref() == Some(agent_id)))
 }
 
-/// Seed one transcript offset according to the connection baseline.
-/// Existing paths seen during the first scan are history; paths first seen on
-/// a later scan are new live agents and must be tailed from byte zero.
-fn complete_transcript_prefix_len(raw: &[u8]) -> usize {
-    raw.iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |index| index + 1)
-}
-
-fn seed_session_agent_offset(
-    offsets: &mut HashMap<std::path::PathBuf, u64>,
-    path: &std::path::Path,
-    raw: &[u8],
-    baseline_ready: bool,
-) -> bool {
-    let first_discovery = !offsets.contains_key(path);
-    offsets.entry(path.to_path_buf()).or_insert_with(|| {
-        if baseline_ready {
-            0
-        } else {
-            complete_transcript_prefix_len(raw) as u64
-        }
-    });
-    first_discovery
-}
-
-/// The initial connection needs a history baseline; a later session switch
-/// must replay discovered paths from zero so a fast child created during
-/// ResumeSession cannot disappear before the first asynchronous poll.
-fn baseline_for_session_activation(has_seen_previous_session: bool) -> bool {
-    has_seen_previous_session
-}
-
-/// Match the transcript lowering rules: compact-summary and transcript-only
-/// user records mutate/serve the scrollback snapshot but do not become
+/// Match the transcript lowering rules: engine-authored meta input,
+/// compact-summary, and transcript-only user records must not become
 /// standalone MessageDto rows. Agent indexes count only rows that the full
 /// transcript and live stream can both expose.
 fn session_agent_conversation_is_visible(message: &protocol::ConversationMessage) -> bool {
     !matches!(
         message,
-        protocol::ConversationMessage::User {
-            is_compact_summary: true,
-            ..
-        } | protocol::ConversationMessage::User {
-            is_visible_in_transcript_only: true,
-            ..
-        }
+        protocol::ConversationMessage::User { is_meta: true, .. }
+            | protocol::ConversationMessage::User {
+                is_compact_summary: true,
+                ..
+            }
+            | protocol::ConversationMessage::User {
+                is_visible_in_transcript_only: true,
+                ..
+            }
     )
-}
-
-/// Prime one agent's tool-call side table from complete transcript lines while
-/// establishing the baseline. No events are emitted for this history; the
-/// side effect keeps a later live `ToolResult` paired with its pre-existing
-/// `ToolUse`.
-fn seed_session_agent_tool_index(
-    raw: &[u8],
-    index: &mut client_adapter::turn::ToolUseIndex,
-) -> u64 {
-    let mut visible_count: u64 = 0;
-    for line in raw.split_inclusive(|byte| *byte == b'\n') {
-        if !line.ends_with(b"\n") {
-            break;
-        }
-        let line = line.strip_suffix(b"\n").unwrap_or(line);
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(message) = value.get("message") else {
-            continue;
-        };
-        let Ok(conversation) =
-            serde_json::from_value::<protocol::ConversationMessage>(message.clone())
-        else {
-            continue;
-        };
-        if matches!(&conversation, protocol::ConversationMessage::System { subtype: Some(subtype), .. } if subtype.starts_with("agent_"))
-        {
-            continue;
-        }
-        if !session_agent_conversation_is_visible(&conversation) {
-            continue;
-        }
-        let _ = client_adapter::lowering::lower_conversation_message_with(&conversation, index);
-        visible_count = visible_count.saturating_add(1);
-    }
-    visible_count
 }
 
 /// Lower a complete JSONL prefix into the same snapshot DTOs used by the
@@ -3948,6 +4038,243 @@ fn seed_session_agent_tool_index(
 /// visible live rows in the same filesystem read are emitted.
 fn lower_session_agent_snapshot(raw: &[u8]) -> Vec<client_protocol::message::MessageDto> {
     client_adapter::lowering::lower_transcript(&parse_session_agent_messages(raw))
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn live_session_agent_activity(message: &protocol::ConversationMessage) -> Option<String> {
+    match message {
+        protocol::ConversationMessage::Assistant { content, .. }
+        | protocol::ConversationMessage::User { content, .. } => {
+            content.iter().find_map(|block| match block {
+                protocol::ContentBlock::Text { text } if !text.is_empty() => {
+                    Some(text.chars().take(160).collect())
+                }
+                protocol::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                protocol::ContentBlock::ToolResult { content, .. } if !content.is_empty() => {
+                    Some(content.chars().take(160).collect())
+                }
+                _ => None,
+            })
+        }
+        protocol::ConversationMessage::System { content, .. } if !content.is_empty() => {
+            Some(content.chars().take(160).collect())
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone)]
+struct BoundSessionAgentMeta {
+    session_id: String,
+    name: String,
+    agent_type: String,
+    model: String,
+    model_profile: Option<String>,
+}
+
+struct MobileSessionAgentObserver {
+    event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    session_uuid: Arc<std::sync::Mutex<String>>,
+    bound_agents: tokio::sync::Mutex<HashMap<String, BoundSessionAgentMeta>>,
+    tool_indexes: tokio::sync::Mutex<HashMap<String, client_adapter::turn::ToolUseIndex>>,
+    message_indexes: tokio::sync::Mutex<HashMap<String, u64>>,
+}
+
+impl MobileSessionAgentObserver {
+    fn new(
+        event_sink: Arc<dyn client_adapter::ClientEventSink>,
+        session_uuid: Arc<std::sync::Mutex<String>>,
+    ) -> Self {
+        Self {
+            event_sink,
+            session_uuid,
+            bound_agents: tokio::sync::Mutex::new(HashMap::new()),
+            tool_indexes: tokio::sync::Mutex::new(HashMap::new()),
+            message_indexes: tokio::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn allocated_session_id(&self) -> String {
+        if let Some(session_id) = agent::workflow_transcript_subdir_override()
+            .and_then(|path| path.ancestors().nth(3).map(std::path::Path::to_path_buf))
+            .and_then(|path| path.file_name().map(|name| name.to_owned()))
+            .and_then(|name| name.to_str().map(str::to_string))
+        {
+            return session_id;
+        }
+        self.session_uuid
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    async fn clear_agent_state(&self, agent_id: &str) {
+        self.bound_agents.lock().await.remove(agent_id);
+        self.tool_indexes.lock().await.remove(agent_id);
+        self.message_indexes.lock().await.remove(agent_id);
+    }
+}
+
+#[async_trait::async_trait]
+impl traits::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserver {
+    async fn on_event(&self, event: traits::subagent_spawn::SubagentObservation) {
+        match event {
+            traits::subagent_spawn::SubagentObservation::Allocated {
+                agent_id,
+                agent_type,
+                name,
+                model,
+                model_profile,
+            } => {
+                let session_id = self.allocated_session_id();
+                let name = name.unwrap_or_else(|| agent_type.clone());
+                self.bound_agents.lock().await.insert(
+                    agent_id.to_string(),
+                    BoundSessionAgentMeta {
+                        session_id: session_id.clone(),
+                        name: name.clone(),
+                        agent_type: agent_type.clone(),
+                        model: model.clone(),
+                        model_profile: model_profile.clone(),
+                    },
+                );
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentUpdated {
+                        session_id,
+                        agent: SessionAgentSummaryDto {
+                            agent_id: agent_id.to_string(),
+                            name,
+                            agent_type,
+                            model: Some(model),
+                            model_profile,
+                            status: "running".to_string(),
+                            latest_activity: None,
+                            updated_at_ms: Some(unix_time_ms()),
+                        },
+                    })
+                    .await;
+            }
+            traits::subagent_spawn::SubagentObservation::Message { agent_id, message } => {
+                if !session_agent_conversation_is_visible(&message) {
+                    return;
+                }
+                let agent_key = agent_id.to_string();
+                let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
+                    return;
+                };
+                let dto = {
+                    let mut indexes = self.tool_indexes.lock().await;
+                    let index = indexes.entry(agent_key.clone()).or_default();
+                    client_adapter::lowering::lower_conversation_message_with(&message, index)
+                };
+                let message_index = {
+                    let mut indexes = self.message_indexes.lock().await;
+                    let next = indexes.entry(agent_key.clone()).or_default();
+                    let current = *next;
+                    *next = next.saturating_add(1);
+                    current
+                };
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentMessage {
+                        session_id: bound.session_id.clone(),
+                        agent_id: agent_key.clone(),
+                        message_index,
+                        message: dto,
+                    })
+                    .await;
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentUpdated {
+                        session_id: bound.session_id,
+                        agent: SessionAgentSummaryDto {
+                            agent_id: agent_key.clone(),
+                            name: bound.name,
+                            agent_type: bound.agent_type,
+                            model: Some(bound.model),
+                            model_profile: bound.model_profile,
+                            status: "running".to_string(),
+                            latest_activity: live_session_agent_activity(&message),
+                            updated_at_ms: Some(unix_time_ms()),
+                        },
+                    })
+                    .await;
+            }
+            traits::subagent_spawn::SubagentObservation::Completed { agent_id, .. } => {
+                let agent_key = agent_id.to_string();
+                let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
+                    return;
+                };
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentUpdated {
+                        session_id: bound.session_id,
+                        agent: SessionAgentSummaryDto {
+                            agent_id: agent_key.clone(),
+                            name: bound.name,
+                            agent_type: bound.agent_type,
+                            model: Some(bound.model),
+                            model_profile: bound.model_profile,
+                            status: "completed".to_string(),
+                            latest_activity: None,
+                            updated_at_ms: Some(unix_time_ms()),
+                        },
+                    })
+                    .await;
+                self.clear_agent_state(&agent_key).await;
+            }
+            traits::subagent_spawn::SubagentObservation::Failed { agent_id, error } => {
+                let agent_key = agent_id.to_string();
+                let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
+                    return;
+                };
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentUpdated {
+                        session_id: bound.session_id,
+                        agent: SessionAgentSummaryDto {
+                            agent_id: agent_key.clone(),
+                            name: bound.name,
+                            agent_type: bound.agent_type,
+                            model: Some(bound.model),
+                            model_profile: bound.model_profile,
+                            status: "failed".to_string(),
+                            latest_activity: Some(error),
+                            updated_at_ms: Some(unix_time_ms()),
+                        },
+                    })
+                    .await;
+                self.clear_agent_state(&agent_key).await;
+            }
+            traits::subagent_spawn::SubagentObservation::Killed { agent_id } => {
+                let agent_key = agent_id.to_string();
+                let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
+                    return;
+                };
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentUpdated {
+                        session_id: bound.session_id,
+                        agent: SessionAgentSummaryDto {
+                            agent_id: agent_key.clone(),
+                            name: bound.name,
+                            agent_type: bound.agent_type,
+                            model: Some(bound.model),
+                            model_profile: bound.model_profile,
+                            status: "killed".to_string(),
+                            latest_activity: None,
+                            updated_at_ms: Some(unix_time_ms()),
+                        },
+                    })
+                    .await;
+                self.clear_agent_state(&agent_key).await;
+            }
+            traits::subagent_spawn::SubagentObservation::Progress { .. } => {}
+            traits::subagent_spawn::SubagentObservation::Retry { .. } => {}
+        }
+    }
 }
 
 fn parse_session_agent_messages(raw: &[u8]) -> Vec<protocol::ConversationMessage> {
@@ -3976,273 +4303,12 @@ fn parse_session_agent_messages(raw: &[u8]) -> Vec<protocol::ConversationMessage
         ) {
             continue;
         }
+        if !session_agent_conversation_is_visible(&conversation) {
+            continue;
+        }
         messages.push(conversation);
     }
     messages
-}
-
-impl SessionAgentPump {
-    async fn run(mut self) {
-        let mut offsets: HashMap<std::path::PathBuf, u64> = HashMap::new();
-        let mut tool_indexes: HashMap<String, client_adapter::turn::ToolUseIndex> = HashMap::new();
-        let mut message_indexes: HashMap<String, u64> = HashMap::new();
-        let mut session_id: Option<protocol::SessionId> = None;
-        let mut baseline_ready = false;
-        let mut first_poll = true;
-        loop {
-            let current_session_id = self.orchestrator.current_session_id().await;
-            let current_session_key = current_session_id.as_uuid().to_string();
-            if self.session_lifecycle_rx.borrow().as_str() != current_session_key {
-                // Resume/New/clear update the orchestrator before emitting
-                // their lifecycle event. Wait for that event's sink call to
-                // complete before replaying the new session, so clients never
-                // see indexed agent messages before they reset their snapshot.
-                if self.session_lifecycle_rx.changed().await.is_err() {
-                    return;
-                }
-                continue;
-            }
-            if session_id != Some(current_session_id) {
-                // Offsets, tool pairing and the startup baseline are scoped to
-                // one session. On the initial connection we establish a
-                // history baseline. On a later session switch, replay paths
-                // from zero: a child can be created between ResumeSession and
-                // this first async poll, and dropping it is worse than a
-                // duplicate that iOS can merge by message id.
-                let had_previous_session = session_id.is_some();
-                offsets.clear();
-                tool_indexes.clear();
-                message_indexes.clear();
-                baseline_ready = baseline_for_session_activation(had_previous_session);
-                session_id = Some(current_session_id);
-            }
-            let poll_result = self
-                .poll(
-                    current_session_id,
-                    &mut offsets,
-                    &mut tool_indexes,
-                    &mut message_indexes,
-                    &mut baseline_ready,
-                )
-                .await;
-            if poll_result == SessionAgentPollResult::Retry && !baseline_ready {
-                // A partially scanned startup baseline is not authoritative:
-                // discard seeded offsets/indexes so the next attempt includes
-                // any bytes appended while the directory was unavailable.
-                offsets.clear();
-                tool_indexes.clear();
-                message_indexes.clear();
-            }
-            if should_signal_session_agent_ready(first_poll, poll_result) {
-                // The connection constructor waits for this signal before it
-                // returns the handle. This closes the startup race where a
-                // caller can submit the first prompt (and create a child)
-                // before the pump has established its history baseline.
-                first_poll = false;
-                if let Some(ready_tx) = self.ready_tx.take() {
-                    let _ = ready_tx.send(Ok(()));
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-    }
-
-    async fn poll(
-        &self,
-        session_id: protocol::SessionId,
-        offsets: &mut HashMap<std::path::PathBuf, u64>,
-        tool_indexes: &mut HashMap<String, client_adapter::turn::ToolUseIndex>,
-        message_indexes: &mut HashMap<String, u64>,
-        baseline_ready: &mut bool,
-    ) -> SessionAgentPollResult {
-        let dir = orchestrator::transcript_paths::subagents_dir(
-            &self.lingxi_home,
-            &self.session_cwd,
-            &session_id.as_uuid().to_string(),
-        );
-        let paths = match collect_session_agent_transcript_paths(&dir).await {
-            Ok(paths) => paths,
-            Err(_) => return SessionAgentPollResult::Retry,
-        };
-        let establishing_baseline = !*baseline_ready;
-        for path in paths {
-            let Some(agent_id) = session_agent_id_from_path(&path) else {
-                continue;
-            };
-            let raw = match tokio::fs::read(&path).await {
-                Ok(raw) => raw,
-                Err(_) => return SessionAgentPollResult::Retry,
-            };
-            let first_discovery =
-                seed_session_agent_offset(offsets, &path, &raw, !establishing_baseline);
-            let offset = *offsets.get(&path).expect("offset seeded");
-
-            if establishing_baseline {
-                // The first successful scan establishes the connection
-                // baseline. Existing transcript history is delivered by the
-                // explicit transcript-load command, not replayed as live
-                // events. A file created after this scan starts from offset 0.
-                let index = tool_indexes.entry(agent_id.clone()).or_default();
-                let prefix_len = complete_transcript_prefix_len(&raw);
-                let visible_count = seed_session_agent_tool_index(&raw[..prefix_len], index);
-                message_indexes.insert(agent_id, visible_count);
-                continue;
-            }
-            if first_discovery {
-                // A child created after connection setup is announced before
-                // its first live message so the agent picker can render its
-                // metadata/status immediately.
-                let summary = MobileEngineHandle::read_agent_summary(agent_id.clone(), &path)
-                    .await
-                    .unwrap_or_else(|| SessionAgentSummaryDto {
-                        agent_id: agent_id.clone(),
-                        name: agent_id.clone(),
-                        agent_type: "unknown".to_string(),
-                        status: "running".to_string(),
-                        latest_activity: None,
-                        updated_at_ms: None,
-                    });
-                self.event_sink
-                    .emit(ClientEvent::SessionAgentUpdated {
-                        session_id: session_id.as_uuid().to_string(),
-                        agent: summary,
-                    })
-                    .await;
-            }
-            let start = (offset as usize).min(raw.len());
-            let tail = &raw[start..];
-            let mut consumed = start;
-            for line in tail.split_inclusive(|byte| *byte == b'\n') {
-                if !line.ends_with(b"\n") {
-                    break;
-                }
-                consumed += line.len();
-                let line = line.strip_suffix(b"\n").unwrap_or(line);
-                if line.is_empty() {
-                    continue;
-                }
-                let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
-                    continue;
-                };
-                let Some(message) = value.get("message") else {
-                    continue;
-                };
-                let Ok(conversation) =
-                    serde_json::from_value::<protocol::ConversationMessage>(message.clone())
-                else {
-                    continue;
-                };
-                if matches!(&conversation, protocol::ConversationMessage::System { subtype: Some(subtype), .. } if subtype.starts_with("agent_"))
-                {
-                    if let Some(status) = value.get("status").and_then(serde_json::Value::as_str) {
-                        self.event_sink
-                            .emit(ClientEvent::SessionAgentUpdated {
-                                session_id: session_id.as_uuid().to_string(),
-                                agent: self.summary_for_agent(&agent_id, status, &path).await,
-                            })
-                            .await;
-                    }
-                    continue;
-                }
-                if !session_agent_conversation_is_visible(&conversation) {
-                    // Compact-summary/transcript-only rows mutate the visible
-                    // scrollback without getting their own MessageDto index.
-                    // Publish a prefix snapshot now, before any later visible
-                    // rows from this read, so clients replace stale content
-                    // even when the visible count is unchanged.
-                    self.emit_agent_transcript_snapshot(session_id, &agent_id, &raw[..consumed])
-                        .await;
-                    continue;
-                }
-                let index = tool_indexes.entry(agent_id.clone()).or_default();
-                let dto =
-                    client_adapter::lowering::lower_conversation_message_with(&conversation, index);
-                let message_index = message_indexes.entry(agent_id.clone()).or_default();
-                let current_message_index = *message_index;
-                *message_index = (*message_index).saturating_add(1);
-                self.event_sink
-                    .emit(ClientEvent::SessionAgentMessage {
-                        session_id: session_id.as_uuid().to_string(),
-                        agent_id: agent_id.clone(),
-                        message_index: current_message_index,
-                        message: dto,
-                    })
-                    .await;
-            }
-            offsets.insert(path, consumed.min(raw.len()) as u64);
-        }
-        // Even an empty but readable directory establishes the baseline. A
-        // later file then correctly enters the `offset = 0` path above.
-        *baseline_ready = true;
-        SessionAgentPollResult::Success
-    }
-
-    async fn summary_for_agent(
-        &self,
-        agent_id: &str,
-        status: &str,
-        path: &std::path::Path,
-    ) -> SessionAgentSummaryDto {
-        if let Some(mut summary) =
-            MobileEngineHandle::read_agent_summary(agent_id.to_string(), path).await
-        {
-            // The lifecycle line being consumed is authoritative. A
-            // concurrent summary read can otherwise observe the append just
-            // before its status field and incorrectly downgrade completion.
-            summary.status = status.to_string();
-            return summary;
-        }
-        SessionAgentSummaryDto {
-            agent_id: agent_id.to_string(),
-            name: agent_id.to_string(),
-            agent_type: "unknown".to_string(),
-            status: status.to_string(),
-            latest_activity: None,
-            updated_at_ms: None,
-        }
-    }
-
-    async fn emit_agent_transcript_snapshot(
-        &self,
-        session_id: protocol::SessionId,
-        agent_id: &str,
-        raw_prefix: &[u8],
-    ) {
-        let messages = lower_session_agent_snapshot(raw_prefix);
-        let next_message_index = messages.len() as u64;
-        let revision = session_agent_transcript_revision(raw_prefix);
-        self.event_sink
-            .emit(ClientEvent::SessionAgentTranscript {
-                session_id: session_id.as_uuid().to_string(),
-                agent_id: agent_id.to_string(),
-                messages,
-                next_message_index,
-                revision,
-            })
-            .await;
-    }
-}
-
-impl MobileEngineHandle {
-    /// Start a connection-scoped watcher for child-agent transcript changes.
-    /// Agent runners persist every message before publishing their terminal
-    /// event, so tailing the engine-owned JSONL gives iOS live updates without
-    /// introducing a second event ownership path in the task subsystem.
-    fn start_session_agent_event_pump(
-        self: &Arc<Self>,
-    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let pump = SessionAgentPump {
-            orchestrator: self.inner.orchestrator.clone(),
-            event_sink: self.event_sink.clone(),
-            lingxi_home: self.lingxi_home.clone(),
-            session_cwd: self.session_cwd.clone(),
-            ready_tx: Some(ready_tx),
-            session_lifecycle_rx: self.session_lifecycle_tx.subscribe(),
-        };
-        let _ = self.runtime.spawn(pump.run());
-        ready_rx
-    }
 }
 
 /// Default `ListSessions` row cap when the command omits an explicit `limit`
@@ -4256,6 +4322,7 @@ struct ActiveTurn {
     /// may only affect the owner carrying the same id; Android's legacy
     /// `Cancel(None)` intentionally targets whichever turn is current.
     turn_id: Option<u64>,
+    permission_owner_id: Option<u64>,
     cancel: CancellationToken,
     task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     completed: AtomicBool,
@@ -4269,12 +4336,19 @@ impl ActiveTurn {
     fn new(turn_id: Option<u64>) -> Self {
         Self {
             turn_id,
+            permission_owner_id: None,
             cancel: CancellationToken::new(),
             task: StdMutex::new(None),
             completed: AtomicBool::new(false),
             terminal_emitted: AtomicBool::new(false),
             completion: Notify::new(),
         }
+    }
+
+    fn new_owned(turn_id: Option<u64>, permission_owner_id: u64) -> Self {
+        let mut turn = Self::new(turn_id);
+        turn.permission_owner_id = Some(permission_owner_id);
+        turn
     }
 
     fn set_task_handle(&self, handle: tokio::task::JoinHandle<()>) {
@@ -4410,9 +4484,39 @@ impl ClientEventListener for TurnLifecycleListener {
             tracing::debug!("mobile: dropped stale live-turn event");
         }
     }
+
+    async fn on_workflow_progress(
+        &self,
+        origin_session_id: String,
+        task_id: String,
+        run_id: String,
+        progress: client_protocol::listings::WorkflowProgressDto,
+    ) {
+        self.inner
+            .on_workflow_progress(origin_session_id, task_id, run_id, progress)
+            .await;
+    }
 }
 
 impl MobileEngineHandle {
+    async fn emit_controls_snapshot(&self) {
+        let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+        let Some(controls) = handle.conversation_controls().await else {
+            return;
+        };
+        let requested_permission = self
+            .inner
+            .requested_permission_mode
+            .lock()
+            .map(|mode| mode.clone())
+            .unwrap_or_else(|_| controls.permission.requested.clone());
+        self.event_sink
+            .emit(ClientEvent::ConversationControlsChanged {
+                controls: lower_controls(controls, requested_permission),
+            })
+            .await;
+    }
+
     /// Return a credential-free view over this handle's validated cron store.
     pub async fn cron_store(&self) -> Arc<MobileCronStoreHandle> {
         Arc::new(MobileCronStoreHandle::new(
@@ -4522,7 +4626,14 @@ impl MobileEngineHandle {
         // Keep the local-apps MCP origin-conversation source in lockstep with
         // the session every retarget (New/Resume/Clear).
         if let Ok(mut guard) = self.inner.active_session_uuid.lock() {
-            *guard = session_id.as_uuid().to_string();
+            let session_uuid = session_id.as_uuid().to_string();
+            *guard = session_uuid.clone();
+            self.inner
+                .permission_gate
+                .set_session_id(Some(session_uuid.clone()));
+            self.inner
+                .task_registry
+                .set_workflow_session_filter(Some(session_uuid));
         }
     }
 
@@ -4624,6 +4735,10 @@ impl MobileEngineHandle {
                     })?;
                 self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
                     .await;
+                self.inner
+                    .workflow_checkpoints
+                    .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
+                    .await;
                 let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
@@ -4631,6 +4746,7 @@ impl MobileEngineHandle {
                         messages,
                     })
                     .await;
+                self.emit_controls_snapshot().await;
                 let _ = self.session_lifecycle_tx.send(uuid.to_string());
                 Ok(())
             }
@@ -4679,12 +4795,17 @@ impl MobileEngineHandle {
                     })?;
                 self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
                     .await;
+                self.inner
+                    .workflow_checkpoints
+                    .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
+                    .await;
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
                         session_id: uuid.to_string(),
                         messages: Vec::new(),
                     })
                     .await;
+                self.emit_controls_snapshot().await;
                 let _ = self.session_lifecycle_tx.send(uuid.to_string());
                 Ok(())
             }
@@ -4699,7 +4820,17 @@ impl MobileEngineHandle {
                 message: "a turn is already in flight".into(),
             });
         }
-        let turn = Arc::new(ActiveTurn::new(turn_id));
+        let session_id = self
+            .inner
+            .active_session_uuid
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let permission_owner_id = self
+            .inner
+            .permission_gate
+            .begin_main_turn(Some(session_id), turn_id);
+        let turn = Arc::new(ActiveTurn::new_owned(turn_id, permission_owner_id));
         *active = Some(turn.clone());
         Ok(turn)
     }
@@ -4727,9 +4858,14 @@ impl MobileEngineHandle {
             return Ok(());
         }
 
-        let permission_count = self.inner.permission_gate.drain().await;
+        let cancelled_permissions = if let Some(owner_id) = turn.permission_owner_id {
+            self.inner.permission_gate.cancel_owner(owner_id).await
+        } else {
+            Vec::new()
+        };
+        let permission_count = cancelled_permissions.len();
+        drop(cancelled_permissions);
         let question_count = self.ask_user_question_broker.drain().await;
-        self.tool_names.lock().await.clear();
         turn.cancel.cancel();
         tracing::debug!(
             requested_turn_id,
@@ -4750,6 +4886,9 @@ impl MobileEngineHandle {
                 }
                 drop(active);
                 turn.mark_completed();
+                if let Some(owner_id) = turn.permission_owner_id {
+                    self.inner.permission_gate.end_main_turn(owner_id);
+                }
                 self.event_sink
                     .emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
@@ -4790,6 +4929,7 @@ impl MobileEngineHandle {
         let sink = self.event_sink.clone();
         let active_cancel = self.active_cancel.clone();
         let message_output = self.inner.message_output.clone();
+        let permission_gate = self.inner.permission_gate.clone();
         let task_turn = turn.clone();
         let task = self.runtime.spawn(async move {
             let result = orch
@@ -4815,6 +4955,9 @@ impl MobileEngineHandle {
                 *active = None;
             }
             drop(active);
+            if let Some(owner_id) = task_turn.permission_owner_id {
+                permission_gate.end_main_turn(owner_id);
+            }
             // Notify only after the slot is released: Cancel returning is the
             // guarantee that New/Resume/Clear can no longer observe this turn.
             task_turn.mark_completed();
@@ -4940,6 +5083,7 @@ impl MobileEngineHandle {
         origin: AppCreateOriginDto,
         brief: &str,
         git_enabled: bool,
+        workflow_model: Option<String>,
         conversation_id: Option<String>,
     ) {
         let Some(service) = self.local_apps_or_report(None).await else {
@@ -4965,7 +5109,13 @@ impl MobileEngineHandle {
         // the agent's context — `name` is a display label, never the spec;
         // see `create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name`.
         match service
-            .create_app_with_git(Some(name), brief, conversation_id, git_enabled)
+            .create_app_with_git_and_workflow_model(
+                Some(name),
+                brief,
+                conversation_id,
+                git_enabled,
+                workflow_model.as_deref(),
+            )
             .await
         {
             Ok(record) => {
@@ -5157,6 +5307,27 @@ impl MobileEngineHandle {
         let Some(service) = self.local_apps_or_report(Some(&app_id)).await else {
             return;
         };
+        let active_workflows = self
+            .inner
+            .task_registry
+            .find_nonterminal_local_app_workflows(&app_id)
+            .await;
+        let active_lease = self
+            .inner
+            .workspace_leases
+            .active()
+            .into_iter()
+            .any(|lease| lease.app_id == app_id);
+        if active_lease || !active_workflows.is_empty() {
+            self.emit_app_failure(
+                Some(app_id.clone()),
+                &AppError::RuntimeBusy(format!(
+                    "local app {app_id} has an active build workflow; stop it before deleting"
+                )),
+            )
+            .await;
+            return;
+        }
         if let Err(message) = self
             .local_apps_host
             .manage_runtime_value(serde_json::json!({
@@ -5337,14 +5508,10 @@ impl MobileEngineHandle {
             ClientCommand::ApprovePermission {
                 request_id,
                 response,
-            } => {
-                self.resolve_permission(request_id, response).await;
-                Ok(())
-            }
+            } => self.resolve_permission(request_id, response).await,
             ClientCommand::DenyPermission { request_id } => {
                 self.resolve_permission(request_id, PermissionResponseDto::Deny)
-                    .await;
-                Ok(())
+                    .await
             }
             ClientCommand::AnswerAskUserQuestion {
                 request_id,
@@ -5373,6 +5540,7 @@ impl MobileEngineHandle {
             }
 
             ClientCommand::SetPermissionMode { mode } => {
+                let requested_mode = mode.clone();
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 handle
                     .set_permission_mode(&mode)
@@ -5381,9 +5549,84 @@ impl MobileEngineHandle {
                         message: format!("set_permission_mode failed: {e}"),
                     })?;
                 let active = handle.permission_mode().await.unwrap_or(mode);
+                if let Ok(mut requested) = self.inner.requested_permission_mode.lock() {
+                    *requested = requested_mode;
+                }
                 self.event_sink
                     .emit(ClientEvent::PermissionModeChanged { mode: active })
                     .await;
+                self.emit_controls_snapshot().await;
+                Ok(())
+            }
+
+            ClientCommand::GetConversationControls => {
+                self.emit_controls_snapshot().await;
+                Ok(())
+            }
+
+            ClientCommand::SetReasoningSelection { selection } => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                let requested = decode_reasoning_selection(selection);
+                let previous = handle
+                    .conversation_controls()
+                    .await
+                    .map(|controls| {
+                        (
+                            controls.requested_reasoning_selection,
+                            controls.effective_reasoning_selection,
+                            controls.reasoning_spec.selections_persistable,
+                        )
+                    });
+                let settings_path = self.lingxi_home.join("settings.json");
+                if let Err(error) = handle.set_reasoning_selection(requested).await {
+                    return Err(ClientError::Rejected {
+                        message: format!("set_reasoning_selection failed: {error}"),
+                    });
+                }
+
+                // The engine is authoritative: an unsupported selection is
+                // reset to Auto rather than nearest-mapped. Persist only the
+                // validated/effective value so an invalid request cannot
+                // poison the next session's default.
+                let (effective, persistable) = handle
+                    .conversation_controls()
+                    .await
+                    .map(|controls| {
+                        (
+                            controls.effective_reasoning_selection,
+                            controls.reasoning_spec.selections_persistable,
+                        )
+                    })
+                    .unwrap_or((traits::ReasoningSelection::Automatic, true));
+                let persisted_default = persistable
+                    .then_some(effective)
+                    .unwrap_or(traits::ReasoningSelection::Automatic);
+                if let Err(error) = command_core::effort::persist_reasoning_default_selection_at(
+                    &settings_path,
+                    Some(&persisted_default),
+                ) {
+                    let rollback = previous
+                        .as_ref()
+                        .map(|(requested, _, _)| requested.clone())
+                        .unwrap_or(traits::ReasoningSelection::Automatic);
+                    let _ = handle.set_reasoning_selection(rollback.clone()).await;
+                    let previous_default = previous.as_ref().map_or(
+                        traits::ReasoningSelection::Automatic,
+                        |(_, effective, persistable)| {
+                            persistable
+                                .then_some(effective.clone())
+                                .unwrap_or(traits::ReasoningSelection::Automatic)
+                        },
+                    );
+                    let _ = command_core::effort::persist_reasoning_default_selection_at(
+                        &settings_path,
+                        Some(&previous_default),
+                    );
+                    return Err(ClientError::Rejected {
+                        message: format!("persist reasoning selection failed: {error}"),
+                    });
+                }
+                self.emit_controls_snapshot().await;
                 Ok(())
             }
 
@@ -5489,6 +5732,18 @@ impl MobileEngineHandle {
                     .map_err(|e| ClientError::Internal {
                         message: format!("switch_model failed: {e}"),
                     })?;
+                if let Some(controls) = handle.conversation_controls().await {
+                    if !matches!(
+                        controls.requested_reasoning_selection,
+                        traits::ReasoningSelection::Automatic
+                    ) && controls.requested_reasoning_selection
+                        != controls.effective_reasoning_selection
+                    {
+                        let _ = handle
+                            .set_reasoning_selection(traits::ReasoningSelection::Automatic)
+                            .await;
+                    }
+                }
                 // The local-app LLM stages (author/plan/write-source) ride
                 // their OWN `ApiServiceModel`, not the orchestrator's model
                 // selection — without this they would stay silently pinned
@@ -5507,6 +5762,7 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::ModelChanged { model: selected })
                     .await;
+                self.emit_controls_snapshot().await;
                 Ok(())
             }
             ClientCommand::ListModels => {
@@ -5778,6 +6034,7 @@ impl MobileEngineHandle {
                         session_id: session_id.clone(),
                     })
                     .await;
+                self.emit_controls_snapshot().await;
                 let _ = self.session_lifecycle_tx.send(session_id);
                 Ok(())
             }
@@ -5839,10 +6096,18 @@ impl MobileEngineHandle {
                 origin,
                 brief,
                 git_enabled,
+                workflow_model,
                 conversation_id,
             } => {
-                self.handle_create_app(&name, origin, &brief, git_enabled, conversation_id)
-                    .await;
+                self.handle_create_app(
+                    &name,
+                    origin,
+                    &brief,
+                    git_enabled,
+                    workflow_model,
+                    conversation_id,
+                )
+                .await;
                 Ok(())
             }
             ClientCommand::StartApp { app_id } => {
@@ -5941,6 +6206,7 @@ impl MobileEngineHandle {
                         match s {
                             client_protocol::listings::TaskStatusDto::Pending => "pending",
                             client_protocol::listings::TaskStatusDto::Running => "running",
+                            client_protocol::listings::TaskStatusDto::Paused => "paused",
                             client_protocol::listings::TaskStatusDto::Completed => "completed",
                             client_protocol::listings::TaskStatusDto::Failed => "failed",
                             // The DTO's user-stop variant maps back to the
@@ -6002,9 +6268,96 @@ impl MobileEngineHandle {
                         .emit(ClientEvent::TaskStatusChanged {
                             task_id: record.task_id.clone(),
                             status: client_adapter::lowering::lower_task_status(&record.status),
+                            origin_session_id: None,
                         })
                         .await;
                 }
+                Ok(())
+            }
+            ClientCommand::ResumeWorkflow { task_id } => {
+                let registry: &dyn traits::task_registry::TaskRegistryHandle =
+                    &*self.inner.task_registry;
+                let resume_session = self
+                    .inner
+                    .active_session_uuid
+                    .lock()
+                    .ok()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_default();
+                let workflow = registry
+                    .list_workflows()
+                    .await
+                    .map_err(|error| ClientError::Internal {
+                        message: format!("workflow list failed: {error}"),
+                    })?
+                    .into_iter()
+                    .find(|workflow| workflow.task_id == task_id)
+                    .ok_or_else(|| ClientError::NotFound {
+                        message: format!("workflow task {task_id}"),
+                    })?;
+                let still_active = self
+                    .inner
+                    .active_session_uuid
+                    .lock()
+                    .ok()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_default();
+                if still_active != resume_session {
+                    return Err(ClientError::Rejected {
+                        message: "cannot resume workflow while the active session is changing"
+                            .to_string(),
+                    });
+                }
+                if workflow.status != "paused" {
+                    return Err(ClientError::Rejected {
+                        message: format!("workflow task {task_id} is not paused"),
+                    });
+                }
+                let run_id = workflow.run_id.clone().ok_or_else(|| ClientError::Rejected {
+                    message: format!("workflow task {task_id} has no resumable run id"),
+                })?;
+                let script_path = workflow.script_path.clone().ok_or_else(|| ClientError::Rejected {
+                    message: format!("workflow task {task_id} has no persisted script"),
+                })?;
+                let args = workflow
+                    .args
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|error| ClientError::Rejected {
+                        message: format!("workflow task {task_id} has invalid args: {error}"),
+                    })?;
+                let launched = self
+                    .inner
+                    .workflow_launcher
+                    .launch(tool_workflow::WorkflowLaunchSpec {
+                        script_path: Some(script_path),
+                        args,
+                        resume_from_run_id: Some(run_id.clone()),
+                        session_uuid: Some(resume_session.clone()),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|error| ClientError::Rejected {
+                        message: error.to_string(),
+                    })?;
+                let new_record = registry
+                    .get(&launched.task_id)
+                    .await
+                    .map_err(|error| ClientError::Internal {
+                        message: format!("resumed workflow lookup failed: {error}"),
+                    })?
+                    .ok_or_else(|| ClientError::Internal {
+                        message: format!("resumed workflow task {} disappeared", launched.task_id),
+                    })?;
+                self.event_sink
+                    .emit(ClientEvent::WorkflowResumed {
+                        previous_task_id: task_id,
+                        task: client_adapter::lowering::lower_task_record(&new_record),
+                        run_id,
+                        origin_session_id: Some(resume_session),
+                    })
+                    .await;
                 Ok(())
             }
 
@@ -6191,25 +6544,24 @@ impl MobileEngineHandle {
 
 impl MobileEngineHandle {
     /// Resolve a parked permission request on the connection-scoped gate (the
-    /// inbound side of the inverted handshake). Looks the recorded tool name back
-    /// up so an `AllowAlways` can append the right session rule.
-    async fn resolve_permission(&self, request_id: u64, response: PermissionResponseDto) {
-        let tool_name = self
-            .tool_names
-            .lock()
-            .await
-            .remove(&request_id)
-            .unwrap_or_default();
+    /// inbound side of the inverted handshake). The gate owns the original tool
+    /// name and rejects stale/unknown ids rather than accepting a phantom tap.
+    async fn resolve_permission(
+        &self,
+        request_id: u64,
+        response: PermissionResponseDto,
+    ) -> Result<(), ClientError> {
         let resolved = self
             .inner
             .permission_gate
-            .resolve(request_id, response, &tool_name)
+            .resolve(request_id, response, "")
             .await;
-        if !resolved {
-            tracing::debug!(
-                request_id,
-                "engine-mobile: resolve for unknown / already-resolved permission id"
-            );
+        if resolved {
+            Ok(())
+        } else {
+            Err(ClientError::NotFound {
+                message: format!("permission request {request_id} is no longer pending"),
+            })
         }
     }
 
@@ -6413,11 +6765,16 @@ impl MobileEngineHandle {
     ) -> Option<SessionAgentSummaryDto> {
         let messages = Self::hide_agent_lifecycle_messages(
             session::agent_rows::read_transcript_messages(path.parent()?, &agent_id).await,
-        );
+        )
+        .into_iter()
+        .filter(session_agent_conversation_is_visible)
+        .collect::<Vec<_>>();
         let raw = tokio::fs::read_to_string(path).await.ok();
         let mut status = "running".to_string();
         let mut metadata_name: Option<String> = None;
         let mut metadata_type: Option<String> = None;
+        let mut metadata_model: Option<String> = None;
+        let mut metadata_model_profile: Option<String> = None;
         let mut latest_activity =
             Self::agent_summary_activity(&client_adapter::lowering::lower_transcript(&messages));
         if let Some(raw) = raw {
@@ -6437,6 +6794,18 @@ impl MobileEngineHandle {
                     .filter(|value| !value.is_empty())
                     .map(ToOwned::to_owned)
                     .or(metadata_type);
+                metadata_model = value
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or(metadata_model);
+                metadata_model_profile = value
+                    .get("model_profile")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or(metadata_model_profile);
                 if let Some(status_value) = value.get("status").and_then(serde_json::Value::as_str)
                 {
                     status = match status_value {
@@ -6459,15 +6828,17 @@ impl MobileEngineHandle {
             }
         }
         let row = session::agent_rows::read_row(path.parent()?, &agent_id).await;
-        let (row_name, row_type, idle) = row
+        let (row_name, row_type, row_model, row_model_profile, idle) = row
             .map(|row| {
                 (
                     row.request.name.or(row.request.description),
                     (!row.request.subagent_type.is_empty()).then_some(row.request.subagent_type),
+                    row.request.model,
+                    row.request.model_profile,
                     true,
                 )
             })
-            .unwrap_or((None, None, false));
+            .unwrap_or((None, None, None, None, false));
         let agent_type = metadata_type
             .or(row_type)
             .unwrap_or_else(|| "unknown".to_string());
@@ -6495,6 +6866,8 @@ impl MobileEngineHandle {
             agent_id,
             name,
             agent_type,
+            model: metadata_model.or(row_model),
+            model_profile: metadata_model_profile.or(row_model_profile),
             status,
             latest_activity: latest_activity.take(),
             updated_at_ms,
@@ -6513,6 +6886,8 @@ impl MobileEngineHandle {
             agent_id: "main".to_string(),
             name: "Main agent".to_string(),
             agent_type: "main".to_string(),
+            model: Some(snapshot.model.clone()),
+            model_profile: snapshot.model_profile.clone(),
             status: status.to_string(),
             latest_activity: (snapshot.n_messages > 0)
                 .then(|| format!("{} messages · {}", snapshot.n_messages, snapshot.model)),
@@ -6649,7 +7024,11 @@ impl MobileEngineHandle {
                 .inner
                 .orchestrator
                 .permission_mode()
-                .unwrap_or_else(|| PermissionMode::Default.wire_str().to_string()),
+                // `capture_slash_authority` runs after construction and on
+                // command dispatch; the boot-local resolved mode is not in
+                // scope here. The orchestrator is authoritative once built,
+                // while Auto is the built-in fallback for new runtimes.
+                .unwrap_or_else(|| PermissionMode::Auto.wire_str().to_string()),
             auth: lower_auth_state(self.inner.auth.current_user().await),
             catalog: self.slash_command_catalog_snapshot().await,
         }
@@ -7998,16 +8377,6 @@ pub fn build_mobile_engine_inner(
         .build()
         .map_err(|e| MobileEngineError::Internal(format!("tokio runtime build failed: {e}")))?;
 
-    // F3-05: interpose a recording sink so the inbound `ApprovePermission` /
-    // `DenyPermission` command path (which carries only the `request_id`) can
-    // recover the tool name for an `AllowAlways` rule append. The foreign sink
-    // still receives every request — the recorder wraps, never replaces it.
-    let tool_names: Arc<Mutex<HashMap<u64, String>>> = Arc::new(Mutex::new(HashMap::new()));
-    let recording_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink {
-        inner: permission_sink,
-        tool_names: tool_names.clone(),
-    });
-
     // SESSIONS/HISTORY: capture the session-enumerator inputs BEFORE `cfg` /
     // `platform` are moved into `build_mobile_inner`. `submit(ListSessions)`
     // reads the on-disk catalog with these (the SAME `fs` the tools use).
@@ -8035,7 +8404,7 @@ pub fn build_mobile_engine_inner(
             cfg,
             platform,
             lifecycle_listener,
-            recording_sink,
+            permission_sink,
             streaming_override,
             Some(ask_user_question_tx),
         ))
@@ -8371,7 +8740,6 @@ pub fn build_mobile_engine_inner(
         inner,
         event_sink,
         active_cancel,
-        tool_names,
         ask_user_question_broker,
         skill_count,
         lingxi_home,
@@ -8388,32 +8756,7 @@ pub fn build_mobile_engine_inner(
         app_domain_subscription,
         app_domain_observer,
     });
-    // Establish the watcher baseline before exposing the connection. Without
-    // this readiness barrier, a first prompt could spawn a fast child between
-    // `spawn` and the pump's first scan and have that child mistaken for
-    // pre-existing history.
-    let pump_ready = handle.start_session_agent_event_pump();
-    let pump_result = handle.runtime.block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(5), pump_ready).await
-    });
-    match pump_result {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(error))) => {
-            return Err(MobileEngineError::Internal(format!(
-                "session-agent watcher failed before readiness: {error}"
-            )))
-        }
-        Ok(Err(_)) => {
-            return Err(MobileEngineError::Internal(
-                "session-agent watcher stopped before readiness".to_string(),
-            ))
-        }
-        Err(_) => {
-            return Err(MobileEngineError::Internal(
-                "session-agent watcher baseline timed out".to_string(),
-            ))
-        }
-    }
+    handle.runtime.block_on(handle.emit_controls_snapshot());
     Ok(handle)
 }
 
@@ -8423,19 +8766,18 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
     use async_trait::async_trait;
-    use client_adapter::{ClientEventListener, PermissionRequestSink};
+    use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
     use client_protocol::events::ClientEvent;
+    use traits::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
     use traits::OrchestratorHandle as _;
 
     use super::{
-        baseline_for_session_activation, build_mobile, classify_provider_connection_response,
-        collect_session_agent_transcript_paths, complete_transcript_prefix_len,
-        find_session_agent_transcript_path, lower_session_agent_snapshot,
-        mobile_cron_schedule_error, provider_models_endpoint, seed_session_agent_offset,
-        seed_session_agent_tool_index, session_agent_conversation_is_visible,
-        session_agent_transcript_event, session_agent_transcript_revision,
-        should_signal_session_agent_ready, MobileConfig, MobileCronStoreHandle,
-        SessionAgentPollResult,
+        build_mobile, classify_provider_connection_response,
+        collect_session_agent_transcript_paths, find_session_agent_transcript_path,
+        lower_session_agent_snapshot, mobile_cron_schedule_error, provider_models_endpoint,
+        session_agent_conversation_is_visible, session_agent_transcript_event,
+        session_agent_transcript_revision, MobileConfig, MobileCronStoreHandle,
+        MobileSessionAgentObserver,
     };
     // F3-06: the off-device host shim now lives in `crate::test_support` (the
     // single, non-drifting definition shared with the `skeleton_test.rs`
@@ -8446,50 +8788,6 @@ mod tests {
         test_config, CollectingPermissionSink as RecordingPermissionSink, FakeListener,
         HostFakePlatform,
     };
-
-    #[test]
-    fn session_agent_pump_baselines_history_but_tails_new_paths() {
-        let existing = std::path::PathBuf::from("agent-existing.jsonl");
-        let new_path = std::path::PathBuf::from("agent-new.jsonl");
-        let mut offsets = HashMap::new();
-
-        assert!(seed_session_agent_offset(
-            &mut offsets,
-            &existing,
-            b"existing history\npartial suffix",
-            false,
-        ));
-        assert_eq!(offsets.get(&existing), Some(&17));
-
-        assert!(seed_session_agent_offset(
-            &mut offsets,
-            &new_path,
-            b"new child",
-            true
-        ));
-        assert_eq!(offsets.get(&new_path), Some(&0));
-
-        // Polling an already-known path never resets its tail position.
-        assert!(!seed_session_agent_offset(
-            &mut offsets,
-            &new_path,
-            b"new child now longer",
-            true,
-        ));
-        assert_eq!(offsets.get(&new_path), Some(&0));
-
-        // A missing directory is treated as an empty baseline. The first
-        // path created after that scan follows the same byte-zero rule.
-        let mut empty_baseline_offsets = HashMap::new();
-        let first_after_empty = std::path::PathBuf::from("agent-first.jsonl");
-        assert!(seed_session_agent_offset(
-            &mut empty_baseline_offsets,
-            &first_after_empty,
-            b"first child",
-            true,
-        ));
-        assert_eq!(empty_baseline_offsets.get(&first_after_empty), Some(&0));
-    }
 
     #[tokio::test]
     async fn session_agent_helpers_find_nested_workflow_transcripts() {
@@ -8527,22 +8825,6 @@ mod tests {
                 .expect("find nested transcript"),
             Some(path)
         );
-    }
-
-    #[test]
-    fn session_agent_pump_readiness_waits_for_successful_baseline() {
-        assert!(!should_signal_session_agent_ready(
-            true,
-            SessionAgentPollResult::Retry
-        ));
-        assert!(should_signal_session_agent_ready(
-            true,
-            SessionAgentPollResult::Success
-        ));
-        assert!(!should_signal_session_agent_ready(
-            false,
-            SessionAgentPollResult::Success
-        ));
     }
 
     #[test]
@@ -8629,73 +8911,16 @@ mod tests {
     }
 
     #[test]
-    fn session_switch_replays_fast_child_instead_of_baselining_it_away() {
-        let path = std::path::PathBuf::from("agent-fast.jsonl");
-        let mut offsets = HashMap::new();
-
-        // Initial connection treats existing history as already delivered by
-        // the explicit transcript-load command.
-        assert!(seed_session_agent_offset(
-            &mut offsets,
-            &path,
-            b"old message\n",
-            false,
-        ));
-        assert_eq!(offsets.get(&path), Some(&12));
-
-        // ResumeSession clears offsets, but its first asynchronous poll must
-        // replay from zero so a child created during the switch is observable.
-        offsets.clear();
-        assert!(baseline_for_session_activation(true));
-        assert!(seed_session_agent_offset(
-            &mut offsets,
-            &path,
-            b"fast child message\n",
-            baseline_for_session_activation(true),
-        ));
-        assert_eq!(offsets.get(&path), Some(&0));
-    }
-
-    #[test]
-    fn session_agent_pump_primes_tool_index_from_baseline_history() {
-        let tool_id = protocol::ToolUseId::from("toolu_seed");
-        let assistant = protocol::ConversationMessage::Assistant {
+    fn session_agent_index_excludes_hidden_transcript_records() {
+        let hidden_meta = protocol::ConversationMessage::User {
             id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::ToolUse {
-                id: tool_id.clone(),
-                name: "Read".to_string(),
-                input: serde_json::json!({"file_path": "/tmp/example.txt"}),
-                provider_id: None,
+            content: vec![protocol::ContentBlock::Text {
+                text: "<runtime-reminder>internal</runtime-reminder>".to_string(),
             }],
-            stop_reason: Some("tool_use".to_string()),
-        };
-        let line = serde_json::json!({"message": assistant}).to_string() + "\n";
-        let mut index = client_adapter::turn::ToolUseIndex::default();
-        seed_session_agent_tool_index(line.as_bytes(), &mut index);
-
-        let result = protocol::ConversationMessage::User {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::ToolResult {
-                tool_use_id: tool_id,
-                content: "ok".to_string(),
-                is_error: false,
-                provider_tool_use_id: None,
-                content_blocks: None,
-            }],
-            is_meta: false,
+            is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
         };
-        let dto = client_adapter::lowering::lower_conversation_message_with(&result, &mut index);
-        let client_protocol::message::MessageBlockDto::ToolResult { tool, .. } = &dto.blocks[0]
-        else {
-            panic!("expected paired tool result");
-        };
-        assert_eq!(tool, "Read");
-    }
-
-    #[test]
-    fn session_agent_index_excludes_hidden_transcript_records() {
         let hidden_summary = protocol::ConversationMessage::User {
             id: protocol::MessageId::new(),
             content: Vec::new(),
@@ -8715,101 +8940,137 @@ mod tests {
             content: Vec::new(),
             stop_reason: None,
         };
+        assert!(!session_agent_conversation_is_visible(&hidden_meta));
         assert!(!session_agent_conversation_is_visible(&hidden_summary));
         assert!(!session_agent_conversation_is_visible(
             &hidden_transcript_only
         ));
         assert!(session_agent_conversation_is_visible(&visible));
+
+        let raw = [hidden_meta, visible]
+            .into_iter()
+            .map(|message| {
+                serde_json::to_string(&serde_json::json!({ "message": message })).unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lowered = lower_session_agent_snapshot(raw.as_bytes());
+        assert_eq!(
+            lowered.len(),
+            1,
+            "meta seed must not occupy a live message index"
+        );
+        assert_eq!(lowered[0].role, "assistant");
     }
 
-    #[test]
-    fn session_agent_baseline_rewinds_to_last_complete_line_for_partial_suffix() {
-        let complete_id = protocol::ToolUseId::from("toolu_complete");
-        let partial_id = protocol::ToolUseId::from("toolu_partial");
-        let complete = protocol::ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::ToolUse {
-                id: complete_id,
-                name: "Read".to_string(),
-                input: serde_json::json!({"file_path": "/tmp/complete.txt"}),
-                provider_id: None,
-            }],
-            stop_reason: Some("tool_use".to_string()),
-        };
-        let partial = protocol::ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::ToolUse {
-                id: partial_id.clone(),
-                name: "Write".to_string(),
-                input: serde_json::json!({"file_path": "/tmp/partial.txt"}),
-                provider_id: None,
-            }],
-            stop_reason: Some("tool_use".to_string()),
-        };
-        let complete_line = serde_json::json!({"message": complete}).to_string();
-        let partial_line = serde_json::json!({"message": partial}).to_string();
-        let raw = format!("{complete_line}\n{partial_line}");
-        let boundary = complete_transcript_prefix_len(raw.as_bytes());
-        assert_eq!(boundary, complete_line.len() + 1);
+    #[tokio::test]
+    async fn session_agent_observer_binds_metadata_at_allocate_time() {
+        let listener = Arc::new(FakeListener::default());
+        let sink = ListenerSink::arc(listener.clone());
+        let session_uuid = Arc::new(std::sync::Mutex::new("session-a".to_string()));
+        let observer = MobileSessionAgentObserver::new(sink, session_uuid.clone());
+        let agent_id = protocol::AgentId::new();
 
-        let mut offsets = HashMap::new();
-        let path = std::path::PathBuf::from("agent-partial.jsonl");
-        assert!(seed_session_agent_offset(
-            &mut offsets,
-            &path,
-            raw.as_bytes(),
-            false,
-        ));
-        assert_eq!(offsets.get(&path), Some(&(boundary as u64)));
+        observer
+            .on_event(SubagentObservation::Allocated {
+                agent_id,
+                agent_type: "researcher".to_string(),
+                name: Some("Design".to_string()),
+                model: "deepseek-v4-flash".to_string(),
+                model_profile: Some("deepseek".to_string()),
+            })
+            .await;
+        *session_uuid.lock().unwrap() = "session-b".to_string();
+        observer
+            .on_event(SubagentObservation::Message {
+                agent_id,
+                message: protocol::ConversationMessage::Assistant {
+                    id: protocol::MessageId::new(),
+                    content: vec![protocol::ContentBlock::Text {
+                        text: "working".to_string(),
+                    }],
+                    stop_reason: None,
+                },
+            })
+            .await;
+        observer
+            .on_event(SubagentObservation::Completed {
+                agent_id,
+                content: serde_json::json!("done"),
+                usage: traits::SubagentUsage::default(),
+                total_tool_use_count: 0,
+                total_duration_ms: 0,
+                assistant_message_count: 0,
+                last_request_id: None,
+            })
+            .await;
 
-        // ToolUseIndex receives exactly the same complete prefix as the
-        // baseline offset; the unterminated suffix is deferred to the next
-        // poll and cannot accidentally pair a live result.
-        let mut index = client_adapter::turn::ToolUseIndex::default();
-        seed_session_agent_tool_index(&raw.as_bytes()[..boundary], &mut index);
-        let result = protocol::ConversationMessage::User {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::ToolResult {
-                tool_use_id: partial_id,
-                content: "ok".to_string(),
-                is_error: false,
-                provider_tool_use_id: None,
-                content_blocks: None,
-            }],
-            is_meta: false,
-            is_compact_summary: false,
-            is_visible_in_transcript_only: false,
-        };
-        let dto = client_adapter::lowering::lower_conversation_message_with(&result, &mut index);
-        let client_protocol::message::MessageBlockDto::ToolResult { tool, .. } = &dto.blocks[0]
-        else {
-            panic!("expected paired tool result");
-        };
-        assert!(tool.is_empty(), "partial suffix must not be indexed early");
+        let events = listener.received.lock().await.clone();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::SessionAgentUpdated { session_id, agent }
+                if session_id == "session-a"
+                    && agent.agent_id == agent_id.to_string()
+                    && agent.name == "Design"
+                    && agent.agent_type == "researcher"
+                    && agent.status == "running"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::SessionAgentMessage { session_id, agent_id: event_agent_id, message_index, .. }
+                if session_id == "session-a"
+                    && event_agent_id == &agent_id.to_string()
+                    && *message_index == 0
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::SessionAgentUpdated { session_id, agent }
+                if session_id == "session-a"
+                    && agent.agent_id == agent_id.to_string()
+                    && agent.name == "Design"
+                    && agent.agent_type == "researcher"
+                    && agent.status == "completed"
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ClientEvent::SessionAgentUpdated { session_id, .. }
+                | ClientEvent::SessionAgentMessage { session_id, .. }
+                if session_id == "session-b"
+        )));
+        assert!(observer.bound_agents.lock().await.is_empty());
+        assert!(observer.tool_indexes.lock().await.is_empty());
+        assert!(observer.message_indexes.lock().await.is_empty());
+    }
 
-        // Once the writer completes that suffix (the next poll sees its
-        // terminating newline), the tail starts exactly at boundary and the
-        // deferred message is emitted. Re-run the same lowering path to prove
-        // the partial line is not lost or treated as baseline history.
-        let completed_raw = format!("{raw}\n");
-        let resumed_line = &completed_raw[boundary..completed_raw.len() - 1];
-        let resumed_value: serde_json::Value = serde_json::from_str(resumed_line)
-            .expect("completed suffix must parse as one transcript line");
-        let resumed_message: protocol::ConversationMessage = serde_json::from_value(
-            resumed_value
-                .get("message")
-                .cloned()
-                .expect("transcript line message"),
-        )
-        .expect("completed suffix message");
-        let resumed_dto =
-            client_adapter::lowering::lower_conversation_message_with(&resumed_message, &mut index);
-        let client_protocol::message::MessageBlockDto::ToolUse { tool, .. } =
-            &resumed_dto.blocks[0]
-        else {
-            panic!("expected deferred tool-use event");
-        };
-        assert_eq!(tool, "Write");
+    #[tokio::test]
+    async fn workflow_agent_observer_uses_pinned_origin_session() {
+        let listener = Arc::new(FakeListener::default());
+        let sink = ListenerSink::arc(listener.clone());
+        let session_uuid = Arc::new(std::sync::Mutex::new("session-b".to_string()));
+        let observer = MobileSessionAgentObserver::new(sink, session_uuid);
+        let agent_id = protocol::AgentId::new();
+        let workflow_dir = std::path::PathBuf::from(
+            "/profile/projects/workspace/session-a/subagents/workflows/wf_abcdef",
+        );
+
+        agent::with_transcript_subdir_override(Some(workflow_dir), async {
+            observer
+                .on_event(SubagentObservation::Allocated {
+                    agent_id,
+                    agent_type: "design".to_string(),
+                    name: Some("Design".to_string()),
+                    model: "deepseek-v4-flash".to_string(),
+                    model_profile: Some("deepseek".to_string()),
+                })
+                .await;
+        })
+        .await;
+
+        assert!(listener.received.lock().await.iter().any(|event| matches!(
+            event,
+            ClientEvent::SessionAgentUpdated { session_id, agent }
+                if session_id == "session-a" && agent.agent_id == agent_id.to_string()
+        )));
     }
 
     #[tokio::test]
@@ -8818,7 +9079,7 @@ mod tests {
         let path = temp.path().join("agent-agent:test.jsonl");
         tokio::fs::write(
             &path,
-            r#"{"agent_type":"researcher","status":"running"}
+            r#"{"agent_type":"researcher","model":"deepseek-v4-flash","model_profile":"deepseek","status":"running"}
 "#,
         )
         .await
@@ -8829,6 +9090,8 @@ mod tests {
             .expect("summary");
         assert_eq!(summary.agent_type, "researcher");
         assert_eq!(summary.name, "researcher");
+        assert_eq!(summary.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(summary.model_profile.as_deref(), Some("deepseek"));
     }
 
     #[tokio::test]
@@ -9391,6 +9654,8 @@ mod tests {
             session_uuid: std::sync::Arc::new(std::sync::Mutex::new(
                 "00000000-0000-0000-0000-000000000000".to_string(),
             )),
+            checkpoints: rt.workflow_checkpoints.clone(),
+            status_sink: rt.workflow_status_sink.clone(),
         };
         let launched = launcher
             .launch(tool_workflow::WorkflowLaunchSpec {
@@ -9443,7 +9708,7 @@ mod tests {
         assert!(
             listener.received.lock().await.iter().any(|event| matches!(
                 event,
-                ClientEvent::TaskStatusChanged { task_id, status }
+                ClientEvent::TaskStatusChanged { task_id, status, .. }
                     if task_id == &launched.task_id
                         && *status == client_protocol::listings::TaskStatusDto::Completed
             )),
@@ -9757,6 +10022,7 @@ mod tests {
                 .create(
                     tasks::TaskType::LocalWorkflow,
                     tasks::TaskSpawnInput::LocalWorkflow {
+                        session_uuid: None,
                         workflow_id: "workflow".to_string(),
                         script: "return null;".to_string(),
                         resume_from_run_id: None,
@@ -9775,6 +10041,7 @@ mod tests {
                 .on_event(Ev::TaskStatusChanged {
                     task_id: task_id.clone(),
                     status: client_protocol::listings::TaskStatusDto::Cancelled,
+                    origin_session_id: None,
                 })
                 .await;
 
@@ -11281,6 +11548,7 @@ mod tests {
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
                     git_enabled: true,
+                    workflow_model: None,
                     conversation_id: None,
                 })
                 .await
@@ -11323,6 +11591,7 @@ mod tests {
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
                     git_enabled: true,
+                    workflow_model: None,
                     conversation_id: None,
                 })
                 .await
@@ -11344,6 +11613,31 @@ mod tests {
                 .init_session_id
                 .clone()
                 .expect("library create pins an empty init anchor");
+            let settings_path = tmp
+                .path()
+                .join("apps")
+                .join(&app_id)
+                .join("workspace")
+                .join(".lingxi/settings.local.json");
+            let settings: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&settings_path)
+                    .expect("CreateApp seeds workspace permission settings"),
+            )
+            .expect("workspace permission settings are valid JSON");
+            assert_eq!(
+                settings["permissions"]["allow"],
+                serde_json::json!(["Read(./**)", "Edit(./**)"])
+            );
+            assert!(
+                !tmp.path()
+                    .join("apps")
+                    .join(&app_id)
+                    .join("workspace")
+                    .join(&init_id)
+                    .join(".lingxi/settings.local.json")
+                    .exists(),
+                "session ids are catalog keys, not workspace path components"
+            );
 
             handle
                 .submit(ClientCommand::ListAppSessions {
@@ -11544,6 +11838,7 @@ mod tests {
                     origin: AppCreateOriginDto::Library,
                     brief: BRIEF.into(),
                     git_enabled: true,
+                    workflow_model: Some("deepseek/deepseek-v4-flash".into()),
                     conversation_id: None,
                 })
                 .await
@@ -11564,6 +11859,11 @@ mod tests {
                 record.brief, BRIEF,
                 "the brief the caller supplied is the brief that gets stored — not the \
                  name, not empty, not anything else"
+            );
+            assert_eq!(
+                record.workflow_model.as_deref(),
+                Some("deepseek/deepseek-v4-flash"),
+                "CreateApp must persist the selected workflow model as structured metadata"
             );
         });
     }
@@ -11591,6 +11891,7 @@ mod tests {
                     origin: AppCreateOriginDto::Chat,
                     brief: "a test app".into(),
                     git_enabled: true,
+                    workflow_model: None,
                     conversation_id: Some("conv-7".into()),
                 })
                 .await
@@ -11701,6 +12002,7 @@ mod tests {
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
                     git_enabled: true,
+                    workflow_model: None,
                     conversation_id: None,
                 })
                 .await
@@ -11775,6 +12077,7 @@ mod tests {
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
                     git_enabled: true,
+                    workflow_model: None,
                     conversation_id: None,
                 })
                 .await
@@ -11872,6 +12175,7 @@ mod tests {
                     origin: AppCreateOriginDto::Library,
                     brief: "a test app".into(),
                     git_enabled: true,
+                    workflow_model: None,
                     conversation_id: None,
                 })
                 .await

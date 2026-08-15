@@ -577,6 +577,8 @@ fn task_row_round_trips() {
             task_type: "background".to_string(),
             status: TaskStatusDto::Running,
             description: "Build the docs".to_string(),
+            can_resume: false,
+            started_at_ms: None,
         },
     };
     let json = serde_json::to_value(&ev).expect("serialize TaskRow");
@@ -612,6 +614,7 @@ fn task_status_changed_round_trips() {
     let ev = ClientEvent::TaskStatusChanged {
         task_id: "b1234abcd".to_string(),
         status: TaskStatusDto::Completed,
+        origin_session_id: None,
     };
     let json = serde_json::to_value(&ev).expect("serialize TaskStatusChanged");
     assert_eq!(json["type"], "task_status_changed");
@@ -628,6 +631,7 @@ fn task_status_variants_round_trip() {
     for (status, tag) in [
         (TaskStatusDto::Pending, "pending"),
         (TaskStatusDto::Running, "running"),
+        (TaskStatusDto::Paused, "paused"),
         (TaskStatusDto::Completed, "completed"),
         (TaskStatusDto::Failed, "failed"),
         (TaskStatusDto::Cancelled, "cancelled"),

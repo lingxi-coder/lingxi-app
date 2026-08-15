@@ -104,8 +104,22 @@ function validatePermissionResponse(v: unknown): void {
 function validateTaskStatus(v: unknown): void {
   const o = rec(v);
   assert.ok(
-    ['pending', 'running', 'completed', 'failed', 'cancelled'].includes(o['type'] as string),
+    ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(
+      o['type'] as string,
+    ),
   );
+}
+
+function validateTaskRow(v: unknown): void {
+  const task = rec(v);
+  assert.ok(
+    isString(task['task_id']) &&
+      isString(task['task_type']) &&
+      isString(task['description']),
+  );
+  validateTaskStatus(task['status']);
+  if ('can_resume' in task) assert.ok(isBool(task['can_resume']));
+  if ('started_at_ms' in task) assert.ok(isNumber(task['started_at_ms']));
 }
 
 // ── tool_display.rs — the pre-derived render model ────────────────────────────
@@ -158,6 +172,8 @@ function validateSessionAgent(v: unknown): void {
       isString(a['agent_type']) &&
       isString(a['status']),
   );
+  if ('model' in a) assert.ok(isString(a['model']));
+  if ('model_profile' in a) assert.ok(isString(a['model_profile']));
   if ('latest_activity' in a) assert.ok(isString(a['latest_activity']));
   if ('updated_at_ms' in a) assert.ok(isNumber(a['updated_at_ms']));
 }
@@ -294,6 +310,65 @@ function validatePermissionMode(v: unknown): void {
       v as string,
     ),
   );
+}
+
+function validateDisabledReason(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['code']));
+  if ('message' in o) assert.ok(isString(o['message']));
+}
+
+function validateReasoningSelection(v: unknown): void {
+  const o = rec(v);
+  switch (o['type']) {
+    case 'automatic':
+    case 'disabled':
+    case 'enabled':
+      break;
+    case 'level':
+      assert.ok(isString(o['id']));
+      break;
+    case 'token_budget':
+      assert.ok(isNumber(o['tokens']));
+      break;
+    default:
+      assert.fail(`unknown ReasoningSelectionDto type "${String(o['type'])}"`);
+  }
+}
+
+function validateConversationControls(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['qualified_model']));
+
+  const permission = rec(o['permission']);
+  validatePermissionMode(permission['requested']);
+  validatePermissionMode(permission['effective']);
+  assert.ok(Array.isArray(permission['options']));
+  for (const option of permission['options'] as unknown[]) {
+    const item = rec(option);
+    validatePermissionMode(item['mode']);
+    assert.ok(isBool(item['available']));
+    if ('disabled_reason' in item) validateDisabledReason(item['disabled_reason']);
+  }
+
+  const reasoning = rec(o['reasoning']);
+  validateReasoningSelection(reasoning['requested']);
+  validateReasoningSelection(reasoning['effective']);
+
+  const spec = rec(reasoning['spec']);
+  assert.ok(Array.isArray(spec['options']));
+  for (const option of spec['options'] as unknown[]) {
+    const item = rec(option);
+    validateReasoningSelection(item['selection']);
+    assert.ok(isBool(item['persistable']));
+  }
+  if ('budget_range' in spec) {
+    const range = rec(spec['budget_range']);
+    assert.ok(isNumber(range['min_tokens']) && isNumber(range['max_tokens']));
+  }
+  validateReasoningSelection(spec['provider_default']);
+  assert.ok(isBool(spec['forced_reasoning']) && isBool(spec['editable']));
+  if ('disabled_reason' in spec) validateDisabledReason(spec['disabled_reason']);
 }
 
 // ── local_apps.rs validators (bare-string enums + kind/op-tagged DTOs) ────────
@@ -694,6 +769,11 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'list_models':
       break;
+    case 'get_conversation_controls':
+      break;
+    case 'set_reasoning_selection':
+      validateReasoningSelection(o['selection']);
+      break;
     case 'run_slash_command':
       assert.ok(isString(o['raw']));
       if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
@@ -733,12 +813,16 @@ function validateCommand(name: string, v: unknown): void {
     case 'task_stop':
       assert.ok(isString(o['task_id']));
       break;
+    case 'resume_workflow':
+      assert.ok(isString(o['task_id']));
+      break;
     case 'list_apps':
       break;
     case 'create_app':
       assert.ok(isString(o['name']) && isString(o['brief']));
       validateAppCreateOrigin(o['origin']);
       if ('git_enabled' in o) assert.ok(isBool(o['git_enabled']));
+      if ('workflow_model' in o) assert.ok(isString(o['workflow_model']));
       if ('conversation_id' in o) assert.ok(isString(o['conversation_id']));
       break;
     case 'start_app':
@@ -799,6 +883,12 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'ask_user_question_resolved':
       assert.ok(isNumber(o['request_id']));
+      break;
+    case 'permission_request_resolved':
+      assert.ok(isNumber(o['request_id']));
+      assert.ok(
+        ['approved', 'denied', 'cancelled', 'expired'].includes(String(o['resolution'])),
+      );
       break;
     case 'attachment':
       validateAttachment(o['attachment']);
@@ -915,6 +1005,9 @@ function validateEvent(name: string, v: unknown): void {
     case 'permission_mode_changed':
       validatePermissionMode(o['mode']);
       break;
+    case 'conversation_controls_changed':
+      validateConversationControls(o['controls']);
+      break;
     case 'provider_credential_status':
       assert.ok(
         isNumber(o['operation_id']) &&
@@ -1020,9 +1113,7 @@ function validateEvent(name: string, v: unknown): void {
       break;
     }
     case 'task_row': {
-      const t = rec(o['task']);
-      assert.ok(isString(t['task_id']) && isString(t['task_type']) && isString(t['description']));
-      validateTaskStatus(t['status']);
+      validateTaskRow(o['task']);
       break;
     }
     case 'task_output_chunk':
@@ -1036,6 +1127,15 @@ function validateEvent(name: string, v: unknown): void {
     case 'task_status_changed':
       assert.ok(isString(o['task_id']));
       validateTaskStatus(o['status']);
+      if ('origin_session_id' in o) assert.ok(isString(o['origin_session_id']));
+      break;
+    case 'workflow_resumed':
+      assert.ok(
+        isString(o['previous_task_id']) &&
+          isString(o['run_id']),
+      );
+      validateTaskRow(o['task']);
+      if ('origin_session_id' in o) assert.ok(isString(o['origin_session_id']));
       break;
     case 'apps_changed':
       assert.ok(Array.isArray(o['apps']));
@@ -1137,6 +1237,12 @@ function validatePermissionRequest(v: unknown): void {
     assert.ok(isString(w['name']) && isString(w['color']));
     if ('team' in w) assert.ok(isString(w['team']));
   }
+  if ('owner' in o) {
+    const owner = rec(o['owner']);
+    if ('session_id' in owner) assert.ok(isString(owner['session_id']));
+    if ('turn_id' in owner) assert.ok(isNumber(owner['turn_id']));
+    if ('worker_name' in owner) assert.ok(isString(owner['worker_name']));
+  }
 }
 
 function validatePermissionResolved(v: unknown): void {
@@ -1161,15 +1267,34 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 43, `expected 43 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 46, `expected 46 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
 });
 
+test('workflow model metadata and paused task status pass the wire guards', () => {
+  validateTaskStatus({ type: 'paused' });
+  validateCommand('create_app.json', {
+    type: 'create_app',
+    name: 'Demo',
+    origin: 'chat',
+    brief: 'Demo app',
+    workflow_model: 'deepseek/deepseek-v4-flash',
+  });
+  validateSessionAgent({
+    agent_id: 'design',
+    name: 'design',
+    agent_type: 'design',
+    model: 'deepseek-v4-flash',
+    model_profile: 'deepseek',
+    status: 'running',
+  });
+});
+
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 57, `expected 57 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 60, `expected 60 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

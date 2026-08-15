@@ -13,7 +13,7 @@ use crate::state::{TaskState, TaskStateBase, TaskStatus};
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use agent::{StateMachinePool, SubagentApiClient};
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -27,6 +27,8 @@ use traits::{
 /// Tracks running tasks and dispatches lifecycle operations to handlers.
 pub struct TaskRegistry {
     tasks: Arc<RwLock<HashMap<String, TaskState>>>,
+    workflow_launch_reservations: Arc<std::sync::Mutex<HashSet<String>>>,
+    workflow_session_filter: Arc<std::sync::RwLock<Option<String>>>,
     /// Alternate addresses accepted by task tools (`agent_id`, named async
     /// agents, `name@team`) mapped onto the canonical task id. Real task ids
     /// still win on lookup; aliases only bridge claude-code's Agent return
@@ -104,6 +106,53 @@ struct RestPayload {
 
 type TaskCleanup = Arc<dyn Fn() + Send + Sync>;
 
+/// Durable handoff fields used to rebuild a checkpointed workflow after the
+/// host process restarts. The workflow is registered as `Paused`; no worker is
+/// spawned until the user explicitly invokes `Workflow` with its run id.
+#[derive(Debug, Clone)]
+pub struct AdoptedWorkflow {
+    /// Original workflow task id.
+    pub task_id: String,
+    /// Session that owned this workflow when it was checkpointed.
+    pub session_uuid: Option<String>,
+    /// Display identity derived from the workflow metadata.
+    pub workflow_id: String,
+    /// Stable `wf_…` journal run id.
+    pub run_id: String,
+    /// Persisted deterministic script to rerun.
+    pub script_path: String,
+    /// Serialized workflow args, when present.
+    pub args: Option<String>,
+    /// Directory containing the run's `journal.jsonl`.
+    pub transcript_dir: String,
+    /// Human-readable workflow description.
+    pub description: String,
+    /// Original run start time.
+    pub start_time: SystemTime,
+}
+
+/// Cancellation-safe ownership of one workflow run id during launch/adoption.
+/// Dropping the token releases the id even if the surrounding async future is
+/// aborted before it reaches its normal return path.
+#[must_use = "dropping the reservation immediately reopens the workflow run id"]
+#[derive(Debug)]
+pub struct WorkflowRunReservation {
+    reservations: Arc<std::sync::Mutex<HashSet<String>>>,
+    run_id: Option<String>,
+}
+
+impl Drop for WorkflowRunReservation {
+    fn drop(&mut self) {
+        let Some(run_id) = self.run_id.take() else {
+            return;
+        };
+        self.reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&run_id);
+    }
+}
+
 impl TaskRegistry {
     /// Construct an empty registry with no handlers yet registered.
     #[must_use]
@@ -114,6 +163,8 @@ impl TaskRegistry {
     ) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            workflow_launch_reservations: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            workflow_session_filter: Arc::new(std::sync::RwLock::new(None)),
             aliases: Arc::new(RwLock::new(HashMap::new())),
             handlers: HashMap::new(),
             handles: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -635,7 +686,82 @@ impl TaskRegistry {
         self.tasks.read().await.values().cloned().collect()
     }
 
-    /// Find a RUNNING `local_workflow` task whose effective run id equals
+    /// Scope workflow rows in `TaskList` / `/workflows` to one session.
+    /// `None` leaves all workflows visible (desktop / single-session behavior).
+    pub fn set_workflow_session_filter(&self, session_uuid: Option<String>) {
+        let mut guard = self
+            .workflow_session_filter
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = session_uuid;
+    }
+
+    pub(crate) fn workflow_visible_in_current_session(&self, state: &TaskState) -> bool {
+        let Some(current_session) = self
+            .workflow_session_filter
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        else {
+            return true;
+        };
+        match state {
+            TaskState::LocalWorkflow(workflow) => {
+                workflow.session_uuid.as_deref() == Some(current_session.as_str())
+            }
+            _ => true,
+        }
+    }
+
+    fn workflow_run_id_blocks_launch(status: TaskStatus) -> bool {
+        matches!(status, TaskStatus::Pending | TaskStatus::Running)
+    }
+
+    /// Atomically reserve `run_id` for a new workflow launch so another launch
+    /// cannot pass the live-run check before the task row exists.
+    pub async fn try_reserve_workflow_run_id(
+        &self,
+        run_id: &str,
+    ) -> Result<WorkflowRunReservation, TaskError> {
+        {
+            let mut reservations = self
+                .workflow_launch_reservations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !reservations.insert(run_id.to_string()) {
+                return Err(TaskError::Internal(format!(
+                    "workflow run id {run_id} is already launching"
+                )));
+            }
+        }
+        let reservation = WorkflowRunReservation {
+            reservations: self.workflow_launch_reservations.clone(),
+            run_id: Some(run_id.to_string()),
+        };
+        let tasks = self.tasks.read().await;
+        if let Some((task_id, status)) = tasks.iter().find_map(|(task_id, state)| match state {
+            TaskState::LocalWorkflow(workflow)
+                if workflow.run_id.as_deref() == Some(run_id)
+                    && Self::workflow_run_id_blocks_launch(workflow.base.status) =>
+            {
+                Some((task_id.clone(), workflow.base.status))
+            }
+            _ => None,
+        }) {
+            let state = match status {
+                TaskStatus::Pending => "pending",
+                TaskStatus::Running => "running",
+                _ => "live",
+            };
+            return Err(TaskError::Internal(format!(
+                "workflow run id {run_id} is already {state} on task {task_id}"
+            )));
+        }
+        drop(tasks);
+        Ok(reservation)
+    }
+
+    /// Find a live `local_workflow` task whose effective run id equals
     /// `run_id`, returning its task id. Backs claude-code's resume gate
     /// (Workflow validateInput errorCode 3): a `resumeFromRunId` naming a
     /// still-running workflow must be rejected — two runs sharing a run id
@@ -644,13 +770,174 @@ impl TaskRegistry {
         let tasks = self.tasks.read().await;
         tasks.iter().find_map(|(task_id, state)| match state {
             TaskState::LocalWorkflow(w)
-                if matches!(w.base.status, TaskStatus::Running)
+                if Self::workflow_run_id_blocks_launch(w.base.status)
                     && w.run_id.as_deref() == Some(run_id) =>
             {
                 Some(task_id.clone())
             }
             _ => None,
         })
+    }
+
+    /// Return non-terminal local-app build tasks bound to `app_id`.
+    ///
+    /// Delete flows use this as a guard before removing the app directory. The
+    /// workflow args are persisted as JSON by the launcher, so a malformed or
+    /// missing app id is deliberately not treated as belonging to a specific
+    /// app; the active workspace lease remains the second guard for running
+    /// tasks.
+    pub async fn find_nonterminal_local_app_workflows(&self, app_id: &str) -> Vec<String> {
+        let tasks = self.tasks.read().await;
+        tasks
+            .iter()
+            .filter_map(|(task_id, state)| match state {
+                TaskState::LocalWorkflow(workflow)
+                    if !workflow.base.status.is_terminal()
+                        && workflow.workflow_id == "local-app-build"
+                        && workflow.args.as_deref().and_then(|args| {
+                            serde_json::from_str::<serde_json::Value>(args).ok()
+                        }).and_then(|value| {
+                            value
+                                .get("app_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string)
+                        }) == Some(app_id.to_string()) =>
+                {
+                    Some(task_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Attach the on-disk resume identity to a newly launched workflow row.
+    pub async fn set_workflow_resume_metadata(
+        &self,
+        task_id: &str,
+        script_path: String,
+        transcript_dir: std::path::PathBuf,
+    ) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut tasks = self.tasks.write().await;
+        let state = tasks
+            .get_mut(&task_id)
+            .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+        let TaskState::LocalWorkflow(workflow) = state else {
+            return Err(TaskError::Internal(format!(
+                "task {task_id} is not a local workflow"
+            )));
+        };
+        workflow.script_path = Some(script_path);
+        workflow.transcript_dir = Some(transcript_dir);
+        Ok(())
+    }
+
+    /// Rebuild one workflow checkpoint without starting its script. This is the
+    /// mobile equivalent of Claude Code's `registerAdoptedWorkflowTask`.
+    pub async fn register_adopted_workflow(
+        &self,
+        adopted: AdoptedWorkflow,
+    ) -> Result<(), TaskError> {
+        let valid_task_id = adopted.task_id.len() == 9
+            && adopted
+                .task_id
+                .starts_with(TaskType::LocalWorkflow.id_prefix())
+            && adopted
+                .task_id
+                .bytes()
+                .skip(1)
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+        if !valid_task_id {
+            return Err(TaskError::Internal(format!(
+                "invalid adopted workflow task id {:?}",
+                adopted.task_id
+            )));
+        }
+        if !adopted.run_id.starts_with("wf_") {
+            return Err(TaskError::Internal(format!(
+                "invalid adopted workflow run id {:?}",
+                adopted.run_id
+            )));
+        }
+
+        let _reservation = self.try_reserve_workflow_run_id(&adopted.run_id).await?;
+        let output_file = match self.output_manager.allocate(&adopted.task_id).await {
+            Ok(path) => path,
+            Err(crate::output_manager::OutputError::AlreadyExists(_)) => self
+                .output_manager
+                .path_for(&adopted.task_id)
+                .map_err(|error| TaskError::Io(error.to_string()))?,
+            Err(error) => return Err(TaskError::Io(error.to_string())),
+        };
+        let mut tasks = self.tasks.write().await;
+        if let Some(existing) = tasks.get(&adopted.task_id) {
+            if matches!(
+                existing,
+                TaskState::LocalWorkflow(workflow)
+                    if Self::workflow_run_id_blocks_launch(workflow.base.status)
+            ) {
+                return Err(TaskError::Internal(format!(
+                    "cannot adopt workflow {}: live task {} already exists",
+                    adopted.run_id, adopted.task_id
+                )));
+            }
+        }
+        if let Some(existing_task_id) = tasks.iter().find_map(|(task_id, state)| match state {
+            TaskState::LocalWorkflow(workflow)
+                if workflow.run_id.as_deref() == Some(adopted.run_id.as_str())
+                    && Self::workflow_run_id_blocks_launch(workflow.base.status) =>
+            {
+                Some(task_id.clone())
+            }
+            _ => None,
+        }) {
+            return Err(TaskError::Internal(format!(
+                "cannot adopt workflow {}: live task {} already owns that run id",
+                adopted.run_id, existing_task_id
+            )));
+        }
+        let state = TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
+            base: TaskStateBase {
+                id: adopted.task_id.clone(),
+                task_type: TaskType::LocalWorkflow,
+                status: TaskStatus::Paused,
+                description: adopted.description,
+                tool_use_id: None,
+                start_time: adopted.start_time,
+                end_time: None,
+                total_paused_ms: 0,
+                output_file,
+                output_offset: 0,
+                notified: true,
+                creator_teammate_name: None,
+                creator_team_name: None,
+            },
+            session_uuid: adopted.session_uuid,
+            workflow_id: adopted.workflow_id,
+            script: String::new(),
+            resume_from_run_id: Some(adopted.run_id.clone()),
+            args: adopted.args,
+            run_id: Some(adopted.run_id),
+            script_path: Some(adopted.script_path),
+            transcript_dir: Some(std::path::PathBuf::from(adopted.transcript_dir)),
+            current_step: 0,
+        });
+        tasks.insert(adopted.task_id, state);
+        Ok(())
+    }
+
+    /// Remove the paused predecessor after an explicit resume has successfully
+    /// spawned a replacement task for the same workflow run in the same session.
+    pub async fn remove_paused_workflow_by_run_id(&self, session_uuid: &str, run_id: &str) {
+        self.tasks.write().await.retain(|_, state| {
+            !matches!(
+                state,
+                TaskState::LocalWorkflow(workflow)
+                    if workflow.base.status == TaskStatus::Paused
+                        && workflow.session_uuid.as_deref() == Some(session_uuid)
+                        && workflow.run_id.as_deref() == Some(run_id)
+            )
+        });
     }
 
     /// Record a shell-backed task's child exit code (M8 cc2.1.198 "Task
@@ -1352,6 +1639,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             })
         }
         TaskSpawnInput::LocalWorkflow {
+            session_uuid,
             workflow_id,
             script,
             resume_from_run_id,
@@ -1359,10 +1647,11 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             run_id,
             invocation_mode: _,
             workflow_source: _,
-            transcript_subdir: _,
+            transcript_subdir,
             launched_from_subagent: _,
         } => TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
             base,
+            session_uuid: session_uuid.clone(),
             workflow_id: workflow_id.clone(),
             script: script.clone(),
             resume_from_run_id: resume_from_run_id.clone(),
@@ -1370,6 +1659,8 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             // Effective run id: the launcher-minted id for a fresh run, else the
             // resumed id (so the resume gate can find a still-running workflow).
             run_id: run_id.clone().or_else(|| resume_from_run_id.clone()),
+            script_path: None,
+            transcript_dir: transcript_subdir.clone(),
             current_step: 0,
         }),
         TaskSpawnInput::MonitorMcp { server_name, watch } => {

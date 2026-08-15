@@ -1,5 +1,7 @@
 package com.lingxi.code.localapps
 
+import androidx.compose.ui.graphics.Color
+import com.lingxi.code.model.ModelOption
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -20,6 +22,22 @@ class LocalAppsScreenTest {
     fun `an empty description cannot be submitted`() {
         assertFalse(canSubmitBrief("   "))
         assertTrue(canSubmitBrief("一个记事本 app"))
+    }
+
+    @Test
+    fun `workflow model row shows both model and provider without changing its wire id`() {
+        val option = ModelOption(
+            id = "deepseek/deepseek-v3.2",
+            name = "DeepSeek V3.2",
+            desc = "deepseek-v3.2",
+            tag = "",
+            color = Color.Blue,
+            providerId = "deepseek",
+            providerName = "DeepSeek",
+        )
+
+        assertEquals("DeepSeek V3.2 · DeepSeek", workflowModelOptionLabel(option))
+        assertEquals("deepseek/deepseek-v3.2", option.id)
     }
 
     @Test

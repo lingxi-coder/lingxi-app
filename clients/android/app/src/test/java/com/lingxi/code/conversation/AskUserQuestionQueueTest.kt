@@ -68,7 +68,11 @@ class AskUserQuestionQueueTest {
             // per-turn path and must NOT clear the queue (only SessionEnded /
             // Resolved may). The out-of-band reducer ignores it entirely.
             viewModel.reduceClientEvent(
-                ClientEvent.TaskStatusChanged(taskId = "abc123def", status = TaskStatusDto.RUNNING),
+                ClientEvent.TaskStatusChanged(
+                    taskId = "abc123def",
+                    status = TaskStatusDto.RUNNING,
+                    originSessionId = null,
+                ),
             )
             assertEquals(2, viewModel.state.value.pendingQuestions.size)
 
@@ -137,12 +141,20 @@ class AskUserQuestionQueueTest {
             runCurrent()
 
             viewModel.reduceClientEvent(
-                ClientEvent.TaskStatusChanged(taskId = "abc123def", status = TaskStatusDto.COMPLETED),
+                ClientEvent.TaskStatusChanged(
+                    taskId = "abc123def",
+                    status = TaskStatusDto.COMPLETED,
+                    originSessionId = null,
+                ),
             )
             assertEquals("后台任务 abc123def 已完成", viewModel.state.value.statusLine)
 
             viewModel.reduceClientEvent(
-                ClientEvent.TaskStatusChanged(taskId = "abc123def", status = TaskStatusDto.FAILED),
+                ClientEvent.TaskStatusChanged(
+                    taskId = "abc123def",
+                    status = TaskStatusDto.FAILED,
+                    originSessionId = null,
+                ),
             )
             assertEquals("后台任务 abc123def 已失败", viewModel.state.value.statusLine)
         } finally {

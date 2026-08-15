@@ -49,6 +49,18 @@ pub enum PermissionDecision {
     },
 }
 
+/// Terminal permission outcome for a prompt-avoiding agent session.
+///
+/// Unlike [`PermissionDecision::Deny`], this stops the owning agent loop rather
+/// than producing a recoverable tool-result denial. The policy gate emits it
+/// only when the auto-mode classifier denial breaker trips in a non-interactive
+/// context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionAbort {
+    /// Byte-exact terminal message surfaced by the owning agent or turn loop.
+    pub message: String,
+}
+
 /// Synchronous, prompt-free authorization used while expanding embedded shell
 /// commands from slash-command/skill prompt text. `None` from the trait method
 /// means the gate has no local rule layer and the caller should use its static
@@ -153,6 +165,17 @@ pub struct PermissionCheckContext {
     /// to before. Only the rule-evaluating `PolicyPermissionGate` consults it;
     /// other transports ignore it.
     pub mode_override: Option<String>,
+    /// Whether the owning agent session cannot surface permission prompts.
+    ///
+    /// This is the per-dispatch equivalent of Claude Code's
+    /// `shouldAvoidPermissionPrompts`. It is deliberately carried on the call
+    /// context rather than stored process-globally so synchronous and async
+    /// subagents can inherit the correct owner semantics without races.
+    pub is_non_interactive_session: bool,
+    /// Ephemeral local-app workspace lease used to bind automatic filesystem
+    /// authorization to the workflow that owns the call. `None` for ordinary
+    /// session and main-loop dispatches.
+    pub workspace_lease_token: Option<u64>,
 }
 
 /// Wire-neutral description of a matched permission Ask rule.
@@ -306,6 +329,15 @@ pub enum PermissionResolution {
     /// interactive mode, or auto-deny it in headless. The turn loop fires the
     /// `PermissionRequest` hook here before resolving via the transport.
     Ask,
+    /// The gate would prompt, carrying the classifier breaker context that
+    /// must be forwarded to the prompt transport without a global side-channel.
+    /// This is emitted only for the interactive auto-mode denial-limit fallback.
+    AskWithContext {
+        /// Discriminant sent as `decision_reason_type`.
+        decision_reason_type: Option<String>,
+        /// Free-text reason sent as `decision_reason`.
+        decision_reason: Option<String>,
+    },
 }
 
 /// The workspace-wide authorization gate consulted before every tool dispatch.
@@ -407,6 +439,22 @@ pub trait PermissionGate: Send + Sync {
             },
             PermissionDecision::Deny { reason } => PermissionOutcome::Deny { reason },
         }
+    }
+
+    /// Like [`Self::check_with_context`], but preserves a terminal
+    /// [`PermissionAbort`] instead of folding every failure into a recoverable
+    /// [`PermissionOutcome::Deny`].
+    ///
+    /// The default keeps existing gates source-compatible and never aborts.
+    /// Rule-evaluating gates override this only for prompt-avoiding auto-mode
+    /// denial-breaker trips.
+    async fn check_with_context_or_abort(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> Result<PermissionOutcome, PermissionAbort> {
+        Ok(self.check_with_context(name, input, ctx).await)
     }
 
     /// Apply permission-context updates to the live in-memory gate state.
@@ -623,6 +671,22 @@ pub trait PermissionGate: Send + Sync {
                 content_blocks: Vec::new(),
             },
         }
+    }
+
+    /// Like [`Self::resolve_detailed`], but carries dispatch context and
+    /// preserves a terminal [`PermissionAbort`].
+    ///
+    /// The main turn loop uses this source-first surface so permission hooks
+    /// retain their ordering. The default delegates to the legacy method and
+    /// therefore never aborts.
+    async fn resolve_detailed_or_abort(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> Result<PermissionResolution, PermissionAbort> {
+        let _ = ctx;
+        Ok(self.resolve_detailed(name, input).await)
     }
 
     /// Tool-name targets of every TOOL-WIDE deny rule the gate enforces (a deny

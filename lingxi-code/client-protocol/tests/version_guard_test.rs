@@ -325,6 +325,14 @@ fn current_contract_index() -> ContractIndex {
         "permission_mode_changed",
     );
     put("ClientEvent::PermissionModeChanged.mode", "String");
+    put(
+        "ClientEvent::ConversationControlsChanged",
+        "conversation_controls_changed",
+    );
+    put(
+        "ClientEvent::ConversationControlsChanged.controls",
+        "ConversationControlsDto",
+    );
 
     put(
         "ClientEvent::ProviderCredentialStatus",
@@ -395,6 +403,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::TaskStatusChanged", "task_status_changed");
     put("ClientEvent::TaskStatusChanged.task_id", "String");
     put("ClientEvent::TaskStatusChanged.status", "TaskStatusDto");
+    put(
+        "ClientEvent::TaskStatusChanged.origin_session_id",
+        "Option<String>",
+    );
 
     put("ClientEvent::CommandsChanged", "commands_changed");
     put(
@@ -567,6 +579,18 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::SetModel.model", "String");
 
     put("ClientCommand::ListModels", "list_models");
+    put(
+        "ClientCommand::GetConversationControls",
+        "get_conversation_controls",
+    );
+    put(
+        "ClientCommand::SetReasoningSelection",
+        "set_reasoning_selection",
+    );
+    put(
+        "ClientCommand::SetReasoningSelection.selection",
+        "ReasoningSelectionDto",
+    );
 
     put("ClientCommand::RunSlashCommand", "run_slash_command");
     put("ClientCommand::RunSlashCommand.raw", "String");
@@ -627,6 +651,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::CreateApp.origin", "AppCreateOriginDto");
     put("ClientCommand::CreateApp.brief", "String");
     put("ClientCommand::CreateApp.git_enabled", "bool");
+    put("ClientCommand::CreateApp.workflow_model", "Option<String>");
     put("ClientCommand::CreateApp.conversation_id", "Option<String>");
 
     put("ClientCommand::StartApp", "start_app");
@@ -918,6 +943,74 @@ fn current_contract_index() -> ContractIndex {
     put("PermissionResponseDto::AllowAlways", "allow_always");
     put("PermissionResponseDto::Deny", "deny");
 
+    // ── Conversation controls (controls.rs) ──────────────────────────────
+    put("ControlDisabledReasonDto.code", "String");
+    put("ControlDisabledReasonDto.message", "Option<String>");
+
+    put("ReasoningSelectionDto::Automatic", "automatic");
+    put("ReasoningSelectionDto::Disabled", "disabled");
+    put("ReasoningSelectionDto::Enabled", "enabled");
+    put("ReasoningSelectionDto::Level", "level");
+    put("ReasoningSelectionDto::Level.id", "String");
+    put("ReasoningSelectionDto::TokenBudget", "token_budget");
+    put("ReasoningSelectionDto::TokenBudget.tokens", "u64");
+
+    put("ReasoningOptionDto.selection", "ReasoningSelectionDto");
+    put("ReasoningOptionDto.persistable", "bool");
+
+    put("ReasoningBudgetRangeDto.min_tokens", "u64");
+    put("ReasoningBudgetRangeDto.max_tokens", "u64");
+
+    put("ReasoningControlSpecDto.options", "Vec<ReasoningOptionDto>");
+    put(
+        "ReasoningControlSpecDto.budget_range",
+        "Option<ReasoningBudgetRangeDto>",
+    );
+    put(
+        "ReasoningControlSpecDto.provider_default",
+        "ReasoningSelectionDto",
+    );
+    put("ReasoningControlSpecDto.forced_reasoning", "bool");
+    put("ReasoningControlSpecDto.editable", "bool");
+    put(
+        "ReasoningControlSpecDto.disabled_reason",
+        "Option<ControlDisabledReasonDto>",
+    );
+
+    put(
+        "ReasoningControlStateDto.requested",
+        "ReasoningSelectionDto",
+    );
+    put(
+        "ReasoningControlStateDto.effective",
+        "ReasoningSelectionDto",
+    );
+    put("ReasoningControlStateDto.spec", "ReasoningControlSpecDto");
+
+    put("PermissionModeOptionDto.mode", "String");
+    put("PermissionModeOptionDto.available", "bool");
+    put(
+        "PermissionModeOptionDto.disabled_reason",
+        "Option<ControlDisabledReasonDto>",
+    );
+
+    put("PermissionControlStateDto.requested", "String");
+    put("PermissionControlStateDto.effective", "String");
+    put(
+        "PermissionControlStateDto.options",
+        "Vec<PermissionModeOptionDto>",
+    );
+
+    put("ConversationControlsDto.qualified_model", "String");
+    put(
+        "ConversationControlsDto.permission",
+        "PermissionControlStateDto",
+    );
+    put(
+        "ConversationControlsDto.reasoning",
+        "ReasoningControlStateDto",
+    );
+
     // ── ComputerAccessRequestDto / ComputerAccessResponseDto
     //    (computer_access.rs) ────────────────────────────────────────────
     put("ComputerAccessRequestDto.request_id", "u64");
@@ -1045,9 +1138,12 @@ fn current_contract_index() -> ContractIndex {
     put("TaskRowDto.task_type", "String");
     put("TaskRowDto.status", "TaskStatusDto");
     put("TaskRowDto.description", "String");
+    put("TaskRowDto.can_resume", "bool");
+    put("TaskRowDto.started_at_ms", "Option<u64>");
 
     put("TaskStatusDto::Pending", "pending");
     put("TaskStatusDto::Running", "running");
+    put("TaskStatusDto::Paused", "paused");
     put("TaskStatusDto::Completed", "completed");
     put("TaskStatusDto::Failed", "failed");
     put("TaskStatusDto::Cancelled", "cancelled");
@@ -1583,6 +1679,11 @@ fn contract_index_covers_every_dto() {
         AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
         TccStateDto,
     };
+    use client_protocol::controls::{
+        ControlDisabledReasonDto, ConversationControlsDto, PermissionControlStateDto,
+        PermissionModeOptionDto, ReasoningBudgetRangeDto, ReasoningControlSpecDto,
+        ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
+    };
     use client_protocol::error::ClientError;
     use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
     use client_protocol::listings::{
@@ -1628,6 +1729,41 @@ fn contract_index_covers_every_dto() {
             unavailable_provider_ids: Vec::new(),
             storage_encrypted: false,
             error: None,
+        },
+        ClientEvent::ConversationControlsChanged {
+            controls: ConversationControlsDto {
+                qualified_model: String::new(),
+                permission: PermissionControlStateDto {
+                    requested: String::new(),
+                    effective: String::new(),
+                    options: vec![PermissionModeOptionDto {
+                        mode: String::new(),
+                        available: false,
+                        disabled_reason: Some(ControlDisabledReasonDto {
+                            code: String::new(),
+                            message: None,
+                        }),
+                    }],
+                },
+                reasoning: ReasoningControlStateDto {
+                    requested: ReasoningSelectionDto::Automatic,
+                    effective: ReasoningSelectionDto::Level { id: String::new() },
+                    spec: ReasoningControlSpecDto {
+                        options: vec![ReasoningOptionDto {
+                            selection: ReasoningSelectionDto::TokenBudget { tokens: 0 },
+                            persistable: false,
+                        }],
+                        budget_range: Some(ReasoningBudgetRangeDto {
+                            min_tokens: 0,
+                            max_tokens: 0,
+                        }),
+                        provider_default: ReasoningSelectionDto::Enabled,
+                        forced_reasoning: false,
+                        editable: true,
+                        disabled_reason: None,
+                    },
+                },
+            },
         },
         ClientEvent::SessionEnded,
     ];
@@ -1718,6 +1854,10 @@ fn contract_index_covers_every_dto() {
         },
         ClientCommand::ListModels,
         ClientCommand::RequestExit,
+        ClientCommand::GetConversationControls,
+        ClientCommand::SetReasoningSelection {
+            selection: ReasoningSelectionDto::Automatic,
+        },
         ClientCommand::ApproveComputerAccess {
             request_id: 0,
             response: ComputerAccessResponseDto::default(),
@@ -1751,6 +1891,7 @@ fn contract_index_covers_every_dto() {
             color: String::new(),
             team: None,
         }),
+        owner: None,
     };
     let _resolved = PermissionResolved {
         request_id: 0,
@@ -1799,6 +1940,8 @@ fn contract_index_covers_every_dto() {
             agent_id: String::new(),
             name: String::new(),
             agent_type: String::new(),
+            model: None,
+            model_profile: None,
             status: String::new(),
             latest_activity: None,
             updated_at_ms: None,
@@ -1853,6 +1996,8 @@ fn contract_index_covers_every_dto() {
             task_type: String::new(),
             status: TaskStatusDto::Pending,
             description: String::new(),
+            can_resume: false,
+            started_at_ms: None,
         },
         CoordinatorWorkerDto {
             agent_id: String::new(),

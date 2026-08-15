@@ -39,6 +39,9 @@ data class PermissionPromptState(
     val detail: String,
     /** Worker attribution when the request originates from a sub-agent (reserved). */
     val worker: WorkerPrompt? = null,
+    /** Immutable engine ownership; presentation remains global across navigation. */
+    val originSessionId: String? = null,
+    val ownerTurnId: ULong? = null,
 )
 
 /** Worker attribution rendered on a [PermissionPromptState] (reserved). */
@@ -78,9 +81,16 @@ fun permissionRequestToPrompt(
         requestId = request.requestId,
         title = title,
         detail = detail,
-        worker = request.worker?.toPrompt(),
+        worker = request.worker?.toPrompt()
+            ?: request.owner?.workerName?.takeIf(String::isNotBlank)?.let {
+                WorkerPrompt(name = it, color = DEFAULT_WORKER_COLOR)
+            },
+        originSessionId = request.owner?.sessionId,
+        ownerTurnId = request.owner?.turnId,
     )
 }
+
+private const val DEFAULT_WORKER_COLOR = "#7C8CF8"
 
 /** Map the reserved [WorkerInfoDto] onto the UI-facing [WorkerPrompt]. */
 private fun WorkerInfoDto.toPrompt(): WorkerPrompt =

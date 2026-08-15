@@ -35,6 +35,8 @@ pub fn workflow_row_from_record(r: WorkflowRecord) -> WorkflowRow {
         current_step: r.current_step,
         started_at_ms: r.started_at_ms,
         ended_at_ms: r.ended_at_ms,
+        script_path: r.script_path,
+        args: r.args,
         // Enriched separately from the run's output spool (the record carries
         // no progress data); `cmd_workflows` fills these via
         // `parse_workflow_spool`.

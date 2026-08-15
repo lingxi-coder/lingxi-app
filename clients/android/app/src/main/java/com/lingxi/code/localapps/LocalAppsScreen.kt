@@ -20,6 +20,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -66,6 +67,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lingxi.code.R
+import com.lingxi.code.model.ModelOption
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
@@ -216,9 +218,11 @@ private fun LocalAppsLibraryScreen(
     }
     if (showCreateDialog) {
         CreateAppDialog(
+            models = state.workflowModels,
+            currentModelId = state.currentWorkflowModelId,
             onDismiss = { showCreateDialog = false },
-            onCreate = { brief, gitEnabled ->
-                onAction(LocalAppsAction.CreateFromBrief(brief, gitEnabled))
+            onCreate = { brief, gitEnabled, workflowModel ->
+                onAction(LocalAppsAction.CreateFromBrief(brief, gitEnabled, workflowModel))
                 showCreateDialog = false
             },
         )
@@ -233,11 +237,19 @@ private fun LocalAppsLibraryScreen(
  */
 @Composable
 private fun CreateAppDialog(
+    models: List<ModelOption>,
+    currentModelId: String?,
     onDismiss: () -> Unit,
-    onCreate: (String, Boolean) -> Unit,
+    onCreate: (String, Boolean, String?) -> Unit,
 ) {
     var brief by remember { mutableStateOf("") }
     var gitEnabled by remember { mutableStateOf(true) }
+    var workflowModel by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(models, workflowModel) {
+        if (workflowModel != null && models.none { it.id == workflowModel }) {
+            workflowModel = null
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.local_apps_create)) },
@@ -256,6 +268,23 @@ private fun CreateAppDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
                 )
+                Text(
+                    stringResource(R.string.local_apps_create_model_section),
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
+                )
+                WorkflowModelSelector(
+                    models = models,
+                    currentModelId = currentModelId,
+                    selectedModelId = workflowModel,
+                    onSelected = { workflowModel = it },
+                )
+                Text(
+                    stringResource(R.string.local_apps_create_model_detail),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
                 Row(
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -269,13 +298,88 @@ private fun CreateAppDialog(
             }
         },
         confirmButton = {
-            Button(enabled = canSubmitBrief(brief), onClick = { onCreate(brief, gitEnabled) }) {
+            Button(
+                enabled = canSubmitBrief(brief),
+                onClick = { onCreate(brief, gitEnabled, workflowModel) },
+            ) {
                 Text(stringResource(R.string.local_apps_create_and_design))
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }
+
+@Composable
+private fun WorkflowModelSelector(
+    models: List<ModelOption>,
+    currentModelId: String?,
+    selectedModelId: String?,
+    onSelected: (String?) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedModel = models.firstOrNull { it.id == selectedModelId }
+    val currentModel = models.firstOrNull { it.id == currentModelId }
+    val followCurrent = stringResource(R.string.local_apps_create_model_follow_current)
+    val selectionLabel = selectedModel?.let(::workflowModelOptionLabel)
+        ?: listOfNotNull(followCurrent, currentModel?.name).joinToString(" · ")
+
+    Box(Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                text = selectionLabel,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                Icons.Rounded.KeyboardArrowDown,
+                contentDescription = stringResource(R.string.local_apps_create_model_label),
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        listOfNotNull(followCurrent, currentModel?.name).joinToString(" · "),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                onClick = {
+                    onSelected(null)
+                    expanded = false
+                },
+            )
+            models.forEach { model ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            workflowModelOptionLabel(model),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    onClick = {
+                        onSelected(model.id)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+internal fun workflowModelOptionLabel(model: ModelOption): String =
+    listOf(model.name, model.providerName)
+        .filter(String::isNotBlank)
+        .joinToString(" · ")
 
 /**
  * The create screen's one and only input — a documented count, not a UI

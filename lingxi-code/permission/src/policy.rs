@@ -18,8 +18,10 @@ use crate::result::{
 };
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource};
 use crate::shell_command;
+use crate::workspace_lease;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Base commands a Bash invocation may auto-allow in `AcceptEdits` mode — 1:1
@@ -145,6 +147,10 @@ pub struct PermissionPolicy {
     /// Set at engine boot from any enabling settings tier via
     /// [`crate::classify_all_shell_from_settings_json`].
     pub classify_all_shell: bool,
+    /// Ephemeral local-app workflow leases.  This is deliberately orthogonal
+    /// to the session-wide mode and is checked only after explicit deny/ask
+    /// rules and shell safety guards have run.
+    pub workspace_leases: Option<Arc<crate::WorkspacePermissionLeaseRegistry>>,
 }
 
 impl PermissionPolicy {
@@ -168,6 +174,7 @@ impl PermissionPolicy {
             pwsh_parser: None,
             allow_managed_permission_rules_only: false,
             classify_all_shell: false,
+            workspace_leases: None,
         }
     }
 
@@ -339,6 +346,15 @@ impl PermissionPolicy {
         self
     }
 
+    #[must_use]
+    pub fn with_workspace_leases(
+        mut self,
+        leases: Arc<crate::WorkspacePermissionLeaseRegistry>,
+    ) -> Self {
+        self.workspace_leases = Some(leases);
+        self
+    }
+
     /// Mark whether `BypassPermissions` mode was available at session start
     /// (TS `isBypassPermissionsModeAvailable`). When `true`, `Plan` mode bypasses
     /// permissions like `BypassPermissions` (see
@@ -504,6 +520,17 @@ impl PermissionPolicy {
         input: &serde_json::Value,
         mode: PermissionMode,
     ) -> PermissionResult {
+        self.authorize_with_mode_and_workspace_lease(tool_name, input, mode, None)
+    }
+
+    #[must_use]
+    pub fn authorize_with_mode_and_workspace_lease(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        mode: PermissionMode,
+        workspace_lease_token: Option<u64>,
+    ) -> PermissionResult {
         // SECURITY (Monitor→Bash): the oracle's Monitor `checkPermissions` is
         // `if(e.ws)return NU_(e.ws); return Lon({...e,command:e.command},t)` — a
         // COMMAND-monitor is evaluated by the FULL Bash resolver. Keyed by tool
@@ -524,7 +551,7 @@ impl PermissionPolicy {
         } else {
             tool_name
         };
-        let result = self.authorize_inner(tool_name, input, mode);
+        let result = self.authorize_inner(tool_name, input, mode, workspace_lease_token);
         // BGOP-01 — `&` background-operator allow→ask downgrade (claude-code
         // `Yqr`, the Bash checkPermissions wrapper). After the whole flow, an
         // ALLOW for a shell command containing `&` is downgraded to a forced ask
@@ -586,6 +613,7 @@ impl PermissionPolicy {
             pwsh_parser: self.pwsh_parser.clone(),
             allow_managed_permission_rules_only: self.allow_managed_permission_rules_only,
             classify_all_shell: self.classify_all_shell,
+            workspace_leases: self.workspace_leases.clone(),
         }
     }
 
@@ -609,6 +637,7 @@ impl PermissionPolicy {
         tool_name: &str,
         input: &serde_json::Value,
         mode: PermissionMode,
+        workspace_lease_token: Option<u64>,
     ) -> PermissionResult {
         let sources = SOURCES_BY_PRIORITY;
 
@@ -802,6 +831,9 @@ impl PermissionPolicy {
                     if let Some(deny) = self.output_redirect_deny(&sources, command, roots) {
                         return deny;
                     }
+                    if let Some(deny) = self.input_redirect_deny(&sources, command, roots) {
+                        return deny;
+                    }
                     // 2b-deny(read/cmd). PATH-01: a COMMAND-PATH target matching a
                     //     Read-deny (read op) / Edit-deny (write/create op) CONTENT
                     //     rule is DENIED (claude-code `EUr`→`Ptt` returns a
@@ -861,6 +893,32 @@ impl PermissionPolicy {
                 }
             }
         }
+        // Host-owned local-app metadata is a hard deny for leased workflows.
+        // Place this before shell exact-allow and the generic allow/mode
+        // branches so a broad `Edit(./**)` or `Bash(...)` rule cannot turn the
+        // generated workspace metadata into agent-writable state. Explicit
+        // deny/ask rules have already run above and retain their precedence.
+        if let (Some(leases), Some(roots)) = (&self.workspace_leases, &self.roots) {
+            if leases.denies_host_owned_for_token(workspace_lease_token, tool_name, input, roots) {
+                return deny_workspace_host_owned(tool_name);
+            }
+        }
+        // The generated local-app settings file contains a broad
+        // `Edit(./**)` allow for source files. Keep host-owned metadata and
+        // symlink escapes protected even after the temporary build lease has
+        // expired, and before any generic allow rule can short-circuit.
+        if let Some(roots) = self.roots.as_ref() {
+            if workspace_lease::WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
+                tool_name, input, roots,
+            ) {
+                return deny_workspace_host_owned(tool_name);
+            }
+            if workspace_lease::WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
+                tool_name, input, roots,
+            ) {
+                return deny_workspace_outside(tool_name);
+            }
+        }
         // 2c. BASH COMMAND-INJECTION SAFETY (claude-code `bashCommandIsSafe`,
         //     `bashSecurity.ts`'s legacy `bashCommandIsSafe_DEPRECATED` battery,
         //     wired at `bashPermissions.ts:1217-1239` inside
@@ -914,6 +972,15 @@ impl PermissionPolicy {
         }
         if let Some(ask) = Self::shell_bash_safety_ask(tool_name, input) {
             return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
+        }
+        // Local-app build workflows receive a temporary, canonical-root lease.
+        // Explicit deny/ask rules and shell safety/containment guards have
+        // already run above, so this cannot weaken policy rules or approve an
+        // unsafe shell command.
+        if let (Some(leases), Some(roots)) = (&self.workspace_leases, &self.roots) {
+            if leases.allows_for_token(workspace_lease_token, tool_name, input, roots) {
+                return allow_with_mode(mode);
+            }
         }
         // 3. Allow. Shell tools need compound aggregation (a single allow rule
         //    matching ONE subcommand must not allow a whole compound command),
@@ -1755,6 +1822,39 @@ impl PermissionPolicy {
                             reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
                             explanation: Some(format!(
                                 "Output redirection to '{target}' was blocked by a deny rule."
+                            )),
+                            metadata: PermissionMetadata::default(),
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn input_redirect_deny(
+        &self,
+        sources: &[PermissionRuleSource],
+        command: &str,
+        roots: &FsRoots,
+    ) -> Option<PermissionResult> {
+        for target in crate::path_constraints::read_redirect_targets(command, roots) {
+            for src in sources {
+                let Some(rules) = self.deny_rules.get(src) else {
+                    continue;
+                };
+                for rule in rules {
+                    if rule.value.tool_name != "Read" {
+                        continue;
+                    }
+                    let Some(pattern) = rule.value.rule_content.as_deref() else {
+                        continue;
+                    };
+                    if path_matches_rule_pattern(&target, pattern, rule.source, roots) {
+                        return Some(PermissionResult::Deny {
+                            reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+                            explanation: Some(format!(
+                                "Input redirection from '{target}' was blocked by a deny rule."
                             )),
                             metadata: PermissionMetadata::default(),
                         });
@@ -2622,6 +2722,31 @@ fn deny_with_mode(mode: PermissionMode) -> PermissionResult {
     PermissionResult::Deny {
         reason: PermissionDecisionReason::PermissionMode { mode },
         explanation: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+fn deny_workspace_host_owned(tool_name: &str) -> PermissionResult {
+    PermissionResult::Deny {
+        reason: PermissionDecisionReason::Other {
+            reason: format!("{tool_name} cannot modify host-owned local-app workspace metadata"),
+        },
+        explanation: Some(
+            "Host-owned local-app workspace metadata cannot be modified by an agent.".to_string(),
+        ),
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+fn deny_workspace_outside(tool_name: &str) -> PermissionResult {
+    PermissionResult::Deny {
+        reason: PermissionDecisionReason::Other {
+            reason: format!("{tool_name} path escapes the local-app workspace"),
+        },
+        explanation: Some(
+            "Local-app workspace operations cannot follow paths outside the canonical workspace."
+                .to_string(),
+        ),
         metadata: PermissionMetadata::default(),
     }
 }

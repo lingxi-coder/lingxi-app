@@ -6901,6 +6901,9 @@ mod persist_with_parent_tests {
             OrchestratorError::StreamingProtocol("bad".into()),
             OrchestratorError::StreamEndedWithoutStop,
             OrchestratorError::RepeatedOverloaded,
+            OrchestratorError::PermissionAbort {
+                message: "Agent aborted: too many classifier denials in headless mode".into(),
+            },
             OrchestratorError::MaxTurnsReached { max_turns: 30 },
             OrchestratorError::MaxBudgetReached {
                 budget_nano_usd: 5_000_000_000,

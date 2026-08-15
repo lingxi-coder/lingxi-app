@@ -32,6 +32,7 @@
 //! enters this crate.
 
 use crate::computer_access::ComputerAccessResponseDto;
+use crate::controls::ReasoningSelectionDto;
 use crate::listings::TaskStatusDto;
 use crate::local_apps::{AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto};
 use crate::permission::PermissionResponseDto;
@@ -336,6 +337,14 @@ pub enum ClientCommand {
         task_id: String,
     },
 
+    /// Resume a paused local workflow in the current session. The engine
+    /// resolves the persisted script/checkpoint by task id; clients never
+    /// receive or submit script paths or arguments directly.
+    ResumeWorkflow {
+        /// Paused workflow task id.
+        task_id: String,
+    },
+
     // ── Local apps ────────────────────────────────────────────────────────
     /// List the local apps. Replied with an
     /// [`AppsChanged`](crate::events::ClientEvent::AppsChanged) event carrying
@@ -367,6 +376,10 @@ pub enum ClientCommand {
             skip_serializing_if = "is_default_git_version_control"
         )]
         git_enabled: bool,
+        /// Provider-qualified model reference used by the app creation
+        /// workflow. Skipped when the app follows the current session model.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow_model: Option<String>,
         /// Conversation the app was created from (`origin: chat`). Skipped
         /// from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -475,6 +488,16 @@ pub enum ClientCommand {
     // ── Lifecycle ─────────────────────────────────────────────────────────
     /// Request a clean engine/connection shutdown.
     RequestExit,
+
+    /// Request the authoritative conversation-controls snapshot for the
+    /// active session/model.
+    GetConversationControls,
+
+    /// Change the live reasoning selection for subsequent provider requests.
+    SetReasoningSelection {
+        /// Provider-neutral reasoning selection.
+        selection: ReasoningSelectionDto,
+    },
 }
 
 /// Prompt-input mode for [`ClientCommand::SendPrompt`]. Internally tagged on

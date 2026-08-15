@@ -91,6 +91,14 @@ data class ChatState(
     val agentRunsByMessageId: Map<String, AgentRunState> = emptyMap(),
     /** Out-of-band tasks that remain alive after their initiating turn ended. */
     val activeBackgroundTaskIds: Set<String> = emptySet(),
+    /** Full task rows retained for the unified execution card. */
+    val backgroundTasks: Map<String, BackgroundTaskUi> = emptyMap(),
+    /** Session agent roster shown alongside workflows and tasks. */
+    val sessionAgents: List<SessionAgentUi> = emptyList(),
+    /** Direct resume feedback for the unified workflow row. */
+    val workflowResumeState: WorkflowResumeUiState = WorkflowResumeUiState.Idle,
+    /** Event-driven workflow/subagent progress for the visible session only. */
+    val workflowRuns: Map<String, WorkflowRunUi> = emptyMap(),
     /**
      * A persistent, dismissible turn error. Unlike [statusLine] (which the next
      * tool-activity event overwrites and a turn clears), this survives until the
@@ -310,6 +318,11 @@ class ChatViewModel(
     /** Parent job for all out-of-band flows of the currently owned source. */
     private var sourceBindingJob: Job? = null
 
+    /** Structured runs remain partitioned by their immutable origin session. */
+    private val workflowRunsBySession = mutableMapOf<String, Map<String, WorkflowRunUi>>()
+    /** Task status can arrive before the first workflow callback on a separate bridge. */
+    private val workflowStatusesBySession = mutableMapOf<String, Map<String, TaskStatusDto>>()
+
     /** Serializes Project/global Source transactions across rapid drawer taps. */
     private val workspaceSwitchMutex = Mutex()
 
@@ -391,6 +404,11 @@ class ChatViewModel(
                 }
             }
             launch {
+                boundSource.workflowProgress.collect { update ->
+                    if (sourceGeneration == generation) reduceWorkflowProgress(update)
+                }
+            }
+            launch {
                 boundSource.mcpServers.collect { servers ->
                     if (sourceGeneration == generation) _mcpServers.value = servers
                 }
@@ -443,28 +461,107 @@ class ChatViewModel(
             is ClientEvent.SessionEnded -> _state.update {
                 it.copy(pendingQuestions = emptyList())
             }
-            is ClientEvent.TaskRow -> _state.update {
-                it.copy(
-                    activeBackgroundTaskIds = it.activeBackgroundTaskIds.withTaskStatus(
-                        event.task.taskId,
-                        event.task.status,
-                    ),
+                is ClientEvent.TaskRow -> _state.update {
+                    val task = event.task.toBackgroundTaskUi()
+                    it.copy(
+                        backgroundTasks = it.backgroundTasks + (task.taskId to task),
+                        activeBackgroundTaskIds = it.activeBackgroundTaskIds.withTaskStatus(
+                            task.taskId,
+                            task.status,
+                        ),
+                    )
+                }
+            is ClientEvent.WorkflowResumed -> _state.update { state ->
+                val origin = event.originSessionId?.let(::canonicalSessionId)
+                if (origin != null && origin != canonicalSessionId(state.session.id)) return@update state
+                val task = event.task.toBackgroundTaskUi()
+                state.copy(
+                    backgroundTasks = state.backgroundTasks - event.previousTaskId + (task.taskId to task),
+                    activeBackgroundTaskIds = state.activeBackgroundTaskIds
+                        .minus(event.previousTaskId)
+                        .withTaskStatus(task.taskId, task.status),
+                    workflowResumeState = WorkflowResumeUiState.Succeeded,
+                    statusLine = "Workflow resumed: ${event.runId}",
                 )
             }
-            is ClientEvent.TaskStatusChanged -> _state.update {
-                it.copy(
-                    statusLine = taskStatusLine(event.taskId, event.status, strings),
-                    activeBackgroundTaskIds = it.activeBackgroundTaskIds.withTaskStatus(
-                        event.taskId,
-                        event.status,
-                    ),
-                )
+            is ClientEvent.SessionAgentList -> _state.update { state ->
+                if (canonicalSessionId(event.sessionId) != canonicalSessionId(state.session.id)) {
+                    state
+                } else {
+                    state.copy(sessionAgents = event.agents.map { it.toSessionAgentUi() })
+                }
+            }
+            is ClientEvent.SessionAgentUpdated -> _state.update { state ->
+                if (canonicalSessionId(event.sessionId) != canonicalSessionId(state.session.id)) {
+                    state
+                } else {
+                    val agent = event.agent.toSessionAgentUi()
+                    state.copy(sessionAgents = state.sessionAgents.filterNot { it.agentId == agent.agentId } + agent)
+                }
+            }
+            is ClientEvent.TaskStatusChanged -> {
+                _state.update {
+                    val belongsToVisibleSession = event.originSessionId
+                        ?.let(::canonicalSessionId)
+                        ?.let { origin -> origin == canonicalSessionId(it.session.id) }
+                        ?: true
+                    if (!belongsToVisibleSession) return@update it
+                    it.copy(
+                        statusLine = if (belongsToVisibleSession) {
+                            taskStatusLine(event.taskId, event.status, strings)
+                        } else {
+                            it.statusLine
+                        },
+                        backgroundTasks = it.backgroundTasks.updateStatus(event.taskId, event.status),
+                        activeBackgroundTaskIds = it.activeBackgroundTaskIds.withTaskStatus(
+                            event.taskId,
+                            event.status,
+                        ),
+                    )
+                }
+                event.originSessionId?.let { origin ->
+                    updateWorkflowTaskStatus(origin, event.taskId, event.status)
+                }
             }
             is ClientEvent.CoordinatorStatus -> updateCoordinatorWorkers(
                 event.activeWorkers.toInt(),
                 event.team,
             )
             else -> Unit
+        }
+    }
+
+    internal fun reduceWorkflowProgress(update: WorkflowProgressUpdate) {
+        val origin = canonicalSessionId(update.originSessionId)
+        if (origin.isBlank()) return
+        val sessionRuns = workflowRunsBySession[origin].orEmpty()
+        var reduced = reduceWorkflowProgress(sessionRuns[update.taskId], update.copy(originSessionId = origin))
+            ?: return
+        workflowStatusesBySession[origin]?.get(update.taskId)?.let { status ->
+            reduced = reduced.copy(status = status)
+        }
+        val nextRuns = sessionRuns + (update.taskId to reduced)
+        workflowRunsBySession[origin] = nextRuns
+        if (canonicalSessionId(_state.value.session.id) == origin) {
+            _state.update { it.copy(workflowRuns = nextRuns) }
+        }
+    }
+
+    private fun updateWorkflowTaskStatus(
+        originSessionId: String,
+        taskId: String,
+        status: TaskStatusDto,
+    ) {
+        val origin = canonicalSessionId(originSessionId)
+        if (origin.isBlank()) return
+        workflowStatusesBySession[origin] =
+            workflowStatusesBySession[origin].orEmpty() + (taskId to status)
+        val sessionRuns = workflowRunsBySession[origin] ?: return
+        val run = sessionRuns[taskId] ?: return
+        val nextRuns = sessionRuns + (taskId to run.copy(status = status))
+        workflowRunsBySession[origin] = nextRuns
+        if (canonicalSessionId(_state.value.session.id) == origin) {
+            _state.update { it.copy(workflowRuns = nextRuns) }
         }
     }
 
@@ -511,6 +608,32 @@ class ChatViewModel(
             runCatching {
                 source.submitClientCommand(ClientCommand.CancelAskUserQuestion(requestId))
             }.onFailure { reportHostError(it.message ?: it::class.simpleName.orEmpty()) }
+        }
+    }
+
+    /** Resume one paused workflow without creating a new conversation turn. */
+    fun resumeWorkflow(taskId: String) {
+        val task = _state.value.backgroundTasks[taskId] ?: return
+        if (!task.canResume || task.status != TaskStatusDto.PAUSED) return
+        _state.update { it.copy(workflowResumeState = WorkflowResumeUiState.Resuming) }
+        viewModelScope.launch {
+            runCatching {
+                source.submitClientCommand(ClientCommand.ResumeWorkflow(taskId))
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        workflowResumeState = WorkflowResumeUiState.Failed,
+                        statusLine = error.message ?: "Workflow resume failed",
+                    )
+                }
+            }
+        }
+    }
+
+    /** Re-pull durable execution rows after an Android foreground transition. */
+    fun refreshExecutionStatus() {
+        viewModelScope.launch {
+            runCatching { source.refreshExecutionStatus() }
         }
     }
 
@@ -563,12 +686,18 @@ class ChatViewModel(
         _sessions.value = EngineSessionState.loading()
         _pendingPermission.value = null
         _mcpServers.value = emptyList()
+        workflowRunsBySession.clear()
+        workflowStatusesBySession.clear()
         // A questionnaire's request_id is a CONNECTION-scoped correlator, so a
         // replaced engine source invalidates every parked card.
         _state.update {
             it.copy(
                 pendingQuestions = emptyList(),
                 activeBackgroundTaskIds = emptySet(),
+                backgroundTasks = emptyMap(),
+                sessionAgents = emptyList(),
+                workflowResumeState = WorkflowResumeUiState.Idle,
+                workflowRuns = emptyMap(),
             )
         }
         bindSource()
@@ -693,11 +822,17 @@ class ChatViewModel(
         _sessions.value = EngineSessionState.loading()
         _pendingPermission.value = null
         _mcpServers.value = emptyList()
+        workflowRunsBySession.clear()
+        workflowStatusesBySession.clear()
         // Parked questionnaires die with the connection they were parked on.
         _state.update {
             it.copy(
                 pendingQuestions = emptyList(),
                 activeBackgroundTaskIds = emptySet(),
+                backgroundTasks = emptyMap(),
+                sessionAgents = emptyList(),
+                workflowResumeState = WorkflowResumeUiState.Idle,
+                workflowRuns = emptyMap(),
             )
         }
         bindSource()
@@ -814,12 +949,17 @@ class ChatViewModel(
                 agentRun = null,
                 agentRunsByMessageId = reconstructTerminalAgentRuns(restored.transcript),
                 error = null,
+                activeBackgroundTaskIds = emptySet(),
+                backgroundTasks = emptyMap(),
+                sessionAgents = emptyList(),
+                workflowResumeState = WorkflowResumeUiState.Idle,
                 // The plan and every expansion belong to the session that was
                 // just replaced; carrying them across would attribute one
                 // session's checklist to another.
                 planTasks = emptyList(),
                 planExpanded = false,
                 expandedToolCalls = emptySet(),
+                workflowRuns = workflowRunsBySession[canonicalSessionId(restored.sessionId)].orEmpty(),
             )
         }
     }
@@ -910,6 +1050,7 @@ class ChatViewModel(
                 planTasks = emptyList(),
                 planExpanded = false,
                 expandedToolCalls = emptySet(),
+                workflowRuns = workflowRunsBySession[canonicalSessionId(target.id)].orEmpty(),
             )
         }
         sessionTransitionJob = viewModelScope.launch {
@@ -1550,10 +1691,21 @@ internal fun reconstructTerminalAgentRuns(messages: List<Message>): Map<String, 
         }
     }
 
+private fun Map<String, BackgroundTaskUi>.updateStatus(
+    taskId: String,
+    status: TaskStatusDto,
+): Map<String, BackgroundTaskUi> = mapNotNull { (id, task) ->
+    if (id == taskId) id to task.copy(status = status) else id to task
+}.toMap()
+
 private fun Set<String>.withTaskStatus(taskId: String, status: TaskStatusDto): Set<String> =
     when (status) {
         TaskStatusDto.PENDING, TaskStatusDto.RUNNING -> this + taskId
-        TaskStatusDto.COMPLETED, TaskStatusDto.FAILED, TaskStatusDto.CANCELLED -> this - taskId
+        TaskStatusDto.PAUSED,
+        TaskStatusDto.COMPLETED,
+        TaskStatusDto.FAILED,
+        TaskStatusDto.CANCELLED,
+        -> this - taskId
     }
 
 /**
@@ -1668,6 +1820,8 @@ internal fun taskStatusLine(
         strings.resolve(R.string.chat_task_status_pending, "后台任务 %1\$s 已排队", taskId)
     TaskStatusDto.RUNNING ->
         strings.resolve(R.string.chat_task_status_running, "后台任务 %1\$s 运行中", taskId)
+    TaskStatusDto.PAUSED ->
+        strings.resolve(R.string.chat_task_status_paused, "后台任务 %1\$s 已暂停", taskId)
     TaskStatusDto.COMPLETED ->
         strings.resolve(R.string.chat_task_status_completed, "后台任务 %1\$s 已完成", taskId)
     TaskStatusDto.FAILED ->

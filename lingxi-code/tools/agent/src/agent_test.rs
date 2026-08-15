@@ -876,15 +876,17 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         let tool = AgentTool::new(bctx);
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
-        ctx.options.main_loop_model = "claude-sonnet-5".to_string();
+        ctx.options.main_loop_model = "deepseek-v4-flash".to_string();
+        ctx.options.model_profile = Some("deepseek".to_string());
         let input = serde_json::json!({ "description": "do it", "prompt": "go" });
         tool.call(input, ctx, fresh_tx()).await.expect("spawn ok");
         let inv = spawner.invocations();
         assert_eq!(
             inv[0].request.parent_model_override.as_deref(),
-            Some("claude-sonnet-5"),
+            Some("deepseek-v4-flash"),
             "the live/parent main_loop_model is threaded as the spawn's parent override"
         );
+        assert_eq!(inv[0].request.model_profile.as_deref(), Some("deepseek"));
     }
 
     // The legacy `"subagent"` placeholder (an un-seeded dispatch) is NOT threaded
@@ -1754,7 +1756,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_budget(u64::MAX),
         );
         let tool = AgentTool::new(bctx);
-        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.options.model_profile = Some("deepseek".to_string());
         let input = serde_json::json!({
             "description": "desc here",
             "subagent_type": "general-purpose",
@@ -1774,6 +1777,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let req = &spawner.invocations()[0].request;
         assert_eq!(req.description.as_deref(), Some("desc here"));
         assert_eq!(req.model.as_deref(), Some("opus"));
+        assert!(
+            req.model_profile.is_none(),
+            "an explicit family override must not be pinned to the inherited provider"
+        );
         assert_eq!(req.name.as_deref(), Some("scout"));
         assert_eq!(req.team_name.as_deref(), Some("alpha"));
         // (parity 2.1.212) The `mode` call param is DEPRECATED and ignored — it is

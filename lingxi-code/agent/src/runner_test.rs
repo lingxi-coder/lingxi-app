@@ -230,6 +230,26 @@ impl traits::ToolInvoker for CountingInvoker {
     }
 }
 
+struct AbortInvoker;
+
+#[async_trait]
+impl traits::ToolInvoker for AbortInvoker {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        _ctx: traits::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        Err(traits::tool_invoker::ToolInvokerError::Abort(
+            "Agent aborted: too many classifier denials in headless mode".into(),
+        ))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 struct SessionModeRecordingInvoker {
     captured: Mutex<Option<bool>>,
 }
@@ -460,6 +480,208 @@ async fn drain(mut rx: mpsc::Receiver<SubagentEvent>) -> Vec<SubagentEvent> {
         out.push(ev);
     }
     out
+}
+
+#[tokio::test]
+async fn workflow_watchdog_times_out_stream_open() {
+    let policy = traits::WorkflowQueryWatchdog {
+        stall_timeout_ms: 10,
+        max_retries: 0,
+    };
+    let result = await_workflow_query_phase::<(), _>(
+        async {
+            std::future::pending::<()>().await;
+            Ok(())
+        },
+        Some(policy),
+        "opening the response stream",
+    )
+    .await;
+    assert!(matches!(result, Err(ref error) if is_workflow_watchdog_timeout(error)));
+}
+
+#[tokio::test]
+async fn workflow_watchdog_times_out_before_first_event() {
+    use futures::StreamExt;
+    let stream =
+        futures::stream::pending::<Result<llm_client::LlmEvent, llm_client::LlmError>>().boxed();
+    let mut watched = with_workflow_stream_watchdog(
+        stream,
+        Some(traits::WorkflowQueryWatchdog {
+            stall_timeout_ms: 10,
+            max_retries: 0,
+        }),
+    );
+    let event = watched.next().await.expect("watchdog error event");
+    assert!(matches!(event, Err(ref error) if is_workflow_watchdog_timeout(error)));
+    assert!(
+        watched.next().await.is_none(),
+        "timeout terminates the stream"
+    );
+}
+
+#[tokio::test]
+async fn workflow_watchdog_resets_between_events_and_has_no_total_deadline() {
+    use futures::StreamExt;
+    let stream = futures::stream::unfold(0_u8, |index| async move {
+        if index == 4 {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        Some((Ok(ev_message_start()), index + 1))
+    })
+    .boxed();
+    let watched = with_workflow_stream_watchdog(
+        stream,
+        Some(traits::WorkflowQueryWatchdog {
+            stall_timeout_ms: 20,
+            max_retries: 0,
+        }),
+    );
+    let events = watched.collect::<Vec<_>>().await;
+    assert_eq!(events.len(), 4);
+    assert!(events.iter().all(Result::is_ok));
+    // Four 8ms waits exceed the 20ms idle threshold in aggregate. Success
+    // proves the deadline resets after every event instead of wrapping the
+    // whole accumulator/model round-trip.
+}
+
+struct SlowInvoker {
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl traits::ToolInvoker for SlowInvoker {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        _ctx: traits::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(serde_json::json!("slow-tool-finished"))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn workflow_watchdog_does_not_cover_tool_execution() {
+    let inner = StreamingMockApiClient::new(vec![
+        streamed_tool_use_turn("Read", "tool_use"),
+        streamed_text_turn("done", "end_turn"),
+    ]);
+    let api: Arc<dyn crate::api::SubagentApiClient> =
+        Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+            inner,
+            traits::WorkflowQueryWatchdog {
+                stall_timeout_ms: 10,
+                max_retries: 0,
+            },
+            Vec::new(),
+        ));
+    let invoker: Arc<dyn traits::ToolInvoker> = Arc::new(SlowInvoker {
+        delay: std::time::Duration::from_millis(35),
+    });
+    let ctx = loop_ctx(api, Some(invoker), 3);
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert!(events.iter().any(
+        |event| matches!(event, SubagentEvent::Completed { result, .. } if result["text"] == "done")
+    ));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+}
+
+struct TimeoutAfterToolApi {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl crate::api::SubagentApiClient for TimeoutAfterToolApi {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            Ok(text_and_tool_response("partial", "Read", Some("tool_use")))
+        } else {
+            std::future::pending().await
+        }
+    }
+}
+
+#[derive(Default)]
+struct RetryObserver {
+    attempts: Mutex<Vec<u32>>,
+    reasons: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl traits::SubagentSpawnObserver for RetryObserver {
+    async fn on_event(&self, event: traits::SubagentObservation) {
+        if let traits::SubagentObservation::Retry {
+            attempt, reason, ..
+        } = event
+        {
+            self.attempts.lock().unwrap().push(attempt);
+            self.reasons.lock().unwrap().push(reason);
+        }
+    }
+}
+
+#[tokio::test]
+async fn workflow_watchdog_retries_five_times_then_fails_without_partial_salvage() {
+    let inner = Arc::new(TimeoutAfterToolApi {
+        calls: AtomicUsize::new(0),
+    });
+    let observer = Arc::new(RetryObserver::default());
+    let observer_dyn: Arc<dyn traits::SubagentSpawnObserver> = observer.clone();
+    let api: Arc<dyn crate::api::SubagentApiClient> =
+        Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+            inner.clone(),
+            traits::WorkflowQueryWatchdog {
+                stall_timeout_ms: 10,
+                max_retries: 5,
+            },
+            vec![observer_dyn],
+        ));
+    let ctx = loop_ctx(api, Some(CountingInvoker::new()), 3);
+    let (event_tx, event_rx) = mpsc::channel(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(inner.calls.load(Ordering::SeqCst), 7);
+    assert_eq!(*observer.attempts.lock().unwrap(), vec![2, 3, 4, 5, 6]);
+    assert!(observer
+        .reasons
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|reason| reason.contains("opening the response stream")));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubagentEvent::Failed { error, .. }
+            if error.contains("workflow query timeout")
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. })),
+        "watchdog exhaustion must not salvage prior partial text as success"
+    );
 }
 
 /// Build a minimal assistant message with a single text block.
@@ -900,7 +1122,10 @@ async fn schema_retry_cap_exceeded_aborts() {
     ctx.schema =
         Some(r#"{"type":"object","properties":{"answer":{"type":"integer"}}}"#.to_string());
     let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
-    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    // Five invalid schema turns each surface multiple non-terminal events
+    // before the runner returns. Keep the fixture from back-pressuring the
+    // runner while this synchronous test waits to drain after completion.
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
     let err = evs
@@ -1487,6 +1712,38 @@ async fn loop_tool_use_then_end_turn_invokes_tool_and_runs_two_turns() {
     let result = one_completed(&evs);
     assert_eq!(result["text"], "done");
     assert_eq!(result["stop_reason"], "end_turn");
+}
+
+#[tokio::test]
+async fn permission_abort_fails_subagent_without_recoverable_tool_result() {
+    let api = MockSubagentApiClient::new(vec![
+        Ok(tool_use_response("Bash", Some("tool_use"))),
+        Ok(text_response("must not run", Some("end_turn"))),
+    ]);
+    let ctx = loop_ctx(api.clone(), Some(Arc::new(AbortInvoker)), 4);
+
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(api.call_count(), 1, "the abort must stop the model loop");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubagentEvent::Failed { error, .. }
+            if error == "Agent aborted: too many classifier denials in headless mode"
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            SubagentEvent::Message { message, .. }
+                if message.to_string().contains("tool_result")
+        )),
+        "a terminal permission abort must not be fed back to the model: {events:?}"
+    );
 }
 
 #[tokio::test]
@@ -3167,6 +3424,54 @@ async fn run_subagent_persists_its_conversation_to_the_agent_transcript() {
         body.contains("the answer"),
         "the reply is persisted: {body}"
     );
+}
+
+/// A child transcript is also the live UI's source of truth. The seeded user
+/// prompt must therefore be durable and observable before the first model
+/// response; otherwise a stalled first request leaves the agent detail screen
+/// empty even though the model already received its task.
+#[tokio::test]
+async fn run_subagent_exposes_seed_before_first_model_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = StuckThenCapturingApiClient::new();
+    let mut ctx = loop_ctx(api.clone(), None, 4);
+    ctx.transcript_subdir = dir.path().to_path_buf();
+    ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    )) as Arc<dyn traits::FileSystem>);
+    ctx.prompt_messages = vec![protocol::ConversationMessage::user(
+        MessageId::new(),
+        "design the airplane game".to_string(),
+    )];
+    let agent_id = ctx.agent_id;
+
+    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, mut out_rx) = mpsc::channel::<SubagentEvent>(16);
+    let task = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+    api.first_call_started.notified().await;
+
+    let path = dir.path().join(format!("agent-{agent_id}.jsonl"));
+    let body = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("seed transcript at {} should exist: {e}", path.display()));
+    assert!(
+        body.contains("design the airplane game"),
+        "the prompt must be readable while the first request is still pending: {body}"
+    );
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), out_rx.recv())
+        .await
+        .expect("seed message event before the first model response")
+        .expect("runner output remains open");
+    let SubagentEvent::Message { message, .. } = event else {
+        panic!("expected the seeded prompt as the first live message, got {event:?}");
+    };
+    let message: ConversationMessage =
+        serde_json::from_value(message).expect("seed event is a conversation message");
+    assert_eq!(message.text_content(), "design the airplane game");
+
+    event_tx.send(engine::Event::UserExit).await.unwrap();
+    task.await.unwrap();
 }
 
 /// A host that wires no transcript filesystem persists nothing and behaves

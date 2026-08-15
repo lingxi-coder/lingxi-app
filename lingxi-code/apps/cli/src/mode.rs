@@ -292,6 +292,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             tui_build.computer_access_rx,
         ),
     };
+    let workflow_events = tui_build.workflow_events;
     let turn_tx = tui_build.turn_tx;
     // (companyAnnouncements) The merged array, moved out before `tui_build` is
     // consumed further below; selected + rendered into the startup banner.
@@ -424,6 +425,13 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // tx clone for the off-loop stop effect (mirrors the sandbox triplet).
     let task_registry_handle: std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle> =
         tui_build.runtime.task_registry.clone();
+    if let Some(workflow_events) = workflow_events {
+        spawn_workflow_event_forwarder(
+            workflow_events,
+            task_registry_handle.clone(),
+            turn_tx.clone(),
+        );
+    }
     let task_handle = handle.clone();
     let task_turn_tx = turn_tx.clone();
     let agent_status_registry = task_registry_handle.clone();
@@ -2251,6 +2259,163 @@ async fn run_connect_action(
             }
         }
     }
+}
+
+/// Merge the desktop engine's push-only workflow feed into the same render
+/// channel as turn output. The registry is consulted only when a new task/run
+/// first appears, so this is event-triggered seeding rather than periodic
+/// polling.
+fn forward_desktop_workflow_event(
+    turn_tx: &tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+    event: engine_desktop::DesktopWorkflowEvent,
+    status_run_id: Option<String>,
+) {
+    use tui_core::multiagent::{MultiAgentEvent, WorkflowProgressEvent};
+    use tui_core::orchestrator_bridge::TurnEvent;
+
+    match event {
+        engine_desktop::DesktopWorkflowEvent::Progress {
+            task_id,
+            run_id,
+            progress,
+        } => {
+            let _ = turn_tx.send(TurnEvent::MultiAgent(MultiAgentEvent::WorkflowProgress(
+                WorkflowProgressEvent {
+                    task_id,
+                    run_id,
+                    kind: progress.kind,
+                    index: progress.index,
+                    title: progress.title,
+                    label: progress.label,
+                    phase_index: progress.phase_index.map(|value| value as usize),
+                    phase_title: progress.phase_title,
+                    state: progress.state,
+                },
+            )));
+        }
+        engine_desktop::DesktopWorkflowEvent::Status { task_id, status } => {
+            let _ = turn_tx.send(TurnEvent::MultiAgent(
+                MultiAgentEvent::WorkflowStatusChanged {
+                    task_id,
+                    run_id: status_run_id,
+                    status: match status {
+                        tasks::TaskStatus::Pending => "pending",
+                        tasks::TaskStatus::Running => "running",
+                        tasks::TaskStatus::Paused => "paused",
+                        tasks::TaskStatus::Completed => "completed",
+                        tasks::TaskStatus::Failed => "failed",
+                        tasks::TaskStatus::Killed => "killed",
+                    }
+                    .to_owned(),
+                    ended_at_ms: None,
+                },
+            ));
+        }
+    }
+}
+
+fn spawn_workflow_event_forwarder(
+    mut src: tokio::sync::mpsc::UnboundedReceiver<engine_desktop::DesktopWorkflowEvent>,
+    registry: Arc<dyn traits::task_registry::TaskRegistryHandle>,
+    turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+) {
+    use std::collections::HashMap;
+    use tui_core::multiagent::{workflow_row_from_record, MultiAgentEvent};
+    use tui_core::orchestrator_bridge::TurnEvent;
+
+    tokio::spawn(async move {
+        let mut known_runs: HashMap<String, String> = HashMap::new();
+        let mut pending_events: HashMap<String, Vec<engine_desktop::DesktopWorkflowEvent>> =
+            HashMap::new();
+        while let Some(event) = src.recv().await {
+            match event {
+                engine_desktop::DesktopWorkflowEvent::Progress {
+                    task_id,
+                    run_id,
+                    progress,
+                } => {
+                    let current = engine_desktop::DesktopWorkflowEvent::Progress {
+                        task_id: task_id.clone(),
+                        run_id: run_id.clone(),
+                        progress,
+                    };
+                    if known_runs.get(&task_id) != Some(&run_id) {
+                        let mut seeded = false;
+                        if let Ok(rows) = registry.list_workflows().await {
+                            if let Some(row) = rows.into_iter().find(|row| {
+                                row.task_id == task_id
+                                    && row.run_id.as_deref() == Some(run_id.as_str())
+                            }) {
+                                known_runs.insert(task_id.clone(), run_id.clone());
+                                let _ = turn_tx.send(TurnEvent::MultiAgent(
+                                    MultiAgentEvent::WorkflowUpsert(workflow_row_from_record(row)),
+                                ));
+                                seeded = true;
+                            }
+                        }
+                        if !seeded {
+                            pending_events.entry(task_id).or_default().push(current);
+                            continue;
+                        }
+                        if let Some(events) = pending_events.remove(&task_id) {
+                            for event in events {
+                                forward_desktop_workflow_event(
+                                    &turn_tx,
+                                    event,
+                                    known_runs.get(&task_id).cloned(),
+                                );
+                            }
+                        }
+                    }
+                    forward_desktop_workflow_event(&turn_tx, current, None);
+                }
+                engine_desktop::DesktopWorkflowEvent::Status { task_id, status } => {
+                    if known_runs.contains_key(&task_id) {
+                        let status_run_id = known_runs.get(&task_id).cloned();
+                        forward_desktop_workflow_event(
+                            &turn_tx,
+                            engine_desktop::DesktopWorkflowEvent::Status { task_id, status },
+                            status_run_id,
+                        );
+                        continue;
+                    }
+                    let current = engine_desktop::DesktopWorkflowEvent::Status {
+                        task_id: task_id.clone(),
+                        status,
+                    };
+                    let mut seeded = false;
+                    if let Ok(rows) = registry.list_workflows().await {
+                        if let Some(row) = rows.into_iter().find(|row| row.task_id == task_id) {
+                            known_runs
+                                .insert(task_id.clone(), row.run_id.clone().unwrap_or_default());
+                            let _ = turn_tx.send(TurnEvent::MultiAgent(
+                                MultiAgentEvent::WorkflowUpsert(workflow_row_from_record(row)),
+                            ));
+                            seeded = true;
+                        }
+                    }
+                    if !seeded {
+                        pending_events.entry(task_id).or_default().push(current);
+                        continue;
+                    }
+                    if let Some(events) = pending_events.remove(&task_id) {
+                        for event in events {
+                            forward_desktop_workflow_event(
+                                &turn_tx,
+                                event,
+                                known_runs.get(&task_id).cloned(),
+                            );
+                        }
+                    }
+                    forward_desktop_workflow_event(
+                        &turn_tx,
+                        current,
+                        known_runs.get(&task_id).cloned(),
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// (M8 cc2.1.198) Interpose the bridge channel: pass every [`tui::events::

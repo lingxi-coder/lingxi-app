@@ -168,6 +168,12 @@ pub struct SessionAgentSummaryDto {
     pub name: String,
     /// Agent type (for example `general-purpose` or `teammate`).
     pub agent_type: String,
+    /// Concrete provider-local model selected for this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider profile paired with [`Self::model`], when pinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_profile: Option<String>,
     /// Lifecycle label (`running`, `idle`, `completed`, `failed`, `killed`,
     /// or `unknown`).
     pub status: String,
@@ -177,6 +183,62 @@ pub struct SessionAgentSummaryDto {
     /// Last transcript update as Unix epoch milliseconds, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at_ms: Option<u64>,
+}
+
+/// Connection-scoped live workflow/subagent progress row.
+///
+/// This mirrors Claude Code's `workflow_agent` reducer shape closely enough for
+/// clients to key by `(run_id, index)` and update a row in place while keeping
+/// every field UniFFI-friendly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct WorkflowProgressDto {
+    pub kind: String,
+    pub index: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_progress_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_preview: Option<String>,
 }
 
 // ── Slash commands ───────────────────────────────────────────────────────────
@@ -400,10 +462,17 @@ pub struct TaskRowDto {
     pub status: TaskStatusDto,
     /// Human-readable description.
     pub description: String,
+    /// Whether this row represents a paused local workflow that can be
+    /// resumed through the explicit `ResumeWorkflow` command.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub can_resume: bool,
+    /// Wall-clock start time, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
 }
 
 /// Task status — the lowered `tasks::TaskStatus` (`tasks/src/state.rs:11`), the
-/// 5 byte-locked statuses. Internally tagged on `type`, `snake_case`.
+/// Internally tagged on `type`, `snake_case`.
 /// `#[non_exhaustive]` so a future status is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -414,6 +483,8 @@ pub enum TaskStatusDto {
     Pending,
     /// Currently executing.
     Running,
+    /// Checkpointed and waiting for an explicit resume.
+    Paused,
     /// Finished successfully.
     Completed,
     /// Finished with an error.

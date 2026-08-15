@@ -672,6 +672,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         // upstream and never reach `surface_model_error` — dead arms kept for
         // totality.
         OrchestratorError::Internal(_)
+        | OrchestratorError::PermissionAbort { .. }
         | OrchestratorError::StreamingProtocol(_)
         | OrchestratorError::StreamEndedWithoutStop
         | OrchestratorError::Compaction(_)
@@ -989,6 +990,8 @@ pub struct ConversationOrchestrator {
     /// Live main-loop effort. Unlike `config.effort`, this can change through
     /// stream-json control requests and in-place resume.
     pub(crate) current_effort: std::sync::RwLock<Option<String>>,
+    /// Provider-neutral live reasoning selection for subsequent requests.
+    pub(crate) current_reasoning_selection: std::sync::RwLock<traits::ReasoningSelection>,
     /// Whether the live effort came from an explicit launch/control choice.
     /// Hot resume may inherit transcript effort only while this is false.
     pub(crate) current_effort_explicit: std::sync::atomic::AtomicBool,
@@ -1792,6 +1795,10 @@ impl ConversationOrchestrator {
         );
         let session = SessionState::empty(SessionId::new(), config.model.clone());
         let current_effort = config.effort.clone();
+        let current_reasoning_selection = current_effort
+            .as_ref()
+            .map(|effort| traits::ReasoningSelection::Level { id: effort.clone() })
+            .unwrap_or(traits::ReasoningSelection::Automatic);
         let current_effort_explicit = current_effort.is_some();
         Self {
             config,
@@ -1805,6 +1812,7 @@ impl ConversationOrchestrator {
             session: Arc::new(Mutex::new(session)),
             turn_gate: Mutex::new(()),
             current_effort: std::sync::RwLock::new(current_effort),
+            current_reasoning_selection: std::sync::RwLock::new(current_reasoning_selection),
             current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),
             memory,
             current_cwd: Arc::new(std::sync::Mutex::new(cwd.clone())),
@@ -5293,6 +5301,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     "effort".to_string(),
                     serde_json::Value::String(effort.clone()),
                 );
+            }
+            let selection = self
+                .current_reasoning_selection
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if !matches!(selection, traits::ReasoningSelection::Automatic) {
+                if let Ok(value) = serde_json::to_value(selection) {
+                    extra.insert("reasoningSelection".to_string(), value);
+                }
             }
         }
         // Top-level api-error envelope (`createAssistantAPIErrorMessage`/`fje`):
@@ -10909,7 +10927,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let mut index = usize::from(
             messages
                 .first()
-                .is_some_and(Self::is_mobile_runtime_environment_message),
+                .is_some_and(|message| {
+                    Self::is_mobile_runtime_environment_message(message)
+                        || self
+                            .mobile_runtime_environment_message
+                            .as_ref()
+                            .is_some_and(|runtime| runtime == message)
+                }),
         );
         if self.mobile_runtime_environment.is_some()
             && messages.get(index).is_some_and(|message| {
@@ -12864,20 +12888,76 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     pub fn set_effort(&self, effort: Option<String>) {
         self.current_effort_explicit
             .store(true, std::sync::atomic::Ordering::Release);
+        *self
+            .current_reasoning_selection
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = effort
+            .clone()
+            .map(|id| traits::ReasoningSelection::Level { id })
+            .unwrap_or(traits::ReasoningSelection::Automatic);
         self.apply_effort(effort);
     }
 
     /// Restore transcript effort only when no launch/control override owns the
     /// live value. Unlike [`Self::set_effort`], inheritance deliberately does
     /// not pin the value, so a later resume can adopt or clear it again.
-    pub(crate) fn restore_effort_from_resume(&self, effort: Option<String>) {
+    pub(crate) fn restore_effort_from_resume(
+        &self,
+        model: &str,
+        provider_id: Option<&str>,
+        effort: Option<String>,
+    ) {
         if self
             .current_effort_explicit
             .load(std::sync::atomic::Ordering::Acquire)
         {
             return;
         }
-        self.apply_effort(effort);
+        let selection = effort
+            .clone()
+            .map(|id| traits::ReasoningSelection::Level { id })
+            .unwrap_or(traits::ReasoningSelection::Automatic);
+        let (validated, thinking, provider_effort, legacy_effort) =
+            Self::reasoning_request_state(model, provider_id, &selection);
+        *self
+            .current_reasoning_selection
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = validated;
+        *self
+            .current_effort
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = legacy_effort;
+        self.api.set_thinking_config(thinking);
+        self.api.set_effort(provider_effort);
+    }
+
+    /// Restore a structured transcript selection without claiming it as an
+    /// explicit live override. Older transcripts continue through
+    /// `restore_effort_from_resume`; newer rows retain toggles and budgets.
+    pub(crate) fn restore_reasoning_selection_from_resume(
+        &self,
+        model: &str,
+        provider_id: Option<&str>,
+        selection: traits::ReasoningSelection,
+    ) {
+        if self
+            .current_effort_explicit
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        let (validated, thinking, provider_effort, legacy_effort) =
+            Self::reasoning_request_state(model, provider_id, &selection);
+        *self
+            .current_reasoning_selection
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = validated;
+        *self
+            .current_effort
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = legacy_effort;
+        self.api.set_thinking_config(thinking);
+        self.api.set_effort(provider_effort);
     }
 
     fn apply_effort(&self, effort: Option<String>) {
@@ -12886,6 +12966,459 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = effort.clone();
         self.api.set_effort(effort.map(serde_json::Value::String));
+    }
+
+    #[must_use]
+    pub fn current_reasoning_selection(&self) -> traits::ReasoningSelection {
+        self.current_reasoning_selection
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Project the llm-client's request-facing capability registry into the
+    /// provider-neutral controls DTO. Keeping this conversion at the
+    /// orchestrator seam means the same catalog that validates/encodes a
+    /// request also drives the mobile UI; unknown/custom profiles remain
+    /// Auto-only because they have no verified adapter contract.
+    fn reasoning_spec_for_model(
+        model: &str,
+        provider_id: Option<&str>,
+    ) -> traits::ReasoningControlSpec {
+        // A missing profile is the legacy/builtin route for known Anthropic
+        // models. Infer it only from the shared model-capability registry;
+        // arbitrary or custom ids remain Auto-only instead of inheriting
+        // Anthropic controls by name.
+        let inferred_provider = provider_id.or_else(|| {
+            traits::model_capabilities::has_capability(
+                model,
+                traits::model_capabilities::ModelCapability::Effort,
+            )
+            .then_some("builtin")
+        });
+        let (protocol, base_url) = match inferred_provider.unwrap_or_default() {
+            "anthropic" | "builtin" => (
+                llm_client::ProtocolFamily::AnthropicMessages,
+                "https://api.anthropic.com",
+            ),
+            "openai" => (
+                llm_client::ProtocolFamily::OpenAiResponses,
+                "https://api.openai.com/v1",
+            ),
+            "openai-chatgpt" => (
+                llm_client::ProtocolFamily::OpenAiResponses,
+                "https://chatgpt.com/backend-api/codex",
+            ),
+            "gemini" => (
+                llm_client::ProtocolFamily::GeminiGenerateContent,
+                "https://generativelanguage.googleapis.com/v1beta",
+            ),
+            "deepseek" => (
+                llm_client::ProtocolFamily::OpenAiChat,
+                "https://api.deepseek.com",
+            ),
+            "kimi" => (
+                llm_client::ProtocolFamily::OpenAiChat,
+                "https://api.moonshot.cn/v1",
+            ),
+            "kimi-code" => (
+                llm_client::ProtocolFamily::OpenAiChat,
+                "https://api.kimi.com/coding/v1",
+            ),
+            "openrouter" => (
+                llm_client::ProtocolFamily::OpenAiChat,
+                "https://openrouter.ai/api/v1",
+            ),
+            _ => return traits::reasoning_control_spec_for_model(model, inferred_provider),
+        };
+
+        let raw = llm_client::reasoning_controls::reasoning_control_spec(
+            llm_client::reasoning_controls::ReasoningTarget {
+                profile_name: inferred_provider,
+                protocol: &protocol,
+                base_url,
+                model,
+            },
+        );
+        let mandatory = raw.mandatory_selection.as_ref().map(|selection| match selection {
+            llm_client::reasoning_controls::ReasoningSelection::Automatic => {
+                traits::ReasoningSelection::Automatic
+            }
+            llm_client::reasoning_controls::ReasoningSelection::Disabled => {
+                traits::ReasoningSelection::Disabled
+            }
+            llm_client::reasoning_controls::ReasoningSelection::Enabled => {
+                traits::ReasoningSelection::Enabled
+            }
+            llm_client::reasoning_controls::ReasoningSelection::Level(id) => {
+                traits::ReasoningSelection::Level { id: id.clone() }
+            }
+            llm_client::reasoning_controls::ReasoningSelection::TokenBudget(tokens) => {
+                traits::ReasoningSelection::TokenBudget {
+                    tokens: u64::from(*tokens),
+                }
+            }
+        });
+
+        let mut available = Vec::new();
+        if let Some(mandatory) = &mandatory {
+            available.push(mandatory.clone());
+        } else {
+            available.push(traits::ReasoningSelection::Automatic);
+            if raw.can_disable {
+                available.push(traits::ReasoningSelection::Disabled);
+            }
+            if raw.can_enable {
+                available.push(traits::ReasoningSelection::Enabled);
+            }
+            available.extend(raw.levels.iter().cloned().map(|id| {
+                traits::ReasoningSelection::Level { id }
+            }));
+        }
+
+        let auto_only = available.len() == 1
+            && matches!(available.first(), Some(traits::ReasoningSelection::Automatic))
+            && raw.token_budget.is_none();
+        traits::ReasoningControlSpec {
+            available,
+            selections_persistable: mandatory.is_none(),
+            budget_range: raw.token_budget.map(|range| traits::ReasoningBudgetRange {
+                min_tokens: range.min,
+                max_tokens: range.max,
+                supports_dynamic: false,
+                supports_disabled: raw.can_disable,
+            }),
+            provider_default: mandatory.unwrap_or(traits::ReasoningSelection::Automatic),
+            forced: raw.mandatory_selection.is_some(),
+            modifiable: raw.mandatory_selection.is_none() && !auto_only,
+            disabled_reason: if raw.mandatory_selection.is_some() {
+                Some("reasoning_required".to_string())
+            } else if auto_only {
+                Some("reasoning_unavailable".to_string())
+            } else {
+                None
+            },
+        }
+    }
+
+    fn validate_reasoning_selection(
+        selection: &traits::ReasoningSelection,
+        model: &str,
+        provider_id: Option<&str>,
+    ) -> traits::ReasoningSelection {
+        let spec = Self::reasoning_spec_for_model(model, provider_id);
+        let supported = match selection {
+            traits::ReasoningSelection::Automatic => true,
+            traits::ReasoningSelection::TokenBudget { tokens } => spec
+                .budget_range
+                .as_ref()
+                .is_some_and(|range| {
+                    (*tokens >= u64::from(range.min_tokens)
+                        && *tokens <= u64::from(range.max_tokens))
+                        || (range.supports_disabled && *tokens == 0)
+                }),
+            other => spec.available.iter().any(|candidate| candidate == other),
+        };
+        if spec.forced && !spec.modifiable {
+            spec.provider_default
+        } else if supported {
+            selection.clone()
+        } else {
+            traits::ReasoningSelection::Automatic
+        }
+    }
+
+    fn reasoning_request_state(
+        model: &str,
+        provider_id: Option<&str>,
+        selection: &traits::ReasoningSelection,
+    ) -> (
+        traits::ReasoningSelection,
+        llm_client::model::thinking::ThinkingConfig,
+        Option<serde_json::Value>,
+        Option<String>,
+    ) {
+        use llm_client::model::thinking::ThinkingConfig;
+        let validated = Self::validate_reasoning_selection(selection, model, provider_id);
+        let effort_level = |id: &str| Some(serde_json::Value::String(id.to_string()));
+        let legacy = |id: &str| Some(id.to_string());
+        let provider_id = provider_id.or_else(|| {
+            traits::model_capabilities::has_capability(
+                model,
+                traits::model_capabilities::ModelCapability::Effort,
+            )
+            .then_some("builtin")
+        });
+        let provider_id = provider_id.unwrap_or_default();
+        let model_lc = model.to_ascii_lowercase();
+
+        match provider_id {
+            "anthropic" | "builtin" => match &validated {
+                traits::ReasoningSelection::Automatic => {
+                    (validated, ThinkingConfig::Automatic, None, None)
+                }
+                traits::ReasoningSelection::Disabled => {
+                    (validated, ThinkingConfig::Disabled, None, None)
+                }
+                traits::ReasoningSelection::TokenBudget { tokens } => (
+                    validated.clone(),
+                    ThinkingConfig::Enabled {
+                        budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
+                    },
+                    None,
+                    None,
+                ),
+                traits::ReasoningSelection::Level { id } => {
+                    (validated.clone(), ThinkingConfig::Adaptive, effort_level(id), legacy(id))
+                }
+                traits::ReasoningSelection::Enabled => {
+                    (validated, ThinkingConfig::Adaptive, None, None)
+                }
+            },
+            "openai" | "openai-chatgpt" => match &validated {
+                traits::ReasoningSelection::Automatic => {
+                    (validated, ThinkingConfig::Automatic, None, None)
+                }
+                traits::ReasoningSelection::Level { id } => {
+                    (validated.clone(), ThinkingConfig::Adaptive, effort_level(id), legacy(id))
+                }
+                traits::ReasoningSelection::Disabled => {
+                    // Responses API uses the explicit `none` effort value to
+                    // distinguish a user-off override from provider Auto.
+                    (validated, ThinkingConfig::Disabled, effort_level("none"), None)
+                }
+                traits::ReasoningSelection::Enabled => {
+                    (validated, ThinkingConfig::Adaptive, None, None)
+                }
+                traits::ReasoningSelection::TokenBudget { .. } => {
+                    (validated, ThinkingConfig::Adaptive, None, None)
+                }
+            },
+            "gemini" => {
+                if model_lc.starts_with("gemini-3.") {
+                    match &validated {
+                        traits::ReasoningSelection::Automatic => {
+                            (validated, ThinkingConfig::Automatic, None, None)
+                        }
+                        traits::ReasoningSelection::Level { id } => {
+                            (validated.clone(), ThinkingConfig::Adaptive, effort_level(id), legacy(id))
+                        }
+                        traits::ReasoningSelection::Disabled => {
+                            (validated, ThinkingConfig::Disabled, None, None)
+                        }
+                        traits::ReasoningSelection::Enabled => {
+                            (validated, ThinkingConfig::Adaptive, None, None)
+                        }
+                        traits::ReasoningSelection::TokenBudget { .. } => {
+                            (validated, ThinkingConfig::Adaptive, None, None)
+                        }
+                    }
+                } else {
+                    match &validated {
+                        traits::ReasoningSelection::Automatic => {
+                            (validated, ThinkingConfig::Automatic, None, None)
+                        }
+                        traits::ReasoningSelection::TokenBudget { tokens } => (
+                            validated.clone(),
+                            ThinkingConfig::Enabled {
+                                budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
+                            },
+                            None,
+                            None,
+                        ),
+                        traits::ReasoningSelection::Disabled => {
+                            (validated, ThinkingConfig::Disabled, None, None)
+                        }
+                        traits::ReasoningSelection::Enabled => {
+                            (validated, ThinkingConfig::Adaptive, None, None)
+                        }
+                        traits::ReasoningSelection::Level { .. } => {
+                            (validated, ThinkingConfig::Adaptive, None, None)
+                        }
+                    }
+                }
+            }
+            "deepseek" => match &validated {
+                traits::ReasoningSelection::Automatic => (
+                    validated,
+                    ThinkingConfig::Automatic,
+                    None,
+                    None,
+                ),
+                traits::ReasoningSelection::Disabled => (
+                    validated,
+                    ThinkingConfig::Disabled,
+                    effort_level("off"),
+                    None,
+                ),
+                traits::ReasoningSelection::Level { id } => {
+                    (validated.clone(), ThinkingConfig::Adaptive, effort_level(id), legacy(id))
+                }
+                traits::ReasoningSelection::Enabled => {
+                    (validated, ThinkingConfig::Adaptive, None, None)
+                }
+                traits::ReasoningSelection::TokenBudget { .. } => {
+                    (validated, ThinkingConfig::Adaptive, None, None)
+                }
+            },
+            "kimi" | "kimi-code" => {
+                if matches!(model_lc.as_str(), "kimi-k3" | "k3" | "k3-256k") {
+                    match &validated {
+                        traits::ReasoningSelection::Automatic => (
+                            validated,
+                            ThinkingConfig::Automatic,
+                            None,
+                            None,
+                        ),
+                        traits::ReasoningSelection::Level { id } => (
+                            validated.clone(),
+                            ThinkingConfig::Adaptive,
+                            effort_level(id),
+                            legacy(id),
+                        ),
+                        traits::ReasoningSelection::Disabled => {
+                            (validated, ThinkingConfig::Disabled, None, None)
+                        }
+                        traits::ReasoningSelection::Enabled => {
+                            (validated, ThinkingConfig::Adaptive, None, None)
+                        }
+                        traits::ReasoningSelection::TokenBudget { .. } => {
+                            (validated, ThinkingConfig::Adaptive, None, None)
+                        }
+                    }
+                } else {
+                    match &validated {
+                        traits::ReasoningSelection::Automatic => (
+                            validated,
+                            ThinkingConfig::Automatic,
+                            None,
+                            None,
+                        ),
+                        traits::ReasoningSelection::Disabled => (
+                            validated,
+                            ThinkingConfig::Disabled,
+                            effort_level("off"),
+                            None,
+                        ),
+                        traits::ReasoningSelection::Enabled => (
+                            validated,
+                            ThinkingConfig::Adaptive,
+                            effort_level("on"),
+                            None,
+                        ),
+                        traits::ReasoningSelection::Level { id } => {
+                            (validated.clone(), ThinkingConfig::Adaptive, effort_level(id), legacy(id))
+                        }
+                        traits::ReasoningSelection::TokenBudget { tokens } => (
+                            validated.clone(),
+                            ThinkingConfig::Enabled {
+                                budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
+                            },
+                            None,
+                            None,
+                        ),
+                    }
+                }
+            }
+            _ => match &validated {
+                traits::ReasoningSelection::Automatic => {
+                    (validated, ThinkingConfig::Automatic, None, None)
+                }
+                _ => (validated, ThinkingConfig::Adaptive, None, None),
+            },
+        }
+    }
+
+    pub fn set_reasoning_selection_for_model(
+        &self,
+        model: &str,
+        provider_id: Option<&str>,
+        selection: traits::ReasoningSelection,
+    ) -> traits::ReasoningSelection {
+        self.current_effort_explicit
+            .store(true, std::sync::atomic::Ordering::Release);
+        let (validated, thinking, effort, legacy_effort) =
+            Self::reasoning_request_state(model, provider_id, &selection);
+        *self
+            .current_reasoning_selection
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = validated.clone();
+        *self
+            .current_effort
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = legacy_effort.clone();
+        self.api.set_thinking_config(thinking);
+        self.api.set_effort(effort);
+        validated
+    }
+
+    /// Seed a persisted new-session default without marking it as an explicit
+    /// session override.  This lets resume restore a transcript's selection
+    /// while still applying the user's default to a genuinely new session.
+    pub fn initialize_reasoning_selection_for_model(
+        &self,
+        model: &str,
+        provider_id: Option<&str>,
+        selection: traits::ReasoningSelection,
+    ) -> traits::ReasoningSelection {
+        let (validated, thinking, effort, legacy_effort) =
+            Self::reasoning_request_state(model, provider_id, &selection);
+        self.current_effort_explicit
+            .store(false, std::sync::atomic::Ordering::Release);
+        *self
+            .current_reasoning_selection
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = validated.clone();
+        *self
+            .current_effort
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = legacy_effort;
+        self.api.set_thinking_config(thinking);
+        self.api.set_effort(effort);
+        validated
+    }
+
+    #[must_use]
+    pub fn conversation_controls_for_model(
+        &self,
+        model: &str,
+        provider_id: Option<&str>,
+    ) -> traits::ConversationControls {
+        let reasoning_spec = Self::reasoning_spec_for_model(model, provider_id);
+        let requested_reasoning = self.current_reasoning_selection();
+        let effective_reasoning =
+            Self::validate_reasoning_selection(&requested_reasoning, model, provider_id);
+        let requested_permission = self.permission_mode().unwrap_or_else(|| "default".to_string());
+        let effective_permission = requested_permission.clone();
+        let permission_modes = [
+            "default",
+            "acceptEdits",
+            "plan",
+            "auto",
+            "dontAsk",
+            "bypassPermissions",
+        ]
+        .into_iter()
+        .map(|mode| {
+            let unavailable = mode == "bypassPermissions";
+            traits::PermissionModeAvailability {
+                mode: mode.to_string(),
+                available: !unavailable,
+                disabled_reason: unavailable.then(|| "not_yet_available".to_string()),
+            }
+        })
+        .collect();
+        traits::ConversationControls {
+            model_reference: traits::qualified_model_ref(model, provider_id),
+            permission: traits::PermissionControlState {
+                requested: requested_permission,
+                effective: effective_permission,
+                modes: permission_modes,
+            },
+            requested_reasoning_selection: requested_reasoning,
+            effective_reasoning_selection: effective_reasoning,
+            reasoning_spec,
+        }
     }
 
     /// Apply a LIVE session permission-mode change (stream-json

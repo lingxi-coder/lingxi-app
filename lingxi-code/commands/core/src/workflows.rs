@@ -1,4 +1,4 @@
-//! `/workflows` — browse running and completed dynamic workflows.
+//! `/workflows` — browse running, paused, and completed dynamic workflows.
 //!
 //! The TUI intercepts this command and opens its interactive workflow picker.
 //! This handler is the shared registry/headless projection used by mobile and
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use traits::task_registry::{TaskRegistryHandle, WorkflowRecord};
 
-const DESCRIPTION: &str = "Browse running and completed workflows";
+const DESCRIPTION: &str = "Browse running, paused, and completed workflows";
 const TITLE: &str = "Dynamic workflows";
 const EMPTY: &str = "No dynamic workflows in this session.";
 
@@ -123,13 +123,20 @@ fn render_workflows(records: &[WorkflowRecord], agent_counts: &[usize], now_ms: 
         .iter()
         .filter(|record| record.status == "running")
         .count();
-    let completed = records.len() - running;
-    let mut summary = Vec::with_capacity(2);
+    let paused = records
+        .iter()
+        .filter(|record| record.status == "paused")
+        .count();
+    let completed = records.len() - running - paused;
+    let mut summary = Vec::with_capacity(3);
     if running > 0 {
         summary.push(format!("{running} running"));
     }
     if completed > 0 {
         summary.push(format!("{completed} completed"));
+    }
+    if paused > 0 {
+        summary.push(format!("{paused} paused"));
     }
 
     let mut lines = vec![TITLE.to_string(), summary.join(" · "), String::new()];
@@ -137,6 +144,7 @@ fn render_workflows(records: &[WorkflowRecord], agent_counts: &[usize], now_ms: 
         let glyph = match record.status.as_str() {
             "completed" => "✔",
             "failed" | "killed" => "✘",
+            "paused" => "Ⅱ",
             _ => "⟳",
         };
         let mut meta = Vec::with_capacity(2);
@@ -155,6 +163,22 @@ fn render_workflows(records: &[WorkflowRecord], agent_counts: &[usize], now_ms: 
             format!("  {}", meta.join(" · "))
         };
         lines.push(format!("{glyph} {}{suffix}", display_name(record)));
+        if record.status == "paused" {
+            if let (Some(script_path), Some(run_id)) =
+                (record.script_path.as_deref(), record.run_id.as_deref())
+            {
+                let script_path = script_path.replace('\\', "\\\\").replace('\'', "\\'");
+                let args = record
+                    .args
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(|value| format!(", args: {value}"))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "  Resume: Workflow({{scriptPath: '{script_path}', resumeFromRunId: '{run_id}'{args}}})"
+                ));
+            }
+        }
     }
     lines.join("\n")
 }
@@ -227,6 +251,24 @@ mod tests {
         assert_eq!(
             rendered,
             "Dynamic workflows\n1 running · 1 completed\n\n⟳ Build  2 agents · 45s\n✔ Audit  1 agent · 1m 23s"
+        );
+    }
+
+    #[test]
+    fn paused_snapshot_exposes_the_explicit_resume_call() {
+        let mut paused = record("w-pause", "Build", "paused", 10_000, None);
+        paused.run_id = Some("wf_abcdef".into());
+        paused.script_path = Some("/workspace/build.js".into());
+        paused.args = Some(r#"{"app_id":"demo"}"#.into());
+
+        assert_eq!(
+            render_workflows(&[paused], &[1], 55_000),
+            concat!(
+                "Dynamic workflows\n1 paused\n\n",
+                "Ⅱ Build  1 agent · 45s\n",
+                "  Resume: Workflow({scriptPath: '/workspace/build.js', ",
+                "resumeFromRunId: 'wf_abcdef', args: {\"app_id\":\"demo\"}})"
+            )
         );
     }
 

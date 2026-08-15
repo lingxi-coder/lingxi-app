@@ -1138,7 +1138,11 @@ Reach for this when the task matches an available agent type, when you have inde
             context_paths: parsed.context_paths.clone(),
             description: Some(parsed.description.clone()),
             model: if is_fork { None } else { parsed.model.clone() },
-            model_profile: None,
+            model_profile: if parsed.model.is_none() {
+                ctx.options.model_profile.clone()
+            } else {
+                None
+            },
             run_in_background: true,
             name: if is_fork { None } else { parsed.name.clone() },
             team_name: if is_fork {
@@ -2057,7 +2061,11 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // FORK_AGENT's `Inherit` resolves to the parent model unchanged; the
             // explicit-model override is honored only on the non-fork path.
             model: if is_fork { None } else { parsed.model.clone() },
-            model_profile: None,
+            model_profile: if parsed.model.is_none() {
+                ctx.options.model_profile.clone()
+            } else {
+                None
+            },
             // This is the synchronous arm after the resolved availability and
             // subscription gates above. Do not leak the caller's now-disabled
             // request bit into the child runtime snapshot.

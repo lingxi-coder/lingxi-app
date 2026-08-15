@@ -1085,6 +1085,7 @@ mod tests {
         let result = handler
             .spawn(
                 TaskSpawnInput::LocalWorkflow {
+                    session_uuid: None,
                     workflow_id: "wf".into(),
                     script: String::new(),
                     resume_from_run_id: None,

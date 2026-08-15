@@ -10,7 +10,7 @@ export const meta = {
   ],
 };
 
-// args: { app_id: string, spec: string|object, revision_prompt?: string }
+// args: { app_id: string, spec: string|object, revision_prompt?: string, model?: string }
 const input = args && typeof args === 'object' ? args : {};
 const appId = typeof input.app_id === 'string' ? input.app_id : '';
 if (!appId) {
@@ -34,6 +34,16 @@ if (
   );
 }
 const revision = typeof input.revision_prompt === 'string' ? input.revision_prompt : '';
+const requestedModel = typeof input.model === 'string' ? input.model.trim() : '';
+const modelSeparator = requestedModel.indexOf('/');
+const modelOptions = requestedModel
+  ? modelSeparator > 0 && modelSeparator < requestedModel.length - 1
+    ? {
+        model: requestedModel.slice(modelSeparator + 1),
+        modelProfile: requestedModel.slice(0, modelSeparator),
+      }
+    : { model: requestedModel }
+  : {};
 
 const CONTRACT = [
   'Workspace contract (violations break the app):',
@@ -158,6 +168,7 @@ const designResult = await agent(
     'The CLI scaffold is the only Design-phase source initialization. Do not install packages in this phase; Dependencies owns npm install/npm uninstall/npm ci.',
   ].join('\n'),
   {
+    ...modelOptions,
     label: 'design',
     phase: 'Design',
     schema: DESIGN_RESULT_SCHEMA,
@@ -180,7 +191,7 @@ const dependenciesResult = await agent(
     'Use the existing Git capability for checkpoint status, diff, and source restore operations when available; otherwise use standard git commands through Shell. Preserve app data and keep package-lock.json in the normal workspace history.',
     'Reject empty, newline/NUL, option-like, ambiguous, or more-than-64 specs before invoking Shell; keep every displayed spec exact and never silently add a package.',
   ].join('\n'),
-  { label: 'dependencies', phase: 'Dependencies', throwOnError: true },
+  { ...modelOptions, label: 'dependencies', phase: 'Dependencies', throwOnError: true },
 );
 const dependencies = requireAgentResult(dependenciesResult, 'the dependency step');
 
@@ -198,7 +209,7 @@ const generated = await agent(
     'When the UI persists declared collection data, use the locked upsertRecord/deleteRecord helpers and queryCollection response shape. Read only records[].document for app fields. Do not make localStorage, IndexedDB, or an in-memory cache authoritative over native collection data. Do not swallow bridge errors or convert a rejected native write into UI success.',
     'Use platform tokens and adapters instead of scattered platform conditionals. Include loading, empty, error, success, disabled, offline, permission-denied, and reduced-motion states where relevant. Build actual copy and interaction paths, not a placeholder shell. Do not build or start anything in this phase.',
   ].join('\n'),
-  { label: 'generate', phase: 'Generate', throwOnError: true },
+  { ...modelOptions, label: 'generate', phase: 'Generate', throwOnError: true },
 );
 // Without this check the Build phase would happily build the untouched
 // scaffold, the host would stamp the app `ready`, and the workflow would
@@ -215,6 +226,7 @@ let build = requirePreviewOnSuccess(await agent(
     CONTRACT,
   ].join('\n'),
   {
+    ...modelOptions,
     label: 'build',
     phase: 'Build',
     schema: BUILD_RESULT_SCHEMA,
@@ -241,6 +253,7 @@ for (let round = 0; round <= 2; round += 1) {
       'Return ok, findings, checked matrix, browser_available, webview_checked, degraded_verification, and data_roundtrip {status, collections, evidence}. Do not repair source in this pass.',
     ].join('\n'),
     {
+      ...modelOptions,
       label: `verify-${round}`,
       phase: 'Verify',
       schema: VERIFICATION_RESULT_SCHEMA,
@@ -258,6 +271,7 @@ for (let round = 0; round <= 2; round += 1) {
       'Fix the smallest source-level cause. Do not install packages or edit workspace package files in the repair pass, and do not claim verification yet.',
     ].join('\n'),
     {
+      ...modelOptions,
       label: `repair-${repairRounds}`,
       phase: 'Verify',
       throwOnError: true,
@@ -272,6 +286,7 @@ for (let round = 0; round <= 2; round += 1) {
       CONTRACT,
     ].join('\n'),
     {
+      ...modelOptions,
       label: `rebuild-${repairRounds}`,
       phase: 'Verify',
       schema: BUILD_RESULT_SCHEMA,

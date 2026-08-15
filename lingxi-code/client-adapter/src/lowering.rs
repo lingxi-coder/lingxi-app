@@ -146,6 +146,7 @@ pub fn lower_check_status(status: &CheckStatus) -> CheckStatusDto {
 pub fn lower_task_status(wire: &str) -> TaskStatusDto {
     match wire {
         "running" => TaskStatusDto::Running,
+        "paused" => TaskStatusDto::Paused,
         "completed" => TaskStatusDto::Completed,
         "failed" => TaskStatusDto::Failed,
         "killed" => TaskStatusDto::Cancelled,
@@ -288,6 +289,11 @@ pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
         task_type: rec.task_type.clone(),
         status: lower_task_status(&rec.status),
         description: rec.description.clone(),
+        // The reduced task record intentionally keeps no script/checkpoint
+        // paths. The concrete mobile command performs the stronger metadata
+        // validation before launching; this flag is only an affordance hint.
+        can_resume: rec.task_type == "local_workflow" && rec.status == "paused",
+        started_at_ms: rec.started_at_ms,
     }
 }
 
@@ -540,6 +546,7 @@ mod tests {
     fn task_status_wire_lowers_with_killed_to_cancelled() {
         assert_eq!(lower_task_status("pending"), TaskStatusDto::Pending);
         assert_eq!(lower_task_status("running"), TaskStatusDto::Running);
+        assert_eq!(lower_task_status("paused"), TaskStatusDto::Paused);
         assert_eq!(lower_task_status("completed"), TaskStatusDto::Completed);
         assert_eq!(lower_task_status("failed"), TaskStatusDto::Failed);
         // The engine's terminal "killed" maps to the DTO's user-stop variant.

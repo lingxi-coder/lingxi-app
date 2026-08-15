@@ -186,6 +186,17 @@ fun MainSettingsPage(
                 label = stringResource(R.string.settings_data_privacy), sub = stringResource(R.string.settings_data_privacy_sub),
                 onTap = { navController.navigate(SettingsRoutes.PRIVACY) },
             )
+            SettingsRow(
+                icon = LXIconName.Check, iconColor = t.accent,
+                label = stringResource(R.string.settings_permission_mode_title),
+                sub = stringResource(R.string.settings_permission_mode_sub),
+                value = if (state.permissionMode == state.effectivePermissionMode) {
+                    state.permissionMode
+                } else {
+                    "${state.permissionMode} → ${state.effectivePermissionMode}"
+                },
+                onTap = { navController.navigate(SettingsRoutes.PERMISSION_MODE) },
+            )
             PrivacyToggleRow(LXIconName.Sparkle, t.text3, stringResource(R.string.settings_usage_diagnostics), state.telemetry) {}
             PrivacyToggleRow(LXIconName.Check, t.text3, stringResource(R.string.settings_auto_update), state.autoUpdate, isLast = true) {}
         }

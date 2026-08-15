@@ -26,6 +26,7 @@ import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.model.DefaultSessionCatalogStrings
+import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.model.SessionCatalogStrings
 import kotlinx.coroutines.CoroutineStart
@@ -100,6 +101,16 @@ class LocalAppsViewModel(
                     launch(start = CoroutineStart.UNDISPATCHED) {
                         bound.clientEvents.collect(::reduce)
                     }
+                    launch(start = CoroutineStart.UNDISPATCHED) {
+                        bound.modelState.collect { engine ->
+                            _uiState.update {
+                                it.copy(
+                                    workflowModels = EngineModelCatalog.options(engine.available),
+                                    currentWorkflowModelId = engine.active.takeIf(String::isNotBlank),
+                                )
+                            }
+                        }
+                    }
                     launch { requestSnapshots(bound) }
                 }
             }
@@ -120,7 +131,11 @@ class LocalAppsViewModel(
             LocalAppsAction.Create -> _uiState.update { it.copy(createName = "") }
             is LocalAppsAction.Search -> _uiState.update { it.copy(query = action.query) }
             is LocalAppsAction.ChangeCreateName -> _uiState.update { it.copy(createName = action.name) }
-            is LocalAppsAction.CreateFromBrief -> createFromBrief(action.brief, action.gitEnabled)
+            is LocalAppsAction.CreateFromBrief -> createFromBrief(
+                brief = action.brief,
+                gitEnabled = action.gitEnabled,
+                workflowModel = action.workflowModel,
+            )
             is LocalAppsAction.OpenApp -> openApp(action.appId)
             is LocalAppsAction.LoadAppSessions -> requestSessions(action.appId, action.offset)
             is LocalAppsAction.StartRuntime -> {
@@ -176,9 +191,25 @@ class LocalAppsViewModel(
      * the caller's name is blank, so there is no client-side name to collect
      * or fabricate (mirrors iOS's `LocalAppsStore.createApp(brief:)`).
      */
-    private fun createFromBrief(brief: String, gitEnabled: Boolean) {
+    private fun createFromBrief(
+        brief: String,
+        gitEnabled: Boolean,
+        workflowModel: String?,
+    ) {
         val trimmedBrief = brief.trim()
         if (trimmedBrief.isEmpty()) return
+        val selectedModel = workflowModel?.trim()?.takeIf(String::isNotEmpty)
+        if (selectedModel != null && _uiState.value.workflowModels.none { it.id == selectedModel }) {
+            // An explicit selection must still belong to the engine's live catalog.
+            // Do not silently turn a stale/forged id into "follow current".
+            error(
+                strings.resolve(
+                    R.string.local_apps_error_workflow_model_unavailable,
+                    "所选 Workflow 模型已不可用，请重新选择。",
+                ),
+            )
+            return
+        }
         pendingCreates += trimmedBrief
         submit(
             ClientCommand.CreateApp(
@@ -186,6 +217,7 @@ class LocalAppsViewModel(
                 origin = AppCreateOriginDto.LIBRARY,
                 brief = trimmedBrief,
                 gitEnabled = gitEnabled,
+                workflowModel = selectedModel,
                 conversationId = null,
             ),
         )

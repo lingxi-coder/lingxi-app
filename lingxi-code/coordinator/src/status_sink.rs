@@ -69,7 +69,7 @@ impl CoordinatorStatusSink {
             TaskStatus::Killed => Some(WorkerStatus::Killed),
             // No transition: `Pending` predates the worker link; `Completed` is
             // emitted per turn-set by a still-running persistent teammate.
-            TaskStatus::Pending | TaskStatus::Completed => None,
+            TaskStatus::Pending | TaskStatus::Paused | TaskStatus::Completed => None,
         }
     }
 }

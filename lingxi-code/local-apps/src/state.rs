@@ -76,6 +76,7 @@ impl AppState {
                 id: id.clone(),
                 name,
                 brief,
+                workflow_model: None,
                 git_enabled,
                 init_session_id: None,
                 created_at_ms: now_ms,

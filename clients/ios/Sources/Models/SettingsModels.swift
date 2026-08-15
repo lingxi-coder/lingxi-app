@@ -304,6 +304,44 @@ final class SettingsStore {
     var bioLock = true
     var telemetry = false
     var autoUpdate = true
+    var permissionMode = PermissionModeConfigurationRepository.shared.load()
+    var effectivePermissionMode = PermissionModeConfigurationRepository.shared.load()
+    var permissionModeError: String?
+
+    @discardableResult
+    func setPermissionMode(_ mode: String) -> Bool {
+        guard ["default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"].contains(mode) else { return false }
+        do {
+            try PermissionModeConfigurationRepository.shared.save(mode)
+            permissionMode = mode
+            permissionModeError = nil
+            return true
+        } catch {
+            // Keep the previous value when persistence fails; the UI can retry.
+            permissionModeError = error.localizedDescription
+            return false
+        }
+    }
+
+    func restorePermissionMode(_ mode: String, effectiveMode: String? = nil, error: String? = nil) {
+        let persistenceError: String?
+        do {
+            try PermissionModeConfigurationRepository.shared.save(mode)
+            persistenceError = nil
+        } catch {
+            persistenceError = errorMessage(error)
+        }
+        permissionMode = mode
+        effectivePermissionMode = effectiveMode ?? mode
+        let messages = [error, persistenceError]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+        permissionModeError = messages.isEmpty ? nil : messages.joined(separator: "; ")
+    }
+
+    private func errorMessage(_ error: Error) -> String {
+        error.localizedDescription
+    }
 
     // MARK: store access by kind
 

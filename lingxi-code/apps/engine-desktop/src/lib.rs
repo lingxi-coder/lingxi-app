@@ -445,7 +445,10 @@ async fn load_boot_permission_tiers(
     setting_source_scope: (bool, bool),
 ) -> BootPermissionTiers {
     let mut rules = Vec::new();
-    let mut mode = permission::PermissionMode::Default;
+    // With no explicit setting, new sessions start in Auto.  The resolved
+    // mode is still passed through the existing model/provider/killswitch gate
+    // below, so unsupported routes safely downgrade to Default.
+    let mut mode = permission::PermissionMode::Auto;
     let mut bypass_disabled = false;
     let mut auto_mode_disabled = false;
     let mut classify_all_shell = false;
@@ -1063,14 +1066,13 @@ fn managed_only_sandbox_overrides(
 /// later scalars override earlier but omitted fields are preserved), so
 /// `sandbox.allowAppleEvents` is resolved PER-FIELD last-defined across the
 /// tiers — a later drop-in that carries only a partial `sandbox` block (e.g.
-/// `{"sandbox":{"network":…}}`) must NOT clobber an earlier tier's value. The
-/// engine has no boot-time `--settings` analog (see the `sandbox_runtime_cfg`
-/// comment on `flagSettings`), so the flag slot is skipped. Returns `None` when
-/// no honored source set it — matching CC's `.find(...) === undefined ⇒ manager
-/// reads `false``. Threaded onto
+/// `{"sandbox":{"network":…}}`) must NOT clobber an earlier tier's value.
+/// Returns `None` when no honored source set it — matching CC's
+/// `.find(...) === undefined ⇒ manager reads `false``. Threaded onto
 /// [`SandboxConvertContext::allow_apple_events_override`].
 fn apple_events_override(
     managed_raw_tiers: &[String],
+    flag_settings_raw: Option<&str>,
     user_settings_raw: Option<&str>,
 ) -> Option<bool> {
     use sandbox::runtime_config::SettingsJson;
@@ -1087,7 +1089,13 @@ fn apple_events_override(
     if let Some(v) = merged_managed {
         return Some(v);
     }
-    // flagSettings has no boot-time analog in the engine (skipped) — then user.
+    if let Some(v) = flag_settings_raw
+        .and_then(|raw| serde_json::from_str::<SettingsJson>(raw).ok())
+        .and_then(|s| s.sandbox)
+        .and_then(|s| s.allow_apple_events)
+    {
+        return Some(v);
+    }
     user_settings_raw
         .and_then(|raw| serde_json::from_str::<SettingsJson>(raw).ok())
         .and_then(|s| s.sandbox)
@@ -1097,7 +1105,7 @@ fn apple_events_override(
 /// Resolve the SOURCE-RESTRICTED `sandbox.network.strictAllowlist` (2.1.219).
 ///
 /// Same tier rule as [`apple_events_override`]: honored only from managed /
-/// policy, CLI `--settings` (no boot-time analog here), and user settings.
+/// policy, CLI `--settings`, and user settings.
 /// Project `.lingxi/settings.json` and `settings.local.json` are IGNORED — the
 /// oracle's own description says so outright.
 ///
@@ -1105,6 +1113,7 @@ fn apple_events_override(
 /// than inheriting whatever a non-honored tier merged in.
 fn strict_allowlist_override(
     managed_raw_tiers: &[String],
+    flag_settings_raw: Option<&str>,
     user_settings_raw: Option<&str>,
 ) -> Option<bool> {
     // Managed/policy file tiers are deep-merged; resolve per-field last-defined
@@ -1116,6 +1125,9 @@ fn strict_allowlist_override(
         }
     }
     if let Some(v) = merged_managed {
+        return Some(v);
+    }
+    if let Some(v) = flag_settings_raw.and_then(strict_allowlist_setting) {
         return Some(v);
     }
     user_settings_raw.and_then(strict_allowlist_setting)
@@ -1133,6 +1145,81 @@ fn strict_allowlist_setting(raw: &str) -> Option<bool> {
         .get("network")?
         .get("strictAllowlist")?
         .as_bool()
+}
+
+/// Resolve the SOURCE-RESTRICTED `sandbox.ripgrep` (2.1.232).
+///
+/// Same tier rule as [`apple_events_override`]: honored only from managed /
+/// policy, CLI `--settings`, and user settings.
+/// Project `.lingxi/settings.json` and `settings.local.json` are IGNORED.
+///
+/// Managed file tiers are deep-merged per-field, so a later partial `ripgrep`
+/// block keeps earlier fields unless it redefines them. An honored empty object
+/// still counts as "set to defaults", so it overrides a lower-tier user value.
+fn ripgrep_override(
+    managed_raw_tiers: &[String],
+    flag_settings_raw: Option<&str>,
+    user_settings_raw: Option<&str>,
+) -> Option<sandbox::runtime_config::RipgrepConfig> {
+    let mut merged_managed: Option<serde_json::Map<String, serde_json::Value>> = None;
+    for raw in managed_raw_tiers {
+        if let Some(obj) = ripgrep_object(raw) {
+            merged_managed
+                .get_or_insert_with(serde_json::Map::new)
+                .extend(obj);
+        }
+    }
+    if let Some(obj) = merged_managed {
+        return ripgrep_config_from_object(&obj);
+    }
+    if let Some(cfg) = flag_settings_raw
+        .and_then(|raw| ripgrep_object(raw).and_then(|obj| ripgrep_config_from_object(&obj)))
+    {
+        return Some(cfg);
+    }
+    user_settings_raw
+        .and_then(|raw| ripgrep_object(raw).and_then(|obj| ripgrep_config_from_object(&obj)))
+}
+
+fn ripgrep_object(raw: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let ripgrep = value.get("sandbox")?.get("ripgrep")?;
+    ripgrep.as_object().cloned()
+}
+
+fn ripgrep_config_from_object(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<sandbox::runtime_config::RipgrepConfig> {
+    let command = match obj.get("command") {
+        Some(serde_json::Value::String(v)) => v.clone(),
+        Some(_) => return None,
+        None => String::new(),
+    };
+    let args = match obj.get("args") {
+        Some(serde_json::Value::Array(values)) => {
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(s) = value.as_str() else {
+                    return None;
+                };
+                out.push(s.to_string());
+            }
+            out
+        }
+        Some(_) => return None,
+        None => Vec::new(),
+    };
+    let argv0 = match obj.get("argv0") {
+        Some(serde_json::Value::String(v)) => Some(v.clone()),
+        Some(serde_json::Value::Null) => None,
+        Some(_) => return None,
+        None => None,
+    };
+    Some(sandbox::runtime_config::RipgrepConfig {
+        command,
+        args,
+        argv0,
+    })
 }
 
 /// claude-code `getClaudeTempDir()` + `getClaudeTempDirName()` analog (Shell.ts:307),
@@ -1436,7 +1523,7 @@ struct TaskRegistryWorkflowLauncher {
 impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
     async fn launch(
         &self,
-        spec: tool_workflow::WorkflowLaunchSpec,
+        mut spec: tool_workflow::WorkflowLaunchSpec,
     ) -> Result<tool_workflow::WorkflowLaunched, tool_workflow::WorkflowLaunchError> {
         let cwd = self.cwd.clone();
         let abs = |p: &str| -> std::path::PathBuf {
@@ -1508,95 +1595,114 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             let v = nanos ^ seq.wrapping_mul(0x9e37_79b9_7f4a_7c15);
             format!("wf_{:08x}-{:03x}", (v >> 32) as u32, (v as u32) & 0xfff)
         });
-        // Persist the script so it is editable + re-runnable via `scriptPath`
-        // (claude-code persists every invocation's script "under the session
-        // directory"). A `scriptPath` input is already on disk → return it as-is;
-        // an inline/`name` script is written under `<cwd>/.lingxi-scratch/workflows`.
-        let script_path = if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty()) {
-            abs(p).to_str().map(str::to_string)
-        } else {
-            let dir = cwd.join(".lingxi-scratch").join("workflows");
-            let file = dir.join(format!("{run_id}.js"));
-            (std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&file, &script).is_ok())
-                .then(|| file.to_str().map(str::to_string))
-                .flatten()
-        };
         // `meta.name` → `workflowName` in the result.
         let workflow_name = workflow::meta_string_value(&script, "name");
+        tool_workflow::apply_local_app_build_default_model(
+            &cwd,
+            workflow_name.as_deref(),
+            &mut spec.args,
+        )?;
         // `meta.description` → `summary` in the result (claude-code `p = c.meta.description`).
         let summary = workflow::meta_string_value(&script, "description");
-        // `transcriptDir` = `<sessionProjectDir>/<sessionId>/subagents/workflows/<runId>`
-        // (claude-code `Nte(runId)` → `path.join(CU() ?? _g(gr()), xt(), "subagents",
-        // "workflows", e)`). We derive via `orchestrator::transcript_paths::subagents_dir`
-        // which computes `<lingxi_home>/projects/<sanitize(cwd)>/<session_uuid>/subagents`,
-        // then append `workflows/<runId>`.
-        let transcript_dir = {
-            let subagents = orchestrator::transcript_paths::subagents_dir(
-                &self.lingxi_home,
-                &self.cwd.to_string_lossy(),
-                &self.session_uuid,
-            );
-            subagents.join("workflows").join(&run_id)
-        };
-        std::fs::create_dir_all(&transcript_dir).map_err(|error| {
-            tool_workflow::WorkflowLaunchError(format!(
-                "cannot create workflow transcript directory '{}': {error}",
-                transcript_dir.display()
-            ))
-        })?;
-        let transcript_dir_wire = transcript_dir.to_str().map(str::to_string);
-        // Derive telemetry fields for tengu_workflow_launched (oracle §7).
-        let (invocation_mode, workflow_source) =
-            if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty()) {
-                ("scriptPath".to_string(), p.to_string())
-            } else if let Some(n) = spec.name.as_deref().filter(|s| !s.is_empty()) {
-                ("named".to_string(), n.to_string())
-            } else {
-                ("inline".to_string(), "inline".to_string())
-            };
-        let task_id = self
+        // Reserve before the first run-id-derived filesystem write. Collect
+        // every subsequent error in one block so release is unconditional.
+        let reservation = self
             .registry
-            .spawn(
-                tasks::TaskType::LocalWorkflow,
-                tasks::TaskSpawnInput::LocalWorkflow {
-                    // Display name = the script's `meta.name` (claude-code
-                    // `workflowName`), so an INLINE workflow shows its real name
-                    // in `/workflows` rather than the empty fallback; a named
-                    // workflow falls back to its saved `spec.name`.
-                    workflow_id: workflow_name
-                        .clone()
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| spec.name.clone())
-                        .unwrap_or_default(),
-                    script,
-                    resume_from_run_id: spec.resume_from_run_id.clone(),
-                    // The `args` global, serialised to a JSON string for the runtime.
-                    args: spec
-                        .args
-                        .as_ref()
-                        .map(|v| serde_json::to_string(v).unwrap_or_default()),
-                    run_id: Some(run_id.clone()),
-                    invocation_mode: Some(invocation_mode),
-                    workflow_source: Some(workflow_source),
-                    transcript_subdir: Some(transcript_dir.clone()),
-                    // `t.agentId != null` in claude-code: the Workflow tool is called
-                    // from a subagent when a sub-session invokes it. LingXi does not
-                    // thread the calling agent id to the launcher at this time; treat
-                    // as false (top-level launch) — this field is best-effort.
-                    launched_from_subagent: false,
-                },
-                "Workflow".to_string(),
-            )
+            .try_reserve_workflow_run_id(&run_id)
             .await
-            .map_err(|e| tool_workflow::WorkflowLaunchError(e.to_string()))?;
-        Ok(tool_workflow::WorkflowLaunched {
-            task_id,
-            run_id: Some(run_id),
-            script_path,
-            workflow_name,
-            summary,
-            transcript_dir: transcript_dir_wire,
-        })
+            .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
+        let launch_result = async {
+            // Persist the script so it is editable + re-runnable via `scriptPath`
+            // (claude-code persists every invocation's script "under the session
+            // directory"). A `scriptPath` input is already on disk → return it as-is;
+            // an inline/`name` script is written under `<cwd>/.lingxi-scratch/workflows`.
+            let script_path = if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty())
+            {
+                abs(p).to_str().map(str::to_string)
+            } else {
+                let dir = cwd.join(".lingxi-scratch").join("workflows");
+                let file = dir.join(format!("{run_id}.js"));
+                (std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&file, &script).is_ok())
+                    .then(|| file.to_str().map(str::to_string))
+                    .flatten()
+            };
+            // `transcriptDir` = `<sessionProjectDir>/<sessionId>/subagents/workflows/<runId>`
+            // (claude-code `Nte(runId)` → `path.join(CU() ?? _g(gr()), xt(), "subagents",
+            // "workflows", e)`). We derive via `orchestrator::transcript_paths::subagents_dir`
+            // which computes `<lingxi_home>/projects/<sanitize(cwd)>/<session_uuid>/subagents`,
+            // then append `workflows/<runId>`.
+            let transcript_dir = {
+                let subagents = orchestrator::transcript_paths::subagents_dir(
+                    &self.lingxi_home,
+                    &self.cwd.to_string_lossy(),
+                    &self.session_uuid,
+                );
+                subagents.join("workflows").join(&run_id)
+            };
+            std::fs::create_dir_all(&transcript_dir).map_err(|error| {
+                tool_workflow::WorkflowLaunchError(format!(
+                    "cannot create workflow transcript directory '{}': {error}",
+                    transcript_dir.display()
+                ))
+            })?;
+            let transcript_dir_wire = transcript_dir.to_str().map(str::to_string);
+            // Derive telemetry fields for tengu_workflow_launched (oracle §7).
+            let (invocation_mode, workflow_source) =
+                if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty()) {
+                    ("scriptPath".to_string(), p.to_string())
+                } else if let Some(n) = spec.name.as_deref().filter(|s| !s.is_empty()) {
+                    ("named".to_string(), n.to_string())
+                } else {
+                    ("inline".to_string(), "inline".to_string())
+                };
+            let task_id = self
+                .registry
+                .spawn(
+                    tasks::TaskType::LocalWorkflow,
+                    tasks::TaskSpawnInput::LocalWorkflow {
+                        session_uuid: Some(self.session_uuid.clone()),
+                        // Display name = the script's `meta.name` (claude-code
+                        // `workflowName`), so an INLINE workflow shows its real name
+                        // in `/workflows` rather than the empty fallback; a named
+                        // workflow falls back to its saved `spec.name`.
+                        workflow_id: workflow_name
+                            .clone()
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| spec.name.clone())
+                            .unwrap_or_default(),
+                        script,
+                        resume_from_run_id: spec.resume_from_run_id.clone(),
+                        // The `args` global, serialised to a JSON string for the runtime.
+                        args: spec
+                            .args
+                            .as_ref()
+                            .map(|v| serde_json::to_string(v).unwrap_or_default()),
+                        run_id: Some(run_id.clone()),
+                        invocation_mode: Some(invocation_mode),
+                        workflow_source: Some(workflow_source),
+                        transcript_subdir: Some(transcript_dir.clone()),
+                        // `t.agentId != null` in claude-code: the Workflow tool is called
+                        // from a subagent when a sub-session invokes it. LingXi does not
+                        // thread the calling agent id to the launcher at this time; treat
+                        // as false (top-level launch) — this field is best-effort.
+                        launched_from_subagent: false,
+                    },
+                    "Workflow".to_string(),
+                )
+                .await
+                .map_err(|e| tool_workflow::WorkflowLaunchError(e.to_string()))?;
+            Ok(tool_workflow::WorkflowLaunched {
+                task_id,
+                run_id: Some(run_id.clone()),
+                script_path,
+                workflow_name,
+                summary,
+                transcript_dir: transcript_dir_wire,
+            })
+        }
+        .await;
+        drop(reservation);
+        launch_result
     }
 }
 
@@ -2618,7 +2724,7 @@ impl Default for DesktopConfig {
             injected_permission_gate: None,
             session_started_as_coordinator: false,
             memory_provider: None,
-            permission_mode: permission::PermissionMode::Default,
+            permission_mode: permission::PermissionMode::Auto,
             permission_mode_cli: None,
             permission_mode_cli_explicit: false,
             allow_dangerously_skip_permissions: false,
@@ -3143,6 +3249,10 @@ pub struct DesktopRuntime {
     /// The desktop task registry shared with the tool context (the TUI / a
     /// transport wraps it in a poller to read live background-task state).
     pub task_registry: Arc<tasks::registry::TaskRegistry>,
+    /// Event-driven lifecycle/progress feed for the interactive TUI. Hosts
+    /// take this receiver once and merge it into their existing TurnEvent
+    /// channel; a host that does not render a TUI may simply drop it.
+    pub workflow_events: Option<tokio::sync::mpsc::UnboundedReceiver<DesktopWorkflowEvent>>,
     /// M10: the per-session coordinator team registry. One is constructed per
     /// `build()` regardless of mode so the status feed (and the PHASE-2 command
     /// router) always have a handle to read; it is observable but empty (no
@@ -3296,6 +3406,67 @@ pub struct DesktopRuntime {
     /// effect calls `add_root(...)` + `notify_roots_list_changed_all()` on it so
     /// every connected server's `roots/list` reflects the new working directory.
     pub mcp_registry: Arc<mcp::McpRegistry>,
+}
+
+/// Push-only workflow updates emitted by the desktop composition root.
+///
+/// The registry remains authoritative for snapshots and control operations;
+/// this feed only removes the old timer/polling dependency from the live TUI
+/// path. It intentionally carries the task runtime's structured progress DTO
+/// instead of depending on a presentation crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopWorkflowEvent {
+    /// One structured phase/agent update from a running workflow.
+    Progress {
+        task_id: String,
+        run_id: String,
+        progress: tasks::handlers::local_workflow::WorkflowProgressUpdate,
+    },
+    /// A workflow task transitioned to a new registry status.
+    Status {
+        task_id: String,
+        status: tasks::TaskStatus,
+    },
+}
+
+struct DesktopWorkflowEventSink {
+    registry: Arc<tasks::registry_status_sink::RegistryStatusSink>,
+    tx: tokio::sync::mpsc::UnboundedSender<DesktopWorkflowEvent>,
+}
+
+#[async_trait::async_trait]
+impl tasks::handlers::TaskStatusSink for DesktopWorkflowEventSink {
+    async fn set_status(&self, task_id: &str, status: tasks::TaskStatus) {
+        tasks::handlers::TaskStatusSink::set_status(&*self.registry, task_id, status).await;
+        let _ = self.tx.send(DesktopWorkflowEvent::Status {
+            task_id: task_id.to_owned(),
+            status,
+        });
+    }
+
+    async fn is_registered(&self, task_id: &str) -> bool {
+        tasks::handlers::TaskStatusSink::is_registered(&*self.registry, task_id).await
+    }
+
+    async fn is_terminal(&self, task_id: &str) -> bool {
+        tasks::handlers::TaskStatusSink::is_terminal(&*self.registry, task_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl tasks::handlers::local_workflow::WorkflowProgressSink for DesktopWorkflowEventSink {
+    async fn emit_workflow_progress(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        progress: tasks::handlers::local_workflow::WorkflowProgressUpdate,
+    ) {
+        let _ = self.tx.send(DesktopWorkflowEvent::Progress {
+            task_id: task_id.to_owned(),
+            run_id: run_id.to_owned(),
+            progress,
+        });
+    }
 }
 
 /// Construct the live sandbox runner used by desktop composition roots.
@@ -4814,7 +4985,9 @@ async fn apply_worktree_launch(
                 // `--print`/stream-json stdout; this follows the port's boot-
                 // notice precedent (the settings-warning `eprintln!` in
                 // `build`). Colorization (206 `ht.green`) is dropped.
-                eprintln!("Created tmux session: {session_name}\nTo attach: tmux attach -t {session_name}");
+                eprintln!(
+                    "Created tmux session: {session_name}\nTo attach: tmux attach -t {session_name}"
+                );
                 if let Some(session) = ctx
                     .worktree_session
                     .lock()
@@ -5278,13 +5451,18 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
     }
     if openai_chatgpt_delegate.is_none() {
         match (
-            std::env::var("OPENAI_CHATGPT_ACCESS_TOKEN").ok().filter(|s| !s.trim().is_empty()),
-            std::env::var("OPENAI_CHATGPT_ACCOUNT_ID").ok().filter(|s| !s.trim().is_empty()),
+            std::env::var("OPENAI_CHATGPT_ACCESS_TOKEN")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            std::env::var("OPENAI_CHATGPT_ACCOUNT_ID")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
         ) {
             (Some(tok), Some(acc)) => {
                 openai_chatgpt_delegate = Some(Arc::new(
                     openai_oauth::ExternalTokensCredentialProvider::from_supplied(tok, Some(acc)),
-                ) as Arc<dyn llm_client::CredentialProvider>);
+                )
+                    as Arc<dyn llm_client::CredentialProvider>);
             }
             (Some(_), None) | (None, Some(_)) => tracing::warn!(
                 "incomplete external ChatGPT tokens: set BOTH OPENAI_CHATGPT_ACCESS_TOKEN and OPENAI_CHATGPT_ACCOUNT_ID"
@@ -5960,6 +6138,7 @@ pub async fn build(
         default_listings,
         default_model_id,
         default_model_profile,
+        profile_first_party,
         profile_auto_mode_provider,
         first_party_environment_provider,
         provider_availability,
@@ -5974,10 +6153,6 @@ pub async fn build(
         subscriber_state,
         credential_origin,
         has_oauth_token,
-        // `profile_first_party` is an input to the resolution itself (the
-        // Explore firstParty gate consumes it inside `resolve_llm_stack`); the
-        // session half below reads the resolved outputs instead. Headless
-        // callers still get it off `LlmStack`.
         ..
     } = resolve_llm_stack(&cfg).await?;
 
@@ -6378,8 +6553,10 @@ pub async fn build(
     // a spawn whose request carries no `parent_model_override` (the non-`AgentTool`
     // spawn paths) resolves `AgentModel::Inherit` against the LIVE session model
     // (updated by `/model` switches / resume) instead of the boot snapshot below.
-    let subagent_default_model_provider_cell =
-        subagent_spawner_concrete.default_model_provider_handle();
+    let subagent_default_model_selection_provider_cell =
+        subagent_spawner_concrete.default_model_selection_provider_handle();
+    let subagent_provider_first_party_resolver_cell =
+        subagent_spawner_concrete.provider_first_party_resolver_handle();
     // Box ONCE as the concrete `Arc<PoolSubagentSpawner>` so it can serve as
     // BOTH the one-shot `SubagentSpawner` and the persistent/resume
     // `StreamingSubagentSpawner` (Phase-1 seam) — the LocalAgent handler needs
@@ -6883,6 +7060,7 @@ pub async fn build(
     // arms below (the full union when enforcing; `--add-dir` only otherwise), so
     // it is always initialized before its later reads.
     let boot_additional_working_dirs: Vec<std::path::PathBuf>;
+    let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         // Read the persistable rule tiers in ASCENDING priority — user →
         // project → local (3c: settings.local.json read after project so a
@@ -6988,6 +7166,7 @@ pub async fn build(
             permission::PermissionPolicy::from_rules(permission::PermissionMode::Default, rules)
                 .with_roots(roots)
                 .with_working_dirs(additional_working_dirs)
+                .with_workspace_leases(workspace_leases.clone())
                 .with_sandbox_runtime(sandbox_auto_allow)
                 .with_managed_permission_rules_only(allow_managed_permission_rules_only)
                 // `autoMode.classifyAllShell` escalation (`QOi()`): any tier enabling
@@ -7688,6 +7867,12 @@ pub async fn build(
     // "no stuck Running" wiring bash + local_agent already have.
     let local_workflow_status_sink =
         Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    let (workflow_event_tx, workflow_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<DesktopWorkflowEvent>();
+    let local_workflow_event_sink = Arc::new(DesktopWorkflowEventSink {
+        registry: local_workflow_status_sink.clone(),
+        tx: workflow_event_tx,
+    });
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
         Arc::new(
@@ -7703,10 +7888,13 @@ pub async fn build(
             .with_token_budget(orch_cfg.token_budget)
             .with_output_pool_cell(local_workflow_output_pool.clone())
             .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
+            .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
             .with_worktree_manager(worktree_manager.clone())
             .with_status_sink(
-                local_workflow_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
-            ),
+                local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
+            )
+            .with_workflow_progress_sink(local_workflow_event_sink.clone()
+                as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>),
         ),
     );
 
@@ -7800,6 +7988,10 @@ pub async fn build(
     };
     let sandbox_runtime_cfg = {
         let mut tiers: Vec<String> = Vec::new();
+        let flag_settings_raw = cfg
+            .flag_settings
+            .as_ref()
+            .and_then(|settings| serde_json::to_string(settings).ok());
         // Read the USER tier (lingxi_home/settings.json) separately so the
         // source-restricted `allowAppleEvents` resolution can consult it: CC honors
         // allowAppleEvents from user / managed / flag only, NOT project/local.
@@ -7817,13 +8009,17 @@ pub async fn build(
                 tiers.push(raw);
             }
         }
+        // CLI `--settings` / `flagSettings` sits between localSettings and
+        // policySettings in `SETTING_SOURCES`, so include its raw JSON before
+        // the managed tiers in the ascending-priority fold.
+        if let Some(raw) = &flag_settings_raw {
+            tiers.push(raw.clone());
+        }
         // Managed (policySettings) tier — HIGHEST priority (SETTING_SOURCES:
         // …→localSettings→flagSettings→policySettings). Appended LAST so the
-        // ascending-priority fold lets a managed `sandbox.*` win over user/
-        // project/local (faithful to getInitialSettings()/loadSettingsFromDisk).
-        // flagSettings is omitted: the engine has no boot-time `--settings`
-        // analog (see spec §4e); if one is added, push its raw text BEFORE the
-        // managed tier to honor `localSettings→flagSettings→policySettings`.
+        // ascending-priority fold lets a managed `sandbox.*` win over user /
+        // project / local / flagSettings (faithful to
+        // getInitialSettings()/loadSettingsFromDisk).
         let managed_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
         tiers.extend(managed_tiers.iter().cloned());
         let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
@@ -7834,12 +8030,23 @@ pub async fn build(
             managed_only_sandbox_overrides(&managed_tiers, &cwd);
         // allowAppleEvents: source-restricted to user / managed / flag (project &
         // local are IGNORED — CC parity @223928133). First-defined wins managed →
-        // flag(none) → user; `None` leaves the default `false`.
-        let allow_apple_events_override =
-            apple_events_override(&managed_tiers, user_settings_raw.as_deref());
+        // flag → user; `None` leaves the default `false`.
+        let allow_apple_events_override = apple_events_override(
+            &managed_tiers,
+            flag_settings_raw.as_deref(),
+            user_settings_raw.as_deref(),
+        );
         // strictAllowlist: same source restriction (2.1.219).
-        let strict_allowlist_override_v =
-            strict_allowlist_override(&managed_tiers, user_settings_raw.as_deref());
+        let strict_allowlist_override_v = strict_allowlist_override(
+            &managed_tiers,
+            flag_settings_raw.as_deref(),
+            user_settings_raw.as_deref(),
+        );
+        let ripgrep_override_v = ripgrep_override(
+            &managed_tiers,
+            flag_settings_raw.as_deref(),
+            user_settings_raw.as_deref(),
+        );
         // Seed the `SandboxConvertContext` with the boot-resolvable hardening
         // paths so the settings/skills denyWrite defense actually fires
         // (sandbox-adapter.ts:225-299). Seeds with no boot analog
@@ -7867,6 +8074,7 @@ pub async fn build(
             managed_read_paths,
             allow_apple_events_override,
             strict_allowlist_override: strict_allowlist_override_v,
+            ripgrep_override: ripgrep_override_v,
             ..Default::default()
         };
         sandbox_runtime_config_from_settings_tiers(&refs, &cwd, &ctx)
@@ -8655,6 +8863,10 @@ pub async fn build(
     // copy (parity batch 21). First fill wins.
     let _ = subagent_tool_registry_cell.set(tools.clone());
     let _ = subagent_agent_catalog_cell.set(agent_catalog.clone());
+    let profile_first_party_for_subagents = profile_first_party.clone();
+    let _ = subagent_provider_first_party_resolver_cell.set(Arc::new(move |profile| {
+        profile_first_party_for_subagents.get(profile).copied()
+    }));
     // In-process teammate full parity (P1): advertise the SAME resolved tool pool
     // + apply the SAME tool-wide deny filter as the spawner, so a teammate can
     // actually use tools (not chat-only). The deny names are copied from the
@@ -8664,44 +8876,19 @@ pub async fn build(
     if let Some(deny) = subagent_tool_wide_deny_cell.get() {
         let _ = teammate_tool_wide_deny_cell.set(deny.clone());
     }
-
-    // Cold resume: rebuild parked background agents only after every dependency
-    // they inherit is live (tool registry, permission gate, budget, agent
-    // catalog, skill resolver, and LocalAgent handler). The restore spawner
-    // preserves each persisted agent id, so transcript paths and SendMessage
-    // routes remain stable instead of leaving a stale row beside a new agent.
-    if cfg.session_id_override.is_some() {
-        let restore_inheritance = traits::subagent_spawn::SubagentInheritance {
-            tool_invoker: Arc::new(
-                tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
-                    .with_gate(perms.clone()),
-            ),
-            budget: budget_enforcer.clone(),
-        };
-        for (agent_id, outcome) in agent_restore::restore_parked_agents(
-            &main_subagents_dir,
-            subagent_spawner.as_ref(),
-            fork_resume_gate.as_ref(),
-            &restore_inheritance,
-        )
-        .await
-        {
-            match outcome {
-                agent_restore::RestoreOutcome::Restored(restored_id) => {
-                    tracing::info!(%agent_id, %restored_id, "restored parked background agent");
-                }
-                agent_restore::RestoreOutcome::Refused(reason) => {
-                    tracing::warn!(%agent_id, %reason, "refused parked background agent restore");
-                }
-                agent_restore::RestoreOutcome::EmptyTranscript => {
-                    tracing::warn!(%agent_id, "parked agent transcript is empty; restore skipped");
-                }
-                agent_restore::RestoreOutcome::Failed(error) => {
-                    tracing::warn!(%agent_id, %error, "parked background agent restore failed");
-                }
-            }
-        }
-    }
+    // Capture the fully-wired restore inheritance before `tools` and `perms`
+    // move into the orchestrator. The actual cold restore runs later, after the
+    // live model/provider selection cell is published.
+    let parked_agent_restore_inheritance =
+        cfg.session_id_override
+            .is_some()
+            .then(|| traits::subagent_spawn::SubagentInheritance {
+                tool_invoker: Arc::new(
+                    tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
+                        .with_gate(perms.clone()),
+                ),
+                budget: budget_enforcer.clone(),
+            });
 
     // Clone `cwd` for the settings watcher before it is moved into the
     // orchestrator constructor below.
@@ -9037,14 +9224,87 @@ pub async fn build(
     // `session.model` (the SAME source `build_prompt_context` / `get_status_snapshot`
     // read — updated by a mid-session `/model` switch or resume), superseding the
     // boot snapshot `orch_cfg.model` for spawns that carry no `parent_model_override`.
-    // The read happens at spawn time (during tool execution, when the session lock
-    // is free), so a `try_lock` fast path is sufficient; on the rare contended read
-    // it returns `None` and the spawner falls back to its boot snapshot.
+    // The read happens at spawn time. A last-known-good provider-qualified
+    // selection covers a contended session lock; it must never fall back to the
+    // boot model because that can silently change providers after `/model`.
     {
         let session = orch.session();
-        let _ = subagent_default_model_provider_cell.set(std::sync::Arc::new(move || {
-            session.try_lock().ok().map(|s| s.model.clone())
-        }));
+        let selection_model_providers = model_providers.clone();
+        let selection_profile_auto_mode_provider = profile_auto_mode_provider.clone();
+        let last_selection = std::sync::Arc::new(std::sync::Mutex::new(
+            session
+                .try_lock()
+                .ok()
+                .map(|state| agent::DefaultModelSelection {
+                    model: state.model.clone(),
+                    model_profile: state.model_profile.clone(),
+                    provider_first_party: state
+                        .model_profile
+                        .as_ref()
+                        .or_else(|| {
+                            selection_model_providers
+                                .get(&state.model)
+                                .map(|(profile, _)| profile)
+                        })
+                        .and_then(|profile| selection_profile_auto_mode_provider.get(profile))
+                        .map_or(true, |provider| provider == "firstParty"),
+                }),
+        ));
+        let _ =
+            subagent_default_model_selection_provider_cell.set(std::sync::Arc::new(move || {
+                if let Ok(state) = session.try_lock() {
+                    let selection = agent::DefaultModelSelection {
+                        model: state.model.clone(),
+                        model_profile: state.model_profile.clone(),
+                        provider_first_party: state
+                            .model_profile
+                            .as_ref()
+                            .or_else(|| {
+                                selection_model_providers
+                                    .get(&state.model)
+                                    .map(|(profile, _)| profile)
+                            })
+                            .and_then(|profile| selection_profile_auto_mode_provider.get(profile))
+                            .map_or(true, |provider| provider == "firstParty"),
+                    };
+                    if let Ok(mut cached) = last_selection.lock() {
+                        *cached = Some(selection.clone());
+                    }
+                    return Some(selection);
+                }
+                last_selection.lock().ok().and_then(|cached| cached.clone())
+            }));
+    }
+
+    // Cold resume: rebuild parked agents only after the live provider-qualified
+    // session selection is published above. Transcript metadata pins the exact
+    // model/profile used before restart; legacy transcripts fall back to the
+    // parked row and resolve through this live selection instead of a boot-only
+    // default. All inherited dependencies are live at this point as well.
+    if let Some(restore_inheritance) = parked_agent_restore_inheritance {
+        for (agent_id, outcome) in agent_restore::restore_parked_agents(
+            &main_subagents_dir,
+            subagent_spawner.as_ref(),
+            fork_resume_gate.as_ref(),
+            &restore_inheritance,
+        )
+        .await
+        {
+            match outcome {
+                agent_restore::RestoreOutcome::Restored(restored_id) => {
+                    tracing::info!(%agent_id, %restored_id, "restored parked background agent");
+                }
+                agent_restore::RestoreOutcome::Refused(reason) => {
+                    tracing::warn!(%agent_id, %reason, "refused parked background agent restore");
+                }
+                agent_restore::RestoreOutcome::EmptyTranscript => {
+                    tracing::warn!(%agent_id, "parked agent transcript is empty; restore skipped");
+                }
+                agent_restore::RestoreOutcome::Failed(error) => {
+                    tracing::warn!(%agent_id, %error, "parked background agent restore failed");
+                }
+            }
+        }
     }
     // H-CHG-02: wire the enforcing gate's live `set_permission_mode` auto gate to
     // the SAME live `session.model` source, so a runtime switch to `auto` after a
@@ -9802,6 +10062,7 @@ pub async fn build(
         // orchestrator builder consumed the originals).
         session_cwd: runtime_session_cwd,
         mcp_registry: runtime_mcp_registry,
+        workflow_events: Some(workflow_event_rx),
     })
 }
 
@@ -10262,7 +10523,9 @@ mod tests {
         std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
         assert_eq!(
             model_deprecation_warning(Some("claude-3-opus-20240229")).as_deref(),
-            Some("⚠ Claude 3 Opus will be retired on January 15, 2026. Consider switching to a newer model.")
+            Some(
+                "⚠ Claude 3 Opus will be retired on January 15, 2026. Consider switching to a newer model."
+            )
         );
         assert_eq!(
             model_deprecation_warning(Some("claude-3-5-haiku-20241022")),
@@ -10274,7 +10537,9 @@ mod tests {
         std::env::set_var("CLAUDE_CODE_USE_VERTEX", "1");
         assert_eq!(
             model_deprecation_warning(Some("claude-3-7-sonnet-20250219")).as_deref(),
-            Some("⚠ Claude 3.7 Sonnet will be retired on May 11, 2026. Consider switching to a newer model.")
+            Some(
+                "⚠ Claude 3.7 Sonnet will be retired on May 11, 2026. Consider switching to a newer model."
+            )
         );
         clear_provider_env();
     }
@@ -10299,7 +10564,9 @@ mod tests {
         // The key match is lowercased, so uppercase input still matches.
         assert_eq!(
             model_deprecation_warning(Some("CLAUDE-3-OPUS-20240229")).as_deref(),
-            Some("⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model.")
+            Some(
+                "⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model."
+            )
         );
         // Bedrock-prefixed id still matches the substring.
         assert!(model_deprecation_warning(Some("anthropic.claude-3-opus-20240229-v1:0")).is_some());
@@ -10311,15 +10578,21 @@ mod tests {
         clear_provider_env();
         assert_eq!(
             model_deprecation_warning(Some("claude-3-opus-20240229")).as_deref(),
-            Some("⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model.")
+            Some(
+                "⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model."
+            )
         );
         assert_eq!(
             model_deprecation_warning(Some("claude-3-7-sonnet-20250219")).as_deref(),
-            Some("⚠ Claude 3.7 Sonnet will be retired on February 19, 2026. Consider switching to a newer model.")
+            Some(
+                "⚠ Claude 3.7 Sonnet will be retired on February 19, 2026. Consider switching to a newer model."
+            )
         );
         assert_eq!(
             model_deprecation_warning(Some("claude-3-5-haiku-20241022")).as_deref(),
-            Some("⚠ Claude 3.5 Haiku will be retired on February 19, 2026. Consider switching to a newer model.")
+            Some(
+                "⚠ Claude 3.5 Haiku will be retired on February 19, 2026. Consider switching to a newer model."
+            )
         );
     }
 
@@ -10353,8 +10626,9 @@ mod tests {
         assert!(cfg.mcp_paths.is_empty());
         // CLI default — opt into `NoOpPermissionGate`.
         assert!(cfg.use_noop_permission_gate);
-        // The CLI-resolved permission mode defaults to `Default` (no override).
-        assert_eq!(cfg.permission_mode, permission::PermissionMode::Default);
+        // New sessions use the built-in Auto preference unless a trusted
+        // settings/CLI tier explicitly supplies another mode.
+        assert_eq!(cfg.permission_mode, permission::PermissionMode::Auto);
 
         // Frozen field set is fully reachable via struct-update syntax, and the
         // type implements `Clone`/secret-safe `Debug` so a host can fan it out
@@ -12224,7 +12498,9 @@ mod tests {
             .map(|(k, entries)| (k.clone(), entries.iter().map(|e| e.model.clone()).collect()))
             .collect();
         assert_eq!(
-            fallback_overrides.get("claude-sonnet-4-6").map(Vec::as_slice),
+            fallback_overrides
+                .get("claude-sonnet-4-6")
+                .map(Vec::as_slice),
             Some(&["llama-3.3-70b-versatile".to_string()][..]),
             "fallback chain must translate to the bare model-id list (provider_id dropped); got: {fallback_overrides:?}"
         );
@@ -13664,32 +13940,52 @@ mod tests {
         use super::apple_events_override;
         let on = r#"{"sandbox":{"allowAppleEvents":true}}"#.to_string();
         let off = r#"{"sandbox":{"allowAppleEvents":false}}"#.to_string();
+        let flag_on = r#"{"sandbox":{"allowAppleEvents":true}}"#.to_string();
+        let flag_off = r#"{"sandbox":{"allowAppleEvents":false}}"#.to_string();
 
         // No honored source set it → None (⇒ default false downstream).
-        assert_eq!(apple_events_override(&[], None), None);
-        assert_eq!(apple_events_override(&[], Some(r#"{"sandbox":{}}"#)), None);
+        assert_eq!(apple_events_override(&[], None, None), None);
+        assert_eq!(
+            apple_events_override(&[], None, Some(r#"{"sandbox":{}}"#)),
+            None
+        );
 
         // User tier sets it (no managed) → honored.
-        assert_eq!(apple_events_override(&[], Some(&on)), Some(true));
-        assert_eq!(apple_events_override(&[], Some(&off)), Some(false));
+        assert_eq!(apple_events_override(&[], None, Some(&on)), Some(true));
+        assert_eq!(apple_events_override(&[], None, Some(&off)), Some(false));
+
+        // flagSettings outranks user.
+        assert_eq!(
+            apple_events_override(&[], Some(&flag_on), Some(&off)),
+            Some(true)
+        );
+        assert_eq!(
+            apple_events_override(&[], Some(&flag_off), Some(&on)),
+            Some(false)
+        );
 
         // Managed set → managed wins over user (first-defined managed → user).
         assert_eq!(
-            apple_events_override(std::slice::from_ref(&on), Some(&off)),
+            apple_events_override(std::slice::from_ref(&on), None, Some(&off)),
             Some(true),
             "managed allowAppleEvents must win over the user tier"
         );
         assert_eq!(
-            apple_events_override(std::slice::from_ref(&off), Some(&on)),
+            apple_events_override(std::slice::from_ref(&off), None, Some(&on)),
             Some(false),
             "managed false must win over a user true"
+        );
+        assert_eq!(
+            apple_events_override(std::slice::from_ref(&off), Some(&flag_on), Some(&on)),
+            Some(false),
+            "managed false must also win over flagSettings"
         );
 
         // Multiple managed tiers that BOTH set the field: last write wins
         // (drop-ins override the base), mirroring CC's deep-merge of the
         // file-based managed sources (`Fie(r, next, Bpe)`, later scalar wins).
         assert_eq!(
-            apple_events_override(&[on.clone(), off.clone()], None),
+            apple_events_override(&[on.clone(), off.clone()], None, None),
             Some(false)
         );
 
@@ -13703,6 +13999,7 @@ mod tests {
             apple_events_override(
                 &[on.clone(), r#"{"sandbox":{"enabled":true}}"#.to_string()],
                 None,
+                None,
             ),
             Some(true),
             "a later partial-sandbox drop-in must not clobber an earlier tier's allowAppleEvents"
@@ -13712,6 +14009,7 @@ mod tests {
             apple_events_override(
                 &[r#"{"sandbox":{"enabled":true}}"#.to_string(), off.clone()],
                 None,
+                None,
             ),
             Some(false),
             "a later tier's allowAppleEvents still overrides once it is defined"
@@ -13719,13 +14017,17 @@ mod tests {
 
         // A managed tier WITHOUT the field but user WITH it → user honored.
         assert_eq!(
-            apple_events_override(&[r#"{"sandbox":{"enabled":true}}"#.to_string()], Some(&on)),
+            apple_events_override(
+                &[r#"{"sandbox":{"enabled":true}}"#.to_string()],
+                None,
+                Some(&on)
+            ),
             Some(true)
         );
 
         // Malformed managed tiers are skipped, user still consulted.
         assert_eq!(
-            apple_events_override(&["not json".to_string()], Some(&on)),
+            apple_events_override(&["not json".to_string()], None, Some(&on)),
             Some(true)
         );
     }
@@ -13739,32 +14041,127 @@ mod tests {
         use super::strict_allowlist_override;
         let on = r#"{"sandbox":{"network":{"strictAllowlist":true}}}"#.to_string();
         let off = r#"{"sandbox":{"network":{"strictAllowlist":false}}}"#.to_string();
+        let flag_on = r#"{"sandbox":{"network":{"strictAllowlist":true}}}"#.to_string();
+        let flag_off = r#"{"sandbox":{"network":{"strictAllowlist":false}}}"#.to_string();
         let partial = r#"{"sandbox":{"network":{"allowedDomains":["example.com"]}}}"#.to_string();
 
-        assert_eq!(strict_allowlist_override(&[], None), None);
-        assert_eq!(strict_allowlist_override(&[], Some(&on)), Some(true));
-        assert_eq!(strict_allowlist_override(&[], Some(&off)), Some(false));
+        assert_eq!(strict_allowlist_override(&[], None, None), None);
+        assert_eq!(strict_allowlist_override(&[], None, Some(&on)), Some(true));
+        assert_eq!(
+            strict_allowlist_override(&[], None, Some(&off)),
+            Some(false)
+        );
+        assert_eq!(
+            strict_allowlist_override(&[], Some(&flag_on), Some(&off)),
+            Some(true)
+        );
+        assert_eq!(
+            strict_allowlist_override(&[], Some(&flag_off), Some(&on)),
+            Some(false)
+        );
 
         assert_eq!(
-            strict_allowlist_override(std::slice::from_ref(&off), Some(&on)),
+            strict_allowlist_override(std::slice::from_ref(&off), None, Some(&on)),
             Some(false),
             "managed false must override a user true"
         );
         assert_eq!(
-            strict_allowlist_override(&[on.clone(), off.clone()], None),
+            strict_allowlist_override(&[on.clone(), off.clone()], None, None),
             Some(false),
             "the last managed scalar must win"
         );
         assert_eq!(
-            strict_allowlist_override(&[on, partial.clone()], None),
+            strict_allowlist_override(&[on.clone(), partial.clone()], None, None),
             Some(true),
             "a partial managed drop-in must not erase an earlier value"
         );
         assert_eq!(
-            strict_allowlist_override(&[partial, "not json".to_string()], Some(&off)),
+            strict_allowlist_override(std::slice::from_ref(&off), Some(&flag_on), Some(&on)),
+            Some(false),
+            "managed false must also override flagSettings"
+        );
+        assert_eq!(
+            strict_allowlist_override(&[partial, "not json".to_string()], None, Some(&off)),
             Some(false),
             "absent or malformed managed tiers must fall back to the user tier"
         );
+    }
+
+    #[test]
+    fn ripgrep_override_preserves_partial_and_precedence() {
+        use super::ripgrep_override;
+
+        let user =
+            r#"{"sandbox":{"ripgrep":{"command":"rg-user","args":["--hidden"],"argv0":"rg"}}}"#
+                .to_string();
+        let flag =
+            r#"{"sandbox":{"ripgrep":{"command":"rg-flag","args":["--no-config"],"argv0":"rg-flag"}}}"#
+                .to_string();
+        let managed_base =
+            r#"{"sandbox":{"ripgrep":{"command":"rg-managed","args":["--no-config"]}}}"#
+                .to_string();
+        let managed_partial = r#"{"sandbox":{"ripgrep":{"argv0":"rg-managed"}}}"#.to_string();
+        let managed_empty = r#"{"sandbox":{"ripgrep":{}}}"#.to_string();
+
+        assert!(ripgrep_override(&[], None, None).is_none());
+
+        let user_cfg = ripgrep_override(&[], None, Some(&user)).expect("user ripgrep config");
+        assert_eq!(user_cfg.command, "rg-user");
+        assert_eq!(user_cfg.args, vec!["--hidden"]);
+        assert_eq!(user_cfg.argv0.as_deref(), Some("rg"));
+
+        let flag_cfg =
+            ripgrep_override(&[], Some(&flag), Some(&user)).expect("flag ripgrep config");
+        assert_eq!(flag_cfg.command, "rg-flag");
+        assert_eq!(flag_cfg.args, vec!["--no-config"]);
+        assert_eq!(flag_cfg.argv0.as_deref(), Some("rg-flag"));
+
+        let managed_cfg = ripgrep_override(
+            &[managed_base.clone(), managed_partial.clone()],
+            Some(&flag),
+            Some(&user),
+        )
+        .expect("managed ripgrep config");
+        assert_eq!(
+            managed_cfg.command, "rg-managed",
+            "later managed partials must preserve earlier fields"
+        );
+        assert_eq!(managed_cfg.args, vec!["--no-config"]);
+        assert_eq!(managed_cfg.argv0.as_deref(), Some("rg-managed"));
+
+        let malformed_fallback = ripgrep_override(&["not json".to_string()], None, Some(&user))
+            .expect("user fallback ripgrep config");
+        assert_eq!(
+            malformed_fallback.command, "rg-user",
+            "malformed managed tiers must be skipped so user settings still apply"
+        );
+        assert_eq!(malformed_fallback.args, vec!["--hidden"]);
+        assert_eq!(malformed_fallback.argv0.as_deref(), Some("rg"));
+
+        let reset_cfg = ripgrep_override(&[managed_empty], Some(&flag), Some(&user))
+            .expect("managed empty ripgrep config");
+        assert_eq!(reset_cfg.command, "");
+        assert!(reset_cfg.args.is_empty());
+        assert_eq!(
+            reset_cfg.argv0, None,
+            "an honored empty managed object must reset to runtime defaults"
+        );
+    }
+
+    #[test]
+    fn sandbox_runtime_config_ignores_project_merged_ripgrep_without_override() {
+        use super::sandbox_runtime_config_from_settings_tiers;
+
+        let cfg = sandbox_runtime_config_from_settings_tiers(
+            &[
+                r#"{ "sandbox": { "enabled": true, "ripgrep": { "command": "rg-proj", "args": ["--hidden"] } } }"#,
+            ],
+            std::path::Path::new("/tmp"),
+            &sandbox::policy_convert::SandboxConvertContext::default(),
+        );
+        assert_eq!(cfg.ripgrep.command, "");
+        assert!(cfg.ripgrep.args.is_empty());
+        assert_eq!(cfg.ripgrep.argv0, None);
     }
 
     // ── IMPL-R3: managed (policySettings) tier in the sandbox derivation ──────

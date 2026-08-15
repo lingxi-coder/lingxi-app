@@ -174,6 +174,8 @@ pub fn model_sends_temperature(model: &str) -> bool {
 /// adaptive-capable models (`alwaysThinkingEnabled` true by default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ThinkingConfig {
+    /// Provider-owned automatic mode. No thinking/reasoning override is sent.
+    Automatic,
     /// Thinking is off — no `thinking` field, and `temperature:1` is sent.
     Disabled,
     /// Adaptive thinking — the model decides depth (default).
@@ -205,7 +207,8 @@ pub fn is_thinking_env_disabled(name: &str) -> bool {
 /// thinking-off `temperature:1` rule in `ApiService::build_request`.
 #[must_use]
 pub fn session_thinking_active(thinking: ThinkingConfig) -> bool {
-    thinking != ThinkingConfig::Disabled && !is_thinking_env_disabled("LINGXI_DISABLE_THINKING")
+    !matches!(thinking, ThinkingConfig::Disabled | ThinkingConfig::Automatic)
+        && !is_thinking_env_disabled("LINGXI_DISABLE_THINKING")
 }
 
 /// Resolve the boot SESSION [`ThinkingConfig`] from the `MAX_THINKING_TOKENS`
@@ -328,6 +331,9 @@ pub fn reasoning_for_request(
     model: &str,
     max_tokens: Option<u32>,
 ) -> Option<crate::ReasoningConfig> {
+    if matches!(thinking, ThinkingConfig::Automatic) {
+        return None;
+    }
     if !session_thinking_active(thinking) {
         return None;
     }

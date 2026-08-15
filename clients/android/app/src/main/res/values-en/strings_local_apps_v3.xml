@@ -20,6 +20,7 @@
     <string name="chat_question_submit">Submit</string>
     <string name="chat_task_status_pending">Background task %1$s queued</string>
     <string name="chat_task_status_running">Background task %1$s running</string>
+    <string name="chat_task_status_paused">Background task %1$s paused</string>
     <string name="chat_task_status_completed">Background task %1$s completed</string>
     <string name="chat_task_status_failed">Background task %1$s failed</string>
     <string name="chat_task_status_cancelled">Background task %1$s cancelled</string>

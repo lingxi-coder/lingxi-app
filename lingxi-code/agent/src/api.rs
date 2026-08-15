@@ -18,6 +18,67 @@
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use llm_client::{LlmError, LlmEvent, LlmResponse};
+use protocol::AgentId;
+use std::sync::Arc;
+use traits::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
+
+const OBSERVER_EVENT_BUFFER: usize = 100;
+
+/// Ordered, bounded hand-off from the child event pump to host observers.
+///
+/// Observer implementations commonly bridge to a UI/main-thread executor. They
+/// must not be awaited by the model/tool event pump: a suspended UI would stop
+/// the child from draining its own bounded output channel. The dedicated worker
+/// preserves event order while `try_emit` keeps the producer non-blocking.
+#[derive(Clone)]
+pub(crate) struct ObserverEventSink {
+    sender: tokio::sync::mpsc::Sender<SubagentObservation>,
+}
+
+impl ObserverEventSink {
+    pub(crate) fn new(observers: Vec<Arc<dyn SubagentSpawnObserver>>) -> Self {
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::channel::<SubagentObservation>(OBSERVER_EVENT_BUFFER);
+        tokio::spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                for observer in &observers {
+                    observer.on_event(event.clone()).await;
+                }
+            }
+        });
+        Self { sender }
+    }
+
+    pub(crate) fn try_emit(&self, event: SubagentObservation) {
+        match self.sender.try_send(event) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("subagent observer queue is full; dropping non-terminal event");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!("subagent observer queue closed");
+            }
+        }
+    }
+
+    /// Deliver a terminal lifecycle event without holding up the completed
+    /// child pump. When the queue is saturated, one detached send waits for
+    /// bounded capacity so terminal state is not discarded.
+    pub(crate) fn emit_terminal(&self, event: SubagentObservation) {
+        match self.sender.try_send(event) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
+                let sender = self.sender.clone();
+                tokio::spawn(async move {
+                    let _ = sender.send(event).await;
+                });
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!("subagent observer queue closed before terminal event");
+            }
+        }
+    }
+}
 
 /// `messages.create` seam used by the subagent loop.
 ///
@@ -26,6 +87,24 @@ use llm_client::{LlmError, LlmEvent, LlmResponse};
 /// provide a scripted mock (see [`crate::runner`] tests).
 #[async_trait]
 pub trait SubagentApiClient: Send + Sync {
+    /// Workflow-only watchdog policy attached by the spawn adapter. Ordinary
+    /// clients return `None`, so non-workflow subagents retain their existing
+    /// transport/retry behavior.
+    fn workflow_query_watchdog(&self) -> Option<WorkflowQueryWatchdog> {
+        None
+    }
+
+    /// Publish a typed retry observation. The default is a no-op; the
+    /// per-workflow wrapper fans the event out to the spawn observers without
+    /// adding another polling/event channel.
+    async fn observe_workflow_query_retry(
+        &self,
+        _agent_id: AgentId,
+        _attempt: u32,
+        _reason: String,
+    ) {
+    }
+
     /// Issue one non-streaming model round-trip.
     ///
     /// `system` is the assembled system prompt (stable across the run);
@@ -149,6 +228,142 @@ pub trait SubagentApiClient: Send + Sync {
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         let _ = profile;
         self.messages_create_stream_forced(model, system, messages, tools, forced_tool, effort)
+            .await
+    }
+}
+
+/// Per-spawn API wrapper that enables the workflow query watchdog and routes
+/// retry notifications onto the same typed observer stream as child lifecycle
+/// events. It deliberately delegates every model operation to the original
+/// client so provider/profile/forced-tool routing stays unchanged.
+pub(crate) struct WorkflowWatchdogApiClient {
+    inner: Arc<dyn SubagentApiClient>,
+    policy: WorkflowQueryWatchdog,
+    observer_events: ObserverEventSink,
+}
+
+impl WorkflowWatchdogApiClient {
+    pub(crate) fn new(
+        inner: Arc<dyn SubagentApiClient>,
+        policy: WorkflowQueryWatchdog,
+        observers: Vec<Arc<dyn SubagentSpawnObserver>>,
+    ) -> Self {
+        Self::with_observer_events(inner, policy, ObserverEventSink::new(observers))
+    }
+
+    pub(crate) fn with_observer_events(
+        inner: Arc<dyn SubagentApiClient>,
+        policy: WorkflowQueryWatchdog,
+        observer_events: ObserverEventSink,
+    ) -> Self {
+        Self {
+            inner,
+            policy,
+            observer_events,
+        }
+    }
+}
+
+#[async_trait]
+impl SubagentApiClient for WorkflowWatchdogApiClient {
+    fn workflow_query_watchdog(&self) -> Option<WorkflowQueryWatchdog> {
+        Some(self.policy)
+    }
+
+    async fn observe_workflow_query_retry(&self, agent_id: AgentId, attempt: u32, reason: String) {
+        self.observer_events.try_emit(SubagentObservation::Retry {
+            agent_id,
+            attempt,
+            reason,
+        });
+    }
+
+    async fn messages_create(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<LlmResponse, LlmError> {
+        self.inner
+            .messages_create(model, system, messages, tools)
+            .await
+    }
+
+    async fn messages_create_stream(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        self.inner
+            .messages_create_stream(model, system, messages, tools, effort)
+            .await
+    }
+
+    async fn messages_create_stream_forced(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        self.inner
+            .messages_create_stream_forced(model, system, messages, tools, forced_tool, effort)
+            .await
+    }
+
+    async fn messages_create_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<LlmResponse, LlmError> {
+        self.inner
+            .messages_create_in(model, profile, system, messages, tools)
+            .await
+    }
+
+    async fn messages_create_stream_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        self.inner
+            .messages_create_stream_in(model, profile, system, messages, tools, effort)
+            .await
+    }
+
+    async fn messages_create_stream_forced_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        self.inner
+            .messages_create_stream_forced_in(
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                forced_tool,
+                effort,
+            )
             .await
     }
 }

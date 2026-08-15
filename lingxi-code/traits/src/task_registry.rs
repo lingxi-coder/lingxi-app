@@ -143,7 +143,7 @@ pub struct WorkflowRecord {
     pub run_id: Option<String>,
     /// Display name — the workflow's `meta.name` / `workflow_id`.
     pub name: String,
-    /// Status wire string (`pending`/`running`/`completed`/`failed`/`killed`).
+    /// Status wire string (`pending`/`running`/`paused`/`completed`/`failed`/`killed`).
     pub status: String,
     /// The workflow's launch description (script summary), when present.
     #[serde(default)]
@@ -157,6 +157,12 @@ pub struct WorkflowRecord {
     /// Wall-clock end (epoch millis) for a terminal run, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at_ms: Option<u64>,
+    /// Script path needed by an explicitly resumed paused workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_path: Option<String>,
+    /// Serialized workflow args needed by an explicitly resumed paused workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<String>,
 }
 
 /// Everything a terminating `local_agent` run reports beyond its status — the
@@ -346,7 +352,7 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// List tasks, optionally filtered.
     async fn list(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError>;
 
-    /// List `local_workflow` runs (running AND completed-but-not-evicted) for the
+    /// List `local_workflow` runs (running, adopted-paused, and completed) for the
     /// `/workflows` picker. The default impl derives them from [`Self::list`],
     /// filling only the reduced [`TaskRecord`] fields; the concrete
     /// `TaskRegistry` impl overrides this to add the `wf_…` run id, phase step,
@@ -366,6 +372,8 @@ pub trait TaskRegistryHandle: Send + Sync {
                 current_step: 0,
                 started_at_ms: None,
                 ended_at_ms: None,
+                script_path: None,
+                args: None,
             })
             .collect())
     }

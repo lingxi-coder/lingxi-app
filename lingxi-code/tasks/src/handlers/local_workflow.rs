@@ -30,6 +30,7 @@
 //! the worker loop sees the closed channel and ends, and the outcome that the
 //! script thread sends last is delivered to the caller.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -45,6 +46,7 @@ use traits::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
+use traits::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
@@ -57,8 +59,52 @@ use telemetry::AnalyticsBus;
 // across handlers), exactly as `local_agent` does.
 pub use crate::handlers::local_bash::{NoopStatusSink, TaskStatusSink};
 
+/// Structured workflow progress payload routed alongside the existing
+/// human-readable task spool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowProgressUpdate {
+    pub kind: String,
+    pub index: u64,
+    pub title: Option<String>,
+    pub message: Option<String>,
+    pub label: Option<String>,
+    pub phase_index: Option<u32>,
+    pub phase_title: Option<String>,
+    pub agent_id: Option<String>,
+    pub agent_type: Option<String>,
+    pub model: Option<String>,
+    pub fallback_model: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub queued_at_ms: Option<u64>,
+    pub started_at_ms: Option<u64>,
+    pub last_progress_at_ms: Option<u64>,
+    pub attempt: Option<u32>,
+    pub last_attempt_reason: Option<String>,
+    pub tokens: Option<u64>,
+    pub tool_calls: Option<u64>,
+    pub last_tool_name: Option<String>,
+    pub last_tool_summary: Option<String>,
+    pub prompt_preview: Option<String>,
+}
+
+#[async_trait]
+pub trait WorkflowProgressSink: Send + Sync {
+    async fn emit_workflow_progress(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        progress: WorkflowProgressUpdate,
+    );
+}
+
 /// Handler name reported by [`Task::name`] / used as the runtime task-name.
 const HANDLER_NAME: &str = "local_workflow";
+
+fn local_app_workspace_root(data_root: &std::path::Path, app_id: &str) -> std::path::PathBuf {
+    data_root.join("apps").join(app_id).join("workspace")
+}
 
 /// claude-code `k6a` — the per-run lifetime cap on real `agent()` spawns. The
 /// 1001st spawn is refused via the throw channel so the prelude rejects the
@@ -78,6 +124,43 @@ const WF_THROW_PREFIX: &str = "\u{1}__wf_throw__\u{1}";
 const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 
 const REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Adds the current workflow's lease token to every recursive tool dispatch.
+/// The wrapper is deliberately stateful and cannot be reused by another app.
+struct WorkspaceLeaseToolInvoker {
+    inner: Arc<dyn ToolInvoker>,
+    token: u64,
+}
+
+#[async_trait]
+impl ToolInvoker for WorkspaceLeaseToolInvoker {
+    async fn invoke(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+    ) -> Result<Value, ToolInvokerError> {
+        self.inner
+            .invoke_with_workspace_lease(name, input, ctx, Some(self.token))
+            .await
+    }
+
+    async fn invoke_with_workspace_lease(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+        _workspace_lease_token: Option<u64>,
+    ) -> Result<Value, ToolInvokerError> {
+        self.inner
+            .invoke_with_workspace_lease(name, input, ctx, Some(self.token))
+            .await
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 /// Build a throw-channel result slot carrying `message`.
 fn wf_throw(message: &str) -> String {
@@ -113,9 +196,12 @@ fn saved_workflow_candidates(name: &str) -> Vec<PathBuf> {
 
 /// Normalize the opts object for the resume chain-key (claude-code `ABp`).
 ///
-/// The binary projects opts to ONLY `["schema","model","effort","isolation","agentType"]`
-/// (in that order; undefined/function values skipped) then `JSON.stringify` with a
-/// recursive key-sorter. In JSON there are no functions, so we skip null/absent.
+/// The binary projects opts to ONLY `["schema","model","effort","isolation","agentType"]`.
+/// LingXi additionally treats `modelProfile` as identity because its multi-provider
+/// routing allows two providers to expose the same wire model id. The snake-case
+/// compatibility alias is canonicalized to `modelProfile`, then the projected value
+/// is serialized with a recursive key-sorter. In JSON there are no functions, so we
+/// skip null/absent.
 ///
 /// IMPORTANT: `serde_json` is compiled with `preserve_order` (IndexMap-backed), so
 /// `serde_json::Map` preserves INSERTION order, NOT alphabetical order. The explicit
@@ -126,11 +212,23 @@ fn saved_workflow_candidates(name: &str) -> Vec<PathBuf> {
 /// so annotating a call differently does NOT change the key and does NOT invalidate
 /// the cache on resume.
 fn normalize_opts_for_chain_key(opts: &Value) -> String {
-    const KEYS: &[&str] = &["schema", "model", "effort", "isolation", "agentType"];
+    const KEYS: &[&str] = &[
+        "schema",
+        "model",
+        "modelProfile",
+        "effort",
+        "isolation",
+        "agentType",
+    ];
     let mut map = serde_json::Map::new();
     if let Some(obj) = opts.as_object() {
         for &k in KEYS {
-            if let Some(v) = obj.get(k) {
+            let value = if k == "modelProfile" {
+                obj.get(k).or_else(|| obj.get("model_profile"))
+            } else {
+                obj.get(k)
+            };
+            if let Some(v) = value {
                 if !v.is_null() {
                     map.insert(k.to_string(), sort_value(v.clone()));
                 }
@@ -187,6 +285,73 @@ fn chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
     fold(b"\x1f");
     fold(opts_json.as_bytes());
     format!("{h:016x}")
+}
+
+/// Append-only workflow cache journal. Claude Code writes one `started` record
+/// when the child id is allocated and one `result` record when that child
+/// returns a cacheable value; a restart can therefore reuse every completed
+/// prefix without waiting for the whole workflow to finish.
+#[derive(Clone)]
+struct WorkflowJournalWriter {
+    path: PathBuf,
+    fs: Arc<dyn FileSystem>,
+}
+
+impl WorkflowJournalWriter {
+    async fn ensure_exists(&self) {
+        if let Some(path) = self.path.to_str() {
+            let _ = self.fs.append_file_with_mode(path, "", 0o600).await;
+        }
+    }
+
+    async fn append_started(&self, key: &str, agent_id: &str) {
+        self.append(serde_json::json!({
+            "type": "started",
+            "key": key,
+            "agentId": agent_id,
+        }))
+        .await;
+    }
+
+    async fn append_result(&self, key: &str, agent_id: &str, result: &str) {
+        self.append(serde_json::json!({
+            "type": "result",
+            "key": key,
+            "agentId": agent_id,
+            "result": result,
+        }))
+        .await;
+    }
+
+    async fn append(&self, record: Value) {
+        let Some(path) = self.path.to_str() else {
+            return;
+        };
+        if let Ok(mut line) = serde_json::to_string(&record) {
+            line.push('\n');
+            let _ = self.fs.append_file_with_mode(path, &line, 0o600).await;
+        }
+    }
+
+    async fn load_results(&self) -> HashMap<String, String> {
+        let Some(path) = self.path.to_str() else {
+            return HashMap::new();
+        };
+        let Ok(file) = self.fs.read_file(path, None, None).await else {
+            return HashMap::new();
+        };
+        file.content
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| record.get("type").and_then(Value::as_str) == Some("result"))
+            .filter_map(|record| {
+                Some((
+                    record.get("key")?.as_str()?.to_string(),
+                    record.get("result")?.as_str()?.to_string(),
+                ))
+            })
+            .collect()
+    }
 }
 
 /// `WorkflowBudgetExceededError` message (binary `I6a` @201953813), with
@@ -250,6 +415,8 @@ pub struct LocalWorkflowHandler {
     output_manager: Arc<TaskOutputManager>,
     /// Where terminal status transitions are reported.
     status_sink: Arc<dyn TaskStatusSink>,
+    /// Optional structured workflow-progress sink for realtime client updates.
+    workflow_progress_sink: Option<Arc<dyn WorkflowProgressSink>>,
     /// Optional worktree manager used to realize workflow `agent(...,
     /// {isolation:"worktree"})` calls. When wired, each isolated workflow
     /// subagent gets a fresh worktree cwd and the terminal keep/cleanup
@@ -281,6 +448,13 @@ pub struct LocalWorkflowHandler {
     /// snapshots `baseline.load()` so the run's `budget.spent()` is turn-relative
     /// (`pool - baseline` = `getTurnSpent()`). Unset (tests) ⇒ baseline 0.
     turn_baseline_cell: Option<Arc<OnceLock<Arc<AtomicU64>>>>,
+    /// Optional permission lease registry used by local-app build workflows.
+    workspace_leases: Option<Arc<permission::WorkspacePermissionLeaseRegistry>>,
+    /// Profile root containing `apps/<app_id>/workspace`. The local-app
+    /// workflow derives the exact app workspace from its validated `app_id`
+    /// instead of reusing the engine session cwd (which may belong to another
+    /// app or to the host project).
+    workspace_root: Option<std::path::PathBuf>,
 }
 
 impl LocalWorkflowHandler {
@@ -301,6 +475,7 @@ impl LocalWorkflowHandler {
             budget,
             output_manager,
             status_sink: Arc::new(NoopStatusSink),
+            workflow_progress_sink: None,
             worktree_manager: None,
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
@@ -308,6 +483,8 @@ impl LocalWorkflowHandler {
             token_budget_total: None,
             output_pool_cell: None,
             turn_baseline_cell: None,
+            workspace_leases: None,
+            workspace_root: None,
         }
     }
 
@@ -315,6 +492,13 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
         self.status_sink = sink;
+        self
+    }
+
+    /// Attach a structured workflow-progress sink for realtime client updates.
+    #[must_use]
+    pub fn with_workflow_progress_sink(mut self, sink: Arc<dyn WorkflowProgressSink>) -> Self {
+        self.workflow_progress_sink = Some(sink);
         self
     }
 
@@ -366,6 +550,17 @@ impl LocalWorkflowHandler {
         self
     }
 
+    #[must_use]
+    pub fn with_workspace_permission_leases(
+        mut self,
+        registry: Arc<permission::WorkspacePermissionLeaseRegistry>,
+        app_data_root: std::path::PathBuf,
+    ) -> Self {
+        self.workspace_leases = Some(registry);
+        self.workspace_root = Some(app_data_root);
+        self
+    }
+
     /// Share the same `workers` map with an external owner (registry wiring) so a
     /// [`TaskHandle::cleanup`] closure and [`Task::kill`] observe the same handles.
     #[must_use]
@@ -401,43 +596,55 @@ impl WorkflowIsolationSpawner {
         mut request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: Option<traits::subagent_spawn::WorkflowQueryWatchdog>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         let worktree = if request.isolation.as_deref() == Some("worktree") {
-            let Some(manager) = self.worktree.as_ref() else {
+            if let Some(manager) = self.worktree.as_ref() {
+                let seq = self
+                    .sequence
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let slug = format!("workflow-agent-{}-{seq}", self.slug_prefix);
+                let handle = manager
+                    .create_worktree(&slug, None, &[])
+                    .await
+                    .map_err(|e| {
+                        SubagentSpawnError::Runtime(format!(
+                            "Cannot create workflow agent worktree: {e}"
+                        ))
+                    })?;
+                if request.cwd.is_none() {
+                    request.cwd = Some(handle.path.to_string_lossy().into_owned());
+                }
+                request.worktree = Some(handle.clone());
+                Some(handle)
+            } else {
                 // Mobile and other minimal builds document `isolation:"worktree"`
                 // as a plain spawn fallback when no worktree manager is wired.
-                return agent::with_transcript_subdir_override(
-                    self.transcript_subdir.clone(),
-                    self.inner.spawn_with_progress(request, inherit, progress),
-                )
-                .await;
-            };
-            let seq = self
-                .sequence
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let slug = format!("workflow-agent-{}-{seq}", self.slug_prefix);
-            let handle = manager
-                .create_worktree(&slug, None, &[])
-                .await
-                .map_err(|e| {
-                    SubagentSpawnError::Runtime(format!(
-                        "Cannot create workflow agent worktree: {e}"
-                    ))
-                })?;
-            if request.cwd.is_none() {
-                request.cwd = Some(handle.path.to_string_lossy().into_owned());
+                None
             }
-            request.worktree = Some(handle.clone());
-            Some(handle)
         } else {
             request.worktree.clone()
         };
 
-        let result = agent::with_transcript_subdir_override(
-            self.transcript_subdir.clone(),
-            self.inner.spawn_with_progress(request, inherit, progress),
-        )
-        .await;
+        let result =
+            agent::with_transcript_subdir_override(self.transcript_subdir.clone(), async {
+                match watchdog {
+                    Some(policy) => {
+                        self.inner
+                            .spawn_workflow_with_observer(
+                                request, inherit, progress, observer, policy,
+                            )
+                            .await
+                    }
+                    None => {
+                        self.inner
+                            .spawn_with_observer(request, inherit, progress, observer)
+                            .await
+                    }
+                }
+            })
+            .await;
         if let (Some(manager), Some(handle)) = (self.worktree.as_ref(), worktree.as_ref()) {
             let _ = traits::worktree::agent_worktree_result(manager.as_ref(), handle).await;
         }
@@ -470,7 +677,7 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        self.spawn_inner(request, inherit, None).await
+        self.spawn_inner(request, inherit, None, None, None).await
     }
 
     async fn spawn_with_progress(
@@ -479,7 +686,31 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        self.spawn_inner(request, inherit, progress).await
+        self.spawn_inner(request, inherit, progress, None, None)
+            .await
+    }
+
+    async fn spawn_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>>,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.spawn_inner(request, inherit, progress, observer, None)
+            .await
+    }
+
+    async fn spawn_workflow_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: traits::subagent_spawn::WorkflowQueryWatchdog,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.spawn_inner(request, inherit, progress, observer, Some(watchdog))
+            .await
     }
 
     async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
@@ -546,6 +777,8 @@ fn make_request(
             .map(str::to_string)
     };
     let subagent_type = opt_str("agentType").unwrap_or_else(|| default_subagent_type.to_string());
+    let model = opt_str("model");
+    let model_profile = opt_str("modelProfile").or_else(|| opt_str("model_profile"));
 
     // Workflow agent() routing (binary §§1-4 + §6):
     // Case 1: bare agent(prompt) → workflow-subagent + kBp (subagent_type already =
@@ -588,8 +821,8 @@ fn make_request(
         observer: None,
         context_paths: Vec::new(),
         description: None,
-        model: opt_str("model"),
-        model_profile: None,
+        model,
+        model_profile,
         run_in_background: false,
         // `agent(prompt, { label })` → the subagent's display label.
         name: opt_str("label"),
@@ -713,6 +946,249 @@ fn format_progress(p: &workflow::Progress) -> String {
                 "[workflow_agent] {}",
                 serde_json::to_string(&obj).unwrap_or_default()
             )
+        }
+    }
+}
+
+fn unix_time_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn workflow_progress_update(progress: &workflow::Progress) -> WorkflowProgressUpdate {
+    match progress {
+        workflow::Progress::Phase { index, title } => WorkflowProgressUpdate {
+            kind: "workflow_phase".to_string(),
+            index: u64::from(*index),
+            title: Some(title.clone()),
+            message: None,
+            label: None,
+            phase_index: Some(*index),
+            phase_title: Some(title.clone()),
+            agent_id: None,
+            agent_type: None,
+            model: None,
+            fallback_model: None,
+            state: None,
+            error: None,
+            tool_use_id: None,
+            queued_at_ms: None,
+            started_at_ms: None,
+            last_progress_at_ms: Some(unix_time_ms_now()),
+            attempt: None,
+            last_attempt_reason: None,
+            tokens: None,
+            tool_calls: None,
+            last_tool_name: None,
+            last_tool_summary: None,
+            prompt_preview: None,
+        },
+        workflow::Progress::Log { message } => WorkflowProgressUpdate {
+            kind: "workflow_log".to_string(),
+            index: 0,
+            title: None,
+            message: Some(message.clone()),
+            label: None,
+            phase_index: None,
+            phase_title: None,
+            agent_id: None,
+            agent_type: None,
+            model: None,
+            fallback_model: None,
+            state: None,
+            error: None,
+            tool_use_id: None,
+            queued_at_ms: None,
+            started_at_ms: None,
+            last_progress_at_ms: Some(unix_time_ms_now()),
+            attempt: None,
+            last_attempt_reason: None,
+            tokens: None,
+            tool_calls: None,
+            last_tool_name: None,
+            last_tool_summary: None,
+            prompt_preview: None,
+        },
+        workflow::Progress::Agent {
+            index,
+            label,
+            phase_index,
+            phase_title,
+            agent_id,
+            model,
+            state,
+            error,
+            tool_use_id,
+        } => WorkflowProgressUpdate {
+            kind: "workflow_agent".to_string(),
+            index: *index,
+            title: None,
+            message: None,
+            label: Some(label.clone()),
+            phase_index: *phase_index,
+            phase_title: phase_title.clone(),
+            agent_id: agent_id.clone(),
+            agent_type: None,
+            model: model.clone(),
+            fallback_model: None,
+            state: Some(state.as_str().to_string()),
+            error: error.clone(),
+            tool_use_id: Some(tool_use_id.clone()),
+            queued_at_ms: None,
+            started_at_ms: None,
+            last_progress_at_ms: Some(unix_time_ms_now()),
+            attempt: None,
+            last_attempt_reason: None,
+            tokens: None,
+            tool_calls: None,
+            last_tool_name: None,
+            last_tool_summary: None,
+            prompt_preview: None,
+        },
+    }
+}
+
+#[derive(Clone)]
+struct WorkflowAgentLiveObserver {
+    tx: Option<mpsc::UnboundedSender<WorkflowProgressUpdate>>,
+    state: Arc<tokio::sync::Mutex<WorkflowProgressUpdate>>,
+    journal: Option<(WorkflowJournalWriter, String)>,
+}
+
+impl WorkflowAgentLiveObserver {
+    fn new(
+        tx: Option<mpsc::UnboundedSender<WorkflowProgressUpdate>>,
+        base: WorkflowProgressUpdate,
+        journal: Option<(WorkflowJournalWriter, String)>,
+    ) -> Self {
+        Self {
+            tx,
+            state: Arc::new(tokio::sync::Mutex::new(base)),
+            journal,
+        }
+    }
+
+    async fn publish_with<F>(&self, apply: F)
+    where
+        F: FnOnce(&mut WorkflowProgressUpdate),
+    {
+        let mut state = self.state.lock().await;
+        apply(&mut state);
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(state.clone());
+        }
+    }
+}
+
+#[async_trait]
+impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver {
+    async fn on_event(&self, event: traits::subagent_spawn::SubagentObservation) {
+        match event {
+            traits::subagent_spawn::SubagentObservation::Allocated {
+                agent_id,
+                agent_type,
+                model,
+                model_profile,
+                ..
+            } => {
+                if let Some((journal, key)) = &self.journal {
+                    journal.append_started(key, &agent_id.to_string()).await;
+                }
+                let now = unix_time_ms_now();
+                self.publish_with(move |state| {
+                    state.agent_id = Some(agent_id.to_string());
+                    state.agent_type = Some(agent_type);
+                    state.model = Some(traits::qualified_model_ref(
+                        &model,
+                        model_profile.as_deref(),
+                    ));
+                    state.state = Some("progress".to_string());
+                    state.started_at_ms = Some(now);
+                    state.last_progress_at_ms = Some(now);
+                })
+                .await;
+            }
+            traits::subagent_spawn::SubagentObservation::Progress {
+                tool_use_count,
+                token_count,
+                ..
+            } => {
+                let now = unix_time_ms_now();
+                self.publish_with(move |state| {
+                    state.tokens = Some(token_count);
+                    state.tool_calls = Some(u64::from(tool_use_count));
+                    state.last_progress_at_ms = Some(now);
+                })
+                .await;
+            }
+            traits::subagent_spawn::SubagentObservation::Retry {
+                attempt, reason, ..
+            } => {
+                let now = unix_time_ms_now();
+                self.publish_with(move |state| {
+                    state.state = Some("progress".to_string());
+                    state.attempt = Some(attempt);
+                    state.last_attempt_reason = Some(reason);
+                    state.last_progress_at_ms = Some(now);
+                })
+                .await;
+            }
+            traits::subagent_spawn::SubagentObservation::Message { message, .. } => {
+                let now = unix_time_ms_now();
+                self.publish_with(move |state| {
+                    state.last_progress_at_ms = Some(now);
+                    if let protocol::ConversationMessage::Assistant { content, .. } = message {
+                        for block in content {
+                            if let protocol::ContentBlock::ToolUse { name, .. } = block {
+                                state.last_tool_name = Some(name.clone());
+                                state.last_tool_summary = Some(name);
+                            }
+                        }
+                    }
+                })
+                .await;
+            }
+            traits::subagent_spawn::SubagentObservation::Completed {
+                total_tool_use_count,
+                usage,
+                ..
+            } => {
+                let now = unix_time_ms_now();
+                self.publish_with(move |state| {
+                    state.state = Some("done".to_string());
+                    state.tool_calls = Some(total_tool_use_count);
+                    state.tokens = Some(
+                        usage
+                            .input_tokens
+                            .saturating_add(usage.output_tokens)
+                            .saturating_add(usage.cache_creation_input_tokens)
+                            .saturating_add(usage.cache_read_input_tokens),
+                    );
+                    state.last_progress_at_ms = Some(now);
+                })
+                .await;
+            }
+            traits::subagent_spawn::SubagentObservation::Failed { error, .. } => {
+                let now = unix_time_ms_now();
+                self.publish_with(move |state| {
+                    state.state = Some("error".to_string());
+                    state.error = Some(error);
+                    state.last_progress_at_ms = Some(now);
+                })
+                .await;
+            }
+            traits::subagent_spawn::SubagentObservation::Killed { .. } => {
+                let now = unix_time_ms_now();
+                self.publish_with(move |state| {
+                    state.state = Some("error".to_string());
+                    state.error = Some("subagent was cancelled".to_string());
+                    state.last_progress_at_ms = Some(now);
+                })
+                .await;
+            }
         }
     }
 }
@@ -853,6 +1329,48 @@ pub async fn run_workflow_script(
     // phase_completed events still fire but omit these optional context fields.
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
+    run_workflow_script_with_live_updates(
+        script,
+        subagent_type,
+        spawner,
+        tool_invoker,
+        budget,
+        progress_tx,
+        None,
+        journal,
+        None,
+        token_budget_total,
+        shared_pool,
+        turn_start_baseline,
+        nested,
+        cancel,
+        bus,
+        agent_count_out,
+        phase_telemetry_ctx,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_workflow_script_with_live_updates(
+    script: &str,
+    subagent_type: &str,
+    spawner: Arc<dyn SubagentSpawner>,
+    tool_invoker: Arc<dyn ToolInvoker>,
+    budget: Arc<dyn BudgetEnforcerHandle>,
+    progress_tx: Option<mpsc::UnboundedSender<String>>,
+    live_progress_tx: Option<mpsc::UnboundedSender<WorkflowProgressUpdate>>,
+    journal: Option<Arc<std::sync::Mutex<HashMap<String, String>>>>,
+    journal_writer: Option<WorkflowJournalWriter>,
+    token_budget_total: Option<u64>,
+    shared_pool: Option<Arc<AtomicU64>>,
+    turn_start_baseline: u64,
+    nested: NestedConfig,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    bus: Arc<AnalyticsBus>,
+    agent_count_out: Option<Arc<AtomicU64>>,
+    phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
+) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
         allow_nested,
         args: nested_args,
@@ -883,6 +1401,7 @@ pub async fn run_workflow_script(
     // script thread owns the original for phase()/log() events; the async worker
     // uses this clone to emit workflow_agent start/done/error/cached events.
     let progress_tx_for_worker = progress_tx.clone();
+    let live_progress_tx_for_worker = live_progress_tx.clone();
 
     // The script runs synchronously on its own OS thread; its batch runner is
     // plain sync code, so `blocking_send`/`blocking_recv` are safe here (this is
@@ -908,6 +1427,9 @@ pub async fn run_workflow_script(
             let on_progress = move |p: &workflow::Progress| {
                 if let Some(tx) = &progress_tx {
                     let _ = tx.send(format_progress(p));
+                }
+                if let Some(tx) = &live_progress_tx {
+                    let _ = tx.send(workflow_progress_update(p));
                 }
             };
             let outcome = workflow::run_with_progress(
@@ -936,6 +1458,7 @@ pub async fn run_workflow_script(
     let call_index_counter = Arc::new(AtomicU64::new(0));
     // Use the pre-cloned progress_tx for the async worker (agent lifecycle events).
     let worker_progress_tx = progress_tx_for_worker;
+    let worker_live_progress_tx = live_progress_tx_for_worker;
     // PREFIX resume cursor (claude-code `m` + gone-live flag `f`): the journal is
     // a longest-unchanged-prefix cache. `running_key` chains each real agent()
     // call into the previous key (so any change cascades to all later keys), and
@@ -990,9 +1513,9 @@ pub async fn run_workflow_script(
                 });
             // Advance the chained key for this real agent() call (before the
             // cache check, so cached calls also advance the chain — claude `m`).
-            // Normalize opts to the 5 identity keys only (ABp): display-only
-            // fields like `phase`/`label`/`stallMs` are stripped so re-annotating
-            // a call doesn't invalidate the cache on resume.
+            // Normalize opts to the binary identity keys plus LingXi's provider
+            // profile: display-only fields like `phase`/`label`/`stallMs` are
+            // stripped so re-annotating a call doesn't invalidate resume cache.
             let normalized_opts = normalize_opts_for_chain_key(&opts);
             let key = chain_key(&running_key, &prompt, &normalized_opts);
             running_key.clone_from(&key);
@@ -1033,6 +1556,7 @@ pub async fn run_workflow_script(
             let budget = budget.clone();
             let subagent_type = subagent_type.to_string();
             let journal = journal.clone();
+            let journal_writer = journal_writer.clone();
             let spent = spent.clone();
             let agent_count = agent_count.clone();
             let nested_fs = nested_fs.clone();
@@ -1040,6 +1564,7 @@ pub async fn run_workflow_script(
             let baseline = turn_start_baseline;
             let bus_call = bus.clone();
             let ptx = worker_progress_tx.clone();
+            let live_tx = worker_live_progress_tx.clone();
             async move {
                 let (key, prompt, opts_json, call_index, label, phase_index, phase_title) = match plan {
                     // `workflow()` resolution: read + strip the nested source; `""`
@@ -1067,6 +1592,11 @@ pub async fn run_workflow_script(
                         if let Some(ref tx) = ptx {
                             let _ = tx.send(format_progress(&cached_event));
                         }
+                        if let Some(ref tx) = live_tx {
+                            let mut update = workflow_progress_update(&cached_event);
+                            update.tool_use_id = Some(format!("workflow_agent_{call_index}_cached"));
+                            let _ = tx.send(update);
+                        }
                         return result;
                     }
                     Plan::Live {
@@ -1080,8 +1610,19 @@ pub async fn run_workflow_script(
                     } => (key, prompt, opts_json, call_index, label, phase_index, phase_title),
                 };
                 let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
-                // Extract model from opts for the workflow_agent event.
+                // Keep workflow progress provider-qualified. The request itself
+                // carries the provider-local wire model and profile separately,
+                // while the UI needs one stable display identity across the
+                // queued, live-observer, and terminal events.
                 let agent_model = opts.get("model").and_then(Value::as_str).map(str::to_string);
+                let agent_model_profile = opts
+                    .get("modelProfile")
+                    .or_else(|| opts.get("model_profile"))
+                    .and_then(Value::as_str)
+                    .filter(|profile| !profile.is_empty());
+                let agent_display_model = agent_model.as_deref().map(|model| {
+                    traits::qualified_model_ref(model, agent_model_profile)
+                });
                 // Budget hard ceiling (claude-code `v()` before each spawn): when a
                 // token target is set and the turn-relative spend has reached it,
                 // refuse the spawn → the prelude throws WorkflowBudgetExceededError
@@ -1138,7 +1679,7 @@ pub async fn run_workflow_script(
                         phase_index,
                         phase_title: phase_title.clone(),
                         agent_id: None,
-                        model: agent_model.clone(),
+                        model: agent_display_model.clone(),
                         state: workflow::AgentState::Start,
                         error: None,
                         tool_use_id: format!("workflow_agent_{call_index}_queued"),
@@ -1146,13 +1687,64 @@ pub async fn run_workflow_script(
                     if let Some(ref tx) = ptx {
                         let _ = tx.send(format_progress(&start_event));
                     }
+                    if let Some(ref tx) = live_tx {
+                        let mut update = workflow_progress_update(&start_event);
+                        update.queued_at_ms = Some(unix_time_ms_now());
+                        update.attempt = Some(1);
+                        update.prompt_preview = Some(prompt.chars().take(120).collect());
+                        let _ = tx.send(update);
+                    }
                 }
                 let inherit = SubagentInheritance {
                     tool_invoker,
                     budget,
                 };
                 let request = make_request(&subagent_type, &prompt, &opts_json);
-                let raw = spawner.spawn(request, inherit).await;
+                let raw = if live_tx.is_some() || (journal_writer.is_some() && key.is_some()) {
+                    let observer = WorkflowAgentLiveObserver::new(
+                        live_tx.clone(),
+                        WorkflowProgressUpdate {
+                            kind: "workflow_agent".to_string(),
+                            index: call_index,
+                            title: None,
+                            message: None,
+                            label: Some(label.clone()),
+                            phase_index,
+                            phase_title: phase_title.clone(),
+                            agent_id: None,
+                            agent_type: Some(request.subagent_type.clone()),
+                            model: agent_display_model.clone(),
+                            fallback_model: None,
+                            state: Some("start".to_string()),
+                            error: None,
+                            tool_use_id: Some(format!("workflow_agent_{call_index}_queued")),
+                            queued_at_ms: Some(unix_time_ms_now()),
+                            started_at_ms: None,
+                            last_progress_at_ms: Some(unix_time_ms_now()),
+                            attempt: Some(1),
+                            last_attempt_reason: None,
+                            tokens: None,
+                            tool_calls: None,
+                            last_tool_name: None,
+                            last_tool_summary: None,
+                            prompt_preview: Some(prompt.chars().take(120).collect()),
+                        },
+                        journal_writer
+                            .clone()
+                            .zip(key.clone()),
+                    );
+                    spawner
+                        .spawn_workflow_with_observer(
+                            request,
+                            inherit,
+                            None,
+                            Some(Arc::new(observer)),
+                            traits::subagent_spawn::WorkflowQueryWatchdog::default(),
+                        )
+                        .await
+                } else {
+                    spawner.spawn(request, inherit).await
+                };
                 let terminal_error = subagent_failure_reason(&raw);
                 // Accumulate this fresh subagent's output tokens into the shared
                 // `spent` pool (replayed/cached agents cost nothing) — the same
@@ -1184,7 +1776,7 @@ pub async fn run_workflow_script(
                         phase_index,
                         phase_title,
                         agent_id: agent_id_str,
-                        model: agent_model,
+                        model: agent_display_model,
                         state,
                         error: terminal_error.clone(),
                         tool_use_id,
@@ -1192,19 +1784,33 @@ pub async fn run_workflow_script(
                     if let Some(ref tx) = ptx {
                         let _ = tx.send(format_progress(&lifecycle_event));
                     }
+                    if let Some(ref tx) = live_tx {
+                        let mut update = workflow_progress_update(&lifecycle_event);
+                        update.last_progress_at_ms = Some(unix_time_ms_now());
+                        let _ = tx.send(update);
+                    }
                 }
                 if opts.get("throwOnError").and_then(Value::as_bool) == Some(true) {
                     if let Some(error) = terminal_error {
                         return wf_throw(&format!("Workflow agent {label:?} failed: {error}"));
                     }
                 }
+                let journal_agent_id = match &raw {
+                    Ok(SubagentResult::Completed { agent_id, .. }) => agent_id.to_string(),
+                    _ => String::new(),
+                };
                 let result = result_to_string(raw);
                 // Journal only a real result — a dead/skipped agent (NULL sentinel)
                 // is NOT cached (claude-code `if (a && ie && de !== null) append`),
                 // so a resume re-runs it.
                 if result != workflow::WF_NULL_SENTINEL {
                     if let (Some(j), Some(k)) = (journal.as_ref(), key) {
-                        j.lock().unwrap().insert(k, result.clone());
+                        j.lock().unwrap().insert(k.clone(), result.clone());
+                        if let Some(writer) = &journal_writer {
+                            writer
+                                .append_result(&k, &journal_agent_id, &result)
+                                .await;
+                        }
                     }
                 }
                 result
@@ -1350,7 +1956,8 @@ impl Task for LocalWorkflowHandler {
     ) -> Result<TaskHandle, TaskError> {
         // 1. Only the LocalWorkflow variant is accepted.
         let TaskSpawnInput::LocalWorkflow {
-            workflow_id: _workflow_id,
+            session_uuid: _session_uuid,
+            workflow_id,
             script,
             resume_from_run_id,
             args: workflow_args,
@@ -1364,6 +1971,48 @@ impl Task for LocalWorkflowHandler {
             return Err(TaskError::Internal(
                 "local_workflow handler received a non-LocalWorkflow spawn input".into(),
             ));
+        };
+
+        // A local-app build may only run with a lease bound to the exact app
+        // workspace. Do this validation before allocating task/spool state so
+        // a malformed scope cannot start a prompt-heavy workflow with a
+        // generic cwd or leave an orphaned spool file behind.
+        let workspace_lease = if workflow_id == "local-app-build" {
+            let app_id = workflow_args
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|value| {
+                    value
+                        .get("app_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .filter(|app_id| !app_id.is_empty())
+                .ok_or_else(|| {
+                    TaskError::Internal(
+                        "local-app-build requires a non-empty workflow args.app_id".into(),
+                    )
+                })?;
+            let registry = self.workspace_leases.clone().ok_or_else(|| {
+                TaskError::Internal(
+                    "local-app-build requires a workspace permission lease registry".into(),
+                )
+            })?;
+            let data_root = self.workspace_root.clone().ok_or_else(|| {
+                TaskError::Internal("local-app-build requires an app data root".into())
+            })?;
+            // AppService's persisted invariant is exactly
+            // `apps/<id>/workspace`. Keep this derivation here, at the point
+            // where the workflow's app_id is validated, so a workflow cannot
+            // borrow the current session cwd or another app's workspace.
+            let root = local_app_workspace_root(&data_root, &app_id);
+            Some(
+                registry
+                    .begin_local_app(app_id, root)
+                    .map_err(TaskError::Internal)?,
+            )
+        } else {
+            None
         };
 
         // 2. Generate the task id (prefix 'w') and allocate its spool file.
@@ -1386,6 +2035,7 @@ impl Task for LocalWorkflowHandler {
         let tool_invoker = self.tool_invoker.clone();
         let budget = self.budget.clone();
         let status_sink = self.status_sink.clone();
+        let workflow_progress_sink = self.workflow_progress_sink.clone();
         let workers = self.workers.clone();
         let output_manager = self.output_manager.clone();
         let fs = ctx.fs.clone();
@@ -1435,12 +2085,16 @@ impl Task for LocalWorkflowHandler {
         // This is marked unavailable in the module comment below.
         let meta_phase_count: i64 = 0; // UNAVAILABLE: no workflow::meta_array_len()
         let script_size_chars: i64 = script.chars().count() as i64;
+        let workspace_lease_token = workspace_lease
+            .as_ref()
+            .map(permission::WorkspacePermissionLease::token);
         // Shared agent_count Arc threaded into run_workflow_script so the completed
         // event can read the real post-run count (oracle §7: `k.agentCount`).
         let shared_agent_count = Arc::new(AtomicU64::new(0));
         let worker = Box::pin({
             let shared_agent_count = shared_agent_count.clone();
             async move {
+                let _workspace_lease = workspace_lease;
                 let registered = wait_for_workflow_registration(
                     &status_sink,
                     &runtime,
@@ -1542,14 +2196,31 @@ impl Task for LocalWorkflowHandler {
                 let journal_path = worker_spool_path
                     .parent()
                     .map(|d| d.join(format!("workflow-{run_id}.json")));
+                let journal_writer =
+                    transcript_subdir
+                        .as_ref()
+                        .map(|directory| WorkflowJournalWriter {
+                            path: directory.join("journal.jsonl"),
+                            fs: fs.clone(),
+                        });
+                if let Some(writer) = &journal_writer {
+                    writer.ensure_exists().await;
+                }
                 let mut cache: HashMap<String, String> = HashMap::new();
                 if resume_from_run_id.is_some() {
-                    if let Some(p) = journal_path.as_ref().and_then(|p| p.to_str()) {
-                        if let Ok(fc) = fs.read_file(p, None, None).await {
-                            if let Ok(loaded) =
-                                serde_json::from_str::<HashMap<String, String>>(&fc.content)
-                            {
-                                cache = loaded;
+                    if let Some(writer) = &journal_writer {
+                        cache = writer.load_results().await;
+                    }
+                    // Compatibility with runs created before the append-only
+                    // transcript journal existed.
+                    if cache.is_empty() {
+                        if let Some(p) = journal_path.as_ref().and_then(|p| p.to_str()) {
+                            if let Ok(fc) = fs.read_file(p, None, None).await {
+                                if let Ok(loaded) =
+                                    serde_json::from_str::<HashMap<String, String>>(&fc.content)
+                                {
+                                    cache = loaded;
+                                }
                             }
                         }
                     }
@@ -1577,14 +2248,38 @@ impl Task for LocalWorkflowHandler {
                 // finishes. The drainer ends when `run_workflow_script` drops its
                 // sender on return.
                 let (ptx, mut prx) = mpsc::unbounded_channel::<String>();
+                let (wptx, mut wprx) = mpsc::unbounded_channel::<WorkflowProgressUpdate>();
                 let prog_output = output_manager.clone();
                 let prog_spool = worker_spool_path.clone();
+                let worker_task_id_for_progress = worker_task_id.clone();
+                let run_id_for_progress = run_id.clone();
                 let drain = async move {
                     while let Some(line) = prx.recv().await {
                         let _ = prog_output.append(&prog_spool, &format!("{line}\n")).await;
                     }
                 };
+                let live_drain = async move {
+                    while let Some(progress) = wprx.recv().await {
+                        if let Some(ref sink) = workflow_progress_sink {
+                            sink.emit_workflow_progress(
+                                &worker_task_id_for_progress,
+                                &run_id_for_progress,
+                                progress,
+                            )
+                            .await;
+                        }
+                    }
+                };
                 let run_start = std::time::Instant::now();
+                let workflow_tool_invoker: Arc<dyn ToolInvoker> =
+                    if let Some(token) = workspace_lease_token {
+                        Arc::new(WorkspaceLeaseToolInvoker {
+                            inner: tool_invoker.clone(),
+                            token,
+                        })
+                    } else {
+                        tool_invoker.clone()
+                    };
                 let workflow_spawner: Arc<dyn SubagentSpawner> =
                     if let Some(worktree) = worktree_manager.clone() {
                         Arc::new(WorkflowIsolationSpawner {
@@ -1603,14 +2298,16 @@ impl Task for LocalWorkflowHandler {
                             transcript_subdir: transcript_subdir.clone(),
                         })
                     };
-                let run = run_workflow_script(
+                let run = run_workflow_script_with_live_updates(
                     &script,
                     DEFAULT_WORKFLOW_SUBAGENT,
                     workflow_spawner,
-                    tool_invoker,
+                    workflow_tool_invoker,
                     budget,
                     Some(ptx),
+                    Some(wptx),
                     Some(journal.clone()),
+                    journal_writer,
                     token_budget_total,
                     shared_pool,
                     turn_start_baseline,
@@ -1633,7 +2330,7 @@ impl Task for LocalWorkflowHandler {
                         invocation_mode: invocation_mode.clone(),
                     }),
                 );
-                let (outcome, ()) = tokio::join!(run, drain);
+                let (outcome, (), ()) = tokio::join!(run, drain, live_drain);
                 let elapsed_ms = run_start.elapsed().as_millis() as i64;
 
                 // tengu_workflow_completed — oracle §7 exact payload.

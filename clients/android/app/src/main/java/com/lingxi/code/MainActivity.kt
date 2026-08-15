@@ -212,6 +212,7 @@ class MainActivity : ComponentActivity() {
             // Monotonic across configuration changes: rotation must not turn a
             // prior reconnect generation back into zero and rebuild a live engine.
             var engineReconnect by rememberSaveable { mutableIntStateOf(0) }
+            var activeConversationSource by remember { mutableStateOf<com.lingxi.code.conversation.ConversationSource?>(null) }
             var engineRuntimeMode by rememberSaveable {
                 mutableStateOf(settingsState.linuxRuntime.selectedMode.name)
             }
@@ -298,6 +299,7 @@ class MainActivity : ComponentActivity() {
                         voiceLang = prefs.voiceLang,
                         reconnectToken = engineReconnect,
                         settingsStore = settingsStore,
+                        onConversationSourceChanged = { activeConversationSource = it },
                     )
                     AnimatedVisibility(
                         visible = settingsOpen,
@@ -309,6 +311,9 @@ class MainActivity : ComponentActivity() {
                             isDark = darkTheme,
                             accentId = prefs.accentId,
                             store = settingsStore,
+                            onPermissionModeChanged = { mode ->
+                                activeConversationSource?.setPermissionMode(mode)
+                            },
                             initialRoute = settingsInitialRoute,
                             onClose = {
                                 settingsOpen = false

@@ -124,12 +124,34 @@ impl Platform for HostFakePlatform {
 pub struct FakeListener {
     /// Every [`ClientEvent`] the adapter delivered, in arrival order.
     pub received: Mutex<Vec<ClientEvent>>,
+    /// Every direct structured workflow update, in arrival order.
+    pub workflow_progress: Mutex<
+        Vec<(
+            String,
+            String,
+            String,
+            client_protocol::listings::WorkflowProgressDto,
+        )>,
+    >,
 }
 
 #[async_trait]
 impl ClientEventListener for FakeListener {
     async fn on_event(&self, event: ClientEvent) {
         self.received.lock().await.push(event);
+    }
+
+    async fn on_workflow_progress(
+        &self,
+        origin_session_id: String,
+        task_id: String,
+        run_id: String,
+        progress: client_protocol::listings::WorkflowProgressDto,
+    ) {
+        self.workflow_progress
+            .lock()
+            .await
+            .push((origin_session_id, task_id, run_id, progress));
     }
 }
 

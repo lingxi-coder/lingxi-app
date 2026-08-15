@@ -44,6 +44,10 @@ pub struct Runtime {
     /// mount wraps it in a `PollerFeed` so the background-task footer + dialog
     /// read live state.
     pub task_registry: Arc<tasks::registry::TaskRegistry>,
+    /// Event-driven workflow lifecycle/progress feed from the desktop
+    /// composition root. Non-interactive hosts may drop it.
+    pub workflow_events:
+        Option<tokio::sync::mpsc::UnboundedReceiver<engine_desktop::DesktopWorkflowEvent>>,
     /// Live settings watcher firing `ConfigChange` hooks when settings files
     /// mutate on disk. Held here purely to keep the watcher alive for the
     /// session: dropping the `Runtime` (process teardown) aborts the watch
@@ -190,6 +194,12 @@ pub struct TuiBuild {
     /// bridge pump. `UnboundedSender` is `Clone`, so cloning it here does not
     /// disturb the `BridgeOutputStream` that owns the original.
     pub turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+    /// Event-driven workflow lifecycle/progress feed. The TUI merges these
+    /// updates into `turn_tx`; this is deliberately separate from the
+    /// orchestrator output receiver so workflow pushes cannot be starved by a
+    /// slow transcript renderer.
+    pub workflow_events:
+        Option<tokio::sync::mpsc::UnboundedReceiver<engine_desktop::DesktopWorkflowEvent>>,
     /// (TUI-PERM) Receiver for the injected `TuiPermissionGate`'s exchanges.
     /// Threaded into `session::Runtime::with_permission_rx` so the TUI's
     /// permission pump drives the interactive dialog.
@@ -1064,6 +1074,7 @@ pub async fn build_runtime_from_config(
         auth: rt.auth,
         enforcing_permission_gate: rt.enforcing_permission_gate,
         task_registry: rt.task_registry,
+        workflow_events: rt.workflow_events,
         settings_watcher: rt.settings_watcher,
         file_changed_watcher: rt.file_changed_watcher,
         subscription: rt.subscription,
@@ -1182,7 +1193,8 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         Some(gate as std::sync::Arc<dyn permission::gate::PermissionGate>);
 
     let flag_settings = cfg.flag_settings.clone();
-    let runtime = build_runtime_from_config(cfg, bridge).await?;
+    let mut runtime = build_runtime_from_config(cfg, bridge).await?;
+    let workflow_events = runtime.workflow_events.take();
     crate::startup_trace::mark("tui_runtime_build_end");
     // (companyAnnouncements) Read the merged array honoring `--setting-sources`;
     // the composition root (`run_ratatui`) selects + renders it at startup.
@@ -1197,6 +1209,7 @@ pub async fn build_runtime_for_tui_inner_with_parent(
             || permission_mode == permission::PermissionMode::BypassPermissions,
         bridge_rx,
         turn_tx,
+        workflow_events,
         permission_rx: perm_rx,
         ask_user_question_rx,
         computer_access_rx,

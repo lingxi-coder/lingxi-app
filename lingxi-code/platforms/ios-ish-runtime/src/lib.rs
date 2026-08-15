@@ -2104,6 +2104,27 @@ fn validate_mount(
         return Err(MobileLinuxError::InvalidRequest(
             "only workspace mounts may target the managed workspace guest path".to_string(),
         ));
+    } else if let Some(app_id) = parse_local_app_build_node_modules_guest_path(&mount.guest_path) {
+        // The fixed local-app build mounts the app-owned dependency tree as a
+        // read-only companion mount below the managed build root. It remains
+        // an `External` mount because its host endpoint is the app workspace,
+        // not the generated build directory. Keep this exception exact: no
+        // other child of the managed build root may be supplied by a caller.
+        let expected_host_path = normalize_host_path(
+            &config
+                .app_sandbox_root
+                .join("apps")
+                .join(app_id)
+                .join("workspace")
+                .join("node_modules"),
+            "local-app dependency host_path",
+        )?;
+        if !mount.read_only || host_path != expected_host_path {
+            return Err(MobileLinuxError::InvalidRequest(
+                "local-app dependency mount must be the read-only app workspace node_modules"
+                    .to_string(),
+            ));
+        }
     } else if guest_path_has_prefix(&mount.guest_path, LOCAL_APP_BUILD_GUEST_ROOT) {
         return Err(MobileLinuxError::InvalidRequest(
             "only local-app build mounts may target the managed local-app build guest path"
@@ -2140,6 +2161,22 @@ fn parse_local_app_build_guest_path(path: &str) -> Result<(&str, &str), MobileLi
         )));
     }
     Ok((app_id, channel))
+}
+
+fn parse_local_app_build_node_modules_guest_path(path: &str) -> Option<&str> {
+    let relative = path
+        .strip_prefix(LOCAL_APP_BUILD_GUEST_ROOT)
+        .and_then(|suffix| suffix.strip_prefix('/'))?;
+    let mut segments = relative.split('/');
+    let app_id = segments.next()?;
+    let channel = segments.next()?;
+    if segments.next()? != "node_modules" || segments.next().is_some() {
+        return None;
+    }
+    if !is_valid_local_app_id(app_id) || !matches!(channel, "store" | "full") {
+        return None;
+    }
+    Some(app_id)
 }
 
 fn is_valid_local_app_id(value: &str) -> bool {
@@ -2843,6 +2880,96 @@ mod tests {
             mount.guest_path,
             "/var/lingxi/local-app-build/abcd1234/store"
         );
+    }
+
+    #[test]
+    fn local_app_build_dependency_mount_accepts_the_app_workspace_node_modules() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("app");
+        let config = test_config(&root);
+        let host_path = root
+            .join("apps")
+            .join("abcd1234")
+            .join("workspace")
+            .join("node_modules");
+        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
+        fs::create_dir_all(host_path.clone()).expect("create app dependencies");
+        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
+        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
+
+        let mount = validate_mount(
+            &MountSpec {
+                host_path,
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/node_modules".to_string(),
+                read_only: true,
+                purpose: MountPurpose::External,
+            },
+            &config,
+        )
+        .expect("app workspace dependencies are a valid build companion mount");
+
+        assert_eq!(
+            mount.guest_path,
+            "/var/lingxi/local-app-build/abcd1234/store/node_modules"
+        );
+    }
+
+    #[test]
+    fn local_app_build_dependency_mount_rejects_other_children_and_writable_mounts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("app");
+        let config = test_config(&root);
+        let dependencies = root
+            .join("apps")
+            .join("abcd1234")
+            .join("workspace")
+            .join("node_modules");
+        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
+        fs::create_dir_all(dependencies.clone()).expect("create app dependencies");
+        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
+        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
+
+        let writable = validate_mount(
+            &MountSpec {
+                host_path: dependencies.clone(),
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/node_modules".to_string(),
+                read_only: false,
+                purpose: MountPurpose::External,
+            },
+            &config,
+        )
+        .expect_err("dependency mount must be read-only");
+        assert!(matches!(writable, MobileLinuxError::InvalidRequest(_)));
+
+        let wrong_host = root
+            .join("apps")
+            .join("other123")
+            .join("workspace")
+            .join("node_modules");
+        fs::create_dir_all(wrong_host.clone()).expect("create sibling dependencies");
+        let sibling = validate_mount(
+            &MountSpec {
+                host_path: wrong_host,
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/node_modules".to_string(),
+                read_only: true,
+                purpose: MountPurpose::External,
+            },
+            &config,
+        )
+        .expect_err("dependency mount must stay bound to the same app");
+        assert!(matches!(sibling, MobileLinuxError::InvalidRequest(_)));
+
+        let other_child = validate_mount(
+            &MountSpec {
+                host_path: dependencies,
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/cache".to_string(),
+                read_only: true,
+                purpose: MountPurpose::External,
+            },
+            &config,
+        )
+        .expect_err("arbitrary build-root children must remain blocked");
+        assert!(matches!(other_child, MobileLinuxError::InvalidRequest(_)));
     }
 
     #[test]

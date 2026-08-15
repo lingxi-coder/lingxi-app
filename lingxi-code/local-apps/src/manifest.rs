@@ -17,6 +17,11 @@ use traits::FsError;
 
 /// Manifest filename under `workspace/.lingxi`.
 pub const APP_MANIFEST_FILE: &str = "app.manifest.json";
+/// Permission settings filename under `workspace/.lingxi`.
+///
+/// This is the project-local permission file consumed by the permission
+/// loader when a local-app workspace is used as the session cwd.
+pub const WORKSPACE_SETTINGS_LOCAL_FILE: &str = "settings.local.json";
 /// App-private data directory.
 pub const DATA_DIR: &str = "data";
 /// `SQLite` database filename.
@@ -424,6 +429,19 @@ impl AppLayout {
         self.workspace_rel()
             .join(crate::storage::APP_STATE_DIR)
             .join(APP_MANIFEST_FILE)
+    }
+
+    /// Root-relative project-local permission settings for the app workspace.
+    ///
+    /// The app storage contract uses `apps/<id>/workspace` as the physical
+    /// workspace root. Session ids identify transcript catalog entries under
+    /// the profile's session store; they are not additional filesystem path
+    /// components here.
+    #[must_use]
+    pub fn workspace_settings_local_rel(&self) -> PathBuf {
+        self.workspace_rel()
+            .join(crate::storage::APP_STATE_DIR)
+            .join(WORKSPACE_SETTINGS_LOCAL_FILE)
     }
 
     /// Root-relative `SQLite` database path.

@@ -62,6 +62,8 @@ import XCTest
                 agentId: "agent:child-1",
                 name: "researcher",
                 agentType: "explorer",
+                model: "deepseek-v4-flash",
+                modelProfile: "deepseek",
                 status: "running",
                 latestActivity: "搜索代码",
                 updatedAtMs: 42
@@ -72,6 +74,9 @@ import XCTest
 
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [summary]))
             XCTAssertEqual(source.model.agentSummaries.map(\.id), [ConversationModel.mainAgentID, "agent:child-1"])
+            let child = source.model.agentSummaries.first { $0.id == "agent:child-1" }
+            XCTAssertEqual(child?.model, "deepseek-v4-flash")
+            XCTAssertEqual(child?.modelProfile, "deepseek")
             XCTAssertEqual(
                 source.model.agentSummaries.first?.name,
                 String(localized: "chat_agent_main")
@@ -90,23 +95,65 @@ import XCTest
                     agentId: ConversationModel.mainAgentID,
                     name: "Remote main",
                     agentType: "main",
+                    model: nil,
+                    modelProfile: nil,
                     status: "idle",
                     latestActivity: "12 messages · model",
                     updatedAtMs: nil
                 )
             ))
             XCTAssertEqual(source.model.agentSummaries.first?.name, String(localized: "chat_agent_main"))
-            XCTAssertNil(source.model.agentSummaries.first?.latestActivity)
+            XCTAssertEqual(source.model.agentSummaries.first?.latestActivity, "12 messages · model")
             source.selectAgent("agent:child-1")
             XCTAssertTrue(source.model.isSelectedAgentReadOnly)
             XCTAssertEqual(source.model.selectedAgentSummary?.latestActivity, "搜索代码")
+        }
+
+        func testDelayedAgentListCannotOverwriteNewerLiveUpdate() {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            let agentID = "agent:child-1"
+
+            source.applyForTesting(.sessionAgentUpdated(
+                sessionId: "session-a",
+                agent: SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "designer",
+                    agentType: "workflow-subagent",
+                    model: "deepseek-v4-flash",
+                    modelProfile: "deepseek",
+                    status: "completed",
+                    latestActivity: "Design complete",
+                    updatedAtMs: 2_000
+                )
+            ))
+            source.applyForTesting(.sessionAgentList(
+                sessionId: "session-a",
+                agents: [SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "designer",
+                    agentType: "workflow-subagent",
+                    model: "claude-opus-4-8",
+                    modelProfile: "anthropic",
+                    status: "running",
+                    latestActivity: "Starting",
+                    updatedAtMs: 1_000
+                )]
+            ))
+
+            let child = source.model.agentSummaries.first { $0.id == agentID }
+            XCTAssertEqual(child?.status, "completed")
+            XCTAssertEqual(child?.latestActivity, "Design complete")
+            XCTAssertEqual(child?.model, "deepseek-v4-flash")
+            XCTAssertEqual(child?.modelProfile, "deepseek")
+            XCTAssertEqual(child?.updatedAtMs, 2_000)
         }
 
         func testSessionAgentTranscriptReplacesOnlySelectedChildView() {
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: "agent:child-1", name: "worker", agentType: "general", status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: "agent:child-1", name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent("agent:child-1")
             source.applyForTesting(.sessionAgentTranscript(
@@ -132,6 +179,8 @@ import XCTest
                     agentId: agentID,
                     name: "worker",
                     agentType: "general",
+                    model: nil,
+                    modelProfile: nil,
                     status: "working",
                     latestActivity: nil,
                     updatedAtMs: nil
@@ -163,6 +212,8 @@ import XCTest
                     agentId: agentID,
                     name: "worker",
                     agentType: "general",
+                    model: nil,
+                    modelProfile: nil,
                     status: "working",
                     latestActivity: nil,
                     updatedAtMs: nil
@@ -196,7 +247,7 @@ import XCTest
             let agentID = "agent:child-1"
             let repeated = MessageDto(role: "assistant", blocks: [.text(text: "same")])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -230,6 +281,8 @@ import XCTest
                     agentId: agentID,
                     name: "worker",
                     agentType: "general",
+                    model: nil,
+                    modelProfile: nil,
                     status: "idle",
                     latestActivity: nil,
                     updatedAtMs: nil
@@ -281,6 +334,8 @@ import XCTest
                     agentId: agentID,
                     name: "worker",
                     agentType: "general",
+                    model: nil,
+                    modelProfile: nil,
                     status: "idle",
                     latestActivity: nil,
                     updatedAtMs: nil
@@ -319,6 +374,8 @@ import XCTest
                     agentId: agentID,
                     name: "worker",
                     agentType: "general",
+                    model: nil,
+                    modelProfile: nil,
                     status: "working",
                     latestActivity: nil,
                     updatedAtMs: nil
@@ -362,7 +419,7 @@ import XCTest
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", status: "working", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -412,6 +469,8 @@ import XCTest
                     agentId: agentID,
                     name: "worker",
                     agentType: "general",
+                    model: nil,
+                    modelProfile: nil,
                     status: "working",
                     latestActivity: nil,
                     updatedAtMs: nil
@@ -454,7 +513,7 @@ import XCTest
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", status: "working", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -480,8 +539,8 @@ import XCTest
             let first = "agent:first"
             let second = "agent:second"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: first, name: "first", agentType: "general", status: "idle", latestActivity: nil, updatedAtMs: nil),
-                SessionAgentSummaryDto(agentId: second, name: "second", agentType: "general", status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: first, name: "first", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil),
+                SessionAgentSummaryDto(agentId: second, name: "second", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(first)
             source.selectAgent(second)
@@ -500,6 +559,8 @@ import XCTest
                     agentId: agentID,
                     name: "worker",
                     agentType: "general",
+                    model: nil,
+                    modelProfile: nil,
                     status: "idle",
                     latestActivity: nil,
                     updatedAtMs: nil
@@ -536,7 +597,7 @@ import XCTest
             source.model.activeSessionId = "session-old"
             let agentID = "agent:old"
             source.applyForTesting(.sessionAgentList(sessionId: "session-old", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "old", agentType: "general", status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: "old", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
             source.model.activeSessionId = "session-new"
@@ -561,6 +622,8 @@ import XCTest
                     agentId: "agent:child-1",
                     name: "worker",
                     agentType: "general",
+                    model: nil,
+                    modelProfile: nil,
                     status: "idle",
                     latestActivity: nil,
                     updatedAtMs: nil
@@ -606,6 +669,8 @@ import XCTest
                     agentId: agentID,
                     name: "worker",
                     agentType: "general",
+                    model: nil,
+                    modelProfile: nil,
                     status: "working",
                     latestActivity: nil,
                     updatedAtMs: nil
@@ -835,6 +900,101 @@ import XCTest
             XCTAssertEqual(source.model.activeSessionId, "saved-session")
         }
 
+        func testSameTargetSessionStartedCannotCompleteResumeBeforeTranscriptReplay() {
+            let source = makeSource()
+            source.setCommandSubmitterForTesting { _ in }
+            source.model.activeSessionId = "saved-session"
+
+            source.resumeSession("saved-session")
+            XCTAssertTrue(source.model.sessionTransitionPending)
+
+            source.applyForTesting(.sessionStarted(sessionId: "saved-session"))
+
+            XCTAssertTrue(
+                source.model.sessionTransitionPending,
+                "only SessionResumed carries the authoritative transcript replay"
+            )
+            XCTAssertEqual(source.model.activeSessionId, "saved-session")
+        }
+
+        func testSameSessionStartedPreservesSelectedChildTranscript() {
+            let source = makeSource()
+            let sessionID = "session-a"
+            let agentID = "agent:design"
+            source.model.activeSessionId = sessionID
+            source.applyForTesting(.sessionAgentList(sessionId: sessionID, agents: [
+                SessionAgentSummaryDto(
+                    agentId: agentID,
+                    name: "design",
+                    agentType: "designer",
+                    model: "deepseek-v4-flash",
+                    modelProfile: "deepseek",
+                    status: "running",
+                    latestActivity: "Inspecting layout",
+                    updatedAtMs: 10
+                )
+            ]))
+            source.applyForTesting(.sessionAgentTranscript(
+                sessionId: sessionID,
+                agentId: agentID,
+                messages: [MessageDto(role: "assistant", blocks: [.text(text: "Design notes")])],
+                nextMessageIndex: 1,
+                revision: 1
+            ))
+            source.selectAgent(agentID)
+
+            source.applyForTesting(.sessionStarted(sessionId: sessionID))
+
+            XCTAssertEqual(source.model.selectedAgentID, agentID)
+            XCTAssertEqual(source.model.agentSummaries.map(\.id), [
+                ConversationModel.mainAgentID,
+                agentID,
+            ])
+            XCTAssertEqual(source.model.agentTranscripts[agentID]?.messages.map(\.text), [
+                "Design notes"
+            ])
+        }
+
+        func testLateSessionResumedCannotOverwriteNewerConfirmedSession() {
+            let source = makeSource()
+            source.setCommandSubmitterForTesting { _ in }
+            source.model.activeSessionId = "session-a"
+
+            source.resumeSession("session-b")
+            source.applyForTesting(.sessionResumed(
+                sessionId: "session-b",
+                messages: [MessageDto(role: "assistant", blocks: [.text(text: "B")])]
+            ))
+            source.resumeSession("session-c")
+            source.applyForTesting(.sessionResumed(
+                sessionId: "session-c",
+                messages: [MessageDto(role: "assistant", blocks: [.text(text: "C")])]
+            ))
+
+            source.applyForTesting(.sessionResumed(
+                sessionId: "session-b",
+                messages: [MessageDto(role: "assistant", blocks: [.text(text: "late B")])]
+            ))
+
+            XCTAssertEqual(source.model.activeSessionId, "session-c")
+            XCTAssertEqual(source.model.messages.map(\.text), ["C"])
+        }
+
+        func testUnexpectedBootstrapSessionStartedDoesNotClearVisibleTranscript() {
+            let source = makeSource()
+            let visibleMessage = Message(role: .ai, text: "keep me visible")
+            source.model.activeSessionId = "active-session"
+            source.model.messages = [visibleMessage]
+            source.model.items = [.message(visibleMessage)]
+
+            source.applyForTesting(.sessionStarted(sessionId: "bootstrap-session"))
+
+            XCTAssertEqual(source.model.messages, [visibleMessage])
+            XCTAssertEqual(source.model.items, [.message(visibleMessage)])
+            XCTAssertEqual(source.model.activeSessionId, "active-session")
+            XCTAssertFalse(source.model.isNew)
+        }
+
         /// The loaded transition is the persistence trigger. It must never be
         /// observable before the rows carried by the same engine event, or a
         /// crash between the two publications can durably erase the old index.
@@ -879,6 +1039,7 @@ import XCTest
                 MessageDto(role: "user", blocks: [.text(text: "第一条用户消息")]),
                 MessageDto(role: "assistant", blocks: [.text(text: "助手的回复")]),
             ]
+            source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
 
             XCTAssertEqual(source.model.activeSessionId, uuid(),
@@ -912,6 +1073,7 @@ import XCTest
                             isError: false, oldString: nil, newString: nil, filePath: nil,
                             display: nil),
             ])
+            source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: [assistant]))
 
             XCTAssertEqual(source.model.messages.count, 2)
@@ -990,6 +1152,7 @@ import XCTest
                 MessageDto(role: "assistant", blocks: [.text(text: "检查完成")]),
             ]
 
+            source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
 
             let kinds = source.model.items.map { item -> String in
@@ -1027,6 +1190,7 @@ import XCTest
                 ]),
             ]
 
+            source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
 
             let order = source.model.visibleTimelineGroups.flatMap(\.rows).map { row -> String in
@@ -1072,6 +1236,7 @@ import XCTest
                 MessageDto(role: "assistant", blocks: [.text(text: "已改用其他方法")]),
             ]
 
+            source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: messages))
 
             let runs = source.model.items.compactMap { item -> ConversationExecutionRun? in
@@ -1133,6 +1298,7 @@ import XCTest
             let source = makeSource()
             source.model.messages = [Message(role: .ai, text: "placeholder")]
 
+            source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: []))
 
             XCTAssertEqual(source.model.activeSessionId, uuid())
@@ -1148,6 +1314,7 @@ import XCTest
         func testSessionResumedSystemRoleRendersAsAi() {
             let source = makeSource()
             let system = MessageDto(role: "system", blocks: [.text(text: "系统提示")])
+            source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), messages: [system]))
 
             XCTAssertEqual(source.model.messages.count, 1)

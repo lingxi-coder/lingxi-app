@@ -6,6 +6,8 @@
       "agent_id": "main",
       "name": "Main agent",
       "agent_type": "main",
+      "model": "deepseek-v4-flash",
+      "model_profile": "deepseek",
       "status": "running",
       "latest_activity": "Working on the selected conversation",
       "updated_at_ms": 1750000000000

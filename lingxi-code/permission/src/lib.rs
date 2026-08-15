@@ -63,6 +63,7 @@ pub mod shadow;
 pub mod shell_command;
 pub mod shell_rule_matching;
 pub mod update;
+pub mod workspace_lease;
 
 pub use allow_suggestion::{allow_suggestion, call_matches_rule};
 pub use auto_edit_safety::{
@@ -131,3 +132,6 @@ pub use sed_validation::{
 };
 pub use shadow::{detect_unreachable_rules, is_shared_setting_source, ShadowType, UnreachableRule};
 pub use update::PermissionUpdate;
+pub use workspace_lease::{
+    WorkspaceLeaseInfo, WorkspacePermissionLease, WorkspacePermissionLeaseRegistry,
+};

@@ -17,6 +17,7 @@ final class LocalAppsStore {
 
     private struct PendingCreation {
         let knownAppIDs: Set<String>
+        let modelOverride: String?
     }
 
     private(set) var apps: [LocalAppSummary] = []
@@ -54,6 +55,9 @@ final class LocalAppsStore {
         /// the init-chat kickoff so the agent starts from the ACTUAL ask,
         /// not a generic opener.
         let brief: String
+        /// Optional provider-qualified workflow model selected in the create UI.
+        /// `nil` means inherit the new conversation's live model.
+        let modelOverride: String?
     }
 
     private(set) var createdAppSession: CreatedAppSession?
@@ -62,6 +66,7 @@ final class LocalAppsStore {
     /// creates inside the fallback window would otherwise overwrite each
     /// other, stranding the first with no landing at all.
     @ObservationIgnored private var awaitingInitPinAppIDs: Set<String> = []
+    @ObservationIgnored private var awaitingInitPinModelOverrides: [String: String] = [:]
     private(set) var pendingPermission: LocalAppPermissionPrompt?
     private(set) var requestedPresentationAppID: String?
     private(set) var activeUIRequestAppID: String?
@@ -134,7 +139,8 @@ final class LocalAppsStore {
                         // The pin arrived with the first announce (fast path).
                         createdAppSession = CreatedAppSession(
                             appID: created.id, initSessionID: initSession,
-                            brief: created.brief)
+                            brief: created.brief,
+                            modelOverride: pendingCreation.modelOverride)
                     } else {
                         // The engine announces twice: first the record, then
                         // the `init_session_id` pin (`set_init_session`
@@ -142,11 +148,15 @@ final class LocalAppsStore {
                         // can land DIRECTLY in the init chat; if the mint
                         // failed engine-side, fall back to the details page.
                         awaitingInitPinAppIDs.insert(created.id)
+                        if let modelOverride = pendingCreation.modelOverride {
+                            awaitingInitPinModelOverrides[created.id] = modelOverride
+                        }
                         let appID = created.id
                         Task { [weak self] in
                             try? await Task.sleep(for: .seconds(3))
                             guard let self,
                                   self.awaitingInitPinAppIDs.remove(appID) != nil else { return }
+                            self.awaitingInitPinModelOverrides.removeValue(forKey: appID)
                             self.createdAppID = appID
                         }
                     }
@@ -159,7 +169,8 @@ final class LocalAppsStore {
                     awaitingInitPinAppIDs.remove(pinned.id)
                     createdAppSession = CreatedAppSession(
                         appID: pinned.id, initSessionID: initSession,
-                        brief: pinned.brief)
+                        brief: pinned.brief,
+                        modelOverride: awaitingInitPinModelOverrides.removeValue(forKey: pinned.id))
                 }
                 lastRefreshAt = .now
                 isRefreshing = false
@@ -284,20 +295,31 @@ final class LocalAppsStore {
     /// collected here. `name` goes over the wire empty, and `AppService::
     /// create_app` derives a display name from the brief itself (first 24
     /// characters) when none is supplied.
-    func createApp(brief: String, gitEnabled: Bool = true) async -> Bool {
+    func createApp(
+        brief: String,
+        gitEnabled: Bool = true,
+        modelOverride: String? = nil
+    ) async -> Bool {
         let trimmed = brief.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             errorMessage = String(localized: "local_apps_error_brief_required")
             return false
         }
         #if canImport(engine_mobileFFI)
-            pendingCreation = PendingCreation(knownAppIDs: Set(apps.map(\.id)))
+            let trimmedModel = modelOverride?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let workflowModel = trimmedModel.flatMap { $0.isEmpty ? nil : $0 }
+            pendingCreation = PendingCreation(
+                knownAppIDs: Set(apps.map(\.id)),
+                modelOverride: workflowModel
+            )
             let succeeded = await send(
                 .createApp(
                     name: "",
                     origin: .library,
                     brief: trimmed,
                     gitEnabled: gitEnabled,
+                    workflowModel: workflowModel,
                     conversationId: nil
                 )
             )

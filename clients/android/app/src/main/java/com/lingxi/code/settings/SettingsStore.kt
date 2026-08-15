@@ -48,6 +48,9 @@ data class SettingsUiState(
     val bioLock: Boolean = true,
     val telemetry: Boolean = false,
     val autoUpdate: Boolean = true,
+    val permissionMode: String = "auto",
+    val effectivePermissionMode: String = "auto",
+    val permissionModeError: String? = null,
 ) {
     /**
      * True until an enabled LLM has both a selected model and a credential that
@@ -73,6 +76,7 @@ data class SettingsUiState(
 class SettingsStore(
     private val providerRepo: ProviderSettingsRepository? = null,
     private val voiceRepo: VoiceSettingsRepository? = null,
+    private val permissionModeRepo: PermissionModeSettingsRepository? = null,
     /**
      * Resolves a string resource id to its localized text. The production
      * factory wires the application context's `getString`; unit tests keep the
@@ -90,12 +94,16 @@ class SettingsStore(
     private fun resolveWithFallback(id: Int, fallback: String): String =
         resolveString(id).ifEmpty { fallback }
 
+    private val initialPermissionMode: String = permissionModeRepo?.load() ?: "auto"
+
     private val _state = MutableStateFlow(
         providerRepo?.loadProviderState()?.let { (llm, search, fetch) ->
             SettingsUiState(
                 llmProviders = llm,
                 searchProviders = search,
                 fetchProviders = fetch,
+                permissionMode = initialPermissionMode,
+                effectivePermissionMode = initialPermissionMode,
                 voice = voiceRepo?.load() ?: VoiceConfig(),
                 skills = SettingsMock.bundledSkills(::resolveWithFallback),
                 mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
@@ -108,6 +116,8 @@ class SettingsStore(
             )
         } ?: SettingsUiState(
             voice = voiceRepo?.load() ?: VoiceConfig(),
+            permissionMode = initialPermissionMode,
+            effectivePermissionMode = initialPermissionMode,
             skills = SettingsMock.bundledSkills(::resolveWithFallback),
             mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
             dream = DreamConfig(
@@ -136,6 +146,52 @@ class SettingsStore(
     fun setBioLock(on: Boolean) = _state.update { it.copy(bioLock = on) }
     fun setTelemetry(on: Boolean) = _state.update { it.copy(telemetry = on) }
     fun setAutoUpdate(on: Boolean) = _state.update { it.copy(autoUpdate = on) }
+    fun setPermissionMode(mode: String, onApply: (suspend (String) -> Unit)? = null) {
+        if (mode !in PermissionModeOptions.values) return
+        val previous = _state.value.permissionMode
+        val previousEffective = _state.value.effectivePermissionMode
+        try {
+            permissionModeRepo?.save(mode)
+        } catch (error: Exception) {
+            _state.update {
+                it.copy(permissionModeError = error.message ?: "permission mode could not be saved")
+            }
+            return
+        }
+        _state.update { it.copy(permissionMode = mode, permissionModeError = null) }
+        if (onApply != null) {
+            viewModelScope.launch {
+                runCatching { onApply(mode) }.onFailure { error ->
+                    // The engine's PermissionModeChanged event is authoritative;
+                    // a rejected killswitch/availability gate rolls the optimistic
+                    // UI and persisted preference back to the prior selection.
+                    val rollbackError = runCatching { permissionModeRepo?.save(previous) }
+                        .exceptionOrNull()
+                    _state.update {
+                        it.copy(
+                            permissionMode = previous,
+                            effectivePermissionMode = previousEffective,
+                            permissionModeError = buildString {
+                                append(error.message ?: "permission mode rejected")
+                                if (rollbackError != null) {
+                                    append("; failed to restore saved preference: ")
+                                    append(rollbackError.message ?: "unknown persistence error")
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun clearPermissionModeError() = _state.update { it.copy(permissionModeError = null) }
+
+    fun setEffectivePermissionMode(mode: String) {
+        if (mode in PermissionModeOptions.values) {
+            _state.update { it.copy(effectivePermissionMode = mode) }
+        }
+    }
     fun setNotifs(notifs: NotifConfig) = _state.update { it.copy(notifs = notifs) }
     fun setVoice(voice: VoiceConfig) {
         voiceRepo?.save(voice)
@@ -515,6 +571,7 @@ class SettingsStore(
                     return SettingsStore(
                         providerRepo = ProviderSettingsRepository(appContext),
                         voiceRepo = VoiceSettingsRepository(appContext),
+                        permissionModeRepo = PermissionModeSettingsRepository(appContext),
                         resolveString = appContext::getString,
                     ) as T
                 }

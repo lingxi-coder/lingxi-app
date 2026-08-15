@@ -90,6 +90,9 @@ pub enum PermissionDecisionReason {
         classifier: ClassifierKind,
         /// Classifier confidence in `[0.0, 1.0]`.
         score: f64,
+        /// Human-readable classifier explanation, forwarded as the oracle's
+        /// `decisionReason.reason` text.
+        reason: String,
     },
     /// A `PreToolUse` hook overrode the rule-based decision.
     HookOverride {

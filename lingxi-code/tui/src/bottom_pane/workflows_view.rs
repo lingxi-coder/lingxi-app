@@ -3,11 +3,11 @@
 //!
 //! Rendered as a full-frame [`BottomPaneView`] with the same contract as
 //! [`crate::bottom_pane::tasks_view::TasksView`] (workflow runs ARE background
-//! tasks, `task_type == "local_workflow"`). The list is a snapshot of the live
-//! `TaskRegistry` taken in [`crate::chat_widget::ChatWidget::cmd_workflows`],
-//! filtered to workflow runs and enriched with each run's `wf_…` id, start/end
-//! wall-clock, and the agent-count + phase/agent tree parsed from its output
-//! spool ([`tui_core::multiagent::parse_workflow_spool`]).
+//! tasks, `task_type == "local_workflow"`). The initial rows come from the live
+//! `TaskRegistry` in [`crate::chat_widget::ChatWidget::cmd_workflows`], enriched
+//! with each run's `wf_…` id, timing, and phase/agent tree. Once mounted, the
+//! list and detail view consume pushed [`tui_core::multiagent::MultiAgentEvent`]
+//! updates on the render-loop channel; no refresh timer is involved.
 //!
 //! Layout mirrors the oracle: title "Dynamic workflows", a `N running · M
 //! completed` subtitle, one flat newest-first list, per-row `{glyph} {name}
@@ -17,8 +17,7 @@
 //! the seam `/tasks` uses) and marks the row `killed`, keeping the picker open;
 //! `Esc`/`q` closes.
 //!
-//! The list is a snapshot at open time (re-run `/workflows` to refresh). The
-//! oracle's third-level agent-transcript drill-down is not ported; the detail
+//! The oracle's third-level agent-transcript drill-down is not ported; the detail
 //! view shows the phase/agent tree (its primary value). The `s` "Save dynamic
 //! workflow" flow IS ported ([`WorkflowSaveView`]): when the selected run
 //! carries an inline `script`, `s` opens a name/scope form that writes the
@@ -39,7 +38,10 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use tool_workflow::{
     sanitize_workflow_name, save_dynamic_workflow, saved_feedback, WorkflowSaveError, WorkflowScope,
 };
-use tui_core::multiagent::{WorkflowPhase, WorkflowRow};
+use tui_core::multiagent::{
+    apply_workflow_progress, sort_workflows_newest_first, MultiAgentEvent, WorkflowPhase,
+    WorkflowRow,
+};
 use tui_core::theme::Theme;
 
 use crate::bottom_pane::view::{BottomPaneView, TaskAction, ViewOutcome};
@@ -119,6 +121,7 @@ fn list_glyph(status: &str) -> &'static str {
     match status {
         "completed" => "\u{2714}",         // ✔
         "failed" | "killed" => "\u{2718}", // ✘
+        "paused" => "\u{2161}",            // Ⅱ
         _ => "\u{27f3}",                   // ⟳
     }
 }
@@ -130,7 +133,7 @@ const LIST_CHROME: u16 = 7;
 
 /// The `/workflows` interactive run picker (list mode).
 pub struct WorkflowsView {
-    /// Snapshot of the runs (newest-first — `cmd_workflows` sorts by start desc).
+    /// Live runs (newest-first — upserts re-sort by start descending).
     rows: Vec<WorkflowRow>,
     /// Index of the highlighted row.
     selected: usize,
@@ -179,13 +182,17 @@ impl WorkflowsView {
             return String::new();
         }
         let running = self.rows.iter().filter(|r| r.status == "running").count();
-        let completed = self.rows.len() - running;
+        let paused = self.rows.iter().filter(|r| r.status == "paused").count();
+        let completed = self.rows.len() - running - paused;
         let mut parts = Vec::new();
         if running > 0 {
             parts.push(format!("{running} running"));
         }
         if completed > 0 {
             parts.push(format!("{completed} completed"));
+        }
+        if paused > 0 {
+            parts.push(format!("{paused} paused"));
         }
         parts.join(" \u{00b7} ")
     }
@@ -296,6 +303,11 @@ impl WorkflowsView {
             {
                 parts.push("x stop".to_string());
             }
+            if self.rows.get(self.selected).is_some_and(|r| {
+                r.status == "paused" && r.script_path.is_some() && r.run_id.is_some()
+            }) {
+                parts.push("p resume".to_string());
+            }
             if self
                 .rows
                 .get(self.selected)
@@ -312,6 +324,61 @@ impl WorkflowsView {
     #[must_use]
     pub fn rows(&self) -> &[WorkflowRow] {
         &self.rows
+    }
+
+    fn apply_live_event(&mut self, event: &MultiAgentEvent) {
+        let selected_task = self.rows.get(self.selected).map(|row| row.task_id.clone());
+        match event {
+            MultiAgentEvent::WorkflowUpsert(incoming) => {
+                if let Some(existing) = self
+                    .rows
+                    .iter_mut()
+                    .find(|row| row.task_id == incoming.task_id)
+                {
+                    let mut replacement = incoming.clone();
+                    if replacement.phases.is_empty() && !existing.phases.is_empty() {
+                        replacement.phases.clone_from(&existing.phases);
+                        replacement.agent_count = existing.agent_count;
+                    }
+                    *existing = replacement;
+                } else {
+                    self.rows.push(incoming.clone());
+                }
+                sort_workflows_newest_first(&mut self.rows);
+            }
+            MultiAgentEvent::WorkflowProgress(progress) => {
+                if let Some(row) = self
+                    .rows
+                    .iter_mut()
+                    .find(|row| row.task_id == progress.task_id)
+                {
+                    let _ = apply_workflow_progress(row, progress);
+                }
+            }
+            MultiAgentEvent::WorkflowStatusChanged {
+                task_id,
+                run_id,
+                status,
+                ended_at_ms,
+            } => {
+                if let Some(row) = self.rows.iter_mut().find(|row| {
+                    row.task_id == *task_id
+                        && run_id
+                            .as_deref()
+                            .is_none_or(|run_id| row.run_id.as_deref() == Some(run_id))
+                }) {
+                    row.status.clone_from(status);
+                    if ended_at_ms.is_some() {
+                        row.ended_at_ms = *ended_at_ms;
+                    }
+                }
+            }
+            MultiAgentEvent::TasksRefreshed(_) | MultiAgentEvent::WorkersRefreshed(_) => {}
+        }
+        self.selected = selected_task
+            .as_deref()
+            .and_then(|task_id| self.rows.iter().position(|row| row.task_id == task_id))
+            .unwrap_or_else(|| self.selected.min(self.rows.len().saturating_sub(1)));
     }
 }
 
@@ -372,6 +439,27 @@ impl BottomPaneView for WorkflowsView {
                 }
                 _ => ViewOutcome::Pending,
             },
+            KeyCode::Char('p') => match self.rows.get(self.selected) {
+                Some(row) if row.status == "paused" => {
+                    match (row.script_path.as_deref(), row.run_id.as_deref()) {
+                        (Some(script_path), Some(run_id)) => {
+                            let script_path =
+                                script_path.replace('\\', "\\\\").replace('\'', "\\'");
+                            let args = row
+                                .args
+                                .as_deref()
+                                .filter(|value| !value.is_empty())
+                                .map(|value| format!(", args: {value}"))
+                                .unwrap_or_default();
+                            ViewOutcome::SubmitPrompt(format!(
+                                "Workflow({{scriptPath: '{script_path}', resumeFromRunId: '{run_id}'{args}}})"
+                            ))
+                        }
+                        _ => ViewOutcome::Pending,
+                    }
+                }
+                _ => ViewOutcome::Pending,
+            },
             // Oracle `s` chord (`chord:"s", action:"save"`), gated on the row
             // carrying a saveable inline script → open the "Save dynamic
             // workflow" form.
@@ -396,6 +484,10 @@ impl BottomPaneView for WorkflowsView {
         false
     }
 
+    fn apply_multiagent_event(&mut self, event: &MultiAgentEvent) {
+        self.apply_live_event(event);
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -408,7 +500,7 @@ fn agent_state_label(state: &str) -> &'static str {
     match state {
         "done" | "cached" => "Completed",
         "error" => "Failed",
-        "start" => "Running",
+        "start" | "progress" => "Running",
         _ => "Queued",
     }
 }
@@ -447,6 +539,41 @@ impl WorkflowDetailView {
             theme,
             scroll: 0,
             last_viewport: Cell::new(0),
+        }
+    }
+
+    fn apply_live_event(&mut self, event: &MultiAgentEvent) {
+        match event {
+            MultiAgentEvent::WorkflowUpsert(incoming)
+                if incoming.task_id == self.row.task_id
+                    && (self.row.run_id.is_none() || incoming.run_id == self.row.run_id) =>
+            {
+                let mut replacement = incoming.clone();
+                if replacement.phases.is_empty() && !self.row.phases.is_empty() {
+                    replacement.phases.clone_from(&self.row.phases);
+                    replacement.agent_count = self.row.agent_count;
+                }
+                self.row = replacement;
+            }
+            MultiAgentEvent::WorkflowProgress(progress) => {
+                let _ = apply_workflow_progress(&mut self.row, progress);
+            }
+            MultiAgentEvent::WorkflowStatusChanged {
+                task_id,
+                run_id,
+                status,
+                ended_at_ms,
+            } if *task_id == self.row.task_id
+                && run_id
+                    .as_deref()
+                    .is_none_or(|run_id| self.row.run_id.as_deref() == Some(run_id)) =>
+            {
+                self.row.status.clone_from(status);
+                if ended_at_ms.is_some() {
+                    self.row.ended_at_ms = *ended_at_ms;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -613,6 +740,10 @@ impl BottomPaneView for WorkflowDetailView {
 
     fn wants_status_line(&self) -> bool {
         false
+    }
+
+    fn apply_multiagent_event(&mut self, event: &MultiAgentEvent) {
+        self.apply_live_event(event);
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -880,7 +1011,7 @@ impl BottomPaneView for WorkflowSaveView {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
-    use tui_core::multiagent::{WorkflowAgentRow, WorkflowPhase};
+    use tui_core::multiagent::{WorkflowAgentRow, WorkflowPhase, WorkflowProgressEvent};
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -896,16 +1027,20 @@ mod tests {
             current_step: 1,
             started_at_ms: Some(1_000),
             ended_at_ms: None,
+            script_path: None,
+            args: None,
             agent_count: 3,
             phases: vec![WorkflowPhase {
                 index: 0,
                 title: "Scan".to_string(),
                 agents: vec![
                     WorkflowAgentRow {
+                        index: 0,
                         label: "grep".to_string(),
                         state: "done".to_string(),
                     },
                     WorkflowAgentRow {
+                        index: 1,
                         label: "scan".to_string(),
                         state: "start".to_string(),
                     },
@@ -1038,6 +1173,89 @@ mod tests {
     }
 
     #[test]
+    fn paused_workflow_p_submits_explicit_resume_prompt() {
+        let mut paused = row("w1", "paused", "build");
+        paused.run_id = Some("wf_abcdef".into());
+        paused.script_path = Some("/workspace/build.js".into());
+        paused.args = Some(r#"{"app_id":"demo"}"#.into());
+        let mut view = view(vec![paused]);
+
+        match view.handle_key(press(KeyCode::Char('p'))) {
+            ViewOutcome::SubmitPrompt(prompt) => assert_eq!(
+                prompt,
+                "Workflow({scriptPath: '/workspace/build.js', resumeFromRunId: 'wf_abcdef', args: {\"app_id\":\"demo\"}})"
+            ),
+            _ => panic!("expected resume prompt"),
+        }
+    }
+
+    #[test]
+    fn pushed_events_add_and_update_a_workflow_without_reopening_the_view() {
+        let mut view = view(Vec::new());
+        let mut live = row("w-live", "running", "build");
+        live.run_id = Some("wf_live".into());
+        live.phases.clear();
+        live.agent_count = 0;
+
+        view.apply_multiagent_event(&MultiAgentEvent::WorkflowUpsert(live));
+        view.apply_multiagent_event(&MultiAgentEvent::WorkflowProgress(WorkflowProgressEvent {
+            task_id: "w-live".into(),
+            run_id: "wf_live".into(),
+            kind: "workflow_phase".into(),
+            index: 1,
+            title: Some("Design".into()),
+            ..WorkflowProgressEvent::default()
+        }));
+        view.apply_multiagent_event(&MultiAgentEvent::WorkflowProgress(WorkflowProgressEvent {
+            task_id: "w-live".into(),
+            run_id: "wf_live".into(),
+            kind: "workflow_agent".into(),
+            index: 0,
+            label: Some("design".into()),
+            phase_index: Some(1),
+            state: Some("start".into()),
+            ..WorkflowProgressEvent::default()
+        }));
+        view.apply_multiagent_event(&MultiAgentEvent::WorkflowStatusChanged {
+            task_id: "w-live".into(),
+            run_id: Some("wf_live".into()),
+            status: "completed".into(),
+            ended_at_ms: Some(2_000),
+        });
+
+        assert_eq!(view.rows().len(), 1);
+        assert_eq!(view.rows()[0].status, "completed");
+        assert_eq!(view.rows()[0].agent_count, 1);
+        assert_eq!(view.rows()[0].phases[0].title, "Design");
+        assert_eq!(view.rows()[0].phases[0].agents[0].label, "design");
+    }
+
+    #[test]
+    fn pushed_event_updates_an_already_open_workflow_detail() {
+        let mut live = row("w-live", "running", "build");
+        live.run_id = Some("wf_live".into());
+        live.phases.clear();
+        live.agent_count = 0;
+        let mut detail = WorkflowDetailView::new(live, Theme::dark());
+
+        detail.apply_multiagent_event(&MultiAgentEvent::WorkflowProgress(WorkflowProgressEvent {
+            task_id: "w-live".into(),
+            run_id: "wf_live".into(),
+            kind: "workflow_agent".into(),
+            index: 0,
+            label: Some("dependencies".into()),
+            phase_index: Some(2),
+            phase_title: Some("Dependencies".into()),
+            state: Some("start".into()),
+            ..WorkflowProgressEvent::default()
+        }));
+
+        assert_eq!(detail.row.agent_count, 1);
+        assert_eq!(detail.row.phases[0].title, "Dependencies");
+        assert_eq!(detail.row.phases[0].agents[0].state, "start");
+    }
+
+    #[test]
     fn detail_renders_phase_and_agents() {
         let v = WorkflowDetailView::new(row("w1", "running", "deploy"), Theme::dark());
         let area = Rect::new(0, 0, 70, 20);
@@ -1079,6 +1297,7 @@ mod tests {
         assert_eq!(list_glyph("completed"), "\u{2714}"); // ✔
         assert_eq!(list_glyph("failed"), "\u{2718}"); // ✘
         assert_eq!(list_glyph("killed"), "\u{2718}"); // ✘
+        assert_eq!(list_glyph("paused"), "\u{2161}"); // Ⅱ
         assert_eq!(list_glyph("running"), "\u{27f3}"); // ⟳
         assert_eq!(list_glyph("pending"), "\u{27f3}"); // ⟳
         assert_eq!(list_glyph("nonsense"), "\u{27f3}"); // fallback ⟳

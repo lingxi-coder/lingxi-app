@@ -798,9 +798,10 @@ impl BottomPane {
             .push(Box::new(tasks_view::TasksView::new(rows, self.theme)));
     }
 
-    /// Open the `/workflows` picker over a snapshot of workflow runs. Oracle
+    /// Open the `/workflows` picker over its initial workflow rows. Pushed
+    /// lifecycle events keep the mounted list/detail live. Oracle
     /// `NH_`: with EXACTLY one run, jump straight into its detail view instead
-    /// of the list (the snapshot is synchronous, so there is no loading gate).
+    /// of the list (the initial read is synchronous, so there is no loading gate).
     pub fn show_workflows(&mut self, rows: Vec<tui_core::multiagent::WorkflowRow>) {
         if rows.len() == 1 {
             self.view_stack
@@ -814,6 +815,13 @@ impl BottomPane {
                     rows, self.theme,
                 )));
         }
+    }
+
+    /// Deliver one pushed workflow/task event to every stacked view. The list
+    /// remains mounted beneath its detail view, so updating the whole stack
+    /// prevents stale data when the user presses Esc back to the list.
+    pub fn apply_multiagent_event(&mut self, event: &tui_core::multiagent::MultiAgentEvent) {
+        self.view_stack.apply_multiagent_event(event);
     }
 
     /// Open the `/plugin` manager over `snapshot` (installed plugins + enabled
@@ -2134,6 +2142,13 @@ impl ViewStack {
     #[must_use]
     pub fn views(&self) -> &[Box<dyn BottomPaneView>] {
         &self.views
+    }
+
+    /// Push one multi-agent lifecycle event into every mounted view.
+    pub fn apply_multiagent_event(&mut self, event: &tui_core::multiagent::MultiAgentEvent) {
+        for view in &mut self.views {
+            view.apply_multiagent_event(event);
+        }
     }
 
     /// Drop every turn-owned interactive prompt while preserving unrelated

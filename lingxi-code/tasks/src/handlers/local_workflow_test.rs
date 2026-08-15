@@ -16,6 +16,23 @@ use traits::{BudgetError, SubagentUsage};
 
 static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
+#[test]
+fn local_app_workflow_lease_root_is_derived_from_the_requested_app() {
+    let data_root = PathBuf::from("/profile");
+    assert_eq!(
+        local_app_workspace_root(&data_root, "app-a"),
+        PathBuf::from("/profile/apps/app-a/workspace")
+    );
+    assert_eq!(
+        local_app_workspace_root(&data_root, "app-b"),
+        PathBuf::from("/profile/apps/app-b/workspace")
+    );
+    assert_ne!(
+        local_app_workspace_root(&data_root, "app-a"),
+        local_app_workspace_root(&data_root, "app-b")
+    );
+}
+
 // ---- Echo SubagentSpawner: `agent(p)` → "echo:p" (records prompts) ------
 
 #[derive(Default)]
@@ -23,6 +40,86 @@ struct EchoSpawner {
     seen: StdMutex<Vec<String>>,
     seen_reqs: StdMutex<Vec<SubagentSpawnRequest>>,
     fail: bool,
+}
+
+#[derive(Default)]
+struct WorkflowForwardingProbeSpawner {
+    plain_spawns: std::sync::atomic::AtomicUsize,
+    watchdogs: StdMutex<Vec<traits::subagent_spawn::WorkflowQueryWatchdog>>,
+    observer_presence: StdMutex<Vec<bool>>,
+}
+
+fn completed_probe_result(agent_id: protocol::AgentId) -> SubagentResult {
+    SubagentResult::Completed {
+        agent_id,
+        content: Value::String("done".to_string()),
+        usage: SubagentUsage::default(),
+        total_tool_use_count: 0,
+        total_duration_ms: 0,
+        total_tokens: 0,
+        assistant_message_count: 0,
+        response_char_count: 0,
+        last_request_id: None,
+    }
+}
+
+#[async_trait]
+impl SubagentSpawner for WorkflowForwardingProbeSpawner {
+    async fn spawn(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.plain_spawns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(completed_probe_result(protocol::AgentId::new()))
+    }
+
+    async fn spawn_workflow_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: traits::subagent_spawn::WorkflowQueryWatchdog,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.watchdogs.lock().unwrap().push(watchdog);
+        self.observer_presence
+            .lock()
+            .unwrap()
+            .push(observer.is_some());
+        let agent_id = protocol::AgentId::new();
+        if let Some(observer) = observer {
+            observer
+                .on_event(traits::subagent_spawn::SubagentObservation::Allocated {
+                    agent_id,
+                    agent_type: request.subagent_type,
+                    name: request.name,
+                    model: request.model.unwrap_or_else(|| "inherited".to_string()),
+                    model_profile: request.model_profile,
+                })
+                .await;
+        }
+        Ok(completed_probe_result(agent_id))
+    }
+}
+
+#[derive(Default)]
+struct AllocationCountingObserver {
+    allocations: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl traits::subagent_spawn::SubagentSpawnObserver for AllocationCountingObserver {
+    async fn on_event(&self, event: traits::subagent_spawn::SubagentObservation) {
+        if matches!(
+            event,
+            traits::subagent_spawn::SubagentObservation::Allocated { .. }
+        ) {
+            self.allocations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 }
 
 #[async_trait]
@@ -391,6 +488,7 @@ fn make_ctx(fs: Arc<dyn FileSystem>) -> TaskContext {
 
 fn workflow_input(script: &str) -> TaskSpawnInput {
     TaskSpawnInput::LocalWorkflow {
+        session_uuid: None,
         workflow_id: "wf".into(),
         script: script.into(),
         resume_from_run_id: None,
@@ -772,6 +870,63 @@ fn make_request_maps_effort_opt() {
     assert!(make_request("general-purpose", "p", "{}").effort.is_none());
 }
 
+#[test]
+fn make_request_maps_provider_qualified_model_opts() {
+    let request = make_request(
+        "general-purpose",
+        "p",
+        r#"{"model":"deepseek-v4-flash","modelProfile":"deepseek"}"#,
+    );
+    assert_eq!(request.model.as_deref(), Some("deepseek-v4-flash"));
+    assert_eq!(request.model_profile.as_deref(), Some("deepseek"));
+
+    let snake_case = make_request(
+        "general-purpose",
+        "p",
+        r#"{"model":"deepseek-v4-flash","model_profile":"deepseek"}"#,
+    );
+    assert_eq!(snake_case.model_profile.as_deref(), Some("deepseek"));
+}
+
+#[tokio::test]
+async fn workflow_agent_progress_keeps_provider_qualified_model() {
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    run_workflow_script_with_live_updates(
+        r#"await agent('design', {model:'deepseek-v4-flash', modelProfile:'deepseek'});"#,
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        Some(progress_tx),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect("workflow runs to completion");
+    let mut models = Vec::new();
+    while let Ok(progress) = progress_rx.try_recv() {
+        if progress.kind == "workflow_agent" {
+            models.push(progress.model);
+        }
+    }
+    assert_eq!(
+        models,
+        vec![
+            Some("deepseek/deepseek-v4-flash".to_string()),
+            Some("deepseek/deepseek-v4-flash".to_string()),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn sequential_awaits_preserve_order() {
     let spawner = Arc::new(EchoSpawner::default());
@@ -1037,6 +1192,56 @@ async fn workflow_isolation_spawner_creates_worktree_and_threads_cwd() {
 }
 
 #[tokio::test]
+async fn workflow_isolation_spawner_forwards_live_observer_and_watchdog() {
+    let inner = Arc::new(WorkflowForwardingProbeSpawner::default());
+    let spawner = WorkflowIsolationSpawner {
+        inner: inner.clone(),
+        worktree: None,
+        slug_prefix: "workflow".to_string(),
+        sequence: AtomicU64::new(0),
+        transcript_subdir: None,
+    };
+    let observer = Arc::new(AllocationCountingObserver::default());
+    let watchdog = traits::subagent_spawn::WorkflowQueryWatchdog {
+        stall_timeout_ms: 1_234,
+        max_retries: 2,
+    };
+    let request = make_request(
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "design the app",
+        r#"{"model":"deepseek-v4-flash","modelProfile":"deepseek"}"#,
+    );
+
+    spawner
+        .spawn_workflow_with_observer(
+            request,
+            SubagentInheritance {
+                tool_invoker: Arc::new(MockInvoker),
+                budget: Arc::new(MockBudget),
+            },
+            None,
+            Some(observer.clone()),
+            watchdog,
+        )
+        .await
+        .expect("workflow spawn succeeds");
+
+    assert_eq!(
+        inner.plain_spawns.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "wrapper must not degrade the workflow call to plain spawn"
+    );
+    assert_eq!(*inner.watchdogs.lock().unwrap(), vec![watchdog]);
+    assert_eq!(*inner.observer_presence.lock().unwrap(), vec![true]);
+    assert_eq!(
+        observer
+            .allocations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
 async fn handler_runs_workflow_and_spools_the_return_value() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let spawner = Arc::new(EchoSpawner::default());
@@ -1240,6 +1445,7 @@ async fn workflow_transcript_root_stays_pinned_across_retarget() {
     let handle = handler
         .spawn(
             TaskSpawnInput::LocalWorkflow {
+                session_uuid: None,
                 workflow_id: "wf".into(),
                 script: "await agent('a'); await agent('b'); return 'done';".into(),
                 resume_from_run_id: None,
@@ -1288,6 +1494,7 @@ async fn workflow_transcript_dir_matches_child_transcript_location() {
     handler
         .spawn(
             TaskSpawnInput::LocalWorkflow {
+                session_uuid: None,
                 workflow_id: "wf".into(),
                 script: "await agent('child'); return 'done';".into(),
                 resume_from_run_id: None,
@@ -1362,6 +1569,7 @@ async fn resume_replays_journaled_agent_results_without_respawning() {
     let sink2 = Arc::new(RecordingSink::default());
     let h2 = make_handler(spawner2.clone(), mgr.clone(), sink2.clone());
     let input2 = TaskSpawnInput::LocalWorkflow {
+        session_uuid: None,
         workflow_id: "wf".into(),
         script: script.into(),
         resume_from_run_id: Some(run_id),
@@ -1388,6 +1596,94 @@ async fn resume_replays_journaled_agent_results_without_respawning() {
         out2.content.contains(r#"{"a":"echo:a","b":"echo:b"}"#),
         "rebuilt from cache: {}",
         out2.content
+    );
+}
+
+#[tokio::test]
+async fn transcript_journal_appends_started_and_result_before_resume() {
+    let fs = Arc::new(InMemoryFs::new());
+    let fs_trait: Arc<dyn FileSystem> = fs.clone();
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs_trait.clone(),
+    ));
+    let transcript_dir = dir
+        .path()
+        .join("session")
+        .join("subagents")
+        .join("workflows")
+        .join("wf_append");
+    let spawner = Arc::new(WorkflowForwardingProbeSpawner::default());
+    let sink = Arc::new(RecordingSink::default());
+    let handler = make_handler(spawner.clone(), mgr.clone(), sink.clone());
+    let script = "return await agent('design');";
+
+    handler
+        .spawn(
+            TaskSpawnInput::LocalWorkflow {
+                session_uuid: None,
+                workflow_id: "wf".into(),
+                script: script.into(),
+                resume_from_run_id: None,
+                args: None,
+                run_id: Some("wf_append".into()),
+                invocation_mode: Some("inline".into()),
+                workflow_source: Some("inline".into()),
+                transcript_subdir: Some(transcript_dir.clone()),
+                launched_from_subagent: false,
+            },
+            make_ctx(fs_trait.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+
+    let journal_path = transcript_dir.join("journal.jsonl");
+    let journal = fs
+        .read_file(journal_path.to_str().unwrap(), None, None)
+        .await
+        .unwrap()
+        .content;
+    let records = journal
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records.len(),
+        2,
+        "started and result are append-only records"
+    );
+    assert_eq!(records[0]["type"], "started");
+    assert_eq!(records[1]["type"], "result");
+    assert_eq!(records[0]["key"], records[1]["key"]);
+    assert_eq!(records[0]["agentId"], records[1]["agentId"]);
+
+    let resumed_spawner = Arc::new(WorkflowForwardingProbeSpawner::default());
+    let resumed_sink = Arc::new(RecordingSink::default());
+    let resumed = make_handler(resumed_spawner.clone(), mgr, resumed_sink.clone());
+    resumed
+        .spawn(
+            TaskSpawnInput::LocalWorkflow {
+                session_uuid: None,
+                workflow_id: "wf".into(),
+                script: script.into(),
+                resume_from_run_id: Some("wf_append".into()),
+                args: None,
+                run_id: None,
+                invocation_mode: Some("inline".into()),
+                workflow_source: Some("inline".into()),
+                transcript_subdir: Some(transcript_dir),
+                launched_from_subagent: false,
+            },
+            make_ctx(fs_trait),
+        )
+        .await
+        .unwrap();
+    assert_eq!(await_terminal(&resumed_sink).await, TaskStatus::Completed);
+    assert!(
+        resumed_spawner.watchdogs.lock().unwrap().is_empty(),
+        "a resumed cached prefix must not spawn the child again"
     );
 }
 
@@ -1446,6 +1742,7 @@ async fn resume_with_a_changed_prefix_reruns_from_the_edit_onward() {
     let sink2 = Arc::new(RecordingSink::default());
     let h2 = make_handler(spawner2.clone(), mgr.clone(), sink2.clone());
     let input2 = TaskSpawnInput::LocalWorkflow {
+        session_uuid: None,
         workflow_id: "wf".into(),
         script: script2.into(),
         resume_from_run_id: Some(run_id),
@@ -1738,6 +2035,45 @@ fn chain_key_differs_on_model_change() {
         key_a, key_b,
         "different model must produce different chain key"
     );
+}
+
+/// Provider identity is part of the extended workflow model reference. Two
+/// providers can expose the same wire model id and must not share cached output.
+#[test]
+fn chain_key_differs_on_model_profile_change() {
+    let opts_a = r#"{"model":"gpt-5.5","modelProfile":"openai"}"#;
+    let opts_b = r#"{"model":"gpt-5.5","modelProfile":"github-copilot"}"#;
+    let key_a = chain_key(
+        "",
+        "do something",
+        &normalize_opts_for_chain_key(&serde_json::from_str(opts_a).unwrap()),
+    );
+    let key_b = chain_key(
+        "",
+        "do something",
+        &normalize_opts_for_chain_key(&serde_json::from_str(opts_b).unwrap()),
+    );
+    assert_ne!(
+        key_a, key_b,
+        "different providers must not share a cache key"
+    );
+}
+
+#[test]
+fn chain_key_canonicalizes_model_profile_alias() {
+    let camel = r#"{"model":"deepseek-v4-flash","modelProfile":"deepseek"}"#;
+    let snake = r#"{"model":"deepseek-v4-flash","model_profile":"deepseek"}"#;
+    let camel_key = chain_key(
+        "",
+        "do something",
+        &normalize_opts_for_chain_key(&serde_json::from_str(camel).unwrap()),
+    );
+    let snake_key = chain_key(
+        "",
+        "do something",
+        &normalize_opts_for_chain_key(&serde_json::from_str(snake).unwrap()),
+    );
+    assert_eq!(camel_key, snake_key);
 }
 
 /// Key order in the raw opts JSON must NOT matter — normalization sorts keys.
@@ -2579,4 +2915,66 @@ async fn workflow_agent_throw_on_error_preserves_failure_reason() {
         err.to_string().contains("boom"),
         "the workflow error must retain the real subagent reason: {err}"
     );
+}
+
+#[tokio::test]
+async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let observer = WorkflowAgentLiveObserver::new(
+        Some(tx),
+        workflow_progress_update(&workflow::Progress::Agent {
+            index: 3,
+            label: "Design".to_string(),
+            phase_index: Some(1),
+            phase_title: Some("Design".to_string()),
+            agent_id: None,
+            model: Some("test-model".to_string()),
+            state: workflow::AgentState::Start,
+            error: None,
+            tool_use_id: "workflow_agent_3_queued".to_string(),
+        }),
+        None,
+    );
+    let agent_id = protocol::AgentId::new();
+    let agent_id_string = agent_id.to_string();
+
+    traits::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        traits::subagent_spawn::SubagentObservation::Allocated {
+            agent_id,
+            agent_type: "designer".to_string(),
+            name: Some("Design agent".to_string()),
+            model: "deepseek-v4-flash".to_string(),
+            model_profile: Some("deepseek".to_string()),
+        },
+    )
+    .await;
+    let allocated = rx.recv().await.expect("allocated progress");
+    assert_eq!(allocated.state.as_deref(), Some("progress"));
+    assert_eq!(
+        allocated.agent_id.as_deref(),
+        Some(agent_id_string.as_str())
+    );
+    assert_eq!(allocated.agent_type.as_deref(), Some("designer"));
+    assert_eq!(
+        allocated.model.as_deref(),
+        Some("deepseek/deepseek-v4-flash")
+    );
+
+    traits::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        traits::subagent_spawn::SubagentObservation::Retry {
+            agent_id,
+            attempt: 2,
+            reason: "workflow model query stalled while opening the response stream".to_string(),
+        },
+    )
+    .await;
+    let retry = rx.recv().await.expect("retry progress");
+    assert_eq!(retry.state.as_deref(), Some("progress"));
+    assert_eq!(retry.attempt, Some(2));
+    assert!(retry
+        .last_attempt_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("opening the response stream")));
 }

@@ -50,21 +50,10 @@
 //! the external build / residual seam" note was stale.)
 //!
 //! On a trip the consumer now emits [`DENIAL_LIMIT_EVENT`]
-//! (`telemetry::emit_auto_mode_denial_limit_exceeded`) and logs
-//! [`DenialBreakerTrip::fallback_warn_line`], then falls back to prompting (the
-//! counter/circuit-breaker semantics are byte-faithful).
-//!
-//! What is **still NOT wired** are the two pieces that need architecture the
-//! permission gate lacks: (a) threading the real `shouldAvoidPermissionPrompts`
-//! to `trip(headless)` and ABORTING headless runs
-//! ([`DenialBreakerTrip::HEADLESS_ABORT_MESSAGE`]) — needs a headless flag on the
-//! outer gate AND an agent-level abort channel (the gate only returns per-tool
-//! decisions today; a tripped headless run currently degrades SAFELY to per-tool
-//! denies via `DenyOnAskGate`); and (b) carrying
-//! [`DenialBreakerTrip::decision_reason`] onto the resulting Ask — cannot be a
-//! `Some(Ask)` return here because [`crate::policy_gate`]'s `resolve_with_mode`
-//! `Ask` arm re-invokes the classifier, so it needs a side-channel. The breaker
-//! logic, thresholds, telemetry, and byte-exact trip outcome are complete.
+//! (`telemetry::emit_auto_mode_denial_limit_exceeded`), logs
+//! [`DenialBreakerTrip::fallback_warn_line`], and either aborts headless runs or
+//! falls back to prompting. The headless abort and interactive rewritten reason
+//! both travel through typed gate results, so no shared side-channel is needed.
 //!
 //! [`record_auto_deny`]: DenialTrackingState::record_auto_deny
 

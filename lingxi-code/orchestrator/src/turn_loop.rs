@@ -1900,13 +1900,16 @@ pub(crate) async fn surface_terminal_api_error(
 ///   `emit_terminal_rate_limit_if_changed`).
 /// - `Overloaded` / `RepeatedOverloaded` — the byte-locked "Repeated 529
 ///   Overloaded errors" surface (`errors.ts:166`).
+/// - `PermissionAbort` — the auto-mode denial breaker deliberately terminates
+///   a prompt-avoiding agent and must not be converted into `model_error`.
 /// Mirrors claude-code, whose top-level `catch` is reached only AFTER the retry
 /// layer has handled 429/529; everything else falls through to `model_error`.
 #[must_use]
 pub(crate) fn is_carveout_propagated(e: &OrchestratorError) -> bool {
     matches!(
         e,
-        OrchestratorError::RepeatedOverloaded
+        OrchestratorError::PermissionAbort { .. }
+            | OrchestratorError::RepeatedOverloaded
             | OrchestratorError::ApiCall(
                 LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
             )
@@ -3445,7 +3448,18 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // NORMAL permission path. Resolve the decision SOURCE first (without
             // delegating to the prompt transport) so the source-gated permission
             // hooks fire the way claude-code does.
-            let resolution = orch.perms.resolve_detailed(name, &effective_input).await;
+            let resolution_ctx = traits::permission_gate::PermissionCheckContext {
+                tool_use_id: Some(tool_use_id.to_string()),
+                is_non_interactive_session: !orch.config.interactive_permissions,
+                ..Default::default()
+            };
+            let resolution = orch
+                .perms
+                .resolve_detailed_or_abort(name, &effective_input, &resolution_ctx)
+                .await
+                .map_err(|abort| OrchestratorError::PermissionAbort {
+                    message: abort.message,
+                })?;
             // R-D3: a PreToolUse hook `permissionBehavior:"ask"` (HookDecision::Ask)
             // forces the interactive prompt even over a configured ALLOW rule, but a
             // DENY rule still overrides the hook. This is 1:1 with claude-code's
@@ -3468,6 +3482,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 PermissionResolution::Ask
             } else {
                 resolution
+            };
+            let ask_reason_context = match &resolution {
+                PermissionResolution::AskWithContext {
+                    decision_reason_type,
+                    decision_reason,
+                } => (decision_reason_type.clone(), decision_reason.clone()),
+                _ => (None, None),
             };
             match resolution {
                 PermissionResolution::Allow { rule_source } => {
@@ -3557,7 +3578,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                         .await;
                     PermissionDecision::Deny { reason }
                 }
-                PermissionResolution::Ask => {
+                PermissionResolution::Ask | PermissionResolution::AskWithContext { .. } => {
                     // HOOK.3 issue 2 — the gate is ABOUT TO ASK. Fire the
                     // PermissionRequest hook FIRST (claude-code
                     // `runPermissionRequestHooksForHeadlessAgent`, fired on the ask
@@ -3643,6 +3664,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                 // floor so the Auto classifier can't re-allow past it
                                 // (policy_gate Ask arm gates the classifier on this).
                                 hook_ask_floor: hook_ask,
+                                is_non_interactive_session: !orch.config.interactive_permissions,
+                                decision_reason_type: ask_reason_context.0.clone(),
+                                decision_reason: ask_reason_context.1.clone(),
                                 ..Default::default()
                             };
                             match orch

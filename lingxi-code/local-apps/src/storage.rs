@@ -40,7 +40,10 @@
 //! it across the whole load (read + repair persists) and
 //! [`save_index_preserving`] holds it across its re-read + merge + write, so
 //! two service instances over one root cannot clobber each other's index
-//! entries. Deletion is rename-to-trash: `apps/<id>` is atomically renamed
+//! entries. Per-app build promotion, checkpoint mutation, and deletion share
+//! `apps/<id>/build.lock`, so a second engine process cannot rename or reset a
+//! workspace while another process is copying/building it. Deletion is
+//! rename-to-trash: `apps/<id>` is atomically renamed
 //! into `apps/.trash/<id>-<nonce>` (the commit point AND the tombstone —
 //! `rename` never follows the final component, and a racing create cannot
 //! collide while either the live dir or the tombstone exists), then removed;
@@ -76,6 +79,9 @@ pub const INDEX_FILE: &str = "index.json";
 /// process). A runtime artifact, not a persisted document — loaders never
 /// read it.
 pub const INDEX_LOCK_FILE: &str = "index.lock";
+/// Per-app advisory lock serializing build promotion and physical deletion.
+/// This is a runtime artifact, not a persisted document.
+pub const BUILD_LOCK_FILE: &str = "build.lock";
 /// Tombstone directory for deleted app dirs (`apps/.trash`). Never a legal
 /// app id (ids cannot start with `.`), invisible to the index-driven
 /// [`load_all`], swept best-effort at load.
@@ -145,6 +151,74 @@ fn lock_index(root: &Path) -> Result<rooted_fs::RootedFileLock, AppError> {
 #[must_use]
 pub fn app_dir_rel(app_id: &str) -> PathBuf {
     PathBuf::from(APPS_DIR).join(app_id)
+}
+
+/// Root-relative path of the per-app build/deletion lock.
+#[must_use]
+pub fn build_lock_rel(app_id: &str) -> PathBuf {
+    app_dir_rel(app_id).join(BUILD_LOCK_FILE)
+}
+
+/// Take the advisory lock shared by local-app builds and physical deletion.
+///
+/// Callers must hold this lock for the complete operation that mutates or
+/// removes an app's workspace/build tree. The app directory must already
+/// exist; unlike the index lock, this helper deliberately does not create an
+/// app directory as a side effect.
+pub fn lock_app_build(root: &Path, app_id: &str) -> Result<rooted_fs::RootedFileLock, AppError> {
+    ids::validate_app_id(app_id)?;
+    let app_dir = rooted_fs::checked_join(root, &app_dir_rel(app_id))
+        .map_err(|error| AppError::from_fs("lock app build", &error))?;
+    match std::fs::symlink_metadata(&app_dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(AppError::StorageCorrupt(format!(
+                "{} is not a real directory",
+                app_dir.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppError::NotFound(format!("app {app_id}")));
+        }
+        Err(error) => {
+            return Err(AppError::Io(format!(
+                "inspect {} before locking: {error}",
+                app_dir.display()
+            )));
+        }
+    }
+    rooted_fs::lock_exclusive(
+        root,
+        &build_lock_rel(app_id),
+        rooted_fs::PRIVATE_DIR_MODE,
+        rooted_fs::PRIVATE_FILE_MODE,
+    )
+    .map_err(|error| match error {
+        FsError::NotFound(_) => AppError::NotFound(format!("app {app_id}")),
+        other => AppError::from_fs("lock app build", &other),
+    })
+}
+
+fn lock_app_build_if_present(
+    root: &Path,
+    app_id: &str,
+) -> Result<Option<rooted_fs::RootedFileLock>, AppError> {
+    ids::validate_app_id(app_id)?;
+    let app_dir = rooted_fs::checked_join(root, &app_dir_rel(app_id))
+        .map_err(|error| AppError::from_fs("lock app deletion", &error))?;
+    match std::fs::symlink_metadata(&app_dir) {
+        Ok(metadata) if metadata.is_dir() => match lock_app_build(root, app_id) {
+            Ok(lock) => Ok(Some(lock)),
+            Err(AppError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        },
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AppError::Io(format!(
+            "inspect {} before deleting: {error}",
+            app_dir.display()
+        ))),
+    }
 }
 
 /// Root-relative path of `apps/<id>/runtime.json`.
@@ -630,7 +704,8 @@ pub fn save_runtime(root: &Path, app_id: &str, runtime: &AppRuntimeRecord) -> Re
     write_doc(root, &runtime_rel(app_id), runtime)
 }
 
-/// Remove `apps/<id>`: rename-to-trash first (the commit point — see
+/// Remove `apps/<id>`: serialize against any in-flight build, then
+/// rename-to-trash first (the commit point — see
 /// [`trash_app_dir`]), then recursively remove the trash entry. A removal
 /// failure AFTER the rename still leaves the id fully out of the `apps/`
 /// namespace; the leftover trash entry is swept at the next load.
@@ -660,6 +735,10 @@ pub fn delete_app_dir(root: &Path, app_id: &str) -> Result<(), AppError> {
 /// real directories.
 pub fn trash_app_dir(root: &Path, app_id: &str) -> Result<Option<PathBuf>, AppError> {
     ids::validate_app_id(app_id)?;
+    // Keep the lock through the rename commit point. Once the directory is in
+    // `.trash`, no build can resolve it through the live app path anymore and
+    // the lock can be released safely before the best-effort recursive remove.
+    let _build_lock = lock_app_build_if_present(root, app_id)?;
     let apps_rel = PathBuf::from(APPS_DIR);
     let apps_dir = rooted_fs::checked_join(root, &apps_rel)
         .map_err(|error| AppError::from_fs("delete app dir", &error))?;
@@ -1301,9 +1380,31 @@ mod tests {
         save_full(dir.path(), &apps);
         delete_app_dir(dir.path(), "eeee5555").unwrap();
         assert!(!dir.path().join("apps/eeee5555").exists());
+        assert!(
+            !dir.path().join("apps/eeee5555/build.lock").exists(),
+            "the per-app lock is a runtime artifact and must not survive deletion"
+        );
         assert!(dir.path().join("apps/ffff6666/runtime.json").is_file());
         // Deleting a missing dir is a no-op.
         delete_app_dir(dir.path(), "eeee5555").unwrap();
+    }
+
+    #[test]
+    fn app_build_lock_is_confined_to_an_existing_app_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = new_app("llll2222");
+        save_full(dir.path(), std::slice::from_ref(&app));
+
+        let lock = lock_app_build(dir.path(), "llll2222").unwrap();
+        assert!(dir.path().join("apps/llll2222/build.lock").is_file());
+        drop(lock);
+
+        let err = match lock_app_build(dir.path(), "mmmm3333") {
+            Ok(_) => panic!("missing app directory must not be created by locking"),
+            Err(error) => error,
+        };
+        assert_eq!(err.code(), AppErrorCode::NotFound);
+        assert!(!dir.path().join("apps/mmmm3333").exists());
     }
 
     #[test]

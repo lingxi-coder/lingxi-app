@@ -216,6 +216,19 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
 
 private final class CronEngineListener: IosEventListener, @unchecked Sendable {
     func onEvent(event: ClientEvent) async {}
+    func onWorkflowProgress(
+        originSessionId _: String,
+        taskId _: String,
+        runId _: String,
+        progress _: WorkflowProgressDto
+    ) async {}
+
+    /// Compatibility with pre-session-scoping generated bindings.
+    func onWorkflowProgress(
+        taskId _: String,
+        runId _: String,
+        progress _: WorkflowProgressDto
+    ) async {}
 }
 
 private final class CronPermissionSink: IosPermissionSink, @unchecked Sendable {

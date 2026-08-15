@@ -90,7 +90,14 @@ pub fn parse_workflow_spool(spool: &str) -> (usize, Vec<WorkflowPhase>) {
                     slot.1.label = label;
                 }
             } else {
-                bucket.push((key, WorkflowAgentRow { label, state }));
+                bucket.push((
+                    key,
+                    WorkflowAgentRow {
+                        index,
+                        label,
+                        state,
+                    },
+                ));
             }
         }
     }

@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, watch, Mutex};
@@ -406,6 +406,9 @@ pub(crate) struct LocalAppsHostBroker {
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     session_permissions: Mutex<SessionPermissions>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
+    /// Serializes builds per app so concurrent workflow retries cannot copy or
+    /// promote two build trees over one another.
+    build_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     /// See [`PortLeases`].  Broker-scoped because a profile's apps are what
     /// collide with each other, and one broker is exactly one profile.
     port_leases: PortLeases,
@@ -490,6 +493,7 @@ impl LocalAppsHostBroker {
             pending_ui: Mutex::new(HashMap::new()),
             session_permissions: Mutex::new(SessionPermissions::default()),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
+            build_locks: Mutex::new(HashMap::new()),
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
             port_allocation: Mutex::new(()),
             next_request_id: AtomicU64::new(1),
@@ -546,6 +550,20 @@ impl LocalAppsHostBroker {
 
     fn npm_toolchain_available(&self) -> bool {
         self.shell_available() && self.fixed_runtime_mount().is_ok()
+    }
+
+    pub(crate) async fn build_lock(&self, app_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.build_locks.lock().await;
+        // App ids are minted randomly and the broker can outlive many app
+        // deletions. Retain only weak handles so historical ids do not keep
+        // every per-app mutex alive indefinitely.
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(app_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(app_id.to_string(), Arc::downgrade(&lock));
+        lock
     }
 
     pub(crate) fn attach_llm(
@@ -1654,9 +1672,29 @@ impl LocalAppsHostBroker {
                 .await
                 .err()
                 .map(|error| error.to_string());
+            let rollback_build_error = if source_rollback_error.is_none() {
+                builder
+                    .build_workspace(&layout)
+                    .await
+                    .err()
+                    .map(|error| error.to_string())
+            } else {
+                None
+            };
+            let restarted = if was_running && source_rollback_error.is_none() {
+                self.manage_runtime_value(json!({
+                    "app_id": app_id.clone(),
+                    "action": "start",
+                }))
+                .await
+                .is_ok()
+            } else {
+                false
+            };
             return Err(format!(
-                "checkpoint {checkpoint_id} was restored, but rebuilding failed: {error}; source rollback: {}. Read the build log via read_logs (log=\"build\"), fix the source, then run the build tool again.",
-                source_rollback_error.as_deref().unwrap_or("completed")
+                "checkpoint {checkpoint_id} was restored, but rebuilding failed: {error}; source rollback: {}; rollback rebuild: {}; runtime restarted: {restarted}. Read the build log via read_logs (log=\"build\"), fix the source, then run the build tool again.",
+                source_rollback_error.as_deref().unwrap_or("completed"),
+                rollback_build_error.as_deref().unwrap_or("completed")
             ));
         }
         // Best-effort restart when the runtime was serving before the

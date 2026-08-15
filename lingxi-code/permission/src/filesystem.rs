@@ -31,18 +31,13 @@
 //!   identical for "does THIS rule match THIS path?" except for cross-rule
 //!   gitignore NEGATION (`!pattern`) interplay within one root — permission
 //!   rule strings never carry `!`, so the case does not arise.
-//! - **POSIX only.** The Windows POSIX-drive (`//c/Users/…`) conversion, the
-//!   `windowsPathToPosixPath` step, and `hasSuspiciousWindowsPathPattern` /
-//!   UNC defense-in-depth are omitted (the port's parity target is macOS/Linux,
-//!   matching the orchestrator's `absolutize` divergence). The `//abs`→`/`-root
-//!   and `~/`→home cases ARE ported.
-//! - **Lexical, not `realpath`.** [`expand_path`] never touches disk (no
-//!   symlink resolution / `getPathsForPermissionCheck`), matching the
-//!   orchestrator's `expandPath` mirror. The wider
-//!   `checkRead/checkWritePermissionForTool` flow (working-directory auto-allow,
-//!   internal-path allowances, `.git`/`.claude` safety asks, suggestions) is
-//!   NOT reproduced here — `authorize` keeps its deny→allow→mode shape; see its
-//!   docs for what that elides.
+//! - [`expand_path`] itself is lexical, matching the orchestrator's `expandPath`
+//!   mirror. Working-directory containment separately adds native and Windows
+//!   Git-Bash cookie symlink forms, like `getPathsForPermissionCheck`.
+//! - The wider `checkRead/checkWritePermissionForTool` flow (internal-path
+//!   allowances, `.git`/`.claude` safety asks, suggestions) is NOT reproduced
+//!   here — `authorize` keeps its deny→allow→mode shape; see its docs for what
+//!   that elides.
 //! - **No Unicode NFC** on `~`-expansion (`homedir().normalize('NFC')`): a no-op
 //!   for ASCII paths and `OsStr` has no portable NFC primitive.
 //!
@@ -56,18 +51,66 @@
 //! accept iff the working-dir-relative path neither escapes upward (`..`-segment)
 //! nor is absolute.
 //!
-//! **Divergence (forced, pre-accepted): lexical only — no on-disk symlink
-//! resolution.** claude-code's `pathInAllowedWorkingPath` checks BOTH the
-//! original path AND its `realpathSync`-resolved form (`getPathsForPermissionCheck`
-//! / `getResolvedWorkingDirPaths`) against EVERY resolved working dir, to defeat
-//! symlink-escape. This port resolves nothing on disk (consistent with
-//! [`expand_path`]'s "Lexical, not `realpath`" decision): it compares the single
-//! lexically-expanded target against the single lexically-expanded working dir.
-//! Symlink-escape hardening is a known, already-accepted divergence in this crate
-//! (the `/private/var`↔`/var` rewrite still handles the one common macOS case).
+//! Both the lexical path and all discoverable symlink-resolved forms are checked
+//! against the corresponding forms of every working directory. Resolution is
+//! best-effort: unreadable, malformed, cyclic, and over-depth links retain the
+//! lexical form, matching claude-code's exception-swallowing resolver.
 
 use crate::rule::PermissionRuleSource;
+#[cfg(windows)]
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::Read;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
+
+const WINDOWS_COOKIE_SYMLINK_PREFIX: &[u8] = b"!<symlink>";
+const WINDOWS_COOKIE_SYMLINK_READ_BYTES: usize = WINDOWS_COOKIE_SYMLINK_PREFIX.len() + 2 + 8192;
+const PERMISSION_PATH_RESOLUTION_MAX_HOPS: usize = 64;
+
+/// A decoded Git-Bash cookie target. BOM-prefixed UTF-16 stays as raw code
+/// units because JavaScript strings preserve lone surrogates and Windows
+/// `OsString` can represent them; converting through Rust `String` would
+/// replace them with U+FFFD and change the path being checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WindowsCookieSymlinkTarget {
+    Text(String),
+    Utf16(Vec<u16>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PermissionPathForms {
+    Paths(Vec<PathBuf>),
+    FailClosed,
+}
+
+impl WindowsCookieSymlinkTarget {
+    fn into_path_buf(self) -> PathBuf {
+        match self {
+            Self::Text(target) => PathBuf::from(target.replace('\\', "/")),
+            Self::Utf16(mut target) => {
+                // Oracle: `target.replace(/\\/g, "/")` before path resolution.
+                for unit in &mut target {
+                    if *unit == u16::from(b'\\') {
+                        *unit = u16::from(b'/');
+                    }
+                }
+                #[cfg(windows)]
+                {
+                    PathBuf::from(OsString::from_wide(&target))
+                }
+                #[cfg(not(windows))]
+                {
+                    // Cookie symlinks are enabled only on Windows. This branch
+                    // keeps Unix helper tests useful for well-formed targets;
+                    // native Windows execution above remains lossless.
+                    PathBuf::from(String::from_utf16_lossy(&target))
+                }
+            }
+        }
+    }
+}
 
 /// The filesystem roots a [`PermissionRuleSource`] resolves against, supplied
 /// once at policy construction. Mirrors the process-global `getOriginalCwd()` /
@@ -242,15 +285,198 @@ pub(crate) fn expand_path(raw: &str, roots: &FsRoots) -> PathBuf {
 /// The path forms permission checks must consider: the lexical form plus, when
 /// the filesystem exposes one, the symlink-resolved target path. Mirrors
 /// claude-code `getPathsForPermissionCheck` at the containment layer.
-fn permission_paths_to_check(path: &Path, roots: &FsRoots) -> Vec<PathBuf> {
+fn permission_paths_to_check(path: &Path, roots: &FsRoots) -> PermissionPathForms {
     let absolute = expand_path(&path.to_string_lossy(), roots);
+    if path_resolution_must_fail_closed(&absolute) {
+        return PermissionPathForms::FailClosed;
+    }
+
     let mut out = vec![absolute.clone()];
-    if let Some(resolved) = resolve_deepest_existing_ancestor(&absolute) {
-        if resolved != absolute {
+    for resolved in resolve_additional_permission_paths(&absolute, cfg!(windows)) {
+        if resolved != absolute && !out.contains(&resolved) {
             out.push(resolved);
         }
     }
-    out
+    PermissionPathForms::Paths(out)
+}
+
+fn path_resolution_must_fail_closed(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    meta.file_type().is_symlink()
+        && std::fs::canonicalize(path).is_err()
+        && resolve_dangling_symlink(path).is_none()
+}
+
+fn resolve_additional_permission_paths(
+    absolute_path: &Path,
+    enable_windows_cookie_symlinks: bool,
+) -> Vec<PathBuf> {
+    let mut resolved = Vec::new();
+    if let Some(collapsed) = resolve_deepest_existing_ancestor(absolute_path) {
+        if collapsed != absolute_path {
+            resolved.push(collapsed);
+        }
+    }
+
+    let mut current = absolute_path.to_path_buf();
+    let mut lineage = Vec::new();
+    for _ in 0..PERMISSION_PATH_RESOLUTION_MAX_HOPS {
+        if lineage.contains(&current) {
+            break;
+        }
+        lineage.push(current.clone());
+
+        match std::fs::read_link(&current) {
+            Ok(target) => {
+                let next = if target.is_absolute() {
+                    target
+                } else {
+                    let Some(parent) = current.parent() else {
+                        break;
+                    };
+                    parent.join(target)
+                };
+                let next = normalize_lexically(&next);
+                if next != current && !resolved.contains(&next) {
+                    resolved.push(next.clone());
+                }
+                current = next;
+            }
+            Err(err) => {
+                if is_cookie_symlink_fallback_error(&err)
+                    && current == absolute_path
+                    && enable_windows_cookie_symlinks
+                {
+                    if let Some(cookie_target) = resolve_windows_cookie_symlink_path(absolute_path)
+                    {
+                        if !resolved.contains(&cookie_target) {
+                            resolved.push(cookie_target);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    if let Ok(real_path) = std::fs::canonicalize(absolute_path) {
+        if real_path != absolute_path && !resolved.contains(&real_path) {
+            resolved.push(real_path);
+        }
+    }
+
+    resolved
+}
+
+fn resolve_windows_cookie_symlink_path(path: &Path) -> Option<PathBuf> {
+    for ancestor in path.ancestors() {
+        let Ok(meta) = std::fs::symlink_metadata(ancestor) else {
+            continue;
+        };
+        if !meta.file_type().is_file() {
+            continue;
+        }
+        let Some(bytes) = read_windows_cookie_symlink_bytes(ancestor) else {
+            continue;
+        };
+        let Some(target) = decode_windows_cookie_symlink_target(&bytes) else {
+            continue;
+        };
+
+        let tail = path.strip_prefix(ancestor).ok()?;
+        let parent = ancestor.parent()?;
+        let target_path = target.into_path_buf();
+        let absolute_target = if target_path.is_absolute() {
+            target_path
+        } else {
+            parent.join(&target_path)
+        };
+        return Some(normalize_lexically(&absolute_target).join(tail));
+    }
+    None
+}
+
+fn read_windows_cookie_symlink_bytes(path: &Path) -> Option<Vec<u8>> {
+    let mut reader = File::open(path)
+        .ok()?
+        .take(WINDOWS_COOKIE_SYMLINK_READ_BYTES as u64);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).ok()?;
+    if !bytes.starts_with(WINDOWS_COOKIE_SYMLINK_PREFIX) {
+        return None;
+    }
+    Some(bytes)
+}
+
+fn decode_windows_cookie_symlink_target(bytes: &[u8]) -> Option<WindowsCookieSymlinkTarget> {
+    let Some(payload) = bytes.strip_prefix(WINDOWS_COOKIE_SYMLINK_PREFIX) else {
+        return None;
+    };
+    if payload.is_empty() {
+        return None;
+    }
+
+    if let Some(utf16_payload) = payload.strip_prefix(&[0xFF, 0xFE]) {
+        let utf16_payload = &utf16_payload[..utf16_payload.len() - (utf16_payload.len() % 2)];
+        if utf16_payload.is_empty() {
+            return None;
+        }
+        let code_units: Vec<u16> = utf16_payload
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let nul = code_units
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(code_units.len());
+        if nul == 0 {
+            return None;
+        }
+        return Some(WindowsCookieSymlinkTarget::Utf16(
+            code_units[..nul].to_vec(),
+        ));
+    }
+
+    if let Ok(utf8) = std::str::from_utf8(payload) {
+        if let Some(utf8) = truncate_string_at_first_nul(utf8.to_owned()) {
+            return Some(WindowsCookieSymlinkTarget::Text(utf8));
+        }
+    }
+    truncate_string_at_first_nul(payload.iter().map(|byte| char::from(*byte)).collect())
+        .map(WindowsCookieSymlinkTarget::Text)
+}
+
+fn truncate_string_at_first_nul(s: String) -> Option<String> {
+    let trimmed = s.split_once('\0').map_or(s.as_str(), |(head, _)| head);
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn is_cookie_symlink_fallback_error(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        if err.raw_os_error() == Some(20) {
+            return true;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if err.raw_os_error() == Some(267) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Resolve the deepest existing ancestor of `absolute_path` through the real
@@ -275,9 +501,8 @@ fn resolve_deepest_existing_ancestor(absolute_path: &Path) -> Option<PathBuf> {
             // link chain to the dangling target and use it.
             Err(_) if meta.file_type().is_symlink() => match resolve_dangling_symlink(ancestor) {
                 Some(target) => target,
-                // Not resolvable (cycle / too many hops) — fail closed by
-                // skipping this ancestor, so containment falls back to the
-                // lexical form and, at worst, over-asks.
+                // Not resolvable (cycle / too many hops) — keep the lexical
+                // form, matching the oracle's best-effort resolver.
                 None => continue,
             },
             // A non-symlink canonicalize failure (e.g. EACCES) keeps the prior
@@ -542,23 +767,31 @@ fn contains_path_traversal(path: &str) -> bool {
 }
 
 /// Is `path` inside ANY of the allowed working directories? — port of
-/// `pathInAllowedWorkingPath` (`filesystem.ts:683-707`), reduced to the lexical
-/// path set (one expanded path vs. one expanded working dir; no `realpath`).
-///
-/// claude-code's "every resolved input path must be within SOME working path"
-/// collapses, with a single lexical path, to "the path is within some working
-/// dir". Returns `false` for an empty `working_dirs` list (no allowance).
+/// `pathInAllowedWorkingPath` (`filesystem.ts:683-707`). Every lexical/resolved
+/// input form must be contained by at least one lexical/resolved working-dir
+/// form. Returns `false` for an empty `working_dirs` list (no allowance).
 #[must_use]
 pub fn path_in_allowed_working_path(
     path: &Path,
     working_dirs: &[PathBuf],
     roots: &FsRoots,
 ) -> bool {
-    let path_forms = permission_paths_to_check(path, roots);
+    let PermissionPathForms::Paths(path_forms) = permission_paths_to_check(path, roots) else {
+        return false;
+    };
     let working_forms: Vec<PathBuf> = working_dirs
         .iter()
-        .flat_map(|wd| permission_paths_to_check(wd, roots))
+        .filter_map(
+            |working_dir| match permission_paths_to_check(working_dir, roots) {
+                PermissionPathForms::Paths(forms) => Some(forms),
+                PermissionPathForms::FailClosed => None,
+            },
+        )
+        .flatten()
         .collect();
+    if working_forms.is_empty() {
+        return false;
+    }
     path_forms.iter().all(|path_form| {
         working_forms
             .iter()
@@ -584,6 +817,11 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(unix)]
+    fn write_windows_cookie_symlink(path: &Path, payload: &[u8]) {
+        std::fs::write(path, [WINDOWS_COOKIE_SYMLINK_PREFIX, payload].concat()).unwrap();
     }
 
     fn roots() -> FsRoots {
@@ -894,6 +1132,76 @@ mod tests {
     }
 
     #[test]
+    fn decode_windows_cookie_symlink_target_prefers_utf8_primary() {
+        let decoded = decode_windows_cookie_symlink_target(b"!<symlink>caf\xC3\xA9").unwrap();
+        assert_eq!(
+            decoded,
+            WindowsCookieSymlinkTarget::Text("café".to_string())
+        );
+    }
+
+    #[test]
+    fn decode_windows_cookie_symlink_target_supports_utf16le_bom() {
+        let decoded = decode_windows_cookie_symlink_target(&[
+            b'!', b'<', b's', b'y', b'm', b'l', b'i', b'n', b'k', b'>', 0xFF, 0xFE, b'd', 0, b'i',
+            0, b'r', 0, b'\\', 0, b'f', 0, b'i', 0, b'l', 0, b'e', 0, 0, 0,
+        ])
+        .unwrap();
+        assert_eq!(
+            decoded,
+            WindowsCookieSymlinkTarget::Utf16("dir\\file".encode_utf16().collect())
+        );
+    }
+
+    #[test]
+    fn decode_windows_cookie_symlink_target_ignores_empty_targets() {
+        assert!(decode_windows_cookie_symlink_target(b"!<symlink>").is_none());
+        assert!(decode_windows_cookie_symlink_target(b"!<symlink>\xFF\xFE\0\0").is_none());
+    }
+
+    #[test]
+    fn decode_windows_cookie_symlink_target_trims_at_first_nul() {
+        let decoded = decode_windows_cookie_symlink_target(b"!<symlink>target\0tail").unwrap();
+        assert_eq!(
+            decoded,
+            WindowsCookieSymlinkTarget::Text("target".to_string())
+        );
+    }
+
+    #[test]
+    fn decode_windows_cookie_symlink_target_truncates_odd_utf16le_tail() {
+        let decoded = decode_windows_cookie_symlink_target(b"!<symlink>\xFF\xFEa\0b").unwrap();
+        assert_eq!(
+            decoded,
+            WindowsCookieSymlinkTarget::Utf16(vec![u16::from(b'a')])
+        );
+    }
+
+    #[test]
+    fn decode_windows_cookie_symlink_target_preserves_lone_surrogates_like_node() {
+        let decoded =
+            decode_windows_cookie_symlink_target(b"!<symlink>\xFF\xFE\x00\xD8x\0").unwrap();
+        assert_eq!(
+            decoded,
+            WindowsCookieSymlinkTarget::Utf16(vec![0xD800, 0x0078])
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cookie_utf16_into_path_buf_preserves_lone_surrogate_and_normalizes_slashes() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let path =
+            WindowsCookieSymlinkTarget::Utf16(vec![0xD800, u16::from(b'\\'), u16::from(b'x')])
+                .into_path_buf();
+        assert_eq!(
+            path.as_os_str().encode_wide().collect::<Vec<u16>>(),
+            vec![0xD800, u16::from(b'/'), u16::from(b'x')]
+        );
+    }
+
+    #[test]
     fn allowed_working_path_iterates_dirs() {
         let r = roots();
         let dirs = vec![PathBuf::from("/proj"), PathBuf::from("/extra/work")];
@@ -921,6 +1229,98 @@ mod tests {
             &[],
             &r
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn windows_cookie_symlink_resolution_keeps_remaining_tail() {
+        let tmp = unique_temp_dir("windows_cookie_tail");
+        let workspace = tmp.join("workspace");
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        write_windows_cookie_symlink(&workspace.join("link"), b"../outside");
+
+        let resolved =
+            resolve_additional_permission_paths(&workspace.join("link/secret.txt"), true);
+        assert!(resolved.contains(&outside.join("secret.txt")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn windows_cookie_utf16le_relative_target_keeps_remaining_tail() {
+        let tmp = unique_temp_dir("windows_cookie_utf16_tail");
+        let workspace = tmp.join("workspace");
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        write_windows_cookie_symlink(
+            &workspace.join("link"),
+            &[
+                0xFF, 0xFE, b'.', 0, b'.', 0, b'/', 0, b'o', 0, b'u', 0, b't', 0, b's', 0, b'i', 0,
+                b'd', 0, b'e', 0,
+            ],
+        );
+
+        assert_eq!(
+            resolve_windows_cookie_symlink_path(&workspace.join("link/nested/secret.txt")),
+            Some(outside.join("nested/secret.txt"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_windows_cookie_symlink_is_ignored() {
+        let tmp = unique_temp_dir("windows_cookie_malformed");
+        let workspace = tmp.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        write_windows_cookie_symlink(&workspace.join("link"), &[0xFF, 0xFE, b'a']);
+
+        assert_eq!(
+            resolve_windows_cookie_symlink_path(&workspace.join("link/secret.txt")),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_windows_cookie_symlink_read_is_bounded_like_oracle() {
+        let tmp = unique_temp_dir("windows_cookie_oversized");
+        let workspace = tmp.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        write_windows_cookie_symlink(
+            &workspace.join("link"),
+            &vec![b'a'; WINDOWS_COOKIE_SYMLINK_READ_BYTES + 128],
+        );
+
+        let bytes = read_windows_cookie_symlink_bytes(&workspace.join("link")).unwrap();
+        assert_eq!(bytes.len(), WINDOWS_COOKIE_SYMLINK_READ_BYTES);
+        let decoded = decode_windows_cookie_symlink_target(&bytes).unwrap();
+        let WindowsCookieSymlinkTarget::Text(target) = &decoded else {
+            panic!("non-BOM ASCII target must decode as text");
+        };
+        assert_eq!(
+            target.len(),
+            WINDOWS_COOKIE_SYMLINK_READ_BYTES - WINDOWS_COOKIE_SYMLINK_PREFIX.len()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn large_non_cookie_regular_file_is_not_treated_as_cookie_symlink() {
+        let tmp = unique_temp_dir("windows_cookie_non_cookie");
+        let workspace = tmp.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("plain"),
+            vec![b'x'; WINDOWS_COOKIE_SYMLINK_READ_BYTES + 128],
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_windows_cookie_symlink_path(&workspace.join("plain/secret.txt")),
+            None
+        );
     }
 
     #[cfg(unix)]
@@ -1017,6 +1417,74 @@ mod tests {
         assert!(
             path_in_allowed_working_path(&workspace.join("build/in"), &[workspace], &roots),
             "a dangling link to an in-workspace target stays contained"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allowed_working_path_skips_fail_closed_working_dir_if_another_contains_target() {
+        let tmp = unique_temp_dir("skip_fail_closed_workdir");
+        let workspace = tmp.join("workspace");
+        let cycle = tmp.join("cycle");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::os::unix::fs::symlink(&cycle, &cycle).unwrap();
+
+        let roots = FsRoots {
+            cwd: workspace.clone(),
+            home: None,
+            lingxi_home: tmp.join(".lingxi"),
+        };
+        let target = workspace.join("src/lib.rs");
+
+        assert_eq!(
+            permission_paths_to_check(&cycle, &roots),
+            PermissionPathForms::FailClosed
+        );
+        assert!(
+            path_in_allowed_working_path(&target, &[cycle, workspace], &roots),
+            "an unresolvable working-dir entry must not poison a valid containing dir"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allowed_working_path_rejects_when_all_working_dirs_fail_closed() {
+        let tmp = unique_temp_dir("all_fail_closed_workdirs");
+        let workspace = tmp.join("workspace");
+        let cycle = tmp.join("cycle");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::os::unix::fs::symlink(&cycle, &cycle).unwrap();
+
+        let roots = FsRoots {
+            cwd: workspace.clone(),
+            home: None,
+            lingxi_home: tmp.join(".lingxi"),
+        };
+
+        assert!(
+            !path_in_allowed_working_path(&workspace.join("src/lib.rs"), &[cycle], &roots),
+            "containment must still deny when every working-dir entry is unresolvable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allowed_working_path_fail_closes_unresolvable_target_path() {
+        let tmp = unique_temp_dir("fail_closed_target_path");
+        let workspace = tmp.join("workspace");
+        let cycle = tmp.join("cycle");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::os::unix::fs::symlink(&cycle, &cycle).unwrap();
+
+        let roots = FsRoots {
+            cwd: workspace.clone(),
+            home: None,
+            lingxi_home: tmp.join(".lingxi"),
+        };
+
+        assert!(
+            !path_in_allowed_working_path(&cycle, &[workspace], &roots),
+            "an unresolvable target path must keep fail-closed behavior"
         );
     }
 }

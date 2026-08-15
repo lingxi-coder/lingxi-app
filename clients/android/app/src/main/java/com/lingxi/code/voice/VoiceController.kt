@@ -30,6 +30,7 @@ import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.SpeechFfiException
+import com.lingxi.code.bindings.WorkflowProgressDto
 import com.lingxi.code.bindings.buildAndroidEngineWithMobileLinux
 import com.lingxi.code.localapps.LocalAppRuntimeAssets
 import com.lingxi.code.location.AndroidLocationAdapter
@@ -202,6 +203,10 @@ fun buildVoiceEngine(
     onEvent: suspend (ClientEvent) -> Unit = { event ->
         Log.d(TAG, "engine event: ${event::class.simpleName}")
     },
+    onWorkflowProgress: suspend (String, String, String, WorkflowProgressDto) -> Unit =
+        { originSessionId, taskId, runId, _ ->
+            Log.d(TAG, "workflow progress: $originSessionId/$taskId/$runId")
+        },
     onPermission: suspend (PermissionRequest) -> Unit = { request ->
         Log.w(TAG, "permission request dropped (no prompt UI wired): ${request.requestId}")
     },
@@ -241,6 +246,15 @@ fun buildVoiceEngine(
             // [onEvent]. EngineConversationSource passes a sink that pushes into
             // its SharedFlow, so the chat surface streams the REAL turn loop.
             onEvent(event)
+        }
+
+        override suspend fun onWorkflowProgress(
+            originSessionId: String,
+            taskId: String,
+            runId: String,
+            progress: WorkflowProgressDto,
+        ) {
+            onWorkflowProgress(originSessionId, taskId, runId, progress)
         }
     }
     // Device-permissions: the engine's adapter gate emits an OUTBOUND

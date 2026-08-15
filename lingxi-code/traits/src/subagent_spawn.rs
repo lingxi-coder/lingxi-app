@@ -11,6 +11,7 @@
 use crate::budget::BudgetEnforcerHandle;
 use crate::tool_invoker::ToolInvoker;
 use async_trait::async_trait;
+use protocol::{AgentId, ConversationMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -275,6 +276,38 @@ pub struct SubagentSpawnRequest {
     pub resumed_history: Option<Vec<protocol::ConversationMessage>>,
 }
 
+/// Workflow-scoped model-query stall policy.
+///
+/// The timeout is an *idle* timeout: it is applied independently to opening a
+/// response stream and to each `stream.next()` wait. A stream that continues to
+/// produce events may run longer than this duration. `max_retries` counts
+/// retries after the initial attempt, matching Claude Code's workflow query
+/// behavior (default: one initial attempt plus at most five retries).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowQueryWatchdog {
+    /// Maximum idle time for stream-open or the next stream event.
+    pub stall_timeout_ms: u64,
+    /// Maximum number of retries after watchdog timeouts.
+    pub max_retries: u32,
+}
+
+impl WorkflowQueryWatchdog {
+    /// Claude Code workflow query stall timeout: three minutes.
+    pub const DEFAULT_STALL_TIMEOUT_MS: u64 = 180_000;
+    /// Claude Code workflow query retry cap.
+    pub const DEFAULT_MAX_RETRIES: u32 = 5;
+}
+
+impl Default for WorkflowQueryWatchdog {
+    fn default() -> Self {
+        Self {
+            stall_timeout_ms: Self::DEFAULT_STALL_TIMEOUT_MS,
+            max_retries: Self::DEFAULT_MAX_RETRIES,
+        }
+    }
+}
+
 /// Token-usage rollup returned at the end of a successful spawn.
 ///
 /// Mirrors the primary numeric buckets of claude-code's AgentTool result `usage`
@@ -307,6 +340,92 @@ pub struct SubagentUsage {
     pub cache_creation_input_tokens: u64,
     /// Cache-read input tokens (claude `usage.cache_read_input_tokens`).
     pub cache_read_input_tokens: u64,
+}
+
+/// Typed lifecycle/event stream for a spawned subagent.
+///
+/// This is additive over the legacy `spawn_with_progress` string channel: hosts
+/// that need live structured updates can observe the real child event stream
+/// without scraping transcript files, while existing callers keep their string
+/// progress unchanged.
+#[derive(Debug, Clone)]
+pub enum SubagentObservation {
+    /// The child slot has been allocated and the real agent id is now known.
+    Allocated {
+        /// Stable id of the allocated child.
+        agent_id: AgentId,
+        /// Resolved child agent type.
+        agent_type: String,
+        /// Optional caller-facing child name/description.
+        name: Option<String>,
+        /// Concrete wire model selected for this child after inheritance and
+        /// agent-definition resolution.
+        model: String,
+        /// Provider profile used to route [`Self::model`], when pinned.
+        model_profile: Option<String>,
+    },
+    /// The child emitted a typed progress beacon while still running.
+    Progress {
+        /// Child emitting the progress update.
+        agent_id: AgentId,
+        /// Tool calls completed so far.
+        tool_use_count: u32,
+        /// Tokens reported by the latest completed model round-trip.
+        token_count: u64,
+    },
+    /// A workflow-scoped model query stalled and will be retried.
+    Retry {
+        /// Child whose workflow query is retrying.
+        agent_id: AgentId,
+        /// One-based model-attempt number. Initial query is attempt 1, so the
+        /// first retry is 2 and the final default retry is attempt 6.
+        attempt: u32,
+        /// Stable diagnostic explaining which watchdog phase stalled.
+        reason: String,
+    },
+    /// The child emitted a conversation message.
+    Message {
+        /// Child that produced the message.
+        agent_id: AgentId,
+        /// Typed conversation message emitted directly by the runner.
+        message: ConversationMessage,
+    },
+    /// The child completed successfully.
+    Completed {
+        /// Child that completed.
+        agent_id: AgentId,
+        /// Final child result payload.
+        content: Value,
+        /// Final-turn usage rollup.
+        usage: SubagentUsage,
+        /// Tool calls completed across the run.
+        total_tool_use_count: u64,
+        /// End-to-end child duration.
+        total_duration_ms: u64,
+        /// Assistant messages emitted across the run.
+        assistant_message_count: u64,
+        /// Provider request id from the final assistant turn.
+        last_request_id: Option<String>,
+    },
+    /// The child failed terminally.
+    Failed {
+        /// Child that failed.
+        agent_id: AgentId,
+        /// Terminal error detail.
+        error: String,
+    },
+    /// The child was cancelled/terminated.
+    Killed {
+        /// Child that was cancelled.
+        agent_id: AgentId,
+    },
+}
+
+/// Structured observer for a spawned subagent's live lifecycle.
+#[async_trait]
+pub trait SubagentSpawnObserver: Send + Sync {
+    /// Receive one typed event from the child lifecycle.
+    async fn on_event(&self, event: SubagentObservation);
 }
 
 /// Terminal result of one [`SubagentSpawner::spawn`] call.
@@ -637,6 +756,39 @@ pub trait SubagentSpawner: Send + Sync {
         _progress: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.spawn(request, inherit).await
+    }
+
+    /// Like [`Self::spawn_with_progress`], but also exposes a typed live event
+    /// stream for the spawned child.
+    ///
+    /// Defaulted to [`Self::spawn_with_progress`] so existing impls/tests need
+    /// no change; the production pool spawner overrides it to forward the
+    /// actual child event stream.
+    async fn spawn_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+        _observer: Option<Arc<dyn SubagentSpawnObserver>>,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.spawn_with_progress(request, inherit, progress).await
+    }
+
+    /// Workflow-only spawn path with a bounded idle watchdog around model
+    /// stream establishment and each response event. The default delegates to
+    /// [`Self::spawn_with_observer`], preserving compatibility for mock and
+    /// non-pool spawners; the production pool implementation applies `watchdog`
+    /// to this child only.
+    async fn spawn_workflow_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn SubagentSpawnObserver>>,
+        _watchdog: WorkflowQueryWatchdog,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.spawn_with_observer(request, inherit, progress, observer)
+            .await
     }
 
     /// Number of subagents currently occupying this spawner's runtime pool.

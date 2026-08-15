@@ -203,19 +203,73 @@ class ChatViewModelReducerTest {
         )
 
         vm.send("start an asynchronous task")
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null))
         vm.reduce(ReplyEvent.End)
         runCurrent()
 
         assertEquals(listOf(true), execution.activeStates)
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null))
         runCurrent()
         assertEquals(listOf(true, false), execution.activeStates)
     }
 
     @Test
-    fun backgroundTaskLeaseSurvivesSessionSwitchUntilTaskFinishes() = runTest(dispatcher) {
+    fun pausedTaskStaysVisibleButReleasesBackgroundExecutionLease() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(
+            source = RecordingSource(),
+            backgroundExecution = execution,
+        )
+
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null))
+        runCurrent()
+        assertEquals(listOf(true), execution.activeStates)
+
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.PAUSED, null))
+        runCurrent()
+
+        assertFalse(vm.state.value.activeBackgroundTaskIds.contains("task-1"))
+        assertEquals("后台任务 task-1 已暂停", vm.state.value.statusLine)
+        assertEquals(listOf(true, false), execution.activeStates)
+    }
+
+    @Test
+    fun taskStatusFromAnotherSessionIsIgnoredWithoutLeakingIntoVisibleStatus() = runTest(dispatcher) {
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(
+            source = RecordingSource(),
+            backgroundExecution = execution,
+        )
+        vm.applyActivatedSession(
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+        )
+
+        vm.reduceClientEvent(
+            ClientEvent.TaskStatusChanged(
+                taskId = "task-b",
+                status = TaskStatusDto.RUNNING,
+                originSessionId = "session-b",
+            ),
+        )
+        runCurrent()
+
+        assertNull(vm.state.value.statusLine)
+        assertFalse(vm.state.value.activeBackgroundTaskIds.contains("task-b"))
+        assertEquals(emptyList<Boolean>(), execution.activeStates)
+
+        vm.reduceClientEvent(
+            ClientEvent.TaskStatusChanged(
+                taskId = "task-a",
+                status = TaskStatusDto.RUNNING,
+                originSessionId = "session-a",
+            ),
+        )
+        assertEquals("后台任务 task-a 运行中", vm.state.value.statusLine)
+    }
+
+    @Test
+    fun backgroundTaskLeaseIsReleasedWhenSwitchingSessions() = runTest(dispatcher) {
         val execution = RecordingBackgroundExecution()
         val source = EmittingSource()
         val vm = ChatViewModel(
@@ -223,20 +277,20 @@ class ChatViewModelReducerTest {
             backgroundExecution = execution,
         )
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.RUNNING, null))
         runCurrent()
         assertEquals(listOf(true), execution.activeStates)
 
         vm.openSession(SessionRef(id = "B", title = "B"))
         runCurrent()
-        assertTrue(vm.state.value.activeBackgroundTaskIds.contains("task-1"))
+        assertFalse(vm.state.value.activeBackgroundTaskIds.contains("task-1"))
         assertEquals(
-            "engine-scoped work must keep its lease across a conversation switch",
-            listOf(true),
+            "session-scoped work must release its lease on a conversation switch",
+            listOf(true, false),
             execution.activeStates,
         )
 
-        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED))
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null))
         runCurrent()
         assertEquals(listOf(true, false), execution.activeStates)
     }
@@ -251,7 +305,7 @@ class ChatViewModelReducerTest {
 
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "npm test"),
+                TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "npm test", false, null),
             ),
         )
         runCurrent()
@@ -259,7 +313,7 @@ class ChatViewModelReducerTest {
 
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("task-1", "shell", TaskStatusDto.COMPLETED, "npm test"),
+                TaskRowDto("task-1", "shell", TaskStatusDto.COMPLETED, "npm test", false, null),
             ),
         )
         runCurrent()
@@ -1362,6 +1416,7 @@ class ChatViewModelReducerTest {
 
     private fun wireHeader() = ToolHeaderDto(
         verb = ToolVerbDto.UPDATE,
+        icon = null,
         label = "Update",
         primary = "src/host.rs",
         qualifier = null,

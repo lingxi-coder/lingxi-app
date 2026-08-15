@@ -93,12 +93,18 @@ lazy_re!(
     unicode_whitespace_re,
     r"[\u{00A0}\u{1680}\u{2000}-\u{200B}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}]"
 );
-// BACKSLASH_WHITESPACE_RE: `\ `/`\t`, or `\<NL>` adjacent to a non-ws char.
-lazy_re!(backslash_whitespace_re, r"\\[ \t]|[^ \t\n\\]\\\n");
+// BACKSLASH_WHITESPACE_RE: `\ `/`\t`, or an odd-count `\<NL>` continuation
+// that joins tokens across lines in a way tree-sitter tokenizes differently.
+lazy_re!(
+    backslash_whitespace_re,
+    r"\\[ \t]|(?:^|[^ \t\\])(?:\\\\)*\\\n|[ \t](?:\\\\)+\\\n"
+);
 // ZSH_TILDE_BRACKET_RE: zsh `~[name]` dynamic named-directory expansion.
 lazy_re!(zsh_tilde_bracket_re, r"~\[");
 // ZSH_EQUALS_EXPANSION_RE: word-initial `=cmd` zsh EQUALS expansion.
 lazy_re!(zsh_equals_expansion_re, r"(?:^|[\s;&|])=[a-zA-Z_]");
+// ZSH_NUMERIC_RANGE_RE: zsh `<N-M>` numeric-range glob.
+lazy_re!(zsh_numeric_range_re, r"<\d*-\d*>");
 // BRACE_WITH_QUOTE_RE: `{` + quote char (brace-expansion obfuscation), run on
 // the brace-masked command so quoted JSON like `'{"k":"v"}'` doesn't trip it.
 lazy_re!(brace_with_quote_re, r#"\{[^}]*['"]"#);
@@ -3091,13 +3097,31 @@ pub(crate) fn walk_test_expr(
             }
             None
         }
-        "test_operator" | "!" | "(" | ")" | "&&" | "||" | "==" | "=" | "!=" | "<" | ">" | "=~"
-        | "regex" | "extglob_pattern" => {
-            argv.push(node_text(node, src).to_string());
+        "test_operator" | "!" | "(" | ")" | "&&" | "||" | "==" | "=" | "!=" | "<" | ">" | "=~" => {
+            let text = node_text(node, src);
+            if let Some(reason) = test_expr_operator_reason(text) {
+                return Some(ParseForSecurityResult::TooComplex {
+                    reason: reason.to_string(),
+                });
+            }
+            argv.push(text.to_string());
+            None
+        }
+        "regex" | "extglob_pattern" => {
+            let text = node_text(node, src);
+            if let Some(reason) = test_expr_pattern_reason(node.kind(), text) {
+                return Some(ParseForSecurityResult::TooComplex { reason });
+            }
+            argv.push(text.to_string());
             None
         }
         _ => match walk_argument(Some(node), src, inner_commands, var_scope) {
             Ok(s) => {
+                if let Some(reason) = test_expr_leaf_reason(&s) {
+                    return Some(ParseForSecurityResult::TooComplex {
+                        reason: reason.to_string(),
+                    });
+                }
                 argv.push(s);
                 None
             }
@@ -3179,6 +3203,9 @@ pub fn pre_check_too_complex(cmd: &str) -> Option<&'static str> {
     if zsh_equals_expansion_re().is_match(cmd) {
         return Some("Contains zsh =cmd equals expansion");
     }
+    if zsh_numeric_range_re().is_match(cmd) {
+        return Some("Contains zsh <N-M> numeric-range glob");
+    }
     if brace_with_quote_re().is_match(&mask_braces_in_quoted_contexts(cmd)) {
         return Some("Contains brace with quote character (expansion obfuscation)");
     }
@@ -3236,12 +3263,305 @@ pub fn parse_for_security(cmd: &str) -> ParseForSecurityResult {
 /// the propagated `TooComplex` otherwise.
 #[must_use]
 pub fn walk_program(root: Node, src: &[u8]) -> ParseForSecurityResult {
+    if let Some(reason) = validate_top_level_program_layout(root, src) {
+        return ParseForSecurityResult::TooComplex {
+            reason: reason.to_string(),
+        };
+    }
     let mut commands: Vec<SimpleCommand> = Vec::new();
     let mut var_scope: HashMap<String, String> = HashMap::new();
     if let Some(err) = collect_commands(root, &mut commands, &mut var_scope, src) {
         return err;
     }
     ParseForSecurityResult::Simple { commands }
+}
+
+fn validate_top_level_coverage(spans: &[(usize, usize)], src: &[u8]) -> Option<&'static str> {
+    let mut cursor = 0usize;
+    for &(start, end) in spans {
+        if start > src.len() || end > src.len() || start > end {
+            return Some("Parser skipped input between top-level statements");
+        }
+        if start > cursor && !is_allowed_layout_gap(&src[cursor..start]) {
+            return Some("Parser skipped input between top-level statements");
+        }
+        if end > cursor {
+            cursor = end;
+        }
+    }
+    if !is_allowed_layout_gap(&src[cursor..]) {
+        return Some("Parser did not consume trailing input");
+    }
+    None
+}
+
+fn is_allowed_layout_gap(bytes: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' | b'\n' | b'\r' | b';' | b'&' => i += 1,
+            b'\\' if i + 1 < bytes.len() && bytes[i + 1] == b'\n' => i += 2,
+            b'\\' if i + 2 < bytes.len() && bytes[i + 1] == b'\r' && bytes[i + 2] == b'\n' => {
+                i += 3
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn gap_is_same_line_after_continuations(bytes: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if i + 1 < bytes.len() && bytes[i + 1] == b'\n' => i += 2,
+            b'\\' if i + 2 < bytes.len() && bytes[i + 1] == b'\r' && bytes[i + 2] == b'\n' => {
+                i += 3
+            }
+            b'\n' | b'\r' => return false,
+            _ => i += 1,
+        }
+    }
+    true
+}
+
+fn unwrap_statement_candidate(node: Node) -> Node {
+    let mut cur = node;
+    loop {
+        let next = match cur.kind() {
+            "redirected_statement" => children(cur).into_iter().find(|child| {
+                !matches!(
+                    child.kind(),
+                    "file_redirect"
+                        | "heredoc_redirect"
+                        | "herestring_redirect"
+                        | "comment"
+                        | ">"
+                        | ">>"
+                        | "<"
+                        | ">&"
+                        | "<&"
+                        | ">|"
+                        | "&>"
+                        | "&>>"
+                        | "<<<"
+                )
+            }),
+            "negated_command" => children(cur).into_iter().find(|child| child.kind() != "!"),
+            _ => None,
+        };
+        match next {
+            Some(next) => cur = next,
+            None => return cur,
+        }
+    }
+}
+
+fn is_statement_node_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "command"
+            | "declaration_command"
+            | "variable_assignment"
+            | "unset_command"
+            | "test_command"
+            | "for_statement"
+            | "while_statement"
+            | "until_statement"
+            | "if_statement"
+            | "case_statement"
+            | "function_definition"
+            | "compound_statement"
+            | "subshell"
+            | "pipeline"
+    )
+}
+
+fn validate_adjacent_statements_recursive(node: Node, src: &[u8]) -> Option<&'static str> {
+    let mut prev_stmt: Option<Node> = None;
+    for child in children(node) {
+        let unwrapped = unwrap_statement_candidate(child);
+        if is_statement_node_kind(unwrapped.kind()) {
+            if let Some(prev) = prev_stmt {
+                if let Some(reason) = validate_adjacent_statement_spans(
+                    &[
+                        (prev.start_byte(), prev.end_byte()),
+                        (child.start_byte(), child.end_byte()),
+                    ],
+                    src,
+                ) {
+                    return Some(reason);
+                }
+            }
+            prev_stmt = Some(child);
+        } else {
+            prev_stmt = None;
+        }
+        if let Some(reason) = validate_adjacent_statements_recursive(child, src) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+fn validate_adjacent_statement_spans(
+    statement_spans: &[(usize, usize)],
+    src: &[u8],
+) -> Option<&'static str> {
+    for pair in statement_spans.windows(2) {
+        let prev_end = pair[0].1;
+        let next_start = pair[1].0;
+        if next_start <= src.len()
+            && prev_end <= next_start
+            && gap_is_same_line_after_continuations(&src[prev_end..next_start])
+        {
+            return Some(
+                "statement directly follows another statement on the same line — bash reads the text as one command (`!` and shell keywords are plain words after an assignment), not two statements",
+            );
+        }
+    }
+    None
+}
+
+fn validate_top_level_program_layout(root: Node, src: &[u8]) -> Option<&'static str> {
+    let all_spans: Vec<(usize, usize)> = children(root)
+        .into_iter()
+        .map(|child| (child.start_byte(), child.end_byte()))
+        .collect();
+    validate_top_level_coverage(&all_spans, src)
+        .or_else(|| validate_adjacent_statements_recursive(root, src))
+}
+
+fn test_expr_operator_reason(text: &str) -> Option<&'static str> {
+    if text.is_empty() {
+        Some("Test command has a synthesized zero-width token — parser diverged from shell")
+    } else {
+        None
+    }
+}
+
+fn test_expr_contains_expansion(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '`' => return true,
+            '<' | '>' if chars.get(i + 1) == Some(&'(') => return true,
+            '$' => {
+                if let Some(next) = chars.get(i + 1) {
+                    if matches!(
+                        next,
+                        '(' | '{'
+                            | '['
+                            | '#'
+                            | '?'
+                            | '!'
+                            | '*'
+                            | '@'
+                            | '$'
+                            | '\''
+                            | '"'
+                            | '+'
+                            | '~'
+                            | '^'
+                            | '='
+                            | '-'
+                    ) || next.is_ascii_alphanumeric()
+                        || *next == '_'
+                    {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+fn test_expr_pattern_reason(kind: &str, text: &str) -> Option<String> {
+    if text.contains("&&") {
+        return Some(
+            "[[ ]] pattern leaf contains `&&` — shell cond-lexer divergence (zsh splits the word there)"
+                .to_string(),
+        );
+    }
+    if test_expr_contains_expansion(text) {
+        return Some(format!(
+            "[[ ]] {kind} contains expansion / command / process substitution"
+        ));
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut depth = 0i32;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\\' {
+            i += 2;
+            continue;
+        }
+        if !in_double && ch == '\'' {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if !in_single && ch == '"' {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if in_single || in_double {
+            i += 1;
+            continue;
+        }
+        if ch == '&' {
+            return Some(match kind {
+                "extglob_pattern" => {
+                    "[[ ]] pattern contains unquoted & (zsh splits the word at & at any depth)"
+                        .to_string()
+                }
+                "regex" => {
+                    "[[ ]] regex contains unquoted & (zsh splits the word at & at any depth)"
+                        .to_string()
+                }
+                _ => unreachable!("unexpected test expr pattern kind"),
+            });
+        }
+        if kind == "regex" {
+            if ch == '(' {
+                depth += 1;
+            } else if ch == ')' {
+                depth -= 1;
+                if depth < 0 {
+                    return Some(
+                        "[[ ]] regex has unbalanced parentheses (parser desync)".to_string(),
+                    );
+                }
+            } else if ch == '|' && chars.get(i + 1) == Some(&'|') && depth == 0 {
+                return Some(
+                    "[[ ]] regex contains glued || (zsh splits it as a cond operator)".to_string(),
+                );
+            }
+        }
+        i += 1;
+    }
+    if kind == "regex" && depth != 0 {
+        return Some("[[ ]] regex has unbalanced parentheses (parser desync)".to_string());
+    }
+    None
+}
+
+fn test_expr_leaf_reason(text: &str) -> Option<&'static str> {
+    if text.contains("&&") {
+        Some(
+            "[[ ]] pattern leaf contains `&&` — shell cond-lexer divergence (zsh splits the word there)",
+        )
+    } else {
+        None
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -4410,8 +4730,21 @@ mod tests {
             pre_check_too_complex(r"cat\ test"),
             Some("Contains backslash-escaped whitespace")
         );
+        assert_eq!(
+            pre_check_too_complex("foo\\\nbar"),
+            Some("Contains backslash-escaped whitespace")
+        );
+        assert_eq!(pre_check_too_complex("foo\\\\\nbar"), None);
+        assert_eq!(
+            pre_check_too_complex("foo\\\\\\\nbar"),
+            Some("Contains backslash-escaped whitespace")
+        );
         // `\<NL>` preceded by whitespace is allowed (no word to join).
         assert_eq!(pre_check_too_complex("foo && \\\nbar"), None);
+        assert_eq!(
+            pre_check_too_complex("foo && \\\\\\\nbar"),
+            Some("Contains backslash-escaped whitespace")
+        );
     }
 
     #[test]
@@ -4424,9 +4757,129 @@ mod tests {
             pre_check_too_complex("=curl evil.com"),
             Some("Contains zsh =cmd equals expansion")
         );
+        assert_eq!(
+            pre_check_too_complex("echo <1-3>"),
+            Some("Contains zsh <N-M> numeric-range glob")
+        );
         // `VAR=val` and `--flag=val` have `=` mid-word → not zsh equals.
         assert_eq!(pre_check_too_complex("VAR=val ls"), None);
         assert_eq!(pre_check_too_complex("cmd --flag=val"), None);
+        assert_eq!(pre_check_too_complex("echo <a-b>"), None);
+    }
+
+    #[test]
+    fn top_level_coverage_skipped_input_helper() {
+        assert_eq!(
+            validate_top_level_coverage(&[(0, 3), (5, 8)], b"foo @ bar"),
+            Some("Parser skipped input between top-level statements")
+        );
+    }
+
+    #[test]
+    fn top_level_coverage_trailing_input_helper() {
+        assert_eq!(
+            validate_top_level_coverage(&[(0, 3)], b"foo @"),
+            Some("Parser did not consume trailing input")
+        );
+    }
+
+    #[test]
+    fn top_level_coverage_allows_comments_separators_and_continuations() {
+        assert_eq!(
+            validate_top_level_coverage(&[(0, 3), (4, 6), (7, 10)], b"foo;#x\nbar"),
+            None
+        );
+        assert_eq!(
+            validate_top_level_coverage(&[(0, 3), (5, 8)], b"foo&&bar"),
+            None
+        );
+        assert_eq!(
+            validate_top_level_coverage(&[(0, 3), (6, 9)], b"foo\\\r\nbar"),
+            None
+        );
+    }
+
+    #[test]
+    fn top_level_layout_adjacent_same_line_helper() {
+        assert_eq!(
+            validate_adjacent_statement_spans(&[(0, 3), (4, 7)], b"foo bar"),
+            Some(
+                "statement directly follows another statement on the same line — bash reads the text as one command (`!` and shell keywords are plain words after an assignment), not two statements"
+            )
+        );
+        assert_eq!(
+            validate_adjacent_statement_spans(&[(0, 3), (6, 9)], b"foo\\\r\nbar"),
+            Some(
+                "statement directly follows another statement on the same line — bash reads the text as one command (`!` and shell keywords are plain words after an assignment), not two statements"
+            )
+        );
+        assert!(gap_is_same_line_after_continuations(b" \\\r\n "));
+        assert!(!gap_is_same_line_after_continuations(b" \r\n "));
+    }
+
+    #[test]
+    fn nested_recursive_adjacency_walk_sanity() {
+        let cmd = "if true; then foo\nbar; fi";
+        let tree = crate::bash_tree_sitter::parse_raw(cmd).expect("parse");
+        assert_eq!(
+            validate_adjacent_statements_recursive(tree.root_node(), cmd.as_bytes()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_expr_helper_differentials() {
+        assert_eq!(
+            test_expr_operator_reason(""),
+            Some("Test command has a synthesized zero-width token — parser diverged from shell")
+        );
+        assert_eq!(
+            test_expr_pattern_reason("regex", "$foo"),
+            Some("[[ ]] regex contains expansion / command / process substitution".to_string())
+        );
+        assert_eq!(
+            test_expr_pattern_reason("extglob_pattern", "@(a&b)"),
+            Some(
+                "[[ ]] pattern contains unquoted & (zsh splits the word at & at any depth)"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            test_expr_pattern_reason("regex", "foo||bar"),
+            Some("[[ ]] regex contains glued || (zsh splits it as a cond operator)".to_string())
+        );
+        assert_eq!(
+            test_expr_pattern_reason("regex", "(foo"),
+            Some("[[ ]] regex has unbalanced parentheses (parser desync)".to_string())
+        );
+        assert_eq!(
+            test_expr_leaf_reason("foo&&bar"),
+            Some(
+                "[[ ]] pattern leaf contains `&&` — shell cond-lexer divergence (zsh splits the word there)",
+            )
+        );
+    }
+
+    #[test]
+    fn l3_test_command_zsh_regex_hardening() {
+        assert_eq!(
+            pfs("[[ foo =~ foo||bar ]]"),
+            Err("[[ ]] regex contains glued || (zsh splits it as a cond operator)".to_string())
+        );
+        assert_eq!(
+            pfs("[[ foo == @(a&b) ]]"),
+            Err(
+                "[[ ]] pattern contains unquoted & (zsh splits the word at & at any depth)"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            pfs("[[ foo == foo&&bar ]]"),
+            Err(
+                "[[ ]] pattern leaf contains `&&` — shell cond-lexer divergence (zsh splits the word there)"
+                    .to_string()
+            )
+        );
     }
 
     // ── L2: arg / value / assignment / heredoc walkers ──
@@ -4557,6 +5010,23 @@ mod tests {
     }
 
     #[test]
+    fn walk_string_delimiters_only_returns_inner_slice() {
+        let tree = crate::bash_tree_sitter::parse_raw(r#"echo " ""#).expect("parse");
+        let src = br#"echo " ""#;
+        let node = find_kind(tree.root_node(), "string").expect("string node");
+        let mut inner = Vec::new();
+        let mut scope = HashMap::new();
+        assert_eq!(
+            walk_string(node, src, &mut inner, &mut scope),
+            Ok(" ".to_string())
+        );
+        assert!(
+            inner.is_empty(),
+            "delimiters-only literal must not extract inner commands"
+        );
+    }
+
+    #[test]
     fn walk_arithmetic_literal_ok_variable_rejects() {
         // `$((1+2))` — literal arithmetic, argv gets the full span verbatim.
         let argvs = cmd_argvs("echo $((1+2))").expect("simple");
@@ -4675,6 +5145,17 @@ EOF
 system("id")
 EOF
 )""#
+            ),
+            CatHeredoc::Dangerous
+        );
+        // The awk battery also scans heredoc bodies and rejects command-executing
+        // awk programs before they can be treated as static literal content.
+        assert_eq!(
+            cat_h(
+                r#"echo "$(cat <<'EOF'
+BEGIN { system("id") }
+EOF
+ )""#
             ),
             CatHeredoc::Dangerous
         );
@@ -5783,6 +6264,22 @@ EOF
         // inner id extracted first, then the outer echo command.
         assert_eq!(argvs.last().unwrap()[0], "echo");
         assert_eq!(argvs.last().unwrap()[1], format!("xy{CMDSUB_PLACEHOLDER}"));
+    }
+
+    #[test]
+    fn walk_argument_unknown_node_reports_generic_reason() {
+        let tree = crate::bash_tree_sitter::parse_raw("echo ${HOME}").expect("parse");
+        let src = "echo ${HOME}".as_bytes();
+        let node = find_kind(tree.root_node(), "variable_name").expect("variable_name node");
+        let mut inner = Vec::new();
+        let mut scope = HashMap::new();
+        assert_eq!(
+            walk_argument(Some(node), src, &mut inner, &mut scope),
+            Err(ParseForSecurityResult::TooComplex {
+                reason: "Contains shell syntax (variable_name) that cannot be statically analyzed"
+                    .to_string(),
+            })
+        );
     }
 
     #[test]

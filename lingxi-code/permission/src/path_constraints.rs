@@ -213,7 +213,14 @@ fn redirect_target_charset_ok(s: &str) -> bool {
 /// One extracted output redirection: a file `target`, whether the target carried
 /// dangerous expansion (→ shell-expansion ask), and whether it is a braced
 /// write target (→ `EUr` create-op brace-guard ask).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectKind {
+    Input,
+    Output,
+}
+
 struct Redirection {
+    kind: RedirectKind,
     target: String,
     /// Dangerous shell expansion (`eLe` shell_expansion) → "Shell expansion …".
     dangerous: bool,
@@ -237,6 +244,11 @@ fn strip_surrounding_quotes(s: &str) -> &str {
 /// Is every char of `s` an ASCII digit? (fd-number test, `^\d+$`).
 fn is_all_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Is `s` an fd-duplication / close target rather than a pathname?
+fn is_fd_duplication_target(s: &str) -> bool {
+    s == "-" || is_all_digits(s)
 }
 
 /// Tokenize a subcommand into shell-ish tokens, keeping the redirection
@@ -374,7 +386,9 @@ fn read_operator(chars: &[char]) -> (String, usize) {
         (Some('>'), Some('&'), _) => (">&".to_string(), 2),
         // `>`
         (Some('>'), _, _) => (">".to_string(), 1),
-        // `<<`  `<`
+        // `<&`  `<>`  `<<`  `<`
+        (Some('<'), Some('&'), _) => ("<&".to_string(), 2),
+        (Some('<'), Some('>'), _) => ("<>".to_string(), 2),
         (Some('<'), Some('<'), _) => ("<<".to_string(), 2),
         (Some('<'), _, _) => ("<".to_string(), 1),
         // `||`  `|`
@@ -388,16 +402,21 @@ fn read_operator(chars: &[char]) -> (String, usize) {
 
 /// Whether an operator string carries a stdout/stderr FILE-output meaning whose
 /// next word is a file target. `>`, `>>`, `&>`, `&>>`, `>|`, `>!`, `>&` all do;
-/// input (`<`, `<<`) and control (`|`, `&`, `&&`, `||`) operators do not.
-fn op_is_file_output(op: &str) -> bool {
-    matches!(op, ">" | ">>" | "&>" | "&>>" | ">|" | ">!" | ">&")
+/// `<`, `<>`, and file-backed `<&` are read targets; heredocs and control
+/// operators do not.
+fn redirect_kind_for_op(op: &str) -> Option<RedirectKind> {
+    match op {
+        ">" | ">>" | "&>" | "&>>" | ">|" | ">!" | ">&" => Some(RedirectKind::Output),
+        "<" | "<>" | "<&" => Some(RedirectKind::Input),
+        _ => None,
+    }
 }
 
-/// Extract output redirections from one subcommand. Mirrors the FILE-target
-/// subset of TS `extractOutputRedirections` + `handleRedirection`: for each
-/// stdout/stderr file-output operator, the following word is the target. A
-/// `>&` followed by a pure fd number (`2>&1`, `>&2`) is a duplication, NOT a
-/// file — skipped (TS `astRedirectsToOutputRedirections`/`handleRedirection`).
+/// Extract file-backed redirections from one subcommand. Mirrors the FILE-target
+/// subset of TS `extractOutputRedirections` + the 2.1.232 input-redirection
+/// parity path: for each file redirect operator, the following word is the
+/// target. A `>&` followed by a pure fd number (`2>&1`, `>&2`) is a duplication,
+/// NOT a file — skipped (TS `astRedirectsToOutputRedirections`/`handleRedirection`).
 /// Targets are classified dangerous (shell expansion) vs. simple (a path to
 /// validate).
 fn extract_redirections(sub: &str) -> Vec<Redirection> {
@@ -406,11 +425,12 @@ fn extract_redirections(sub: &str) -> Vec<Redirection> {
     let mut idx = 0;
     while idx < tokens.len() {
         if let Token::Op { op, .. } = &tokens[idx] {
-            if op_is_file_output(op) {
+            if let Some(kind) = redirect_kind_for_op(op) {
                 // The target is the next WORD token (if any).
                 if let Some(Token::Word(raw)) = tokens.get(idx + 1) {
-                    // `>&N` / `>&` to a bare fd number is duplication, not a file.
-                    if op == ">&" && is_all_digits(raw) {
+                    // `>&N` / `<&N` and the close forms `>&-` / `<&-` are fd
+                    // operations, not file-backed redirects.
+                    if matches!(op.as_str(), ">&" | "<&") && is_fd_duplication_target(raw) {
                         idx += 2;
                         continue;
                     }
@@ -421,8 +441,11 @@ fn extract_redirections(sub: &str) -> Vec<Redirection> {
                         || (op == ">&" && !redirect_target_charset_ok(&target));
                     // A non-dangerous target with `{`/`}` is a braced write
                     // target → `EUr` create-op brace guard (not shell_expansion).
-                    let brace = !dangerous && (target.contains('{') || target.contains('}'));
+                    let brace = !dangerous
+                        && kind == RedirectKind::Output
+                        && (target.contains('{') || target.contains('}'));
                     out.push(Redirection {
+                        kind,
                         target,
                         dangerous,
                         brace,
@@ -454,7 +477,7 @@ pub(crate) fn command_has_network_device_redirect(subs: &[String]) -> bool {
         let mut idx = 0;
         while idx < tokens.len() {
             if let Token::Op { op } = &tokens[idx] {
-                if op_is_file_output(op) || op == "<" {
+                if redirect_kind_for_op(op).is_some() {
                     if let Some(Token::Word(raw)) = tokens.get(idx + 1) {
                         if is_network_device_target(raw) {
                             return true;
@@ -626,7 +649,11 @@ pub fn check_path_constraints(
     //    (`n && e.some(o => o.target !== "/dev/null")`), so a `/dev/null`-only
     //    redirect set (`cmd > /dev/null 2>&1`) falls through to normal cd/target
     //    validation instead of over-asking.
-    if has_cd && all_redirs.iter().any(|r| r.target != "/dev/null") {
+    if has_cd
+        && all_redirs
+            .iter()
+            .any(|r| r.kind == RedirectKind::Output && r.target != "/dev/null")
+    {
         return Some(PathConstraintAsk {
             message: "Commands that change directories and write via output redirection require explicit approval to ensure paths are evaluated correctly. For security, LingXi cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
             reason: "Compound command contains cd with output redirection - manual approval required to prevent path resolution bypass".to_string(),
@@ -669,9 +696,20 @@ pub fn check_path_constraints(
         }
         let resolved = expand_redirect_target(&r.target, roots);
         if !path_in_allowed_working_path(Path::new(&resolved), &work_dirs, roots) {
+            let resolved_disp = resolved.to_string_lossy();
+            if r.kind == RedirectKind::Input {
+                return Some(PathConstraintAsk {
+                    message: format!(
+                        "Input redirection from '{resolved_disp}' was blocked. For security, LingXi may only read files in the allowed working directories for this session."
+                    ),
+                    reason: format!(
+                        "Input redirection from '{resolved_disp}' was blocked. For security, LingXi may only read files in the allowed working directories for this session."
+                    ),
+                    blocked_path: Some(resolved_disp.into_owned()),
+                });
+            }
             let dirs = all_working_directories(roots, additional);
             let dir_list = format_directory_list(&dirs);
-            let resolved_disp = resolved.to_string_lossy();
             return Some(PathConstraintAsk {
                 message: format!(
                     "Output redirection to '{resolved_disp}' was blocked. For security, LingXi may only write to files in the allowed working directories for this session: {dir_list}."
@@ -761,23 +799,16 @@ pub fn check_path_constraints(
     None
 }
 
-/// Resolve the SIMPLE output-redirect targets of `command` to absolute path
-/// strings — the create/write targets that reach TS `validateOutputRedirections`
-/// (`SPg`) and thus the Edit-deny-rule walk (`EUr`). Dangerous-expansion targets,
-/// `/dev/null`, and `/dev/tcp`/`/dev/udp` network devices are EXCLUDED (they ask
-/// via their own guards in [`check_path_constraints`], never reaching `SPg`).
-///
-/// Consumed by [`crate::policy`] to deny a redirect whose resolved target matches
-/// an `Edit(...)` deny rule (`Output redirection to '<path>' was blocked by a deny
-/// rule.`), before the working-dir containment ask.
-#[must_use]
-pub fn write_redirect_targets(command: &str, roots: &FsRoots) -> Vec<String> {
+fn redirect_targets(command: &str, roots: &FsRoots, kind: RedirectKind) -> Vec<String> {
     let mut out = Vec::new();
     for sub in crate::shell_command::split_command(command) {
         for r in extract_redirections(&sub) {
+            if r.kind != kind {
+                continue;
+            }
             // Dangerous (shell_expansion), braced (create-op brace guard),
             // /dev/null, and /dev/tcp|udp network targets never reach the
-            // Edit-deny-rule walk — they ask via their own guards.
+            // deny-rule walk — they ask via their own guards.
             if r.dangerous
                 || r.brace
                 || r.target == "/dev/null"
@@ -793,6 +824,31 @@ pub fn write_redirect_targets(command: &str, roots: &FsRoots) -> Vec<String> {
         }
     }
     out
+}
+
+/// Resolve the SIMPLE output-redirect targets of `command` to absolute path
+/// strings — the create/write targets that reach TS `validateOutputRedirections`
+/// (`SPg`) and thus the Edit-deny-rule walk (`EUr`). Dangerous-expansion targets,
+/// `/dev/null`, and `/dev/tcp`/`/dev/udp` network devices are EXCLUDED (they ask
+/// via their own guards in [`check_path_constraints`], never reaching `SPg`).
+///
+/// Consumed by [`crate::policy`] to deny a redirect whose resolved target matches
+/// an `Edit(...)` deny rule (`Output redirection to '<path>' was blocked by a deny
+/// rule.`), before the working-dir containment ask.
+#[must_use]
+pub fn write_redirect_targets(command: &str, roots: &FsRoots) -> Vec<String> {
+    redirect_targets(command, roots, RedirectKind::Output)
+}
+
+/// Resolve the SIMPLE input-redirect targets of `command` to absolute path
+/// strings — the read targets that 2.1.232 routes through the same deny/working-
+/// dir gate as positional read arguments. Dangerous-expansion targets,
+/// `/dev/null`, and `/dev/tcp`/`/dev/udp` network devices are EXCLUDED (they ask
+/// via their own guards in [`check_path_constraints`], never reaching the
+/// `Read(...)` deny walk).
+#[must_use]
+pub fn read_redirect_targets(command: &str, roots: &FsRoots) -> Vec<String> {
+    redirect_targets(command, roots, RedirectKind::Input)
 }
 
 /// Shell-expansion pre-guard for a `cd` target — TS `validatePath`'s `$`/`%`/`=`
@@ -891,11 +947,46 @@ mod tests {
     }
 
     #[test]
+    fn input_redirect_outside_cwd_asks() {
+        let a = check("cat < /etc/hosts").expect("should ask");
+        assert_eq!(
+            a.message,
+            "Input redirection from '/etc/hosts' was blocked. For security, LingXi may only read files in the allowed working directories for this session."
+        );
+        assert_eq!(a.reason, a.message);
+    }
+
+    #[test]
+    fn readwrite_redirect_outside_cwd_asks() {
+        let a = check("cat <> /etc/hosts").expect("should ask");
+        assert_eq!(
+            a.message,
+            "Input redirection from '/etc/hosts' was blocked. For security, LingXi may only read files in the allowed working directories for this session."
+        );
+        assert_eq!(a.reason, a.message);
+    }
+
+    #[test]
+    fn file_backed_input_fd_redirect_outside_cwd_asks() {
+        let a = check("cat <& /etc/hosts").expect("should ask");
+        assert_eq!(
+            a.message,
+            "Input redirection from '/etc/hosts' was blocked. For security, LingXi may only read files in the allowed working directories for this session."
+        );
+        assert_eq!(a.reason, a.message);
+    }
+
+    #[test]
     fn redirect_inside_cwd_not_triggered() {
         // `echo x > ./local` resolves under cwd → no constraint violation.
         assert!(check("echo x > ./local").is_none());
         assert!(check("echo x > local").is_none());
         assert!(check("echo x > sub/dir/out.txt").is_none());
+        assert!(check("cat < ./local").is_none());
+        assert!(check("cat < sub/dir/in.txt").is_none());
+        assert!(check("cat <> ./local").is_none());
+        assert!(check("cat <& sub/dir/in.txt").is_none());
+        assert!(check("cat <&0").is_none());
     }
 
     #[test]
@@ -976,6 +1067,30 @@ mod tests {
         assert_eq!(
             a.message,
             "Shell expansion syntax in paths requires manual approval"
+        );
+        let b = check("cat < ~/secret").expect("should ask");
+        assert_eq!(
+            b.message,
+            "Shell expansion syntax in paths requires manual approval"
+        );
+    }
+
+    #[test]
+    fn read_redirect_targets_only_include_simple_reads() {
+        assert_eq!(
+            read_redirect_targets("cat < secrets/in.txt < /dev/null < \"$HOME/x\"", &roots()),
+            vec!["/proj/work/secrets/in.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn read_redirect_targets_include_readwrite_and_file_backed_fd_forms() {
+        assert_eq!(
+            read_redirect_targets("cat <> secrets/rw.txt <& secrets/fd.txt <&0 <&-", &roots()),
+            vec![
+                "/proj/work/secrets/rw.txt".to_string(),
+                "/proj/work/secrets/fd.txt".to_string(),
+            ]
         );
     }
 

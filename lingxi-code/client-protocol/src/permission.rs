@@ -48,6 +48,25 @@ pub struct PermissionRequest {
     /// in the foundation. Optional + skipped when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker: Option<WorkerInfoDto>,
+    /// Immutable owner captured when the request is parked. Older senders omit
+    /// it; clients must continue to correlate by `request_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<PermissionOwnerDto>,
+}
+
+/// Session/turn or worker that owns one parked permission request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PermissionOwnerDto {
+    /// Origin session, when the host has mounted one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Client turn correlator for a main-agent request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<u64>,
+    /// Worker display name for a child-agent request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_name: Option<String>,
 }
 
 /// What the user is being asked to approve. Internally tagged on `type`,
@@ -133,4 +152,19 @@ pub enum PermissionResponseDto {
     AllowAlways,
     /// Deny this invocation.
     Deny,
+}
+
+/// Authoritative engine-side terminal state for a permission request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionResolutionDto {
+    /// The engine accepted the client's approval.
+    Approved,
+    /// The engine accepted a denial.
+    Denied,
+    /// The owning turn was cancelled before the user answered.
+    Cancelled,
+    /// The request exceeded the engine timeout.
+    Expired,
 }

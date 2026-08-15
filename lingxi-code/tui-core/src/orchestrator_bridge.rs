@@ -325,6 +325,10 @@ pub enum TurnEvent {
         /// Currently live background agents.
         agents: Vec<RunningAgentStatus>,
     },
+    /// Event-driven workflow/task lifecycle update. This shares the same
+    /// render-loop channel as turn output, so an open `/workflows` view updates
+    /// immediately without a timer or registry poll.
+    MultiAgent(crate::multiagent::MultiAgentEvent),
     /// A `/compact` (or otherwise forced) compaction pass began. The CLI's
     /// compact closure sends this SYNCHRONOUSLY before awaiting the multi-second
     /// `force_compact()` round-trip so the TUI shows claude-code's

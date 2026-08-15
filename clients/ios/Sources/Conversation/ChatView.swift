@@ -83,31 +83,24 @@ struct ChatView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 messageList
-                // Agent execution is kept in one compact dock. Its collapsed
-                // row preserves the latest activity while leaving the bulk of
-                // the viewport to messages; details expand on demand.
-                if hasChildAgents {
-                    AgentStatusDock(
+                if hasChildAgents || !convo.backgroundTasks.isEmpty || !convo.planTasks.isEmpty
+                    || convo.workflowResumeState != .idle {
+                    ExecutionStatusPanel(
                         agents: convo.agentSummaries,
                         selectedAgentID: selectedAgentBinding,
                         latestActivity: selectedAgentActivity,
                         isReadOnly: convo.isSelectedAgentReadOnly,
-                        showsDetails: false,
-                        onSelect: { id in
+                        tasks: convo.backgroundTasks,
+                        planTasks: convo.planTasks,
+                        workflowResumeState: convo.workflowResumeState,
+                        onSelectAgent: { id in
                             source.selectAgent(id ?? ConversationModel.mainAgentID)
-                        }
-                    ) { EmptyView() }
+                        },
+                        onResumeWorkflow: source.resumeWorkflow
+                    )
                     .padding(.horizontal, 14)
-                    .padding(.top, 4)
-                    .padding(.bottom, 4)
+                    .padding(.vertical, 4)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-                if convo.selectedAgentID == ConversationModel.mainAgentID,
-                   !convo.backgroundTasks.isEmpty {
-                    TasksStatusPanel(tasks: convo.backgroundTasks)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 4)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 runtimeFooter
                 if !convo.isSelectedAgentReadOnly, voiceInteraction.isPresented {
@@ -132,6 +125,18 @@ struct ChatView: View {
                              modelRecents.record(reference)
                              recentModels = modelRecents.resolved(against: convo.availableModels)
                          },
+                         reasoningSelection: convo.reasoningSelection,
+                         reasoningOptions: convo.reasoningOptions,
+                         reasoningOptionDetails: convo.reasoningOptionDetails,
+                         reasoningBudgetRange: convo.controls?.budgetRange,
+                         reasoningDisabledReason: convo.reasoningDisabledReason,
+                         permissionMode: convo.requestedPermissionMode,
+                         effectivePermissionMode: convo.effectivePermissionMode,
+                         permissionOptions: convo.permissionOptions,
+                         controlsPending: convo.controlsPending,
+                         controlsError: convo.controlsError,
+                         onSelectReasoning: { source.setReasoningSelection($0) },
+                         onSelectPermission: { source.setPermissionMode($0) },
                          recentModels: recentModels,
                          draft: $draft,
                          onSend: send,
@@ -175,18 +180,6 @@ struct ChatView: View {
                 }
             }
 
-            // SHIP-BLOCKER #3: the engine-parked permission prompt. Sits above the
-            // conversation so a tool that needs approval is answered (allow / deny)
-            // instead of hanging the turn forever. No-op surface on the mock source
-            // (which never parks a turn on a permission gate).
-            #if canImport(engine_mobileFFI)
-                PermissionPrompt(
-                    pending: convo.pendingPermissions.first,
-                    onApprove: { source.approvePermission($0, $1) },
-                    onDeny: { source.denyPermission($0) }
-                )
-                    .animation(.easeOut(duration: 0.2), value: convo.pendingPermissions.first)
-            #endif
         }
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)

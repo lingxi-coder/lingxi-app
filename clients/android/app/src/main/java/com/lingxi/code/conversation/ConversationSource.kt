@@ -81,80 +81,49 @@ fun conversationStrings(context: Context): ConversationStrings =
     ConversationStrings { id, _, args -> context.getString(id, *args) }
 
 /**
- * Linearizes permission callback ingress with turn cancellation. Checking a
- * standalone boolean and then assigning the StateFlow allowed a callback to
- * republish a stale prompt after Cancel had cleared it. Every phase transition
- * and prompt mutation now shares one monitor and one turn generation.
+ * Process-wide FIFO for permission callbacks. Workflow children can request
+ * permission while the main turn is idle, so main-turn lifecycle events must
+ * not suppress or clear their prompts. The engine's correlated
+ * `PermissionRequestResolved` event removes the exact request that completed.
  */
 internal class PermissionIngress(
     private val permissions: MutableStateFlow<PermissionPromptState?>,
     private val strings: ConversationStrings = DefaultConversationStrings,
 ) {
-    private enum class Phase { IDLE, ACCEPTING, CANCELLING, ENDED }
+    /** Multiple workflow children can park independently; preserve callback order. */
+    private val queued = linkedMapOf<ULong, PermissionPromptState>()
 
-    internal class CancellationSnapshot internal constructor(
-        internal val generation: Long,
-        internal val wasAccepting: Boolean,
-        internal val pending: PermissionPromptState?,
-    )
-
-    private var phase = Phase.IDLE
-    private var generation = 0L
+    internal class CancellationSnapshot internal constructor()
 
     @Synchronized
-    fun beginTurn() {
-        generation += 1
-        phase = Phase.ACCEPTING
-        permissions.value = null
-    }
+    fun beginTurn() = Unit
 
     @Synchronized
-    fun confirmTurnStarted() {
-        if (phase == Phase.CANCELLING || phase == Phase.ACCEPTING) return
-        generation += 1
-        phase = Phase.ACCEPTING
-        permissions.value = null
-    }
+    fun confirmTurnStarted() = Unit
 
     @Synchronized
-    fun beginCancellation(): CancellationSnapshot {
-        val snapshot = CancellationSnapshot(
-            generation = generation,
-            wasAccepting = phase == Phase.ACCEPTING,
-            pending = permissions.value,
-        )
-        phase = Phase.CANCELLING
-        permissions.value = null
-        return snapshot
-    }
+    fun beginCancellation(): CancellationSnapshot = CancellationSnapshot()
 
     @Synchronized
-    fun restoreAfterFailedCancellation(snapshot: CancellationSnapshot) {
-        if (phase != Phase.CANCELLING || generation != snapshot.generation) return
-        phase = if (snapshot.wasAccepting) Phase.ACCEPTING else Phase.IDLE
-        if (snapshot.wasAccepting && permissions.value == null) {
-            permissions.value = snapshot.pending
-        }
-    }
+    fun restoreAfterFailedCancellation(@Suppress("UNUSED_PARAMETER") snapshot: CancellationSnapshot) = Unit
 
     @Synchronized
-    fun endTurn() {
-        phase = Phase.ENDED
-        permissions.value = null
-    }
+    fun endTurn() = Unit
 
     @Synchronized
     fun publish(request: PermissionRequest) {
-        if (phase == Phase.ACCEPTING) {
-            permissions.value = permissionRequestToPrompt(request, strings)
-        }
+        queued[request.requestId] = permissionRequestToPrompt(request, strings)
+        publishHead()
     }
 
     @Synchronized
     fun resolve(requestId: ULong) {
-        if (permissions.value?.requestId == requestId) {
-            permissions.value = null
-        }
+        queued.remove(requestId)
+        publishHead()
+    }
+
+    private fun publishHead() {
+        permissions.value = queued.values.firstOrNull()
     }
 }
 
@@ -187,8 +156,20 @@ interface ConversationSource {
     val clientEvents: Flow<ClientEvent>
         get() = emptyFlow()
 
+    /** Structured workflow/subagent updates, pushed directly by the engine. */
+    val workflowProgress: Flow<WorkflowProgressUpdate>
+        get() = emptyFlow()
+
     /** Submit a non-conversation protocol command through this source. */
     suspend fun submitClientCommand(command: ClientCommand) {}
+
+    /** Refresh task rows and the current session agent roster after a resume. */
+    suspend fun refreshExecutionStatus() {}
+
+    /** Apply the persisted permission-mode preference to the live engine. */
+    suspend fun setPermissionMode(mode: String) {
+        submitClientCommand(ClientCommand.SetPermissionMode(mode))
+    }
 
     /** The conversation a freshly-opened session starts with. */
     fun initialMessages(): List<Message> = emptyList()
@@ -1035,6 +1016,8 @@ class EngineConversationSource private constructor(
     private val handle: MobileEngineHandle,
     private val events: SharedFlow<ClientEvent>,
     private val eventRelay: LosslessEventRelay<ClientEvent>,
+    private val workflowEvents: SharedFlow<WorkflowProgressUpdate>,
+    private val workflowRelay: LosslessEventRelay<WorkflowProgressUpdate>,
     private val eventScope: CoroutineScope,
     private val permissions: MutableStateFlow<PermissionPromptState?>,
     private val permissionIngress: PermissionIngress,
@@ -1046,9 +1029,20 @@ class EngineConversationSource private constructor(
 ) : ConversationSource {
 
     override val clientEvents: Flow<ClientEvent> = events
+    override val workflowProgress: Flow<WorkflowProgressUpdate> = workflowEvents
 
     override suspend fun submitClientCommand(command: ClientCommand) {
         handle.submit(command)
+    }
+
+    override suspend fun refreshExecutionStatus() {
+        handle.submit(ClientCommand.TaskList(null))
+        handle.submit(ClientCommand.ListSessionAgents)
+    }
+
+    override suspend fun setPermissionMode(mode: String) {
+        require(mode in com.lingxi.code.settings.PermissionModeOptions.values)
+        handle.submit(ClientCommand.SetPermissionMode(mode))
     }
 
     /** A fresh engine session starts empty (the engine streams the transcript). */
@@ -1152,34 +1146,32 @@ class EngineConversationSource private constructor(
         requestId: ULong,
         response: PermissionResponseDto,
     ) {
-        resolvePermission(requestId) {
+        submitPermissionResolution {
             handle.submit(ClientCommand.ApprovePermission(requestId = requestId, response = response))
         }
     }
 
     override suspend fun denyPermission(requestId: ULong) {
-        resolvePermission(requestId) {
+        submitPermissionResolution {
             handle.submit(ClientCommand.DenyPermission(requestId = requestId))
         }
     }
 
     /**
-     * Run [submit] to resolve the parked request `requestId`, then clear the
-     * pending prompt (only when it is still the request we resolved — a CAS-style
-     * guard so a fast follow-up request isn't dismissed). A submit failure (no
-     * such parked request) still clears the prompt so the UI never wedges.
+     * Submit the user's decision without speculatively mutating the queue. The
+     * engine emits `PermissionRequestResolved` for approved, denied, cancelled,
+     * and expired gates; that correlated event is the sole dequeue authority.
+     * A delivery failure deliberately leaves the prompt available for retry.
      */
-    private suspend inline fun resolvePermission(
-        requestId: ULong,
+    private inline fun submitPermissionResolution(
         submit: () -> Unit,
     ) {
         try {
             submit()
         } catch (_: Throwable) {
-            // The gate may have already unwound (cancel / timeout); dropping the
-            // prompt below keeps the UI consistent regardless.
+            // Keep the request visible. The engine may still resolve it later,
+            // otherwise the user can retry after reconnecting.
         }
-        permissionIngress.resolve(requestId)
     }
 
     override fun submit(text: String): Flow<ReplyEvent> =
@@ -1223,9 +1215,10 @@ class EngineConversationSource private constructor(
         // Narrow `Cancel(turnId = null)` cancels the current turn (bindings doc:
         // "None cancels the current one"). The engine emits `TurnEnded`, which
         // flows back through the active `submit` stream as `ReplyEvent.End`.
-        // Clear the client prompt before awaiting Block-behavior tools: the host
-        // drains the matching permission gate as part of cancellation, so keeping
-        // an actionable stale approval card would be both misleading and unsafe.
+        // Do not clear permission UI speculatively here: a background workflow
+        // child can own the prompt while the main turn is being cancelled. The
+        // correlated PermissionRequestResolved event is the only authority that
+        // removes a parked request.
         val permissionSnapshot = permissionIngress.beginCancellation()
         try {
             handle.submit(ClientCommand.Cancel(turnId = null))
@@ -1239,6 +1232,7 @@ class EngineConversationSource private constructor(
 
     override fun close() {
         eventRelay.close()
+        workflowRelay.close()
         eventScope.cancel()
         runCatching { handle.destroy() }
     }
@@ -1258,15 +1252,16 @@ class EngineConversationSource private constructor(
             // callback or dropping assistant text / terminal events.
             val eventScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val eventRelay = LosslessEventRelay<ClientEvent>(eventScope)
+            val workflowRelay = LosslessEventRelay<WorkflowProgressUpdate>(eventScope)
             // Resolves user-facing copy in the app's actual selected language
             // (via Context.getString, so it honors AppLanguageStore's locale
             // wrap) for every non-Composable emission site below.
             val strings = conversationStrings(context)
             // The head parked permission request. The engine's outbound
             // `AndroidPermissionSink.onRequest` pushes each request here (mapped
-            // to the UI render model); the prompt clears it on resolve. A plain
-            // StateFlow (latest wins) is fine: only one request is parked per gate
-            // at a time in the foundation (no concurrent worker permissions yet).
+            // to the UI render model); PermissionIngress retains all concurrent
+            // workflow-child requests FIFO and advances this StateFlow when the
+            // engine emits the correlated resolved event.
             val permissions = MutableStateFlow<PermissionPromptState?>(null)
             val permissionIngress = PermissionIngress(permissions, strings)
             // The engine's REAL model catalog + active id (SHIP-BLOCKER #2). The
@@ -1327,16 +1322,30 @@ class EngineConversationSource private constructor(
                     // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
                     if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
                     if (event is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
+                    if (event is ClientEvent.PermissionRequestResolved) {
+                        permissionIngress.resolve(event.requestId)
+                    }
                     if (event is ClientEvent.TurnEnded || event is ClientEvent.Error) {
                         permissionIngress.endTurn()
                     }
                     eventRelay.offer(event)
+                },
+                onWorkflowProgress = { originSessionId, taskId, runId, progress ->
+                    workflowRelay.offer(
+                        WorkflowProgressUpdate(
+                            originSessionId = originSessionId,
+                            taskId = taskId,
+                            runId = runId,
+                            progress = progress,
+                        ),
+                    )
                 },
                 onPermission = { request ->
                     permissionIngress.publish(request)
                 },
             ) ?: run {
                 eventRelay.close()
+                workflowRelay.close()
                 eventScope.cancel()
                 return UnavailableConversationSource(
                     context.getString(R.string.chat_engine_build_failed),
@@ -1369,11 +1378,22 @@ class EngineConversationSource private constructor(
                         ),
                     )
                 }
+                // Prime the unified execution card on cold start as well as
+                // after lifecycle resume. Task rows and session-agent rows are
+                // independent listing replies and may arrive in either order.
+                try {
+                    handle.submit(ClientCommand.TaskList(statusFilter = null))
+                    handle.submit(ClientCommand.ListSessionAgents)
+                } catch (_: Throwable) {
+                    // Status is best-effort; a later foreground refresh retries.
+                }
             }
             return EngineConversationSource(
                 handle = handle,
                 events = eventRelay.events,
                 eventRelay = eventRelay,
+                workflowEvents = workflowRelay.events,
+                workflowRelay = workflowRelay,
                 eventScope = eventScope,
                 permissions = permissions,
                 permissionIngress = permissionIngress,

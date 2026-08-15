@@ -41,7 +41,7 @@ use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use traits::OrchestratorHandle;
 
@@ -235,15 +235,27 @@ fn persist_effort_level(level: Option<EffortLevel>) -> Result<(), String> {
         return Ok(());
     };
 
-    // TS: mkdirSync(dirname(filePath)).
+    let selection = level.map(|level| traits::ReasoningSelection::Level {
+        id: level.as_str().to_string(),
+    });
+    persist_reasoning_default_selection_at(&path, selection.as_ref())
+}
+
+/// Persist the structured reasoning default used by new sessions.
+///
+/// `None` and `Automatic` remove both the structured override and the legacy
+/// root `effortLevel` mirror.  Only the provider-neutral discrete levels that
+/// can be represented by the legacy setting are mirrored; toggles and budgets
+/// intentionally clear that key so an older engine cannot apply a stale value.
+pub fn persist_reasoning_default_selection_at(
+    path: &Path,
+    selection: Option<&traits::ReasoningSelection>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to read raw settings from {}: {e}", path.display()))?;
     }
-
-    // Read existing settings. ENOENT / empty → empty map; broken JSON → bail
-    // without overwriting (TS L459).
-    let mut map: serde_json::Map<String, Value> = match std::fs::read_to_string(&path) {
+    let mut map: serde_json::Map<String, Value> = match std::fs::read_to_string(path) {
         Ok(content) if content.trim().is_empty() => serde_json::Map::new(),
         Ok(content) => serde_json::from_str(&content)
             .map_err(|_| format!("Invalid JSON syntax in settings file at {}", path.display()))?,
@@ -252,26 +264,87 @@ fn persist_effort_level(level: Option<EffortLevel>) -> Result<(), String> {
             return Err(format!(
                 "Failed to read raw settings from {}: {e}",
                 path.display()
-            ))
+            ));
         }
     };
 
-    // mergeWith: Some → set, None → delete.
-    match level {
-        Some(level) => {
-            map.insert("effortLevel".to_string(), json!(level.as_str()));
+    let mut persisted = None;
+    let default_selection = selection.and_then(|selection| match selection {
+        traits::ReasoningSelection::Level { id }
+            if matches!(id.as_str(), "low" | "medium" | "high" | "xhigh") =>
+        {
+            persisted = Some(json!(id));
+            Some(json!({ "type": "level", "id": id }))
+        }
+        traits::ReasoningSelection::Disabled => Some(json!({ "type": "disabled" })),
+        traits::ReasoningSelection::Enabled => Some(json!({ "type": "enabled" })),
+        traits::ReasoningSelection::TokenBudget { tokens } => {
+            Some(json!({ "type": "token_budget", "tokens": tokens }))
+        }
+        traits::ReasoningSelection::Automatic
+        | traits::ReasoningSelection::Level { .. } => None,
+    });
+
+    if let Some(value) = persisted {
+        map.insert("effortLevel".to_string(), value);
+    } else {
+        map.remove("effortLevel");
+    }
+
+    match default_selection {
+        Some(value) => {
+            let reasoning = map
+                .entry("reasoning".to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !reasoning.is_object() {
+                *reasoning = Value::Object(serde_json::Map::new());
+            }
+            reasoning
+                .as_object_mut()
+                .expect("reasoning object normalized")
+                .insert("defaultSelection".to_string(), value);
         }
         None => {
-            map.remove("effortLevel");
+            let mut remove_reasoning = false;
+            if let Some(Value::Object(reasoning)) = map.get_mut("reasoning") {
+                reasoning.remove("defaultSelection");
+                remove_reasoning = reasoning.is_empty();
+            }
+            if remove_reasoning {
+                map.remove("reasoning");
+            }
         }
     }
 
-    // jsonStringify(updatedSettings, null, 2) + '\n' — 2-space indent + newline.
     let serialized = serde_json::to_string_pretty(&map)
         .map_err(|e| format!("Failed to read raw settings from {}: {e}", path.display()))?;
-    std::fs::write(&path, serialized + "\n")
+    std::fs::write(path, serialized + "\n")
         .map_err(|e| format!("Failed to read raw settings from {}: {e}", path.display()))?;
     Ok(())
+}
+
+/// Read the structured reasoning default, with a compatibility fallback for
+/// the legacy root `effortLevel` setting.  Unrepresentable/session-only values
+/// (notably `max`) are ignored so they cannot become a new-session default.
+pub fn load_reasoning_default_selection_at(path: &Path) -> Option<traits::ReasoningSelection> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&content).ok()?;
+    if let Some(default) = value
+        .get("reasoning")
+        .and_then(Value::as_object)
+        .and_then(|reasoning| reasoning.get("defaultSelection"))
+    {
+        if let Ok(selection) = serde_json::from_value::<traits::ReasoningSelection>(default.clone())
+        {
+            return Some(selection);
+        }
+    }
+    match value.get("effortLevel").and_then(Value::as_str) {
+        Some(id @ ("low" | "medium" | "high" | "xhigh")) => {
+            Some(traits::ReasoningSelection::Level { id: id.to_string() })
+        }
+        _ => None,
+    }
 }
 
 /// `modelSupportsMaxEffort` (`effort.ts` L53) — the non-ant reachable subset:
@@ -375,6 +448,22 @@ impl EffortHandler {
         Self { handle }
     }
 
+    async fn supports_level(&self, level: EffortLevel) -> bool {
+        let Some(controls) = self.handle.conversation_controls().await else {
+            // Lightweight command hosts do not expose controls. Preserve their
+            // legacy behavior; production orchestrators always return a spec.
+            return true;
+        };
+        let selection = traits::ReasoningSelection::Level {
+            id: level.as_str().to_string(),
+        };
+        controls
+            .reasoning_spec
+            .available
+            .iter()
+            .any(|candidate| candidate == &selection)
+    }
+
     /// `showCurrentEffort` (`effort.tsx` L62-75) — the `''`/`current`/`status`
     /// branch. The app-state value is the orchestrator's live request effort.
     async fn show_current(&self) -> String {
@@ -419,16 +508,18 @@ impl EffortHandler {
     /// Deletes the persisted `effortLevel`; only the env-conflict note varies.
     async fn clear_effort(&self) -> String {
         // updateSettingsForSource('userSettings', { effortLevel: undefined }).
-        if let Err(msg) = persist_effort_level(None) {
-            return format!("Failed to set effort level: {msg}");
-        }
         let env = effort_env_override();
         let live = match &env {
             EnvOverride::Pinned { level, .. } => Some(level.as_str().to_string()),
             EnvOverride::Cleared | EnvOverride::Unset => None,
         };
+        let previous = self.handle.current_effort().await;
         if let Err(error) = self.handle.set_effort_level(live).await {
             return format!("Failed to set effort level: {error}");
+        }
+        if let Err(msg) = persist_effort_level(None) {
+            let _ = self.handle.set_effort_level(previous).await;
+            return format!("Failed to set effort level: {msg}");
         }
         match env {
             EnvOverride::Pinned { raw, .. } => format!(
@@ -442,10 +533,11 @@ impl EffortHandler {
     async fn set_effort(&self, level: EffortLevel) -> String {
         // toPersistableEffort: low/medium/high persist, max is session-only.
         let persistable = to_persistable(level);
-        if persistable.is_some() {
-            if let Err(msg) = persist_effort_level(Some(level)) {
-                return format!("Failed to set effort level: {msg}");
-            }
+        if !self.supports_level(level).await {
+            return format!(
+                "Failed to set effort level: {} is unsupported for the active model",
+                level.as_str()
+            );
         }
 
         let env = effort_env_override();
@@ -456,8 +548,15 @@ impl EffortHandler {
             EnvOverride::Cleared => None,
             EnvOverride::Unset => Some(level.as_str().to_string()),
         };
+        let previous = self.handle.current_effort().await;
         if let Err(error) = self.handle.set_effort_level(live).await {
             return format!("Failed to set effort level: {error}");
+        }
+        if persistable.is_some() {
+            if let Err(msg) = persist_effort_level(Some(level)) {
+                let _ = self.handle.set_effort_level(previous).await;
+                return format!("Failed to set effort level: {msg}");
+            }
         }
 
         // TS flags env conflict only when env pins a *different* level than the
@@ -739,6 +838,41 @@ Effort levels:\n\
             env.read_settings().unwrap().get("effortLevel"),
             Some(&json!("xhigh"))
         );
+        assert_eq!(
+            env.read_settings()
+                .unwrap()
+                .get("reasoning")
+                .and_then(Value::as_object)
+                .and_then(|reasoning| reasoning.get("defaultSelection")),
+            Some(&json!({"type": "level", "id": "xhigh"}))
+        );
+    }
+
+    #[test]
+    fn structured_default_migrates_and_clears_legacy_mirror() {
+        let env = TestEnv::new();
+        let path = env.settings_path();
+        persist_reasoning_default_selection_at(
+            &path,
+            Some(&traits::ReasoningSelection::TokenBudget { tokens: 12_345 }),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["reasoning"]["defaultSelection"]["type"], "token_budget");
+        assert!(value.get("effortLevel").is_none());
+        assert_eq!(
+            load_reasoning_default_selection_at(&path),
+            Some(traits::ReasoningSelection::TokenBudget { tokens: 12_345 })
+        );
+
+        persist_reasoning_default_selection_at(
+            &path,
+            Some(&traits::ReasoningSelection::Automatic),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(value.get("reasoning").is_none());
+        assert!(value.get("effortLevel").is_none());
     }
 
     #[tokio::test]
@@ -898,7 +1032,7 @@ Effort levels:\n\
         );
         let map = env.read_settings().expect("settings.json written");
         assert_eq!(map.get("effortLevel"), Some(&json!("high")));
-        assert_eq!(map.len(), 1);
+        assert_eq!(map.len(), 2);
     }
 
     #[tokio::test]

@@ -130,6 +130,8 @@ export type ClientCommand =
   // ── Model ─────────────────────────────────────────────────────────────────
   | { type: 'set_model'; model: string }
   | { type: 'list_models' }
+  | { type: 'get_conversation_controls' }
+  | { type: 'set_reasoning_selection'; selection: ReasoningSelectionDto }
   // ── Slash commands ──────────────────────────────────────────────────────────
   | { type: 'run_slash_command'; raw: string; turn_id?: number }
   // ── Listings ────────────────────────────────────────────────────────────────
@@ -149,6 +151,7 @@ export type ClientCommand =
   | { type: 'task_list'; status_filter?: TaskStatusDto }
   | { type: 'task_output'; task_id: string; offset: number }
   | { type: 'task_stop'; task_id: string }
+  | { type: 'resume_workflow'; task_id: string }
   // ── Local apps ──────────────────────────────────────────────────────────────
   | { type: 'list_apps' }
   | { type: 'get_app_details'; app_id: string }
@@ -159,6 +162,8 @@ export type ClientCommand =
       brief: string;
       /** Git-backed source versioning choice; the engine defaults to enabled when omitted. */
       git_enabled?: boolean;
+      /** Provider-qualified model used by the app creation workflow. */
+      workflow_model?: string;
       conversation_id?: string;
     }
   | { type: 'start_app'; app_id: string }
@@ -380,6 +385,14 @@ export interface PermissionRequest {
   request_id: number;
   kind: PermissionKindDto;
   worker?: WorkerInfoDto;
+  owner?: PermissionOwnerDto;
+}
+
+/** Immutable owner scope for a parked permission request. */
+export interface PermissionOwnerDto {
+  session_id?: string;
+  turn_id?: number;
+  worker_name?: string;
 }
 
 /** The user's decision for a permission request (permission.rs `PermissionResponseDto`). */
@@ -401,6 +414,73 @@ export type PermissionModeId =
 export interface PermissionResolved {
   request_id: number;
   response: PermissionResponseDto;
+}
+
+/** Authoritative engine-side terminal state for a permission request. */
+export type PermissionResolutionDto = 'approved' | 'denied' | 'cancelled' | 'expired';
+
+/** One disabled/unavailable reason emitted by the engine. */
+export interface ControlDisabledReasonDto {
+  code: string;
+  message?: string;
+}
+
+/** One provider-neutral reasoning selection. */
+export type ReasoningSelectionDto =
+  | { type: 'automatic' }
+  | { type: 'disabled' }
+  | { type: 'enabled' }
+  | { type: 'level'; id: string }
+  | { type: 'token_budget'; tokens: number };
+
+/** One selectable reasoning option surfaced by the engine. */
+export interface ReasoningOptionDto {
+  selection: ReasoningSelectionDto;
+  persistable: boolean;
+}
+
+/** Official budget bounds for token-budget reasoning models. */
+export interface ReasoningBudgetRangeDto {
+  min_tokens: number;
+  max_tokens: number;
+}
+
+/** Capability description for the active model's reasoning controls. */
+export interface ReasoningControlSpecDto {
+  options: ReasoningOptionDto[];
+  budget_range?: ReasoningBudgetRangeDto;
+  provider_default: ReasoningSelectionDto;
+  forced_reasoning: boolean;
+  editable: boolean;
+  disabled_reason?: ControlDisabledReasonDto;
+}
+
+/** Authoritative state for the active conversation's reasoning controls. */
+export interface ReasoningControlStateDto {
+  requested: ReasoningSelectionDto;
+  effective: ReasoningSelectionDto;
+  spec: ReasoningControlSpecDto;
+}
+
+/** Availability metadata for one permission mode. */
+export interface PermissionModeOptionDto {
+  mode: PermissionModeId;
+  available: boolean;
+  disabled_reason?: ControlDisabledReasonDto;
+}
+
+/** Authoritative state for the active conversation's permission controls. */
+export interface PermissionControlStateDto {
+  requested: PermissionModeId;
+  effective: PermissionModeId;
+  options: PermissionModeOptionDto[];
+}
+
+/** Full conversation-controls snapshot authored by the engine. */
+export interface ConversationControlsDto {
+  qualified_model: string;
+  permission: PermissionControlStateDto;
+  reasoning: ReasoningControlStateDto;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -479,6 +559,8 @@ export interface SessionAgentSummaryDto {
   agent_id: string;
   name: string;
   agent_type: string;
+  model?: string;
+  model_profile?: string;
   status: string;
   latest_activity?: string;
   updated_at_ms?: number;
@@ -588,6 +670,7 @@ export interface DoctorReportDto {
 export type TaskStatusDto =
   | { type: 'pending' }
   | { type: 'running' }
+  | { type: 'paused' }
   | { type: 'completed' }
   | { type: 'failed' }
   | { type: 'cancelled' };
@@ -598,6 +681,8 @@ export interface TaskRowDto {
   task_type: string;
   status: TaskStatusDto;
   description: string;
+  can_resume?: boolean;
+  started_at_ms?: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -926,6 +1011,11 @@ export type ClientEvent =
   | { type: 'system_notice'; message: string; is_error: boolean }
   | { type: 'ask_user_question'; request: AskUserQuestionRequestDto }
   | { type: 'ask_user_question_resolved'; request_id: number }
+  | {
+      type: 'permission_request_resolved';
+      request_id: number;
+      resolution: PermissionResolutionDto;
+    }
   // ── Live-turn streaming events ──────────────────────────────────────────────
   | { type: 'text_delta'; text: string }
   | {
@@ -989,6 +1079,7 @@ export type ClientEvent =
   | { type: 'model_list'; models: string[]; current: string }
   | { type: 'model_changed'; model: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
+  | { type: 'conversation_controls_changed'; controls: ConversationControlsDto }
   | {
       type: 'provider_credential_status';
       operation_id: number;
@@ -1015,7 +1106,19 @@ export type ClientEvent =
       total_lines: number;
       truncated: boolean;
     }
-  | { type: 'task_status_changed'; task_id: string; status: TaskStatusDto }
+  | {
+      type: 'task_status_changed';
+      task_id: string;
+      status: TaskStatusDto;
+      origin_session_id?: string;
+    }
+  | {
+      type: 'workflow_resumed';
+      previous_task_id: string;
+      task: TaskRowDto;
+      run_id: string;
+      origin_session_id?: string;
+    }
   | { type: 'commands_changed'; commands: SlashCommandDto[] }
   // ── Local apps ──────────────────────────────────────────────────────────────
   | { type: 'apps_changed'; apps: AppRecordDto[] }

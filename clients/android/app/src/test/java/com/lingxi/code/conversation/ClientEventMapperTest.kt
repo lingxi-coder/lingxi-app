@@ -319,6 +319,7 @@ class ClientEventMapperTest {
                 inputJson = """{"file_path":"src/host.rs","old_string":"a","new_string":"b"}""",
                 header = ToolHeaderDto(
                     verb = ToolVerbDto.UPDATE,
+                    icon = null,
                     label = "Update",
                     primary = "src/host.rs",
                     qualifier = " (3 edits)",
@@ -486,6 +487,7 @@ class ClientEventMapperTest {
                             inputJson = "{}",
                             header = ToolHeaderDto(
                                 verb = ToolVerbDto.UPDATE,
+                                icon = null,
                                 label = "Update",
                                 primary = "src/host.rs",
                                 qualifier = null,

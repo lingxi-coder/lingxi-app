@@ -140,6 +140,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.applyForTesting(.textDelta(text: "old"))
             XCTAssertEqual(updates.count, 1)
 
+            source.expectSessionResumeForTesting("new-session")
             source.applyForTesting(.sessionResumed(sessionId: "new-session", messages: []))
             source.applyForTesting(.textDelta(text: "late"))
             XCTAssertEqual(updates.count, 1)
@@ -202,6 +203,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 return XCTFail("expected a turn token")
             }
             source.applyForTesting(.textDelta(text: "stale answer"))
+            source.expectSessionResumeForTesting("new-session")
             source.applyForTesting(.sessionResumed(sessionId: "new-session", messages: []))
             source.applyForTesting(
                 .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost)
@@ -248,6 +250,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
 
             XCTAssertNotNil(source.send("old question"))
             await flushTasks()
+            source.expectSessionResumeForTesting("new-session")
             source.applyForTesting(.sessionResumed(sessionId: "new-session", messages: []))
             releaseSubmission?.resume()
             releaseSubmission = nil

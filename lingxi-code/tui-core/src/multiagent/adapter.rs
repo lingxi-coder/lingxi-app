@@ -67,7 +67,7 @@ mod tests {
         assert_eq!(sent, 1);
         match rx.recv().await.unwrap() {
             MultiAgentEvent::TasksRefreshed(rows) => assert_eq!(rows.len(), 1),
-            other @ MultiAgentEvent::WorkersRefreshed(_) => panic!("unexpected: {other:?}"),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 

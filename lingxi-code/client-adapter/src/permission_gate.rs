@@ -41,13 +41,14 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use client_protocol::events::ClientEvent;
 use client_protocol::permission::{
-    PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
-    WorkerInfoDto,
+    PermissionKindDto, PermissionOwnerDto, PermissionRequest as PermissionRequestDto,
+    PermissionResolutionDto, PermissionResponseDto, WorkerInfoDto,
 };
 use permission::gate::{PermissionDecision, PermissionGate, PermissionResponse, PromptWorker};
 use permission::{
@@ -57,6 +58,7 @@ use permission::{
 use tokio::sync::{oneshot, Mutex};
 
 use crate::lowering::{prompt_default_to_allow, value_to_json_string};
+use crate::ClientEventSink;
 
 /// Default per-request timeout — a `check()` parked longer than this resolves
 /// `Deny` (fail-closed). Generous enough that a real user dialog round-trip
@@ -87,6 +89,17 @@ struct ParkedRequest {
     sender: oneshot::Sender<PermissionResponse>,
     /// The tool input of the call, captured at `check()` time.
     input: serde_json::Value,
+    /// Canonical tool name captured with the request; resolution never trusts
+    /// a late transport-side lookup that may have timed out or been cancelled.
+    tool_name: String,
+    /// Immutable owner used for targeted turn cancellation.
+    owner: Option<PermissionOwnerScope>,
+}
+
+#[derive(Clone)]
+struct PermissionOwnerScope {
+    id: u64,
+    wire: PermissionOwnerDto,
 }
 
 /// The id-keyed, fail-closed permission gate the orchestrator binds as its
@@ -105,12 +118,16 @@ pub struct AdapterPermissionGate {
     /// Monotonic `request_id` source. Each `check()` reserves a fresh id so
     /// concurrent worker + main requests never collide.
     next_id: Arc<AtomicU64>,
+    next_owner_id: AtomicU64,
     /// Parked requests keyed by `request_id`. The fail-closed owner: when this map
     /// is drained (or the gate dropped), every [`ParkedRequest::sender`] drops and
     /// the matching `check()` resolves `Deny`. Each entry also carries the call's
     /// tool input so [`Self::resolve`] can NARROW an `AllowAlways` to the specific
     /// command / path / domain (the input is not echoed back on the wire).
     pending: Arc<Mutex<HashMap<u64, ParkedRequest>>>,
+    active_main_owner: StdMutex<Option<PermissionOwnerScope>>,
+    current_session_id: StdMutex<Option<String>>,
+    event_sink: Option<Arc<dyn ClientEventSink>>,
     /// Per-request timeout — a parked `check()` that is not resolved within this
     /// window resolves `Deny`.
     timeout: Duration,
@@ -140,7 +157,11 @@ impl AdapterPermissionGate {
             sink,
             session_allow_rules,
             next_id: Arc::new(AtomicU64::new(1)),
+            next_owner_id: AtomicU64::new(1),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            active_main_owner: StdMutex::new(None),
+            current_session_id: StdMutex::new(None),
+            event_sink: None,
             timeout: DEFAULT_PERMISSION_TIMEOUT,
             persist_paths: None,
             persistence_enabled: AtomicBool::new(true),
@@ -153,6 +174,60 @@ impl AdapterPermissionGate {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// Emit authoritative permission terminal events through the client stream.
+    #[must_use]
+    pub fn with_event_sink(mut self, sink: Arc<dyn ClientEventSink>) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+
+    /// Update the mounted session used for newly-created worker owner records.
+    pub fn set_session_id(&self, session_id: Option<String>) {
+        *self
+            .current_session_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = session_id;
+    }
+
+    /// Begin one main-agent turn and return its private cancellation owner id.
+    pub fn begin_main_turn(&self, session_id: Option<String>, turn_id: Option<u64>) -> u64 {
+        let id = self.next_owner_id.fetch_add(1, Ordering::Relaxed);
+        let owner = PermissionOwnerScope {
+            id,
+            wire: PermissionOwnerDto {
+                session_id,
+                turn_id,
+                worker_name: None,
+            },
+        };
+        *self
+            .active_main_owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(owner);
+        id
+    }
+
+    /// Clear the main owner iff it still names the completed turn.
+    pub fn end_main_turn(&self, owner_id: u64) {
+        let mut active = self
+            .active_main_owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.as_ref().is_some_and(|owner| owner.id == owner_id) {
+            *active = None;
+        }
+    }
+
+    async fn emit_resolution(&self, request_id: u64, resolution: PermissionResolutionDto) {
+        if let Some(sink) = &self.event_sink {
+            sink.emit(ClientEvent::PermissionRequestResolved {
+                request_id,
+                resolution,
+            })
+            .await;
+        }
     }
 
     /// (3c) Enable persisting an `AllowAlways` choice to `settings.local.json`
@@ -182,10 +257,16 @@ impl AdapterPermissionGate {
         &self,
         request_id: u64,
         response: PermissionResponseDto,
-        tool_name: &str,
+        _tool_name_hint: &str,
     ) -> bool {
         let parked = { self.pending.lock().await.remove(&request_id) };
-        let Some(ParkedRequest { sender, input }) = parked else {
+        let Some(ParkedRequest {
+            sender,
+            input,
+            tool_name,
+            ..
+        }) = parked
+        else {
             return false;
         };
 
@@ -206,7 +287,7 @@ impl AdapterPermissionGate {
         if allow_always {
             // NARROW the persisted grant to the specific command / path / domain
             // the call used (claude-code `ruleSuggestions`), not a tool-wide allow.
-            let rule = permission::allow_suggestion(tool_name, &input);
+            let rule = permission::allow_suggestion(&tool_name, &input);
             self.session_allow_rules.lock().await.push(rule.clone());
             // (3c) Durably record the choice to settings.local.json when a
             // persist target is wired. Best-effort: a write failure must not
@@ -222,7 +303,7 @@ impl AdapterPermissionGate {
                 };
                 if let Err(e) = persist_permission_update(&update, paths).await {
                     tracing::warn!(
-                        tool = tool_name,
+                        tool = %tool_name,
                         error_kind = std::any::type_name_of_val(&e),
                         "failed to persist AllowAlways permission rule"
                     );
@@ -230,7 +311,48 @@ impl AdapterPermissionGate {
             }
         }
 
+        let resolution = if matches!(response, PermissionResponseDto::Deny) {
+            PermissionResolutionDto::Denied
+        } else {
+            PermissionResolutionDto::Approved
+        };
+        self.emit_resolution(request_id, resolution).await;
+
         true
+    }
+
+    /// Cancel only requests owned by one main turn, preserving child agents.
+    pub async fn cancel_owner(&self, owner_id: u64) -> Vec<u64> {
+        let removed = {
+            let mut pending = self.pending.lock().await;
+            let ids = pending
+                .iter()
+                .filter_map(|(request_id, parked)| {
+                    parked
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.id == owner_id)
+                        .then_some(*request_id)
+                })
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|request_id| {
+                    pending
+                        .remove(&request_id)
+                        .map(|parked| (request_id, parked))
+                })
+                .collect::<Vec<_>>()
+        };
+        let request_ids = removed
+            .iter()
+            .map(|(request_id, _)| *request_id)
+            .collect::<Vec<_>>();
+        drop(removed);
+        for request_id in &request_ids {
+            self.emit_resolution(*request_id, PermissionResolutionDto::Cancelled)
+                .await;
+        }
+        request_ids
     }
 
     /// Fail-closed drain: drop every parked sender so all in-flight `check()`
@@ -238,9 +360,14 @@ impl AdapterPermissionGate {
     /// Returns the number of requests that were drained.
     pub async fn drain(&self) -> usize {
         let mut pending = self.pending.lock().await;
-        let n = pending.len();
+        let request_ids = pending.keys().copied().collect::<Vec<_>>();
         pending.clear();
-        n
+        drop(pending);
+        for request_id in &request_ids {
+            self.emit_resolution(*request_id, PermissionResolutionDto::Cancelled)
+                .await;
+        }
+        request_ids.len()
     }
 
     /// Number of requests currently parked (test/inspection helper).
@@ -293,6 +420,26 @@ impl PermissionGate for AdapterPermissionGate {
             }
         }
 
+        let owner = if let Some(worker) = worker.as_ref() {
+            Some(PermissionOwnerScope {
+                id: self.next_owner_id.fetch_add(1, Ordering::Relaxed),
+                wire: PermissionOwnerDto {
+                    session_id: self
+                        .current_session_id
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone(),
+                    turn_id: None,
+                    worker_name: Some(worker.name.clone()),
+                },
+            })
+        } else {
+            self.active_main_owner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        };
+
         // Step 2: build the request DTO. Collapse `PromptDefault` → bool and
         // lower the tool input `Value` → JSON string (reusing the F1-11 fns).
         let default_allow = prompt_default_to_allow(permission::tool_default(name));
@@ -311,6 +458,8 @@ impl PermissionGate for AdapterPermissionGate {
                 ParkedRequest {
                     sender: tx,
                     input: input.clone(),
+                    tool_name: name.to_string(),
+                    owner: owner.clone(),
                 },
             );
         }
@@ -326,6 +475,7 @@ impl PermissionGate for AdapterPermissionGate {
                 name: w.name,
                 team: w.team,
             }),
+            owner: owner.map(|owner| owner.wire),
         };
         self.sink.emit_request(request).await;
 
@@ -341,7 +491,11 @@ impl PermissionGate for AdapterPermissionGate {
                 };
             }
             Err(_elapsed) => {
-                self.pending.lock().await.remove(&request_id);
+                let expired = self.pending.lock().await.remove(&request_id).is_some();
+                if expired {
+                    self.emit_resolution(request_id, PermissionResolutionDto::Expired)
+                        .await;
+                }
                 return PermissionDecision::Deny {
                     reason: "permission request timed out".to_string(),
                 };
@@ -364,6 +518,7 @@ impl PermissionGate for AdapterPermissionGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::MockSink;
     use serde_json::json;
     use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;
@@ -646,6 +801,98 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cancelling_main_owner_preserves_worker_request_and_emits_terminal_events() {
+        let requests = MockRequestSink::arc();
+        let events = MockSink::arc();
+        let gate =
+            Arc::new(AdapterPermissionGate::new(requests.clone()).with_event_sink(events.clone()));
+        gate.set_session_id(Some("session-a".to_string()));
+        let owner_id = gate.begin_main_turn(Some("session-a".to_string()), Some(7));
+
+        let main_gate = gate.clone();
+        let main =
+            tokio::spawn(async move { main_gate.check("Bash", &json!({"command": "main"})).await });
+        let worker_gate = gate.clone();
+        let worker = tokio::spawn(async move {
+            worker_gate
+                .check_with_worker(
+                    "Write",
+                    &json!({"file_path": "/tmp/x"}),
+                    Some(PromptWorker {
+                        name: "design".to_string(),
+                        team: None,
+                        is_async: true,
+                    }),
+                )
+                .await
+        });
+
+        wait_for_pending(&gate, 2).await;
+        let emitted = requests.requests().await;
+        let main_request = emitted
+            .iter()
+            .find(|request| {
+                matches!(
+                    &request.kind,
+                    PermissionKindDto::ToolUseConfirm { tool_name, .. } if tool_name == "Bash"
+                )
+            })
+            .expect("main request");
+        let worker_request = emitted
+            .iter()
+            .find(|request| {
+                matches!(
+                    &request.kind,
+                    PermissionKindDto::ToolUseConfirm { tool_name, .. } if tool_name == "Write"
+                )
+            })
+            .expect("worker request");
+        assert_eq!(
+            main_request.owner.as_ref().and_then(|owner| owner.turn_id),
+            Some(7)
+        );
+        assert_eq!(
+            worker_request
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.worker_name.as_deref()),
+            Some("design")
+        );
+
+        let cancelled = gate.cancel_owner(owner_id).await;
+        assert_eq!(cancelled, vec![main_request.request_id]);
+        assert_eq!(gate.pending_count().await, 1);
+        assert!(matches!(
+            main.await.unwrap(),
+            PermissionDecision::Deny { .. }
+        ));
+
+        assert!(
+            gate.resolve(
+                worker_request.request_id,
+                PermissionResponseDto::Deny,
+                "Write"
+            )
+            .await
+        );
+        assert!(matches!(
+            worker.await.unwrap(),
+            PermissionDecision::Deny { .. }
+        ));
+        let terminal = events.events().await;
+        assert!(terminal.iter().any(|event| matches!(
+            event,
+            ClientEvent::PermissionRequestResolved { request_id, resolution: PermissionResolutionDto::Cancelled }
+                if *request_id == main_request.request_id
+        )));
+        assert!(terminal.iter().any(|event| matches!(
+            event,
+            ClientEvent::PermissionRequestResolved { request_id, resolution: PermissionResolutionDto::Denied }
+                if *request_id == worker_request.request_id
+        )));
+    }
+
     /// `drop_resolves_deny` — draining the parked map drops the sender ⇒ the
     /// in-flight `check()` resolves `Deny` (fail-closed on transport teardown).
     #[tokio::test]
@@ -681,6 +928,8 @@ mod tests {
             ParkedRequest {
                 sender,
                 input: json!({"command": "dangerous"}),
+                tool_name: "Bash".to_string(),
+                owner: None,
             },
         );
 
@@ -697,7 +946,10 @@ mod tests {
     #[tokio::test]
     async fn timeout_resolves_deny() {
         let sink = MockRequestSink::arc();
-        let gate = AdapterPermissionGate::new(sink.clone()).with_timeout(Duration::from_millis(20));
+        let events = MockSink::arc();
+        let gate = AdapterPermissionGate::new(sink.clone())
+            .with_event_sink(events.clone())
+            .with_timeout(Duration::from_millis(20));
 
         let decision = gate.check("Bash", &json!({})).await;
         match decision {
@@ -708,6 +960,13 @@ mod tests {
         }
         // The stale parked entry was evicted on timeout (no leak).
         assert_eq!(gate.pending_count().await, 0);
+        assert!(matches!(
+            events.events().await.as_slice(),
+            [ClientEvent::PermissionRequestResolved {
+                resolution: PermissionResolutionDto::Expired,
+                ..
+            }]
+        ));
     }
 
     /// `tool_use_confirm_constructed_with_default_allow` — the `tool_default` →

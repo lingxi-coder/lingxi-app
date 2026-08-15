@@ -998,13 +998,14 @@ mod tests {
             }),
             Some("misc".to_string())
         );
-        // classifier is feature-gated OFF in the external build → None.
+        // classifier preserves the classifier's own free-text reason.
         assert_eq!(
             serialize_decision_reason(&PermissionDecisionReason::ClassifierRejected {
                 classifier: ClassifierKind::Transcript,
                 score: 0.9,
+                reason: "blocked by transcript classifier".into(),
             }),
-            None
+            Some("blocked by transcript classifier".to_string())
         );
         // sandboxOverride: enum reason, no faithful string → None.
         assert_eq!(
@@ -1053,6 +1054,7 @@ mod tests {
             decision_reason_type(&PermissionDecisionReason::ClassifierRejected {
                 classifier: ClassifierKind::Transcript,
                 score: 0.9,
+                reason: "blocked".into(),
             }),
             Some("classifier")
         );
@@ -1141,6 +1143,46 @@ mod tests {
         );
         assert_eq!(seen.classifier_approvable, None);
         assert_eq!(seen.matched_ask_rule, None);
+    }
+
+    #[tokio::test]
+    async fn interactive_denial_breaker_forwards_rewritten_classifier_reason() {
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let inner = Arc::new(ContextRecordingInner {
+            ctx: std::sync::Mutex::new(None),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        let ctx = PermissionCheckContext {
+            is_non_interactive_session: false,
+            tool_use_id: Some("toolu_breaker".into()),
+            ..Default::default()
+        };
+        let input = json!({ "command": "git reset --hard" });
+
+        for _ in 0..2 {
+            assert!(matches!(
+                gate.check_with_context("Bash", &input, &ctx).await,
+                PermissionOutcome::Deny { .. }
+            ));
+        }
+        assert_eq!(
+            gate.check_with_context("Bash", &input, &ctx).await,
+            PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            }
+        );
+        let seen = inner.ctx.lock().unwrap().clone().expect("inner consulted");
+        assert_eq!(seen.tool_use_id.as_deref(), Some("toolu_breaker"));
+        assert_eq!(seen.decision_reason_type.as_deref(), Some("classifier"));
+        assert_eq!(
+            seen.decision_reason.as_deref(),
+            Some("3 consecutive actions were blocked. Please review the transcript before continuing.\n\nLatest blocked action: Auto-mode BLOCK policy matched shell command")
+        );
     }
 
     /// Review MED: a hook-allow overridden by an ASK RULE re-checks via
@@ -1409,6 +1451,7 @@ mod tests {
             map_decision_source(&PermissionDecisionReason::ClassifierRejected {
                 classifier: ClassifierKind::Transcript,
                 score: 0.9,
+                reason: "blocked".into(),
             }),
             PermissionDecisionSource::Classifier
         );
@@ -1503,11 +1546,22 @@ mod tests {
             )
             .await
         {
-            PermissionResolution::Deny { source, reason, .. } => {
+            PermissionResolution::Deny {
+                source,
+                reason,
+                decision_reason_type,
+                decision_reason,
+                ..
+            } => {
                 assert_eq!(source, PermissionDecisionSource::Classifier);
                 assert!(
                     reason.contains("Auto mode classifier blocked action"),
                     "reason carries classifier block text: {reason}"
+                );
+                assert_eq!(decision_reason_type.as_deref(), Some("classifier"));
+                assert_eq!(
+                    decision_reason.as_deref(),
+                    Some("Auto-mode BLOCK policy matched shell command")
                 );
             }
             other => panic!("expected classifier deny, got {other:?}"),
@@ -1548,6 +1602,83 @@ mod tests {
         let tracking = policy.denial_tracking.lock().unwrap();
         assert_eq!(tracking.total_denials, 1, "deny must feed denial tracking");
         assert_eq!(tracking.consecutive_denials, 1);
+    }
+
+    #[tokio::test]
+    async fn headless_auto_mode_denial_limit_returns_exact_abort() {
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        let input = serde_json::json!({ "command": "git reset --hard" });
+        let ctx = PermissionCheckContext {
+            is_non_interactive_session: true,
+            ..Default::default()
+        };
+
+        for _ in 0..2 {
+            assert!(matches!(
+                gate.resolve_detailed_or_abort("Bash", &input, &ctx)
+                    .await
+                    .expect("below the limit is an ordinary classifier decision"),
+                PermissionResolution::Deny {
+                    source: PermissionDecisionSource::Classifier,
+                    ..
+                }
+            ));
+        }
+
+        let abort = gate
+            .resolve_detailed_or_abort("Bash", &input, &ctx)
+            .await
+            .expect_err("the third consecutive headless denial must abort");
+        assert_eq!(
+            abort.message,
+            "Agent aborted: too many classifier denials in headless mode"
+        );
+        assert_eq!(
+            inner.calls(),
+            0,
+            "headless breaker must abort before delegating to the interactive inner gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_auto_mode_denial_limit_still_falls_back_to_ask() {
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        let input = serde_json::json!({ "command": "git reset --hard" });
+        let ctx = PermissionCheckContext::default();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                gate.resolve_detailed_or_abort("Bash", &input, &ctx)
+                    .await
+                    .expect("below the limit is an ordinary classifier decision"),
+                PermissionResolution::Deny {
+                    source: PermissionDecisionSource::Classifier,
+                    ..
+                }
+            ));
+        }
+
+        assert_eq!(
+            gate.resolve_detailed_or_abort("Bash", &input, &ctx)
+                .await
+                .expect("interactive sessions fall back to prompting"),
+            PermissionResolution::AskWithContext {
+                decision_reason_type: Some("classifier".into()),
+                decision_reason: Some(
+                    "3 consecutive actions were blocked. Please review the transcript before continuing.\n\nLatest blocked action: Auto-mode BLOCK policy matched shell command".into(),
+                ),
+            }
+        );
     }
 
     #[tokio::test]
@@ -2010,6 +2141,70 @@ mod tests {
                 .await,
             PermissionDecision::Deny { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn mcp_auto_override_rejects_when_disabled_by_settings() {
+        let mut policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        policy.auto_mode_disabled = true;
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+
+        assert_eq!(
+            gate.set_mcp_permission_mode_override("context7", Some("auto"))
+                .await
+                .unwrap_err(),
+            "Cannot pin MCP server 'context7' to auto: auto mode disabled by settings"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_auto_override_rejects_when_circuit_broken() {
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        {
+            let mut tracking = policy.denial_tracking.lock().unwrap();
+            tracking.record_auto_deny();
+            tracking.record_auto_deny();
+            tracking.record_auto_deny();
+        }
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+
+        assert_eq!(
+            gate.set_mcp_permission_mode_override("context7", Some("auto"))
+                .await
+                .unwrap_err(),
+            "Cannot pin MCP server 'context7' to auto: auto mode is unavailable for your plan"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_auto_override_rejects_unsupported_live_model() {
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let provider: crate::policy_gate::LiveModelProvider = Arc::new(|| {
+            Some(crate::policy_gate::LiveModelContext {
+                model: "claude-sonnet-4-5".to_string(),
+                provider: "firstParty".to_string(),
+            })
+        });
+        gate.live_model_provider_handle()
+            .set(provider)
+            .unwrap_or_else(|_| panic!("cell set once"));
+
+        assert_eq!(
+            gate.set_mcp_permission_mode_override("context7", Some("auto"))
+                .await
+                .unwrap_err(),
+            "Cannot pin MCP server 'context7' to auto: auto mode unavailable for this model"
+        );
     }
 
     #[tokio::test]

@@ -456,14 +456,25 @@ struct BackgroundTaskSnapshot: Identifiable, Equatable, Hashable {
     enum Status: Equatable, Hashable {
         case pending
         case running
+        case paused
         case completed
         case failed
         case cancelled
 
         var isTerminal: Bool {
             switch self {
-            case .pending, .running: return false
+            case .pending, .running, .paused: return false
             case .completed, .failed, .cancelled: return true
+            }
+        }
+
+        /// A paused workflow is durable checkpoint state awaiting an explicit
+        /// resume, not work that can make forward progress under an iOS
+        /// background assertion.
+        var requiresExecutionLease: Bool {
+            switch self {
+            case .pending, .running: return true
+            case .paused, .completed, .failed, .cancelled: return false
             }
         }
     }
@@ -473,6 +484,228 @@ struct BackgroundTaskSnapshot: Identifiable, Equatable, Hashable {
     /// Human-readable description; empty until a `TaskRow` supplies it.
     var descriptionText: String
     var status: Status
+    /// Explicit resume affordance supplied by the engine for adopted paused
+    /// workflows. This is a hint only; the engine remains authoritative.
+    var canResume: Bool = false
+    var startedAtMs: UInt64? = nil
+    /// Structured Claude-style workflow progress for this task when the
+    /// engine exposes it as connection-scoped events.
+    var workflow: ConversationWorkflowRunSnapshot? = nil
+}
+
+enum WorkflowResumeState: Equatable {
+    case idle
+    case resuming(taskID: String)
+    case succeeded(taskID: String)
+    case failed(taskID: String, message: String)
+}
+
+enum ConversationWorkflowProgressKind: String, Equatable, Hashable {
+    case workflowPhase = "workflow_phase"
+    case workflowLog = "workflow_log"
+    case workflowAgent = "workflow_agent"
+}
+
+enum ConversationWorkflowAgentState: String, Equatable, Hashable {
+    case start
+    case progress
+    case done
+    case error
+    case cached
+
+    var isTerminal: Bool {
+        switch self {
+        case .done, .error, .cached:
+            return true
+        case .start, .progress:
+            return false
+        }
+    }
+
+    var isSuccessLike: Bool {
+        switch self {
+        case .done, .cached:
+            return true
+        case .start, .progress, .error:
+            return false
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .start: return String(localized: "cron_status_queued")
+        case .progress: return String(localized: "chat_status_running")
+        case .done: return String(localized: "common_done")
+        case .error: return String(localized: "cron_error_section")
+        case .cached: return String(localized: "chat_workflow_agent_cached")
+        }
+    }
+}
+
+struct ConversationWorkflowProgressPayload: Equatable, Hashable {
+    var kind: ConversationWorkflowProgressKind
+    var index: UInt64?
+    var title: String?
+    var message: String?
+    var label: String?
+    var phaseIndex: UInt32?
+    var phaseTitle: String?
+    var agentId: String?
+    var agentType: String?
+    var model: String?
+    var fallbackModel: String?
+    var state: ConversationWorkflowAgentState?
+    var error: String?
+    var toolUseId: String?
+    var startedAtMs: UInt64?
+    var queuedAtMs: UInt64?
+    var lastProgressAtMs: UInt64?
+    var attempt: UInt32?
+    var lastAttemptReason: String?
+    var tokens: UInt64?
+    var toolCalls: UInt64?
+    var lastToolName: String?
+    var lastToolSummary: String?
+    var promptPreview: String?
+}
+
+struct ConversationWorkflowPhaseSnapshot: Identifiable, Equatable, Hashable {
+    let id: String
+    var index: UInt32?
+    var title: String
+    var label: String?
+    var message: String?
+    var updatedAtMs: UInt64?
+}
+
+struct ConversationWorkflowLogSnapshot: Identifiable, Equatable, Hashable {
+    let id: String
+    var phaseIndex: UInt32?
+    var phaseTitle: String?
+    var label: String?
+    var message: String?
+    var updatedAtMs: UInt64?
+}
+
+struct ConversationWorkflowAgentSnapshot: Identifiable, Equatable, Hashable {
+    let id: String
+    var index: UInt64
+    var title: String?
+    var message: String?
+    var label: String?
+    var phaseIndex: UInt32?
+    var phaseTitle: String?
+    var agentId: String?
+    var agentType: String?
+    var model: String?
+    var fallbackModel: String?
+    var state: ConversationWorkflowAgentState
+    var error: String?
+    var toolUseId: String?
+    var startedAtMs: UInt64?
+    var queuedAtMs: UInt64?
+    var lastProgressAtMs: UInt64?
+    var attempt: UInt32?
+    var lastAttemptReason: String?
+    var tokens: UInt64?
+    var toolCalls: UInt64?
+    var lastToolName: String?
+    var lastToolSummary: String?
+    var promptPreview: String?
+
+    var displayTitle: String {
+        if let title, !title.isEmpty { return title }
+        if let agentType, !agentType.isEmpty { return agentType }
+        if let agentId, !agentId.isEmpty { return agentId }
+        return String(localized: "chat_workflow_agent_fallback \(index + 1)")
+    }
+
+    var activityLine: String? {
+        if let error, !error.isEmpty { return error }
+        if let message, !message.isEmpty { return message }
+        if let lastToolSummary, !lastToolSummary.isEmpty { return lastToolSummary }
+        if let lastToolName, !lastToolName.isEmpty { return lastToolName }
+        if let label, !label.isEmpty { return label }
+        return nil
+    }
+
+    func durationMs(nowMs: UInt64) -> UInt64? {
+        let start = startedAtMs ?? queuedAtMs
+        guard let start else { return nil }
+        let end = state.isTerminal ? (lastProgressAtMs ?? nowMs) : nowMs
+        guard end >= start else { return nil }
+        return end - start
+    }
+}
+
+struct ConversationWorkflowRunSnapshot: Equatable, Hashable {
+    let taskId: String
+    var runId: String
+    var phases: [ConversationWorkflowPhaseSnapshot] = []
+    var logs: [ConversationWorkflowLogSnapshot] = []
+    var agents: [ConversationWorkflowAgentSnapshot] = []
+    var lastUpdatedAtMs: UInt64?
+
+    var totalAgents: Int { agents.count }
+    var queuedAgents: Int { agents.filter { $0.state == .start }.count }
+    var runningAgents: Int { agents.filter { $0.state == .progress }.count }
+    var succeededAgents: Int { agents.filter { $0.state.isSuccessLike }.count }
+    var failedAgents: Int { agents.filter { $0.state == .error }.count }
+    /// Compatibility spelling retained for callers that render a compact
+    /// success fraction. Errors are deliberately excluded.
+    var doneAgents: Int { succeededAgents }
+
+    var currentPhaseTitle: String? {
+        if let running = agents
+            .filter({ !$0.state.isTerminal })
+            .sorted(by: Self.agentSort)
+            .first,
+           let phaseTitle = running.phaseTitle ?? phase(for: running.phaseIndex)?.title,
+           !phaseTitle.isEmpty {
+            return phaseTitle
+        }
+        return sortedPhases.last?.title
+    }
+
+    var sortedPhases: [ConversationWorkflowPhaseSnapshot] {
+        phases.sorted { lhs, rhs in
+            switch (lhs.index, rhs.index) {
+            case let (left?, right?) where left != right:
+                return left < right
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            default:
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            }
+        }
+    }
+
+    var sortedAgents: [ConversationWorkflowAgentSnapshot] {
+        agents.sorted(by: Self.agentSort)
+    }
+
+    func phase(for index: UInt32?) -> ConversationWorkflowPhaseSnapshot? {
+        guard let index else { return nil }
+        return phases.first { $0.index == index }
+    }
+
+    static func agentSort(
+        _ lhs: ConversationWorkflowAgentSnapshot,
+        _ rhs: ConversationWorkflowAgentSnapshot
+    ) -> Bool {
+        switch (lhs.phaseIndex, rhs.phaseIndex) {
+        case let (left?, right?) where left != right:
+            return left < right
+        case (.some, .none):
+            return true
+        case (.none, .some):
+            return false
+        default:
+            return lhs.index < rhs.index
+        }
+    }
 }
 
 /// One pending interactive `AskUserQuestion` request — mirrors

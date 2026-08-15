@@ -347,6 +347,11 @@ pub trait BottomPaneView: Renderable {
         ViewOutcome::Pending
     }
 
+    /// Fold a pushed multi-agent lifecycle update into this view. Most views
+    /// are unrelated and keep the default no-op; workflow list/detail views
+    /// override it so an already-open `/workflows` screen stays live.
+    fn apply_multiagent_event(&mut self, _event: &tui_core::multiagent::MultiAgentEvent) {}
+
     /// Whether the status line (and the composer beneath) should still render
     /// while this view is active. Full-frame views that own the whole
     /// viewport return `false`.

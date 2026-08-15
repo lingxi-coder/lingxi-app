@@ -274,7 +274,10 @@ mod tests {
             |_| {},
             None,
             false,
-            Some(r#"{"app_id":"test-app","spec":"build a test app"}"#.to_string()),
+            Some(
+                r#"{"app_id":"test-app","spec":"build a test app","model":"deepseek/deepseek-v4-flash"}"#
+                    .to_string(),
+            ),
             None,
         )
         .expect("local-app workflow executes");
@@ -290,6 +293,12 @@ mod tests {
         assert_eq!(verification_round.get(), 2);
 
         let calls = calls.borrow();
+        for (_, options) in calls.iter() {
+            let options: serde_json::Value =
+                serde_json::from_str(options).expect("agent options JSON");
+            assert_eq!(options["model"], "deepseek-v4-flash");
+            assert_eq!(options["modelProfile"], "deepseek");
+        }
         for prompt_anchor in [
             "Act as the local app design lead",
             "Invoke $frontend-qa",

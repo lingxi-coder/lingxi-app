@@ -59,6 +59,10 @@ object UiTags {
     /** The conversation's transient status row (engine tool activity / errors). */
     const val CHAT_STATUS = "tag.chatStatus"
 
+    /** Event-driven workflow/subagent progress panel above the composer. */
+    const val WORKFLOW_STATUS_PANEL = "tag.workflowStatusPanel"
+    const val EXECUTION_STATUS_PANEL = "tag.executionStatusPanel"
+
     /** The latest turn's expandable reasoning/tool/retry/usage timeline. */
     const val AGENT_RUN_TIMELINE = "tag.agentRunTimeline"
 

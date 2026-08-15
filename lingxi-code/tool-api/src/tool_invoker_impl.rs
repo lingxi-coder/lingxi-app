@@ -58,8 +58,18 @@ impl ToolInvoker for RegistryToolInvoker {
     async fn invoke(
         &self,
         name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+    ) -> Result<Value, ToolInvokerError> {
+        self.invoke_with_workspace_lease(name, input, ctx, None).await
+    }
+
+    async fn invoke_with_workspace_lease(
+        &self,
+        name: &str,
         mut input: Value,
         ctx: SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
     ) -> Result<Value, ToolInvokerError> {
         let tool = self
             .registry
@@ -69,11 +79,11 @@ impl ToolInvoker for RegistryToolInvoker {
         // Permission gate (enforcement 3b). The subagent/teammate dispatch
         // surface now consults the same gate as the main loop — previously it
         // dispatched any registered tool unconditionally (the bypass). A `Deny`
-        // is surfaced as `Internal` (the frozen `ToolInvokerError` carries no
-        // `Denied` variant; the subagent loop renders any `Err` as an
-        // `is_error` tool_result the model can recover from). Checked AFTER
-        // `find_by_name` so an unknown tool stays `NotFound`, and BEFORE the
-        // borrow of `input` is moved into `call`.
+        // is surfaced as `Internal`, while a headless auto-mode breaker trip is
+        // preserved as `Abort` so the subagent loop terminates instead of
+        // rendering a recoverable `tool_result`. Checked AFTER `find_by_name`
+        // so an unknown tool stays `NotFound`, and BEFORE the borrow of `input`
+        // is moved into `call`.
         if let Some(gate) = &self.gate {
             // Attribute the prompt to the originating worker (claude-code 2.1.186:
             // a background subagent's permission prompt surfaces in the main
@@ -108,17 +118,23 @@ impl ToolInvoker for RegistryToolInvoker {
                 // mutations are gated while reads stay frictionless. `None` for the
                 // main thread / a spawn with no override.
                 mode_override: ctx.mode_override.clone(),
+                is_non_interactive_session: ctx.is_non_interactive_session,
+                workspace_lease_token,
                 ..Default::default()
             };
-            match gate.check_with_context(name, &input, &check_ctx).await {
-                traits::permission_gate::PermissionOutcome::Allow { updated_input, .. } => {
+            match gate
+                .check_with_context_or_abort(name, &input, &check_ctx)
+                .await
+            {
+                Ok(traits::permission_gate::PermissionOutcome::Allow { updated_input, .. }) => {
                     if let Some(u) = updated_input {
                         input = u;
                     }
                 }
-                traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                Ok(traits::permission_gate::PermissionOutcome::Deny { reason }) => {
                     return Err(ToolInvokerError::Internal(reason));
                 }
+                Err(abort) => return Err(ToolInvokerError::Abort(abort.message)),
             }
         }
 
@@ -140,7 +156,7 @@ impl ToolInvoker for RegistryToolInvoker {
                     .parent_model
                     .clone()
                     .unwrap_or_else(|| "subagent".into()),
-                model_profile: None,
+                model_profile: ctx.parent_model_profile.clone(),
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
                 // Use the effective owner mode captured by the runner. It is
@@ -553,6 +569,7 @@ mod tests {
                     depth: 0,
                     observer: None,
                     parent_model: None,
+                    parent_model_profile: None,
                     mode_override: None,
                 },
             )
@@ -578,7 +595,7 @@ mod tests {
     /// resolved model reaches a recursive tool call (claude-code
     /// `AgentTool.tsx:418` `toolUseContext.options.mainLoopModel`).
     struct ModelRecordingTool {
-        captured: Arc<StdMutex<Option<String>>>,
+        captured: Arc<StdMutex<Option<(String, Option<String>)>>>,
     }
     #[async_trait]
     impl Tool for ModelRecordingTool {
@@ -626,7 +643,10 @@ mod tests {
             ctx: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            *self.captured.lock().unwrap() = Some(ctx.options.main_loop_model.clone());
+            *self.captured.lock().unwrap() = Some((
+                ctx.options.main_loop_model.clone(),
+                ctx.options.model_profile.clone(),
+            ));
             Ok(ToolCallResult {
                 data: json!({}),
                 model_content: None,
@@ -649,7 +669,8 @@ mod tests {
     /// unset it falls back to the legacy `"subagent"` placeholder.
     #[tokio::test]
     async fn registry_invoker_threads_parent_model_into_main_loop_model() {
-        let captured: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+        let captured: Arc<StdMutex<Option<(String, Option<String>)>>> =
+            Arc::new(StdMutex::new(None));
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(ModelRecordingTool {
             captured: captured.clone(),
@@ -658,14 +679,15 @@ mod tests {
 
         let mut ctx = no_ctx();
         ctx.parent_model = Some("claude-sonnet-5".to_string());
+        ctx.parent_model_profile = Some("anthropic".to_string());
         invoker
             .invoke("ModelRecordingTool", json!({}), ctx)
             .await
             .expect("dispatch ok");
         assert_eq!(
-            captured.lock().unwrap().as_deref(),
-            Some("claude-sonnet-5"),
-            "the dispatching subagent's model reaches ToolUseContext.options.main_loop_model"
+            captured.lock().unwrap().as_ref(),
+            Some(&("claude-sonnet-5".to_string(), Some("anthropic".to_string()))),
+            "the dispatching subagent's model and provider reach ToolUseContext options"
         );
 
         // Unset parent_model ⇒ the legacy placeholder (byte-identical fallback).
@@ -674,7 +696,10 @@ mod tests {
             .invoke("ModelRecordingTool", json!({}), no_ctx())
             .await
             .expect("dispatch ok");
-        assert_eq!(captured.lock().unwrap().as_deref(), Some("subagent"));
+        assert_eq!(
+            captured.lock().unwrap().as_ref(),
+            Some(&("subagent".to_string(), None))
+        );
     }
 
     // ──── enforcement 3b: permission gate before dispatch ──────────────
@@ -706,6 +731,7 @@ mod tests {
             depth: 0,
             observer: None,
             parent_model: None,
+            parent_model_profile: None,
             mode_override: None,
         }
     }
@@ -886,6 +912,7 @@ mod tests {
             depth: 0,
             observer: None,
             parent_model: None,
+            parent_model_profile: None,
             mode_override: None,
         }
     }
@@ -959,6 +986,32 @@ mod tests {
         }
     }
 
+    struct AbortGate {
+        seen: Arc<StdMutex<Option<traits::permission_gate::PermissionCheckContext>>>,
+    }
+
+    #[async_trait]
+    impl Gate for AbortGate {
+        async fn check(&self, _name: &str, _input: &Value) -> GateDecision {
+            panic!("abort-aware dispatch must not fall back to the legacy gate method")
+        }
+
+        async fn check_with_context_or_abort(
+            &self,
+            _name: &str,
+            _input: &Value,
+            ctx: &traits::permission_gate::PermissionCheckContext,
+        ) -> Result<
+            traits::permission_gate::PermissionOutcome,
+            traits::permission_gate::PermissionAbort,
+        > {
+            *self.seen.lock().unwrap() = Some(ctx.clone());
+            Err(traits::permission_gate::PermissionAbort {
+                message: "Agent aborted: too many classifier denials in headless mode".into(),
+            })
+        }
+    }
+
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
             parent_agent_id: None,
@@ -972,6 +1025,7 @@ mod tests {
             depth: 0,
             observer: None,
             parent_model: None,
+            parent_model_profile: None,
             mode_override: None,
         }
     }
@@ -1017,6 +1071,27 @@ mod tests {
         assert_eq!(worker.name, "researcher");
         assert_eq!(worker.team.as_deref(), Some("alpha"));
         assert!(worker.is_async);
+    }
+
+    #[tokio::test]
+    async fn dispatch_preserves_permission_abort_as_terminal_error() {
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(AbortGate { seen: seen.clone() });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+
+        let error = invoker
+            .invoke("TestEcho", json!({}), ctx_with_tool_use_id("toolu_abort"))
+            .await
+            .expect_err("a permission abort must stop before tool dispatch");
+
+        assert!(matches!(
+            error,
+            ToolInvokerError::Abort(ref message)
+                if message == "Agent aborted: too many classifier denials in headless mode"
+        ));
+        let ctx = seen.lock().unwrap().clone().expect("gate consulted");
+        assert!(ctx.is_non_interactive_session);
+        assert_eq!(ctx.tool_use_id.as_deref(), Some("toolu_abort"));
     }
 
     #[tokio::test]

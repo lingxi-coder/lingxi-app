@@ -1475,6 +1475,9 @@ impl ChatWidget {
                 self.background_agents = agents;
                 self.sync_running_agents();
             }
+            TurnEvent::MultiAgent(event) => {
+                self.bottom_pane.apply_multiagent_event(&event);
+            }
             TurnEvent::HookProgressStarted { id, text } => {
                 self.bottom_pane.set_running_hook(id, text);
             }
@@ -3130,12 +3133,12 @@ impl ChatWidget {
         self.bottom_pane.set_left_arrow_opens_agents(enabled);
     }
 
-    /// `/workflows`: open the interactive "Dynamic workflows" picker over a
-    /// snapshot of `local_workflow` runs (running AND completed) — the same
-    /// `block_on`-snapshot idiom as [`Self::cmd_tasks`], reading the richer
+    /// `/workflows`: seed the interactive "Dynamic workflows" picker with all
+    /// `local_workflow` runs (running AND completed), reading the richer
     /// [`traits::task_registry::TaskRegistryHandle::list_workflows`] projection
     /// and enriching each row with the agent-count + phase/agent tree parsed
-    /// from its output spool. Opens the dialog even when empty (its own
+    /// from its output spool. Subsequent lifecycle changes arrive through
+    /// pushed `MultiAgentEvent`s. Opens the dialog even when empty (its own
     /// "No dynamic workflows in this session." state), matching the oracle.
     pub(crate) fn cmd_workflows(&mut self, _args: &str) -> ChatOutcome {
         let Some(registry) = self.task_registry.clone() else {
@@ -8429,6 +8432,36 @@ mod tests {
         assert_eq!(widget.bottom_pane().running_agents().len(), 2);
         widget.apply_turn_event(TurnEvent::AgentStatusSnapshot { agents: vec![] });
         assert!(widget.bottom_pane().running_agents().is_empty());
+    }
+
+    #[test]
+    fn workflow_events_reach_an_already_open_picker() {
+        let mut widget = widget();
+        widget.bottom_pane.show_workflows(Vec::new());
+
+        widget.apply_turn_event(TurnEvent::MultiAgent(
+            tui_core::multiagent::MultiAgentEvent::WorkflowUpsert(
+                tui_core::multiagent::WorkflowRow {
+                    task_id: "w-live".into(),
+                    run_id: Some("wf_live".into()),
+                    name: "Build".into(),
+                    status: "running".into(),
+                    ..tui_core::multiagent::WorkflowRow::default()
+                },
+            ),
+        ));
+
+        let workflows = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|view| {
+                view.as_any()
+                    .downcast_ref::<crate::bottom_pane::workflows_view::WorkflowsView>()
+            })
+            .expect("workflow picker remains mounted");
+        assert_eq!(workflows.rows().len(), 1);
+        assert_eq!(workflows.rows()[0].task_id, "w-live");
     }
 
     #[test]

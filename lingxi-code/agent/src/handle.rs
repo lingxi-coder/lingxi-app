@@ -28,12 +28,15 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tool_api::ToolRegistry;
 use traits::subagent_spawn::{
-    SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
-    SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
+    SubagentInheritance, SubagentListingEntry, SubagentObservation, SubagentResult,
+    SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner,
+    SubagentUsage,
 };
 
 tokio::task_local! {
     static WORKFLOW_TRANSCRIPT_SUBDIR_OVERRIDE: Option<std::path::PathBuf>;
+    static WORKFLOW_QUERY_WATCHDOG_OVERRIDE:
+        std::cell::RefCell<Option<traits::WorkflowQueryWatchdog>>;
 }
 
 /// Runs a future with a workflow-scoped child transcript directory override.
@@ -134,6 +137,14 @@ pub struct PoolSubagentSpawner {
     /// exists. A SET-ONCE cell mirroring [`Self::tool_registry`]. Unfilled (the
     /// default / tests) ⇒ [`Self::default_model`] stands (byte-identical legacy).
     default_model_provider: Arc<std::sync::OnceLock<DefaultModelProvider>>,
+    /// Optional LIVE source for the model and provider profile as one atomic
+    /// selection. This takes precedence over the model-only provider above so
+    /// workflow and background spawns cannot lose provider identity.
+    default_model_selection_provider: Arc<std::sync::OnceLock<DefaultModelSelectionProvider>>,
+    /// Authoritative provider classification keyed by configured profile id.
+    /// User profiles may target Anthropic first-party under arbitrary names, so
+    /// model routing must never infer this property from the profile string.
+    provider_first_party_resolver: Arc<std::sync::OnceLock<ProviderFirstPartyResolver>>,
     /// Live/boot permission-mode anchor threaded into
     /// [`crate::model_resolution::resolve_agent_model`] so an `AgentModel::Inherit`
     /// spawn gets the plan-mode runtime resolution (`opusplan`→Opus / `haiku`→
@@ -258,6 +269,7 @@ pub struct PoolSubagentSpawner {
         Option<traits::mobile_runtime_environment::MobileRuntimeEnvironment>,
     mobile_workspace_cwd_provider: Option<MobileWorkspaceCwdProvider>,
     session_interactive: Option<bool>,
+    spawn_observer: Option<Arc<dyn SubagentSpawnObserver>>,
 }
 
 /// Resolves an optional child cwd into a safe model-visible mobile guest path.
@@ -277,6 +289,24 @@ pub type SubagentEnvRenderer = Arc<dyn Fn(&str, Option<&std::path::Path>) -> Str
 /// [`PoolSubagentSpawner::default_model_provider`].
 pub type DefaultModelProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
+/// One resolved session model selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultModelSelection {
+    /// Provider-local wire model id.
+    pub model: String,
+    /// Provider profile that disambiguates overlapping model ids.
+    pub model_profile: Option<String>,
+    /// Whether the resolved provider is Anthropic first-party.
+    pub provider_first_party: bool,
+}
+
+/// Reads the LIVE model and provider profile together at spawn time.
+pub type DefaultModelSelectionProvider =
+    Arc<dyn Fn() -> Option<DefaultModelSelection> + Send + Sync>;
+
+/// Resolves whether a configured provider profile is Anthropic first-party.
+pub type ProviderFirstPartyResolver = Arc<dyn Fn(&str) -> Option<bool> + Send + Sync>;
+
 impl PoolSubagentSpawner {
     /// Construct an adapter wrapping `pool` with no API client (legacy stub
     /// runner). Use [`Self::with_api_client`] to enable the real multi-turn
@@ -295,6 +325,8 @@ impl PoolSubagentSpawner {
             agent_catalog: Arc::new(std::sync::OnceLock::new()),
             default_model: None,
             default_model_provider: Arc::new(std::sync::OnceLock::new()),
+            default_model_selection_provider: Arc::new(std::sync::OnceLock::new()),
+            provider_first_party_resolver: Arc::new(std::sync::OnceLock::new()),
             permission_mode: PermissionMode::Default,
             model_setting: None,
             model_restriction: None,
@@ -313,7 +345,15 @@ impl PoolSubagentSpawner {
             mobile_runtime_environment: None,
             mobile_workspace_cwd_provider: None,
             session_interactive: None,
+            spawn_observer: None,
         }
+    }
+
+    /// Builder: attach a global structured observer for every spawned child.
+    #[must_use]
+    pub fn with_spawn_observer(mut self, observer: Arc<dyn SubagentSpawnObserver>) -> Self {
+        self.spawn_observer = Some(observer);
+        self
     }
 
     /// Builder: attach the typed mobile runtime snapshot inherited by all
@@ -413,20 +453,131 @@ impl PoolSubagentSpawner {
         self
     }
 
+    /// Return the set-once cell used by composition roots to publish the live
+    /// session's provider-qualified model after the orchestrator exists.
+    #[must_use]
+    pub fn default_model_selection_provider_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<DefaultModelSelectionProvider>> {
+        self.default_model_selection_provider.clone()
+    }
+
+    /// Set the live provider-qualified default selection immediately (tests).
+    #[must_use]
+    pub fn with_default_model_selection_provider(
+        self,
+        provider: DefaultModelSelectionProvider,
+    ) -> Self {
+        let _ = self.default_model_selection_provider.set(provider);
+        self
+    }
+
+    /// Return the set-once cell composition roots fill from their authoritative
+    /// provider catalog. A profile id alone is never interpreted here.
+    #[must_use]
+    pub fn provider_first_party_resolver_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<ProviderFirstPartyResolver>> {
+        self.provider_first_party_resolver.clone()
+    }
+
+    /// Set the provider classifier immediately (tests/minimal hosts).
+    #[must_use]
+    pub fn with_provider_first_party_resolver(self, resolver: ProviderFirstPartyResolver) -> Self {
+        let _ = self.provider_first_party_resolver.set(resolver);
+        self
+    }
+
+    fn resolve_provider_first_party(&self, profile: Option<&str>) -> Option<bool> {
+        profile.and_then(|profile| {
+            self.provider_first_party_resolver
+                .get()
+                .and_then(|resolve| resolve(profile))
+        })
+    }
+
+    fn resolved_default_selection(&self) -> Option<DefaultModelSelection> {
+        if let Some(provider) = self.default_model_selection_provider.get() {
+            return provider().filter(|selection| !selection.model.trim().is_empty());
+        }
+        if let Some(provider) = self.default_model_provider.get() {
+            if let Some(model) = provider() {
+                if !model.trim().is_empty() {
+                    return Some(DefaultModelSelection {
+                        model,
+                        model_profile: None,
+                        provider_first_party: self.session_provider_first_party,
+                    });
+                }
+            }
+        }
+        self.default_model
+            .clone()
+            .map(|model| DefaultModelSelection {
+                model,
+                model_profile: None,
+                provider_first_party: self.session_provider_first_party,
+            })
+    }
+
     /// The effective default parent / main-loop model at spawn time: the LIVE
     /// source ([`Self::default_model_provider`]) when wired and returning a
     /// non-empty value, else the boot snapshot [`Self::default_model`]. This is
     /// the anchor for `AgentModel::Inherit` + family-alias resolution when a spawn
     /// request carries no `parent_model_override` (claude-code `getMainLoopModel()`).
     fn resolved_default_model(&self) -> Option<String> {
-        if let Some(provider) = self.default_model_provider.get() {
-            if let Some(model) = provider() {
-                if !model.is_empty() {
-                    return Some(model);
-                }
-            }
+        self.resolved_default_selection()
+            .map(|selection| selection.model)
+    }
+
+    fn effective_parent_selection(
+        &self,
+        request: &SubagentSpawnRequest,
+    ) -> Option<DefaultModelSelection> {
+        let live = self.resolved_default_selection();
+        let parent_model = request
+            .parent_model_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+        let parent_model = match parent_model {
+            Some(model) => model,
+            None => return live,
+        };
+        // `model_profile` is backward-compatible wire storage for two distinct
+        // cases. With an explicit request.model it pins the CHILD. Without one
+        // it is the immediate PARENT's profile hint threaded by AgentTool.
+        let parent_profile = request
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .is_none()
+            .then(|| request.model_profile.clone())
+            .flatten();
+
+        // When the override names the live selection, reuse the whole atomic
+        // selection, including its authoritative provider classification. This
+        // handles arbitrary user profile names without interpreting them.
+        if let Some(selection) = live.filter(|selection| {
+            selection.model == parent_model
+                && parent_profile
+                    .as_ref()
+                    .is_none_or(|profile| selection.model_profile.as_ref() == Some(profile))
+        }) {
+            return Some(selection);
         }
-        self.default_model.clone()
+
+        Some(DefaultModelSelection {
+            model: parent_model.to_string(),
+            model_profile: parent_profile.clone(),
+            provider_first_party: self
+                .resolve_provider_first_party(parent_profile.as_deref())
+                // Legacy serialized requests predate the authoritative bit. The
+                // boot session value preserves their old behavior without
+                // guessing from a profile name; every new nested path threads it.
+                .unwrap_or(self.session_provider_first_party),
+        })
     }
 
     /// The parent / main-loop model this spawn resolves `AgentModel::Inherit` +
@@ -436,13 +587,8 @@ impl PoolSubagentSpawner {
     /// spawner's own [`Self::resolved_default_model`] (boot/live fallback for the
     /// non-`AgentTool` spawn paths).
     fn effective_parent_model(&self, request: &SubagentSpawnRequest) -> Option<String> {
-        request
-            .parent_model_override
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| self.resolved_default_model())
+        self.effective_parent_selection(request)
+            .map(|selection| selection.model)
     }
 
     /// Builder: set the live/boot permission-mode anchor threaded into
@@ -512,6 +658,40 @@ impl PoolSubagentSpawner {
                 self.model_setting.as_deref(),
             ),
         }
+    }
+
+    /// Apply the managed model allowlist to a provider-qualified concrete id
+    /// without running it through Claude-family alias or Bedrock-prefix logic.
+    /// Returns `false` when the requested provider/model was rejected and the
+    /// permitted parent model had to be inherited instead.
+    fn resolve_provider_model_pref(
+        &self,
+        model: &str,
+        parent_model: Option<&str>,
+    ) -> Result<(String, bool), SubagentSpawnError> {
+        let barred = self
+            .model_restriction
+            .as_ref()
+            .is_some_and(|(enforcement, _)| {
+                llm_client::model::allowlist::model_allowed_under(enforcement, model) == Some(false)
+            });
+        if !barred {
+            return Ok((model.to_string(), true));
+        }
+
+        tracing::warn!(
+            "Subagent model \"{model}{}",
+            llm_client::model::allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
+        );
+        let Some(parent_model) = parent_model else {
+            return Err(SubagentSpawnError::Runtime(format!(
+                "subagent model {model:?} is not permitted and no parent model is available"
+            )));
+        };
+        Ok((
+            self.resolve_model_pref(&AgentModel::Inherit, parent_model),
+            false,
+        ))
     }
 
     /// Builder: LingXi multi-provider half of the 2.1.198 Explore firstParty
@@ -690,6 +870,17 @@ impl PoolSubagentSpawner {
         subagent_type: &str,
         parent_model: Option<&str>,
     ) -> AgentDefinition {
+        self.resolve_definition_with_profile(subagent_type, parent_model, None, None)
+            .await
+    }
+
+    async fn resolve_definition_with_profile(
+        &self,
+        subagent_type: &str,
+        parent_model: Option<&str>,
+        _parent_model_profile: Option<&str>,
+        parent_provider_first_party: Option<bool>,
+    ) -> AgentDefinition {
         let mut def = self.lookup_definition(subagent_type).await;
         // An explicit `parent_model` (the request override) wins; otherwise fall
         // back to the spawner's own live/boot default. `None` on BOTH ⇒ the model
@@ -706,7 +897,7 @@ impl PoolSubagentSpawner {
             def.model = crate::model_resolution::resolve_builtin_explore_model(
                 &def,
                 parent_model,
-                self.session_provider_first_party,
+                parent_provider_first_party.unwrap_or(self.session_provider_first_party),
             );
             def.model = AgentModel::Explicit(self.resolve_model_pref(&def.model, parent_model));
         }
@@ -1031,9 +1222,37 @@ impl PoolSubagentSpawner {
         // `AgentTool`, claude `AgentTool.tsx:418`) else the spawner's boot/live
         // default. Computed ONCE and threaded into definition + model-override +
         // tool resolution so all three agree on the same anchor.
-        let parent_model = self.effective_parent_model(request);
+        let parent_selection = self.effective_parent_selection(request);
+        let has_explicit_provider_model = request
+            .model
+            .as_deref()
+            .is_some_and(|model| !model.trim().is_empty())
+            && request
+                .model_profile
+                .as_deref()
+                .is_some_and(|profile| !profile.trim().is_empty());
+        if parent_selection.is_none()
+            && self.default_model_selection_provider.get().is_some()
+            && !has_explicit_provider_model
+        {
+            return Err(SubagentSpawnError::Runtime(
+                "live session model/provider selection is unavailable".to_string(),
+            ));
+        }
+        let parent_model = parent_selection
+            .as_ref()
+            .map(|selection| selection.model.clone());
         let mut def = self
-            .resolve_definition(&request.subagent_type, parent_model.as_deref())
+            .resolve_definition_with_profile(
+                &request.subagent_type,
+                parent_model.as_deref(),
+                parent_selection
+                    .as_ref()
+                    .and_then(|selection| selection.model_profile.as_deref()),
+                parent_selection
+                    .as_ref()
+                    .map(|selection| selection.provider_first_party),
+            )
             .await;
         // Per-spawn system-prompt override (workflow xBp / DBp): replace the
         // resolved definition's body with the caller's override BEFORE the Notes
@@ -1054,6 +1273,15 @@ impl PoolSubagentSpawner {
         // AgentTool spawn-surface parity: an explicit `model` from the caller
         // (TS schema `model: 'sonnet' | 'opus' | 'haiku'`) takes precedence over
         // the definition's model frontmatter (AgentTool.tsx:86).
+        // `model_profile` pins the CHILD only when accompanied by an explicit
+        // child model. Without `request.model` it is a parent hint and must not
+        // leak onto a definition that resolves to a different model.
+        let mut accepted_request_model_profile = request
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .and(request.model_profile.clone());
         if let Some(model_pref) = request.model.as_deref() {
             // Dual-LLM dual-PROVIDER routing: when the caller pinned a provider
             // profile (`model_profile`), `request.model` is ALREADY the concrete
@@ -1065,7 +1293,12 @@ impl PoolSubagentSpawner {
             // `profile` (set just below from `request.model_profile`) selects the
             // provider in `messages_create_*_in`.
             if request.model_profile.is_some() {
-                def.model = AgentModel::Explicit(model_pref.to_string());
+                let (resolved, accepted) =
+                    self.resolve_provider_model_pref(model_pref, parent_model.as_deref())?;
+                def.model = AgentModel::Explicit(resolved);
+                if !accepted {
+                    accepted_request_model_profile = None;
+                }
             } else {
                 let requested = AgentModel::Alias(model_pref.to_string());
                 def.model = match parent_model.as_deref() {
@@ -1151,7 +1384,13 @@ impl PoolSubagentSpawner {
         // Per-spawn provider routing (dual-LLM dual-PROVIDER): the runner passes
         // this as the `profile` arg of the api client's `messages_create_*_in`
         // methods so the round-trip targets the candidate's resolved provider.
-        ctx.model_profile = request.model_profile.clone();
+        let resolved_model = crate::runner::resolve_model(&ctx);
+        ctx.model_profile = accepted_request_model_profile.or_else(|| {
+            parent_selection
+                .as_ref()
+                .filter(|selection| selection.model == resolved_model)
+                .and_then(|selection| selection.model_profile.clone())
+        });
         // G4/G5: thread the runner's hook executor + skill loader + hook context
         // seed from the set-once cells (None ⇒ runner skips those steps).
         ctx.hook_executor = self.hook_executor.get().cloned();
@@ -1422,9 +1661,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        // Thin delegate: the real logic lives in `spawn_with_progress`, which
-        // drops the nested-progress stream when none is supplied.
-        self.spawn_with_progress(request, inherit, None).await
+        self.spawn_with_observer(request, inherit, None, None).await
     }
 
     async fn spawn_with_progress(
@@ -1442,12 +1679,39 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // the subagent's work under its Task cell. `None` drops them.
         progress: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.spawn_with_observer(request, inherit, progress, None)
+            .await
+    }
+
+    async fn spawn_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        // `inherit` carries the parent's Arc<dyn ToolInvoker> +
+        // Arc<dyn BudgetEnforcerHandle>. The adapter stashes the tool invoker
+        // on the child's `SubagentContext` so the recursion-lock + budget-
+        // inheritance invariants survive across the spawn boundary; the
+        // child runner dispatches `tool_use` blocks through the very same
+        // `Arc<dyn ToolInvoker>` the parent holds.
+        inherit: SubagentInheritance,
+        // Forwards a one-line summary of each nested subagent tool call as it
+        // happens (the runner's `Message` events), so the caller can surface
+        // the subagent's work under its Task cell. `None` drops them.
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn SubagentSpawnObserver>>,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
         let observer_spec = request
             .observer
             .clone()
             .filter(|_| crate::observer::observer_agents_enabled());
         let observed_agent_type = request.subagent_type.clone();
         let observer_inherit = inherit.clone();
+        let request_name = request.name.clone().or_else(|| request.description.clone());
+        let observers: Vec<Arc<dyn SubagentSpawnObserver>> = self
+            .spawn_observer
+            .iter()
+            .cloned()
+            .chain(observer.into_iter())
+            .collect();
         // Resolve the REAL definition for this subagent_type (file catalog
         // overrides built-ins; unknown → general-purpose). Its tools policy /
         // model / max_turns / system prompt flow into the runner, and its
@@ -1455,24 +1719,49 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Build the child context (non-persistent: the one-shot `spawn` returns
         // on the first terminal stop). The persistent/resumable variant is
         // `spawn_persistent` below.
-        let ctx = self
+        let mut ctx = self
             .build_subagent_context(&request, inherit, false)
             .await?;
+        let resolved_agent_type = ctx.agent_definition.agent_type.clone();
+        let observer_events = crate::api::ObserverEventSink::new(observers.clone());
+        let watchdog = WORKFLOW_QUERY_WATCHDOG_OVERRIDE
+            .try_with(|policy| policy.borrow_mut().take())
+            .ok()
+            .flatten();
+        if let Some(policy) = watchdog {
+            if let Some(api_client) = ctx.api_client.take() {
+                ctx.api_client = Some(Arc::new(
+                    crate::api::WorkflowWatchdogApiClient::with_observer_events(
+                        api_client,
+                        policy,
+                        observer_events.clone(),
+                    ),
+                ));
+            }
+        }
+        let resolved_model = crate::runner::resolve_model(&ctx);
+        let resolved_model_profile = ctx.model_profile.clone();
         let agent_id = ctx.agent_id;
         let (_aid, mut rx) = self.pool.allocate(ctx).await.map_err(|e| match e {
             crate::pool::PoolError::TooManyAgents => SubagentSpawnError::PoolFull,
             other => SubagentSpawnError::Runtime(other.to_string()),
         })?;
 
-        // Cancel-safety: deallocate the detached runner if THIS future is
-        // dropped before reaching a terminal event (disarmed on the normal
-        // path below). Without this a cancelled/timed-out spawn orphans the
-        // runner and leaks its pool slot.
+        // Arm cancel-safety immediately after allocation, before awaiting any
+        // observer. A cancelled or stalled observer must not orphan the already
+        // running child or leak its pool slot.
         let mut dealloc_guard = SpawnDeallocGuard {
             pool: self.pool.clone(),
             agent_id,
             armed: true,
         };
+        observer_events.try_emit(SubagentObservation::Allocated {
+            agent_id,
+            agent_type: resolved_agent_type,
+            name: request_name.clone(),
+            model: resolved_model.clone(),
+            model_profile: resolved_model_profile.clone(),
+        });
 
         // Pump the slot until terminal. The runner emits Progress/Message
         // events as it streams turns; we ignore those here and surface only
@@ -1551,6 +1840,14 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 // to `progress` so the parent UI can show nested execution.
                 // Best-effort: a full/closed channel just drops the line.
                 Some(SubagentEvent::Message { message, .. }) => {
+                    if let Ok(conversation) =
+                        serde_json::from_value::<ConversationMessage>(message.clone())
+                    {
+                        observer_events.try_emit(SubagentObservation::Message {
+                            agent_id,
+                            message: conversation,
+                        });
+                    }
                     if let Some(sink) = progress.as_ref() {
                         for line in subagent_tool_call_lines(&message) {
                             let _ = sink.try_send(line);
@@ -1571,7 +1868,22 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         }
                     }
                 }
-                Some(_) => continue,
+                Some(SubagentEvent::Progress {
+                    tool_use_count,
+                    token_count,
+                    ..
+                }) => {
+                    observer_events.try_emit(SubagentObservation::Progress {
+                        agent_id,
+                        tool_use_count,
+                        token_count,
+                    });
+                    if let Some(sink) = progress.as_ref() {
+                        let _ = sink.try_send(format!(
+                            "progress: tool_uses={tool_use_count} tokens={token_count}"
+                        ));
+                    }
+                }
                 None => {
                     // No terminal event ever arrived; fall back to the bound
                     // ctx agent_id (still the REAL child id, never a fresh one).
@@ -1589,6 +1901,37 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Best-effort deallocate; failures here don't change the surfaced
         // result.
         let _ = self.pool.deallocate(&agent_id).await;
+
+        match &result {
+            SubagentResult::Completed {
+                content,
+                usage,
+                total_tool_use_count,
+                total_duration_ms,
+                assistant_message_count,
+                last_request_id,
+                ..
+            } => {
+                observer_events.emit_terminal(SubagentObservation::Completed {
+                    agent_id,
+                    content: content.clone(),
+                    usage: usage.clone(),
+                    total_tool_use_count: *total_tool_use_count,
+                    total_duration_ms: *total_duration_ms,
+                    assistant_message_count: *assistant_message_count,
+                    last_request_id: last_request_id.clone(),
+                });
+            }
+            SubagentResult::Failed { reason, .. } => {
+                observer_events.emit_terminal(SubagentObservation::Failed {
+                    agent_id,
+                    error: reason.clone(),
+                });
+            }
+            SubagentResult::Killed { .. } => {
+                observer_events.emit_terminal(SubagentObservation::Killed { agent_id });
+            }
+        }
 
         if let (Some(spec), SubagentResult::Completed { content, .. }) =
             (observer_spec, &mut result)
@@ -1683,6 +2026,22 @@ impl SubagentSpawner for PoolSubagentSpawner {
         Ok(result)
     }
 
+    async fn spawn_workflow_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+        observer: Option<Arc<dyn SubagentSpawnObserver>>,
+        watchdog: traits::WorkflowQueryWatchdog,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        WORKFLOW_QUERY_WATCHDOG_OVERRIDE
+            .scope(
+                std::cell::RefCell::new(Some(watchdog)),
+                self.spawn_with_observer(request, inherit, progress, observer),
+            )
+            .await
+    }
+
     async fn concurrent_subagent_count(&self) -> usize {
         self.pool.slot_count().await
     }
@@ -1762,8 +2121,9 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // selection seam — a nested selection's telemetry therefore reports the
         // top-level model, a minor telemetry-only nuance; the SPAWN itself uses the
         // correct immediate-parent model via `build_subagent_context`.)
-        let resolved_model = match self.resolved_default_model() {
-            Some(parent) => {
+        let resolved_model = match self.resolved_default_selection() {
+            Some(selection) => {
+                let parent = selection.model;
                 let pref = match model {
                     Some(m) => AgentModel::Alias(m.to_string()),
                     // 2.1.198 `GAe`: same session-model derivation for the
@@ -1773,7 +2133,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                     None => crate::model_resolution::resolve_builtin_explore_model(
                         &def,
                         &parent,
-                        self.session_provider_first_party,
+                        selection.provider_first_party,
                     ),
                 };
                 self.resolve_model_pref(&pref, &parent)
@@ -1953,6 +2313,27 @@ mod tests {
         calls: AtomicUsize,
     }
 
+    struct BlockingObserver;
+
+    #[async_trait]
+    impl SubagentSpawnObserver for BlockingObserver {
+        async fn on_event(&self, _event: SubagentObservation) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingLifecycleObserver {
+        events: Mutex<Vec<SubagentObservation>>,
+    }
+
+    #[async_trait]
+    impl SubagentSpawnObserver for RecordingLifecycleObserver {
+        async fn on_event(&self, event: SubagentObservation) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
     #[async_trait]
     impl crate::api::SubagentApiClient for QueueApi {
         async fn messages_create(
@@ -2030,16 +2411,19 @@ mod tests {
             frozen_command_denies: Vec::new(),
             resumed_history: None,
         };
-        let result = spawner
-            .spawn(
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            spawner.spawn(
                 request,
                 SubagentInheritance {
                     tool_invoker: Arc::new(DummyInvoker),
                     budget: Arc::new(DummyBudget),
                 },
-            )
-            .await
-            .expect("spawn");
+            ),
+        )
+        .await
+        .expect("observer companion timed out")
+        .expect("spawn");
         let SubagentResult::Completed { content, .. } = result else {
             panic!("expected completed result");
         };
@@ -2050,6 +2434,91 @@ mod tests {
             "observer result"
         );
         std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+    }
+
+    #[tokio::test]
+    async fn blocked_lifecycle_observer_does_not_stall_child_event_pump() {
+        let runtime = Arc::new(CountingRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let api = Arc::new(QueueApi {
+            responses: Mutex::new(VecDeque::from([text_response("done")])),
+            calls: AtomicUsize::new(0),
+        });
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(api)
+            .with_spawn_observer(Arc::new(BlockingObserver));
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "finish"
+        }))
+        .expect("minimal spawn request");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            spawner.spawn(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            ),
+        )
+        .await
+        .expect("observer must not stall the child event pump")
+        .expect("spawn succeeds");
+
+        assert!(matches!(result, SubagentResult::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn observer_receives_resolved_type_and_ordered_terminal_event() {
+        let runtime = Arc::new(CountingRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let api = Arc::new(QueueApi {
+            responses: Mutex::new(VecDeque::from([text_response("done")])),
+            calls: AtomicUsize::new(0),
+        });
+        let observer = Arc::new(RecordingLifecycleObserver::default());
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(api)
+            .with_spawn_observer(observer.clone());
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "unknown-agent-type",
+            "prompt": "finish"
+        }))
+        .expect("minimal spawn request");
+
+        spawner
+            .spawn(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            )
+            .await
+            .expect("spawn succeeds");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if observer.events.lock().unwrap().len() >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("observer events arrive");
+        let events = observer.events.lock().unwrap();
+        assert!(matches!(
+            &events[0],
+            SubagentObservation::Allocated { agent_type, .. }
+                if agent_type == "general-purpose"
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(SubagentObservation::Completed { .. })
+        ));
     }
 
     /// Runtime used to prove pool-level cancellation cleanup: it records
@@ -2823,6 +3292,306 @@ mod tests {
             spawner.resolved_default_model().as_deref(),
             Some("claude-opus-4-7")
         );
+    }
+
+    #[tokio::test]
+    async fn provider_qualified_live_selection_drives_spawn_and_explore_metadata() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_default_model("claude-opus-4-7")
+            .with_session_provider_first_party(true)
+            .with_default_model_selection_provider(Arc::new(|| {
+                Some(DefaultModelSelection {
+                    model: "deepseek-v4-flash".to_string(),
+                    model_profile: Some("deepseek".to_string()),
+                    provider_first_party: false,
+                })
+            }));
+
+        let selected = spawner.resolve_selection("Explore", None).await;
+        assert_eq!(selected.resolved_model, "deepseek-v4-flash");
+
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "Explore",
+            "prompt": "inspect"
+        }))
+        .expect("minimal spawn request");
+        let context = spawner
+            .build_subagent_context(
+                &request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+                false,
+            )
+            .await
+            .expect("provider-qualified context");
+        assert_eq!(crate::runner::resolve_model(&context), "deepseek-v4-flash");
+        assert_eq!(context.model_profile.as_deref(), Some("deepseek"));
+    }
+
+    #[tokio::test]
+    async fn custom_anthropic_live_selection_keeps_first_party_explore_cap() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_session_provider_first_party(false)
+            .with_default_model_selection_provider(Arc::new(|| {
+                Some(DefaultModelSelection {
+                    model: "claude-fable-5".to_string(),
+                    model_profile: Some("anthropic_user".to_string()),
+                    provider_first_party: true,
+                })
+            }));
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "Explore",
+            "prompt": "inspect",
+            "parent_model_override": "claude-fable-5",
+            "model_profile": "anthropic_user"
+        }))
+        .expect("provider-qualified parent request");
+
+        let context = spawner
+            .build_subagent_context(
+                &request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+                false,
+            )
+            .await
+            .expect("custom Anthropic parent selection");
+
+        assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-8");
+        assert_eq!(context.model_profile, None);
+    }
+
+    #[tokio::test]
+    async fn nested_custom_anthropic_parent_uses_catalog_identity_not_profile_name() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_session_provider_first_party(false)
+            .with_default_model_selection_provider(Arc::new(|| {
+                Some(DefaultModelSelection {
+                    model: "deepseek-v4-flash".to_string(),
+                    model_profile: Some("deepseek".to_string()),
+                    provider_first_party: false,
+                })
+            }))
+            .with_provider_first_party_resolver(Arc::new(|profile| match profile {
+                "anthropic_user" => Some(true),
+                "deepseek" => Some(false),
+                _ => None,
+            }));
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "Explore",
+            "prompt": "inspect",
+            "parent_model_override": "claude-fable-5",
+            "model_profile": "anthropic_user"
+        }))
+        .expect("nested provider-qualified request");
+
+        let context = spawner
+            .build_subagent_context(
+                &request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+                false,
+            )
+            .await
+            .expect("catalog-resolved custom Anthropic parent");
+
+        assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-8");
+        assert_eq!(context.model_profile, None);
+    }
+
+    #[tokio::test]
+    async fn parent_profile_is_not_reused_when_definition_changes_model() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner =
+            PoolSubagentSpawner::new(pool).with_default_model_selection_provider(Arc::new(|| {
+                Some(DefaultModelSelection {
+                    model: "deepseek-v4-flash".to_string(),
+                    model_profile: Some("deepseek".to_string()),
+                    provider_first_party: false,
+                })
+            }));
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "statusline-setup",
+            "prompt": "configure status line",
+            "parent_model_override": "deepseek-v4-flash",
+            "model_profile": "deepseek"
+        }))
+        .expect("provider-qualified parent request");
+
+        let context = spawner
+            .build_subagent_context(
+                &request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+                false,
+            )
+            .await
+            .expect("statusline child context");
+
+        assert_eq!(crate::runner::resolve_model(&context), "claude-sonnet-5");
+        assert_eq!(
+            context.model_profile, None,
+            "a parent-provider hint must not pin a different child model"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_live_selection_does_not_fall_back_to_boot_provider() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_default_model("claude-opus-4-7")
+            .with_default_model_selection_provider(Arc::new(|| None));
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "inspect"
+        }))
+        .expect("minimal spawn request");
+        let result = spawner
+            .build_subagent_context(
+                &request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+                false,
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("missing live selection must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("model/provider selection is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn explicit_provider_qualified_spawn_does_not_require_live_selection() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_default_model("claude-opus-4-7")
+            .with_default_model_selection_provider(Arc::new(|| None));
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "workflow-subagent",
+            "prompt": "design the app",
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek"
+        }))
+        .expect("provider-qualified workflow request");
+
+        let context = spawner
+            .build_subagent_context(
+                &request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+                false,
+            )
+            .await
+            .expect("explicit provider-qualified spawn is self-contained");
+
+        assert_eq!(crate::runner::resolve_model(&context), "deepseek-v4-flash");
+        assert_eq!(context.model_profile.as_deref(), Some("deepseek"));
+    }
+
+    #[tokio::test]
+    async fn provider_qualified_spawn_still_obeys_managed_model_restriction() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let enforcement = llm_client::model::allowlist::ModelEnforcement::Active {
+            allowlist: vec!["claude-opus-4-7".to_string()],
+            overrides: std::collections::BTreeMap::new(),
+        };
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_model_restriction_opt(Some((
+                enforcement,
+                vec![
+                    "claude-opus-4-7".to_string(),
+                    "deepseek-v4-flash".to_string(),
+                ],
+            )))
+            .with_default_model_selection_provider(Arc::new(|| {
+                Some(DefaultModelSelection {
+                    model: "claude-opus-4-7".to_string(),
+                    model_profile: Some("anthropic".to_string()),
+                    provider_first_party: true,
+                })
+            }));
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "workflow-subagent",
+            "prompt": "design the app",
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek"
+        }))
+        .expect("provider-qualified workflow request");
+
+        let context = spawner
+            .build_subagent_context(
+                &request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+                false,
+            )
+            .await
+            .expect("barred model inherits the permitted parent");
+
+        assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-7");
+        assert_eq!(context.model_profile.as_deref(), Some("anthropic"));
+    }
+
+    #[tokio::test]
+    async fn live_provider_first_party_flag_is_used_without_a_profile_name() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_session_provider_first_party(true)
+            .with_default_model_selection_provider(Arc::new(|| {
+                Some(DefaultModelSelection {
+                    model: "claude-fable-5".to_string(),
+                    model_profile: None,
+                    provider_first_party: false,
+                })
+            }));
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "Explore",
+            "prompt": "inspect"
+        }))
+        .expect("minimal spawn request");
+
+        let context = spawner
+            .build_subagent_context(
+                &request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+                false,
+            )
+            .await
+            .expect("live provider selection");
+
+        assert_eq!(crate::runner::resolve_model(&context), "claude-fable-5");
+        assert_eq!(context.model_profile, None);
     }
 
     #[tokio::test]

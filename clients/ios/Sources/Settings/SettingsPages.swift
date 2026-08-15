@@ -24,6 +24,7 @@ struct SettingsPages: View {
         case .input:                      InputPage()
         case .appIntegration:             AppIntegrationPage()
         case .privacy:                    PrivacyPage()
+        case .permissionMode:             PermissionModePage(store: store, host: host)
         case .skills:                     SkillsPage(store: store, host: host)
         case .skillDetail(let id):        SkillDetailPage(store: store, host: host, skillId: id)
         case .mcpList:                    MCPListPage(store: store, host: host)
@@ -132,6 +133,11 @@ struct MainSettingsPage: View {
                 SettingsRow(icon: .brain, iconColor: t.text3, label: String(localized: "settings_data_privacy"),
                             sub: String(localized: "settings_data_privacy_sub"),
                             onTap: { host.push(.privacy) })
+                SettingsRow(icon: .check, iconColor: t.accent, label: "权限模式",
+                            sub: "控制工具何时需要确认", value: store.permissionMode == store.effectivePermissionMode
+                                ? store.permissionMode
+                                : "\(store.permissionMode) → \(store.effectivePermissionMode)",
+                            onTap: { host.push(.permissionMode) })
                 SettingsRow(icon: .sparkle, iconColor: t.text3, label: String(localized: "settings_usage_diagnostics"), chevron: false) { LXToggle(isOn: $store.telemetry) }
                 SettingsRow(icon: .check, iconColor: t.text3, label: String(localized: "settings_auto_update"), chevron: false, isLast: true) { LXToggle(isOn: $store.autoUpdate) }
             }

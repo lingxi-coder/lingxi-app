@@ -5,7 +5,7 @@
 use crate::local_apps_host::LocalAppsHostBroker;
 use local_apps::{AppDataStore, AppError, AppLayout, AppManifest};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
@@ -17,7 +17,7 @@ const BUILD_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 const LOW_MEMORY_BUILD_BUDGET_MB: u32 = 2_048;
 const MID_MEMORY_BUILD_BUDGET_MB: u32 = 3_072;
 const HIGH_MEMORY_BUILD_BUDGET_MB: u32 = 4_096;
-const LOCAL_APP_BUILD_GUEST_ROOT: &str = "/var/lingxi/local-app-build";
+const LOCAL_APP_BUILD_GUEST_ROOT: &str = traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT;
 const SHARED_VITE_EXECUTABLE: &str = "/opt/lingxi/local-app-runtime/node_modules/vite/bin/vite.js";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalAppBuildTarget {
@@ -201,7 +201,7 @@ impl LocalAppBuilder<'_> {
     /// The two preconditions a fixed build cannot start without: the mobile
     /// Node runtime and the staged runtime mount. Checked up front by
     /// [`Self::build_workspace`] so a doomed build never reaches the
-    /// destructive `replace_build_source` step, and re-checked inside
+    /// staging `replace_build_source` step, and re-checked inside
     /// [`Self::run_fixed_build`] where the values are actually used.
     fn assert_build_runtime_available(&self) -> Result<(), AppError> {
         if self.mobile_linux.is_none() {
@@ -215,13 +215,12 @@ impl LocalAppBuilder<'_> {
         Ok(())
     }
 
-    async fn run_fixed_build(&self, layout: &AppLayout) -> Result<(), AppError> {
+    async fn run_fixed_build(&self, layout: &AppLayout, build_root: &Path) -> Result<(), AppError> {
         let runtime = self.mobile_linux.as_ref().ok_or_else(|| {
             AppError::NotYetAvailable(
                 "the verified mobile Node runtime is unavailable in this build".into(),
             )
         })?;
-        let build_root = layout.root().join(layout.build_rel(false));
         let build_channel = "store";
         let build_guest_path = local_app_build_guest_path(layout.app_id(), build_channel);
         let tool_name = "Vite";
@@ -274,7 +273,7 @@ impl LocalAppBuilder<'_> {
             ..ResourceLimits::default()
         };
         let mut mounts = vec![MountSpec {
-            host_path: build_root,
+            host_path: build_root.to_path_buf(),
             guest_path: build_guest_path.clone(),
             read_only: false,
             purpose: MountPurpose::LocalAppBuild,
@@ -331,8 +330,12 @@ impl LocalAppBuilder<'_> {
         Ok(())
     }
 
-    pub(crate) async fn run_vite_build(&self, layout: &AppLayout) -> Result<(), AppError> {
-        self.run_fixed_build(layout).await
+    pub(crate) async fn run_vite_build(
+        &self,
+        layout: &AppLayout,
+        build_root: &Path,
+    ) -> Result<(), AppError> {
+        self.run_fixed_build(layout, build_root).await
     }
 
     /// Prepare the repository-verified Vite project used only when the
@@ -362,27 +365,191 @@ impl LocalAppBuilder<'_> {
     /// Copy the workspace into the build root and run the fixed offline
     /// Vite build.
     pub(crate) async fn build_workspace(&self, layout: &AppLayout) -> Result<(), AppError> {
+        let build_lock = self.host.build_lock(layout.app_id()).await;
+        let _build_guard = build_lock.lock().await;
+        // The in-memory guard coalesces builds within this engine. The
+        // storage lock extends the same exclusion across engine processes and
+        // the native delete path, which otherwise could rename the app while
+        // promotion is between its two directory renames.
+        let _process_build_guard =
+            local_apps::storage::lock_app_build(layout.root(), layout.app_id())?;
         let workspace = layout.root().join(layout.workspace_rel());
-        // Availability FIRST. `replace_build_source` below deletes the build
-        // root — which holds the `out/` directory the preview server is
-        // serving right now — so running it before these gates (which now
-        // live inside `run_fixed_build`) would destroy a working app for a
-        // build that could never have started (runtime bundle still
-        // downloading, or evicted).
+        // Availability FIRST. The build is staged separately and promoted
+        // only after Vite succeeds, but these gates still avoid creating
+        // throwaway staging trees for a runtime that cannot build.
         self.assert_build_runtime_available()?;
         let target = detect_build_target(layout)?;
         // Re-pin the host-managed files from the compiled-in templates on
         // EVERY build, before anything is copied into the build root.
         restore_host_managed_files(&workspace, target)?;
         let build_root = layout.root().join(layout.build_rel(false));
-        replace_build_source(&workspace, &build_root)?;
-        self.run_vite_build(layout).await?;
-        Ok(())
+        recover_build_promotion(&build_root)?;
+        let staging_root = build_staging_root(&build_root)?;
+        let build_result = async {
+            replace_build_source(&workspace, &staging_root)?;
+            self.run_vite_build(layout, &staging_root).await?;
+            validate_build_output(&staging_root)?;
+            promote_build_root(&staging_root, &build_root)
+        }
+        .await;
+        if build_result.is_err() {
+            let _ = std::fs::remove_dir_all(&staging_root);
+        }
+        build_result
     }
 }
 
 fn local_app_build_guest_path(app_id: &str, channel: &str) -> String {
     format!("{LOCAL_APP_BUILD_GUEST_ROOT}/{app_id}/{channel}")
+}
+
+fn build_staging_root(build_root: &Path) -> Result<PathBuf, AppError> {
+    let parent = build_root.parent().ok_or_else(|| {
+        AppError::Io(format!("build root {} has no parent", build_root.display()))
+    })?;
+    let file_name = build_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            AppError::Io(format!(
+                "build root {} is not valid UTF-8",
+                build_root.display()
+            ))
+        })?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let staging = parent.join(format!(".{file_name}.staging-{stamp}"));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)
+            .map_err(|error| AppError::Io(format!("clear stale build staging: {error}")))?;
+    }
+    Ok(staging)
+}
+
+fn validate_build_output(staging_root: &Path) -> Result<(), AppError> {
+    let index = staging_root.join("out/index.html");
+    if !index.is_file() {
+        return Err(AppError::Io(format!(
+            "fixed Vite build produced no out/index.html in {}",
+            staging_root.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Recover the only non-atomic window in the directory promotion protocol.
+///
+/// `promote_build_root` first renames the last-good output to a sibling
+/// backup, then renames the validated staging tree into the public `build/`
+/// path. If the process dies between those renames, the next build must put
+/// the last-good output back before creating another staging tree. Stale
+/// staging/backup siblings are private names generated by this module, so
+/// sweeping only those prefixes cannot touch app-owned source files.
+fn recover_build_promotion(build_root: &Path) -> Result<(), AppError> {
+    let Some(parent) = build_root.parent() else {
+        return Ok(());
+    };
+    let Some(file_name) = build_root.file_name().and_then(|name| name.to_str()) else {
+        return Err(AppError::Io(format!(
+            "build root {} is not valid UTF-8",
+            build_root.display()
+        )));
+    };
+    let backup_prefix = format!(".{file_name}.previous-");
+    let staging_prefix = format!(".{file_name}.staging-");
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(AppError::Io(format!(
+                "scan interrupted build promotion: {error}"
+            )))
+        }
+    };
+    let mut backups = Vec::new();
+    let mut staging = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| AppError::Io(format!("scan build promotion: {error}")))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with(&backup_prefix) {
+            backups.push(entry.path());
+        } else if name.starts_with(&staging_prefix) {
+            staging.push(entry.path());
+        }
+    }
+    backups.sort();
+    let has_build = build_root.exists();
+    if !has_build {
+        if let Some(last_good) = backups.pop() {
+            std::fs::rename(&last_good, build_root).map_err(|error| {
+                AppError::Io(format!(
+                    "restore interrupted build output {}: {error}",
+                    last_good.display()
+                ))
+            })?;
+        }
+    }
+    for path in backups.into_iter().chain(staging) {
+        remove_promotion_artifact(&path)?;
+    }
+    Ok(())
+}
+
+fn remove_promotion_artifact(path: &Path) -> Result<(), AppError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| AppError::Io(format!("inspect build promotion artifact: {error}")))?;
+    let result = if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    result.map_err(|error| {
+        AppError::Io(format!(
+            "remove build promotion artifact {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn promote_build_root(staging_root: &Path, build_root: &Path) -> Result<(), AppError> {
+    let parent = build_root.parent().ok_or_else(|| {
+        AppError::Io(format!("build root {} has no parent", build_root.display()))
+    })?;
+    let file_name = build_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            AppError::Io(format!(
+                "build root {} is not valid UTF-8",
+                build_root.display()
+            ))
+        })?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let backup = parent.join(format!(".{file_name}.previous-{stamp}"));
+    let had_current = build_root.exists();
+    if had_current {
+        std::fs::rename(build_root, &backup)
+            .map_err(|error| AppError::Io(format!("stage previous build output: {error}")))?;
+    }
+    if let Err(error) = std::fs::rename(staging_root, build_root) {
+        if had_current {
+            let _ = std::fs::rename(&backup, build_root);
+        }
+        return Err(AppError::Io(format!("promote build output: {error}")));
+    }
+    if had_current {
+        if let Err(error) = std::fs::remove_dir_all(&backup) {
+            tracing::warn!(error = %error, path = %backup.display(), "could not remove previous build backup");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn migrate_manifest_with_approval(
@@ -606,6 +773,46 @@ mod tests {
     }
 
     #[test]
+    fn successful_build_promotion_replaces_output_without_deleting_stage_first() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let build_root = root.path().join("store");
+        let staging_root = root.path().join(".store.staging-test");
+        fs::create_dir_all(build_root.join("out")).expect("current output");
+        fs::write(build_root.join("out/index.html"), "old").expect("old output");
+        fs::create_dir_all(staging_root.join("out")).expect("staged output");
+        fs::write(staging_root.join("out/index.html"), "new").expect("new output");
+
+        promote_build_root(&staging_root, &build_root).expect("promote output");
+
+        assert_eq!(
+            fs::read_to_string(build_root.join("out/index.html")).unwrap(),
+            "new"
+        );
+        assert!(!staging_root.exists());
+    }
+
+    #[test]
+    fn interrupted_build_promotion_restores_last_good_output_and_cleans_artifacts() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let build_root = root.path().join("store");
+        let backup = root.path().join(".store.previous-123");
+        let staging = root.path().join(".store.staging-456");
+        fs::create_dir_all(backup.join("out")).expect("backup output");
+        fs::write(backup.join("out/index.html"), "last-good").expect("backup html");
+        fs::create_dir_all(staging.join("out")).expect("staging output");
+        fs::write(staging.join("out/index.html"), "partial").expect("staging html");
+
+        recover_build_promotion(&build_root).expect("recover interrupted promotion");
+
+        assert_eq!(
+            fs::read_to_string(build_root.join("out/index.html")).unwrap(),
+            "last-good"
+        );
+        assert!(!backup.exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
     fn vite_build_prefers_the_app_local_cli_when_dependencies_are_installed() {
         let root = tempfile::tempdir().expect("tempdir");
         let workspace = root.path().join("workspace");
@@ -673,10 +880,9 @@ mod tests {
         assert!(workspace.join(".lingxi/source-policy.json").is_file());
     }
 
-    /// `replace_build_source` deletes the build root — which holds the `out/`
-    /// directory the preview server is serving right now. Tapping Rebuild
-    /// while the runtime bundle is unavailable must fail BEFORE that, or a
-    /// build that could never have started leaves the live app unservable.
+    /// The build now uses a separate staging root and promotes it only after
+    /// Vite succeeds. Tapping Rebuild while the runtime bundle is unavailable
+    /// must still fail before creating staging work.
     #[tokio::test]
     async fn an_unavailable_runtime_fails_before_the_build_root_is_destroyed() {
         let root = tempfile::tempdir().expect("tempdir");

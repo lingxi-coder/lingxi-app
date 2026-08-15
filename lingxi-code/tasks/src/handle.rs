@@ -57,6 +57,7 @@ fn status_from_wire(s: &str) -> Result<TaskStatus, TaskRegistryError> {
     Ok(match s {
         "pending" => TaskStatus::Pending,
         "running" => TaskStatus::Running,
+        "paused" => TaskStatus::Paused,
         "completed" => TaskStatus::Completed,
         "failed" => TaskStatus::Failed,
         "killed" => TaskStatus::Killed,
@@ -72,6 +73,7 @@ pub(crate) fn status_to_wire(s: TaskStatus) -> &'static str {
     match s {
         TaskStatus::Pending => "pending",
         TaskStatus::Running => "running",
+        TaskStatus::Paused => "paused",
         TaskStatus::Completed => "completed",
         TaskStatus::Failed => "failed",
         TaskStatus::Killed => "killed",
@@ -231,6 +233,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             description: String::new(),
         },
         TaskType::LocalWorkflow => TaskSpawnInput::LocalWorkflow {
+            session_uuid: None,
             workflow_id: String::new(),
             script: String::new(),
             resume_from_run_id: None,
@@ -322,6 +325,9 @@ impl TaskRegistryHandle for TaskRegistry {
         };
         let mut out = Vec::new();
         for state in self.list().await {
+            if !self.workflow_visible_in_current_session(&state) {
+                continue;
+            }
             if let Some(want) = want_status {
                 if state.base().status != want {
                     continue;
@@ -345,6 +351,9 @@ impl TaskRegistryHandle for TaskRegistry {
         }
         let mut out = Vec::new();
         for state in self.list().await {
+            if !self.workflow_visible_in_current_session(&state) {
+                continue;
+            }
             if let TaskState::LocalWorkflow(w) = &state {
                 out.push(WorkflowRecord {
                     task_id: w.base.id.clone(),
@@ -355,6 +364,8 @@ impl TaskRegistryHandle for TaskRegistry {
                     current_step: w.current_step,
                     started_at_ms: epoch_ms(w.base.start_time),
                     ended_at_ms: w.base.end_time.and_then(epoch_ms),
+                    script_path: w.script_path.clone(),
+                    args: w.args.clone(),
                 });
             }
         }
@@ -494,8 +505,9 @@ impl TaskRegistryHandle for TaskRegistry {
             _ => None,
         };
         // Mirror the TS poll predicate `status !== 'running' && status !==
-        // 'pending'` — terminal means the task is "done" for retrieval.
-        let done = status.is_terminal();
+        // 'pending'`. A paused workflow is complete for output retrieval even
+        // though it is intentionally non-terminal in the task lifecycle.
+        let done = !matches!(status, TaskStatus::Pending | TaskStatus::Running);
         let output_file = state.base().output_file.clone();
         let opts = crate::output_manager::OutputOptions {
             offset,
@@ -896,43 +908,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_workflows_projects_running_and_completed_and_skips_others() {
+    async fn list_workflows_projects_running_paused_and_completed_and_skips_others() {
         let (_d, registry) = make_registry();
 
-        let mk_wf = |id: &str, status: TaskStatus, run: &str, ended: bool| {
-            TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
-                base: crate::state::TaskStateBase {
-                    id: id.into(),
-                    task_type: crate::id::TaskType::LocalWorkflow,
-                    status,
-                    description: "review the diff".into(),
-                    tool_use_id: None,
-                    start_time: std::time::SystemTime::UNIX_EPOCH
-                        + std::time::Duration::from_millis(1_000),
-                    end_time: ended.then(|| {
-                        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(5_000)
-                    }),
-                    total_paused_ms: 0,
-                    output_file: PathBuf::from(format!("/tmp/{id}.output")),
-                    output_offset: 0,
-                    notified: false,
-                    creator_teammate_name: None,
-                    creator_team_name: None,
-                },
-                workflow_id: format!("wf-{id}"),
-                script: String::new(),
-                resume_from_run_id: None,
-                args: None,
-                run_id: Some(run.into()),
-                current_step: 2,
-            })
-        };
+        let mk_wf =
+            |id: &str, session: Option<&str>, status: TaskStatus, run: &str, ended: bool| {
+                TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
+                    base: crate::state::TaskStateBase {
+                        id: id.into(),
+                        task_type: crate::id::TaskType::LocalWorkflow,
+                        status,
+                        description: "review the diff".into(),
+                        tool_use_id: None,
+                        start_time: std::time::SystemTime::UNIX_EPOCH
+                            + std::time::Duration::from_millis(1_000),
+                        end_time: ended.then(|| {
+                            std::time::SystemTime::UNIX_EPOCH
+                                + std::time::Duration::from_millis(5_000)
+                        }),
+                        total_paused_ms: 0,
+                        output_file: PathBuf::from(format!("/tmp/{id}.output")),
+                        output_offset: 0,
+                        notified: false,
+                        creator_teammate_name: None,
+                        creator_team_name: None,
+                    },
+                    session_uuid: session.map(str::to_string),
+                    workflow_id: format!("wf-{id}"),
+                    script: String::new(),
+                    resume_from_run_id: None,
+                    args: None,
+                    run_id: Some(run.into()),
+                    script_path: None,
+                    transcript_dir: None,
+                    current_step: 2,
+                })
+            };
         registry
-            .insert_state_for_test(mk_wf("w0000run0", TaskStatus::Running, "wf_run", false))
+            .insert_state_for_test(mk_wf(
+                "w0000run0",
+                None,
+                TaskStatus::Running,
+                "wf_run",
+                false,
+            ))
             .await;
         registry
-            .insert_state_for_test(mk_wf("w0000done0", TaskStatus::Completed, "wf_done", true))
+            .insert_state_for_test(mk_wf(
+                "w0000done0",
+                None,
+                TaskStatus::Completed,
+                "wf_done",
+                true,
+            ))
             .await;
+        let mut paused = mk_wf("w000pause", None, TaskStatus::Paused, "wf_pause", false);
+        if let TaskState::LocalWorkflow(workflow) = &mut paused {
+            workflow.script_path = Some("/workspace/build.js".into());
+            workflow.args = Some(r#"{"app_id":"demo"}"#.into());
+        }
+        registry.insert_state_for_test(paused).await;
         // An unrelated task must NOT appear in the workflow projection.
         let base = crate::state::TaskStateBase {
             id: "b0000bash0".into(),
@@ -964,8 +999,8 @@ mod tests {
 
         assert_eq!(
             wfs.len(),
-            2,
-            "only the two workflow runs, not the bash task"
+            3,
+            "only workflow runs, including the adopted paused run"
         );
         let done = wfs.iter().find(|w| w.task_id == "w0000done0").unwrap();
         assert_eq!(done.name, "wf-w0000done0");
@@ -977,6 +1012,91 @@ mod tests {
         let run = wfs.iter().find(|w| w.task_id == "w0000run0").unwrap();
         assert_eq!(run.status, "running");
         assert_eq!(run.ended_at_ms, None, "a running run has no end");
+        let paused = wfs.iter().find(|w| w.task_id == "w000pause").unwrap();
+        assert_eq!(paused.status, "paused");
+        assert_eq!(paused.script_path.as_deref(), Some("/workspace/build.js"));
+        assert_eq!(paused.args.as_deref(), Some(r#"{"app_id":"demo"}"#));
+    }
+
+    #[tokio::test]
+    async fn list_and_list_workflows_filter_workflow_rows_to_active_session_only() {
+        let (_d, registry) = make_registry();
+
+        let mk_wf = |id: &str, session: &str, status: TaskStatus| {
+            TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
+                base: crate::state::TaskStateBase {
+                    id: id.into(),
+                    task_type: crate::id::TaskType::LocalWorkflow,
+                    status,
+                    description: "session workflow".into(),
+                    tool_use_id: None,
+                    start_time: std::time::SystemTime::UNIX_EPOCH,
+                    end_time: None,
+                    total_paused_ms: 0,
+                    output_file: PathBuf::from(format!("/tmp/{id}.output")),
+                    output_offset: 0,
+                    notified: false,
+                    creator_teammate_name: None,
+                    creator_team_name: None,
+                },
+                session_uuid: Some(session.to_string()),
+                workflow_id: format!("wf-{id}"),
+                script: String::new(),
+                resume_from_run_id: None,
+                args: None,
+                run_id: Some(format!("wf-{id}")),
+                script_path: None,
+                transcript_dir: None,
+                current_step: 0,
+            })
+        };
+        registry
+            .insert_state_for_test(mk_wf("waaaaaaaa", "session-a", TaskStatus::Running))
+            .await;
+        registry
+            .insert_state_for_test(mk_wf("wbbbbbbbb", "session-b", TaskStatus::Paused))
+            .await;
+        registry.set_workflow_session_filter(Some("session-a".to_string()));
+
+        registry
+            .insert_state_for_test(TaskState::LocalBash(crate::state::LocalBashTaskState {
+                base: crate::state::TaskStateBase {
+                    id: "bvisible01".into(),
+                    task_type: crate::id::TaskType::LocalBash,
+                    status: TaskStatus::Running,
+                    description: "still visible".into(),
+                    tool_use_id: None,
+                    start_time: std::time::SystemTime::UNIX_EPOCH,
+                    end_time: None,
+                    total_paused_ms: 0,
+                    output_file: PathBuf::from("/tmp/bvisible01.output"),
+                    output_offset: 0,
+                    notified: false,
+                    creator_teammate_name: None,
+                    creator_team_name: None,
+                },
+                command: "echo visible".into(),
+                pid: None,
+                exit_code: None,
+            }))
+            .await;
+
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let records = h.list(TaskListFilter::default()).await.unwrap();
+        assert!(records.iter().any(|record| record.task_id == "waaaaaaaa"));
+        assert!(records.iter().any(|record| record.task_id == "bvisible01"));
+        assert!(
+            records.iter().all(|record| record.task_id != "wbbbbbbbb"),
+            "workflow rows from other sessions must be hidden: {records:?}"
+        );
+
+        let workflows = h.list_workflows().await.unwrap();
+        assert_eq!(
+            workflows.len(),
+            1,
+            "only the active session workflow remains"
+        );
+        assert_eq!(workflows[0].task_id, "waaaaaaaa");
     }
 
     #[tokio::test]

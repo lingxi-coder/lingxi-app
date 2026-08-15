@@ -11,6 +11,8 @@ enum LocalAppsRoute: Hashable {
 struct LocalAppsRootView: View {
     @Bindable var store: LocalAppsStore
     let initialAppID: String?
+    let availableModels: [String]
+    let activeModelID: String
     let onDismiss: () -> Void
     /// Called with `(appID, sessionUUID)` when the user taps a row of the
     /// app's session catalog. RootView dismisses this cover and switches the
@@ -19,7 +21,7 @@ struct LocalAppsRootView: View {
     /// The create-flow landing: like `onOpenAppSession`, but RootView also
     /// queues the kickoff message that starts the create-local-app flow in
     /// the (empty) init session.
-    var onOpenCreatedAppSession: (String, String, String) -> Void = { _, _, _ in }
+    var onOpenCreatedAppSession: (String, String, String, String?) -> Void = { _, _, _, _ in }
     /// Called with `appID` for「新会话」. RootView dismisses this cover and
     /// starts a fresh conversation in the app's scope.
     var onNewAppSession: (String) -> Void = { _ in }
@@ -31,6 +33,8 @@ struct LocalAppsRootView: View {
             LocalAppsLibraryScreen(
                 store: store,
                 path: $path,
+                availableModels: availableModels,
+                activeModelID: activeModelID,
                 onDismiss: onDismiss,
                 onOpenAppSession: onOpenCreatedAppSession
             )
@@ -75,7 +79,12 @@ struct LocalAppsRootView: View {
     private func destination(_ route: LocalAppsRoute) -> some View {
         switch route {
         case .create:
-            LocalAppCreateView(store: store, path: $path)
+            LocalAppCreateView(
+                store: store,
+                path: $path,
+                availableModels: availableModels,
+                activeModelID: activeModelID
+            )
         case let .details(appID):
             LocalAppDetailView(
                 store: store,
@@ -154,11 +163,13 @@ private struct LocalAppsLibraryScreen: View {
     @Environment(\.theme) private var theme
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
+    let availableModels: [String]
+    let activeModelID: String
     let onDismiss: () -> Void
     /// Threaded from the root cover: `(appID, sessionUUID, brief)` →
     /// dismiss + switch into the app scope (the create flow's init-chat
     /// landing, kickoff seeded with the brief).
-    var onOpenAppSession: (String, String, String) -> Void = { _, _, _ in }
+    var onOpenAppSession: (String, String, String, String?) -> Void = { _, _, _, _ in }
 
     @State private var pendingDelete: LocalAppSummary?
 
@@ -258,7 +269,12 @@ private struct LocalAppsLibraryScreen: View {
         // init conversation — dismiss the cover and switch into the app
         // scope resuming the pinned init session.
         guard let created = store.consumeCreatedAppSession() else { return }
-        onOpenAppSession(created.appID, created.initSessionID, created.brief)
+        onOpenAppSession(
+            created.appID,
+            created.initSessionID,
+            created.brief,
+            created.modelOverride
+        )
     }
 }
 
@@ -335,10 +351,26 @@ private struct LocalAppLibraryRow: View {
 struct LocalAppCreateView: View {
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
+    let availableModels: [String]
+    let activeModelID: String
 
     @State var brief = ""
     @State private var gitEnabled = true
     @State private var creating = false
+    @State private var modelOverride: String?
+    @State private var showingModelPicker = false
+
+    init(
+        store: LocalAppsStore,
+        path: Binding<[LocalAppsRoute]>,
+        availableModels: [String] = [],
+        activeModelID: String = ""
+    ) {
+        self.store = store
+        self._path = path
+        self.availableModels = availableModels
+        self.activeModelID = activeModelID
+    }
 
     /// The submit predicate, as a pure function of the text.
     ///
@@ -370,6 +402,25 @@ struct LocalAppCreateView: View {
                     .foregroundStyle(.secondary)
                 Toggle("local_apps_create_git_version_control", isOn: $gitEnabled)
             }
+            Section("local_apps_create_model_section") {
+                Button {
+                    showingModelPicker = true
+                } label: {
+                    LabeledContent("local_apps_create_model_label") {
+                        Text(modelSelectionLabel)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(availableModels.isEmpty)
+                if modelOverride != nil {
+                    Button("local_apps_create_model_follow_current") {
+                        modelOverride = nil
+                    }
+                }
+                Text("local_apps_create_model_detail")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         .navigationTitle("local_apps_create")
         .navigationBarTitleDisplayMode(.inline)
@@ -382,11 +433,38 @@ struct LocalAppCreateView: View {
                 .accessibilityIdentifier("local-apps.create.submit")
             }
         }
+        .sheet(isPresented: $showingModelPicker) {
+            ModelPickerSheet(
+                availableModels: availableModels,
+                activeModelId: modelOverride ?? activeModelID,
+                recentModels: [],
+                onSelect: { reference in
+                    modelOverride = reference
+                    showingModelPicker = false
+                },
+                onDismiss: { showingModelPicker = false }
+            )
+        }
+    }
+
+    private var modelSelectionLabel: String {
+        guard let modelOverride else {
+            if activeModelID.isEmpty {
+                return String(localized: "local_apps_create_model_follow_current")
+            }
+            return String(localized: "local_apps_create_model_follow_current_value \(ModelDisplay.shortName(for: activeModelID))")
+        }
+        let item = ModelDisplay.item(for: modelOverride)
+        return "\(ModelDisplay.providerName(for: item.providerId)) · \(item.shortName)"
     }
 
     private func create() async {
         creating = true
-        let succeeded = await store.createApp(brief: brief, gitEnabled: gitEnabled)
+        let succeeded = await store.createApp(
+            brief: brief,
+            gitEnabled: gitEnabled,
+            modelOverride: modelOverride
+        )
         creating = false
         if succeeded, !path.isEmpty {
             path.removeLast()

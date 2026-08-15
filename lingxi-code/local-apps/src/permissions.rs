@@ -15,6 +15,15 @@ use traits::FsError;
 
 const MAX_PERMISSIONS_BYTES: u64 = 512 * 1024;
 
+/// The initial workspace-local rules written when a local app is created.
+///
+/// `Edit` is the Claude Code permission verb for the complete file-editing
+/// family (`Write`, `MultiEdit`, and `NotebookEdit` are evaluated through it),
+/// so using `Write` here would look right in JSON but would not grant the
+/// intended operations. The `./` prefix keeps the grant relative to the app
+/// workspace instead of broadening it to the host filesystem.
+pub const LOCAL_APP_WORKSPACE_PERMISSION_RULES: [&str; 2] = ["Read(./**)", "Edit(./**)"];
+
 /// Agent capability that requires user authorization before mutation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -235,6 +244,37 @@ pub fn save_permissions(layout: &AppLayout, permissions: &AppPermissions) -> Res
     .map_err(|error| AppError::from_fs("write app permissions", &error))
 }
 
+/// Write the initial local-app workspace permission file.
+///
+/// This is deliberately separate from [`AppPermissions`]: runtime capability
+/// grants (camera, LLM, notifications, etc.) remain deny-by-default, while
+/// the app-build agent gets file read/edit access scoped to this workspace root.
+/// The file is host-created during app creation; it is not a user capability
+/// grant and does not change the global permission mode.
+pub fn save_workspace_permission_settings(layout: &AppLayout) -> Result<(), AppError> {
+    layout.initialize()?;
+    let body = serde_json::json!({
+        "permissions": {
+            "allow": LOCAL_APP_WORKSPACE_PERMISSION_RULES,
+            // The workspace grant is intentionally broad for source files, but
+            // host-owned metadata must never become model-writable just because
+            // this file is loaded as a local-settings allow rule.
+            "deny": ["Edit(./.lingxi/**)", "Edit(./LINGXI.md)", "Edit(./lib/lingxi-bridge.js)"],
+        }
+    });
+    let mut bytes = serde_json::to_vec_pretty(&body).map_err(|error| {
+        AppError::Io(format!("serialize workspace permission settings: {error}"))
+    })?;
+    bytes.push(b'\n');
+    rooted_fs::atomic_write(
+        layout.root(),
+        &layout.workspace_settings_local_rel(),
+        &bytes,
+        AtomicWriteOptions::default(),
+    )
+    .map_err(|error| AppError::from_fs("write workspace permission settings", &error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +365,28 @@ mod tests {
         assert!(session.allows_domain("abcd1234", "api.example.com"));
         session.revoke_app("abcd1234");
         assert!(!session.allows("abcd1234", AppCapability::UiControl));
+    }
+
+    #[test]
+    fn new_workspace_gets_scoped_read_and_edit_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = AppLayout::new(root.path(), "abcd1234").unwrap();
+        save_workspace_permission_settings(&layout).unwrap();
+
+        let path = root.path().join(layout.workspace_settings_local_rel());
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            value["permissions"]["allow"],
+            serde_json::json!(["Read(./**)", "Edit(./**)"])
+        );
+        assert_eq!(
+            value["permissions"]["deny"],
+            serde_json::json!([
+                "Edit(./.lingxi/**)",
+                "Edit(./LINGXI.md)",
+                "Edit(./lib/lingxi-bridge.js)"
+            ])
+        );
     }
 }

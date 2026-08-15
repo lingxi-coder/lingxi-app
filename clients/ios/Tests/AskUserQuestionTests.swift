@@ -113,11 +113,14 @@ import XCTest
             let source = makeSource()
             XCTAssertFalse(source.model.streaming, "precondition: the turn already ended")
 
-            source.applyForTesting(.taskStatusChanged(taskId: "task-abc12", status: .running))
+            source.applyForTesting(.taskStatusChanged(
+                taskId: "task-abc12", status: .running, originSessionId: nil))
             XCTAssertTrue(source.model.items.isEmpty, "a running transition is not a notice")
 
-            source.applyForTesting(.taskStatusChanged(taskId: "task-abc12", status: .completed))
-            source.applyForTesting(.taskStatusChanged(taskId: "task-def34", status: .failed))
+            source.applyForTesting(.taskStatusChanged(
+                taskId: "task-abc12", status: .completed, originSessionId: nil))
+            source.applyForTesting(.taskStatusChanged(
+                taskId: "task-def34", status: .failed, originSessionId: nil))
 
             let notices: [ConversationExecutionNotice] = source.model.items.compactMap {
                 if case let .notice(notice) = $0 { return notice }

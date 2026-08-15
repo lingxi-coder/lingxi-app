@@ -352,6 +352,9 @@ pub struct ResumeRuntimeSnapshot {
     /// one. Present for parity plumbing; runtimes that cannot live-mutate their
     /// provider adapter may ignore it.
     pub effort: Option<String>,
+    /// Resolved transcript reasoning selection, when the persisted session
+    /// carried one. Legacy transcripts may leave this absent and use `effort`.
+    pub reasoning_selection: Option<ReasoningSelection>,
     /// Persisted main-thread agent type for this session. `None` means the
     /// resumed session used default main-thread behavior.
     pub main_thread_agent_type: Option<String>,
@@ -797,6 +800,400 @@ pub struct ModelListing {
     /// deserializing unchanged.
     #[serde(default)]
     pub supports_reasoning: bool,
+}
+
+/// Provider-neutral user selection for reasoning / effort controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReasoningSelection {
+    /// No user override; let the provider/model default apply.
+    Automatic,
+    /// Explicitly disable reasoning when the provider supports it.
+    Disabled,
+    /// Explicitly enable reasoning when the provider supports a bare toggle.
+    Enabled,
+    /// One provider-defined discrete reasoning level.
+    Level { id: String },
+    /// One provider-defined numeric reasoning budget.
+    TokenBudget { tokens: u64 },
+}
+
+/// Numeric budget constraints for one reasoning control surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningBudgetRange {
+    /// Minimum accepted token budget.
+    pub min_tokens: u32,
+    /// Maximum accepted token budget.
+    pub max_tokens: u32,
+    /// Whether a dynamic/provider-managed budget is supported.
+    pub supports_dynamic: bool,
+    /// Whether an explicit off/zero budget is supported.
+    pub supports_disabled: bool,
+}
+
+/// Provider capability description for the active model's reasoning control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningControlSpec {
+    /// Supported discrete/toggle selections for this model.
+    pub available: Vec<ReasoningSelection>,
+    /// Whether a chosen value may be persisted as the user's default.
+    pub selections_persistable: bool,
+    /// Optional numeric budget range when the provider exposes one.
+    pub budget_range: Option<ReasoningBudgetRange>,
+    /// The provider/model default selection when no override is sent.
+    pub provider_default: ReasoningSelection,
+    /// Whether the provider always reasons for this model.
+    pub forced: bool,
+    /// Whether the user may currently change the setting.
+    pub modifiable: bool,
+    /// Optional reason a control is currently disabled.
+    pub disabled_reason: Option<String>,
+}
+
+/// Availability of one requested permission mode in the current session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionModeAvailability {
+    /// Permission-mode wire id.
+    pub mode: String,
+    /// Whether the mode may currently be selected.
+    pub available: bool,
+    /// Optional reason this mode is unavailable.
+    pub disabled_reason: Option<String>,
+}
+
+/// Authoritative permission state for the active session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionControlState {
+    /// The user's requested mode.
+    pub requested: String,
+    /// The mode effectively applied by the engine.
+    pub effective: String,
+    /// Availability for every surfaced mode.
+    pub modes: Vec<PermissionModeAvailability>,
+}
+
+/// Authoritative controls snapshot for the active conversation model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationControls {
+    /// Provider-qualified active model reference.
+    pub model_reference: String,
+    /// Permission control state.
+    pub permission: PermissionControlState,
+    /// User-requested reasoning selection before model capability validation.
+    pub requested_reasoning_selection: ReasoningSelection,
+    /// Current reasoning selection after validation/reset.
+    pub effective_reasoning_selection: ReasoningSelection,
+    /// Provider/model reasoning capability description.
+    pub reasoning_spec: ReasoningControlSpec,
+}
+
+fn level(id: &str) -> ReasoningSelection {
+    ReasoningSelection::Level { id: id.to_string() }
+}
+
+fn auto_only_reasoning_spec() -> ReasoningControlSpec {
+    ReasoningControlSpec {
+        available: vec![ReasoningSelection::Automatic],
+        selections_persistable: true,
+        budget_range: None,
+        provider_default: ReasoningSelection::Automatic,
+        forced: false,
+        modifiable: false,
+        disabled_reason: Some("reasoning_unavailable".to_string()),
+    }
+}
+
+fn supports_selection(spec: &ReasoningControlSpec, selection: &ReasoningSelection) -> bool {
+    match selection {
+        ReasoningSelection::Automatic => true,
+        ReasoningSelection::TokenBudget { tokens } => {
+            spec.budget_range.as_ref().is_some_and(|range| {
+                (*tokens >= range.min_tokens as u64 && *tokens <= range.max_tokens as u64)
+                    || (range.supports_disabled && *tokens == 0)
+            })
+        }
+        other => spec.available.iter().any(|candidate| candidate == other),
+    }
+}
+
+/// Provider/model reasoning controls for one active model reference.
+#[must_use]
+pub fn reasoning_control_spec_for_model(
+    model: &str,
+    provider_id: Option<&str>,
+) -> ReasoningControlSpec {
+    let provider_id = provider_id.unwrap_or_default();
+    let model = model.to_ascii_lowercase();
+
+    match provider_id {
+        "anthropic" | "builtin" => {
+            let levels = if model.contains("haiku") {
+                vec![
+                    ReasoningSelection::Automatic,
+                    level("low"),
+                    level("medium"),
+                    level("high"),
+                ]
+            } else if model.contains("sonnet-5")
+                || model.contains("opus-4-8")
+                || model.contains("fable-5")
+            {
+                vec![
+                    ReasoningSelection::Automatic,
+                    level("low"),
+                    level("medium"),
+                    level("high"),
+                    level("xhigh"),
+                    level("max"),
+                ]
+            } else {
+                vec![
+                    ReasoningSelection::Automatic,
+                    level("low"),
+                    level("medium"),
+                    level("high"),
+                    level("xhigh"),
+                ]
+            };
+            ReasoningControlSpec {
+                available: levels,
+                selections_persistable: true,
+                budget_range: None,
+                provider_default: level("high"),
+                forced: false,
+                modifiable: true,
+                disabled_reason: None,
+            }
+        }
+        "openai" | "openai-chatgpt" => {
+            let (levels, can_disable) = match model.as_str() {
+                "gpt-5" | "gpt-5-mini" | "gpt-5-nano" => {
+                    (vec!["minimal", "low", "medium", "high"], false)
+                }
+                "gpt-5-pro" => (vec!["high"], false),
+                "gpt-5.1"
+                | "gpt-5.2"
+                | "gpt-5.3-codex-spark"
+                | "gpt-5.4"
+                | "gpt-5.4-mini"
+                | "gpt-5.4-nano"
+                | "gpt-5.5" => (vec!["low", "medium", "high", "xhigh"], true),
+                "gpt-5.1-codex" | "gpt-5.1-codex-mini" | "gpt-5.2-codex" => {
+                    (vec!["low", "medium", "high"], false)
+                }
+                "gpt-5.1-codex-max" | "gpt-5.2-pro" | "gpt-5.4-pro" | "gpt-5.5-pro" => {
+                    (vec!["medium", "high", "xhigh"], false)
+                }
+                _ => return auto_only_reasoning_spec(),
+            };
+            let mut available = vec![ReasoningSelection::Automatic];
+            if can_disable {
+                available.push(ReasoningSelection::Disabled);
+            }
+            available.extend(levels.into_iter().map(level));
+            ReasoningControlSpec {
+                available,
+                selections_persistable: true,
+                budget_range: None,
+                provider_default: level("medium"),
+                forced: false,
+                modifiable: true,
+                disabled_reason: None,
+            }
+        }
+        "gemini" => {
+            if model.starts_with("gemini-2.5-pro") {
+                ReasoningControlSpec {
+                    available: vec![ReasoningSelection::Automatic, ReasoningSelection::Disabled],
+                    selections_persistable: true,
+                    budget_range: Some(ReasoningBudgetRange {
+                        min_tokens: 128,
+                        max_tokens: 32_768,
+                        supports_dynamic: true,
+                        supports_disabled: true,
+                    }),
+                    provider_default: ReasoningSelection::Automatic,
+                    forced: false,
+                    modifiable: true,
+                    disabled_reason: None,
+                }
+            } else if model.starts_with("gemini-2.5-flash-lite") {
+                ReasoningControlSpec {
+                    available: vec![ReasoningSelection::Automatic],
+                    selections_persistable: true,
+                    budget_range: Some(ReasoningBudgetRange {
+                        min_tokens: 512,
+                        max_tokens: 24_576,
+                        supports_dynamic: true,
+                        supports_disabled: false,
+                    }),
+                    provider_default: ReasoningSelection::Automatic,
+                    forced: true,
+                    modifiable: true,
+                    disabled_reason: None,
+                }
+            } else if model.starts_with("gemini-2.5-flash") {
+                ReasoningControlSpec {
+                    available: vec![ReasoningSelection::Automatic, ReasoningSelection::Disabled],
+                    selections_persistable: true,
+                    budget_range: Some(ReasoningBudgetRange {
+                        min_tokens: 0,
+                        max_tokens: 24_576,
+                        supports_dynamic: true,
+                        supports_disabled: true,
+                    }),
+                    provider_default: ReasoningSelection::Automatic,
+                    forced: false,
+                    modifiable: true,
+                    disabled_reason: None,
+                }
+            } else if model.starts_with("gemini-3") {
+                let levels: &[&str] = if model.contains("pro-image") {
+                    &[]
+                } else if model.contains("pro-preview") && !model.contains("3.1") {
+                    &["low", "high"]
+                } else if model.contains("3.1-pro") {
+                    &["low", "medium", "high"]
+                } else if model.contains("image-preview") {
+                    &["minimal", "high"]
+                } else {
+                    &["minimal", "low", "medium", "high"]
+                };
+                if levels.is_empty() {
+                    ReasoningControlSpec {
+                        available: vec![ReasoningSelection::Automatic],
+                        selections_persistable: true,
+                        budget_range: None,
+                        provider_default: ReasoningSelection::Automatic,
+                        forced: true,
+                        modifiable: false,
+                        disabled_reason: Some("reasoning_required".to_string()),
+                    }
+                } else {
+                    ReasoningControlSpec {
+                        available: std::iter::once(ReasoningSelection::Automatic)
+                            .chain(levels.iter().copied().map(level))
+                            .collect(),
+                        selections_persistable: true,
+                        budget_range: None,
+                        provider_default: ReasoningSelection::Automatic,
+                        forced: true,
+                        modifiable: true,
+                        disabled_reason: None,
+                    }
+                }
+            } else {
+                auto_only_reasoning_spec()
+            }
+        }
+        "deepseek" => {
+            if model == "deepseek-reasoner" {
+                ReasoningControlSpec {
+                    available: vec![ReasoningSelection::Enabled],
+                    selections_persistable: false,
+                    budget_range: None,
+                    provider_default: ReasoningSelection::Enabled,
+                    forced: true,
+                    modifiable: false,
+                    disabled_reason: Some("reasoning_required".to_string()),
+                }
+            } else if matches!(
+                model.as_str(),
+                "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek-chat"
+            ) {
+                ReasoningControlSpec {
+                    available: vec![
+                        ReasoningSelection::Automatic,
+                        ReasoningSelection::Disabled,
+                        level("high"),
+                        level("max"),
+                    ],
+                    selections_persistable: true,
+                    budget_range: None,
+                    provider_default: ReasoningSelection::Automatic,
+                    forced: false,
+                    modifiable: true,
+                    disabled_reason: None,
+                }
+            } else {
+                auto_only_reasoning_spec()
+            }
+        }
+        "kimi" | "kimi-code" => {
+            if matches!(model.as_str(), "kimi-k3" | "k3" | "k3-256k") {
+                ReasoningControlSpec {
+                    available: vec![
+                        ReasoningSelection::Automatic,
+                        level("low"),
+                        level("high"),
+                        level("max"),
+                    ],
+                    selections_persistable: true,
+                    budget_range: None,
+                    provider_default: level("high"),
+                    forced: false,
+                    modifiable: true,
+                    disabled_reason: None,
+                }
+            } else if model.contains("k2-thinking") || model.contains("kimi-k2-thinking") {
+                ReasoningControlSpec {
+                    available: vec![ReasoningSelection::Enabled],
+                    selections_persistable: false,
+                    budget_range: None,
+                    provider_default: ReasoningSelection::Enabled,
+                    forced: true,
+                    modifiable: false,
+                    disabled_reason: Some("reasoning_required".to_string()),
+                }
+            } else if model.contains("kimi-for-coding") || model.contains("k2.7-code") {
+                ReasoningControlSpec {
+                    available: vec![ReasoningSelection::Enabled],
+                    selections_persistable: false,
+                    budget_range: None,
+                    provider_default: ReasoningSelection::Enabled,
+                    forced: true,
+                    modifiable: false,
+                    disabled_reason: Some("reasoning_required".to_string()),
+                }
+            } else if model.contains("k2.6") {
+                ReasoningControlSpec {
+                    available: vec![
+                        ReasoningSelection::Automatic,
+                        ReasoningSelection::Disabled,
+                        ReasoningSelection::Enabled,
+                    ],
+                    selections_persistable: true,
+                    budget_range: None,
+                    provider_default: ReasoningSelection::Automatic,
+                    forced: false,
+                    modifiable: true,
+                    disabled_reason: None,
+                }
+            } else {
+                auto_only_reasoning_spec()
+            }
+        }
+        _ => auto_only_reasoning_spec(),
+    }
+}
+
+/// Validate a reasoning selection for the active model. Incompatible values
+/// reset directly to automatic rather than nearest-mapping.
+#[must_use]
+pub fn validated_reasoning_selection_for_model(
+    selection: &ReasoningSelection,
+    model: &str,
+    provider_id: Option<&str>,
+) -> ReasoningSelection {
+    let spec = reasoning_control_spec_for_model(model, provider_id);
+    if spec.forced && !spec.modifiable {
+        return spec.provider_default;
+    }
+    if supports_selection(&spec, selection) {
+        selection.clone()
+    } else {
+        ReasoningSelection::Automatic
+    }
 }
 
 /// Parse a (possibly `profile/model`) text reference against the live model
@@ -1262,6 +1659,19 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Change the live effort for this session as well as future transcript
     /// rows. Persistence of the default remains the slash command's concern.
     async fn set_effort_level(&self, _effort: Option<String>) -> Result<(), HandleError> {
+        Ok(())
+    }
+
+    /// Read the active conversation controls snapshot.
+    async fn conversation_controls(&self) -> Option<ConversationControls> {
+        None
+    }
+
+    /// Replace the live reasoning / effort selection for subsequent requests.
+    async fn set_reasoning_selection(
+        &self,
+        _selection: ReasoningSelection,
+    ) -> Result<(), HandleError> {
         Ok(())
     }
 

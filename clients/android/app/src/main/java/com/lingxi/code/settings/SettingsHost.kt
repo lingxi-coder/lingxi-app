@@ -79,6 +79,7 @@ fun SettingsHost(
     onReplayOnboarding: () -> Unit = {},
     onReconnectEngine: () -> Unit = {},
     onOpenTerminal: (LinuxRuntimeTerminalLaunchRequest) -> Unit = {},
+    onPermissionModeChanged: suspend (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val resolvedStore: SettingsStore =
@@ -142,6 +143,16 @@ fun SettingsHost(
 
                 // 隐私与安全 (A6)
                 page(SettingsRoutes.PRIVACY) { PrivacyPage() }
+                page(SettingsRoutes.PERMISSION_MODE) {
+                    PermissionModePage(
+                        selected = state.permissionMode,
+                        effective = state.effectivePermissionMode,
+                        error = state.permissionModeError,
+                        onSelect = { mode ->
+                            resolvedStore.setPermissionMode(mode, onPermissionModeChanged)
+                        },
+                    )
+                }
                 page(SettingsRoutes.OPEN_SOURCE) { OpenSourceLicensesPage() }
 
                 // 智能 — providers (A7) + voice TTS editor
@@ -285,6 +296,7 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.NOTIFICATIONS -> stringResource(SettingsTitles.NOTIFICATIONS)
         SettingsRoutes.INPUT -> stringResource(SettingsTitles.INPUT)
         SettingsRoutes.PRIVACY -> stringResource(SettingsTitles.PRIVACY)
+        SettingsRoutes.PERMISSION_MODE -> stringResource(SettingsTitles.PERMISSION_MODE)
         SettingsRoutes.OPEN_SOURCE -> stringResource(SettingsTitles.OPEN_SOURCE)
         SettingsRoutes.SKILLS -> stringResource(SettingsTitles.SKILLS)
         SettingsRoutes.MCP_LIST -> stringResource(SettingsTitles.MCP)

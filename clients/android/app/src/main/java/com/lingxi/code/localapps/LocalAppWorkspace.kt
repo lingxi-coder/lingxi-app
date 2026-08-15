@@ -24,7 +24,8 @@ fun localAppWorkspace(appFilesRoot: File, appId: String, workspaceRel: String?):
         ?.takeIf { candidate ->
             val segments = candidate.split('/')
             segments.size == 3 && segments[0] == "apps" &&
-                localAppIdPattern.matches(segments[1]) && segments[2] == "workspace"
+                segments[1] == appId && localAppIdPattern.matches(segments[1]) &&
+                segments[2] == "workspace"
         }
         ?: "apps/$appId/workspace"
     val directory = File(appFilesRoot, rel)

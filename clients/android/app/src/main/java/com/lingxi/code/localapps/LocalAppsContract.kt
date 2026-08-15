@@ -2,6 +2,7 @@ package com.lingxi.code.localapps
 
 import android.content.Context
 import androidx.compose.runtime.Immutable
+import com.lingxi.code.model.ModelOption
 
 /**
  * Resolves a localized string for localapps-package code that runs OUTSIDE a
@@ -202,6 +203,10 @@ data class LocalAppsUiState(
     val destination: LocalAppsDestination = LocalAppsDestination.Library,
     val query: String = "",
     val createName: String = "",
+    /** Real provider-qualified model rows reported by the active engine. */
+    val workflowModels: List<ModelOption> = emptyList(),
+    /** Active provider-qualified model reference; null until the engine reports it. */
+    val currentWorkflowModelId: String? = null,
     val details: Map<String, LocalAppDetails> = emptyMap(),
     /**
      * Per-app workspace-scoped session catalogs — the accumulated
@@ -233,7 +238,12 @@ sealed interface LocalAppsAction {
     data class Search(val query: String) : LocalAppsAction
     data class ChangeCreateName(val name: String) : LocalAppsAction
     /** Creates a new app from a one-line brief. */
-    data class CreateFromBrief(val brief: String, val gitEnabled: Boolean = true) : LocalAppsAction
+    data class CreateFromBrief(
+        val brief: String,
+        val gitEnabled: Boolean = true,
+        /** Null follows the current conversation; otherwise a provider-qualified catalog id. */
+        val workflowModel: String? = null,
+    ) : LocalAppsAction
     data class OpenApp(val appId: String) : LocalAppsAction
     /**
      * (Re)load one page of the app's session catalog. `offset == null` asks

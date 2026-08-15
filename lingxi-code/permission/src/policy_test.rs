@@ -487,6 +487,26 @@ mod tests {
     }
 
     #[test]
+    fn workspace_wide_read_and_edit_rules_do_not_escape_cwd() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Read(./**)", "Edit(./**)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Read", &edit("/proj/src/main.rs")),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Write", &edit("/proj/src/main.rs")),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Edit", &edit("/outside/main.rs")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
     fn content_deny_rule_denies_only_matching_path() {
         let p = policy_with_roots(
             r#"{ "permissions": { "deny": ["Read(./secrets/**)"] } }"#,
@@ -2663,6 +2683,53 @@ mod tests {
                 ..
             } if e.contains("blocked by a deny rule") => {
                 panic!("read path must not hit the output-redirect deny guard")
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn input_redirect_matching_read_deny_rule_is_denied() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Read(secrets/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        for command in [
+            "cat < secrets/keys.txt",
+            "cat <> secrets/keys.txt",
+            "cat <& secrets/keys.txt",
+        ] {
+            match p.authorize("Bash", &bash(command)) {
+                PermissionResult::Deny {
+                    explanation,
+                    reason,
+                    ..
+                } => {
+                    assert_eq!(
+                        explanation.as_deref(),
+                        Some("Input redirection from '/proj/secrets/keys.txt' was blocked by a deny rule.")
+                    );
+                    assert!(
+                        matches!(reason, PermissionDecisionReason::MatchedRule { .. }),
+                        "deny must be rule-typed, got {reason:?}"
+                    );
+                }
+                other => panic!("expected input redirect deny for {command:?}, got {other:?}"),
+            }
+        }
+        assert!(!matches!(
+            p.authorize("Bash", &bash("cat <&0")),
+            PermissionResult::Deny {
+                explanation: Some(ref e),
+                ..
+            } if e.contains("Input redirection from")
+        ));
+        match p.authorize("Bash", &bash("echo x > secrets/keys.txt")) {
+            PermissionResult::Deny {
+                explanation: Some(e),
+                ..
+            } if e.contains("blocked by a deny rule") => {
+                panic!("write path must not hit the input-redirect read deny guard")
             }
             _ => {}
         }

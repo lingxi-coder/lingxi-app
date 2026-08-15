@@ -10,10 +10,8 @@
 //!
 //! ## Shape
 //!
-//! [`ClientEventListener`] is an async callback interface
-//! (`#[uniffi::export(callback_interface)]` under the `uniffi` feature) with a
-//! single `on_event(&self, event: ClientEvent)` method. The host registers one
-//! listener per engine handle (F3-04); the adapter holds it as an
+//! [`ClientEventListener`] is an async callback interface. The host registers
+//! one listener per engine handle (F3-04); the adapter holds it as an
 //! `Arc<dyn ClientEventListener>` wrapped in a [`ListenerSink`] so the SAME
 //! lowering pipeline (`AdapterOutputStream` / turn wrapper / permission gate)
 //! that feeds bridge-server feeds the mobile listener unchanged.
@@ -30,7 +28,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use client_protocol::events::ClientEvent;
+use client_protocol::{events::ClientEvent, listings::WorkflowProgressDto};
 
 use crate::sink::ClientEventSink;
 
@@ -54,6 +52,21 @@ pub trait ClientEventListener: Send + Sync {
     /// Implementations must be cheap / non-blocking with respect to the engine
     /// task — they typically enqueue onto the host UI's event stream.
     async fn on_event(&self, event: ClientEvent);
+
+    /// Deliver one structured workflow progress update directly to the host.
+    ///
+    /// This deliberately stays outside [`ClientEvent`]: that enum is already
+    /// close to UniFFI's fixed metadata limit, while a dedicated callback also
+    /// makes the live child-event channel explicit instead of encouraging
+    /// clients to reconstruct state from transcript events.
+    async fn on_workflow_progress(
+        &self,
+        _origin_session_id: String,
+        _task_id: String,
+        _run_id: String,
+        _progress: WorkflowProgressDto,
+    ) {
+    }
 }
 
 /// Bridges a foreign [`ClientEventListener`] to the adapter's transport-agnostic

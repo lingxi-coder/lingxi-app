@@ -26,7 +26,13 @@ struct PlanTasksPanel: View {
     /// every locale-dependent decision in this panel must read THIS locale.
     @Environment(\.locale) private var locale
     let tasks: [ConversationPlanTask]
+    let showsContainer: Bool
     @State private var collapsed = false
+
+    init(tasks: [ConversationPlanTask], showsContainer: Bool = true) {
+        self.tasks = tasks
+        self.showsContainer = showsContainer
+    }
 
     /// `plan::MAX_VISIBLE_TASKS`. A phone has a scrolling viewport, so the
     /// terminal's height-dependent cap does not apply — the flat 5 does.
@@ -35,7 +41,8 @@ struct PlanTasksPanel: View {
     private var visible: [ConversationPlanTask] { Array(tasks.prefix(Self.visibleLimit)) }
     private var hidden: [ConversationPlanTask] { Array(tasks.dropFirst(Self.visibleLimit)) }
 
-    var body: some View {
+    @ViewBuilder
+    private var panelContent: some View {
         VStack(alignment: .leading, spacing: 5) {
             header
             if !collapsed {
@@ -48,17 +55,25 @@ struct PlanTasksPanel: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(theme.surface)
-                .overlay(
+    }
+
+    var body: some View {
+        if showsContainer {
+            panelContent
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(theme.border, lineWidth: 1)
+                        .fill(theme.surface)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(theme.border, lineWidth: 1)
+                        )
                 )
-        )
-        .accessibilityIdentifier("chat.plan-panel")
+                .accessibilityIdentifier("chat.plan-panel")
+        } else {
+            panelContent
+        }
     }
 
     private var header: some View {

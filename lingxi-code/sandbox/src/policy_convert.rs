@@ -9,7 +9,8 @@
 
 use crate::path_pattern::resolve_path_pattern_for_sandbox;
 use crate::runtime_config::{
-    FilesystemRestrictionConfig, NetworkRestrictionConfig, SandboxRuntimeConfig, SettingsJson,
+    FilesystemRestrictionConfig, NetworkRestrictionConfig, RipgrepConfig, SandboxRuntimeConfig,
+    SettingsJson,
 };
 use std::path::{Path, PathBuf};
 
@@ -94,6 +95,13 @@ pub struct SandboxConvertContext {
     /// project `.lingxi/settings.json` and `settings.local.json` are IGNORED.
     /// `None` ⇒ leave the default `false`.
     pub strict_allowlist_override: Option<bool>,
+    /// SOURCE-RESTRICTED `sandbox.ripgrep` (2.1.232), resolved per-source at the
+    /// composition root exactly like [`Self::allow_apple_events_override`].
+    ///
+    /// The oracle honors it only from user / managed-policy / CLI `--settings`;
+    /// project `.lingxi/settings.json` and `settings.local.json` are IGNORED.
+    /// `None` ⇒ leave the runtime default config.
+    pub ripgrep_override: Option<RipgrepConfig>,
 }
 
 /// Parse a `Tool(content)` permission rule string into `(tool, content)`.
@@ -310,9 +318,6 @@ pub fn convert_settings_to_runtime_config(
         if let Some(v) = &s.excluded_commands {
             cfg.excluded_commands.clone_from(v);
         }
-        if let Some(v) = &s.ripgrep {
-            cfg.ripgrep = v.clone();
-        }
     }
 
     // allowManagedDomainsOnly / allowManagedReadPathsOnly enforcement (applied
@@ -353,6 +358,17 @@ pub fn convert_settings_to_runtime_config(
         // in — leaving it would let project settings enable the flag through
         // the merged blob, which is exactly what the restriction forbids.
         cfg.network.strict_allowlist = false;
+    }
+
+    // `sandbox.ripgrep` has the same source restriction as allowAppleEvents /
+    // strictAllowlist in 2.1.232: only user / managed-policy / CLI `--settings`
+    // may set it, so the merged-blob value is ignored and we apply the
+    // composition-root override explicitly here. `None` clears any project/local
+    // merged value back to the runtime default config.
+    if let Some(v) = &ctx.ripgrep_override {
+        cfg.ripgrep = v.clone();
+    } else {
+        cfg.ripgrep = RipgrepConfig::default();
     }
 
     cfg
@@ -678,7 +694,7 @@ fn has_globs_excluding_trailing_double_star(path: &str) -> bool {
 #[cfg(test)]
 mod apple_events_source_tests {
     use super::{convert_settings_to_runtime_config, SandboxConvertContext};
-    use crate::runtime_config::SettingsJson;
+    use crate::runtime_config::{RipgrepConfig, SettingsJson};
 
     fn convert(json: &str, ctx: &SandboxConvertContext) -> bool {
         let settings: SettingsJson = serde_json::from_str(json).expect("settings parse");
@@ -723,6 +739,36 @@ mod apple_events_source_tests {
         // Honored source set it to false: stays false, and a merged-blob `true`
         // (e.g. from an ignored project tier) cannot override it.
         assert!(!convert(r#"{"sandbox": {"allowAppleEvents": true}}"#, &ctx));
+    }
+
+    #[test]
+    fn merged_blob_does_not_set_ripgrep() {
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"sandbox":{"ripgrep":{"command":"rg","args":["--hidden"]}}}"#)
+                .expect("settings parse");
+        let cfg = convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
+        assert_eq!(cfg.ripgrep.command, "");
+        assert!(cfg.ripgrep.args.is_empty());
+        assert_eq!(cfg.ripgrep.argv0, None);
+    }
+
+    #[test]
+    fn context_override_applies_ripgrep() {
+        let settings: SettingsJson =
+            serde_json::from_str(r#"{"sandbox":{"ripgrep":{"command":"ignored"}}}"#)
+                .expect("settings parse");
+        let ctx = SandboxConvertContext {
+            ripgrep_override: Some(RipgrepConfig {
+                command: "/usr/bin/rg".to_string(),
+                args: vec!["--no-config".to_string()],
+                argv0: Some("rg".to_string()),
+            }),
+            ..Default::default()
+        };
+        let cfg = convert_settings_to_runtime_config(&settings, &ctx);
+        assert_eq!(cfg.ripgrep.command, "/usr/bin/rg");
+        assert_eq!(cfg.ripgrep.args, vec!["--no-config"]);
+        assert_eq!(cfg.ripgrep.argv0.as_deref(), Some("rg"));
     }
 }
 

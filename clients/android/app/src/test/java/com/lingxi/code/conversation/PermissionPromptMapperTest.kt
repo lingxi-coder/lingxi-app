@@ -1,6 +1,7 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.PermissionKindDto
+import com.lingxi.code.bindings.PermissionOwnerDto
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.WorkerInfoDto
 import org.junit.Assert.assertEquals
@@ -26,7 +27,8 @@ class PermissionPromptMapperTest {
         kind: PermissionKindDto,
         requestId: ULong = 7uL,
         worker: WorkerInfoDto? = null,
-    ) = PermissionRequest(requestId = requestId, kind = kind, worker = worker)
+        owner: PermissionOwnerDto? = null,
+    ) = PermissionRequest(requestId = requestId, kind = kind, worker = worker, owner = owner)
 
     // --- tool_use_confirm (the only live-sourced kind) --------------------
 
@@ -174,5 +176,27 @@ class PermissionPromptMapperTest {
         )
         assertEquals("scout", prompt.worker?.name)
         assertNull(prompt.worker?.team)
+    }
+
+    @Test
+    fun ownerAttributesChildAndPreservesImmutableSession() {
+        val prompt = permissionRequestToPrompt(
+            request(
+                kind = PermissionKindDto.ToolUseConfirm(
+                    toolName = "Bash",
+                    toolInputJson = "{}",
+                    defaultAllow = false,
+                ),
+                owner = PermissionOwnerDto(
+                    sessionId = "session-a",
+                    turnId = null,
+                    workerName = "design",
+                ),
+            ),
+        )
+
+        assertEquals("design", prompt.worker?.name)
+        assertEquals("session-a", prompt.originSessionId)
+        assertNull(prompt.ownerTurnId)
     }
 }

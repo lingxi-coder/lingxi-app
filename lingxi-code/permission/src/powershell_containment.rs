@@ -3418,6 +3418,118 @@ const J8_FORMATTING: [&str; 11] = [
 ];
 /// `mG_` — New-Item link item-types (claude-code `VLs`).
 const MG_SYMLINK_TYPES: [&str; 3] = ["symboliclink", "junction", "hardlink"];
+const PLS_ACTION_PARAMS: [&str; 4] = [
+    "-erroraction",
+    "-warningaction",
+    "-informationaction",
+    "-progressaction",
+];
+const PLS_ACTION_SHORT_PARAMS: [&str; 4] = ["-ea", "-wa", "-infa", "-proga"];
+const PLS_VARIABLE_PARAMS: [&str; 5] = [
+    "-errorvariable",
+    "-warningvariable",
+    "-informationvariable",
+    "-outvariable",
+    "-pipelinevariable",
+];
+const PLS_VARIABLE_SHORT_PARAMS: [&str; 5] = ["-ev", "-wv", "-iv", "-ov", "-pv"];
+const PLS_VARIABLE_EXTRA_PARAMS: [&str; 4] = [
+    "-variable",
+    "-sessionvariable",
+    "-responseheadersvariable",
+    "-statuscodevariable",
+];
+const PLS_EXACT_COMMON_PARAMS: [&str; 12] = [
+    "-erroraction",
+    "-warningaction",
+    "-informationaction",
+    "-progressaction",
+    "-errorvariable",
+    "-warningvariable",
+    "-informationvariable",
+    "-outvariable",
+    "-pipelinevariable",
+    "-outbuffer",
+    "-verbose",
+    "-debug",
+];
+const PLS_EXACT_COMMON_PARAMS_NO_PROGRESS: [&str; 11] = [
+    "-erroraction",
+    "-warningaction",
+    "-informationaction",
+    "-errorvariable",
+    "-warningvariable",
+    "-informationvariable",
+    "-outvariable",
+    "-pipelinevariable",
+    "-outbuffer",
+    "-verbose",
+    "-debug",
+];
+const PLS_EXACT_BLOCKED_SHORT_PARAMS: [&str; 8] =
+    ["-ev", "-wv", "-iv", "-ov", "-pv", "-ea", "-wa", "-p"];
+
+static PLS_ALLOWED_ACTION_VALUES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "silentlycontinue",
+        "0",
+        "stop",
+        "1",
+        "continue",
+        "2",
+        "ignore",
+        "4",
+    ]
+    .into_iter()
+    .collect()
+});
+
+static PLS_ALLOWED_VARIABLE_SCOPES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    ["global", "script", "local", "private", "variable"]
+        .into_iter()
+        .collect()
+});
+
+static PLS_PROTECTED_VARIABLES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "psdefaultparametervalues",
+        "confirmpreference",
+        "debugpreference",
+        "erroractionpreference",
+        "errorview",
+        "formatenumerationlimit",
+        "informationpreference",
+        "maximumhistorycount",
+        "ofs",
+        "outputencoding",
+        "progresspreference",
+        "psemailserver",
+        "psmoduleautoloadingpreference",
+        "psnativecommandargumentpassing",
+        "psnativecommanduseerroractionpreference",
+        "pssessionapplicationname",
+        "pssessionconfigurationname",
+        "pssessionoption",
+        "psstyle",
+        "transcript",
+        "verbosepreference",
+        "warningpreference",
+        "whatifpreference",
+        "logcommandhealthevent",
+        "logcommandlifecycleevent",
+        "logenginehealthevent",
+        "logenginelifecycleevent",
+        "logproviderhealthevent",
+        "logproviderlifecycleevent",
+        "maximumaliascount",
+        "maximumdrivecount",
+        "maximumerrorcount",
+        "maximumfunctioncount",
+        "maximumvariablecount",
+    ]
+    .into_iter()
+    .collect()
+});
 
 /// `GLs(name)` — is `name` a write cmdlet (post-`wb` normalization)?
 fn gls_is_write(name: &str) -> bool {
@@ -3427,6 +3539,282 @@ fn gls_is_write(name: &str) -> bool {
 /// `ANt(name)` — is `name` the out-null sink (post-`wb` normalization)?
 fn ant_is_out_null(name: &str) -> bool {
     Y8_OUT_NULL.contains(&normalize_cmdlet(name).as_str())
+}
+
+#[derive(Clone)]
+struct PsInlineBinding {
+    colon_idx: usize,
+    post: String,
+    post_resolved: String,
+    is_here_string: bool,
+}
+
+fn pls_matches_param_prefix(name: &str, candidates: &[&str]) -> bool {
+    name.len() >= 2
+        && candidates
+            .iter()
+            .any(|candidate| candidate.starts_with(name))
+}
+
+fn pls_unique_prefix_match<'a>(name: &str, candidates: &'a [&str]) -> Option<&'a str> {
+    if name.len() < 2 {
+        return None;
+    }
+    let mut found = None;
+    for &candidate in candidates {
+        if candidate.starts_with(name) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(candidate);
+        }
+    }
+    found
+}
+
+fn pls_matches_exact_param(name: &str, shorts: &[&str], longs: &[&str]) -> bool {
+    if PLS_EXACT_BLOCKED_SHORT_PARAMS.contains(&name) {
+        return false;
+    }
+    shorts.contains(&name)
+        || [
+            PLS_EXACT_COMMON_PARAMS.as_slice(),
+            PLS_EXACT_COMMON_PARAMS_NO_PROGRESS.as_slice(),
+        ]
+        .into_iter()
+        .filter_map(|universe| pls_unique_prefix_match(name, universe))
+        .any(|candidate| longs.contains(&candidate))
+}
+
+fn pls_matches_action_param(name: &str, exact: bool) -> bool {
+    if exact {
+        pls_matches_exact_param(name, &PLS_ACTION_SHORT_PARAMS, &PLS_ACTION_PARAMS)
+    } else {
+        PLS_ACTION_SHORT_PARAMS.contains(&name)
+            || pls_matches_param_prefix(name, &PLS_ACTION_PARAMS)
+    }
+}
+
+fn pls_matches_variable_param(name: &str, exact: bool) -> bool {
+    if exact {
+        pls_matches_exact_param(name, &PLS_VARIABLE_SHORT_PARAMS, &PLS_VARIABLE_PARAMS)
+    } else {
+        PLS_VARIABLE_SHORT_PARAMS.contains(&name)
+            || pls_matches_param_prefix(name, &PLS_VARIABLE_PARAMS)
+    }
+}
+
+fn pls_matches_extra_variable_param(name: &str) -> bool {
+    name.len() >= 3
+        && PLS_VARIABLE_EXTRA_PARAMS
+            .iter()
+            .any(|candidate| candidate.starts_with(name))
+}
+
+fn pls_normalize_param_variant(name: &str, exact: bool) -> String {
+    if exact && name.as_bytes().get(1) == Some(&b'-') {
+        return name.to_string();
+    }
+    name.char_indices()
+        .filter_map(|(idx, ch)| {
+            if idx > 0 && matches!(ch, '-' | '\'') {
+                None
+            } else {
+                Some(ch)
+            }
+        })
+        .collect()
+}
+
+fn pls_normalize_flag_prefix(arg: &str) -> String {
+    let mut chars = arg.chars();
+    match chars.next() {
+        Some('-') => arg.to_string(),
+        Some(_) => format!("-{}", chars.as_str()),
+        None => String::new(),
+    }
+}
+
+fn pls_parse_inline_binding(arg: &str) -> Option<PsInlineBinding> {
+    let mut chars = arg.chars();
+    let first = chars.next()?;
+    if !EY.contains(&first) && first != '/' {
+        return None;
+    }
+    let colon_idx = arg
+        .char_indices()
+        .skip(1)
+        .find_map(|(idx, ch)| (ch == ':').then_some(idx))?;
+    let post = strip_comments_and_leading_ws(&arg[colon_idx + 1..]).to_string();
+    let post_resolved = strip_comments_and_leading_ws(&battery_backtick_decode(&post)).to_string();
+    let is_here_string = matches!(post.chars().next(), Some('@'))
+        && post.chars().nth(1).is_some_and(is_quote_char)
+        || matches!(post_resolved.chars().next(), Some('@'))
+            && post_resolved.chars().nth(1).is_some_and(is_quote_char);
+    Some(PsInlineBinding {
+        colon_idx,
+        post,
+        post_resolved,
+        is_here_string,
+    })
+}
+
+fn pls_has_action_preference_arg(args: &[String], element_types: &[String], exact: bool) -> bool {
+    for (arg_idx, arg) in args.iter().enumerate() {
+        if !arg.chars().next().is_some_and(|c| EY.contains(&c)) {
+            continue;
+        }
+        if let Some(kind) = element_types.get(arg_idx + 1) {
+            if kind != "Parameter" {
+                continue;
+            }
+        }
+        let normalized = pls_normalize_flag_prefix(arg);
+        let colon_idx = normalized.find(':').filter(|idx| *idx > 0);
+        let flag = match colon_idx {
+            Some(idx) => normalized[..idx].to_lowercase(),
+            None => normalized.to_lowercase(),
+        };
+        let mut decoded_value = None;
+        if !pls_matches_action_param(&flag, exact)
+            && !pls_matches_action_param(&pls_normalize_param_variant(&flag, exact), exact)
+        {
+            let decoded_flag = battery_backtick_decode(&flag).to_lowercase();
+            let decoded_colon = decoded_flag.find(':').filter(|idx| *idx > 0);
+            let decoded_head =
+                decoded_colon.map_or(decoded_flag.as_str(), |idx| &decoded_flag[..idx]);
+            if !pls_matches_action_param(decoded_head, exact)
+                && !pls_matches_action_param(
+                    &pls_normalize_param_variant(decoded_head, exact),
+                    exact,
+                )
+                && decoded_flag.is_ascii()
+            {
+                continue;
+            }
+            if let Some(colon_idx) = decoded_colon {
+                let inline = decoded_flag[colon_idx + 1..].trim();
+                decoded_value = Some(if inline.is_empty() {
+                    args.get(arg_idx + 1).cloned().unwrap_or_default()
+                } else {
+                    inline.to_string()
+                });
+            }
+        }
+        let fallback = colon_idx
+            .map(|idx| normalized[idx + 1..].to_string())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| args.get(arg_idx + 1).cloned())
+            .unwrap_or_default();
+        let value = decoded_value.unwrap_or(fallback);
+        let normalized_value = strip_surrounding_quotes(&value).trim().to_lowercase();
+        if !normalized_value.is_empty()
+            && !PLS_ALLOWED_ACTION_VALUES.contains(normalized_value.as_str())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn pls_has_variable_write_arg(args: &[String], element_types: &[String], exact: bool) -> bool {
+    let matches_param = |name: &str| {
+        pls_matches_variable_param(name, exact)
+            || (!exact && (name.ends_with("variable") || pls_matches_extra_variable_param(name)))
+    };
+    for (idx, arg) in args.iter().enumerate() {
+        if !arg.chars().next().is_some_and(|c| EY.contains(&c)) {
+            continue;
+        }
+        if let Some(kind) = element_types.get(idx + 1) {
+            if kind != "Parameter" {
+                continue;
+            }
+        }
+        let normalized = pls_normalize_flag_prefix(arg);
+        let binding = pls_parse_inline_binding(&normalized);
+        let flag = binding
+            .as_ref()
+            .map_or_else(|| normalized.as_str(), |info| &normalized[..info.colon_idx])
+            .to_lowercase();
+        if !matches_param(&flag) && !matches_param(&pls_normalize_param_variant(&flag, exact)) {
+            let decoded_flag = battery_backtick_decode(&flag).to_lowercase();
+            if decoded_flag != flag
+                && (matches_param(&decoded_flag)
+                    || matches_param(&pls_normalize_param_variant(&decoded_flag, exact)))
+            {
+                return true;
+            }
+            if let Some(idx) = decoded_flag.find(':').filter(|idx| *idx > 0) {
+                if matches_param(&pls_normalize_param_variant(&decoded_flag[..idx], exact)) {
+                    return true;
+                }
+            }
+            if !decoded_flag.is_ascii() {
+                return true;
+            }
+            continue;
+        }
+        let value = if let Some(info) = binding {
+            if info.is_here_string {
+                return true;
+            }
+            if info.post.contains('$') || info.post.contains('`') {
+                return true;
+            }
+            if !info.post_resolved.is_empty() {
+                info.post_resolved
+            } else {
+                args.get(idx + 1).cloned().unwrap_or_default()
+            }
+        } else {
+            args.get(idx + 1).cloned().unwrap_or_default()
+        };
+        if value.contains('$') || value.contains('`') {
+            return true;
+        }
+        let normalized_value = clean_value(&value).trim().to_lowercase();
+        if normalized_value.is_empty() {
+            continue;
+        }
+        let trimmed = normalized_value
+            .strip_prefix('+')
+            .unwrap_or(&normalized_value);
+        let mut variable_name = trimmed;
+        if let Some(scope_idx) = trimmed.rfind(':') {
+            let scope = &trimmed[..scope_idx];
+            if !PLS_ALLOWED_VARIABLE_SCOPES.contains(scope)
+                && !scope.chars().all(|ch| ch.is_ascii_digit())
+            {
+                return true;
+            }
+            variable_name = &trimmed[scope_idx + 1..];
+        }
+        if !variable_name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+        {
+            return true;
+        }
+        if PLS_PROTECTED_VARIABLES.contains(variable_name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn pls_guard_message(cmd: &PsCommand, nested: bool) -> String {
+    if nested {
+        format!(
+            "Variable-writing or ActionPreference argument in nested '{}' requires approval",
+            cmd.name
+        )
+    } else {
+        format!(
+            "Variable-writing or ActionPreference argument in '{}' requires approval",
+            cmd.name
+        )
+    }
 }
 
 /// `ULs(cmd, command)` — is `cmd` a read-only formatting/display cmdlet whose
@@ -3822,6 +4210,11 @@ pub fn ps_accept_edits_validate(
                     }
                 }
             }
+            if pls_has_variable_write_arg(&c.args, &c.element_types, false)
+                || pls_has_action_preference_arg(&c.args, &c.element_types, false)
+            {
+                return Passthrough(pls_guard_message(c, false));
+            }
             if let Some(reason) = zls_command_tail(c, false) {
                 return Passthrough(reason);
             }
@@ -3835,6 +4228,11 @@ pub fn ps_accept_edits_validate(
                     "Nested command '{}' resolved from a path-like name and requires approval",
                     c.name
                 ));
+            }
+            if pls_has_variable_write_arg(&c.args, &c.element_types, false)
+                || pls_has_action_preference_arg(&c.args, &c.element_types, false)
+            {
+                return Passthrough(pls_guard_message(c, true));
             }
             if let Some(reason) = zls_command_tail(c, true) {
                 return Passthrough(reason);

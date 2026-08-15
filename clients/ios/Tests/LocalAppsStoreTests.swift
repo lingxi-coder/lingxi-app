@@ -1106,6 +1106,36 @@ final class LocalAppsStoreTests: XCTestCase {
     }
 
     #if canImport(engine_mobileFFI)
+        func testCreateAppSubmitsSelectedWorkflowModelAsStructuredData() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            let didSubmit = await store.createApp(
+                brief: "一个记事本",
+                modelOverride: "  deepseek/deepseek-v4-flash  "
+            )
+            XCTAssertTrue(didSubmit)
+
+            let command = try XCTUnwrap(submitted.last)
+            guard case let .createApp(
+                name,
+                origin,
+                brief,
+                gitEnabled,
+                workflowModel,
+                conversationId
+            ) = command else {
+                return XCTFail("expected CreateApp, got \(command)")
+            }
+            XCTAssertEqual(name, "")
+            XCTAssertEqual(origin, .library)
+            XCTAssertEqual(brief, "一个记事本")
+            XCTAssertTrue(gitEnabled)
+            XCTAssertEqual(workflowModel, "deepseek/deepseek-v4-flash")
+            XCTAssertNil(conversationId)
+        }
+
         /// v3: creation should land in the INIT CHAT, and the engine
         /// announces twice — first the bare record, then the
         /// `init_session_id` pin. The claim must wait for the pin (second

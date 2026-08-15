@@ -241,6 +241,17 @@ struct RootView: View {
                     .zIndex(100)
                     .transition(.opacity)
             }
+
+            #if canImport(engine_mobileFFI)
+                // Engine permissions are app-scoped, not chat-scoped. The host
+                // presents above the current UIKit surface, including sheets and
+                // full-screen covers opened after a workflow starts.
+                EnginePermissionPromptHost(
+                    model: source.model,
+                    onApprove: { source.approvePermission($0, $1) },
+                    onDeny: { source.denyPermission($0) }
+                )
+            #endif
         }
         .environment(\.locale, localization.effectiveLocale())
         .onChange(of: scenePhase, handleScenePhase)
@@ -324,6 +335,11 @@ struct RootView: View {
                 openTerminal: {
                     navigation.closeSettings()
                     openCurrentWorkspaceTerminal()
+                },
+                onPermissionModeChanged: { mode in
+                    #if canImport(engine_mobileFFI)
+                        try await source.submitEngineCommand(.setPermissionMode(mode: mode))
+                    #endif
                 },
                 onClose: { navigation.closeSettings() },
                 navigation: navigation
@@ -456,6 +472,8 @@ struct RootView: View {
             LocalAppsRootView(
                 store: localAppsStore,
                 initialAppID: appID,
+                availableModels: source.model.availableModels,
+                activeModelID: source.model.activeModelId,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
                 onOpenCreatedAppSession: openCreatedAppSession,
@@ -493,6 +511,8 @@ struct RootView: View {
             LocalAppsRootView(
                 store: localAppsStore,
                 initialAppID: appID,
+                availableModels: source.model.availableModels,
+                activeModelID: source.model.activeModelId,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
                 onOpenCreatedAppSession: openCreatedAppSession,
@@ -513,8 +533,14 @@ struct RootView: View {
     /// The create-flow landing: same as `openAppSession`, plus the queued
     /// kickoff message that starts the create-local-app flow once the empty
     /// init session is live.
-    private func openCreatedAppSession(appID: String, sessionID: String, brief: String) {
+    private func openCreatedAppSession(
+        appID: String,
+        sessionID: String,
+        brief: String,
+        modelOverride _: String?
+    ) {
         navigation.closePresentedRoute()
+        let kickoff = String(localized: "local_apps_init_kickoff \(brief)")
         // The library consumed its one-shot signal to call this, so a refused
         // switch would lose the created app with nothing left to re-arm it.
         // `switchScope` refuses only while another switch is in flight, so
@@ -522,14 +548,19 @@ struct RootView: View {
         guard switchScope(
             to: .localApp(appID),
             resumeSessionID: sessionID,
-            initialPrompt: String(localized: "local_apps_init_kickoff \(brief)")
+            initialPrompt: kickoff
         ) else {
             Task { @MainActor in
                 for _ in 0..<40 where projectSwitching {
                     try? await Task.sleep(for: .milliseconds(250))
                 }
                 guard !projectSwitching else { return }
-                openCreatedAppSession(appID: appID, sessionID: sessionID, brief: brief)
+                openCreatedAppSession(
+                    appID: appID,
+                    sessionID: sessionID,
+                    brief: brief,
+                    modelOverride: nil
+                )
             }
             return
         }

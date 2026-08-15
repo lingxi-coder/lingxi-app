@@ -114,6 +114,10 @@ pub struct AppRecord {
     /// it for context; the list page displays it. Stored ONCE — a second
     /// copy would inevitably drift.
     pub brief: String,
+    /// Provider-qualified model selected for app-creation workflows. The
+    /// mobile workflow launcher reads this from the app-scoped metadata file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_model: Option<String>,
     /// Whether Git controls this app's source checkpoints and restores.
     #[serde(default = "default_git_version_control")]
     pub git_enabled: bool,
@@ -265,6 +269,7 @@ mod tests {
             id: "abc123".into(),
             name: "Habits".into(),
             brief: "Track daily habits".into(),
+            workflow_model: None,
             git_enabled: true,
             created_at_ms: 1_700_000_000_000,
             updated_at_ms: 1_700_000_000_001,

@@ -221,10 +221,25 @@ impl OrchestratorHandle for ConversationOrchestrator {
             tokens_at_start: goal.tokens_at_start,
         });
         let resumed_effort = runtime.effort.clone();
+        let resumed_reasoning = runtime.reasoning_selection.clone();
+        let resumed_model = s.model.clone();
+        let resumed_profile = s.model_profile.clone();
         // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
         s.session_id = session_id;
         drop(s);
-        self.restore_effort_from_resume(resumed_effort);
+        if let Some(selection) = resumed_reasoning {
+            self.restore_reasoning_selection_from_resume(
+                &resumed_model,
+                resumed_profile.as_deref(),
+                selection,
+            );
+        } else {
+            self.restore_effort_from_resume(
+                &resumed_model,
+                resumed_profile.as_deref(),
+                resumed_effort,
+            );
+        }
         self.restore_main_thread_agent_from_resume(
             runtime.main_thread_agent_type,
             runtime.main_thread_agent_definition,
@@ -722,7 +737,36 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn set_effort_level(&self, effort: Option<String>) -> Result<(), HandleError> {
-        ConversationOrchestrator::set_effort(self, effort);
+        let state = self.session.lock().await;
+        let selection = effort
+            .map(|id| traits::ReasoningSelection::Level { id })
+            .unwrap_or(traits::ReasoningSelection::Automatic);
+        self.set_reasoning_selection_for_model(
+            &state.model,
+            state.model_profile.as_deref(),
+            selection,
+        );
+        Ok(())
+    }
+
+    async fn conversation_controls(&self) -> Option<traits::ConversationControls> {
+        let state = self.session.lock().await;
+        Some(self.conversation_controls_for_model(
+            &state.model,
+            state.model_profile.as_deref(),
+        ))
+    }
+
+    async fn set_reasoning_selection(
+        &self,
+        selection: traits::ReasoningSelection,
+    ) -> Result<(), HandleError> {
+        let state = self.session.lock().await;
+        self.set_reasoning_selection_for_model(
+            &state.model,
+            state.model_profile.as_deref(),
+            selection,
+        );
         Ok(())
     }
 
@@ -1671,9 +1715,10 @@ mod tests {
             None,
             None,
             traits::ResumeRuntimeSnapshot {
-                model: "claude-opus-4-1".to_string(),
+                model: "claude-opus-4-8".to_string(),
                 model_profile: Some("anthropic".to_string()),
                 effort: Some("high".to_string()),
+                reasoning_selection: None,
                 main_thread_agent_type: None,
                 main_thread_agent_definition: None,
                 transcript_only_message_ids: vec![transcript_only],
@@ -1695,7 +1740,7 @@ mod tests {
         .expect("hot resume");
 
         let session = orch.session.lock().await;
-        assert_eq!(session.model, "claude-opus-4-1");
+        assert_eq!(session.model, "claude-opus-4-8");
         assert_eq!(session.model_profile.as_deref(), Some("anthropic"));
         assert!(session.transcript_only_messages.contains(&transcript_only));
         assert!(session.compact_summary_messages.contains(&compact_summary));

@@ -19,6 +19,18 @@ struct Composer: View {
     var availableModels: [String] = []
     var activeModelId: String = ""
     var onSelectModel: (String) -> Void = { _ in }
+    var reasoningSelection: String = "automatic"
+    var reasoningOptions: [String] = []
+    var reasoningOptionDetails: [ConversationReasoningOption] = []
+    var reasoningBudgetRange: ClosedRange<UInt64>? = nil
+    var reasoningDisabledReason: String? = nil
+    var permissionMode: String = "auto"
+    var effectivePermissionMode: String = "auto"
+    var permissionOptions: [ConversationPermissionOption] = []
+    var controlsPending: Bool = false
+    var controlsError: String? = nil
+    var onSelectReasoning: (String) -> Void = { _ in }
+    var onSelectPermission: (String) -> Void = { _ in }
     /// Previously-picked refs, most-recent-first, pinned above the provider
     /// sections in the picker. Owned by the caller (see ChatView) because it
     /// outlives any one composer instance.
@@ -66,6 +78,7 @@ struct Composer: View {
     var voiceInteractionMode: VoiceInteractionMode? = nil
 
     @State private var modelOpen = false
+    @State private var controlsOpen = false
     @State private var holding = false
     @State private var cancellingHold = false
     @State private var suppressMicTap = false
@@ -76,6 +89,18 @@ struct Composer: View {
         availableModels: [String] = [],
         activeModelId: String = "",
         onSelectModel: @escaping (String) -> Void = { _ in },
+        reasoningSelection: String = "automatic",
+        reasoningOptions: [String] = [],
+        reasoningOptionDetails: [ConversationReasoningOption] = [],
+        reasoningBudgetRange: ClosedRange<UInt64>? = nil,
+        reasoningDisabledReason: String? = nil,
+        permissionMode: String = "auto",
+        effectivePermissionMode: String = "auto",
+        permissionOptions: [ConversationPermissionOption] = [],
+        controlsPending: Bool = false,
+        controlsError: String? = nil,
+        onSelectReasoning: @escaping (String) -> Void = { _ in },
+        onSelectPermission: @escaping (String) -> Void = { _ in },
         recentModels: [String] = [],
         draft: Binding<String>,
         onSend: @escaping (String) -> Void,
@@ -102,6 +127,18 @@ struct Composer: View {
         self.availableModels = availableModels
         self.activeModelId = activeModelId
         self.onSelectModel = onSelectModel
+        self.reasoningSelection = reasoningSelection
+        self.reasoningOptions = reasoningOptions
+        self.reasoningOptionDetails = reasoningOptionDetails
+        self.reasoningBudgetRange = reasoningBudgetRange
+        self.reasoningDisabledReason = reasoningDisabledReason
+        self.permissionMode = permissionMode
+        self.effectivePermissionMode = effectivePermissionMode
+        self.permissionOptions = permissionOptions
+        self.controlsPending = controlsPending
+        self.controlsError = controlsError
+        self.onSelectReasoning = onSelectReasoning
+        self.onSelectPermission = onSelectPermission
         self.recentModels = recentModels
         self._draft = draft
         self.onSend = onSend
@@ -183,6 +220,7 @@ struct Composer: View {
                     .buttonStyle(ComposerActionButtonStyle())
                     .accessibilityLabel("composer_add_attachment")
                     modelChip
+                    controlsChip
                     Spacer()
                     if isCancelling || slashCommandPending {
                         ProgressView()
@@ -308,6 +346,23 @@ struct Composer: View {
                 },
                 onDismiss: { modelOpen = false })
         }
+        .sheet(isPresented: $controlsOpen) {
+            ConversationControlsSheet(
+                reasoningSelection: reasoningSelection,
+                reasoningOptions: reasoningOptions,
+                reasoningOptionDetails: reasoningOptionDetails,
+                reasoningBudgetRange: reasoningBudgetRange,
+                reasoningDisabledReason: reasoningDisabledReason,
+                permissionMode: permissionMode,
+                effectivePermissionMode: effectivePermissionMode,
+                permissionOptions: permissionOptions,
+                controlsPending: controlsPending,
+                controlsError: controlsError,
+                onSelectReasoning: { value in onSelectReasoning(value) },
+                onSelectPermission: { value in onSelectPermission(value) },
+                onDismiss: { controlsOpen = false }
+            )
+        }
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
                 Spacer()
@@ -402,6 +457,26 @@ struct Composer: View {
         .buttonStyle(ComposerActionButtonStyle())
         .disabled(availableModels.isEmpty)
         .accessibilityIdentifier("composer.model")
+    }
+
+    private var controlsChip: some View {
+        Button { controlsOpen = true } label: {
+            HStack(spacing: 4) {
+                Text(reasoningSelection == "automatic" ? "Auto" : reasoningSelection.capitalized)
+                Text("·")
+                Text(effectivePermissionMode != permissionMode ? "\(permissionMode) → \(effectivePermissionMode)" : permissionMode)
+            }
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(t.text2)
+            .padding(.horizontal, 8)
+            .frame(minHeight: 40)
+            .background(controlsOpen ? t.surfaceHover : .clear)
+            .clipShape(.rect(cornerRadius: 10))
+        }
+        .buttonStyle(ComposerActionButtonStyle())
+        .disabled(controlsPending)
+        .accessibilityLabel("composer.controls")
+        .accessibilityIdentifier("composer.controls")
     }
 
     private var slashSuggestions: [SlashCommandSuggestion] {

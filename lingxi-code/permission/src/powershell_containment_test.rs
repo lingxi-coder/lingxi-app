@@ -1755,6 +1755,181 @@ fn zls_passthrough_on_h3_array_literal_child() {
 }
 
 #[test]
+fn zls_allows_safe_outvariable_binding() {
+    let c = zc(
+        "Set-Content",
+        "cmdlet",
+        &["-Path", "./f.txt", "-Value", "x", "-OutVariable", "foo"],
+        &[
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+        ],
+    );
+    assert_eq!(
+        ae(&[zstmt(vec![PsElement::Command(c)])]),
+        PsAcceptEditsResult::Allow
+    );
+}
+
+#[test]
+fn zls_passthrough_on_protected_variable_write_arg_exact_message() {
+    let c = zc(
+        "Set-Content",
+        "cmdlet",
+        &[
+            "-Path",
+            "./f.txt",
+            "-Value",
+            "x",
+            "-OutVariable",
+            "PSDefaultParameterValues",
+        ],
+        &[
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+        ],
+    );
+    assert_eq!(
+        ae(&[zstmt(vec![PsElement::Command(c)])]),
+        PsAcceptEditsResult::Passthrough(
+            "Variable-writing or ActionPreference argument in 'Set-Content' requires approval"
+                .to_string(),
+        )
+    );
+}
+
+#[test]
+fn zls_passthrough_on_unsafe_action_preference_value_exact_message() {
+    let c = zc(
+        "Set-Content",
+        "cmdlet",
+        &["-Path", "./f.txt", "-Value", "x", "-ErrorAction", "Suspend"],
+        &[
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+        ],
+    );
+    assert_eq!(
+        ae(&[zstmt(vec![PsElement::Command(c)])]),
+        PsAcceptEditsResult::Passthrough(
+            "Variable-writing or ActionPreference argument in 'Set-Content' requires approval"
+                .to_string(),
+        )
+    );
+}
+
+#[test]
+fn zls_passthrough_on_obfuscated_empty_inline_action_preference_value() {
+    let c = zc(
+        "Set-Content",
+        "cmdlet",
+        &[
+            "-Path",
+            "./f.txt",
+            "-Value",
+            "x",
+            "-Err`orAction:",
+            "Suspend",
+        ],
+        &[
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+            "Parameter",
+            "StringConstant",
+        ],
+    );
+    assert_eq!(
+        ae(&[zstmt(vec![PsElement::Command(c)])]),
+        PsAcceptEditsResult::Passthrough(
+            "Variable-writing or ActionPreference argument in 'Set-Content' requires approval"
+                .to_string(),
+        )
+    );
+}
+
+#[test]
+fn pls_guards_ignore_slash_prefixed_arguments_like_the_oracle() {
+    let args = vec!["/ErrorAction".to_string(), "Suspend".to_string()];
+    let element_types = vec![
+        "StringConstant".to_string(),
+        "Parameter".to_string(),
+        "StringConstant".to_string(),
+    ];
+    assert!(!pls_has_action_preference_arg(&args, &element_types, false));
+
+    let args = vec![
+        "/OutVariable".to_string(),
+        "PSDefaultParameterValues".to_string(),
+    ];
+    assert!(!pls_has_variable_write_arg(&args, &element_types, false));
+}
+
+#[test]
+fn zls_passthrough_on_nested_variable_write_arg_exact_message() {
+    let stmt = PsStatement {
+        commands: vec![PsElement::Command(zc(
+            "Set-Content",
+            "cmdlet",
+            &["-Path", "./outer.txt", "-Value", "ok"],
+            &[
+                "StringConstant",
+                "Parameter",
+                "StringConstant",
+                "Parameter",
+                "StringConstant",
+            ],
+        ))],
+        nested_commands: vec![zc(
+            "Set-Content",
+            "cmdlet",
+            &[
+                "-Path",
+                "./f.txt",
+                "-Value",
+                "x",
+                "-OutVariable",
+                "PSDefaultParameterValues",
+            ],
+            &[
+                "StringConstant",
+                "Parameter",
+                "StringConstant",
+                "Parameter",
+                "StringConstant",
+                "Parameter",
+                "StringConstant",
+            ],
+        )],
+        ..PsStatement::default()
+    };
+    assert_eq!(
+        ae(&[stmt]),
+        PsAcceptEditsResult::Passthrough(
+            "Variable-writing or ActionPreference argument in nested 'Set-Content' requires approval"
+                .to_string(),
+        )
+    );
+}
+
+#[test]
 fn zls_passthrough_on_empty_statements() {
     assert!(matches!(
         ps_accept_edits_validate(&[], &[], false),

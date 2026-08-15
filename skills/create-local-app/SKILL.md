@@ -145,10 +145,13 @@ and enable immediately if ready. Lucide/SVG is sufficient for ordinary icons.
 
 ## Build orchestration
 
-Call the `local-app-build` workflow once with the confirmed spec:
+Call the `local-app-build` workflow once with the confirmed spec. When the
+create-flow kickoff includes a provider-qualified workflow model override,
+pass it byte-for-byte as `args.model`; otherwise omit `model` so every phase
+inherits the current session's live provider/model selection:
 
 ```json
-{"name":"local-app-build","args":{"app_id":"<id>","spec":"<confirmed spec>"}}
+{"name":"local-app-build","args":{"app_id":"<id>","spec":"<confirmed spec>","model":"<optional provider/model>"}}
 ```
 
 The workflow is deterministic and owns these phases in order:

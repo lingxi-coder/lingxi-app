@@ -14,6 +14,7 @@ use crate::{
 
 use base64::Engine;
 use serde_json::Value;
+use crate::reasoning_controls::{request_reasoning_intent, RequestReasoningIntent};
 
 #[derive(Debug, Clone)]
 #[allow(missing_docs)]
@@ -100,17 +101,23 @@ impl WireCodec for OpenAiResponsesCodec {
             body.insert("top_p".to_string(), Value::from(top_p));
         }
 
-        if let Some(reasoning) = &request.reasoning {
+        let intent = request_reasoning_intent(request);
+        if !matches!(intent, RequestReasoningIntent::Automatic | RequestReasoningIntent::LegacyAdaptive) {
+            let effort = match intent {
+                RequestReasoningIntent::Disabled => "none".to_string(),
+                RequestReasoningIntent::Enabled => "high".to_string(),
+                RequestReasoningIntent::Level(level) => level,
+                RequestReasoningIntent::EffortBudget(tokens)
+                | RequestReasoningIntent::LegacyBudget(tokens) => map_reasoning_effort(tokens).to_string(),
+                RequestReasoningIntent::Automatic | RequestReasoningIntent::LegacyAdaptive => unreachable!(),
+            };
+            body.insert("reasoning".to_string(), serde_json::json!({"effort": effort}));
+        } else if let Some(crate::ReasoningConfig::Enabled { budget_tokens }) = &request.reasoning {
             // The Responses API only accepts discrete effort levels. `Adaptive`
             // never reaches this codec (only the Anthropic/firstParty path emits
             // it); map it to the dynamic default `"high"` (budget 0 buckets to
             // `"low"`, so use the max effort for the model-decides case).
-            let effort = match reasoning {
-                crate::ReasoningConfig::Enabled { budget_tokens } => {
-                    map_reasoning_effort(*budget_tokens)
-                }
-                crate::ReasoningConfig::Adaptive => "high",
-            };
+            let effort = map_reasoning_effort(*budget_tokens);
             body.insert(
                 "reasoning".to_string(),
                 serde_json::json!({"effort": effort}),

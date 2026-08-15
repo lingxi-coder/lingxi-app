@@ -85,6 +85,19 @@ import XCTest
                 terminal.fulfill()
             }
         }
+
+        func onWorkflowProgress(
+            originSessionId _: String,
+            taskId _: String,
+            runId _: String,
+            progress _: WorkflowProgressDto
+        ) async {}
+
+        func onWorkflowProgress(
+            taskId _: String,
+            runId _: String,
+            progress _: WorkflowProgressDto
+        ) async {}
     }
 
     /// A no-op `IosPermissionSink` for the keyless round-trip: the keyless turn
@@ -96,6 +109,17 @@ import XCTest
 
     final class NoopEventListener: IosEventListener, @unchecked Sendable {
         func onEvent(event: ClientEvent) async {}
+        func onWorkflowProgress(
+            originSessionId _: String,
+            taskId _: String,
+            runId _: String,
+            progress _: WorkflowProgressDto
+        ) async {}
+        func onWorkflowProgress(
+            taskId _: String,
+            runId _: String,
+            progress _: WorkflowProgressDto
+        ) async {}
     }
 
     /// A test listener that fulfils a distinct expectation for each model event
@@ -128,6 +152,20 @@ import XCTest
                 break
             }
         }
+
+
+        func onWorkflowProgress(
+            originSessionId _: String,
+            taskId _: String,
+            runId _: String,
+            progress _: WorkflowProgressDto
+        ) async {}
+
+        func onWorkflowProgress(
+            taskId _: String,
+            runId _: String,
+            progress _: WorkflowProgressDto
+        ) async {}
     }
 
     final class EngineRoundtripTests: XCTestCase {

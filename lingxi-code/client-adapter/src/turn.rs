@@ -249,6 +249,7 @@ pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
         OrchestratorError::MaxTurnsReached { .. } => ErrorKindDto::MaxTurns,
         OrchestratorError::StreamEndedWithoutStop
         | OrchestratorError::Internal(_)
+        | OrchestratorError::PermissionAbort { .. }
         | OrchestratorError::Compaction(_)
         | OrchestratorError::CompactionCancelled
         // Task 7: all consecutive-overloaded retries exhausted with no fallback model.
@@ -381,6 +382,12 @@ mod tests {
             ),
             (
                 OrchestratorError::Internal("boom".into()),
+                ErrorKindDto::Internal,
+            ),
+            (
+                OrchestratorError::PermissionAbort {
+                    message: "Agent aborted: too many classifier denials in headless mode".into(),
+                },
                 ErrorKindDto::Internal,
             ),
             (

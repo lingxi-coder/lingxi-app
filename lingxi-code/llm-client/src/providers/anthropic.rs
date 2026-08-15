@@ -3,6 +3,7 @@ use crate::{
     LlmResponse, MessageDeltaPayload, ProviderRequest, ProviderResponse, RawStreamFrame,
     ResponseFormat, StreamDecoder, ToolDeclaration, WireCodec,
 };
+use crate::reasoning_controls::{request_reasoning_intent, RequestReasoningIntent};
 
 use std::time::Duration;
 
@@ -234,28 +235,25 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
             .collect();
         body.insert("system".to_string(), Value::Array(system));
     }
-    if let Some(reasoning) = &request.reasoning {
-        // Mirror claude-code's `thinking` field (claude.ts:1596-1630):
-        // adaptive → {"type":"adaptive"}; fixed budget → {"type":"enabled", …}.
-        let thinking = match reasoning {
-            crate::ReasoningConfig::Adaptive => serde_json::json!({"type": "adaptive"}),
-            crate::ReasoningConfig::Enabled { budget_tokens } => {
-                serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens})
-            }
-        };
-        body.insert("thinking".to_string(), thinking);
-    }
-    if let Some(effort) = &request.effort {
-        // claude-code `output_config.effort` (the `effort-2025-11-24` beta): a
-        // level string or an integer budget, emitted verbatim. Merge into any
-        // `output_config` already set (e.g. by structured output).
-        if let Some(oc) = body
-            .entry("output_config".to_string())
-            .or_insert_with(|| Value::Object(serde_json::Map::new()))
-            .as_object_mut()
-        {
-            oc.insert("effort".to_string(), effort.clone());
+    match request_reasoning_intent(request) {
+        RequestReasoningIntent::LegacyAdaptive => {
+            body.insert("thinking".to_string(), serde_json::json!({"type": "adaptive"}));
         }
+        RequestReasoningIntent::LegacyBudget(budget_tokens) => {
+            body.insert(
+                "thinking".to_string(),
+                serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens}),
+            );
+        }
+        RequestReasoningIntent::Level(level) => {
+            insert_output_effort(&mut body, Value::String(level));
+        }
+        RequestReasoningIntent::EffortBudget(tokens) => {
+            insert_output_effort(&mut body, Value::from(tokens));
+        }
+        RequestReasoningIntent::Automatic
+        | RequestReasoningIntent::Disabled
+        | RequestReasoningIntent::Enabled => {}
     }
     if let Some(hint) = &request.context_hint {
         // claude-code `context_hint: {enabled, target_tokens_saved?}` — the
@@ -268,6 +266,16 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
         body.insert("speed".to_string(), Value::String(speed.clone()));
     }
     Ok(body)
+}
+
+fn insert_output_effort(body: &mut serde_json::Map<String, Value>, effort: Value) {
+    if let Some(oc) = body
+        .entry("output_config".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+    {
+        oc.insert("effort".to_string(), effort);
+    }
 }
 
 fn encode_message(message: &crate::Message) -> Result<Value, LlmError> {

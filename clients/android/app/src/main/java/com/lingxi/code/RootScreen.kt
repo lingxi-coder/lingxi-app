@@ -27,6 +27,9 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -36,6 +39,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import com.lingxi.code.conversation.AndroidConversationBackgroundExecution
 import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ChatViewModel
+import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.ComputerUseSetupStatus
 import com.lingxi.code.conversation.ComposerAttachment
 import com.lingxi.code.conversation.EngineConversationSource
@@ -79,6 +83,7 @@ import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.settings.LinuxRuntimeBridge
 import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.settings.SettingsStore
+import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.offline.SherpaVoice
 import android.Manifest
@@ -107,6 +112,8 @@ import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.isActive
 
 /**
@@ -124,6 +131,7 @@ import kotlinx.coroutines.isActive
  * @param onOpenSettings opens the settings surface — a stub until A6 lands.
  */
 @Composable
+@OptIn(ExperimentalCoroutinesApi::class)
 fun RootScreen(
     isDark: Boolean,
     onToggleTheme: () -> Unit,
@@ -150,6 +158,7 @@ fun RootScreen(
     // its owned engine source so provider changes take effect without restart.
     reconnectToken: Int = 0,
     settingsStore: SettingsStore? = null,
+    onConversationSourceChanged: (ConversationSource) -> Unit = {},
     viewModel: ChatViewModel? = null,
 ) {
     val context = LocalContext.current
@@ -177,6 +186,7 @@ fun RootScreen(
     // ViewModel and its live engine remain. Provider reconnects replace the
     // source inside that same ViewModel instead of accumulating keyed VMs.
     val appContext = context.applicationContext
+    val lifecycleOwner = LocalLifecycleOwner.current
     val chatViewModel: ChatViewModel = viewModel ?: viewModel(
         key = "chat",
         factory = viewModelFactory {
@@ -207,6 +217,19 @@ fun RootScreen(
                 )
             }
         }
+        onConversationSourceChanged(chatViewModel.engineSource.value)
+    }
+    LaunchedEffect(chatViewModel) {
+        chatViewModel.engineSource.collect { onConversationSourceChanged(it) }
+    }
+    DisposableEffect(chatViewModel, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                chatViewModel.refreshExecutionStatus()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     val selectedLinuxMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
         ?: LinuxRuntimeMode.Legacy
@@ -387,6 +410,15 @@ fun RootScreen(
     val resolvedSettingsStore: SettingsStore =
         settingsStore ?: viewModel(factory = SettingsStore.factory(context))
     val settingsState by resolvedSettingsStore.state.collectAsState()
+    LaunchedEffect(chatViewModel, resolvedSettingsStore) {
+        chatViewModel.engineSource
+            .flatMapLatest { it.clientEvents }
+            .collect { event ->
+                if (event is ClientEvent.PermissionModeChanged) {
+                    resolvedSettingsStore.setEffectivePermissionMode(event.mode)
+                }
+            }
+    }
     val modelProviderStatuses = remember(settingsState.llmProviders) {
         settingsState.llmProviders.map { provider ->
             ModelProviderStatus(
@@ -1134,6 +1166,7 @@ fun RootScreen(
                         },
                         onAnswerQuestion = chatViewModel::answerQuestion,
                         onCancelQuestion = chatViewModel::cancelQuestion,
+                        onResumeWorkflow = chatViewModel::resumeWorkflow,
                         // Tool-call expansion and the plan panel keep their state in
                         // the ViewModel, not in the recycled rows that render them.
                         onToggleToolCall = chatViewModel::toggleToolCall,

@@ -29,6 +29,9 @@ pub struct TaskRow {
 /// for the agent (`start`/`done`/`error`/`cached`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkflowAgentRow {
+    /// Workflow-global agent invocation index. Stable across `start` → terminal
+    /// lifecycle events even when the later event gains an `agent_id`.
+    pub index: u64,
     /// The agent's display label (from `agent()`'s label/prompt).
     pub label: String,
     /// Latest lifecycle state: `start` / `done` / `error` / `cached`.
@@ -72,6 +75,10 @@ pub struct WorkflowRow {
     pub started_at_ms: Option<u64>,
     /// Wall-clock end (epoch millis) for a terminal run, when known.
     pub ended_at_ms: Option<u64>,
+    /// Persisted script path used by an adopted paused run.
+    pub script_path: Option<String>,
+    /// Serialized args used by an adopted paused run.
+    pub args: Option<String>,
     /// Distinct agents launched by the run (parsed from the spool). `0` until
     /// enriched.
     pub agent_count: usize,

@@ -19,6 +19,7 @@ use client_protocol::commands::{
     ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto, PromptModeDto,
     ProviderCredentialSecretDto,
 };
+use client_protocol::controls::ReasoningSelectionDto;
 use client_protocol::listings::TaskStatusDto;
 use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppCreateOriginDto,
@@ -214,6 +215,25 @@ fn list_models_round_trips() {
     assert_eq!(json["type"], "list_models");
     let back: ClientCommand = serde_json::from_value(json).expect("deserialize ListModels");
     assert_eq!(back, cmd);
+}
+
+#[test]
+fn conversation_controls_commands_round_trip() {
+    let get = ClientCommand::GetConversationControls;
+    let json = serde_json::to_value(&get).expect("serialize GetConversationControls");
+    assert_eq!(json["type"], "get_conversation_controls");
+    assert_eq!(serde_json::from_value::<ClientCommand>(json).unwrap(), get);
+
+    let set = ClientCommand::SetReasoningSelection {
+        selection: ReasoningSelectionDto::Level {
+            id: "high".to_string(),
+        },
+    };
+    let json = serde_json::to_value(&set).expect("serialize SetReasoningSelection");
+    assert_eq!(json["type"], "set_reasoning_selection");
+    assert_eq!(json["selection"]["type"], "level");
+    assert_eq!(json["selection"]["id"], "high");
+    assert_eq!(serde_json::from_value::<ClientCommand>(json).unwrap(), set);
 }
 
 #[test]
@@ -560,6 +580,7 @@ fn create_app_round_trips() {
         origin: AppCreateOriginDto::Chat,
         brief: "Track daily habits with streaks".to_string(),
         git_enabled: true,
+        workflow_model: Some("deepseek/deepseek-v4-flash".to_string()),
         conversation_id: Some("conv-42".to_string()),
     };
     let json = serde_json::to_value(&cmd).expect("serialize CreateApp");
@@ -567,6 +588,7 @@ fn create_app_round_trips() {
     assert_eq!(json["name"], "Habits");
     assert_eq!(json["origin"], "chat");
     assert_eq!(json["brief"], "Track daily habits with streaks");
+    assert_eq!(json["workflow_model"], "deepseek/deepseek-v4-flash");
     assert_eq!(json["conversation_id"], "conv-42");
     assert!(
         json.get("git_enabled").is_none(),
@@ -581,6 +603,7 @@ fn create_app_round_trips() {
         origin: AppCreateOriginDto::Library,
         brief: "A recipe box with tags".to_string(),
         git_enabled: true,
+        workflow_model: None,
         conversation_id: None,
     };
     let json_l = serde_json::to_value(&from_library).expect("serialize library CreateApp");
@@ -598,6 +621,7 @@ fn create_app_round_trips() {
         origin: AppCreateOriginDto::Library,
         brief: "An offline app".to_string(),
         git_enabled: false,
+        workflow_model: None,
         conversation_id: None,
     };
     let json_without_git = serde_json::to_value(&without_git).expect("serialize no-Git CreateApp");
@@ -717,6 +741,10 @@ fn no_live_command_carries_session_id() {
             model: "m".to_string(),
         },
         ClientCommand::ListModels,
+        ClientCommand::GetConversationControls,
+        ClientCommand::SetReasoningSelection {
+            selection: ReasoningSelectionDto::Automatic,
+        },
         ClientCommand::RunSlashCommand {
             raw: "/x".to_string(),
             turn_id: None,
@@ -749,6 +777,7 @@ fn no_live_command_carries_session_id() {
             origin: AppCreateOriginDto::Chat,
             brief: "Track daily habits with streaks".to_string(),
             git_enabled: true,
+            workflow_model: None,
             conversation_id: Some("conv-42".to_string()),
         },
         ClientCommand::StartApp {

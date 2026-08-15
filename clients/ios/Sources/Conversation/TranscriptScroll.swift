@@ -7,15 +7,15 @@ import SwiftUI
 /// you watch — so they get the same scrolling behaviour rather than two
 /// implementations that drift. What lives here is exactly the part that is
 /// identical: the bottom anchor, the "stay pinned until the reader drags away
-/// from the bottom" rule, and the scroll-on-focus nudge. What each
-/// caller keeps is its own content and its own idea of when new content
+/// from the bottom" rule with a delayed resume, and the scroll-on-focus nudge.
+/// What each caller keeps is its own content and its own idea of when new content
 /// arrived.
 ///
 /// `followsLatest` is a binding rather than internal state because the caller
-/// re-arms it on appear (a transcript reopened from the library starts pinned
-/// to the newest message, regardless of where the reader left it). The bottom
-/// anchor does not clear the flag on disappearance: a growing streaming row
-/// can temporarily push that marker off-screen before the follow scroll runs.
+/// re-arms it when the visible session changes. The bottom anchor does not
+/// clear the flag on disappearance: a growing streaming row or a modal
+/// transition can temporarily push that marker off-screen before the follow
+/// scroll runs.
 struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     /// Changes to this value mean "new content arrived" and trigger a scroll —
     /// but only when `followsLatest` is true. Callers compose whatever set of
@@ -23,7 +23,8 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     let follow: Follow
 
     /// Whether the reader is currently parked at the bottom. Re-armable by the
-    /// caller and set back to true when the bottom anchor returns into view.
+    /// caller, set back to true when the bottom anchor returns into view, or
+    /// after the detached-reader cooldown when new content arrives.
     @Binding var followsLatest: Bool
 
     /// Composer focus. A keyboard coming up must reveal the newest content
@@ -63,6 +64,11 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
             }
+            // Chat content is newest-at-the-bottom. Keep that as the default
+            // anchor when SwiftUI re-lays out the container (for example when
+            // a sheet changes the available presentation size) instead of
+            // falling back to the first row.
+            .defaultScrollAnchor(.bottom)
             .scrollIndicators(.hidden)
             .scrollDismissesKeyboard(.interactively)
             .modifier(OptionalAccessibilityIdentifier(identifier: accessibilityIdentifier))
@@ -75,20 +81,33 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
                     .onChanged { value in
                         followsLatest = followState.dragChanged(
                             translationHeight: value.translation.height,
-                            followsLatest: followsLatest
+                            followsLatest: followsLatest,
+                            now: Date()
                         )
                     }
                     .onEnded { _ in
                         followsLatest = followState.dragEnded(
-                            followsLatest: followsLatest
+                            followsLatest: followsLatest,
+                            now: Date()
                         )
                     }
             )
             .onAppear {
-                scrollToLatest(using: proxy, animated: false, requiresFollow: false)
+                // A modal can temporarily recreate this surface. Restore the
+                // bottom only when the reader was already following the latest
+                // message; otherwise preserve the user's reading position.
+                scrollToLatest(using: proxy, animated: false, requiresFollow: true)
             }
             .onChange(of: follow) { _, _ in
-                guard followsLatest else { return }
+                if !followsLatest {
+                    let resumed = followState.autoResumeIfTimedOut(
+                        followsLatest: followsLatest,
+                        now: Date(),
+                        after: TranscriptScrollFollowState.automaticFollowDelay
+                    )
+                    guard resumed else { return }
+                    followsLatest = true
+                }
                 scrollToLatest(using: proxy, animated: true, requiresFollow: true)
             }
             .onChange(of: focused) { _, isFocused in
@@ -126,27 +145,68 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
 }
 
 struct TranscriptScrollFollowState {
+    /// A detached reader gets a grace period before live updates may resume
+    /// automatic following. The timeout is evaluated on the next content
+    /// update rather than by a timer, so a quiet transcript never jumps by
+    /// itself and modal presentation cannot fire a hidden scroll.
+    static let automaticFollowDelay: TimeInterval = 30
+
     private(set) var isBottomVisible = false
+    private var detachedAt: Date?
 
     mutating func bottomVisibilityChanged(
         _ isVisible: Bool,
         followsLatest: Bool
     ) -> Bool {
         isBottomVisible = isVisible
+        if isVisible {
+            detachedAt = nil
+        }
         guard isVisible, !followsLatest else { return followsLatest }
         return true
     }
 
-    func dragChanged(
+    mutating func dragChanged(
         translationHeight: CGFloat,
-        followsLatest: Bool
+        followsLatest: Bool,
+        now: Date = Date()
     ) -> Bool {
         guard translationHeight < 0, followsLatest else { return followsLatest }
+        // Keep the first transition timestamp, then refresh it when the drag
+        // ends so the cooldown starts after the user's last scroll gesture.
+        if detachedAt == nil {
+            detachedAt = now
+        }
         return false
     }
 
-    func dragEnded(followsLatest: Bool) -> Bool {
-        guard isBottomVisible, !followsLatest else { return followsLatest }
+    mutating func dragEnded(
+        followsLatest: Bool,
+        now: Date = Date()
+    ) -> Bool {
+        guard !followsLatest else {
+            detachedAt = nil
+            return followsLatest
+        }
+        guard isBottomVisible else {
+            detachedAt = now
+            return followsLatest
+        }
+        detachedAt = nil
+        return true
+    }
+
+    mutating func autoResumeIfTimedOut(
+        followsLatest: Bool,
+        now: Date,
+        after delay: TimeInterval
+    ) -> Bool {
+        guard !followsLatest,
+              let detachedAt,
+              now.timeIntervalSince(detachedAt) >= delay
+        else { return false }
+
+        self.detachedAt = nil
         return true
     }
 }

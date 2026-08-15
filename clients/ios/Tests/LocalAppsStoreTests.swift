@@ -641,6 +641,79 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(store.runtimes["tracker"]?.url?.absoluteString, "http://127.0.0.1:43123")
         }
 
+        func testInspectRefreshesRuntimeDetailsBeforeReadingThePreview() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            let broker = LocalAppBridgeBroker(appID: "tracker")
+            let controller = LocalAppWebViewController(appID: "tracker", broker: broker)
+            let webView = WKWebView()
+            controller.webView = webView
+            broker.webView = webView
+            controller.markNotReady()
+            defer { LocalAppWebViewRegistry.shared.unregister(controller, appID: "tracker") }
+
+            store.handle(event: .appEvent(event: .appUiRequest(request: AppUiRequestDto(
+                requestId: "inspect-1",
+                appId: "tracker",
+                action: .inspect,
+                target: nil,
+                value: nil
+            ))))
+
+            try await waitUntil("the preview details request to be submitted") {
+                submitted.contains {
+                    if case let .getAppDetails(appId) = $0 { appId == "tracker" } else { false }
+                }
+            }
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertFalse(submitted.contains {
+                if case let .resolveAppUiRequest(requestId, _, _, _) = $0 {
+                    requestId == "inspect-1"
+                } else {
+                    false
+                }
+            }, "Inspect must wait for the preview document, not only its controller")
+
+            // The runtime-details event mounts the preview after the request
+            // has already started waiting. Registration alone is not enough;
+            // the document must also finish loading before the request runs.
+            LocalAppWebViewRegistry.shared.register(controller, appID: "tracker")
+            webView.loadHTMLString(
+                #"<main id="preview-ready">Ready</main>"#,
+                baseURL: URL(string: "http://127.0.0.1:43123")
+            )
+            try await waitForElement("preview-ready", in: webView)
+            controller.markReady()
+
+            try await waitUntil("the preview inspection to resolve") {
+                submitted.contains {
+                    if case let .resolveAppUiRequest(requestId, _, _, _) = $0 {
+                        requestId == "inspect-1"
+                    } else {
+                        false
+                    }
+                }
+            }
+
+            let detailsIndex = try XCTUnwrap(submitted.firstIndex {
+                if case let .getAppDetails(appId) = $0 { appId == "tracker" } else { false }
+            })
+            let resolutionIndex = try XCTUnwrap(submitted.firstIndex {
+                if case let .resolveAppUiRequest(requestId, _, _, _) = $0 {
+                    requestId == "inspect-1"
+                } else {
+                    false
+                }
+            })
+            XCTAssertLessThan(
+                detailsIndex,
+                resolutionIndex,
+                "Inspect must hydrate the runtime URL before it asks the preview WebView to render"
+            )
+        }
+
         func testCapabilityPromptResolvesWithSessionAuthorization() async {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []

@@ -42,18 +42,19 @@ struct MainSettingsPage: View {
     @Bindable var store: SettingsStore
     let host: SettingsHost
     @State private var voiceCapability = VoiceCapabilityModel()
+    @State private var providerRepository = ProviderRepository.shared
 
     var body: some View {
         VStack(spacing: 0) {
             accountCard
 
             SettingsSection(label: String(localized: "settings_section_intelligence")) {
-                let dl = store.llmProviders.first(where: { $0.isDefault }) ?? store.llmProviders.first
+                let llmSummary = providerRepository.settingsSummary
                 let ds = store.searchProviders.first(where: { $0.isDefault }) ?? store.searchProviders.first
                 let df = store.fetchProviders.first(where: { $0.isDefault }) ?? store.fetchProviders.first
                 SettingsRow(icon: .sparkle, iconColor: Accents.color(for: "oklch(70% 0.18 268)"), label: String(localized: "settings_llm_providers"),
-                            sub: String(localized: "settings_provider_default \(dl?.name ?? String(localized: "settings_provider_unconfigured"))"),
-                            value: String(localized: "settings_providers_enabled_count \(store.llmProviders.filter{$0.enabled}.count)"),
+                            sub: String(localized: "settings_provider_default \(llmSummary.defaultProfile?.name ?? String(localized: "settings_provider_unconfigured"))"),
+                            value: String(localized: "settings_providers_enabled_count \(llmSummary.enabledCount)"),
                             onTap: { host.push(.providerList(.init(.llm))) })
                     .accessibilityIdentifier("settings.provider.llm")
                 SettingsRow(icon: .search, iconColor: Color(srgb: 0,0.7151,0.7672), label: String(localized: "settings_web_search"),

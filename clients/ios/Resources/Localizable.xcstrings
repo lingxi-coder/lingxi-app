@@ -44242,6 +44242,96 @@
         }
       }
     },
+    "settings_cancel": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "取消" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "取消" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Cancel" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "キャンセル" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "취소" } }
+      }
+    },
+    "settings_save_and_apply": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "保存并应用" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "儲存並套用" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Save & Apply" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "保存して適用" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "저장 및 적용" } }
+      }
+    },
+    "settings_provider_api_key": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "API 密钥" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "API 金鑰" } },
+        "en": { "stringUnit": { "state": "translated", "value": "API key" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "API キー" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "API 키" } }
+      }
+    },
+    "settings_provider_api_key_placeholder": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "输入 API 密钥" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "輸入 API 金鑰" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Enter API key" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "API キーを入力" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "API 키 입력" } }
+      }
+    },
+    "settings_provider_oauth": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "OAuth" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "OAuth" } },
+        "en": { "stringUnit": { "state": "translated", "value": "OAuth" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "OAuth" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "OAuth" } }
+      }
+    },
+    "settings_provider_status_oauth": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "OAuth 已登录" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "OAuth 已登入" } },
+        "en": { "stringUnit": { "state": "translated", "value": "OAuth signed in" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "OAuth ログイン済み" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "OAuth 로그인됨" } }
+      }
+    },
+    "settings_provider_model_placeholder": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "模型 ID" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "模型 ID" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Model ID" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "モデル ID" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "모델 ID" } }
+      }
+    },
+    "settings_provider_custom_url_hint": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "自定义或代理地址，可按需修改。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "自訂或代理位址，可按需修改。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Custom or proxy endpoint; edit it if needed." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "カスタムまたはプロキシのエンドポイントです。必要に応じて編集できます。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "사용자 지정 또는 프록시 엔드포인트입니다. 필요하면 편집하세요." } }
+      }
+    },
+    "settings_provider_official_url_hint %@": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "官方地址：%@（只读）" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "官方位址：%@（唯讀）" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Official endpoint: %@ (read-only)" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "公式エンドポイント: %@（読み取り専用）" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "공식 엔드포인트: %@ (읽기 전용)" } }
+      }
+    },
+    "settings_provider_save_failed": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "Provider 配置保存失败。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "Provider 設定儲存失敗。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "The provider configuration could not be saved." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Provider 設定を保存できませんでした。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Provider 구성을 저장하지 못했습니다." } }
+      }
+    },
     "settings_provider_default %@": {
       "localizations": {
         "zh-Hans": {
@@ -44274,6 +44364,24 @@
             "value": "기본값: %@"
           }
         }
+      }
+    },
+    "settings_provider_runtime_active %@": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "引擎当前使用：%@" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "引擎目前使用：%@" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Engine currently using: %@" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "エンジンが現在使用中: %@" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "엔진이 현재 사용 중: %@" } }
+      }
+    },
+    "settings_providers_enabled_count %lld": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已启用 %lld 个" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "已啟用 %lld 個" } },
+        "en": { "stringUnit": { "state": "translated", "value": "%lld enabled" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "%lld 件有効" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "%lld개 활성화됨" } }
       }
     },
     "settings_provider_default_fmt": {
@@ -44342,6 +44450,33 @@
             "value": "기본 모델"
           }
         }
+      }
+    },
+    "settings_provider_login": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "登录 OAuth" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "登入 OAuth" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Sign in with OAuth" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "OAuth でログイン" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "OAuth 로그인" } }
+      }
+    },
+    "settings_provider_logout": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "退出 OAuth" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "登出 OAuth" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Sign out" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ログアウト" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "로그아웃" } }
+      }
+    },
+    "settings_provider_oauth_unavailable": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "当前会话不支持 OAuth。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "目前工作階段不支援 OAuth。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "OAuth isn't available in this session." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "このセッションでは OAuth を利用できません。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "현재 세션에서는 OAuth를 사용할 수 없습니다." } }
       }
     },
     "settings_provider_edit_unavailable": {
@@ -60050,6 +60185,87 @@
             "value": "음성"
           }
         }
+      }
+    },
+    "settings_provider_credential_api_key_oauth": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "API Key 优先，OAuth 已登录" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "API Key 優先，OAuth 已登入" } },
+        "en": { "stringUnit": { "state": "translated", "value": "API key preferred; OAuth signed in" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "API キーを優先、OAuth ログイン済み" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "API 키 우선, OAuth 로그인됨" } }
+      }
+    },
+    "settings_provider_credential_pending_clear": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "此密钥已标记为删除，请先保存或输入新密钥。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "此金鑰已標記為刪除，請先儲存或輸入新金鑰。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "This credential is marked for deletion. Save or enter a replacement first." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "この認証情報は削除予定です。先に保存するか、新しい認証情報を入力してください。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "이 자격 증명은 삭제로 표시되었습니다. 먼저 저장하거나 새 자격 증명을 입력하세요." } }
+      }
+    },
+    "settings_provider_operation_in_progress": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "Provider 操作正在进行，请稍候。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "Provider 操作正在進行，請稍候。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "A provider operation is already in progress." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Provider 操作が進行中です。しばらくお待ちください。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Provider 작업이 이미 진행 중입니다." } }
+      }
+    },
+    "settings_provider_oauth_login_success": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "OAuth 登录成功" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "OAuth 登入成功" } },
+        "en": { "stringUnit": { "state": "translated", "value": "OAuth sign-in succeeded" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "OAuth ログインに成功しました" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "OAuth 로그인 성공" } }
+      }
+    },
+    "settings_provider_oauth_logout_success": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "OAuth 已退出" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "OAuth 已登出" } },
+        "en": { "stringUnit": { "state": "translated", "value": "OAuth signed out" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "OAuth からログアウトしました" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "OAuth 로그아웃 완료" } }
+      }
+    },
+    "settings_provider_oauth_test_unavailable": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "OAuth 测试回调不可用" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "OAuth 測試回呼不可用" } },
+        "en": { "stringUnit": { "state": "translated", "value": "The OAuth test callback is unavailable." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "OAuth テストコールバックを利用できません" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "OAuth 테스트 콜백을 사용할 수 없습니다." } }
+      }
+    },
+    "settings_provider_oauth_test_success": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "OAuth 认证探测成功" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "OAuth 驗證探測成功" } },
+        "en": { "stringUnit": { "state": "translated", "value": "OAuth authentication probe succeeded" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "OAuth 認証の確認に成功しました" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "OAuth 인증 확인 성공" } }
+      }
+    },
+    "settings_provider_remove_failed": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "Provider 删除失败。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "Provider 刪除失敗。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "The provider could not be removed." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Provider を削除できませんでした。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Provider를 삭제하지 못했습니다." } }
+      }
+    },
+    "settings_provider_oauth_only": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "此 Provider 使用 OAuth，不需要 API Key。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "此 Provider 使用 OAuth，不需要 API Key。" } },
+        "en": { "stringUnit": { "state": "translated", "value": "This provider uses OAuth and does not require an API key." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "この Provider は OAuth を使用するため、API キーは不要です。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "이 Provider는 OAuth를 사용하므로 API 키가 필요하지 않습니다." } }
       }
     },
     "voice_waiting_permission": {

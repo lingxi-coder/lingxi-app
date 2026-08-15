@@ -71,7 +71,8 @@ use traits::Platform;
 pub use engine_mobile::{
     ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
     MobileConfig, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
-    MobileOAuthSessionDto, MobileOAuthStateDto, PermissionRequestSink, ProviderConnectionTestDto,
+    MobileOAuthSessionDto, MobileOAuthStateDto, PermissionRequestSink, ProviderCatalogEntryDto,
+    ProviderConnectionTestDto,
 };
 
 /// The foreign (Swift) capability objects + config the engine needs to build an

@@ -71,7 +71,8 @@ use llm_client::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_client::oauth::openai as openai_oauth;
 use llm_client::LlmTransportBridge;
 use llm_client::{
-    Credential, CredentialProvider, CredentialScope, DefaultLlmClient, ProviderId, Transport,
+    Credential, CredentialConfig, CredentialProvider, CredentialScope, DefaultLlmClient, ProviderId,
+    Transport,
 };
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
@@ -641,6 +642,20 @@ pub struct ProviderConnectionTestDto {
     pub used_stored_credential: bool,
 }
 
+/// Credential-free metadata used by mobile settings to render the same
+/// provider choices the engine can actually assemble.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCatalogEntryDto {
+    pub profile_id: String,
+    pub display_name: String,
+    pub base_url: String,
+    pub protocol: String,
+    pub auth: String,
+    pub credential_env: Option<String>,
+    pub models: Vec<String>,
+}
+
 /// Native OAuth authorization session returned to iOS/Android. The verifier
 /// and state never cross the FFI boundary.
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -662,6 +677,49 @@ pub struct MobileOAuthStateDto {
     pub account_id: Option<String>,
     pub organization_id: Option<String>,
     pub fedramp: bool,
+}
+
+fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
+    let to_entry = |provider: llm_client::ProviderProfile| {
+        let display_name = if provider.profile_name == "anthropic" {
+            "Anthropic".to_string()
+        } else {
+            provider.profile_name.clone()
+        };
+        let credential_env = match provider.credential {
+            CredentialConfig::Env { var } => Some(var),
+            _ => None,
+        };
+        ProviderCatalogEntryDto {
+            profile_id: provider.profile_name.clone(),
+            display_name,
+            base_url: provider.base_url,
+            protocol: format!("{:?}", provider.protocol),
+            auth: format!("{:?}", provider.auth),
+            credential_env,
+            models: provider
+                .models
+                .into_iter()
+                .map(|model| model.request_model)
+                .collect(),
+        }
+    };
+
+    let anthropic = llm_client::anthropic_provider_profile(
+        ANTHROPIC_OAUTH_API_BASE,
+        llm_client::AuthStrategy::ApiKey,
+        CredentialConfig::Env {
+            var: "ANTHROPIC_API_KEY".to_string(),
+        },
+    );
+    let mut entries = vec![to_entry(anthropic)];
+    entries.extend(
+        llm_client::builtin_presets()
+            .providers
+            .into_iter()
+            .map(to_entry),
+    );
+    entries
 }
 
 const IOS_OAUTH_REDIRECT_URI: &str = "lingxi://oauth/callback";
@@ -5359,6 +5417,14 @@ impl MobileEngineHandle {
 // SAME method body.
 #[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
 impl MobileEngineHandle {
+    /// Return the built-in provider catalog without credentials or runtime
+    /// secrets. The catalog is assembled from the same vendored models.dev
+    /// snapshots used to build the live LLM registry.
+    #[must_use]
+    pub fn builtin_provider_catalog(&self) -> Vec<ProviderCatalogEntryDto> {
+        builtin_provider_catalog()
+    }
+
     /// Start a native OAuth authorization-code flow. PKCE verifier/state stay
     /// in the Rust-owned coordinator; the foreign host receives only the URL.
     pub async fn begin_o_auth(
@@ -8772,13 +8838,57 @@ mod tests {
     use traits::OrchestratorHandle as _;
 
     use super::{
-        build_mobile, classify_provider_connection_response,
+        build_mobile, builtin_provider_catalog, classify_provider_connection_response,
         collect_session_agent_transcript_paths, find_session_agent_transcript_path,
         lower_session_agent_snapshot, mobile_cron_schedule_error, provider_models_endpoint,
         session_agent_conversation_is_visible, session_agent_transcript_event,
         session_agent_transcript_revision, MobileConfig, MobileCronStoreHandle,
         MobileSessionAgentObserver,
     };
+
+    #[test]
+    fn mobile_provider_catalog_matches_engine_presets_without_secrets() {
+        let dto = builtin_provider_catalog();
+        let catalog = llm_client::builtin_presets();
+
+        let anthropic = dto
+            .iter()
+            .find(|entry| entry.profile_id == "anthropic")
+            .expect("catalog must include the first-party Anthropic profile");
+        assert_eq!(anthropic.display_name, "Anthropic");
+        assert_eq!(anthropic.base_url, "https://api.anthropic.com");
+        assert_eq!(anthropic.protocol, "AnthropicMessages");
+        assert_eq!(anthropic.credential_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+
+        assert_eq!(dto.len(), catalog.providers.len() + 1);
+        for (entry, provider) in dto
+            .iter()
+            .filter(|entry| entry.profile_id != "anthropic")
+            .zip(catalog.providers.iter())
+        {
+            assert_eq!(entry.profile_id, provider.profile_name);
+            assert_eq!(entry.display_name, provider.profile_name);
+            assert_eq!(entry.base_url, provider.base_url);
+            assert_eq!(entry.protocol, format!("{:?}", provider.protocol));
+            assert_eq!(entry.auth, format!("{:?}", provider.auth));
+            assert_eq!(
+                entry.credential_env,
+                match &provider.credential {
+                    llm_client::CredentialConfig::Env { var } => Some(var.clone()),
+                    _ => None,
+                }
+            );
+            assert_eq!(
+                entry.models,
+                provider
+                    .models
+                    .iter()
+                    .map(|model| model.request_model.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert!(entry.credential_env.as_deref().is_none_or(|env| !env.contains("KEY=")));
+        }
+    }
     // F3-06: the off-device host shim now lives in `crate::test_support` (the
     // single, non-drifting definition shared with the `skeleton_test.rs`
     // integration test). The in-crate F3-03/F3-05 unit tests reuse it. The
@@ -9670,6 +9780,7 @@ mod tests {
                 script_path: None,
                 args: None,
                 resume_from_run_id: None,
+                session_uuid: None,
             })
             .await
             .expect("launch succeeds");

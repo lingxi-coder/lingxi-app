@@ -890,6 +890,8 @@ protocol ConversationSource: AnyObject {
             profile: ProviderLaunchProfile,
             credentialOverride: String?
         ) async throws -> ProviderConnectionTestResult
+        /// Read the engine's credential-free built-in Provider catalog.
+        func providerCatalog() async throws -> [ProviderCatalogEntry]
         /// Run the native browser OAuth flow. The engine owns PKCE/state and
         /// only receives the callback URL from this coordinator.
         func loginOAuth(provider: String) async throws -> ProviderOAuthState
@@ -947,6 +949,7 @@ extension ConversationSource {
         ) async throws -> ProviderConnectionTestResult {
             .failure(message: String(localized: "chat_provider_engine_unavailable"))
         }
+        func providerCatalog() async throws -> [ProviderCatalogEntry] { [] }
         func loginOAuth(provider: String) async throws -> ProviderOAuthState {
             throw NSError(domain: "ConversationSource", code: 1, userInfo: [NSLocalizedDescriptionKey: "OAuth requires the engine"])
         }
@@ -2444,6 +2447,21 @@ final class MockConversationSource: ConversationSource {
                     usedStoredCredential: result.usedStoredCredential
                 )
                 : .failure(message: result.message)
+        }
+
+        func providerCatalog() async throws -> [ProviderCatalogEntry] {
+            let handle = try await ensureHandle()
+            return handle.builtinProviderCatalog().map {
+                ProviderCatalogEntry(
+                    id: $0.profileId,
+                    displayName: $0.displayName,
+                    baseURL: $0.baseUrl,
+                    protocolName: $0.protocol,
+                    authName: $0.auth,
+                    credentialEnv: $0.credentialEnv,
+                    models: $0.models
+                )
+            }
         }
 
         func loginOAuth(provider: String) async throws -> ProviderOAuthState {
@@ -5336,7 +5354,15 @@ final class MockConversationSource: ConversationSource {
         }
 
         func onRequest(request: PermissionRequest) async {
-            await MainActor.run { [weak source] in
+            // Do not await the main actor here. The Rust engine constructor is
+            // synchronous from Swift and may emit an event/permission while it
+            // is running on the main actor. Awaiting `MainActor.run` from this
+            // callback would make Rust wait for the main actor while the main
+            // actor is waiting for the constructor: a startup deadlock that
+            // leaves every control unresponsive. Enqueue and return so the
+            // engine can finish construction; the actor preserves UI state
+            // mutation on the main thread.
+            Task { @MainActor [weak source] in
                 source?.enqueuePermission(request)
             }
         }
@@ -5353,7 +5379,11 @@ final class MockConversationSource: ConversationSource {
         }
 
         func onEvent(event: ClientEvent) async {
-            await MainActor.run { [weak source] in
+            // The callback must be fire-and-return. `buildIosEngineWithConfig`
+            // drives the Rust runtime synchronously and can emit bootstrap
+            // events before it returns. Waiting for `MainActor.run` here would
+            // deadlock when the constructor itself was invoked on MainActor.
+            Task { @MainActor [weak source] in
                 source?.apply(event)
             }
         }
@@ -5364,7 +5394,7 @@ final class MockConversationSource: ConversationSource {
             runId: String,
             progress: WorkflowProgressDto
         ) async {
-            await MainActor.run { [weak source] in
+            Task { @MainActor [weak source] in
                 source?.applyWorkflowProgress(
                     originSessionId: originSessionId,
                     taskId: taskId,

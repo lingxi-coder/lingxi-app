@@ -84,7 +84,7 @@ pub use host::{
     parse_mobile_provider_config_json, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
     FiredCronJobDto, MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError,
     MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, MobileRuntime,
-    ProviderConnectionTestDto,
+    ProviderCatalogEntryDto, ProviderConnectionTestDto,
 };
 
 // F3-06: the host-only walking-skeleton support — a portable fake `Platform`

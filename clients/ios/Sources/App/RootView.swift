@@ -92,6 +92,7 @@ struct RootView: View {
     @State private var clientEventCenter: ClientEventCenter
     @State private var source: any ConversationSource
     @State private var sourceGeneration = UUID()
+    @State private var providerCatalogBootstrapped = false
     /// The workspace the conversation currently runs in: global, a managed
     /// project, or a local app (v3 — each app is a conversation scope whose
     /// workspace directory is the session cwd).
@@ -284,11 +285,26 @@ struct RootView: View {
         .onOpenURL(perform: handleIncomingURL)
         .task(id: sourceGeneration) {
             let generation = sourceGeneration
-            let current = source
             let sessionToRestore = pendingSessionRestoreID ?? activeSession
-            wireCurrentSource()
+            var current = source
+            wireCurrentSource(preserveCatalog: providerCatalogBootstrapped)
             do {
-                try await current.prepare()
+                var preparedByCatalogRebuild = false
+                if !providerCatalogBootstrapped {
+                    providerCatalogBootstrapped = true
+                    let catalogLoaded = await providerRepository.refreshCatalog()
+                    if catalogLoaded, generation == sourceGeneration {
+                        try await rebuildSource(
+                            snapshot: providerRepository.makeLaunchSnapshot(),
+                            preserveSourceGeneration: true
+                        )
+                        current = source
+                        preparedByCatalogRebuild = true
+                    }
+                }
+                if !preparedByCatalogRebuild {
+                    try await current.prepare()
+                }
                 guard generation == sourceGeneration else { return }
                 current.listSessions()
                 if !sessionToRestore.isEmpty, !current.model.sessionTransitionPending {
@@ -608,7 +624,7 @@ struct RootView: View {
         return projectStore.projects.first(where: { $0.record.id == requestedProjectID })
     }
 
-    private func wireCurrentSource() {
+    private func wireCurrentSource(preserveCatalog: Bool = false) {
         let current = source
         #if canImport(engine_mobileFFI)
             current.setExternalEventHandler { event in
@@ -638,7 +654,11 @@ struct RootView: View {
                 },
                 testOAuthConnection: { provider, profile in
                     try await current.testOAuthConnection(provider: provider, profile: profile)
-                }
+                },
+                providerCatalog: {
+                    try await current.providerCatalog()
+                },
+                resetCatalog: !preserveCatalog
             )
         #else
             providerRepository.configure(submitCommand: nil)
@@ -695,21 +715,33 @@ struct RootView: View {
         )
     }
 
-    private func rebuildSource(snapshot: ProviderLaunchSnapshot) async throws {
+    private func rebuildSource(
+        snapshot: ProviderLaunchSnapshot,
+        preserveSourceGeneration: Bool = false
+    ) async throws {
         persistConversationScope()
         let old = source
-        try await old.cancelAndWait()
         let replacement = makeSource(scope: activeScope, snapshot: snapshot)
         #if canImport(engine_mobileFFI)
             replacement.setExternalEventHandler { event in
                 Task { @MainActor in clientEventCenter.publish(event) }
             }
         #endif
+        // Prepare the replacement before cancelling the current source. A
+        // failed provider/catalog rebuild must leave the live conversation
+        // usable instead of parking a cancelled source in the root view.
         try await replacement.prepare()
+        try await old.cancelAndWait()
         activeSession = confirmedSession
         pendingSessionRestoreID = confirmedSession.isEmpty ? nil : confirmedSession
         source = replacement
-        sourceGeneration = UUID()
+        // The catalog belongs to the engine build, not to a single source
+        // instance. Keep it across normal reconnects so changing a provider
+        // cannot trigger a second catalog bootstrap/rebuild loop.
+        wireCurrentSource(preserveCatalog: true)
+        if !preserveSourceGeneration {
+            sourceGeneration = UUID()
+        }
         if !confirmedSession.isEmpty {
             requestSessionResume(
                 confirmedSession,

@@ -87,7 +87,7 @@ final class LocalAppWebViewRegistry {
     #if canImport(engine_mobileFFI)
         func execute(request: AppUiRequestDto) async -> LocalAppUIExecutionResult {
             for _ in 0 ..< 50 {
-                if let controller = controllers[request.appId]?.value {
+                if let controller = controllers[request.appId]?.value, controller.isReady {
                     return await controller.execute(request: request)
                 }
                 try? await Task.sleep(for: .milliseconds(200))
@@ -312,12 +312,19 @@ final class LocalAppWebViewController {
     let broker: LocalAppBridgeBroker
     weak var webView: WKWebView?
 
+    /// A controller is routable only after WebKit has committed the page.
+    /// `makeUIView` registers the controller before starting navigation so the
+    /// engine request is not lost, therefore the registry must distinguish
+    /// "mounted" from "ready".
+    private(set) var isReady = true
+
     init(appID: String, broker: LocalAppBridgeBroker) {
         self.appID = appID
         self.broker = broker
     }
 
     func close() {
+        isReady = false
         broker.detach()
         webView?.stopLoading()
         for name in LocalAppWebViewRepresentable.messageHandlerNames {
@@ -327,6 +334,14 @@ final class LocalAppWebViewController {
         webView?.uiDelegate = nil
         broker.webView = nil
         webView = nil
+    }
+
+    func markNotReady() {
+        isReady = false
+    }
+
+    func markReady() {
+        isReady = true
     }
 
     #if canImport(engine_mobileFFI)
@@ -340,10 +355,12 @@ final class LocalAppWebViewController {
 
             if request.action == .back {
                 guard webView.canGoBack else { return .failure(String(localized: "local_apps_error_ui_no_history")) }
+                markNotReady()
                 webView.goBack()
                 return encodedResult(["ok": true, "action": "back"])
             }
             if request.action == .reload {
+                markNotReady()
                 webView.reload()
                 return encodedResult(["ok": true, "action": "reload"])
             }
@@ -612,6 +629,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         webView.isInspectable = false
         context.coordinator.broker.webView = webView
         context.coordinator.controller.webView = webView
+        context.coordinator.controller.markNotReady()
         LocalAppWebViewRegistry.shared.register(context.coordinator.controller, appID: appID)
         context.coordinator.loadedURL = url
         webView.load(URLRequest(url: url, cachePolicy: .reloadRevalidatingCacheData))
@@ -625,6 +643,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         // trailing "/"), so the last REQUESTED url is what a reload must key on.
         guard context.coordinator.loadedURL != url else { return }
         context.coordinator.loadedURL = url
+        context.coordinator.controller.markNotReady()
         webView.load(URLRequest(url: url, cachePolicy: .reloadRevalidatingCacheData))
     }
 
@@ -674,6 +693,22 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
                 decisionHandler(.cancel)
                 onExternalNavigation(destination)
             }
+        }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
+            controller.markNotReady()
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
+            controller.markReady()
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
+            controller.markNotReady()
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation?, withError error: Error) {
+            controller.markNotReady()
         }
 
         func webView(

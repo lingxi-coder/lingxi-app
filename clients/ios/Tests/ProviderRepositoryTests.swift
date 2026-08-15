@@ -82,7 +82,7 @@ final class ProviderRepositoryTests: XCTestCase {
 
         XCTAssertTrue(state.hasStoredAPIKey)
         XCTAssertTrue(state.hasStoredCredential)
-        XCTAssertEqual(state.maskedCredentialSummary, "API Key 优先，OAuth 已登录")
+        XCTAssertEqual(state.maskedCredentialSummary, String(localized: "settings_provider_credential_api_key_oauth"))
         XCTAssertEqual(state.credentialFieldMask, "••••••••••••")
     }
 
@@ -354,6 +354,147 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertEqual(retry["maxAttempts"] as? Int, 4)
         XCTAssertEqual(retry["backoffMs"] as? Int, 1200)
         XCTAssertEqual(targets, ["deepseek/deepseek-v4-flash", "kimi/kimi-k3"])
+    }
+
+    func testNewDraftIsNotPublishedUntilApply() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        var draft = repository.makeNewDraft(presetID: "openai")
+        draft.profile.name = "Unpublished OpenAI"
+
+        XCTAssertNil(repository.state(for: draft.id))
+        XCTAssertFalse(repository.makeLaunchSnapshot().profiles.contains { $0.settingsID == draft.id })
+
+        let applied = await repository.applyDraft(draft)
+        XCTAssertFalse(applied, "an enabled draft without a credential must fail validation")
+        XCTAssertNil(repository.state(for: draft.id), "failed draft validation must not create a profile")
+    }
+
+    func testNewDraftUsesAConversationalDefaultModelWhenCatalogStartsWithNonChatModel() throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+
+        let draft = repository.makeNewDraft(presetID: "openai")
+
+        XCTAssertEqual(draft.profile.modelID, "gpt-4o")
+    }
+
+    func testOAuthDraftConnectionUsesOAuthTesterInsteadOfAPIKeyTester() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai-chatgpt")
+        var apiKeyTesterCalled = false
+        var oauthTesterCalled = false
+        repository.configure(
+            submitCommand: nil,
+            testConnection: { _, _ in
+                apiKeyTesterCalled = true
+                return .success()
+            },
+            testOAuthConnection: { provider, profile in
+                oauthTesterCalled = true
+                XCTAssertEqual(provider, "openai-chatgpt")
+                XCTAssertEqual(profile.id, "openai-chatgpt")
+                return .success(message: "OAuth probe")
+            }
+        )
+
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.oauthState = ProviderOAuthState(
+            provider: "openai-chatgpt",
+            signedIn: true,
+            accountLabel: "test",
+            accountID: nil,
+            organizationID: nil,
+            fedramp: false
+        )
+        let tested = await repository.testConnection(for: draft)
+
+        XCTAssertTrue(oauthTesterCalled)
+        XCTAssertFalse(apiKeyTesterCalled)
+        XCTAssertEqual(tested.connectionState, .connected)
+        XCTAssertEqual(tested.detailMessage, "OAuth probe")
+    }
+
+    func testApplyDraftKeepsSavedProfileWhenReconnectFailsAfterPersistence() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        var draft = repository.makeNewDraft(presetID: "openai")
+        draft.profile.name = "Saved before reconnect"
+        draft.profile.enabled = false
+        repository.configure(
+            submitCommand: nil,
+            applyReconnect: { _ in
+                throw NSError(domain: "ProviderRepositoryTests", code: 1)
+            }
+        )
+
+        let applied = await repository.applyDraft(draft)
+        XCTAssertFalse(applied)
+        XCTAssertEqual(repository.state(for: draft.id)?.profile.name, "Saved before reconnect")
+        XCTAssertEqual(repository.state(for: draft.id)?.connectionState, .failed)
+
+        let reloaded = ProviderRepository(persistenceURL: persistenceURL)
+        XCTAssertEqual(reloaded.state(for: draft.id)?.profile.name, "Saved before reconnect")
+    }
+
+    func testEditingAndDiscardingDraftDoesNotChangeSavedSnapshot() throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "deepseek")
+        let before = repository.makeLaunchSnapshot()
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.profile.name = "Temporary name"
+        draft.profile.modelID = "temporary-model"
+        draft.profile.baseURL = "https://proxy.example.test/v1"
+        repository.discardDraft(draft)
+
+        XCTAssertEqual(repository.makeLaunchSnapshot(), before)
+        XCTAssertEqual(repository.state(for: id)?.profile.name, "DeepSeek")
+    }
+
+    func testSummaryCombinesSavedConfigurationWithRuntimeState() throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let first = repository.addProfile(presetID: "deepseek")
+        _ = repository.addProfile(presetID: "openai")
+        repository.setDefaultProfile(first)
+        repository.updateRuntimeSnapshot(
+            models: ["deepseek/deepseek-v4-flash"],
+            activeModelID: "openai/gpt-4o",
+            activeProfileID: "openai",
+            error: "runtime fallback"
+        )
+
+        let summary = repository.settingsSummary
+        XCTAssertEqual(summary.defaultProfile?.id, first)
+        XCTAssertEqual(summary.defaultModelID, "deepseek-v4-flash")
+        XCTAssertEqual(summary.enabledCount, 2)
+        XCTAssertEqual(summary.runtime.activeModelID, "openai/gpt-4o")
+        XCTAssertEqual(summary.runtime.lastError, "runtime fallback")
+        XCTAssertFalse(summary.runtimeMatchesDefault)
+
+        repository.setDefaultProfile("openai")
+        repository.updateRuntimeSnapshot(
+            models: ["openai/gpt-4o"],
+            activeModelID: "openai/gpt-4o",
+            activeProfileID: "openai"
+        )
+        XCTAssertTrue(repository.settingsSummary.runtimeMatchesDefault)
+    }
+
+    func testCatalogRefreshUsesEngineEntriesAndKeepsCustomFallback() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let entry = ProviderCatalogEntry(
+            id: "engine-only",
+            displayName: "Engine Only",
+            baseURL: "https://engine.example.test/v1",
+            protocolName: "OpenAiChat",
+            authName: "ApiKey",
+            credentialEnv: "ENGINE_ONLY_KEY",
+            models: ["engine-model"]
+        )
+        repository.configure(submitCommand: nil, providerCatalog: { [entry] })
+
+        await repository.refreshCatalog()
+
+        XCTAssertEqual(repository.catalogPresets.map(\.id), ["engine-only", "custom"])
+        XCTAssertEqual(repository.preset(for: "engine-only").models, ["engine-model"])
+        XCTAssertEqual(repository.preset(for: "engine-only").defaultUrl, "https://engine.example.test/v1")
     }
 
     func testRoutingFiltersInvalidFallbackSelections() throws {
@@ -648,9 +789,10 @@ final class ProviderRepositoryTests: XCTestCase {
             storageEncrypted: true,
             error: nil
         ))
-        await removeTask.value
+        let removed = await removeTask.value
 
         state = try XCTUnwrap(repository.state(for: openAI))
+        XCTAssertFalse(removed)
         XCTAssertEqual(state.connectionState, .failed)
         XCTAssertEqual(state.detailMessage, "安全存储仍报告该密钥存在。")
         XCTAssertNotNil(repository.state(for: openAI), "a profile must survive a failed secure deletion")
@@ -946,7 +1088,7 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertNil(repository.state(for: removed), "the concurrent removal must have landed")
         XCTAssertEqual(
             repository.state(for: target)?.detailMessage,
-            "OAuth 登录成功",
+            String(localized: "settings_provider_oauth_login_success"),
             "the success message belongs to the profile that signed in"
         )
         XCTAssertNil(

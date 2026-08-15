@@ -449,7 +449,7 @@ final class LocalAppsStore {
                 if decision == .session || decision == .always {
                     approvedUIAutomation[request.appId] = decision
                 }
-                let result = await LocalAppWebViewRegistry.shared.execute(request: request)
+                let result = await executeUIRequestInPreview(request)
                 await resolveUIRequest(
                     requestID: request.requestId,
                     decision: authorization,
@@ -699,7 +699,7 @@ final class LocalAppsStore {
         ) {
             Task { [weak self] in
                 guard let self else { return }
-                let result = await LocalAppWebViewRegistry.shared.execute(request: request)
+                let result = await self.executeUIRequestInPreview(request)
                 await self.resolveUIRequest(
                     requestID: request.requestId,
                     decision: decision,
@@ -707,6 +707,18 @@ final class LocalAppsStore {
                     error: result.error
                 )
             }
+        }
+
+        /// Runtime events and UI requests travel through separate async engine
+        /// paths, so an inspect can reach iOS before the `running` event that
+        /// carries its loopback URL. Refreshing the authoritative details first
+        /// lets the preview route mount its WebView while the registry waits for
+        /// it, instead of stranding the request on the not-ready placeholder.
+        private func executeUIRequestInPreview(
+            _ request: AppUiRequestDto
+        ) async -> LocalAppUIExecutionResult {
+            await getDetails(appID: request.appId)
+            return await LocalAppWebViewRegistry.shared.execute(request: request)
         }
 
         private func replaceCheckpoints(_ values: [AppCheckpointDto], appID: String) {

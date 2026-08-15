@@ -174,11 +174,11 @@ struct SettingsHost: View {
                                 .frame(width: 34, height: 34)
                         }
                         .accessibilityLabel(String(localized: "settings_close_accessibility"))
-                    } else if case .providerEdit(let box, let providerID) = page,
+                    } else if case .providerEdit(let box, _) = page,
                               box.kind == .llm {
-                        Button("settings_save") { saveProviderAndClose(providerID) }
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(t.accent)
+                        // The provider editor is now a self-contained draft
+                        // sheet and owns its Save/Cancel actions.
+                        EmptyView()
                     } else if case .mcpEdit(let serverID) = page {
                         Button("settings_save") { saveMcpAndClose(serverID) }
                             .font(.system(size: 14, weight: .semibold))
@@ -287,6 +287,9 @@ struct SettingsHost: View {
                 : b.kind == .search ? String(localized: "settings_title_add_search")
                 : String(localized: "settings_title_add_fetch")
         case .providerEdit(let b, let id):
+            if b.kind == .llm {
+                return providerRepository.state(for: id)?.profile.name ?? String(localized: "settings_title_edit")
+            }
             return store.providers(b.kind).first(where: { $0.id == id })?.name ?? String(localized: "settings_title_edit")
         case .voice: return String(localized: "settings_voice_tts")
         case .linuxRuntime: return String(localized: "settings_linux_runtime")

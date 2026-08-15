@@ -549,7 +549,8 @@ import SwiftUI
                     toolInputJson: #"{"command":"pwd"}"#,
                     defaultAllow: false
                 ),
-                worker: nil
+                worker: nil,
+                owner: nil
             ))
             source.setCommandSubmitterForTesting { command in
                 if case .cancel = command { throw CancelFailure.rejected }
@@ -576,7 +577,8 @@ import SwiftUI
                     toolInputJson: #"{"command":"pwd"}"#,
                     defaultAllow: false
                 ),
-                worker: WorkerInfoDto(name: "design", color: "design", team: nil)
+                worker: WorkerInfoDto(name: "design", color: "design", team: nil),
+                owner: nil
             ))
             var releaseCancellation: CheckedContinuation<Void, Never>?
             source.setCommandSubmitterForTesting { command in
@@ -608,7 +610,8 @@ import SwiftUI
                     toolInputJson: #"{"command":"ls -la"}"#,
                     defaultAllow: false
                 ),
-                worker: WorkerInfoDto(name: "review", color: "review", team: nil)
+                worker: WorkerInfoDto(name: "review", color: "review", team: nil),
+                owner: nil
             ))
             source.beginTurnForTesting(turnId: 48, sessionId: "session-a")
             source.model.pendingPermissions = [permission]
@@ -628,7 +631,8 @@ import SwiftUI
                     toolInputJson: #"{"command":"pwd"}"#,
                     defaultAllow: false
                 ),
-                worker: WorkerInfoDto(name: "design", color: "design", team: nil)
+                worker: WorkerInfoDto(name: "design", color: "design", team: nil),
+                owner: nil
             ))
 
             let resumedSource = makeSource()
@@ -737,7 +741,8 @@ import SwiftUI
                     toolInputJson: #"{"command":"ls -la"}"#,
                     defaultAllow: false
                 ),
-                worker: WorkerInfoDto(name: "design", color: "design", team: nil)
+                worker: WorkerInfoDto(name: "design", color: "design", team: nil),
+                owner: nil
             )
 
             await EnginePermissionSink(source: source).onRequest(request: request)
@@ -755,7 +760,8 @@ import SwiftUI
                     toolInputJson: #"{"command":"pwd"}"#,
                     defaultAllow: false
                 ),
-                worker: nil
+                worker: nil,
+                owner: nil
             ))
             let second = PendingPermission(request: PermissionRequest(
                 requestId: 202,
@@ -764,7 +770,8 @@ import SwiftUI
                     toolInputJson: #"{"path":"notes.md"}"#,
                     defaultAllow: false
                 ),
-                worker: nil
+                worker: nil,
+                owner: nil
             ))
             source.model.pendingPermissions = [first, second]
 
@@ -787,7 +794,8 @@ import SwiftUI
                     toolInputJson: #"{"command":"pwd"}"#,
                     defaultAllow: false
                 ),
-                worker: WorkerInfoDto(name: "design", color: "design", team: nil)
+                worker: WorkerInfoDto(name: "design", color: "design", team: nil),
+                owner: nil
             ))
             source.setCommandSubmitterForTesting { _ in
                 throw SubmitFailure.rejected
@@ -811,7 +819,8 @@ import SwiftUI
                     toolInputJson: #"{"command":"whoami"}"#,
                     defaultAllow: false
                 ),
-                worker: WorkerInfoDto(name: "review", color: "review", team: nil)
+                worker: WorkerInfoDto(name: "review", color: "review", team: nil),
+                owner: nil
             ))
             source.beginTurnForTesting(turnId: 49, sessionId: "session-a")
             source.model.pendingPermissions = [permission]
@@ -860,7 +869,8 @@ import SwiftUI
                     toolInputJson: #"{"command":"pwd"}"#,
                     defaultAllow: false
                 ),
-                worker: WorkerInfoDto(name: "design", color: "design", team: nil)
+                worker: WorkerInfoDto(name: "design", color: "design", team: nil),
+                owner: nil
             ))]
 
             for _ in 0..<50 where existingModal.presentedViewController == nil {

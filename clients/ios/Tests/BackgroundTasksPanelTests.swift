@@ -32,7 +32,14 @@ import XCTest
             status: TaskStatusDto,
             description: String = "local-app-build workflow"
         ) -> TaskRowDto {
-            TaskRowDto(taskId: id, taskType: "workflow", status: status, description: description)
+            TaskRowDto(
+                taskId: id,
+                taskType: "workflow",
+                status: status,
+                description: description,
+                canResume: false,
+                startedAtMs: nil
+            )
         }
 
         private func workflowProgress(
@@ -612,12 +619,26 @@ import XCTest
             )
 
             let summary = TasksStatusPanel.workflowCompactSummary(for: task, nowMs: 6_000)
-            XCTAssertEqual(summary, "1/2 done · 1 running · Generate")
+            XCTAssertEqual(
+                summary,
+                [
+                    String(localized: "chat_workflow_agents_done \(1) \(2)"),
+                    String(localized: "chat_workflow_agents_running \(1)"),
+                    "Generate",
+                ].joined(separator: " · ")
+            )
 
             let metrics = TasksStatusPanel.workflowAgentMetrics(task.workflow!.agents[0], nowMs: 6_000)
             XCTAssertEqual(
                 metrics,
-                "Running · gpt-5.4 → gpt-5.4-mini · 321 tok · 4 tools · 5s · retry 2: timeout"
+                [
+                    String(localized: "chat_status_running"),
+                    "gpt-5.4 → gpt-5.4-mini",
+                    String(localized: "chat_workflow_tokens \(UInt64(321))"),
+                    String(localized: "chat_workflow_tools \(UInt64(4))"),
+                    "5s",
+                    String(localized: "chat_workflow_retry_reason \(UInt32(2)) \("timeout")"),
+                ].joined(separator: " · ")
             )
         }
 

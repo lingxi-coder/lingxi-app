@@ -185,12 +185,17 @@ struct ChatView: View {
         .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)
         .animation(.spring(response: 0.3, dampingFraction: 0.86), value: voiceInteraction.isPresented)
         .onAppear {
-            followsLatestMessage = true
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
             source.listSessionAgents()
             recentModels = modelRecents.resolved(against: convo.availableModels)
+        }
+        .onChange(of: session.id) { _, _ in
+            // Re-arm following only for a real session switch. A sheet or
+            // navigation presentation may cause this view to appear again;
+            // that must not discard the user's current scroll position.
+            followsLatestMessage = true
         }
         .onChange(of: convo.availableModels) { _, models in
             // Re-resolve against the new catalog so a remembered model whose

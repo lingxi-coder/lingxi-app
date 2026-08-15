@@ -1106,6 +1106,8 @@ private final class ControllerConversationSource: ConversationSource {
 
     func dismissError() {}
     func setModel(_: String) {}
+    func setPermissionMode(_: String) {}
+    func setReasoningSelection(_: String) {}
     func openSession(_: SessionRef) { startNewConversation() }
     func handleBackground() { cancel() }
 }

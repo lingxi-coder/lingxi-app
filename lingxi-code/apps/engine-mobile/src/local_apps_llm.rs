@@ -61,7 +61,7 @@ pub struct ChatMessage {
     pub content: Vec<ChatPart>,
 }
 
-/// A free-text model call a RUNNING app asked for (`window.lingxi.v1.llm`).
+/// A free-text model call a RUNNING app asked for (`window.lingxi.v2.llm`).
 ///
 /// Deliberately smaller than the provider surface: the model and profile are
 /// NOT part of it — an app always rides whatever the user currently has

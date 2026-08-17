@@ -4,7 +4,7 @@
 
 use crate::local_apps_host::LocalAppsHostBroker;
 use local_apps::{AppDataStore, AppError, AppLayout, AppManifest};
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -22,8 +22,32 @@ const HIGH_MEMORY_BUILD_BUDGET_MB: u32 = 4_096;
 const DEPENDENCY_READY_WAIT_TIMEOUT_MS: u64 = 120_000;
 const MAX_BUILD_LOG_BYTES: u64 = 1 * 1024 * 1024;
 const BUILD_PROVENANCE_FILE: &str = "build.json";
+const BUILD_INPUT_MANIFEST_FILE: &str = "input-manifest.json";
+const BUILD_PROVENANCE_VERSION: u8 = 2;
 /// Vite's default deployment directory, relative to the isolated project root.
 pub(crate) const VITE_OUTPUT_DIR: &str = "dist";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BuildInputEntry {
+    path: String,
+    size: u64,
+    modified_ns: u128,
+    content_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BuildInputManifest {
+    files: Vec<BuildInputEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BuildProvenance {
+    version: u8,
+    #[serde(rename = "buildKey")]
+    build_key: String,
+    #[serde(rename = "outputSha256")]
+    output_sha256: String,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalAppBuildTarget {
     ViteReactStaticV1,
@@ -452,6 +476,10 @@ impl LocalAppBuilder<'_> {
                     std::time::Duration::from_millis(DEPENDENCY_READY_WAIT_TIMEOUT_MS),
                 )
                 .await?;
+                // Unit-level builders can reach this compatibility path
+                // without an attached AppService. Preserve the legacy build
+                // key inputs until the service is available again.
+                local_apps::storage::default_dependency_record(layout.app_id(), now_ms())
             }
             Err(error) => return Err(AppError::NotYetAvailable(error)),
         };
@@ -469,15 +497,10 @@ impl LocalAppBuilder<'_> {
         // Re-pin the host-managed files from the compiled-in templates on
         // EVERY build before Vite touches the workspace.
         restore_host_managed_files(&workspace, target)?;
-        await_workspace_dependencies(
-            &workspace,
-            std::time::Duration::from_millis(DEPENDENCY_READY_WAIT_TIMEOUT_MS),
-        )
-        .await?;
         let build_root = layout.root().join(layout.build_rel(false));
         recover_build_promotion(&build_root)?;
         let build_key = workspace_build_key(&workspace, &dependency)?;
-        if build_cache_hit(&workspace, &build_root, &build_key)? {
+        if build_cache_hit(&build_root, &build_key)? {
             return Ok(());
         }
         let artifact_root = workspace_build_artifact_root(&workspace);
@@ -493,13 +516,12 @@ impl LocalAppBuilder<'_> {
                 .await?;
             let validate_artifact_root = artifact_root.clone();
             let validate_build_root = build_root.clone();
-            let workspace_for_publish = workspace.clone();
             let build_key_for_publish = build_key.clone();
             tokio::task::spawn_blocking(move || {
-                validate_build_output(&validate_artifact_root)?;
+                let output_sha256 = validate_build_output(&validate_artifact_root)?;
                 prune_staging_root_for_publish(&validate_artifact_root)?;
                 promote_build_root(&validate_artifact_root, &validate_build_root)?;
-                write_build_provenance(&workspace_for_publish, &build_key_for_publish)
+                write_build_provenance(&validate_build_root, &build_key_for_publish, &output_sha256)
             })
             .await
             .map_err(|error| AppError::Io(format!("build promotion worker failed: {error}")))?
@@ -520,23 +542,51 @@ fn workspace_build_output_rel() -> String {
     format!(".lingxi-build-state/build-output/{VITE_OUTPUT_DIR}")
 }
 
+/// Compute the source build key while reusing content digests for files whose
+/// size and modification timestamp are unchanged. A missing or malformed
+/// manifest falls back to hashing every input, so cache metadata never blocks a
+/// rebuild.
 fn workspace_build_key(
     workspace: &Path,
     dependency: &local_apps::AppDependencyRecord,
 ) -> Result<String, AppError> {
-    let mut files = Vec::new();
-    collect_workspace_files(workspace, &mut files)?;
-    files.sort();
+    let previous = load_build_input_manifest(workspace);
+    let mut inputs = Vec::new();
+    collect_workspace_inputs(workspace, workspace, &mut inputs)?;
+    inputs.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let mut files = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let content_sha256 = match previous
+            .get(&input.path)
+            .filter(|entry| entry.size == input.size && entry.modified_ns == input.modified_ns)
+            .filter(|entry| !entry.content_sha256.is_empty())
+            .map(|entry| entry.content_sha256.clone())
+        {
+            Some(content_sha256) => content_sha256,
+            None => hash_file(&workspace.join(&input.path))?,
+        };
+        files.push(BuildInputEntry {
+            content_sha256,
+            ..input
+        });
+    }
+
+    let manifest_changed = previous.len() != files.len()
+        || files
+            .iter()
+            .any(|entry| previous.get(&entry.path) != Some(entry));
+    if manifest_changed {
+        if let Err(error) = write_build_input_manifest(workspace, &files) {
+            tracing::warn!(error = %error, "could not persist local-app build input manifest");
+        }
+    }
+
     let mut hasher = Sha256::new();
-    for path in files {
-        let relative = path
-            .strip_prefix(workspace)
-            .map_err(|error| AppError::Io(format!("derive build key path: {error}")))?;
-        hasher.update(relative.to_string_lossy().as_bytes());
+    for file in files {
+        hasher.update(file.path.as_bytes());
         hasher.update([0]);
-        hasher.update(std::fs::read(&path).map_err(|error| {
-            AppError::Io(format!("read build key input {}: {error}", path.display()))
-        })?);
+        hasher.update(file.content_sha256.as_bytes());
         hasher.update([0]);
     }
     hasher.update(b"template=vite-react-static-v1\0");
@@ -556,7 +606,11 @@ fn workspace_build_key(
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn collect_workspace_files(current: &Path, files: &mut Vec<PathBuf>) -> Result<(), AppError> {
+fn collect_workspace_inputs(
+    current: &Path,
+    workspace: &Path,
+    files: &mut Vec<BuildInputEntry>,
+) -> Result<(), AppError> {
     for entry in std::fs::read_dir(current).map_err(|error| {
         AppError::Io(format!(
             "read build key directory {}: {error}",
@@ -587,21 +641,87 @@ fn collect_workspace_files(current: &Path, files: &mut Vec<PathBuf>) -> Result<(
             )));
         }
         if metadata.is_dir() {
-            collect_workspace_files(&path, files)?;
+            collect_workspace_inputs(&path, workspace, files)?;
         } else if metadata.is_file() {
-            files.push(path);
+            let relative = path
+                .strip_prefix(workspace)
+                .map_err(|error| AppError::Io(format!("derive build key path: {error}")))?;
+            let modified_ns = metadata
+                .modified()
+                .map_err(|error| {
+                    AppError::Io(format!(
+                        "inspect build key mtime {}: {error}",
+                        path.display()
+                    ))
+                })?
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| {
+                    AppError::Io(format!(
+                        "inspect build key mtime {}: {error}",
+                        path.display()
+                    ))
+                })?
+                .as_nanos();
+            files.push(BuildInputEntry {
+                path: relative.to_string_lossy().replace('\\', "/"),
+                size: metadata.len(),
+                modified_ns,
+                content_sha256: String::new(),
+            });
         }
     }
     Ok(())
 }
 
-fn build_provenance_path(workspace: &Path) -> PathBuf {
-    workspace
-        .join(".lingxi-build-state")
-        .join(BUILD_PROVENANCE_FILE)
+fn hash_file(path: &Path) -> Result<String, AppError> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        AppError::Io(format!("read build key input {}: {error}", path.display()))
+    })?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-fn build_cache_hit(workspace: &Path, build_root: &Path, build_key: &str) -> Result<bool, AppError> {
+fn load_build_input_manifest(workspace: &Path) -> BTreeMap<String, BuildInputEntry> {
+    let path = workspace
+        .join(".lingxi-build-state")
+        .join(BUILD_INPUT_MANIFEST_FILE);
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<BuildInputManifest>(&body) else {
+        return BTreeMap::new();
+    };
+    manifest
+        .files
+        .into_iter()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect()
+}
+
+fn write_build_input_manifest(workspace: &Path, files: &[BuildInputEntry]) -> Result<(), AppError> {
+    let parent = workspace.join(".lingxi-build-state");
+    std::fs::create_dir_all(&parent)
+        .map_err(|error| AppError::Io(format!("create build input directory: {error}")))?;
+    let path = parent.join(BUILD_INPUT_MANIFEST_FILE);
+    let temp = parent.join(format!(".{BUILD_INPUT_MANIFEST_FILE}.tmp-{}", now_stamp()));
+    let body = serde_json::to_vec_pretty(&BuildInputManifest {
+        files: files.to_vec(),
+    })
+    .map_err(|error| AppError::Io(format!("serialize build input manifest: {error}")))?;
+    std::fs::write(&temp, body)
+        .map_err(|error| AppError::Io(format!("write build input manifest: {error}")))?;
+    std::fs::rename(&temp, &path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        AppError::Io(format!("publish build input manifest: {error}"))
+    })
+}
+
+/// Provenance lives beside the promoted build, outside the editable workspace
+/// and outside `dist/`, so the preview server never exposes it as an asset.
+fn build_provenance_path(build_root: &Path) -> PathBuf {
+    build_root.join(BUILD_PROVENANCE_FILE)
+}
+
+fn build_cache_hit(build_root: &Path, build_key: &str) -> Result<bool, AppError> {
     let index = build_root.join(VITE_OUTPUT_DIR).join("index.html");
     let index_metadata = match std::fs::symlink_metadata(&index) {
         Ok(metadata) => metadata,
@@ -611,26 +731,46 @@ fn build_cache_hit(workspace: &Path, build_root: &Path, build_key: &str) -> Resu
     if !index_metadata.is_file() || index_metadata.file_type().is_symlink() {
         return Ok(false);
     }
-    let provenance = match std::fs::read_to_string(build_provenance_path(workspace)) {
+    let provenance = match std::fs::read_to_string(build_provenance_path(build_root)) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(AppError::Io(format!("read build provenance: {error}"))),
     };
-    let value: Value = serde_json::from_str(&provenance)
-        .map_err(|error| AppError::Io(format!("parse build provenance: {error}")))?;
-    Ok(value.get("buildKey").and_then(Value::as_str) == Some(build_key))
+    let provenance: BuildProvenance = match serde_json::from_str(&provenance) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::debug!(error = %error, "ignoring stale local-app build provenance");
+            return Ok(false);
+        }
+    };
+    if provenance.version != BUILD_PROVENANCE_VERSION || provenance.build_key != build_key {
+        return Ok(false);
+    }
+    let output_sha256 = match digest_tree(&build_root.join(VITE_OUTPUT_DIR)) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    Ok(output_sha256 == provenance.output_sha256)
 }
 
-fn write_build_provenance(workspace: &Path, build_key: &str) -> Result<(), AppError> {
-    let path = build_provenance_path(workspace);
+fn write_build_provenance(
+    build_root: &Path,
+    build_key: &str,
+    output_sha256: &str,
+) -> Result<(), AppError> {
+    let path = build_provenance_path(build_root);
     let parent = path
         .parent()
         .ok_or_else(|| AppError::Io("build provenance has no parent".into()))?;
     std::fs::create_dir_all(parent)
         .map_err(|error| AppError::Io(format!("create build provenance directory: {error}")))?;
     let temp = parent.join(format!(".{BUILD_PROVENANCE_FILE}.tmp-{}", now_stamp()));
-    let body = serde_json::to_vec_pretty(&json!({"buildKey": build_key}))
-        .map_err(|error| AppError::Io(format!("serialize build provenance: {error}")))?;
+    let body = serde_json::to_vec_pretty(&BuildProvenance {
+        version: BUILD_PROVENANCE_VERSION,
+        build_key: build_key.to_string(),
+        output_sha256: output_sha256.to_string(),
+    })
+    .map_err(|error| AppError::Io(format!("serialize build provenance: {error}")))?;
     std::fs::write(&temp, body)
         .map_err(|error| AppError::Io(format!("write build provenance: {error}")))?;
     std::fs::rename(&temp, &path).map_err(|error| {
@@ -695,7 +835,7 @@ fn remove_path_if_exists(path: &Path) -> Result<(), AppError> {
     }
 }
 
-fn validate_build_output(staging_root: &Path) -> Result<(), AppError> {
+fn validate_build_output(staging_root: &Path) -> Result<String, AppError> {
     let output_root = staging_root.join(VITE_OUTPUT_DIR);
     let index = output_root.join("index.html");
     if !index.is_file() {
@@ -704,28 +844,55 @@ fn validate_build_output(staging_root: &Path) -> Result<(), AppError> {
             staging_root.display()
         )));
     }
-    validate_no_symlinks(&output_root)?;
-    Ok(())
+    digest_tree(&output_root)
 }
 
-fn validate_no_symlinks(root: &Path) -> Result<(), AppError> {
-    for entry in std::fs::read_dir(root)
-        .map_err(|error| AppError::Io(format!("read build output: {error}")))?
-    {
-        let entry =
-            entry.map_err(|error| AppError::Io(format!("read build output entry: {error}")))?;
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|error| AppError::Io(format!("inspect build output: {error}")))?;
-        if metadata.file_type().is_symlink() {
-            return Err(AppError::InvalidRequest(format!(
-                "build output must not contain symlinks: {}",
+fn digest_tree(root: &Path) -> Result<String, AppError> {
+    let mut files = Vec::new();
+    collect_tree_files(root, &mut files)?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| AppError::Io(format!("derive output digest path: {error}")))?;
+        hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+        hasher.update([0]);
+        hasher.update(std::fs::read(&path).map_err(|error| {
+            AppError::Io(format!(
+                "read output digest input {}: {error}",
                 path.display()
-            )));
+            ))
+        })?);
+        hasher.update([0]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_tree_files(current: &Path, files: &mut Vec<PathBuf>) -> Result<(), AppError> {
+    let metadata = std::fs::symlink_metadata(current)
+        .map_err(|error| AppError::Io(format!("inspect build output: {error}")))?;
+    if metadata.file_type().is_symlink() {
+        return Err(AppError::InvalidRequest(format!(
+            "build output must not contain symlinks: {}",
+            current.display()
+        )));
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(current)
+            .map_err(|error| AppError::Io(format!("read build output: {error}")))?
+        {
+            let entry =
+                entry.map_err(|error| AppError::Io(format!("read build output entry: {error}")))?;
+            collect_tree_files(&entry.path(), files)?;
         }
-        if metadata.is_dir() {
-            validate_no_symlinks(&path)?;
-        }
+    } else if metadata.is_file() {
+        files.push(current.to_path_buf());
+    } else {
+        return Err(AppError::InvalidRequest(format!(
+            "build output must be a regular file or directory: {}",
+            current.display()
+        )));
     }
     Ok(())
 }
@@ -1548,6 +1715,51 @@ mod tests {
             "new"
         );
         assert!(!staging_root.exists());
+    }
+
+    #[test]
+    fn build_key_persists_an_incremental_manifest_and_invalidates_changed_source() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(workspace.join("app")).expect("workspace");
+        fs::write(workspace.join("app/main.jsx"), "export default 'one';").expect("source");
+        let dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
+
+        let first = workspace_build_key(&workspace, &dependency).expect("first key");
+        let manifest_path = workspace
+            .join(".lingxi-build-state")
+            .join(BUILD_INPUT_MANIFEST_FILE);
+        assert!(
+            manifest_path.is_file(),
+            "build key should persist its manifest"
+        );
+        let second = workspace_build_key(&workspace, &dependency).expect("reused key");
+        assert_eq!(first, second, "unchanged inputs should keep the same key");
+
+        fs::write(workspace.join("app/main.jsx"), "export default 'changed';")
+            .expect("changed source");
+        let third = workspace_build_key(&workspace, &dependency).expect("changed key");
+        assert_ne!(first, third, "changed source must invalidate the key");
+    }
+
+    #[test]
+    fn build_cache_hit_rejects_tampered_output_even_with_the_same_source_key() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let build_root = root.path().join("store");
+        let output = build_root.join(VITE_OUTPUT_DIR);
+        fs::create_dir_all(&output).expect("output");
+        fs::write(output.join("index.html"), "<html>good</html>").expect("index");
+        fs::write(output.join("assets.js"), "console.log('good');").expect("asset");
+
+        let digest = digest_tree(&output).expect("output digest");
+        write_build_provenance(&build_root, "source-key", &digest).expect("provenance");
+        assert!(build_cache_hit(&build_root, "source-key").expect("cache check"));
+
+        fs::write(output.join("assets.js"), "console.log('tampered');").expect("tamper");
+        assert!(!build_cache_hit(&build_root, "source-key").expect("tampered cache check"));
+
+        fs::write(build_root.join(BUILD_PROVENANCE_FILE), "{}").expect("stale provenance");
+        assert!(!build_cache_hit(&build_root, "source-key").expect("stale cache check"));
     }
 
     #[test]

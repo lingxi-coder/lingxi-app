@@ -68,8 +68,8 @@ pub mod test_support_stream;
 
 pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};
 pub use conversation::{
-    ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient, SessionMemoryHandle,
-    StreamingApiClient, TurnOutcome,
+    AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient,
+    SessionMemoryHandle, StreamingApiClient, TurnOutcome,
 };
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use error::OrchestratorError;

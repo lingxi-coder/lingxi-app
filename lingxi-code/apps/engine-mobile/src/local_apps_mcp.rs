@@ -11,6 +11,7 @@ use protocol::McpConnectionId;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
@@ -56,6 +57,26 @@ pub trait LocalAppsMcpHost: Send + Sync {
     /// `agent.post` — the app's own timer posting while the agent reads is
     /// the INTENDED usage, not an exotic interleaving.
     async fn read_app_events(&self, input: Value) -> Result<Value, String>;
+    /// Create a persistent app Agent session after the host's capability gate.
+    async fn agent_session_create(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("persistent app Agent sessions are unavailable in this host build".into())
+    }
+    /// List persistent app Agent sessions owned by one app.
+    async fn agent_session_list(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("persistent app Agent sessions are unavailable in this host build".into())
+    }
+    /// Resume or close one persistent app Agent session.
+    async fn agent_session_update(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("persistent app Agent sessions are unavailable in this host build".into())
+    }
+    /// Propose a future App Agent Profile revision; apply remains user-gated.
+    async fn agent_profile_propose(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("App Agent Profiles are unavailable in this host build".into())
+    }
     /// Initialize host metadata and the host-owned scaffold for a freshly
     /// created app so the workflow can edit source immediately without any
     /// package-manager or template bootstrap step.
@@ -78,29 +99,178 @@ pub type InitSessionMinter = dyn Fn(
     + Send
     + Sync;
 
+/// Principal scope for dynamic per-app MCP tools.
+///
+/// The ordinary Conversation Agent uses the existing fixed app-management
+/// tools. App-owned Agent sessions must use an app-scoped transport created
+/// with [`LocalAppsMcpTransport::scoped_for_app`] for dynamic tools. Namespace
+/// spelling alone is not an authorization boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalAppsMcpScope {
+    ConversationAgent,
+    App(String),
+}
+
+impl LocalAppsMcpScope {
+    fn allows_dynamic_app(&self, app_id: &str) -> bool {
+        match self {
+            Self::ConversationAgent => false,
+            Self::App(allowed) => allowed == app_id,
+        }
+    }
+
+    fn is_app_scoped(&self) -> bool {
+        matches!(self, Self::App(_))
+    }
+}
+
 /// Mobile-local implementation of the MCP transport boundary.
 pub struct LocalAppsMcpTransport {
     root: PathBuf,
+    scope: LocalAppsMcpScope,
     lingxi_home: OnceLock<PathBuf>,
     service: OnceLock<Arc<AppService>>,
     host: OnceLock<Arc<dyn LocalAppsMcpHost>>,
     session_id: OnceLock<Arc<SessionIdProvider>>,
     init_session_minter: OnceLock<Arc<InitSessionMinter>>,
+    call_budget: Option<Arc<AgentCallBudget>>,
     connections: StdMutex<HashSet<McpConnectionId>>,
+}
+
+/// Per-turn limits for an app-owned Agent's host calls. The app Agent only
+/// receives an app-scoped transport, so one dynamic MCP invocation represents
+/// one MCP call and one host bridge call at this boundary.
+#[derive(Debug)]
+struct AgentCallBudget {
+    max_bridge_calls: u32,
+    max_mcp_calls: u32,
+    bridge_calls: AtomicU32,
+    mcp_calls: AtomicU32,
+}
+
+impl AgentCallBudget {
+    fn new(max_bridge_calls: u32, max_mcp_calls: u32) -> Self {
+        Self {
+            max_bridge_calls,
+            max_mcp_calls,
+            bridge_calls: AtomicU32::new(0),
+            mcp_calls: AtomicU32::new(0),
+        }
+    }
+
+    fn reserve(&self) -> Result<(), McpError> {
+        if !reserve_counter(&self.mcp_calls, self.max_mcp_calls) {
+            return Err(McpError::Internal("Agent MCP call budget exhausted".into()));
+        }
+        if !reserve_counter(&self.bridge_calls, self.max_bridge_calls) {
+            self.mcp_calls.fetch_sub(1, Ordering::Relaxed);
+            return Err(McpError::Internal(
+                "Agent bridge call budget exhausted".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn reserve_counter(counter: &AtomicU32, max: u32) -> bool {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current >= max {
+            return false;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 impl LocalAppsMcpTransport {
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
+        Self::with_scope(root, LocalAppsMcpScope::ConversationAgent)
+    }
+
+    fn with_scope(root: PathBuf, scope: LocalAppsMcpScope) -> Self {
         Self {
             root,
+            scope,
             lingxi_home: OnceLock::new(),
             service: OnceLock::new(),
             host: OnceLock::new(),
             session_id: OnceLock::new(),
             init_session_minter: OnceLock::new(),
+            call_budget: None,
             connections: StdMutex::new(HashSet::new()),
         }
+    }
+
+    /// Clone the attached host/service wiring into a transport restricted to
+    /// one app namespace. This is the constructor app-owned Agent sessions
+    /// must use; the global transport remains reserved for the Conversation
+    /// Agent's explicit app-management authority.
+    pub(crate) fn scoped_for_app(&self, app_id: &str) -> Result<Self, String> {
+        self.scoped_for_app_inner(app_id, None)
+    }
+
+    /// Create an app-scoped transport with per-turn host-call budgets.
+    pub(crate) fn scoped_for_app_with_budget(
+        &self,
+        app_id: &str,
+        max_bridge_calls: u32,
+        max_mcp_calls: u32,
+    ) -> Result<Self, String> {
+        self.scoped_for_app_inner(
+            app_id,
+            Some(Arc::new(AgentCallBudget::new(
+                max_bridge_calls,
+                max_mcp_calls,
+            ))),
+        )
+    }
+
+    fn scoped_for_app_inner(
+        &self,
+        app_id: &str,
+        call_budget: Option<Arc<AgentCallBudget>>,
+    ) -> Result<Self, String> {
+        local_apps::ids::validate_app_id(app_id).map_err(|error| error.to_string())?;
+        let scoped = Self::with_scope(
+            self.root.clone(),
+            LocalAppsMcpScope::App(app_id.to_string()),
+        );
+        if let Some(value) = self.lingxi_home.get() {
+            let _ = scoped.lingxi_home.set(value.clone());
+        }
+        if let Some(value) = self.service.get() {
+            let _ = scoped.service.set(value.clone());
+        }
+        if let Some(value) = self.host.get() {
+            let _ = scoped.host.set(value.clone());
+        }
+        if let Some(value) = self.session_id.get() {
+            let _ = scoped.session_id.set(value.clone());
+        }
+        if let Some(value) = self.init_session_minter.get() {
+            let _ = scoped.init_session_minter.set(value.clone());
+        }
+        // A budget is deliberately never inherited from the global
+        // Conversation Agent transport. It belongs to exactly one app Agent
+        // turn and is installed only by `scoped_for_app_with_budget`.
+        if let Some(value) = call_budget {
+            // `call_budget` is not a OnceLock because the scoped transport is
+            // immutable after construction.
+            return Ok(Self {
+                call_budget: Some(value),
+                ..scoped
+            });
+        }
+        Ok(scoped)
     }
 
     pub fn attach_lingxi_home(&self, lingxi_home: PathBuf) -> Result<(), PathBuf> {
@@ -465,7 +635,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "create",
-                "Create a local app record and host metadata, then let the host scaffold the workspace before generation. The host also queues a locked workspace-local `pnpm install` in the background; the app remains editable while dependencies prepare.",
+                "Create a local app record and host metadata, then let the host scaffold the workspace before generation; dependencies are already pinned by the host. It queues a locked workspace-local `pnpm install` in the background, and the app remains editable while dependencies prepare.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
                     "name":{"type":"string","minLength":1,"maxLength":200}
@@ -496,7 +666,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "update_manifest",
-                "Declare the app's data collections, allowed network domains, exact capabilities and confirmed native device context in its manifest. Every collection is `{id,name,fields}` and every field is `{id,label,kind,required?,enumOptions?}`. Collection and field ids use lower snake_case. `recordId`, `revision`, `createdAtMs`, and `updatedAtMs` are host-owned record metadata; never declare them as fields. `data_mutation` authorizes conversation-agent calls to mutate_data; a page writing its own collection through window.lingxi.v1.data does not declare it solely for that. Destructive schema migrations against existing data require the user's approval.",
+                "Declare the app's data collections, allowed network domains, exact capabilities and confirmed native device context in its manifest. Every collection is `{id,name,fields}` and every field is `{id,label,kind,required?,enumOptions?}`. Collection and field ids use lower snake_case. `recordId`, `revision`, `createdAtMs`, and `updatedAtMs` are host-owned record metadata; never declare them as fields. `data_mutation` authorizes conversation-agent calls to mutate_data; a page writing its own collection through window.lingxi.v2.data does not declare it solely for that. Destructive schema migrations against existing data require the user's approval.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "collections":{
@@ -629,9 +799,182 @@ impl LocalAppsMcpTransport {
         ]
     }
 
+    fn dynamic_tool_name(app_id: &str, operation: &str) -> String {
+        format!("app_{app_id}__{operation}")
+    }
+
+    /// Generate the logical MCP service for one v2 app. The physical server
+    /// remains this host-owned in-process hub; the app id is part of the tool
+    /// namespace and is rebound by `call` rather than accepted in input.
+    fn dynamic_tool_catalog(manifest: &local_apps::AppManifest) -> Vec<McpToolDto> {
+        if !manifest.runtime_api_compatible() {
+            return Vec::new();
+        }
+        let collection_ids: Vec<&str> = manifest
+            .collections
+            .iter()
+            .map(|collection| collection.id.as_str())
+            .collect();
+        let app_id = manifest.app_id.as_str();
+        vec![
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "data_query"),
+                "Query this local app's host-owned collection. The app id is bound by the MCP namespace.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "collection": {"enum": collection_ids.clone()},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                        "offset": {"type": "integer", "minimum": 0},
+                        "filters": {"type": "array", "maxItems": local_apps::MAX_QUERY_FILTERS},
+                        "sort": {"type": ["string", "object"]},
+                        "sort_key": {"type": ["string", "object"]},
+                        "sort_direction": {"enum": ["ascending", "descending", "asc", "desc"]}
+                    },
+                    "required": ["collection"],
+                    "additionalProperties": false
+                }),
+            ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "data_mutate"),
+                "Mutate this local app's declared collection using fixed upsert/delete CRUD operations. The app id is bound by the MCP namespace.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "collection": {"enum": collection_ids},
+                        "operations": {"type": "array", "minItems": 1, "maxItems": local_apps::MAX_MUTATION_BATCH_SIZE}
+                    },
+                    "required": ["collection", "operations"],
+                    "additionalProperties": false
+                }),
+            ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "runtime_status"),
+                "Read this local app's runtime status. The app id is bound by the MCP namespace.",
+                json!({"type": "object", "additionalProperties": false}),
+            ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "agent_sessions_list"),
+                "List persistent Agent sessions owned by this local app.",
+                json!({"type": "object", "additionalProperties": false}),
+            ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "agent_sessions_create"),
+                "Create a persistent Agent session for this local app. The host owns the session id and budget.",
+                json!({"type": "object", "properties": {"budget": {"type": "object"}}, "additionalProperties": false}),
+            ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "agent_sessions_update"),
+                "Resume or close a persistent Agent session owned by this local app.",
+                json!({"type": "object", "properties": {"session_id": {"type": "string", "minLength": 1}, "action": {"enum": ["resume", "close"]}}, "required": ["session_id", "action"], "additionalProperties": false}),
+            ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "agent_profile_propose_update"),
+                "Propose an app-specific system-prompt layer. The proposal is inert until the user approves it.",
+                json!({"type": "object", "properties": {"base_revision": {"type": "integer", "minimum": 0}, "instructions": {"type": "string", "maxLength": 32768}, "reason": {"type": "string", "maxLength": 2000}}, "required": ["instructions", "reason"], "additionalProperties": false}),
+            ),
+        ]
+    }
+
+    fn parse_dynamic_tool(tool: &str) -> Option<(&str, &str)> {
+        let suffix = tool.strip_prefix("app_")?;
+        let (app_id, operation) = suffix.split_once("__")?;
+        if local_apps::ids::is_valid_app_id(app_id)
+            && matches!(
+                operation,
+                "data_query"
+                    | "data_mutate"
+                    | "runtime_status"
+                    | "agent_sessions_list"
+                    | "agent_sessions_create"
+                    | "agent_sessions_update"
+                    | "agent_profile_propose_update"
+            )
+        {
+            Some((app_id, operation))
+        } else {
+            None
+        }
+    }
+
     async fn call(&self, tool: &str, input: Value) -> Result<McpToolResultDto, McpError> {
         Self::validate_input(&input)?;
         let service = self.service()?;
+        if self.scope.is_app_scoped() && Self::parse_dynamic_tool(tool).is_none() {
+            return Err(McpError::ToolNotFound(tool.into()));
+        }
+        if let Some((app_id, operation)) = Self::parse_dynamic_tool(tool) {
+            if !self.scope.allows_dynamic_app(app_id) {
+                // Do not reveal whether a foreign app namespace exists.
+                return Err(McpError::ToolNotFound(tool.into()));
+            }
+            if let Some(call_budget) = &self.call_budget {
+                call_budget.reserve()?;
+            }
+            if input.get("app_id").is_some() {
+                return Ok(Self::tool_error(
+                    "app_id is host-bound by the app MCP namespace and must not be supplied",
+                ));
+            }
+            service
+                .record(app_id)
+                .await
+                .map_err(|error| McpError::Internal(error.to_string()))?;
+            let layout = local_apps::AppLayout::new(self.root.clone(), app_id)
+                .map_err(|error| McpError::Internal(error.to_string()))?;
+            let manifest = local_apps::load_manifest(&layout)
+                .map_err(|error| McpError::Internal(error.to_string()))?;
+            if !manifest.runtime_api_compatible() {
+                return Ok(Self::tool_error(
+                    "runtime_api_incompatible: this app must be regenerated for Local Apps Runtime OS v2",
+                ));
+            }
+            let mut bound = input
+                .as_object()
+                .cloned()
+                .ok_or_else(|| McpError::Internal("tool input must be a JSON object".into()))?;
+            bound.insert("app_id".into(), Value::String(app_id.into()));
+            let bound = Value::Object(bound);
+            return Ok(match operation {
+                "data_query" => {
+                    if let Err(message) = Self::validate_query_data_input(&bound) {
+                        Self::tool_error(format!("invalid_argument: {message}"))
+                    } else {
+                        match self.host()?.query_data(bound).await {
+                            Ok(value) => Self::query_result(value),
+                            Err(message) => Self::tool_error(message),
+                        }
+                    }
+                }
+                "data_mutate" => match self.host()?.mutate_data(bound).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                },
+                "runtime_status" => match service.runtime_record(app_id).await {
+                    Ok(value) => Self::result(json!({"app_id": app_id, "runtime": value})),
+                    Err(error) => Self::tool_error(error.to_string()),
+                },
+                "agent_sessions_list" => match self.host()?.agent_session_list(bound).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                },
+                "agent_sessions_create" => match self.host()?.agent_session_create(bound).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                },
+                "agent_sessions_update" => match self.host()?.agent_session_update(bound).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                },
+                "agent_profile_propose_update" => {
+                    match self.host()?.agent_profile_propose(bound).await {
+                        Ok(value) => Self::result(value),
+                        Err(message) => Self::tool_error(message),
+                    }
+                }
+                _ => unreachable!("parse_dynamic_tool only returns supported operations"),
+            });
+        }
         let result = match tool {
             "list" => {
                 let query = input
@@ -914,7 +1257,30 @@ impl McpTransport for LocalAppsMcpTransport {
 
     async fn list_tools(&self, conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
         self.ensure_connection(conn)?;
-        Ok(Self::tool_catalog())
+        let mut tools = if self.scope.is_app_scoped() {
+            Vec::new()
+        } else {
+            Self::tool_catalog()
+        };
+        for record in self.service()?.list_apps().await {
+            if !self.scope.allows_dynamic_app(&record.id) {
+                continue;
+            }
+            let layout = match local_apps::AppLayout::new(self.root.clone(), record.id.clone()) {
+                Ok(layout) => layout,
+                Err(error) => {
+                    tracing::warn!(app_id = %record.id, error = %error, "skip invalid app MCP namespace");
+                    continue;
+                }
+            };
+            match local_apps::load_manifest(&layout) {
+                Ok(manifest) => tools.extend(Self::dynamic_tool_catalog(&manifest)),
+                Err(error) => {
+                    tracing::warn!(app_id = %record.id, error = %error, "skip unreadable app MCP namespace")
+                }
+            }
+        }
+        Ok(tools)
     }
 
     async fn list_resources(
@@ -992,6 +1358,23 @@ mod tests {
     use local_apps::test_support::FixedClock;
     use local_apps::{AppLayout, AppService, NoopAppEventObserver};
     use tempfile::TempDir;
+
+    #[test]
+    fn app_agent_call_budget_enforces_mcp_and_bridge_limits() {
+        let budget = AgentCallBudget::new(2, 1);
+        assert!(budget.reserve().is_ok());
+        let error = budget
+            .reserve()
+            .expect_err("MCP limit must stop the second call");
+        assert!(error.to_string().contains("MCP call budget"));
+
+        let bridge_limited = AgentCallBudget::new(1, 2);
+        assert!(bridge_limited.reserve().is_ok());
+        let error = bridge_limited
+            .reserve()
+            .expect_err("bridge limit must stop the second call");
+        assert!(error.to_string().contains("bridge call budget"));
+    }
 
     /// A transport over a real store with one app whose mailbox holds
     /// `count` events.
@@ -1149,6 +1532,7 @@ mod tests {
                 "create",
                 "manage_runtime",
                 "build",
+                "install_dependencies",
                 "create_checkpoint",
                 "update_manifest",
                 "query_data",
@@ -1262,6 +1646,95 @@ mod tests {
             query.input_schema["properties"].get("cursor").is_none(),
             "the broken string cursor contract must not remain in the catalog"
         );
+    }
+
+    #[test]
+    fn dynamic_app_catalog_is_v2_only_and_binds_namespace_ids() {
+        let mut manifest = local_apps::AppManifest::for_new_app("abc12345", "Notes");
+        manifest.collections.push(local_apps::DataCollectionSchema {
+            id: "notes".into(),
+            name: "Notes".into(),
+            fields: vec![],
+        });
+        let tools = LocalAppsMcpTransport::dynamic_tool_catalog(&manifest);
+        assert!(tools
+            .iter()
+            .any(|tool| tool.tool_name == "app_abc12345__data_query"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool.tool_name == "app_abc12345__agent_sessions_create"));
+        assert_eq!(
+            LocalAppsMcpTransport::parse_dynamic_tool("app_abc12345__data_query"),
+            Some(("abc12345", "data_query"))
+        );
+        assert!(LocalAppsMcpTransport::parse_dynamic_tool("app_../__data_query").is_none());
+
+        manifest.runtime_api_version = 1;
+        assert!(LocalAppsMcpTransport::dynamic_tool_catalog(&manifest).is_empty());
+    }
+
+    #[test]
+    fn app_scoped_transport_rejects_foreign_dynamic_namespaces() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let transport = LocalAppsMcpTransport::new(root.path().to_path_buf());
+        let scoped = transport
+            .scoped_for_app("abc12345")
+            .expect("valid app scope");
+        assert!(scoped.scope.allows_dynamic_app("abc12345"));
+        assert!(!scoped.scope.allows_dynamic_app("other123"));
+        assert!(!transport.scope.allows_dynamic_app("abc12345"));
+    }
+
+    #[tokio::test]
+    async fn app_scoped_mcp_lists_and_calls_only_its_namespace() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let service = Arc::new(
+            AppService::load(
+                root.path(),
+                Arc::new(FixedClock::new(1)),
+                Arc::new(NoopAppEventObserver),
+            )
+            .await
+            .expect("service"),
+        );
+        let first = service
+            .create_app(Some("First"), "first", None)
+            .await
+            .expect("first app");
+        let second = service
+            .create_app(Some("Second"), "second", None)
+            .await
+            .expect("second app");
+
+        let global = LocalAppsMcpTransport::new(root.path().to_path_buf());
+        assert!(global.attach_service(service).is_ok());
+        let scoped = global
+            .scoped_for_app(&first.id)
+            .expect("create app-scoped transport");
+        let connection = scoped
+            .connect(&McpTransportSpec::InProcess {
+                registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
+            })
+            .await
+            .expect("connect");
+        let tools = scoped.list_tools(&connection).await.expect("list tools");
+        assert!(!tools.is_empty());
+        assert!(tools
+            .iter()
+            .all(|tool| { tool.tool_name.starts_with(&format!("app_{}__", first.id)) }));
+        assert!(!tools
+            .iter()
+            .any(|tool| { tool.tool_name.starts_with(&format!("app_{}__", second.id)) }));
+
+        let error = scoped
+            .call_tool(
+                &connection,
+                &format!("app_{}__runtime_status", second.id),
+                json!({}),
+            )
+            .await
+            .expect_err("foreign namespace must be hidden");
+        assert!(matches!(error, McpError::ToolNotFound(_)));
     }
 
     #[test]

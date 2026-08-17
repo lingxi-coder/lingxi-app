@@ -7,6 +7,7 @@
 use crate::error::AppError;
 use crate::ids;
 use crate::permissions::AppCapability;
+use crate::runtime_v2::RUNTIME_API_MAJOR;
 use crate::types::APPS_SCHEMA_VERSION;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,6 +58,16 @@ pub const MAX_ENUM_OPTION_BYTES: usize = 500;
 /// Record properties supplied by the host rather than stored in `document`.
 pub const HOST_OWNED_RECORD_FIELD_IDS: [&str; 4] =
     ["recordId", "revision", "createdAtMs", "updatedAtMs"];
+
+fn default_runtime_api_version() -> u16 {
+    // Missing on a legacy manifest means v1. It remains readable for
+    // migration/repair, but the v2 runtime will refuse to mount it.
+    1
+}
+
+fn is_legacy_runtime_api_version(value: &u16) -> bool {
+    *value == 1
+}
 
 /// Supported native collection field types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +206,14 @@ impl DeviceContext {
 pub struct AppManifest {
     /// Persisted local-app schema version.
     pub schema_version: u32,
+    /// Runtime API major used by the generated page. New apps are v2;
+    /// missing values deserialize as v1 so old data is preserved but cannot
+    /// be silently mounted by the v2 host.
+    #[serde(
+        default = "default_runtime_api_version",
+        skip_serializing_if = "is_legacy_runtime_api_version"
+    )]
+    pub runtime_api_version: u16,
     /// Stable app id bound by the native host.
     pub app_id: String,
     /// Monotonic manifest revision.
@@ -226,6 +245,7 @@ impl AppManifest {
     pub fn for_new_app(app_id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             schema_version: APPS_SCHEMA_VERSION,
+            runtime_api_version: RUNTIME_API_MAJOR,
             app_id: app_id.into(),
             revision: 0,
             name: name.into(),
@@ -243,6 +263,12 @@ impl AppManifest {
             return Err(AppError::InvalidRequest(format!(
                 "manifest schemaVersion {} is unsupported (expected {APPS_SCHEMA_VERSION})",
                 self.schema_version
+            )));
+        }
+        if !matches!(self.runtime_api_version, 1 | RUNTIME_API_MAJOR) {
+            return Err(AppError::InvalidRequest(format!(
+                "manifest runtimeApiVersion {} is unsupported",
+                self.runtime_api_version
             )));
         }
         if self.name.trim().is_empty() {
@@ -362,6 +388,13 @@ impl AppManifest {
             device_context.validate()?;
         }
         Ok(())
+    }
+
+    /// True only when this manifest can be mounted by the direct-cutover v2
+    /// runtime. Legacy manifests remain loadable for rebuild/migration UI.
+    #[must_use]
+    pub fn runtime_api_compatible(&self) -> bool {
+        self.runtime_api_version == RUNTIME_API_MAJOR
     }
 
     /// Find a collection by stable id.
@@ -496,6 +529,29 @@ impl AppLayout {
         self.app_dir_rel().join(MAILBOX_FILE)
     }
 
+    /// Root-relative host-owned Agent session catalog.
+    #[must_use]
+    pub fn agent_sessions_rel(&self) -> PathBuf {
+        self.app_dir_rel()
+            .join(crate::agent_sessions::AGENT_SESSION_CATALOG_FILE)
+    }
+
+    /// Root-relative user-approved App Agent Profile.
+    #[must_use]
+    pub fn agent_profile_rel(&self) -> PathBuf {
+        self.app_dir_rel()
+            .join(crate::agent_sessions::AGENT_PROFILE_FILE)
+    }
+
+    /// Root-relative transcript for one host-owned app Agent session.
+    pub fn agent_session_history_rel(&self, session_id: &str) -> Result<PathBuf, AppError> {
+        crate::agent_sessions::validate_agent_session_id(session_id)?;
+        Ok(self
+            .app_dir_rel()
+            .join(crate::agent_sessions::AGENT_SESSION_HISTORY_DIR)
+            .join(format!("{session_id}.json")))
+    }
+
     /// Create the complete app directory skeleton with private permissions.
     pub fn initialize(&self) -> Result<(), AppError> {
         std::fs::create_dir_all(&self.root).map_err(|error| {
@@ -510,6 +566,8 @@ impl AppLayout {
             self.build_rel(false),
             self.build_rel(true),
             self.logs_rel(),
+            self.app_dir_rel()
+                .join(crate::agent_sessions::AGENT_SESSION_HISTORY_DIR),
         ] {
             ensure_private_directory(&self.root, &relative)?;
         }
@@ -684,6 +742,7 @@ mod tests {
     fn manifest() -> AppManifest {
         AppManifest {
             schema_version: APPS_SCHEMA_VERSION,
+            runtime_api_version: RUNTIME_API_MAJOR,
             app_id: "abcd1234".into(),
             revision: 1,
             name: "Tasks".into(),

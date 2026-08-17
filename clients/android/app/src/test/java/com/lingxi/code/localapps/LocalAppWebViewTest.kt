@@ -15,6 +15,9 @@ class LocalAppWebViewTest {
             "query_data", "mutate_data", "network_request", "runtime_status",
             "capture_photo", "pick_image", "record_audio_start", "record_audio_stop",
             "get_location", "transcribe_speech", "post_notification", "llm_chat", "agent_post",
+            "agent_session_create", "agent_session_list", "agent_session_resume",
+            "agent_session_close", "agent_send", "agent_stream", "agent_cancel",
+            "agent_profile_propose_update",
         )
 
         assertEquals(expected, AppBridgeOperationDto.entries.map { it.bridgeWireName() }.toSet())

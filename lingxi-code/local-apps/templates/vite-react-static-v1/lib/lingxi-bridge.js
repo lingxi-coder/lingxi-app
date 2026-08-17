@@ -1,4 +1,6 @@
-const BRIDGE_VERSION = "v1";
+// Runtime OS v2 is a direct cutover.  The host intentionally does not expose
+// a v1 compatibility object to generated apps.
+const BRIDGE_VERSION = "v2";
 
 export function getLingXiBridge() {
   if (typeof window === "undefined") {
@@ -181,4 +183,74 @@ export async function postAgentEvent(request) {
     throw new Error("LingXi agent bridge is unavailable");
   }
   return bridge.agent.post(request);
+}
+
+/** Create a host-owned persistent Agent session for this app. */
+export async function createAgentSession(request = {}) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.agent?.sessions?.create) {
+    throw new Error("LingXi Agent session bridge is unavailable");
+  }
+  return bridge.agent.sessions.create(request);
+}
+
+/** List this app's host-owned persistent Agent sessions. */
+export async function listAgentSessions() {
+  const bridge = getLingXiBridge();
+  if (!bridge?.agent?.sessions?.list) {
+    throw new Error("LingXi Agent session bridge is unavailable");
+  }
+  return bridge.agent.sessions.list();
+}
+
+export async function resumeAgentSession(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.agent?.sessions?.resume) {
+    throw new Error("LingXi Agent session bridge is unavailable");
+  }
+  return bridge.agent.sessions.resume(request);
+}
+
+export async function closeAgentSession(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.agent?.sessions?.close) {
+    throw new Error("LingXi Agent session bridge is unavailable");
+  }
+  return bridge.agent.sessions.close(request);
+}
+
+/** Run one non-streaming turn in an app-owned Agent session. */
+export async function sendAgentTurn(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.agent?.send) {
+    throw new Error("LingXi Agent bridge is unavailable");
+  }
+  return bridge.agent.send(request);
+}
+
+/** Run one streaming turn in an app-owned Agent session. */
+export async function streamAgentTurn(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.agent?.stream) {
+    throw new Error("LingXi Agent bridge is unavailable");
+  }
+  return bridge.agent.stream(request);
+}
+
+/** Cancel one in-flight app-owned Agent turn. */
+export async function cancelAgentTurn(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.agent?.cancel) {
+    throw new Error("LingXi Agent bridge is unavailable");
+  }
+  return bridge.agent.cancel(request);
+}
+
+/** Propose, but never silently apply, an App Agent Profile update. */
+export async function proposeAgentProfileUpdate(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.agent?.profiles?.proposeUpdate) {
+    throw new Error("LingXi Agent Profile bridge is unavailable");
+  }
+  return bridge.agent.profiles.proposeUpdate(request);
 }

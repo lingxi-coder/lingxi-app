@@ -1889,6 +1889,7 @@ dependencies = [
  "reqwest",
  "sandbox",
  "secret",
+ "serde",
  "serde_json",
  "session",
  "sha2",

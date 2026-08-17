@@ -594,6 +594,7 @@ final class LocalAppsStoreTests: XCTestCase {
                 app: appRecord(id: "tracker", name: "Tracker"),
                 manifest: AppManifestDto(
                     schemaVersion: 1,
+                    runtimeApiVersion: nil,
                     appId: "tracker",
                     name: "Tracker",
                     designRevision: 3,

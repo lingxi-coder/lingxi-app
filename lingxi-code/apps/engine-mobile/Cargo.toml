@@ -76,6 +76,7 @@ uniffi = [
     "dep:tracing",
     "dep:thiserror",
     "dep:serde_json",
+    "dep:serde",
     "dep:url",
     "dep:async-trait",
     # 3c-T3: populate LlmResponse.cost from the builtin pricing catalog.
@@ -207,6 +208,7 @@ tokio-util = { workspace = true, optional = true }
 tracing = { version = "0.1", optional = true }
 thiserror = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 url = { version = "2", optional = true }
 async-trait = { workspace = true, optional = true }
 

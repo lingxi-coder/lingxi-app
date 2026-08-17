@@ -1295,6 +1295,7 @@ mod tests {
     fn manifest() -> AppManifest {
         AppManifest {
             schema_version: APPS_SCHEMA_VERSION,
+            runtime_api_version: crate::runtime_v2::RUNTIME_API_MAJOR,
             app_id: "abcd1234".into(),
             revision: 1,
             name: "Tracker".into(),

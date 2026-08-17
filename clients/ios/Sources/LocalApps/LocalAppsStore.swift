@@ -393,6 +393,14 @@ final class LocalAppsStore {
             case ("device", "postNotification"): operation = .postNotification
             case ("llm", "chat"): operation = .llmChat
             case ("agent", "post"): operation = .agentPost
+            case ("agent", "sessionCreate"): operation = .agentSessionCreate
+            case ("agent", "sessionList"): operation = .agentSessionList
+            case ("agent", "sessionResume"): operation = .agentSessionResume
+            case ("agent", "sessionClose"): operation = .agentSessionClose
+            case ("agent", "send"): operation = .agentSend
+            case ("agent", "stream"): operation = .agentStream
+            case ("agent", "cancel"): operation = .agentCancel
+            case ("agent", "profileProposeUpdate"): operation = .agentProfileProposeUpdate
             default: operation = nil
             }
             guard let operation else {
@@ -595,6 +603,16 @@ final class LocalAppsStore {
                     error: response.ok ? nil : (response.error ?? String(localized: "local_apps_error_bridge_failed")),
                     code: response.errorCode
                 )
+
+            // Stream frames are consumed by the app bridge/session stream
+            // owner; the library store must remain exhaustive without
+            // misclassifying an ordered frame as a one-shot response.
+            case let .appBridgeStreamFrame(_, frameJSON):
+                guard let data = frameJSON.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let appID = object["appId"] as? String
+                else { break }
+                LocalAppWebViewRegistry.shared.deliverStreamFrame(appID: appID, frameJSON: frameJSON)
 
             case let .appUiRequest(request):
                 runtimeLastUsedAt[request.appId] = .now

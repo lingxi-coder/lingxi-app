@@ -815,6 +815,8 @@ export type AppRuntimeRecoveryStateDto =
 /** Generated application manifest (local_apps.rs `AppManifestDto`). */
 export interface AppManifestDto {
   schema_version: number;
+  /** Runtime API major; legacy manifests are readable but not mountable in v2. */
+  runtime_api_version?: number;
   app_id: string;
   name: string;
   design_revision: number;
@@ -854,7 +856,7 @@ export interface AppDetailsDto {
   checkpoints: AppCheckpointDto[];
 }
 
-/** Operations accepted by the `window.lingxi.v1` bridge (local_apps.rs `AppBridgeOperationDto`). */
+/** Legacy operation names retained as the v2 native bridge's low-level mapping. */
 export type AppBridgeOperationDto =
   | 'query_data'
   | 'mutate_data'
@@ -868,7 +870,15 @@ export type AppBridgeOperationDto =
   | 'transcribe_speech'
   | 'post_notification'
   | 'llm_chat'
-  | 'agent_post';
+  | 'agent_post'
+  | 'agent_session_create'
+  | 'agent_session_list'
+  | 'agent_session_resume'
+  | 'agent_session_close'
+  | 'agent_send'
+  | 'agent_stream'
+  | 'agent_cancel'
+  | 'agent_profile_propose_update';
 
 /** One host-bound, data-only bridge request (local_apps.rs `AppBridgeRequestDto`). */
 export interface AppBridgeRequestDto {
@@ -887,6 +897,135 @@ export interface AppBridgeResponseDto {
   error?: string;
   /** Stable machine-readable failure code (`capability_not_declared`, …). */
   error_code?: string;
+}
+
+/** Local App Runtime OS v2 version (client-protocol `AppRuntimeApiVersionDto`). */
+export interface AppRuntimeApiVersionDto {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+/** The v2 runtime is a direct cutover; v1 pages are incompatible. */
+export const LOCAL_APP_RUNTIME_API_VERSION: AppRuntimeApiVersionDto = {
+  major: 2,
+  minor: 0,
+  patch: 0,
+};
+
+export type AppInvocationOriginDto =
+  | 'page_foreground'
+  | 'conversation_agent'
+  | 'app_runtime_headless'
+  | 'system_scheduler';
+
+export interface AppInvocationFrameDto {
+  appId: string;
+  capability: string;
+  inputHash: string;
+}
+
+/** Host-created attribution metadata for a privileged v2 call. */
+export interface AppInvocationContextDto {
+  appId: string;
+  appInstanceId: string;
+  requestId: string;
+  turnId?: string;
+  origin: AppInvocationOriginDto;
+  grantEpoch: number;
+  capabilityInstance?: string;
+  callChain?: AppInvocationFrameDto[];
+}
+
+/** Generic v2 operation addressed by a registry id (`llm.stream`, etc.). */
+export interface AppBridgeV2RequestDto {
+  apiVersion: AppRuntimeApiVersionDto;
+  context: AppInvocationContextDto;
+  operation: string;
+  payloadJson?: string;
+  stream?: boolean;
+}
+
+export interface AppBridgeV2ResponseDto {
+  requestId: string;
+  appId: string;
+  ok: boolean;
+  resultJson?: string;
+  error?: string;
+  errorCode?: string;
+  streamId?: string;
+}
+
+export type AppBridgeStreamFrameDto =
+  | { type: 'started'; appId: string; requestId: string; streamId: string }
+  | {
+      type: 'data';
+      appId: string;
+      requestId: string;
+      streamId: string;
+      seq: number;
+      dataJson: string;
+    }
+  | {
+      type: 'completed';
+      appId: string;
+      requestId: string;
+      streamId: string;
+      seq: number;
+    }
+  | {
+      type: 'error';
+      appId: string;
+      requestId: string;
+      streamId: string;
+      seq: number;
+      code: string;
+      message: string;
+    }
+  | {
+      type: 'cancelled';
+      appId: string;
+      requestId: string;
+      streamId: string;
+      seq: number;
+      reason: string;
+    };
+
+export type AppAgentSessionStatusDto = 'active' | 'paused' | 'closed';
+
+export interface AppAgentBudgetDto {
+  maxTokens: number;
+  maxWallMs: number;
+  maxTurns: number;
+  maxBridgeCalls: number;
+  maxMcpCalls: number;
+  maxRecursionDepth: number;
+}
+
+export interface AppAgentSessionDto {
+  sessionId: string;
+  appId: string;
+  appInstanceId: string;
+  status: AppAgentSessionStatusDto;
+  promptProfileRevision: number;
+  budget: AppAgentBudgetDto;
+  turnCount: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface AppAgentProfileDto {
+  appId: string;
+  revision: number;
+  instructions: string;
+  updatedAtMs: number;
+}
+
+export interface AppAgentProfileProposalDto {
+  appId: string;
+  baseRevision: number;
+  instructions: string;
+  reason: string;
 }
 
 /** Allow-listed UI operations; arbitrary script is absent (local_apps.rs `AppUiActionKindDto`). */
@@ -961,7 +1100,8 @@ export type AppEventDto =
   /** An app-initiated `llm.chat` started/finished; drives the "calling AI" indicator. */
   | { type: 'app_llm_activity_changed'; app_id: string; active: boolean }
   /** An app posted a mailbox event via `agent.post`; carries no body — badge only. */
-  | { type: 'app_agent_event_posted'; app_id: string; seq: number; topic: string; created_at_ms: number };
+  | { type: 'app_agent_event_posted'; app_id: string; seq: number; topic: string; created_at_ms: number }
+  | { type: 'app_bridge_stream_frame'; frame: AppBridgeStreamFrameDto; frameJson: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // events.rs

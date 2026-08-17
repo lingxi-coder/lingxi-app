@@ -84,6 +84,14 @@ final class LocalAppWebViewRegistry {
         )
     }
 
+    func deliverStreamFrame(appID: String, frameJSON: String) {
+        guard let controller = controllers[appID]?.value,
+              let data = frameJSON.data(using: .utf8),
+              let json = String(data: data, encoding: .utf8)
+        else { return }
+        controller.webView.evaluateJavaScript("window.lingxi?.__stream(\(json));")
+    }
+
     #if canImport(engine_mobileFFI)
         func execute(request: AppUiRequestDto) async -> LocalAppUIExecutionResult {
             for _ in 0 ..< 50 {
@@ -771,12 +779,12 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
 
     private static let bridgeSourceTemplate = #"""
     (() => {
-      if (window.lingxi?.v1) return;
+      if (window.lingxi?.v2) return;
       const installCsp = () => {
         if (!document.head || document.head.querySelector('meta[data-lingxi-csp]')) return false;
         const meta = document.createElement('meta');
         meta.httpEquiv = 'Content-Security-Policy';
-        meta.dataset.lingxiCsp = 'v1';
+        meta.dataset.lingxiCsp = 'v2';
         meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
         document.head.prepend(meta);
         return true;
@@ -789,7 +797,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
       }
       const localOnly = input => {
         const url = new URL(typeof input === 'string' ? input : input.url, location.href);
-        if (url.origin !== location.origin) throw new TypeError('External network access must use window.lingxi.v1.network');
+        if (url.origin !== location.origin) throw new TypeError('External network access must use window.lingxi.v2.network');
         return url;
       };
       const nativeFetch = window.fetch.bind(window);
@@ -800,6 +808,12 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         return nativeOpen.call(this, method, url, ...rest);
       };
       const pending = new Map();
+      const streamListeners = new Set();
+      const emitStream = frame => {
+        for (const listener of streamListeners) {
+          try { listener(frame); } catch (_) { /* app listener isolation */ }
+        }
+      };
       const request = (namespace, operation, payload = {}) => new Promise((resolve, reject) => {
         const requestId = crypto.randomUUID();
         const handler = window.webkit?.messageHandlers?.[`lingxi${namespace}`];
@@ -876,6 +890,23 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         }),
         agent: Object.freeze({
           post: payload => request('Agent', 'post', payload),
+          sessions: Object.freeze({
+            create: (payload = {}) => request('Agent', 'sessionCreate', payload),
+            list: () => request('Agent', 'sessionList', {}),
+            resume: (payload) => request('Agent', 'sessionResume', payload),
+            close: (payload) => request('Agent', 'sessionClose', payload),
+          }),
+          send: payload => request('Agent', 'send', payload),
+          stream: payload => request('Agent', 'stream', payload),
+          cancel: payload => request('Agent', 'cancel', payload),
+          onFrame: listener => {
+            if (typeof listener !== 'function') throw new TypeError('Agent stream listener must be a function');
+            streamListeners.add(listener);
+            return () => streamListeners.delete(listener);
+          },
+          profiles: Object.freeze({
+            proposeUpdate: payload => request('Agent', 'profileProposeUpdate', payload),
+          }),
         }),
       });
       const resolveNative = envelope => {
@@ -894,7 +925,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         }
       };
       Object.defineProperty(window, 'lingxi', {
-        value: Object.freeze({ v1: api, __resolve: resolveNative }),
+        value: Object.freeze({ v2: api, __resolve: resolveNative, __stream: emitStream }),
         configurable: false,
         writable: false,
       });

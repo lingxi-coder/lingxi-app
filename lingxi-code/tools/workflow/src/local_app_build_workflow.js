@@ -3,8 +3,7 @@ export const meta = {
   description: 'Design, generate, build, and verify a confirmed local app.',
   phases: [
     { title: 'Design' },
-    { title: 'Generate' },
-    { title: 'Build' },
+    { title: 'Generate & Build' },
     { title: 'Verify' },
   ],
 };
@@ -146,24 +145,6 @@ const VERIFICATION_RESULT_SCHEMA = {
   ],
 };
 
-const runBuildStep = async ({ headline, promptLabel, runtimeAction, logHint, resultStage }) =>
-  requirePreviewOnSuccess(await agent(
-    [
-      headline,
-      `Call mcp__local_apps__build with {"app_id":"${appId}"}.`,
-      logHint,
-      `If the build succeeds, call mcp__local_apps__manage_runtime with {"app_id":"${appId}","action":"${runtimeAction}"} and preserve the returned preview URL in preview_url. If the build or runtime step fails, return preview_url as an empty string.`,
-      CONTRACT,
-    ].join('\n'),
-    {
-      ...modelOptions,
-      label: promptLabel,
-      phase: 'Build',
-      schema: BUILD_RESULT_SCHEMA,
-      throwOnError: true,
-    },
-  ), resultStage);
-
 phase('Design');
 const designResult = await agent(
   [
@@ -188,7 +169,7 @@ const designResult = await agent(
 );
 const design = requireAgentResult(designResult, 'the design step');
 
-phase('Generate');
+phase('Generate & Build');
 const generated = await agent(
   [
     'Generate the complete React implementation. Invoke $accessibility and $react-best-practices as independent reviewers while writing the source.',
@@ -201,31 +182,30 @@ const generated = await agent(
     'When the UI persists declared collection data, use the locked upsertRecord/deleteRecord helpers and queryCollection response shape. Read only records[].document for app fields. Do not make localStorage, IndexedDB, or an in-memory cache authoritative over native collection data. Do not swallow bridge errors or convert a rejected native write into UI success.',
     'Use platform tokens and adapters instead of scattered platform conditionals. Include loading, empty, error, success, disabled, offline, permission-denied, and reduced-motion states where relevant. Build actual copy and interaction paths, not a placeholder shell.',
     'Stay inside the host-scaffolded dependency set. If a desired approach would require package or root-file changes, choose a source-only implementation instead of requesting dependency work.',
-    'Do not build, preview, run npm, or start anything in this phase.',
+    `After the source is complete, call mcp__local_apps__build with {"app_id":"${appId}"}. If it fails, inspect mcp__local_apps__read_logs with log="build", fix only editable source files, and retry the build once. The host may prepare locked workspace dependencies as part of build recovery; do not run a package manager or request an alternate package flow.`,
+    `If the build succeeds, call mcp__local_apps__manage_runtime with {"app_id":"${appId}","action":"start"} and preserve the returned preview URL in preview_url. If the build or runtime step fails, return ok=false and preview_url as an empty string.`,
+    'Return the structured build result only after generation, build, and runtime start have all completed.',
   ].join('\n'),
-  { ...modelOptions, label: 'generate', phase: 'Generate', throwOnError: true },
+  {
+    ...modelOptions,
+    label: 'generate-build',
+    phase: 'Generate & Build',
+    schema: BUILD_RESULT_SCHEMA,
+    throwOnError: true,
+  },
 );
-// Without this check the Build phase would happily build the untouched
-// scaffold, the host would stamp the app `ready`, and the workflow would
-// report success for an app that is still a blank template.
-requireAgentResult(generated, 'the source-generation step');
+// Generation and the deterministic host build share one agent context. This
+// avoids paying for a second model startup merely to call build + start, while
+// the structured result still prevents an untouched scaffold or missing
+// preview from being reported as success.
+let build = requirePreviewOnSuccess(generated, 'initial build');
 
-phase('Build');
-let build = await runBuildStep({
-  headline: `Build local app "${appId}" with the host-owned builder.`,
-  promptLabel: 'build',
-  runtimeAction: 'start',
-  logHint:
-    'If it fails, inspect mcp__local_apps__read_logs with log="build", fix only editable source files, and retry the build once in this phase. The host may prepare locked workspace dependencies as part of build recovery; do not run npm yourself or request alternate package flows.',
-  resultStage: 'initial build',
-});
-
-phase('Verify');
 let verification = null;
 let repairRounds = 0;
 // The two allowed repair rounds are repair -> rebuild -> re-verify cycles. A remaining
 // finding is returned honestly instead of being hidden by another iteration.
 for (let round = 0; round <= 2; round += 1) {
+  phase('Verify');
   verification = await agent(
     [
       'Invoke $frontend-qa for deterministic local-app verification.',
@@ -249,28 +229,26 @@ for (let round = 0; round <= 2; round += 1) {
   if (verification && verification.ok) break;
   if (round === 2) break;
   repairRounds += 1;
-  await agent(
+  phase('Generate & Build');
+  const repaired = await agent(
     [
       `Repair the findings from frontend-qa for local app "${appId}".`,
       JSON.stringify(verification),
       CONTRACT,
-      'Fix the smallest source-level cause. Do not install packages, change root infra files, or edit workspace package files in the repair pass, and do not claim verification yet.',
+      'Fix the smallest source-level cause. Do not install packages, change root infra files, or edit workspace package files, and do not claim verification yet.',
+      `After repairing, call mcp__local_apps__build with {"app_id":"${appId}"}. Let the host prepare locked dependencies if needed. If the build fails, read the build log, fix only editable source files, and retry once.`,
+      `If the build succeeds, call mcp__local_apps__manage_runtime with {"app_id":"${appId}","action":"restart"} and preserve its preview URL in preview_url. Otherwise return ok=false and preview_url as an empty string.`,
+      'Return the structured build result only after repair, rebuild, and runtime restart have all completed.',
     ].join('\n'),
     {
       ...modelOptions,
-      label: `repair-${repairRounds}`,
-      phase: 'Verify',
+      label: `repair-build-${repairRounds}`,
+      phase: 'Generate & Build',
+      schema: BUILD_RESULT_SCHEMA,
       throwOnError: true,
     },
   );
-  build = await runBuildStep({
-    headline: `Rebuild local app "${appId}" after repair round ${repairRounds}.`,
-    promptLabel: `rebuild-${repairRounds}`,
-    runtimeAction: 'restart',
-    logHint:
-      'Let the host manage any locked dependency preparation needed for the build. If the build fails, read the build log, fix only editable source files, and do not restart the runtime.',
-    resultStage: `rebuild ${repairRounds}`,
-  });
+  build = requirePreviewOnSuccess(repaired, `repair build ${repairRounds}`);
 }
 
 // The task's terminal status comes from whether this SCRIPT throws — an `Ok`

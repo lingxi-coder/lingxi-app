@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /**
  * Local apps are agent-driven (protocol v3): the record set collapsed to
@@ -481,6 +482,17 @@ class LocalAppsViewModel(
                     )
                 }
             }
+            // Stream frames are consumed by the app bridge/session stream
+            // owner. Keep the library reducer exhaustive without treating a
+            // frame as a one-shot bridge result.
+            is AppEventDto.AppBridgeStreamFrame -> {
+                val appId = runCatching { JSONObject(event.frameJson).optString("appId") }
+                    .getOrNull()
+                    ?.takeIf { it.isNotBlank() }
+                if (appId != null) {
+                    LocalAppWebViewRegistry.deliverStreamFrame(appId, event.frameJson)
+                }
+            }
             is AppEventDto.AppUiRequest -> {
                 val request = event.request
                 val action = request.toUiAutomationAction()
@@ -774,6 +786,14 @@ internal fun AppBridgeOperationDto.bridgeWireName(): String = when (this) {
     AppBridgeOperationDto.POST_NOTIFICATION -> "post_notification"
     AppBridgeOperationDto.LLM_CHAT -> "llm_chat"
     AppBridgeOperationDto.AGENT_POST -> "agent_post"
+    AppBridgeOperationDto.AGENT_SESSION_CREATE -> "agent_session_create"
+    AppBridgeOperationDto.AGENT_SESSION_LIST -> "agent_session_list"
+    AppBridgeOperationDto.AGENT_SESSION_RESUME -> "agent_session_resume"
+    AppBridgeOperationDto.AGENT_SESSION_CLOSE -> "agent_session_close"
+    AppBridgeOperationDto.AGENT_SEND -> "agent_send"
+    AppBridgeOperationDto.AGENT_STREAM -> "agent_stream"
+    AppBridgeOperationDto.AGENT_CANCEL -> "agent_cancel"
+    AppBridgeOperationDto.AGENT_PROFILE_PROPOSE_UPDATE -> "agent_profile_propose_update"
 }
 
 internal fun bridgeOperationFor(wireName: String): AppBridgeOperationDto? =

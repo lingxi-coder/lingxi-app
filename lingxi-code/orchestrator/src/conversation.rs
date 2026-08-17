@@ -970,6 +970,17 @@ pub(crate) struct DateChangeState {
 
 const TOOL_TOKEN_COUNT_OVERHEAD: u64 = 500;
 
+/// Host-approved app-specific instructions appended after the immutable
+/// platform/runtime prompt layers. This is intentionally not
+/// `system_prompt_override`, which would replace the security prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppAgentPromptProfile {
+    /// Monotonic host-approved profile revision.
+    pub revision: u64,
+    /// Bounded app-specific instructions.
+    pub instructions: String,
+}
+
 pub struct ConversationOrchestrator {
     pub(crate) config: OrchestratorConfig,
     pub(crate) api: Arc<dyn OrchestratorApiClient>,
@@ -1651,6 +1662,9 @@ pub struct ConversationOrchestrator {
     /// a stale prewarm cannot later seed `previous_response_id`.
     pub(crate) startup_responses_websocket_prewarm:
         std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// User-approved app Agent Profile applied additively to the next turn.
+    pub(crate) app_agent_prompt_profile:
+        std::sync::RwLock<Option<AppAgentPromptProfile>>,
 }
 
 /// Everything [`ConversationOrchestrator::maybe_extract_session_memory`] needs to
@@ -1897,6 +1911,7 @@ impl ConversationOrchestrator {
             surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
             session_memory: None,
             startup_responses_websocket_prewarm: std::sync::Mutex::new(None),
+            app_agent_prompt_profile: std::sync::RwLock::new(None),
         }
     }
 
@@ -10844,15 +10859,61 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         if let Some(custom) = &self.config.system_prompt_override {
             return custom.clone();
         }
-        {
-            let guard = self.main_thread_agent.read().await;
-            if let Some(agent) = guard.as_ref() {
-                if let Some(prompt) = &agent.system_prompt {
-                    return prompt.clone();
+        let main_thread_prompt = self
+            .main_thread_agent
+            .read()
+            .await
+            .as_ref()
+            .and_then(|agent| agent.system_prompt.clone());
+        let mut prompt = match main_thread_prompt {
+            Some(prompt) => prompt,
+            None => self.build_system_prompt().await,
+        };
+        if let Ok(profile) = self.app_agent_prompt_profile.read() {
+            if let Some(profile) = profile.as_ref() {
+                if !profile.instructions.trim().is_empty() {
+                    prompt.push_str("\n\n# App Agent Profile\n");
+                    prompt.push_str(&format!("Revision: {}\n", profile.revision));
+                    prompt.push_str(&profile.instructions);
                 }
             }
         }
-        self.build_system_prompt().await
+        prompt
+    }
+
+    /// Install a host-approved app Agent Profile as an additive prompt layer.
+    /// The next turn observes it; the current in-flight request keeps its
+    /// already-built prompt.
+    pub fn set_app_agent_prompt_profile(
+        &self,
+        revision: u64,
+        instructions: String,
+    ) -> Result<(), String> {
+        if instructions.len() > 32 * 1024 {
+            return Err("app Agent Profile exceeds 32 KiB".into());
+        }
+        let mut profile = self
+            .app_agent_prompt_profile
+            .write()
+            .map_err(|_| "app Agent Profile lock is poisoned".to_string())?;
+        if profile.as_ref().is_some_and(|current| revision < current.revision) {
+            return Err("app Agent Profile revision moved backwards".into());
+        }
+        *profile = Some(AppAgentPromptProfile {
+            revision,
+            instructions,
+        });
+        Ok(())
+    }
+
+    /// Remove the app-specific additive prompt layer when an app session is
+    /// closed or the host switches back to the ordinary conversation.
+    pub fn clear_app_agent_prompt_profile(&self) -> Result<(), String> {
+        self.app_agent_prompt_profile
+            .write()
+            .map_err(|_| "app Agent Profile lock is poisoned".to_string())?
+            .take();
+        Ok(())
     }
 
     /// Read-only introspection seam for the ordinary per-turn additional
@@ -12853,6 +12914,28 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     #[must_use]
     pub fn session(&self) -> Arc<Mutex<SessionState>> {
         self.session.clone()
+    }
+
+    /// Snapshot the live conversation history for an embedding host that owns
+    /// a separate durable session store.
+    pub async fn snapshot_history(&self) -> Vec<ConversationMessage> {
+        self.session.lock().await.history.clone()
+    }
+
+    /// Restore history before the first turn of a newly constructed
+    /// orchestrator. The session id and all host-owned runtime state remain
+    /// local to this orchestrator; only the ordered message transcript is
+    /// adopted.
+    pub async fn restore_history(
+        &self,
+        history: Vec<ConversationMessage>,
+    ) -> Result<(), String> {
+        let mut session = self.session.lock().await;
+        if !session.history.is_empty() {
+            return Err("cannot restore Agent history after a turn has started".into());
+        }
+        session.history = history;
+        Ok(())
     }
 
     /// Return all registered tool names (alphabetical, same order as the

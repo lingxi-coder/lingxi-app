@@ -251,11 +251,12 @@ fn write_store(root: &Path, states: &[AppState]) {
     for app in states {
         save_app_files(root, app).expect("save app files");
         let layout = AppLayout::new(root, app.record.id.clone()).expect("target layout");
-        save_manifest(
-            &layout,
-            &AppManifest::for_new_app(&app.record.id, &app.record.name),
-        )
-        .expect("save manifest");
+        let mut manifest = AppManifest::for_new_app(&app.record.id, &app.record.name);
+        // Reproduce the checked-in legacy fixture: a v1 manifest predates the
+        // runtimeApiVersion field and must remain byte-stable for migration
+        // compatibility tests.
+        manifest.runtime_api_version = 1;
+        save_manifest(&layout, &manifest).expect("save manifest");
         save_permissions(&layout, &AppPermissions::default()).expect("save permissions");
     }
     let records: Vec<AppRecord> = states.iter().map(|app| app.record.clone()).collect();

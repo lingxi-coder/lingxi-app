@@ -1521,6 +1521,7 @@ fn canonical_app_record() -> AppRecordDto {
 fn canonical_app_manifest() -> AppManifestDto {
     AppManifestDto {
         schema_version: 1,
+        runtime_api_version: None,
         app_id: "habits-1a2b".to_string(),
         name: "Habits".to_string(),
         design_revision: 4,

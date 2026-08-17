@@ -23,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_sessions;
 pub mod checkpoints;
 pub mod data;
 pub mod error;
@@ -31,12 +32,17 @@ pub mod ids;
 pub mod mailbox;
 pub mod manifest;
 pub mod permissions;
+pub mod runtime_v2;
 pub mod service;
 pub mod state;
 pub mod storage;
 pub mod test_support;
 pub mod types;
 
+pub use agent_sessions::{
+    load_agent_history, load_profile, load_sessions, save_agent_history, save_profile,
+    save_sessions, upsert_session,
+};
 pub use checkpoints::AppCheckpointStore;
 pub use data::{
     AppDataStore, DataFilter, DataFilterOperator, DataMigrationPreview, DataMigrationResult,
@@ -56,6 +62,17 @@ pub use manifest::{
 pub use permissions::{
     load_permissions, save_permissions, save_workspace_permission_settings, AppCapability,
     AppPermissions, PermissionDecision, SessionPermissions, LOCAL_APP_WORKSPACE_PERMISSION_RULES,
+};
+pub use runtime_v2::{
+    allowed_for_origin, apply_approved_profile, compose_prompt_layers, normalized_input_hash,
+    AgentBudget, AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppAgentProfileProposal,
+    BackgroundJournalEntry, BackgroundTaskRecord, BackgroundTaskStatus, BackgroundTrigger,
+    CapabilityDescriptor, CapabilityId, CapabilityRegistry, CapabilityScope, CapabilityTransport,
+    FlowDefinition, FlowStep, InvocationContext, InvocationFrame, InvocationOrigin,
+    InvocationReplayGuard, PromptLayer, PromptLayerKind, RuntimeContractError, StreamBuffer,
+    StreamFrame, StreamValidator, MAX_AGENT_MAX_BRIDGE_CALLS, MAX_AGENT_MAX_MCP_CALLS,
+    MAX_AGENT_MAX_TOKENS, MAX_AGENT_MAX_TURNS, MAX_AGENT_MAX_WALL_MS, RUNTIME_API_MAJOR,
+    RUNTIME_API_VERSION, RUNTIME_CONTRACT_SCHEMA_VERSION,
 };
 pub use service::AppService;
 pub use state::{runtime_transition_allowed, AppState};

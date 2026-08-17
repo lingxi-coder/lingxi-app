@@ -285,6 +285,9 @@ mod llm_ops;
 // `agent.post` — the app-to-conversation mailbox write.
 #[path = "local_apps_host_agent.rs"]
 mod agent_ops;
+pub(crate) use agent_ops::{
+    AgentOutputRouter, AgentOutputStream, AgentTurnControl, LocalAppsAgentExecutor,
+};
 
 /// A bridge failure: human-readable message plus an optional stable machine
 /// code the page can branch on (`AppBridgeResponseDto::error_code`). Every
@@ -392,6 +395,15 @@ pub(crate) struct LocalAppsHostBroker {
     /// Serializes mailbox read-modify-writes. Held across the file update
     /// and NOTHING else — never across an emit, never across a client call.
     mailbox_writes: Mutex<()>,
+    /// Serializes Agent session catalog read-modify-writes. Atomic file
+    /// replacement alone cannot prevent concurrent creates/updates from
+    /// overwriting a stale catalog snapshot.
+    agent_session_writes: Mutex<()>,
+    /// Host-owned app Agent execution seam, attached by the mobile composition
+    /// root after the app service and MCP host are ready.
+    agent_executor: OnceLock<Arc<dyn LocalAppsAgentExecutor>>,
+    /// Active app Agent turns keyed by host-minted turn id.
+    agent_turns: Arc<Mutex<HashMap<String, Arc<AgentTurnControl>>>>,
     /// Serializes `device.recordAudioStart` — and ONLY starts.
     ///
     /// Separate from `recording` because a start crosses into Swift and the
@@ -485,6 +497,9 @@ impl LocalAppsHostBroker {
             media: crate::local_apps_device::MediaCache::default(),
             llm_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             mailbox_writes: Mutex::new(()),
+            agent_session_writes: Mutex::new(()),
+            agent_executor: OnceLock::new(),
+            agent_turns: Arc::new(Mutex::new(HashMap::new())),
             recording_start: Mutex::new(()),
             self_ref: OnceLock::new(),
             pending_capabilities: Mutex::new(HashMap::new()),
@@ -547,6 +562,13 @@ impl LocalAppsHostBroker {
         self.llm.set(llm)
     }
 
+    pub(crate) fn attach_agent_executor(
+        &self,
+        executor: Arc<dyn LocalAppsAgentExecutor>,
+    ) -> Result<(), Arc<dyn LocalAppsAgentExecutor>> {
+        self.agent_executor.set(executor)
+    }
+
     pub(crate) fn attach_device(
         &self,
         device: Arc<crate::local_apps_device::SharedDeviceCapabilities>,
@@ -560,7 +582,10 @@ impl LocalAppsHostBroker {
             .await
             .map_err(|error| error.to_string())?;
         let layout = self.layout(app_id)?;
-        save_permissions(&layout, &AppPermissions::default()).map_err(|error| error.to_string())?;
+        let current = load_permissions(&layout).map_err(|error| error.to_string())?;
+        let mut reset = AppPermissions::default();
+        reset.grant_epoch = current.grant_epoch.saturating_add(1).max(1);
+        save_permissions(&layout, &reset).map_err(|error| error.to_string())?;
         self.session_permissions.lock().await.revoke_app(app_id);
         Ok(())
     }
@@ -1609,6 +1634,12 @@ impl LocalAppsHostBroker {
                 format!("invalid bridge payload JSON: {error}"),
             )
         })?;
+        // The page-facing DTO is intentionally small and legacy-compatible;
+        // the v2 attribution context is created here, inside the trusted host,
+        // before any capability handler runs. A page cannot manufacture its
+        // origin, app instance, or grant epoch.
+        self.build_bridge_invocation_context(request)
+            .map_err(BridgeFailure::from)?;
         let mut input = payload.as_object().cloned().ok_or_else(|| {
             BridgeFailure::coded("payload_invalid", "bridge payload must be a JSON object")
         })?;
@@ -1662,8 +1693,103 @@ impl LocalAppsHostBroker {
             AppBridgeOperationDto::AgentPost => {
                 self.agent_post_value(&request.app_id, &payload).await
             }
+            AppBridgeOperationDto::AgentSessionCreate => {
+                self.agent_session_create_value(Value::Object(input))
+                    .await
+                    .map_err(BridgeFailure::from)
+            }
+            AppBridgeOperationDto::AgentSessionList => {
+                self.agent_session_list_value(Value::Object(input))
+                    .await
+                    .map_err(BridgeFailure::from)
+            }
+            AppBridgeOperationDto::AgentSessionResume => {
+                input.insert("action".into(), Value::String("resume".into()));
+                self.agent_session_update_value(Value::Object(input))
+                    .await
+                    .map_err(BridgeFailure::from)
+            }
+            AppBridgeOperationDto::AgentSessionClose => {
+                input.insert("action".into(), Value::String("close".into()));
+                self.agent_session_update_value(Value::Object(input))
+                    .await
+                    .map_err(BridgeFailure::from)
+            }
+            AppBridgeOperationDto::AgentSend => self
+                .agent_send_value(&request.app_id, &request.request_id, &payload)
+                .await,
+            AppBridgeOperationDto::AgentStream => self
+                .agent_stream_value(&request.app_id, &request.request_id, &payload)
+                .await,
+            AppBridgeOperationDto::AgentCancel => self
+                .agent_cancel_value(&request.app_id, &payload)
+                .await,
+            AppBridgeOperationDto::AgentProfileProposeUpdate => {
+                self.agent_profile_propose_value(Value::Object(input))
+                    .await
+                    .map_err(BridgeFailure::from)
+            }
             _ => Err("unsupported bridge operation for this engine version".into()),
         }
+    }
+
+    fn build_bridge_invocation_context(
+        &self,
+        request: &AppBridgeRequestDto,
+    ) -> Result<local_apps::InvocationContext, String> {
+        let capability = match request.operation {
+            AppBridgeOperationDto::QueryData => local_apps::CapabilityId::DataQuery,
+            AppBridgeOperationDto::MutateData => local_apps::CapabilityId::DataMutate,
+            AppBridgeOperationDto::NetworkRequest => local_apps::CapabilityId::NetworkRequest,
+            AppBridgeOperationDto::RuntimeStatus => local_apps::CapabilityId::RuntimeStatus,
+            AppBridgeOperationDto::CapturePhoto => local_apps::CapabilityId::Camera,
+            AppBridgeOperationDto::PickImage => local_apps::CapabilityId::PhotoLibrary,
+            AppBridgeOperationDto::RecordAudioStart
+            | AppBridgeOperationDto::RecordAudioStop => local_apps::CapabilityId::Microphone,
+            AppBridgeOperationDto::GetLocation => local_apps::CapabilityId::Location,
+            AppBridgeOperationDto::TranscribeSpeech => local_apps::CapabilityId::SpeechToText,
+            AppBridgeOperationDto::PostNotification => local_apps::CapabilityId::Notifications,
+            AppBridgeOperationDto::LlmChat => local_apps::CapabilityId::LlmComplete,
+            AppBridgeOperationDto::AgentPost => local_apps::CapabilityId::AgentEmit,
+            AppBridgeOperationDto::AgentSessionCreate => {
+                local_apps::CapabilityId::AgentSessionCreate
+            }
+            AppBridgeOperationDto::AgentSessionList => local_apps::CapabilityId::AgentSessionList,
+            AppBridgeOperationDto::AgentSessionResume => {
+                local_apps::CapabilityId::AgentSessionResume
+            }
+            AppBridgeOperationDto::AgentSessionClose => {
+                local_apps::CapabilityId::AgentSessionClose
+            }
+            AppBridgeOperationDto::AgentSend => local_apps::CapabilityId::AgentSend,
+            AppBridgeOperationDto::AgentStream => local_apps::CapabilityId::AgentStream,
+            AppBridgeOperationDto::AgentCancel => local_apps::CapabilityId::AgentCancel,
+            AppBridgeOperationDto::AgentProfileProposeUpdate => {
+                local_apps::CapabilityId::AgentProfilePropose
+            }
+            _ => return Err("unsupported bridge operation for runtime v2 context".into()),
+        };
+        let layout = self.layout(&request.app_id)?;
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        if !manifest.runtime_api_compatible() {
+            return Err(format!(
+                "runtime_api_incompatible: app manifest targets runtime API v{}",
+                manifest.runtime_api_version
+            ));
+        }
+        let permissions = load_permissions(&layout).map_err(|error| error.to_string())?;
+        let context = local_apps::InvocationContext {
+            app_id: request.app_id.clone(),
+            app_instance_id: format!("page-{}", request.app_id),
+            request_id: request.request_id.clone(),
+            turn_id: None,
+            origin: local_apps::InvocationOrigin::PageForeground,
+            grant_epoch: permissions.grant_epoch,
+            capability_instance: Some(format!("{}:{}", request.app_id, capability.as_str())),
+            call_chain: Vec::new(),
+        };
+        context.validate().map_err(|error| error.to_string())?;
+        Ok(context)
     }
 
     async fn network_request(&self, app_id: &str, input: Value) -> Result<Value, String> {
@@ -1873,6 +1999,21 @@ impl LocalAppsHostBroker {
         };
         let service = self.service()?;
         let layout = self.layout(app_id)?;
+        let manifest = local_apps::load_manifest(&layout).map_err(|error| error.to_string())?;
+        if !manifest.runtime_api_compatible() {
+            return self
+                .fail_reserved_runtime_start(
+                    app_id,
+                    generation,
+                    None,
+                    format!(
+                        "runtime_api_incompatible: app manifest targets runtime API v{}; regenerate or rebuild this app for v{}",
+                        manifest.runtime_api_version,
+                        local_apps::RUNTIME_API_MAJOR
+                    ),
+                )
+                .await;
+        }
         let static_root = layout
             .root()
             .join(layout.build_rel(false))
@@ -2541,6 +2682,22 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
 
     async fn read_app_events(&self, input: Value) -> Result<Value, String> {
         self.read_app_events_value(input).await
+    }
+
+    async fn agent_session_create(&self, input: Value) -> Result<Value, String> {
+        self.agent_session_create_value(input).await
+    }
+
+    async fn agent_session_list(&self, input: Value) -> Result<Value, String> {
+        self.agent_session_list_value(input).await
+    }
+
+    async fn agent_session_update(&self, input: Value) -> Result<Value, String> {
+        self.agent_session_update_value(input).await
+    }
+
+    async fn agent_profile_propose(&self, input: Value) -> Result<Value, String> {
+        self.agent_profile_propose_value(input).await
     }
 
     async fn scaffold_app(&self, record: local_apps::AppRecord) -> Result<(), String> {

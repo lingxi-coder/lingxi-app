@@ -156,6 +156,13 @@ class LocalAppWebViewController internal constructor(
         )
     }
 
+    fun deliverStreamFrame(frameJson: String) {
+        webView.evaluateJavascript(
+            "window.lingxi?.__stream(JSON.parse(${jsonStringLiteral(frameJson)}));",
+            null,
+        )
+    }
+
     internal fun detach() {
         broker.failAllInFlight()
         webView.stopLoading()
@@ -788,6 +795,11 @@ internal object LocalAppWebViewRegistry {
     fun resumeAfterFailedDeletion(appId: String) {
         controllers[appId]?.get()?.resumeAfterFailedDeletion()
     }
+
+    @Synchronized
+    fun deliverStreamFrame(appId: String, frameJson: String) {
+        controllers[appId]?.get()?.deliverStreamFrame(frameJson)
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -1012,12 +1024,12 @@ internal fun buildLingxiV1Bootstrap(formFactor: String): String {
 
 private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
 (() => {
-  if (window.lingxi?.v1) return;
+  if (window.lingxi?.v2) return;
   const installCsp = () => {
     if (!document.head || document.head.querySelector('meta[data-lingxi-csp]')) return false;
     const meta = document.createElement('meta');
     meta.httpEquiv = 'Content-Security-Policy';
-    meta.dataset.lingxiCsp = 'v1';
+    meta.dataset.lingxiCsp = 'v2';
     meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
     document.head.prepend(meta);
     return true;
@@ -1032,7 +1044,7 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
     const raw = typeof input === 'string' || input instanceof URL ? input : input?.url;
     const target = new URL(raw, location.href);
     if (target.origin !== location.origin) {
-      throw new TypeError('External network access must use window.lingxi.v1.network');
+      throw new TypeError('External network access must use window.lingxi.v2.network');
     }
     return target;
   };
@@ -1078,6 +1090,12 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
     return nativeSetAttribute.call(this, name, value);
   };
   const pending = new Map();
+  const streamListeners = new Set();
+  const emitStream = frame => {
+    for (const listener of streamListeners) {
+      try { listener(frame); } catch (_) { /* app listener isolation */ }
+    }
+  };
   const request = (operation, payload = {}) => new Promise((resolve, reject) => {
     const requestId = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
     const handler = window.LingXiNativeV1;
@@ -1130,7 +1148,7 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
     get reducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true; },
     get inputMode() { return window.matchMedia?.('(pointer: fine)').matches ? 'pointer' : 'touch'; },
   });
-  const v1 = Object.freeze({
+  const v2 = Object.freeze({
     deviceContext,
     data: Object.freeze({
       query: (payload) => request('query_data', payload),
@@ -1158,7 +1176,24 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
       chat: payload => request('llm_chat', payload)
     }),
     agent: Object.freeze({
-      post: payload => request('agent_post', payload)
+      post: payload => request('agent_post', payload),
+      sessions: Object.freeze({
+        create: (payload = {}) => request('agent_session_create', payload),
+        list: () => request('agent_session_list', {}),
+        resume: payload => request('agent_session_resume', payload),
+        close: payload => request('agent_session_close', payload),
+      }),
+      send: payload => request('agent_send', payload),
+      stream: payload => request('agent_stream', payload),
+      cancel: payload => request('agent_cancel', payload),
+      onFrame: listener => {
+        if (typeof listener !== 'function') throw new TypeError('Agent stream listener must be a function');
+        streamListeners.add(listener);
+        return () => streamListeners.delete(listener);
+      },
+      profiles: Object.freeze({
+        proposeUpdate: payload => request('agent_profile_propose_update', payload),
+      }),
     })
   });
   const resolveNative = envelope => {
@@ -1174,7 +1209,7 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
     }
   };
   Object.defineProperty(window, 'lingxi', {
-    value: Object.freeze({v1, __resolve: resolveNative}),
+    value: Object.freeze({v2, __resolve: resolveNative, __stream: emitStream}),
     configurable: false,
     writable: false
   });

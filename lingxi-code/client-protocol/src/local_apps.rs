@@ -292,6 +292,8 @@ pub enum AppRuntimeRecoveryStateDto {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AppManifestDto {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_api_version: Option<u16>,
     pub app_id: String,
     pub name: String,
     pub design_revision: u64,
@@ -395,6 +397,22 @@ pub enum AppBridgeOperationDto {
     LlmChat,
     /// Post one event into the app's conversation mailbox (`agent.post`).
     AgentPost,
+    /// Create a persistent app-owned Agent session.
+    AgentSessionCreate,
+    /// List persistent app-owned Agent sessions.
+    AgentSessionList,
+    /// Resume one persistent app-owned Agent session.
+    AgentSessionResume,
+    /// Close one persistent app-owned Agent session.
+    AgentSessionClose,
+    /// Run one non-streaming turn in an app-owned Agent session.
+    AgentSend,
+    /// Run one streaming turn in an app-owned Agent session.
+    AgentStream,
+    /// Cancel one in-flight app-owned Agent turn.
+    AgentCancel,
+    /// Propose a user-approved App Agent Profile revision.
+    AgentProfileProposeUpdate,
 }
 
 /// One host-bound bridge request. Payloads are data, never executable script.
@@ -424,6 +442,200 @@ pub struct AppBridgeResponseDto {
     /// `llm_busy`, …) so page code can branch without parsing `error` prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+}
+
+/// Runtime API version advertised by a generated Local App.  The v2 cutover
+/// is explicit: a v1 page is not silently interpreted as a v2 page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AppRuntimeApiVersionDto {
+    pub major: u16,
+    pub minor: u16,
+    pub patch: u16,
+}
+
+/// v2 invocation origin.  The host derives this from the execution path and
+/// does not trust a page-supplied value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AppInvocationOriginDto {
+    PageForeground,
+    ConversationAgent,
+    AppRuntimeHeadless,
+    SystemScheduler,
+}
+
+/// Host-created v2 attribution metadata.  `call_chain` is retained on the
+/// wire for audit/debugging but is still validated and rebuilt by the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppInvocationContextDto {
+    pub app_id: String,
+    pub app_instance_id: String,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub origin: AppInvocationOriginDto,
+    pub grant_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_instance: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_chain: Vec<AppInvocationFrameDto>,
+}
+
+/// One nested invocation edge for recursion and audit enforcement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppInvocationFrameDto {
+    pub app_id: String,
+    pub capability: String,
+    pub input_hash: String,
+}
+
+/// Generic v2 bridge request.  `operation` is a registry id such as
+/// `llm.stream` or `agent.sessions.resume`, not a handler name selected by the
+/// app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppBridgeV2RequestDto {
+    pub api_version: AppRuntimeApiVersionDto,
+    pub context: AppInvocationContextDto,
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<String>,
+    #[serde(default)]
+    pub stream: bool,
+}
+
+/// Generic v2 bridge response.  Streaming responses are delivered as
+/// `AppBridgeStreamFrameDto` events with the same request id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppBridgeV2ResponseDto {
+    pub request_id: String,
+    pub app_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+}
+
+/// Ordered v2 stream frame used by LLM and Agent session streams.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+#[non_exhaustive]
+pub enum AppBridgeStreamFrameDto {
+    Started {
+        app_id: String,
+        request_id: String,
+        stream_id: String,
+    },
+    Data {
+        app_id: String,
+        request_id: String,
+        stream_id: String,
+        seq: u64,
+        data_json: String,
+    },
+    Completed {
+        app_id: String,
+        request_id: String,
+        stream_id: String,
+        seq: u64,
+    },
+    Error {
+        app_id: String,
+        request_id: String,
+        stream_id: String,
+        seq: u64,
+        code: String,
+        message: String,
+    },
+    Cancelled {
+        app_id: String,
+        request_id: String,
+        stream_id: String,
+        seq: u64,
+        reason: String,
+    },
+}
+
+/// Persistent app Agent session status on the v2 wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AppAgentSessionStatusDto {
+    Active,
+    Paused,
+    Closed,
+}
+
+/// Bounded Agent execution budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppAgentBudgetDto {
+    pub max_tokens: u32,
+    pub max_wall_ms: u64,
+    pub max_turns: u32,
+    pub max_bridge_calls: u32,
+    pub max_mcp_calls: u32,
+    pub max_recursion_depth: u16,
+}
+
+/// Host-owned persistent Agent session row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppAgentSessionDto {
+    pub session_id: String,
+    pub app_id: String,
+    pub app_instance_id: String,
+    pub status: AppAgentSessionStatusDto,
+    pub prompt_profile_revision: u64,
+    pub budget: AppAgentBudgetDto,
+    pub turn_count: u32,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+/// User-approved prompt profile revision for an app Agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppAgentProfileDto {
+    pub app_id: String,
+    pub revision: u64,
+    pub instructions: String,
+    pub updated_at_ms: u64,
+}
+
+/// A profile proposal is inert until a separate user approval is applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppAgentProfileProposalDto {
+    pub app_id: String,
+    pub base_revision: u64,
+    pub instructions: String,
+    pub reason: String,
 }
 
 /// Allow-list of UI operations; arbitrary JavaScript is intentionally absent.
@@ -553,4 +765,34 @@ pub enum AppEventDto {
         topic: String,
         created_at_ms: u64,
     },
+    /// One ordered v2 bridge stream frame.  This is appended so UniFFI enum
+    /// ordinals for existing local-app events remain stable.
+    AppBridgeStreamFrame {
+        frame: AppBridgeStreamFrameDto,
+        /// Pre-serialized camelCase frame for WebView delivery on FFI clients.
+        #[serde(rename = "frameJson")]
+        frame_json: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppBridgeStreamFrameDto;
+
+    #[test]
+    fn v2_stream_frame_fields_use_camel_case_on_json_wire() {
+        let value = serde_json::to_value(AppBridgeStreamFrameDto::Data {
+            app_id: "abc12345".into(),
+            request_id: "request-1".into(),
+            stream_id: "stream-1".into(),
+            seq: 0,
+            data_json: "{}".into(),
+        })
+        .expect("serialize stream frame");
+        assert_eq!(value["appId"], "abc12345");
+        assert_eq!(value["requestId"], "request-1");
+        assert_eq!(value["streamId"], "stream-1");
+        assert_eq!(value["dataJson"], "{}");
+        assert!(value.get("app_id").is_none());
+    }
 }

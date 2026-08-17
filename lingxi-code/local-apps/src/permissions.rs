@@ -19,6 +19,14 @@ const LOCAL_APP_WORKSPACE_PERMISSION_SETTINGS: &[u8] = include_bytes!(concat!(
     "/templates/vite-react-static-v1/.lingxi/settings.local.json"
 ));
 
+fn default_grant_epoch() -> u64 {
+    1
+}
+
+fn is_initial_grant_epoch(value: &u64) -> bool {
+    *value == 1
+}
+
 /// The initial workspace-local rules written when a local app is created.
 ///
 /// `Edit` is the Claude Code permission verb for the complete file-editing
@@ -96,6 +104,13 @@ pub struct AppPermissions {
     /// HTTPS hostnames the user chose to always allow for this app.
     #[serde(default)]
     pub always_allowed_domains: BTreeSet<String>,
+    /// Monotonic host-owned epoch for invalidating stale capability context.
+    /// Omitted legacy files deserialize as epoch 1 and remain byte-compatible.
+    #[serde(
+        default = "default_grant_epoch",
+        skip_serializing_if = "is_initial_grant_epoch"
+    )]
+    pub grant_epoch: u64,
 }
 
 impl Default for AppPermissions {
@@ -104,6 +119,7 @@ impl Default for AppPermissions {
             schema_version: APPS_SCHEMA_VERSION,
             always_allowed_capabilities: BTreeSet::new(),
             always_allowed_domains: BTreeSet::new(),
+            grant_epoch: 1,
         }
     }
 }
@@ -124,11 +140,13 @@ impl AppPermissions {
     /// Add a durable capability grant.
     pub fn grant(&mut self, capability: AppCapability) {
         self.always_allowed_capabilities.insert(capability);
+        self.bump_grant_epoch();
     }
 
     /// Revoke a durable capability grant.
     pub fn revoke(&mut self, capability: AppCapability) {
         self.always_allowed_capabilities.remove(&capability);
+        self.bump_grant_epoch();
     }
 
     /// Add a durable domain grant after validating the hostname.
@@ -136,12 +154,18 @@ impl AppPermissions {
         let domain = domain.into();
         validate_domain(&domain)?;
         self.always_allowed_domains.insert(domain);
+        self.bump_grant_epoch();
         Ok(())
     }
 
     /// Revoke a durable domain grant.
     pub fn revoke_domain(&mut self, domain: &str) {
         self.always_allowed_domains.remove(domain);
+        self.bump_grant_epoch();
+    }
+
+    fn bump_grant_epoch(&mut self) {
+        self.grant_epoch = self.grant_epoch.saturating_add(1).max(1);
     }
 
     fn validate(&self) -> Result<(), AppError> {
@@ -150,6 +174,11 @@ impl AppPermissions {
                 "permissions schemaVersion {} is unsupported (expected {APPS_SCHEMA_VERSION})",
                 self.schema_version
             )));
+        }
+        if self.grant_epoch == 0 {
+            return Err(AppError::StorageCorrupt(
+                "permissions grantEpoch must be non-zero".into(),
+            ));
         }
         for domain in &self.always_allowed_domains {
             validate_domain(domain).map_err(|error| {
@@ -282,6 +311,7 @@ mod tests {
         let mut permissions = AppPermissions::default();
         permissions.grant(AppCapability::DataMutation);
         permissions.grant_domain("api.example.com").unwrap();
+        assert!(permissions.grant_epoch > 1);
         save_permissions(&layout, &permissions).unwrap();
         assert_eq!(load_permissions(&layout).unwrap(), permissions);
 

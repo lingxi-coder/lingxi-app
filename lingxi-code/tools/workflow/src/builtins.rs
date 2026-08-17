@@ -102,13 +102,13 @@ mod tests {
         );
         workflow::validate_meta(descriptor.script).expect("valid built-in metadata");
         workflow::check_determinism(descriptor.script).expect("deterministic built-in");
-        for phase in ["Design", "Generate", "Build", "Verify"] {
+        for phase in ["Design", "Generate & Build", "Verify"] {
             assert!(
                 descriptor.script.contains(&format!("title: '{phase}'")),
                 "missing {phase} phase"
             );
         }
-        let phase_positions = ["Design", "Generate", "Build", "Verify"].map(|phase| {
+        let phase_positions = ["Design", "Generate & Build", "Verify"].map(|phase| {
             descriptor
                 .script
                 .find(&format!("title: '{phase}'"))
@@ -180,8 +180,6 @@ mod tests {
                         if prompt.contains("Act as the local app design lead") {
                             r#"{"targets":[{"os":"android","form_factor":"phone"}],"summary":"designed"}"#.to_string()
                         } else if prompt.contains("Generate the complete React implementation") {
-                            "generated".to_string()
-                        } else if prompt.contains("Build local app") {
                             r#"{"ok":true,"preview_url":"http://preview/first","summary":"built"}"#.to_string()
                         } else if prompt.contains("Invoke $frontend-qa") {
                             r#"{"ok":true,"findings":[],"checked_matrix":["android-phone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string()
@@ -207,6 +205,11 @@ mod tests {
         assert!(result.get("scaffold_mode").is_none());
         assert!(result.get("template").is_none());
         assert_eq!(result["repair_rounds"], 0);
+        assert_eq!(
+            prompts_seen.borrow().len(),
+            3,
+            "happy path uses design, generate-build, and verify only"
+        );
         assert_eq!(
             prompts_seen
                 .borrow()
@@ -238,8 +241,6 @@ mod tests {
                         if prompt.contains("Act as the local app design lead") {
                             r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"summary":"designed"}"#.to_string()
                         } else if prompt.contains("Generate the complete React implementation") {
-                            "generated".to_string()
-                        } else if prompt.contains("Build local app") {
                             r#"{"ok":true,"preview_url":"http://preview/initial","summary":"built"}"#.to_string()
                         } else if prompt.contains("Invoke $frontend-qa") {
                             let round = next_verification_round.get();
@@ -250,8 +251,6 @@ mod tests {
                                 r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string()
                             }
                         } else if prompt.contains("Repair the findings") {
-                            "repaired".to_string()
-                        } else if prompt.contains("Rebuild local app") {
                             r#"{"ok":true,"preview_url":"http://preview/repaired","summary":"rebuilt and restarted"}"#.to_string()
                         } else {
                             panic!("unexpected local-app workflow prompt: {prompt}");
@@ -279,6 +278,11 @@ mod tests {
         assert!(result.get("template").is_none());
         assert_eq!(result["repair_rounds"], 1);
         assert_eq!(verification_round.get(), 2);
+        assert_eq!(
+            calls.borrow().len(),
+            5,
+            "one repair uses no standalone build agents"
+        );
 
         let calls = calls.borrow();
         for (_, options) in calls.iter() {
@@ -290,7 +294,7 @@ mod tests {
         for prompt_anchor in [
             "Act as the local app design lead",
             "Invoke $frontend-qa",
-            "Rebuild local app",
+            "Repair the findings",
         ] {
             let (_, options) = calls
                 .iter()
@@ -314,8 +318,8 @@ mod tests {
         );
         let rebuild = calls
             .iter()
-            .find(|(prompt, _)| prompt.contains("Rebuild local app"))
-            .expect("rebuild call");
+            .find(|(prompt, _)| prompt.contains("Repair the findings"))
+            .expect("repair-build call");
         assert!(rebuild.0.contains(r#""action":"restart""#));
     }
 
@@ -332,8 +336,6 @@ mod tests {
                         if prompt.contains("Act as the local app design lead") {
                             r#"{"targets":[{"os":"android","form_factor":"phone"}],"summary":"designed"}"#.to_string()
                         } else if prompt.contains("Generate the complete React implementation") {
-                            "generated".to_string()
-                        } else if prompt.contains("Build local app") {
                             r#"{"ok":true,"summary":"built without returning the runtime URL"}"#.to_string()
                         } else {
                             panic!("a missing preview URL must fail before verification: {prompt}");
@@ -385,15 +387,11 @@ mod tests {
         let anchor = if prompt.contains("Act as the local app design lead") {
             "design"
         } else if prompt.contains("Generate the complete React implementation") {
-            "generate"
-        } else if prompt.contains("Build local app") {
-            "build"
+            "generate-build"
         } else if prompt.contains("Invoke $frontend-qa") {
             "verify"
         } else if prompt.contains("Repair the findings") {
-            "repair"
-        } else if prompt.contains("Rebuild local app") {
-            "rebuild"
+            "repair-build"
         } else {
             panic!("unexpected local-app workflow prompt: {prompt}")
         };
@@ -405,7 +403,7 @@ mod tests {
                 r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"summary":"designed"}"#
                     .to_string()
             }
-            "build" | "rebuild" => r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#.to_string(),
+            "generate-build" | "repair-build" => r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#.to_string(),
             "verify" => r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string(),
             other => other.to_string(),
         }
@@ -419,8 +417,7 @@ mod tests {
     fn local_app_build_throws_when_any_phase_agent_dies() {
         for (dead, expected) in [
             ("design", "the design step"),
-            ("generate", "the source-generation step"),
-            ("build", "initial build"),
+            ("generate-build", "initial build"),
         ] {
             let dead = dead.to_string();
             let error = run_local_app_build(move |prompt| local_app_reply(prompt, &dead))
@@ -437,7 +434,9 @@ mod tests {
     #[test]
     fn local_app_build_throws_when_the_build_never_succeeds() {
         let error = run_local_app_build(|prompt| {
-            if prompt.contains("Build local app") || prompt.contains("Rebuild local app") {
+            if prompt.contains("Generate the complete React implementation")
+                || prompt.contains("Repair the findings")
+            {
                 r#"{"ok":false,"preview_url":"","summary":"vite build exited 1"}"#.to_string()
             } else if prompt.contains("Invoke $frontend-qa") {
                 r#"{"ok":false,"findings":["no preview to check"],"checked_matrix":[],"browser_available":false,"webview_checked":false,"degraded_verification":true,"data_roundtrip":{"status":"failed","collections":[],"evidence":"preview unavailable"},"summary":"cannot verify"}"#.to_string()

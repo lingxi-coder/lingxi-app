@@ -48,9 +48,13 @@ struct LocalAppDetailView: View {
             .navigationTitle(app?.name ?? String(localized: "local_apps_detail_title"))
             .navigationBarTitleDisplayMode(.inline)
             .task {
-                await store.refresh()
+                // Library/create events normally already supplied the summary.
+                // Keep the refresh only as a deep-link recovery path; details
+                // already carries checkpoints, so a second list is redundant.
+                if store.app(id: appID) == nil {
+                    await store.refresh()
+                }
                 await store.getDetails(appID: appID)
-                await store.listCheckpoints(appID: appID)
             }
     }
 

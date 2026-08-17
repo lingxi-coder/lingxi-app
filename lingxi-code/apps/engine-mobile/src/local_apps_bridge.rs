@@ -378,6 +378,7 @@ pub(crate) fn lower_runtime_details(runtime: &AppRuntimeRecord) -> AppRuntimeDet
 pub(crate) fn lower_manifest(manifest: AppManifest) -> AppManifestDto {
     AppManifestDto {
         schema_version: manifest.schema_version,
+        runtime_api_version: Some(manifest.runtime_api_version),
         app_id: manifest.app_id,
         name: manifest.name,
         design_revision: manifest.revision,

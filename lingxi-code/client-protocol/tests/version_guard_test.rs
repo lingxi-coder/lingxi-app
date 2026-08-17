@@ -2075,6 +2075,7 @@ fn contract_index_covers_every_dto() {
     };
     let _app_manifest = AppManifestDto {
         schema_version: 0,
+        runtime_api_version: None,
         app_id: String::new(),
         name: String::new(),
         design_revision: 0,

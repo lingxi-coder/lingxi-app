@@ -666,8 +666,9 @@ pub fn save_index_preserving(
             }
         };
     let mut merged = records.to_vec();
+    let mut merged_ids: BTreeSet<String> = merged.iter().map(|record| record.id.clone()).collect();
     for entry in disk {
-        if !known_ids.contains(&entry.id) && !merged.iter().any(|r| r.id == entry.id) {
+        if !known_ids.contains(&entry.id) && merged_ids.insert(entry.id.clone()) {
             tracing::warn!(
                 app_id = %entry.id,
                 "preserving a foreign-process app index entry this instance has never seen"

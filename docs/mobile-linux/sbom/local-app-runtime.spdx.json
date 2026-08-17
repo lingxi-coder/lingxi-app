@@ -3,7 +3,7 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "lingxi-local-app-runtime",
-  "documentNamespace": "https://lingxi.app/spdx/local-app-runtime/7843ba0515800c536cbfff5154ffd2e563874a57e4983ee4de35f10cfa2216de",
+  "documentNamespace": "https://lingxi.app/spdx/local-app-runtime/1f38c3832edbcac5a60036ee10f45789dff56739ff76242293b73b9dd2fe9d81",
   "creationInfo": {
     "created": "1970-01-01T00:00:00Z",
     "creators": [
@@ -728,15 +728,15 @@
     {
       "name": "nanoid",
       "SPDXID": "SPDXRef-Npm-ef6c34dd10459938",
-      "versionInfo": "3.3.17",
-      "downloadLocation": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.17.tgz",
+      "versionInfo": "3.3.18",
+      "downloadLocation": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.18.tgz",
       "filesAnalyzed": false,
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",
       "checksums": [
         {
           "algorithm": "SHA512",
-          "checksumValue": "c502dfd00dc738c9601ead27db8eff2d1b80398981edd5c9fc3bc0c46bec4818a3e395ed052990c9cbbe17c3836c7c27b3f5f21596a0c8bd7e27439f7f0d44d2"
+          "checksumValue": "0d38383096c631691f8ba55915d36ddbf71a31b432e0ebbe3a9fe1250bc611672755fa00d5003ec7344a033c3d8c3ebe19538e798aff98872e0d276e83a17afb"
         }
       ],
       "sourceInfo": "npm package-lock path: node_modules/nanoid",
@@ -744,7 +744,7 @@
         {
           "referenceCategory": "PACKAGE-MANAGER",
           "referenceType": "purl",
-          "referenceLocator": "pkg:npm/nanoid@3.3.17"
+          "referenceLocator": "pkg:npm/nanoid@3.3.18"
         }
       ]
     },

@@ -15,22 +15,25 @@ use client_protocol::local_apps::{
 };
 use futures_util::StreamExt;
 use local_apps::{
-    load_manifest, load_permissions, save_permissions, AppCapability, AppCheckpointStore,
-    AppDataStore, AppLayout, AppPermissions, AppRuntimeMode, AppRuntimeState, AppService,
-    DataMigrationPreview, DataMutation, DataQuery, DataSortDirection, DataSortKey,
-    PermissionDecision, SessionPermissions,
+    load_manifest, load_permissions, save_permissions, AppCapability, AppDataStore, AppLayout,
+    AppPermissions, AppRuntimeMode, AppRuntimeState, AppService, DataMigrationPreview,
+    DataMutation, DataQuery, DataSortDirection, DataSortKey, PermissionDecision,
+    SessionPermissions,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, watch, Mutex};
 use tokio::time::{sleep, timeout, Duration};
-use traits::{MobileLinuxRuntime, MountPurpose, MountSpec};
+use traits::MobileLinuxRuntime;
+#[cfg(test)]
+use traits::MountSpec;
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UI_TIMEOUT: Duration = Duration::from_secs(2 * 60);
@@ -38,6 +41,7 @@ const MAX_HTTP_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_STATIC_ASSET_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_NETWORK_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const STATIC_ACCEPT_RETRY: Duration = Duration::from_millis(50);
+const RUNTIME_SEED_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Consecutive `accept()` failures that retire the static server.  A burst of
 /// ECONNABORTED/EMFILE must not, so the cap is deliberately generous
 /// (100 * 50 ms ~= 5 s of an unbroken failure); a listener whose I/O driver is
@@ -50,6 +54,7 @@ const APP_PORT_WINDOW_FIRST: u16 = 20_000;
 const APP_PORT_WINDOW_LEN: u16 = 12_000;
 const LOCAL_APP_BRIDGE_CONTROL_BYTES: usize = 64 * 1024;
 const LOCAL_APP_BRIDGE_LLM_BYTES: usize = 8 * 1024 * 1024;
+static LOCAL_APP_BUILD_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
 const LOCAL_APP_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 #[derive(Debug)]
@@ -341,12 +346,8 @@ pub(crate) fn remove_app_session_file(
     std::fs::remove_file(path).is_ok()
 }
 
-pub(crate) fn create_next_step_guidance(npm_toolchain_available: Option<bool>) -> String {
-    match npm_toolchain_available {
-        Some(true) => "Run local-app-build: Design uses the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript). Dependencies use the existing Shell for npm. Generate edits src/ and injects the bridge/platform adapter, then call build and preview via manage_runtime.".into(),
-        Some(false) => "Run local-app-build: The local-app Node/npm toolchain is unavailable, so reuse existing source if present or the repository-verified .lingxi/vite-fallback when the source root is still empty, report the toolchain-unavailable reason, avoid npm dependency operations, then call build and preview via manage_runtime.".into(),
-        None => "Run local-app-build: If the local-app Node/npm toolchain is available, Design uses the official Vite CLI in an empty staging source root (react by default, react-ts only for confirmed TypeScript); otherwise reuse existing source or the repository-verified .lingxi/vite-fallback and report the toolchain-unavailable reason. Use npm dependency commands only when that toolchain is available, then call build and preview via manage_runtime.".into(),
-    }
+pub(crate) fn create_next_step_guidance() -> String {
+    "Run local-app-build: the workspace already contains the repository-verified Vite scaffold. Edit app/main.jsx, app/globals.css, src/, components/, styles/, public/, and any new non-host-managed lib files. Do not recreate the app scaffold or run npm in the local-app workspace. Then call build and preview via manage_runtime.".into()
 }
 
 struct LocalAppsRuntimeConfiguration {
@@ -361,10 +362,6 @@ pub(crate) struct LocalAppsHostBroker {
     root: PathBuf,
     event_sink: Arc<dyn ClientEventSink>,
     runtime_configuration: RwLock<LocalAppsRuntimeConfiguration>,
-    /// Whether the current connection actually exposes the model-facing Shell
-    /// tool. Kept separate from `mobile_linux`: an unavailable runtime object
-    /// may still be present (for example an iOS simulator stub).
-    shell_available: AtomicBool,
     service: OnceLock<Arc<AppService>>,
     /// Set once at profile load (same call site as `attach_service`), so the
     /// broker's `llm.chat` bridge operation reaches the live model.
@@ -406,9 +403,6 @@ pub(crate) struct LocalAppsHostBroker {
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     session_permissions: Mutex<SessionPermissions>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
-    /// Serializes builds per app so concurrent workflow retries cannot copy or
-    /// promote two build trees over one another.
-    build_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     /// See [`PortLeases`].  Broker-scoped because a profile's apps are what
     /// collide with each other, and one broker is exactly one profile.
     port_leases: PortLeases,
@@ -474,7 +468,6 @@ impl LocalAppsHostBroker {
         let broker = Arc::new(Self {
             root,
             event_sink,
-            shell_available: AtomicBool::new(mobile_linux.is_some()),
             runtime_configuration: RwLock::new(LocalAppsRuntimeConfiguration {
                 mobile_linux,
                 physical_memory_bytes,
@@ -493,7 +486,6 @@ impl LocalAppsHostBroker {
             pending_ui: Mutex::new(HashMap::new()),
             session_permissions: Mutex::new(SessionPermissions::default()),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
-            build_locks: Mutex::new(HashMap::new()),
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
             port_allocation: Mutex::new(()),
             next_request_id: AtomicU64::new(1),
@@ -511,17 +503,6 @@ impl LocalAppsHostBroker {
 
     pub(crate) fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
         self.service.set(service)
-    }
-
-    /// Refresh the connection-scoped Shell capability used by generated app
-    /// guidance. A cached profile host survives reconnects, while the selected
-    /// runtime and its authorization may not.
-    pub(crate) fn set_shell_available(&self, available: bool) {
-        self.shell_available.store(available, Ordering::Release);
-    }
-
-    fn shell_available(&self) -> bool {
-        self.shell_available.load(Ordering::Acquire)
     }
 
     pub(crate) fn refresh_runtime_configuration(
@@ -548,22 +529,10 @@ impl LocalAppsHostBroker {
             .clone()
     }
 
-    fn npm_toolchain_available(&self) -> bool {
-        self.shell_available() && self.fixed_runtime_mount().is_ok()
-    }
-
-    pub(crate) async fn build_lock(&self, app_id: &str) -> Arc<Mutex<()>> {
-        let mut locks = self.build_locks.lock().await;
-        // App ids are minted randomly and the broker can outlive many app
-        // deletions. Retain only weak handles so historical ids do not keep
-        // every per-app mutex alive indefinitely.
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = locks.get(app_id).and_then(Weak::upgrade) {
-            return lock;
-        }
-        let lock = Arc::new(Mutex::new(()));
-        locks.insert(app_id.to_string(), Arc::downgrade(&lock));
-        lock
+    pub(crate) fn build_lock(&self) -> Arc<Mutex<()>> {
+        LOCAL_APP_BUILD_LOCK
+            .get_or_init(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub(crate) fn attach_llm(
@@ -614,23 +583,197 @@ impl LocalAppsHostBroker {
             .physical_memory_bytes
     }
 
-    pub(crate) fn fixed_runtime_mount(&self) -> Result<MountSpec, String> {
-        let root = self
-            .runtime_configuration
+    pub(crate) fn configured_runtime_root(&self) -> Result<PathBuf, String> {
+        self.runtime_configuration
             .read()
             .expect("local-app runtime configuration poisoned")
             .runtime_root
             .clone()
-            .filter(|path| path.join("node_modules/vite/bin/vite.js").is_file())
             .ok_or_else(|| {
-                "verified local-app Node runtime is unavailable or incomplete; stage the Vite local-app-runtime first".to_string()
+                "local-app runtime root is not configured; stage the Vite local-app-runtime first"
+                    .to_string()
+            })
+    }
+
+    fn runtime_seed_ready(root: &Path) -> Result<bool, String> {
+        let vite = root.join("node_modules/vite/bin/vite.js");
+        let vite_ready = match std::fs::symlink_metadata(&vite) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+                "verified local-app runtime seed is invalid: {} must be a regular file",
+                vite.display()
+            )),
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(format!(
+                "inspect verified local-app runtime seed {}: {error}",
+                vite.display()
+            )),
+        }?;
+        if !vite_ready {
+            return Ok(false);
+        }
+        if !Self::runtime_seed_root_is_digest_addressed(root) {
+            return Ok(true);
+        }
+        Self::runtime_seed_ready_marker(root)
+    }
+
+    fn runtime_seed_root_is_digest_addressed(root: &Path) -> bool {
+        root.file_name()
+            .and_then(|leaf| leaf.to_str())
+            .is_some_and(|leaf| {
+                leaf.len() == 64
+                    && leaf
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+    }
+
+    fn runtime_seed_ready_marker(root: &Path) -> Result<bool, String> {
+        let Some(digest) = root.file_name().and_then(|leaf| leaf.to_str()) else {
+            return Err(format!(
+                "verified local-app runtime root {} has no digest leaf",
+                root.display()
+            ));
+        };
+        let marker = Self::runtime_seed_marker_path(root, ".ready")?;
+        match std::fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "verified local-app runtime ready marker is invalid: {} must not be a symlink",
+                    marker.display()
+                ))
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "verified local-app runtime ready marker is invalid: {} must be a regular file",
+                    marker.display()
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "inspect verified local-app runtime ready marker {}: {error}",
+                    marker.display()
+                ))
+            }
+        }
+        let mut marker_file = std::fs::File::open(&marker).map_err(|error| {
+            format!(
+                "open verified local-app runtime ready marker {}: {error}",
+                marker.display()
+            )
+        })?;
+        let mut content = Vec::with_capacity(65);
+        marker_file
+            .by_ref()
+            .take(65)
+            .read_to_end(&mut content)
+            .map_err(|error| {
+                format!(
+                    "read verified local-app runtime ready marker {}: {error}",
+                    marker.display()
+                )
             })?;
-        Ok(MountSpec {
-            host_path: root.join("node_modules"),
-            guest_path: "/opt/lingxi/local-app-runtime/node_modules".into(),
-            read_only: true,
-            purpose: MountPurpose::Shared,
-        })
+        if content.len() != digest.len() || content.as_slice() != digest.as_bytes() {
+            return Err(format!(
+                "verified local-app runtime ready marker is invalid: {} must contain exactly its digest leaf",
+                marker.display()
+            ));
+        }
+        Ok(true)
+    }
+
+    fn runtime_seed_marker_path(root: &Path, suffix: &str) -> Result<PathBuf, String> {
+        let digest = root.file_name().ok_or_else(|| {
+            format!(
+                "verified local-app runtime root {} has no digest leaf",
+                root.display()
+            )
+        })?;
+        let parent = root.parent().ok_or_else(|| {
+            format!(
+                "verified local-app runtime root {} has no parent directory",
+                root.display()
+            )
+        })?;
+        let mut marker_name = std::ffi::OsString::from(".");
+        marker_name.push(digest);
+        marker_name.push(suffix);
+        Ok(parent.join(marker_name))
+    }
+
+    fn runtime_seed_failure_marker(root: &Path) -> Result<Option<PathBuf>, String> {
+        let marker = Self::runtime_seed_marker_path(root, ".failed")?;
+        match std::fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                Ok(Some(marker))
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+                "verified local-app runtime failure marker is invalid: {} must not be a symlink",
+                marker.display()
+            )),
+            Ok(_) => Err(format!(
+                "verified local-app runtime failure marker is invalid: {} must be a regular file",
+                marker.display()
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!(
+                "inspect verified local-app runtime failure marker {}: {error}",
+                marker.display()
+            )),
+        }
+    }
+
+    fn read_runtime_seed_failure(root: &Path) -> Result<Option<String>, String> {
+        let Some(marker) = Self::runtime_seed_failure_marker(root)? else {
+            return Ok(None);
+        };
+        let reason = std::fs::read_to_string(&marker).map_err(|error| {
+            format!(
+                "read verified local-app runtime failure marker {}: {error}",
+                marker.display()
+            )
+        })?;
+        let detail = reason.trim();
+        if detail.is_empty() {
+            Ok(Some(format!(
+                "verified local-app runtime seed staging failed; see {}",
+                marker.display()
+            )))
+        } else {
+            Ok(Some(format!(
+                "verified local-app runtime seed staging failed: {detail}"
+            )))
+        }
+    }
+
+    pub(crate) async fn await_fixed_runtime_root(
+        &self,
+        timeout_duration: Duration,
+    ) -> Result<PathBuf, String> {
+        let root = self.configured_runtime_root()?;
+        let start = tokio::time::Instant::now();
+        loop {
+            match Self::runtime_seed_ready(&root)? {
+                true => return Ok(root.clone()),
+                false => {
+                    if let Some(failure) = Self::read_runtime_seed_failure(&root)? {
+                        return Err(failure);
+                    }
+                }
+            }
+            if start.elapsed() >= timeout_duration {
+                return Err(format!(
+                    "local-app runtime root is configured at {}, but the verified runtime seed is not ready yet; waited {} ms for node_modules/vite/bin/vite.js",
+                    root.display(),
+                    timeout_duration.as_millis()
+                ));
+            }
+            sleep(RUNTIME_SEED_POLL_INTERVAL).await;
+        }
     }
 
     pub(crate) async fn resolve_capability(
@@ -1163,56 +1306,54 @@ impl LocalAppsHostBroker {
             .record(app_id)
             .await
             .map_err(|error| error.to_string())?;
-        loop {
-            let access_tick = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-            let mut wait_for_start = None;
-            let mut return_running = false;
-            let mut reserved_generation = None;
-            {
-                let mut runtimes = self.runtimes.lock().await;
-                if let Some(entry) = runtimes.get_mut(app_id) {
-                    entry.last_used = access_tick;
-                    match &entry.state {
-                        RuntimeEntryState::Starting { gate } => {
-                            wait_for_start = Some(gate.subscribe());
-                        }
-                        RuntimeEntryState::Running { .. } => {
-                            return_running = true;
-                        }
+        let access_tick = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let mut wait_for_start = None;
+        let mut return_running = false;
+        let mut reserved_generation = None;
+        {
+            let mut runtimes = self.runtimes.lock().await;
+            if let Some(entry) = runtimes.get_mut(app_id) {
+                entry.last_used = access_tick;
+                match &entry.state {
+                    RuntimeEntryState::Starting { gate } => {
+                        wait_for_start = Some(gate.subscribe());
                     }
-                } else {
-                    let generation = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-                    let (gate, _) = watch::channel(RuntimeStartStatus::Pending);
-                    runtimes.insert(
-                        app_id.to_string(),
-                        RuntimeEntry {
-                            state: RuntimeEntryState::Starting { gate },
-                            last_used: access_tick,
-                            generation,
-                        },
-                    );
-                    reserved_generation = Some(generation);
+                    RuntimeEntryState::Running { .. } => {
+                        return_running = true;
+                    }
                 }
+            } else {
+                let generation = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+                let (gate, _) = watch::channel(RuntimeStartStatus::Pending);
+                runtimes.insert(
+                    app_id.to_string(),
+                    RuntimeEntry {
+                        state: RuntimeEntryState::Starting { gate },
+                        last_used: access_tick,
+                        generation,
+                    },
+                );
+                reserved_generation = Some(generation);
             }
-            if let Some(receiver) = wait_for_start {
-                return self.wait_for_runtime_start(app_id, receiver).await;
-            }
-            if return_running {
-                let runtime = service
-                    .runtime_record(app_id)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                return Ok(json!({
-                    "app_id": app_id,
-                    "state": runtime.state,
-                    "url": runtime.port.map(|port| format!("http://127.0.0.1:{port}"))
-                }));
-            }
-            let Some(generation) = reserved_generation else {
-                return Err("runtime start reservation disappeared before completion".into());
-            };
-            return self.start_reserved_runtime(app_id, generation).await;
         }
+        if let Some(receiver) = wait_for_start {
+            return self.wait_for_runtime_start(app_id, receiver).await;
+        }
+        if return_running {
+            let runtime = service
+                .runtime_record(app_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok(json!({
+                "app_id": app_id,
+                "state": runtime.state,
+                "url": runtime.port.map(|port| format!("http://127.0.0.1:{port}"))
+            }));
+        }
+        let Some(generation) = reserved_generation else {
+            return Err("runtime start reservation disappeared before completion".into());
+        };
+        self.start_reserved_runtime(app_id, generation).await
     }
 
     async fn wait_for_runtime_start(
@@ -1254,7 +1395,10 @@ impl LocalAppsHostBroker {
         };
         let service = self.service()?;
         let layout = self.layout(app_id)?;
-        let static_root = layout.root().join(layout.build_rel(false)).join("out");
+        let static_root = layout
+            .root()
+            .join(layout.build_rel(false))
+            .join(crate::local_apps_build::VITE_OUTPUT_DIR);
         if !static_root.join("index.html").is_file() {
             return self
                 .fail_reserved_runtime_start(
@@ -1417,7 +1561,7 @@ impl LocalAppsHostBroker {
             match runtimes.get(app_id).map(|entry| &entry.state) {
                 None => return Ok(json!({"app_id": app_id, "state": "stopped"})),
                 Some(RuntimeEntryState::Starting { .. }) => {
-                    return Err("runtime is still starting; retry stop shortly".into())
+                    return Err("runtime is still starting; retry stop shortly".into());
                 }
                 Some(RuntimeEntryState::Running { .. }) => {}
             }
@@ -1586,28 +1730,7 @@ impl LocalAppsHostBroker {
             );
         }
         let layout = self.layout(&app_id)?;
-        let checkpoint_store = AppCheckpointStore::new(&layout);
-        let current_package_lock_digest = checkpoint_store
-            .current_package_lock_digest()
-            .map_err(|error| error.to_string())?;
-        let target_package_lock_digest = checkpoint_store
-            .package_lock_digest(&checkpoint_id)
-            .map_err(|error| error.to_string())?;
-        let package_lock_changed = current_package_lock_digest != target_package_lock_digest;
-        let restore_reason = if package_lock_changed {
-            let dependency_action = if target_package_lock_digest.is_some() {
-                "run npm ci through the existing Shell tool"
-            } else {
-                "stale node_modules will be removed as part of the restore; then run npm install through the existing Shell tool because the target has no lockfile"
-            };
-            format!(
-                "Restoring rewinds application source code and changes package-lock.json digest from {} to {}. After the source restore, {dependency_action}; Shell will apply its normal network approval and command logging. App data is not changed.",
-                current_package_lock_digest.as_deref().unwrap_or("none"),
-                target_package_lock_digest.as_deref().unwrap_or("none"),
-            )
-        } else {
-            "Restoring rewinds application source code. App data is not changed.".to_string()
-        };
+        let restore_reason = "Restoring rewinds application source code. The host will rebuild the fixed local-app scaffold from its verified runtime snapshot before the app can serve again. App data is not changed.".to_string();
         let decision = self
             .request_capability(
                 &app_id,
@@ -1639,28 +1762,6 @@ impl LocalAppsHostBroker {
             .restore_checkpoint(&app_id, &checkpoint_id)
             .await
             .map_err(|error| error.to_string())?;
-        if package_lock_changed {
-            let workspace = layout.root().join(layout.workspace_rel());
-            let dependency_plan =
-                reconcile_restored_dependencies(&workspace, target_package_lock_digest.as_deref())?;
-            return Ok(json!({
-                "ok": true,
-                "app_id": app_id,
-                "checkpoint_id": checkpoint_id,
-                "rebuilt": false,
-                "restarted": false,
-                "package_lock_changed": true,
-                "dependency_reconciliation_required": dependency_plan.dependency_install_required,
-                "npm_ci_required": dependency_plan.npm_ci_required,
-                "npm_install_required": !dependency_plan.npm_ci_required,
-                "dependency_install_command": dependency_plan.install_command,
-                "node_modules_removed": dependency_plan.node_modules_removed,
-                "next_step": format!(
-                    "Use the existing Shell tool in the app workspace for {}, then call build.",
-                    dependency_plan.install_command,
-                ),
-            }));
-        }
         // Rebuild the restored source so the served output matches it.
         let builder = crate::local_apps_build::LocalAppBuilder {
             mobile_linux: self.mobile_linux(),
@@ -1716,49 +1817,35 @@ impl LocalAppsHostBroker {
         }))
     }
 
-    /// Initialize the host-owned metadata and repository-verified offline
-    /// fallback for a freshly created app. The normal source scaffold is done
-    /// later by the workflow through the existing Mobile Linux Shell, using
-    /// the official Vite CLI in an empty staging directory.
-    pub(crate) async fn scaffold_app_value(&self, app_id: &str) -> Result<(), String> {
-        let layout = self.layout(app_id)?;
-        let builder = crate::local_apps_build::LocalAppBuilder {
-            mobile_linux: self.mobile_linux(),
-            host: self,
-        };
-        builder
-            .prepare_offline_vite_fallback(&layout)
-            .await
-            .map_err(|error| error.to_string())?;
+    /// Initialize the host-owned metadata and repository-verified Vite
+    /// scaffold for a freshly created app.
+    pub(crate) async fn scaffold_app_value(
+        &self,
+        record: &local_apps::AppRecord,
+    ) -> Result<(), String> {
+        let layout = self.layout(&record.id)?;
         // Write the per-app LINGXI.md context file at the workspace root:
         // every session rooted in this workspace auto-loads it into the
         // system context (`orchestrator::prompt::real_provider`), so the
         // agent starts with the brief + the workspace contract without any
         // prompt plumbing. It sits OUTSIDE the writable roots, so the agent
         // cannot edit its own contract.
-        let record = self
-            .service()?
-            .record(app_id)
-            .await
-            .map_err(|e| e.to_string())?;
         let workspace = layout.root().join(layout.workspace_rel());
-        let setup_path =
-            "- Treat Node/npm as a current-session capability, never a persisted guarantee. Use npm only when the current local-app workflow explicitly reports that its Node/npm toolchain is available; then verify `command -v node` and `command -v npm` through the current `Shell`. If no current availability report exists, or either check fails, treat the toolchain as unavailable.\n\
-             - When the toolchain is available, the normal new-app path is the official Vite CLI: `npm create vite@latest . -- --template react --no-interactive`; use `--template react-ts` only for confirmed TypeScript. Because `.lingxi/` is host metadata, run it in a newly created empty staging directory and copy into the still-empty source root without overwriting existing source.\n\
-             - If the toolchain or registry/network access is unavailable, reuse existing source when present; otherwise reuse only the repository-verified `.lingxi/vite-fallback/` files and report the reason. Do not add a Vite wrapper or scaffold API.\n\
-             - Generated source must not edit `package.json` or `package-lock.json`. Leave dependency changes as explicit follow-up requirements unless the current-session checks above pass. Preserve `index.html` and `vite.config.*`; `src/` remains the preferred source root when it already exists.\n\
-             - After those checks pass, show exact package specs in the confirmed design and use the current `Shell` for `npm install`, `npm uninstall`, or `npm ci`. Its existing network/command approval and logs apply; the subsequent build is offline.\n\
-             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history plus the package-lock digest, not a second package/version store.\n";
+        let setup_path = "- This workspace already contains the repository-verified Vite scaffold. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run npm in this local-app workspace.\n\
+             - Host-managed files are `package.json`, `package-lock.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, and `lib/platform-adapter.js`. Do not edit them.\n\
+             - Default editable entry points are `app/main.jsx` and `app/globals.css`. You may also edit files under `src/`, `components/`, `styles/`, `public/`, and add new helper files under `lib/` as long as you do not touch the host-managed files above.\n\
+             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds from its fixed runtime snapshot.\n";
         let build_preview =
             "- `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
-             (30-minute budget). Use `npm run build` or `npx vite` for a Shell-only \
-             preview only after the current-session Node/npm checks above pass.\n";
+             (30-minute budget). The host builds from an isolated `project/` root, copies its \
+             verified `node_modules` snapshot into that project, forces the official `dist/` \
+             output, and serves only the promoted `build/store/dist/`.\n";
         let context = format!(
             "# Local App: {name} ({id})\n\n\
              Brief: {brief}\n\n\
              ## Workspace contract\n\
              - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `mcp__local_apps__list` or `mcp__local_apps__get` to rediscover or confirm it, and do not call `mcp__local_apps__create` again.\n\
-             - Edit ONLY files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
+             - Edit ONLY app-owned files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
              {setup_path}\
              - The page reaches host data/network/device ONLY through `window.lingxi.v1` \
              (see `lib/lingxi-bridge.js`).\n\
@@ -1779,15 +1866,22 @@ impl LocalAppsHostBroker {
             setup_path = setup_path,
             build_preview = build_preview,
         );
-        std::fs::write(workspace.join("LINGXI.md"), context)
-            .map_err(|error| format!("write workspace LINGXI.md: {error}"))
+        tokio::task::spawn_blocking(move || {
+            crate::local_apps_build::scaffold_workspace(&layout)?;
+            std::fs::write(workspace.join("LINGXI.md"), context).map_err(|error| {
+                local_apps::AppError::Io(format!("write workspace LINGXI.md: {error}"))
+            })
+        })
+        .await
+        .map_err(|error| format!("join workspace scaffold worker: {error}"))?
+        .map_err(|error| error.to_string())
     }
 }
 
 #[async_trait]
 impl LocalAppsMcpHost for LocalAppsHostBroker {
     fn create_next_step(&self) -> String {
-        create_next_step_guidance(Some(self.npm_toolchain_available()))
+        create_next_step_guidance()
     }
 
     async fn manage_runtime(&self, input: Value) -> Result<Value, String> {
@@ -1812,22 +1906,21 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .await
             .map_err(|e| e.to_string())?;
         // "Ready" means SERVABLE, not "the build tool exited 0". The static
-        // preview server refuses to start without `build/store/out/index.html`
+        // preview server refuses to start without `build/store/dist/index.html`
         // (see `start_reserved_runtime`), and a build whose output landed
-        // elsewhere — e.g. a `vite.config.*` reverting `build.outDir` to the
-        // Vite default — exits 0 while producing nothing this host can serve.
+        // elsewhere exits 0 while producing nothing this host can serve.
         // Stamping `ready` there would leave a permanently unstartable app
         // advertised as ready in the library.
         let served_index = layout
             .root()
             .join(layout.build_rel(false))
-            .join("out")
+            .join(crate::local_apps_build::VITE_OUTPUT_DIR)
             .join("index.html");
         if !served_index.exists() {
             return Err(format!(
                 "the build finished but produced no servable output at {}. The build must emit \
-                 an `out/` directory (the checked-in `vite.config.mjs` sets `build.outDir`); \
-                 restore it, then run the build tool again.",
+                 the canonical `dist/` directory; restore the standard Vite output contract, \
+                 then run the build tool again.",
                 served_index.display()
             ));
         }
@@ -1964,8 +2057,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.read_app_events_value(input).await
     }
 
-    async fn scaffold_app(&self, app_id: String) -> Result<(), String> {
-        self.scaffold_app_value(&app_id).await
+    async fn scaffold_app(&self, record: local_apps::AppRecord) -> Result<(), String> {
+        self.scaffold_app_value(&record).await
     }
 }
 
@@ -2401,51 +2494,6 @@ fn derived_window_slot(app_id: &str) -> u16 {
         hash.wrapping_mul(16_777_619) ^ u32::from(byte)
     });
     u16::try_from(hash % u32::from(APP_PORT_WINDOW_LEN)).unwrap_or(0)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct RestoredDependencyPlan {
-    dependency_install_required: bool,
-    npm_ci_required: bool,
-    install_command: &'static str,
-    node_modules_removed: bool,
-}
-
-fn reconcile_restored_dependencies(
-    workspace: &Path,
-    target_package_lock_digest: Option<&str>,
-) -> Result<RestoredDependencyPlan, String> {
-    if target_package_lock_digest.is_some() {
-        return Ok(RestoredDependencyPlan {
-            dependency_install_required: true,
-            npm_ci_required: true,
-            install_command: "npm ci",
-            node_modules_removed: false,
-        });
-    }
-
-    let node_modules = workspace.join("node_modules");
-    let node_modules_removed = match std::fs::symlink_metadata(&node_modules) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-            std::fs::remove_dir_all(&node_modules)
-                .map_err(|error| format!("remove stale workspace node_modules: {error}"))?;
-            true
-        }
-        Ok(_) => {
-            std::fs::remove_file(&node_modules)
-                .map_err(|error| format!("remove stale workspace node_modules: {error}"))?;
-            true
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(format!("inspect stale workspace node_modules: {error}")),
-    };
-
-    Ok(RestoredDependencyPlan {
-        dependency_install_required: true,
-        npm_ci_required: false,
-        install_command: "npm install",
-        node_modules_removed,
-    })
 }
 
 /// Ports every OTHER app in this profile has already pinned, each paired with
@@ -3073,54 +3121,178 @@ mod tests {
         )
     }
 
-    fn create_runtime_root(root: &TempDir) -> PathBuf {
+    fn create_configured_runtime_root(root: &TempDir) -> PathBuf {
         let runtime_root = root.path().join("runtime-root");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        runtime_root
+    }
+
+    fn create_configured_digest_runtime_root(root: &TempDir) -> PathBuf {
+        let runtime_container = root.path().join("runtime-root");
+        fs::create_dir_all(&runtime_container).expect("create runtime container");
+        let runtime_root = runtime_container
+            .join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        fs::create_dir_all(&runtime_root).expect("create digest runtime root");
+        runtime_root
+    }
+
+    fn write_runtime_seed_ready_marker(runtime_root: &Path) {
+        let digest = runtime_root
+            .file_name()
+            .and_then(|leaf| leaf.to_str())
+            .expect("digest runtime root leaf");
+        let marker = runtime_root
+            .parent()
+            .expect("digest runtime root parent")
+            .join(format!(".{digest}.ready"));
+        fs::write(marker, digest).expect("write ready marker");
+    }
+
+    fn create_runtime_root(root: &TempDir) -> PathBuf {
+        let runtime_root = create_configured_runtime_root(root);
         let vite_bin = runtime_root.join("node_modules/vite/bin/vite.js");
         fs::create_dir_all(vite_bin.parent().unwrap()).expect("create Vite runtime root");
         fs::write(&vite_bin, b"#!/usr/bin/env node\n").expect("write Vite bin");
         runtime_root
     }
 
-    #[test]
-    fn restoring_without_a_lockfile_removes_stale_dependencies_and_requires_npm_install() {
+    #[tokio::test]
+    async fn await_fixed_runtime_root_waits_for_a_configured_seed_to_finish_staging() {
         let root = TempDir::new().expect("tempdir");
-        let workspace = root.path().join("workspace");
-        let stale_package = workspace.join("node_modules/stale/package.json");
-        fs::create_dir_all(stale_package.parent().expect("stale package parent"))
-            .expect("create stale dependencies");
-        fs::write(&stale_package, "{}").expect("write stale dependency");
+        let runtime_root = create_configured_digest_runtime_root(&root);
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            Arc::new(NoopClientEventSink),
+            None,
+            false,
+            Some(runtime_root.clone()),
+        );
+        let runtime_root_for_seed = runtime_root.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(150)).await;
+            let vite_bin = runtime_root_for_seed.join("node_modules/vite/bin/vite.js");
+            fs::create_dir_all(vite_bin.parent().expect("vite bin parent"))
+                .expect("create staged runtime root");
+            fs::write(&vite_bin, b"#!/usr/bin/env node\n").expect("write staged Vite bin");
+            write_runtime_seed_ready_marker(&runtime_root_for_seed);
+        });
 
-        let plan = reconcile_restored_dependencies(&workspace, None)
-            .expect("reconcile dependencies without a lockfile");
+        let ready = broker
+            .await_fixed_runtime_root(Duration::from_secs(1))
+            .await
+            .expect("wait for runtime seed");
 
-        assert!(!workspace.join("node_modules").exists());
-        assert!(!plan.npm_ci_required);
-        assert!(plan.dependency_install_required);
-        assert_eq!(plan.install_command, "npm install");
-        assert!(plan.node_modules_removed);
+        assert_eq!(ready, runtime_root);
     }
 
-    #[test]
-    fn restoring_a_different_lockfile_requires_npm_ci_without_preemptive_deletion() {
+    #[tokio::test]
+    async fn await_fixed_runtime_root_times_out_when_the_seed_never_becomes_ready() {
         let root = TempDir::new().expect("tempdir");
-        let workspace = root.path().join("workspace");
-        let installed_package = workspace.join("node_modules/current/package.json");
-        fs::create_dir_all(
-            installed_package
-                .parent()
-                .expect("installed package parent"),
+        let runtime_root = create_configured_digest_runtime_root(&root);
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            Arc::new(NoopClientEventSink),
+            None,
+            false,
+            Some(runtime_root.clone()),
+        );
+
+        let error = broker
+            .await_fixed_runtime_root(Duration::from_millis(250))
+            .await
+            .expect_err("unready runtime seed must time out");
+
+        assert!(error.contains("runtime root is configured at"), "{error}");
+        assert!(error.contains("waited 250 ms"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn await_fixed_runtime_root_accepts_an_immutable_bundle_root_without_a_ready_marker() {
+        let root = TempDir::new().expect("tempdir");
+        let runtime_root = create_runtime_root(&root);
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            Arc::new(NoopClientEventSink),
+            None,
+            false,
+            Some(runtime_root.clone()),
+        );
+
+        let ready = broker
+            .await_fixed_runtime_root(Duration::from_millis(50))
+            .await
+            .expect("bundle root should stay ready without a marker");
+
+        assert_eq!(ready, runtime_root);
+    }
+
+    #[tokio::test]
+    async fn await_fixed_runtime_root_fails_fast_when_staging_wrote_a_failure_marker() {
+        let root = TempDir::new().expect("tempdir");
+        let runtime_root = create_configured_digest_runtime_root(&root);
+        let failure_marker = runtime_root
+            .parent()
+            .expect("runtime root parent")
+            .join(".0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.failed");
+        fs::write(
+            &failure_marker,
+            "runtime seed inventory validation failed before publish",
         )
-        .expect("create installed dependencies");
-        fs::write(&installed_package, "{}").expect("write installed dependency");
+        .expect("write failure marker");
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            Arc::new(NoopClientEventSink),
+            None,
+            false,
+            Some(runtime_root),
+        );
 
-        let plan = reconcile_restored_dependencies(&workspace, Some("target-lock-digest"))
-            .expect("reconcile dependencies for a lockfile");
+        let started = tokio::time::Instant::now();
+        let error = broker
+            .await_fixed_runtime_root(Duration::from_secs(1))
+            .await
+            .expect_err("failure marker must fail fast");
 
-        assert!(workspace.join("node_modules").exists());
-        assert!(plan.npm_ci_required);
-        assert!(plan.dependency_install_required);
-        assert_eq!(plan.install_command, "npm ci");
-        assert!(!plan.node_modules_removed);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "failure marker should stop polling early",
+        );
+        assert!(
+            error.contains("runtime seed inventory validation failed before publish"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_fixed_runtime_root_rejects_a_corrupt_ready_marker() {
+        let root = TempDir::new().expect("tempdir");
+        let runtime_root = create_configured_digest_runtime_root(&root);
+        let vite_bin = runtime_root.join("node_modules/vite/bin/vite.js");
+        fs::create_dir_all(vite_bin.parent().expect("vite bin parent"))
+            .expect("create staged runtime root");
+        fs::write(&vite_bin, b"#!/usr/bin/env node\n").expect("write staged Vite bin");
+        let marker = runtime_root
+            .parent()
+            .expect("runtime root parent")
+            .join(".0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.ready");
+        fs::write(&marker, "wrong-digest").expect("write corrupt ready marker");
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            Arc::new(NoopClientEventSink),
+            None,
+            false,
+            Some(runtime_root),
+        );
+
+        let error = broker
+            .await_fixed_runtime_root(Duration::from_millis(50))
+            .await
+            .expect_err("corrupt ready marker must fail");
+
+        assert!(
+            error.contains("must contain exactly its digest leaf"),
+            "{error}"
+        );
     }
 
     async fn create_broker(
@@ -3157,9 +3329,12 @@ mod tests {
             .await
             .expect("create app");
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
-        let static_out = root.path().join(layout.build_rel(false)).join("out");
-        fs::create_dir_all(&static_out).expect("create static out");
-        fs::write(static_out.join("index.html"), "<html>ok</html>").expect("write index.html");
+        let static_dist = root
+            .path()
+            .join(layout.build_rel(false))
+            .join(crate::local_apps_build::VITE_OUTPUT_DIR);
+        fs::create_dir_all(&static_dist).expect("create static dist");
+        fs::write(static_dist.join("index.html"), "<html>ok</html>").expect("write index.html");
         let full_build = root.path().join(layout.build_rel(true));
         fs::create_dir_all(&full_build).expect("create full build");
         let workspace = root.path().join(layout.workspace_rel());
@@ -3178,7 +3353,7 @@ mod tests {
             .await
             .expect("create app");
         broker
-            .scaffold_app_value(&record.id)
+            .scaffold_app_value(&record)
             .await
             .expect("scaffold app");
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
@@ -3192,32 +3367,29 @@ mod tests {
     async fn scaffold_writes_capability_neutral_lingxi_when_toolchain_is_available() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
         let (_app_id, lingxi) = scaffolded_lingxi(true, Some(runtime)).await;
+        assert!(lingxi.contains("Do not run `npm create vite`"), "{lingxi}");
         assert!(
-            lingxi.contains("Treat Node/npm as a current-session capability"),
+            lingxi.contains("do not run npm in this local-app workspace"),
             "{lingxi}"
         );
         assert!(
-            lingxi.contains("verify `command -v node` and `command -v npm`"),
+            lingxi.contains("Host-managed files are `package.json`, `package-lock.json`"),
             "{lingxi}"
         );
+        assert!(lingxi.contains("isolated `project/` root"), "{lingxi}");
+        assert!(lingxi.contains("`build/store/dist/`"), "{lingxi}");
     }
 
     #[tokio::test]
     async fn scaffold_writes_capability_neutral_lingxi_when_shell_is_missing() {
         let (_app_id, lingxi) = scaffolded_lingxi(true, None).await;
         assert!(
-            lingxi.contains("Treat Node/npm as a current-session capability"),
+            lingxi.contains("repository-verified Vite scaffold"),
             "{lingxi}"
         );
-        assert!(
-            lingxi.contains("reuse only the repository-verified `.lingxi/vite-fallback/` files"),
-            "{lingxi}"
-        );
-        assert!(
-            lingxi.contains("Leave dependency changes as explicit follow-up requirements"),
-            "{lingxi}"
-        );
-        assert!(lingxi.contains("verify `command -v node` and `command -v npm`"));
+        assert!(lingxi.contains("Do not run `npm create vite`"), "{lingxi}");
+        assert!(lingxi.contains("do not run npm in this local-app workspace"));
+        assert!(!lingxi.contains("vite-fallback"), "{lingxi}");
     }
 
     #[tokio::test]
@@ -3229,36 +3401,7 @@ mod tests {
             .await
             .expect("create app");
         broker
-            .scaffold_app_value(&record.id)
-            .await
-            .expect("scaffold app");
-        broker.set_shell_available(false);
-        let layout = AppLayout::new(root.path().to_path_buf(), record.id).expect("layout");
-        let lingxi =
-            std::fs::read_to_string(root.path().join(layout.workspace_rel()).join("LINGXI.md"))
-                .expect("read LINGXI.md");
-
-        assert!(
-            lingxi.contains("Treat Node/npm as a current-session capability"),
-            "{lingxi}"
-        );
-        assert!(broker
-            .create_next_step()
-            .contains("local-app Node/npm toolchain is unavailable"));
-    }
-
-    #[tokio::test]
-    async fn unavailable_runtime_object_does_not_make_shell_guidance_available() {
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let (root, service, broker) = create_broker(true, Some(runtime)).await;
-        broker.set_shell_available(false);
-        let record = service
-            .create_app(Some("Tracker"), "a test app", None)
-            .await
-            .expect("create app");
-
-        broker
-            .scaffold_app_value(&record.id)
+            .scaffold_app_value(&record)
             .await
             .expect("scaffold app");
         let layout = AppLayout::new(root.path().to_path_buf(), record.id).expect("layout");
@@ -3266,10 +3409,13 @@ mod tests {
             std::fs::read_to_string(root.path().join(layout.workspace_rel()).join("LINGXI.md"))
                 .expect("read LINGXI.md");
 
-        assert!(lingxi.contains("Treat Node/npm as a current-session capability"));
+        assert!(lingxi.contains("do not run npm in this local-app workspace"));
         assert!(broker
             .create_next_step()
-            .contains("local-app Node/npm toolchain is unavailable"));
+            .contains("Do not recreate the app scaffold"));
+        assert!(broker
+            .create_next_step()
+            .contains("run npm in the local-app workspace"));
     }
 
     /// `create_app_fixture` with a CHOSEN id, for the one test whose exercised
@@ -3311,9 +3457,12 @@ mod tests {
         storage::save_app_files(root.path(), &app).expect("persist the seeded app documents");
         storage::save_index(root.path(), std::slice::from_ref(&app.record))
             .expect("persist the seeded index");
-        let static_out = root.path().join(layout.build_rel(false)).join("out");
-        fs::create_dir_all(&static_out).expect("create static out");
-        fs::write(static_out.join("index.html"), "<html>ok</html>").expect("write index.html");
+        let static_dist = root
+            .path()
+            .join(layout.build_rel(false))
+            .join(crate::local_apps_build::VITE_OUTPUT_DIR);
+        fs::create_dir_all(&static_dist).expect("create static dist");
+        fs::write(static_dist.join("index.html"), "<html>ok</html>").expect("write index.html");
     }
 
     /// A registry of its own for a probe that drives `bind_stable_loopback`
@@ -4628,7 +4777,9 @@ mod tests {
                 app_id.clone(),
                 generation,
                 listener,
-                root.path().join(layout.build_rel(false)).join("out"),
+                root.path()
+                    .join(layout.build_rel(false))
+                    .join(crate::local_apps_build::VITE_OUTPUT_DIR),
                 receiver,
             );
 

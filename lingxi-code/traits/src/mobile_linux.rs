@@ -42,15 +42,22 @@ pub mod guest_paths {
     pub const SCRATCH: &[&str] = &["/tmp", "/var/tmp"];
     /// Parent of every per-workspace mount.
     pub const WORKSPACE_ROOT: &str = "/workspace";
-    /// Root of the local-app build channels
-    /// (`<root>/<app-id>/<channel>` per mount contract).
+    /// Root of the local-app build channels.
     pub const LOCAL_APP_BUILD_ROOT: &str = "/var/lingxi/local-app-build";
+    /// The project-root leaf below a local-app build channel.
+    pub const LOCAL_APP_BUILD_PROJECT_DIR: &str = "project";
 
     /// THE `/workspace/<id>` format — previously duplicated as a format
     /// string in six places across two languages.
     #[must_use]
     pub fn workspace(stable_workspace_id: &str) -> String {
         format!("{WORKSPACE_ROOT}/{stable_workspace_id}")
+    }
+
+    /// The isolated project root used by a local-app build.
+    #[must_use]
+    pub fn local_app_build_project(app_id: &str, channel: &str) -> String {
+        format!("{LOCAL_APP_BUILD_ROOT}/{app_id}/{channel}/{LOCAL_APP_BUILD_PROJECT_DIR}")
     }
 
     /// Guest prefixes a sandbox policy may declare writable.
@@ -70,7 +77,12 @@ pub mod guest_paths {
             assert_eq!(super::SCRATCH, &["/tmp", "/var/tmp"]);
             assert_eq!(super::WORKSPACE_ROOT, "/workspace");
             assert_eq!(super::LOCAL_APP_BUILD_ROOT, "/var/lingxi/local-app-build");
+            assert_eq!(super::LOCAL_APP_BUILD_PROJECT_DIR, "project");
             assert_eq!(super::workspace("abc-123"), "/workspace/abc-123");
+            assert_eq!(
+                super::local_app_build_project("abc-123", "store"),
+                "/var/lingxi/local-app-build/abc-123/store/project"
+            );
             assert_eq!(
                 super::writable_roots(),
                 ["/root", "/tmp", "/var/tmp", "/workspace"]
@@ -574,6 +586,28 @@ pub trait MobileLinuxRuntime: Send + Sync {
         request: LinuxCommandRequest,
     ) -> Result<LinuxCommandResult, MobileLinuxError>;
 
+    /// Run a command to completion using ONLY the mounts supplied in
+    /// `request.mounts`.
+    ///
+    /// This isolates host bind mounts from configured/default workspace and
+    /// persistent-home mounts. It does NOT isolate writes inside the shared
+    /// managed rootfs; callers that need filesystem write isolation must still
+    /// provision a separate writable rootfs layer.
+    ///
+    /// This entry point is reserved for the local-app builder's single
+    /// `LocalAppBuild` project mount. Platform implementations reject empty,
+    /// additional, or differently purposed mount sets.
+    ///
+    /// The default implementation fails closed so an isolated request is never
+    /// silently downgraded into the ordinary merged-mount execution path.
+    async fn run_isolated(
+        &self,
+        request: LinuxCommandRequest,
+    ) -> Result<LinuxCommandResult, MobileLinuxError> {
+        let _ = request;
+        Err(MobileLinuxError::Unsupported)
+    }
+
     /// Run a command while streaming its output.
     async fn run_streaming(
         &self,
@@ -943,6 +977,33 @@ mod tests {
             .await
             .expect_err("pty must fail");
         assert!(matches!(err, MobileLinuxError::Unavailable(_)));
+    }
+
+    #[tokio::test]
+    async fn default_run_isolated_fails_closed() {
+        let runtime = UnavailableMobileLinuxRuntime::unavailable(
+            SandboxBackend::IosIsh,
+            MobileLinuxRuntimeMode::MobileLinux,
+            "ios",
+            "arm64",
+            "runtime assets not linked",
+        );
+
+        let err = runtime
+            .run_isolated(LinuxCommandRequest {
+                command: "/bin/true".to_string(),
+                args: vec![],
+                cwd: None,
+                env: BTreeMap::new(),
+                stdin: None,
+                timeout_ms: None,
+                network: NetworkPolicy::Allowed,
+                resource_limits: ResourceLimits::default(),
+                mounts: vec![],
+            })
+            .await
+            .expect_err("isolated run must fail closed");
+        assert!(matches!(err, MobileLinuxError::Unsupported));
     }
 
     #[test]

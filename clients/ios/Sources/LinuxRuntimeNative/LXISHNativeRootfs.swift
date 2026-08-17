@@ -72,10 +72,19 @@ enum LXISHGuestPaths {
     static let scratch = ["/tmp", "/var/tmp"]
     /// Parent of every per-workspace mount.
     static let workspaceRoot = "/workspace"
+    /// Parent of every isolated local-app build project.
+    static let localAppBuildRoot = "/var/lingxi/local-app-build"
+    /// The project-root leaf below a local-app build channel.
+    static let localAppBuildProjectDirectory = "project"
 
     /// THE `/workspace/<id>` format.
     static func workspace(_ stableWorkspaceId: String) -> String {
         "\(workspaceRoot)/\(stableWorkspaceId)"
+    }
+
+    /// The isolated project root for one app build channel.
+    static func localAppBuildProject(appId: String, channel: String) -> String {
+        "\(localAppBuildRoot)/\(appId)/\(channel)/\(localAppBuildProjectDirectory)"
     }
 }
 

@@ -46,7 +46,7 @@ use client_protocol::commands::{
     ClientCommand, ListingKindDto as ProtocolListingKind, ProviderCredentialSecretDto,
 };
 use client_protocol::controls::{
-    ConversationControlsDto, ControlDisabledReasonDto, PermissionControlStateDto,
+    ControlDisabledReasonDto, ConversationControlsDto, PermissionControlStateDto,
     PermissionModeOptionDto, ReasoningBudgetRangeDto, ReasoningControlSpecDto,
     ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
 };
@@ -71,8 +71,8 @@ use llm_client::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_client::oauth::openai as openai_oauth;
 use llm_client::LlmTransportBridge;
 use llm_client::{
-    Credential, CredentialConfig, CredentialProvider, CredentialScope, DefaultLlmClient, ProviderId,
-    Transport,
+    Credential, CredentialConfig, CredentialProvider, CredentialScope, DefaultLlmClient,
+    ProviderId, Transport,
 };
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
@@ -249,9 +249,9 @@ pub struct MobileConfig {
     /// built with Vite and served through the static loopback server in every
     /// distribution.
     pub local_apps_full_runtime: bool,
-    /// Host path containing the verified, read-only `node_modules` runtime
-    /// bundle. Its `node_modules` child is mounted at the canonical read-only
-    /// `/opt/lingxi/local-app-runtime/node_modules` path for build/run only.
+    /// Host path containing the verified, read-only local-app dependency seed.
+    /// Each build materializes its `node_modules` child into one disposable,
+    /// writable project snapshot; the seed is never exposed as a guest mount.
     pub local_apps_runtime_root: Option<std::path::PathBuf>,
     /// Physical memory reported by the native host. Local-app runtime quotas
     /// are derived from this value; zero is the conservative fallback.
@@ -427,8 +427,14 @@ pub struct MobileRuntime {
     /// never `None`: F3-05's `submit(ApprovePermission/DenyPermission)` calls
     /// [`AdapterPermissionGate::resolve`] on it to satisfy a parked `check()`.
     pub permission_gate: Arc<AdapterPermissionGate>,
+    /// The enforcing policy gate. The iOS UI records an explicit risk
+    /// acknowledgement here before it sends a live bypass-mode transition.
+    pub permission_policy_gate: Arc<permission::PolicyPermissionGate>,
     /// User-requested permission mode before model/provider auto resolution.
     pub requested_permission_mode: Arc<StdMutex<String>>,
+    /// Mode assigned to a newly-created session when it has no transcript
+    /// metadata of its own. Existing sessions always restore their own value.
+    pub session_default_permission_mode: String,
     /// The registered foreign event listener. Held so F3-04's handle can own /
     /// re-surface it; the adapter already feeds it via a [`ListenerSink`].
     pub listener: Arc<dyn ClientEventListener>,
@@ -465,10 +471,6 @@ pub struct MobileRuntime {
     /// Mobile-only Linux userspace runtime seam (Android PRoot / iOS iSH),
     /// when the platform wires one. `None` preserves the pre-migration state.
     pub mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
-    /// Whether the final capability gate exposes the model-facing mobile
-    /// Shell. This may be false even when `mobile_linux` holds an unavailable
-    /// runtime stub.
-    pub mobile_shell_available: bool,
     /// The mobile MCP registry. It always contains the built-in `local_apps`
     /// provider and also loads the app-private `settings.json` plus project
     /// `.mcp.json` entries using the shared MCP parser.
@@ -534,9 +536,7 @@ fn lower_reasoning_selection(selection: &traits::ReasoningSelection) -> Reasonin
         traits::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
         traits::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
         traits::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        traits::ReasoningSelection::Level { id } => {
-            ReasoningSelectionDto::Level { id: id.clone() }
-        }
+        traits::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
         traits::ReasoningSelection::TokenBudget { tokens } => {
             ReasoningSelectionDto::TokenBudget { tokens: *tokens }
         }
@@ -2616,7 +2616,10 @@ async fn build_mobile_inner_with_ask(
     let mut resolved_permission_mode = PermissionMode::Auto;
     let mut requested_permission_mode = PermissionMode::Auto.wire_str().to_string();
     let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
-    let perms: Arc<dyn PermissionGate> = {
+    let (perms, permission_policy_gate): (
+        Arc<dyn PermissionGate>,
+        Arc<permission::PolicyPermissionGate>,
+    ) = {
         let mut rules = Vec::new();
         // Auto is the built-in default.  `apply_auto_mode_gate` below retains
         // the existing safety downgrade for unsupported models/providers or
@@ -2765,9 +2768,12 @@ async fn build_mobile_inner_with_ask(
         boot_permission_policy = Some(policy.clone());
         // Grab the LIVE-model cell BEFORE coercing to `Arc<dyn PermissionGate>`;
         // filled once the orchestrator exists (below).
-        let enforcing = permission::PolicyPermissionGate::new(policy, adapter_gate.clone());
+        let enforcing = Arc::new(permission::PolicyPermissionGate::new(
+            policy,
+            adapter_gate.clone(),
+        ));
         live_model_provider_cell = Some(enforcing.live_model_provider_handle());
-        Arc::new(enforcing)
+        (enforcing.clone(), enforcing)
     };
 
     // (6) Hook executor + memory provider.
@@ -3156,10 +3162,7 @@ async fn build_mobile_inner_with_ask(
                 as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
             .with_output_pool_cell(local_workflow_output_pool.clone())
             .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
-            .with_workspace_permission_leases(
-                workspace_leases.clone(),
-                mobile_apps_data_root(&cfg),
-            )
+            .with_workspace_permission_leases(workspace_leases.clone(), mobile_apps_data_root(&cfg))
             .with_status_sink(
                 local_workflow_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
             ),
@@ -3342,12 +3345,12 @@ async fn build_mobile_inner_with_ask(
     // the default; `LINGXI_DISABLE_WORKFLOWS` still works via
     // `workflows_enabled`.
     let workflow_launcher = Arc::new(crate::workflow_support::MobileWorkflowLauncher {
-                registry: task_registry.clone(),
-                cwd: cwd.clone(),
-                lingxi_home: cfg.lingxi_home.clone(),
-                session_uuid: active_session_uuid.clone(),
-                checkpoints: workflow_checkpoints.clone(),
-                status_sink: local_workflow_status_sink.clone(),
+        registry: task_registry.clone(),
+        cwd: cwd.clone(),
+        lingxi_home: cfg.lingxi_home.clone(),
+        session_uuid: active_session_uuid.clone(),
+        checkpoints: workflow_checkpoints.clone(),
+        status_sink: local_workflow_status_sink.clone(),
     });
     {
         traits::session_flags::set_dynamic_workflows_enabled(tool_workflow::workflows_enabled(
@@ -3807,7 +3810,7 @@ async fn build_mobile_inner_with_ask(
         .unwrap_or_else(|| PermissionMode::Auto.wire_str().to_string());
     event_sink
         .emit(ClientEvent::PermissionModeChanged {
-            mode: initial_permission_mode,
+            mode: initial_permission_mode.clone(),
         })
         .await;
 
@@ -3818,7 +3821,9 @@ async fn build_mobile_inner_with_ask(
         auth,
         oauth,
         permission_gate: adapter_gate,
+        permission_policy_gate,
         requested_permission_mode: Arc::new(StdMutex::new(requested_permission_mode)),
+        session_default_permission_mode: initial_permission_mode,
         listener,
         event_sink,
         message_output,
@@ -3826,7 +3831,6 @@ async fn build_mobile_inner_with_ask(
         oauth_supported,
         credentials,
         mobile_linux,
-        mobile_shell_available: gated_shell_ctx.as_ref().is_some_and(|ctx| ctx.enabled),
         mcp_registry,
         routable_listings: default_listings.clone(),
         local_apps_mcp,
@@ -4695,6 +4699,68 @@ impl MobileEngineHandle {
         }
     }
 
+    async fn recorded_permission_mode(
+        &self,
+        session_id: uuid::Uuid,
+        cwd: &str,
+    ) -> Option<String> {
+        let path = session::jsonl::session_path(&self.lingxi_home, cwd, &session_id.to_string());
+        let routed = session::jsonl::JsonlReader::new(path, self.fs.clone())
+            .read_routed()
+            .await
+            .ok()?;
+        routed.permission_modes.get(&session_id.to_string()).cloned()
+    }
+
+    async fn restore_session_permission_mode(&self, mode: &str) -> Result<String, ClientError> {
+        let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+        let result = if mode == "bypassPermissions" {
+            self.inner
+                .permission_policy_gate
+                .restore_session_permission_mode(mode)
+                .await
+        } else {
+            handle
+                .set_permission_mode(mode)
+                .await
+                .map_err(|error| error.to_string())
+        };
+        result.map_err(|error| ClientError::Rejected {
+            message: format!("restore session permission mode failed: {error}"),
+        })?;
+        let active = handle.permission_mode().await.unwrap_or_else(|| mode.to_string());
+        if let Ok(mut requested) = self.inner.requested_permission_mode.lock() {
+            *requested = active.clone();
+        }
+        Ok(active)
+    }
+
+    async fn persist_session_permission_mode(&self, mode: &str) -> Result<(), ClientError> {
+        let path = self.inner.session_writer.active_path();
+        if !path.exists() {
+            let session_id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| ClientError::Internal {
+                    message: "persist session permission mode failed: invalid transcript path".into(),
+                })?;
+            self.inner
+                .session_writer
+                .append_mobile_empty_session(session_id, "新对话")
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: format!("persist session permission anchor failed: {error}"),
+                })?;
+        }
+        self.inner
+            .session_writer
+            .append_permission_mode(mode)
+            .await
+            .map_err(|error| ClientError::Internal {
+                message: format!("persist session permission mode failed: {error}"),
+            })
+    }
+
     async fn has_mobile_empty_session_anchor(&self, session_id: uuid::Uuid, cwd: &str) -> bool {
         let path = session::jsonl::session_path(&self.lingxi_home, cwd, &session_id.to_string());
         let Some(path) = path.to_str() else {
@@ -4763,13 +4829,23 @@ impl MobileEngineHandle {
             Some(requested) => canonical_cwd_string(std::path::Path::new(requested)),
             None => self.session_cwd.clone(),
         };
+        let recorded_permission_mode = self.recorded_permission_mode(uuid, &cwd).await;
 
         match orchestrator::replay_session_state(&self.lingxi_home, &cwd, uuid, self.fs.clone())
             .await
         {
             Ok(replayed) => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-                handle
+                let previous_permission_mode = handle
+                    .permission_mode()
+                    .await
+                    .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
+                let target_permission_mode = recorded_permission_mode
+                    .clone()
+                    .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
+                self.restore_session_permission_mode(&target_permission_mode)
+                    .await?;
+                if let Err(error) = handle
                     .resume_session(
                         protocol::SessionId::from_uuid(uuid),
                         replayed.state.history.clone(),
@@ -4788,9 +4864,14 @@ impl MobileEngineHandle {
                         replayed.handle_runtime_snapshot(),
                     )
                     .await
-                    .map_err(|error| ClientError::Internal {
+                {
+                    let _ = self
+                        .restore_session_permission_mode(&previous_permission_mode)
+                        .await;
+                    return Err(ClientError::Internal {
                         message: format!("resume_session failed: {error}"),
-                    })?;
+                    });
+                }
                 self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
                     .await;
                 self.inner
@@ -4839,7 +4920,16 @@ impl MobileEngineHandle {
                 }
 
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-                handle
+                let previous_permission_mode = handle
+                    .permission_mode()
+                    .await
+                    .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
+                let target_permission_mode = recorded_permission_mode
+                    .clone()
+                    .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
+                self.restore_session_permission_mode(&target_permission_mode)
+                    .await?;
+                if let Err(resume_error) = handle
                     .resume_session(
                         protocol::SessionId::from_uuid(uuid),
                         Vec::new(),
@@ -4848,9 +4938,14 @@ impl MobileEngineHandle {
                         traits::ResumeRuntimeSnapshot::default(),
                     )
                     .await
-                    .map_err(|resume_error| ClientError::Internal {
+                {
+                    let _ = self
+                        .restore_session_permission_mode(&previous_permission_mode)
+                        .await;
+                    return Err(ClientError::Internal {
                         message: format!("resume empty session failed: {resume_error}"),
-                    })?;
+                    });
+                }
                 self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
                     .await;
                 self.inner
@@ -5162,34 +5257,32 @@ impl MobileEngineHandle {
         // never binds one. Derived from the RAISED origin (an exhaustive
         // match — see `AppCreateOrigin::conversation_binding`).
         let conversation_id = origin.conversation_binding(conversation_id);
-        // Success needs no extra emit: `create_app` announces the new record
-        // set via its own `AppsChanged` domain event. `brief` is stored for
-        // the agent's context — `name` is a display label, never the spec;
-        // see `create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name`.
+        // The pinned workspace scaffold is a create precondition. Keep it
+        // inside AppService's pre-commit initializer so neither the native UI
+        // nor observers can see an app that is not buildable yet.
+        let scaffold_host = Arc::clone(&self.local_apps_host);
         match service
-            .create_app_with_git_and_workflow_model(
+            .create_app_with_git_and_workflow_model_and_initializer(
                 Some(name),
                 brief,
                 conversation_id,
                 git_enabled,
                 workflow_model.as_deref(),
+                move |record| {
+                    let host = Arc::clone(&scaffold_host);
+                    async move {
+                        host.scaffold_app_value(&record)
+                            .await
+                            .map_err(local_apps::AppError::Io)
+                    }
+                },
             )
             .await
         {
             Ok(record) => {
-                // Best-effort scaffold (v3): the record already committed, so
-                // a scaffold failure degrades to a warning — the agent can
-                // still lay files down itself and `build` names the gap.
-                if let Err(error) = self.local_apps_host.scaffold_app_value(&record.id).await {
-                    tracing::warn!(
-                        app_id = %record.id,
-                        error = %error,
-                        "CreateApp: workspace scaffold failed; the record stays usable"
-                    );
-                }
                 // v3 Phase 4: pin the init session (fork the source chat, or
-                // anchor an empty one). Best-effort like the scaffold — a
-                // missing pin is repaired by the boot backfill sweep.
+                // anchor an empty one). Session pinning remains best-effort;
+                // a missing pin is repaired by the boot backfill sweep.
                 match mint_app_init_session(
                     &self.lingxi_home,
                     &self.session_cwd,
@@ -5494,6 +5587,15 @@ impl MobileEngineHandle {
             .await
     }
 
+    /// Record the iOS risk acknowledgement that permits a subsequent live
+    /// `bypassPermissions` mode transition for this session.
+    pub async fn confirm_bypass_permissions(&self) -> Result<(), ClientError> {
+        self.inner
+            .permission_policy_gate
+            .confirm_bypass_permissions()
+            .map_err(|message| ClientError::Rejected { message })
+    }
+
     /// Submit one [`ClientCommand`] to the engine (plan F3-05).
     ///
     /// This is the mobile analog of the bridge-server's inbound frame dispatch
@@ -5608,6 +5710,10 @@ impl MobileEngineHandle {
             ClientCommand::SetPermissionMode { mode } => {
                 let requested_mode = mode.clone();
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                let previous_mode = handle
+                    .permission_mode()
+                    .await
+                    .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
                 handle
                     .set_permission_mode(&mode)
                     .await
@@ -5615,6 +5721,10 @@ impl MobileEngineHandle {
                         message: format!("set_permission_mode failed: {e}"),
                     })?;
                 let active = handle.permission_mode().await.unwrap_or(mode);
+                if let Err(error) = self.persist_session_permission_mode(&active).await {
+                    let _ = self.restore_session_permission_mode(&previous_mode).await;
+                    return Err(error);
+                }
                 if let Ok(mut requested) = self.inner.requested_permission_mode.lock() {
                     *requested = requested_mode;
                 }
@@ -5633,16 +5743,13 @@ impl MobileEngineHandle {
             ClientCommand::SetReasoningSelection { selection } => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 let requested = decode_reasoning_selection(selection);
-                let previous = handle
-                    .conversation_controls()
-                    .await
-                    .map(|controls| {
-                        (
-                            controls.requested_reasoning_selection,
-                            controls.effective_reasoning_selection,
-                            controls.reasoning_spec.selections_persistable,
-                        )
-                    });
+                let previous = handle.conversation_controls().await.map(|controls| {
+                    (
+                        controls.requested_reasoning_selection,
+                        controls.effective_reasoning_selection,
+                        controls.reasoning_spec.selections_persistable,
+                    )
+                });
                 let settings_path = self.lingxi_home.join("settings.json");
                 if let Err(error) = handle.set_reasoning_selection(requested).await {
                     return Err(ClientError::Rejected {
@@ -6066,12 +6173,24 @@ impl MobileEngineHandle {
                     None => None,
                 };
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-                handle
+                let previous_permission_mode = handle
+                    .permission_mode()
+                    .await
+                    .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
+                let new_session_permission_mode = self.inner.session_default_permission_mode.clone();
+                self.restore_session_permission_mode(&new_session_permission_mode)
+                    .await?;
+                if let Err(error) = handle
                     .clear_session()
                     .await
-                    .map_err(|e| ClientError::Internal {
-                        message: format!("new session (clear_session) failed: {e}"),
-                    })?;
+                {
+                    let _ = self
+                        .restore_session_permission_mode(&previous_permission_mode)
+                        .await;
+                    return Err(ClientError::Internal {
+                        message: format!("new session (clear_session) failed: {error}"),
+                    });
+                }
                 let new_session_id = handle.current_session_id().await;
                 self.retarget_session_writer(new_session_id, &self.session_cwd)
                     .await;
@@ -6082,6 +6201,8 @@ impl MobileEngineHandle {
                     .map_err(|error| ClientError::Internal {
                         message: format!("new session anchor failed: {error}"),
                     })?;
+                self.persist_session_permission_mode(&new_session_permission_mode)
+                    .await?;
                 if let Some((model_id, profile)) = requested_model {
                     handle
                         .switch_model(&model_id, profile.as_deref())
@@ -6379,12 +6500,19 @@ impl MobileEngineHandle {
                         message: format!("workflow task {task_id} is not paused"),
                     });
                 }
-                let run_id = workflow.run_id.clone().ok_or_else(|| ClientError::Rejected {
-                    message: format!("workflow task {task_id} has no resumable run id"),
-                })?;
-                let script_path = workflow.script_path.clone().ok_or_else(|| ClientError::Rejected {
-                    message: format!("workflow task {task_id} has no persisted script"),
-                })?;
+                let run_id = workflow
+                    .run_id
+                    .clone()
+                    .ok_or_else(|| ClientError::Rejected {
+                        message: format!("workflow task {task_id} has no resumable run id"),
+                    })?;
+                let script_path =
+                    workflow
+                        .script_path
+                        .clone()
+                        .ok_or_else(|| ClientError::Rejected {
+                            message: format!("workflow task {task_id} has no persisted script"),
+                        })?;
                 let args = workflow
                     .args
                     .as_deref()
@@ -8555,7 +8683,6 @@ pub fn build_mobile_engine_inner(
             (Err(error), host, None, None, None, None)
         }
     };
-    local_apps_host.set_shell_available(inner.mobile_shell_available);
     if inner
         .local_apps_mcp
         .attach_host(local_apps_host.clone())
@@ -8858,7 +8985,10 @@ mod tests {
         assert_eq!(anthropic.display_name, "Anthropic");
         assert_eq!(anthropic.base_url, "https://api.anthropic.com");
         assert_eq!(anthropic.protocol, "AnthropicMessages");
-        assert_eq!(anthropic.credential_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(
+            anthropic.credential_env.as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
 
         assert_eq!(dto.len(), catalog.providers.len() + 1);
         for (entry, provider) in dto
@@ -8886,7 +9016,10 @@ mod tests {
                     .map(|model| model.request_model.clone())
                     .collect::<Vec<_>>()
             );
-            assert!(entry.credential_env.as_deref().is_none_or(|env| !env.contains("KEY=")));
+            assert!(entry
+                .credential_env
+                .as_deref()
+                .is_none_or(|env| !env.contains("KEY=")));
         }
     }
     // F3-06: the off-device host shim now lives in `crate::test_support` (the
@@ -11138,10 +11271,22 @@ mod tests {
             let path =
                 session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd, &after_uuid);
             let raw = std::fs::read_to_string(path).expect("new session anchor exists");
-            let anchor: serde_json::Value =
-                serde_json::from_str(raw.trim()).expect("anchor is valid json");
+            let records = raw
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL"))
+                .collect::<Vec<_>>();
+            let anchor = records
+                .iter()
+                .find(|record| record["mobileEmptySession"] == 1)
+                .expect("new session anchor exists");
             assert_eq!(anchor["sessionId"], after_uuid);
             assert_eq!(anchor["mobileEmptySession"], 1);
+            let expected_permission_mode = handle.inner().session_default_permission_mode.clone();
+            assert!(records.iter().any(|record| {
+                record["type"] == "permission-mode"
+                    && record["sessionId"] == after_uuid
+                    && record["permissionMode"] == expected_permission_mode
+            }));
 
             handle
                 .submit(ClientCommand::ListSessions { limit: None })
@@ -11208,6 +11353,44 @@ mod tests {
                     messages,
                 } if session_id == &expected && messages.is_empty()
             )));
+        });
+    }
+
+    #[test]
+    fn submit_resume_session_restores_its_persisted_permission_mode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (session_id, _) = seed_replay_valid_session(tmp.path());
+        let cfg = test_config(tmp.path());
+        let path = session::jsonl::session_path(
+            &cfg.lingxi_home,
+            &cfg.cwd.to_string_lossy(),
+            &session_id,
+        );
+        let record = serde_json::json!({
+            "type": "permission-mode",
+            "permissionMode": "bypassPermissions",
+            "sessionId": session_id,
+        });
+        let mut transcript = std::fs::read_to_string(&path).expect("read seeded transcript");
+        transcript.push_str(&format!("{record}\n"));
+        std::fs::write(&path, transcript).expect("append permission mode");
+
+        let (handle, _) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            use traits::OrchestratorHandle;
+
+            handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id: session_id.clone(),
+                    cwd: None,
+                })
+                .await
+                .expect("resume persisted session");
+            let orchestrator: Arc<dyn OrchestratorHandle> = handle.inner().orchestrator.clone();
+            assert_eq!(
+                orchestrator.permission_mode().await.as_deref(),
+                Some("bypassPermissions")
+            );
         });
     }
 

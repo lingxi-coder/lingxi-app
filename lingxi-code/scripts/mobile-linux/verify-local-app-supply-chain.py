@@ -22,6 +22,32 @@ EXPECTED_ROLLDOWN_BINDINGS = {
     "@rolldown/binding-linux-arm64-musl": "1.2.3",
     "@rolldown/binding-linux-x64-musl": "1.2.3",
 }
+EXPECTED_LIGHTNINGCSS_BINDINGS = {
+    "lightningcss-linux-arm64-musl": "1.33.0",
+    "lightningcss-linux-x64-musl": "1.33.0",
+}
+EXPECTED_NATIVE_PACKAGE_BINARIES = {
+    "@rolldown/binding-linux-arm64-musl": "rolldown-binding.linux-arm64-musl.node",
+    "@rolldown/binding-linux-x64-musl": "rolldown-binding.linux-x64-musl.node",
+    "@rolldown/binding-linux-arm64-gnu": "rolldown-binding.linux-arm64-gnu.node",
+    "@rolldown/binding-linux-x64-gnu": "rolldown-binding.linux-x64-gnu.node",
+    "lightningcss-linux-arm64-musl": "lightningcss.linux-arm64-musl.node",
+    "lightningcss-linux-x64-musl": "lightningcss.linux-x64-musl.node",
+    "lightningcss-linux-arm64-gnu": "lightningcss.linux-arm64-gnu.node",
+    "lightningcss-linux-x64-gnu": "lightningcss.linux-x64-gnu.node",
+}
+EXPECTED_NATIVE_PACKAGE_LIBC = {
+    "@rolldown/binding-linux-arm64-musl": "musl",
+    "@rolldown/binding-linux-x64-musl": "musl",
+    "@rolldown/binding-linux-arm64-gnu": "glibc",
+    "@rolldown/binding-linux-x64-gnu": "glibc",
+    "lightningcss-linux-arm64-musl": "musl",
+    "lightningcss-linux-x64-musl": "musl",
+    "lightningcss-linux-arm64-gnu": "glibc",
+    "lightningcss-linux-x64-gnu": "glibc",
+}
+EXPECTED_ROLLDOWN_VERSION = "1.2.3"
+EXPECTED_LIGHTNINGCSS_VERSION = "1.33.0"
 EXPECTED_WRITABLE_ROOTS = ["app", "components", "lib", "styles", "public"]
 VITE_EXPECTED_WRITABLE_ROOTS = EXPECTED_WRITABLE_ROOTS + ["src"]
 FORBIDDEN_ROUTE_FILES = {"route.js", "route.jsx", "route.ts", "route.tsx"}
@@ -69,6 +95,29 @@ FORBIDDEN_SOURCE_PATTERNS = {
     "package manager invocation": re.compile(r"\b(npm|npx|corepack|yarn|pnpm)\b\s+(install|add|exec|dlx)\b"),
     "server action": re.compile(r"^[\t ]*[\"']use server[\"'];?", re.MULTILINE),
 }
+
+
+def expected_native_packages_for(platform: str, family: str) -> dict[str, str]:
+    if family == "rolldown":
+        bindings = EXPECTED_ROLLDOWN_BINDINGS
+        arm64 = "@rolldown/binding-linux-arm64-musl"
+    elif family == "lightningcss":
+        bindings = EXPECTED_LIGHTNINGCSS_BINDINGS
+        arm64 = "lightningcss-linux-arm64-musl"
+    else:
+        fail(f"unknown native package family: {family}")
+    if platform == "ios":
+        return {arm64: bindings[arm64]}
+    if platform == "android":
+        return dict(bindings)
+    fail(f"unknown runtime platform: {platform}")
+
+
+def expected_native_binary_for(package_name: str) -> str:
+    binary = EXPECTED_NATIVE_PACKAGE_BINARIES.get(package_name)
+    if binary is None:
+        fail(f"missing expected binary metadata for native package: {package_name}")
+    return binary
 
 
 def fail(message: str) -> None:
@@ -306,12 +355,44 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
     ):
         fail("package-lock must not retain Next.js or SWC packages")
     rolldown = packages.get("node_modules/rolldown")
-    if not isinstance(rolldown, dict) or rolldown.get("version") != "1.2.3":
-        fail("package-lock did not pin rolldown@1.2.3")
+    if not isinstance(rolldown, dict) or rolldown.get("version") != EXPECTED_ROLLDOWN_VERSION:
+        fail(f"package-lock did not pin rolldown@{EXPECTED_ROLLDOWN_VERSION}")
     for name, version in EXPECTED_ROLLDOWN_BINDINGS.items():
         entry = packages.get(f"node_modules/{name}")
         if not isinstance(entry, dict) or entry.get("version") != version:
             fail(f"package-lock did not pin {name}@{version}")
+        if entry.get("libc") != [EXPECTED_NATIVE_PACKAGE_LIBC[name]]:
+            fail(f"package-lock did not pin {name} libc={EXPECTED_NATIVE_PACKAGE_LIBC[name]}")
+    for name, version in {
+        "@rolldown/binding-linux-arm64-gnu": EXPECTED_ROLLDOWN_VERSION,
+        "@rolldown/binding-linux-x64-gnu": EXPECTED_ROLLDOWN_VERSION,
+    }.items():
+        entry = packages.get(f"node_modules/{name}")
+        if not isinstance(entry, dict) or entry.get("version") != version:
+            fail(f"package-lock did not pin {name}@{version}")
+        if entry.get("libc") != [EXPECTED_NATIVE_PACKAGE_LIBC[name]]:
+            fail(f"package-lock did not pin {name} libc={EXPECTED_NATIVE_PACKAGE_LIBC[name]}")
+    lightningcss = packages.get("node_modules/lightningcss")
+    if (
+        not isinstance(lightningcss, dict)
+        or lightningcss.get("version") != EXPECTED_LIGHTNINGCSS_VERSION
+    ):
+        fail(f"package-lock did not pin lightningcss@{EXPECTED_LIGHTNINGCSS_VERSION}")
+    for name, version in EXPECTED_LIGHTNINGCSS_BINDINGS.items():
+        entry = packages.get(f"node_modules/{name}")
+        if not isinstance(entry, dict) or entry.get("version") != version:
+            fail(f"package-lock did not pin {name}@{version}")
+        if entry.get("libc") != [EXPECTED_NATIVE_PACKAGE_LIBC[name]]:
+            fail(f"package-lock did not pin {name} libc={EXPECTED_NATIVE_PACKAGE_LIBC[name]}")
+    for name, version in {
+        "lightningcss-linux-arm64-gnu": EXPECTED_LIGHTNINGCSS_VERSION,
+        "lightningcss-linux-x64-gnu": EXPECTED_LIGHTNINGCSS_VERSION,
+    }.items():
+        entry = packages.get(f"node_modules/{name}")
+        if not isinstance(entry, dict) or entry.get("version") != version:
+            fail(f"package-lock did not pin {name}@{version}")
+        if entry.get("libc") != [EXPECTED_NATIVE_PACKAGE_LIBC[name]]:
+            fail(f"package-lock did not pin {name} libc={EXPECTED_NATIVE_PACKAGE_LIBC[name]}")
 
     runtime = pins.get("local_app_runtime")
     expected_runtime = {
@@ -320,8 +401,10 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
         "react": EXPECTED_DEPENDENCIES["react"],
         "react_dom": EXPECTED_DEPENDENCIES["react-dom"],
         "vite": EXPECTED_DEPENDENCIES["vite"],
-        "rolldown": "1.2.3",
+        "rolldown": EXPECTED_ROLLDOWN_VERSION,
         "rolldown_bindings": EXPECTED_ROLLDOWN_BINDINGS,
+        "lightningcss": EXPECTED_LIGHTNINGCSS_VERSION,
+        "lightningcss_bindings": EXPECTED_LIGHTNINGCSS_BINDINGS,
         "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/package-lock.json",
         # Checked against the file on disk rather than a literal, so a lockfile
         # edit that forgets to refresh the pin is caught as drift instead of
@@ -391,7 +474,30 @@ def validate_source_policy(template: pathlib.Path, pins: dict) -> None:
         top_level_files={"index.html", "vite.config.mjs"},
         description="app template",
     )
+    source_policy = load_json(template / ".lingxi" / "source-policy.json")
+    if source_policy.get("host_managed_paths") != [
+        ".lingxi",
+        "LINGXI.md",
+        "index.html",
+        "vite.config.mjs",
+        "package.json",
+        "package-lock.json",
+        "lib/device-context.js",
+        "lib/lingxi-bridge.js",
+        "lib/platform-adapter.js",
+        "node_modules",
+    ]:
+        fail("app template host-managed paths diverged from build enforcement")
+    if "package_install" not in source_policy.get("forbidden_features", []):
+        fail("app template must forbid package installation during generation")
     config = (template / "vite.config.mjs").read_text(encoding="utf-8")
+    out_dir_values = re.findall(
+        r'^[\t ]*outDir\s*:\s*["\']([^"\']+)["\']\s*,?[\t ]*(?://.*)?$',
+        config,
+        flags=re.MULTILINE,
+    )
+    if out_dir_values != ["dist"]:
+        fail("fixed Vite build must use the official dist output directory")
     compressed_size_values = re.findall(
         r"^[\t ]*reportCompressedSize\s*:\s*(true|false)\s*,?[\t ]*(?://.*)?$",
         config,
@@ -471,28 +577,42 @@ def validate_sbom(repo: pathlib.Path, template: pathlib.Path) -> None:
 def validate_runtime_policy(repo: pathlib.Path) -> None:
     policy = load_json(repo / "docs" / "mobile-linux" / "local-app-runtime-policy.json")
     node = "/usr/bin/node"
-    vite_binary = "/opt/lingxi/local-app-runtime/node_modules/vite/bin/vite.js"
-    node_path = "/opt/lingxi/local-app-runtime/node_modules"
+    build_root = "/var/lingxi/local-app-build/{app_id}/{channel}/project"
+    guest_build_state_root = f"{build_root}/.lingxi-build-state"
+    guest_home_root = f"{guest_build_state_root}/home"
+    guest_temp_root = f"{guest_build_state_root}/tmp"
+    guest_xdg_cache_root = f"{guest_build_state_root}/xdg-cache"
+    guest_xdg_config_root = f"{guest_build_state_root}/xdg-config"
+    guest_xdg_data_root = f"{guest_build_state_root}/xdg-data"
+    guest_npm_cache_root = f"{guest_build_state_root}/npm-cache"
+    vite_binary = f"{build_root}/node_modules/vite/bin/vite.js"
     if policy.get("schema_version") != 1:
         fail("local-app runtime policy must use schema_version 1")
     if policy.get("node_executable") != node or policy.get("vite_executable") != vite_binary:
         fail("local-app runtime command paths diverged")
     if "next_executable" in policy:
         fail("local-app runtime policy must not retain a Next executable path")
-    mount = policy.get("node_modules_mount")
-    if not isinstance(mount, dict) or mount.get("target") != "/opt/lingxi/local-app-runtime/node_modules" or mount.get("read_only") is not True:
-        fail("node_modules must use the fixed read-only mount")
-    scaffold = policy.get("scaffold")
-    if scaffold != {
-        "primary": "official_create_vite_cli",
-        "target": "empty_staging_source_root",
-        "javascript_command": "npm create vite@latest . -- --template react --no-interactive",
-        "typescript_command": "npm create vite@latest . -- --template react-ts --no-interactive",
-        "shell": "existing_mobile_linux_shell",
-        "offline_fallback": ".lingxi/vite-fallback",
-        "fallback_only_when": "registry_or_network_unavailable",
+    if "node_modules_mount" in policy:
+        fail("local-app runtime policy must not guest-mount shared node_modules")
+    if "scaffold" in policy:
+        fail("local-app runtime policy must not pin create-vite scaffolding policy")
+    dependency_snapshot = policy.get("dependency_snapshot")
+    if dependency_snapshot != {
+        "source": "bundled:local-app-runtime/node_modules",
+        "materialize_into": f"{build_root}/node_modules",
+        "guest_mount": "forbidden",
+        "selection_policy": "verified_runtime_only",
     }:
-        fail("local-app scaffold policy must prefer the official Vite CLI")
+        fail("local-app dependency snapshot policy diverged")
+    build_mount = policy.get("build_mount")
+    if build_mount != {
+        "kind": "LocalAppBuild",
+        "count": 1,
+        "host_path_policy": "staging_or_store_root",
+        "guest_path": build_root,
+        "writable": True,
+    }:
+        fail("local-app build mount policy diverged")
     commands = policy.get("commands")
     old_space_argument = "--max-old-space-size={build_node_old_space_size_mib}"
     if not isinstance(commands, dict):
@@ -502,9 +622,23 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
     vite_build = commands.get("vite_static_build")
     if (
         not isinstance(vite_build, dict)
-        or vite_build.get("argv") != [node, old_space_argument, vite_binary, "build"]
+        or vite_build.get("argv")
+        != [node, old_space_argument, vite_binary, "build", "--outDir", "dist", "--emptyOutDir"]
+        or vite_build.get("cwd") != build_root
+        or vite_build.get("output_dir") != "dist"
         or vite_build.get("environment")
-        != {"NODE_ENV": "production", "NODE_PATH": node_path}
+        != {
+            "NODE_ENV": "production",
+            "HOME": guest_home_root,
+            "TMPDIR": guest_temp_root,
+            "TMP": guest_temp_root,
+            "TEMP": guest_temp_root,
+            "XDG_CACHE_HOME": guest_xdg_cache_root,
+            "XDG_CONFIG_HOME": guest_xdg_config_root,
+            "XDG_DATA_HOME": guest_xdg_data_root,
+            "NPM_CONFIG_CACHE": guest_npm_cache_root,
+            "npm_config_cache": guest_npm_cache_root,
+        }
         or vite_build.get("network_policy") != "disabled"
         or vite_build.get("memory_limit_policy") != "physical_memory_tier"
         or "memory_limit_bytes" in vite_build
@@ -538,15 +672,8 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
         or "node_process_tree_memory_bytes" in limits
     ):
         fail("local-app build tiers or runtime memory limit diverged")
-    package_policy = policy.get("package_manager_policy")
-    if package_policy != {
-        "interactive_terminal_apk": True,
-        "generation_jobs": False,
-        "mcp": False,
-        "npm_family_present": True,
-        "npm_scope": "app_workspace_shell_approval",
-    }:
-        fail("local-app package-manager policy diverged")
+    if "package_manager_policy" in policy:
+        fail("local-app runtime policy must not pin CLI scaffolding/package-manager policy")
 
     launcher = policy.get("android_network_policy_launcher")
     expected_source = "clients/android/app/src/main/cpp/mobile_linux_policy_launcher.c"
@@ -627,6 +754,9 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
         or ish_policy.get("watchdog_interval_ms") != 250
         or ish_policy.get("memory_accounting")
         != "guest_backed_pages_by_execution_context"
+        or ish_policy.get("local_app_build_mount_layout")
+        != "single_root_materialized_snapshot"
+        or ish_policy.get("nested_bind_mount_resolution") != "longest_guest_prefix"
         or ish_policy.get("platform") != "iphoneos"
     ):
         fail("iOS iSH execution-policy contract diverged")
@@ -640,6 +770,19 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
             fail(f"missing iOS iSH execution-policy source: {exc}")
         if actual_digest != digest:
             fail(f"iOS iSH execution-policy source SHA-256 diverged: {expected_path}")
+
+    ish_patch_path = repo / ish_sources["ish_patch_source"][1]
+    try:
+        ish_patch_text = ish_patch_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"missing iOS iSH execution-policy patch: {exc}")
+    nested_bind_tokens = {
+        "best_guest_match",
+        "best_guest_path_len",
+        "g_bind_mounts[best_guest_match].host_path",
+    }
+    if any(token not in ish_patch_text for token in nested_bind_tokens):
+        fail("iOS iSH patch does not make nested bind mounts prefer the longest guest prefix")
 
     ios_build_script = repo / "clients/ios/scripts/build-linux-runtime.sh"
     try:
@@ -675,21 +818,14 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "mcp__local_apps__query_data",
         "mcp__local_apps__mutate_data",
         "mcp__local_apps__restore_checkpoint",
-        "existing `Shell` tool",
-        "npm install",
-        "npm uninstall",
-        "npm ci",
-        "npm create vite@latest . -- --template react --no-interactive",
-        "npm create vite@latest . -- --template react-ts --no-interactive",
-        "npx vite",
-        "npm run build",
-        "offline-fallback",
         "window.lingxi.v1",
         "Do not call `mcp__local_apps__list` or `mcp__local_apps__get`",
         "call `AskUserQuestion`",
         "Never ask unresolved questions in ordinary assistant text",
         "Every collection requires `id`, `name`, and `fields`",
         "Never declare host-owned record metadata",
+        "vite build --outDir dist --emptyOutDir",
+        "build/store/dist/",
     }
     missing = sorted(token for token in required_tokens if token not in text)
     if missing:
@@ -709,12 +845,9 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     except OSError as exc:
         fail(f"missing local-app-build workflow: {exc}")
     workflow_tokens = {
-        "npm create vite@latest . -- --template react --no-interactive",
-        "npm create vite@latest . -- --template react-ts --no-interactive",
-        "existing Mobile Linux Shell/Bash",
-        ".lingxi/vite-fallback/",
-        "offline-fallback",
         "mcp__local_apps__build",
+        "--outDir dist --emptyOutDir",
+        "build/store/dist/",
     }
     missing_workflow = sorted(token for token in workflow_tokens if token not in workflow)
     if missing_workflow:

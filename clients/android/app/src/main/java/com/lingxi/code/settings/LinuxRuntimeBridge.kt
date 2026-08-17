@@ -54,6 +54,9 @@ object LinuxRuntimeBridge {
     private fun managedRoot(context: Context): String =
         File(context.applicationContext.filesDir, "mobile-linux/android-proot").absolutePath
 
+    private fun appSandboxRoot(context: Context): String =
+        context.applicationContext.filesDir.canonicalFile.absolutePath
+
     private fun workspaceHostPath(context: Context, workspaceID: String): String =
         File(context.applicationContext.filesDir, "workspaces/$workspaceID")
             .also { it.mkdirs() }
@@ -90,6 +93,7 @@ object LinuxRuntimeBridge {
         val hostPath = workspace?.hostPath ?: workspaceHostPath(context, workspaceID)
         return mobileLinuxConfig(
             managedRoot = managedRoot(context),
+            appSandboxRoot = appSandboxRoot(context),
             workspaceHostPath = hostPath,
             stableWorkspaceId = workspaceID,
             abi = abi(),
@@ -106,6 +110,7 @@ object LinuxRuntimeBridge {
         val key = listOf(
             config.mode,
             config.managedRoot,
+            config.appSandboxRoot,
             config.workspaceHostPath,
             config.stableWorkspaceId,
             config.abi,

@@ -178,3 +178,86 @@ index 618929d7..2e07ca06 100644
 +    unlock(&pids_lock);
 +    return active;
 +}
+diff --git a/fs/fake.c b/fs/fake.c
+index c86ac940..f339adaa 100644
+--- a/fs/fake.c
++++ b/fs/fake.c
+@@ -188,6 +188,9 @@ static bool fakefs_host_path_contains_rootfs(const char *host_path, int host_pat
+  * suppression is no-op until fakefs_set_rootfs_data_path() is called by
+  * the host. */
+ bool fakefs_bind_mount_resolve_path(const char *resolved, char *out_path, size_t out_size) {
++    int best_host_match = -1;
++    int best_host_path_len = -1;
++    const char *best_resolved_path = NULL;
+     for (int i = 0; i < FAKEFS_MAX_BIND_MOUNTS; i++) {
+         if (!g_bind_mounts[i].active)
+             continue;
+@@ -213,9 +216,12 @@ bool fakefs_bind_mount_resolve_path(const char *resolved, char *out_path, size_t
+         /* Try matching as-is first */
+         if (strncmp(resolved, g_bind_mounts[i].host_path, hlen) == 0 &&
+             (resolved[hlen] == '/' || resolved[hlen] == '\0')) {
+-            snprintf(out_path, out_size, "%s%s",
+-                     g_bind_mounts[i].path, resolved + hlen);
+-            return true;
++            if (hlen > best_host_path_len) {
++                best_host_match = i;
++                best_host_path_len = hlen;
++                best_resolved_path = resolved;
++            }
++            continue;
+         }
+         /* F_GETPATH resolves /var -> /private/var on iOS.
+          * If host_path starts with /var/ but resolved starts with /private/var/,
+@@ -225,12 +231,20 @@ bool fakefs_bind_mount_resolve_path(const char *resolved, char *out_path, size_t
+             const char *resolved_no_private = resolved + 8; /* skip "/private" */
+             if (strncmp(resolved_no_private, g_bind_mounts[i].host_path, hlen) == 0 &&
+                 (resolved_no_private[hlen] == '/' || resolved_no_private[hlen] == '\0')) {
+-                snprintf(out_path, out_size, "%s%s",
+-                         g_bind_mounts[i].path, resolved_no_private + hlen);
+-                return true;
++                if (hlen > best_host_path_len) {
++                    best_host_match = i;
++                    best_host_path_len = hlen;
++                    best_resolved_path = resolved_no_private;
++                }
+             }
+         }
+     }
++    if (best_host_match >= 0) {
++        snprintf(out_path, out_size, "%s%s",
++                 g_bind_mounts[best_host_match].path,
++                 best_resolved_path + best_host_path_len);
++        return true;
++    }
+     /* Static table miss — fall through to the host-provided reverse hook
+      * if one is registered. The hook knows about per-context routes that
+      * are not in g_bind_mounts[]. */
+@@ -276,16 +290,24 @@ static bool bind_mount_translate_path_ex(const char *path, char *out_path,
+             return true;
+         }
+     }
++    int best_guest_match = -1;
++    int best_guest_path_len = -1;
+     for (int i = 0; i < FAKEFS_MAX_BIND_MOUNTS; i++) {
+         if (!g_bind_mounts[i].active)
+             continue;
+         int len = g_bind_mounts[i].path_len;
+         if (strncmp(g_bind_mounts[i].path, cmp_path, len) == 0 &&
+-            (cmp_path[len] == '/' || cmp_path[len] == '\0')) {
+-            snprintf(out_path, out_size, "%s%s",
+-                     g_bind_mounts[i].host_path, cmp_path + len);
+-            return true;
++            (cmp_path[len] == '/' || cmp_path[len] == '\0') &&
++            len > best_guest_path_len) {
++            best_guest_match = i;
++            best_guest_path_len = len;
+         }
+     }
++    if (best_guest_match >= 0) {
++        snprintf(out_path, out_size, "%s%s",
++                 g_bind_mounts[best_guest_match].host_path,
++                 cmp_path + best_guest_path_len);
++        return true;
++    }
+     return false;
+ }

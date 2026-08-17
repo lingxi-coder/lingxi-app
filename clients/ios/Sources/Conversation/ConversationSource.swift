@@ -409,6 +409,7 @@ final class ConversationModel: ObservableObject {
     @Published var reasoningDisabledReason: String?
     @Published var controlsPending: Bool = false
     @Published var controlsError: String?
+    @Published var bypassPermissionsWarningSuppressed: Bool = false
     // ── Out-of-band session state (real history) ───────────────────────────────
     // `ListSessions` / `SessionList` are NOT part of a text turn, so — exactly
     // like `ModelList` above — they ride a SEPARATE session-state path here,
@@ -521,7 +522,7 @@ final class ConversationModel: ObservableObject {
         self.reasoningOptions = ["automatic"]
         self.permissionOptions = [
             "default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"
-        ].map { ConversationPermissionOption(id: $0, available: $0 != "bypassPermissions", disabledReason: $0 == "bypassPermissions" ? "not_yet_available" : nil) }
+        ].map { ConversationPermissionOption(id: $0, available: true, disabledReason: nil) }
     }
 
     /// Replace the agent roster while retaining the selected row when it is
@@ -821,6 +822,9 @@ protocol ConversationSource: AnyObject {
     /// Settings. The string is the wire mode (default/acceptEdits/plan/auto/
     /// dontAsk/bypassPermissions).
     func setPermissionMode(_ mode: String)
+    /// Apply `bypassPermissions` only after the controls sheet has shown and the
+    /// user has accepted its explicit risk warning.
+    func confirmAndSetBypassPermissions(suppressWarning: Bool)
     /// Change provider-aware reasoning selection. `automatic` deliberately
     /// means no user override; other values are validated by the engine.
     func setReasoningSelection(_ selection: String)
@@ -1346,6 +1350,13 @@ final class MockConversationSource: ConversationSource {
         model.effectivePermissionMode = mode
     }
 
+    func confirmAndSetBypassPermissions(suppressWarning: Bool) {
+        setPermissionMode("bypassPermissions")
+        if suppressWarning {
+            model.bypassPermissionsWarningSuppressed = true
+        }
+    }
+
     func setReasoningSelection(_ selection: String) {
         model.reasoningSelection = selection
     }
@@ -1469,6 +1480,7 @@ final class MockConversationSource: ConversationSource {
 
         private let config: EngineConfig
         private let handleBuilder: HandleBuilder
+        private let permissionModeRepository: PermissionModeConfigurationRepository
         private var handle: MobileEngineHandle?
         /// One shared bootstrap attempt for every entry point that needs the
         /// engine. Keeping the task on the main actor prevents two callers that
@@ -1508,6 +1520,7 @@ final class MockConversationSource: ConversationSource {
         /// Original user spelling for a slash command awaiting dispatch.
         private var pendingSlashRaw: String?
         private var testCommandSubmitter: ((ClientCommand) async throws -> Void)?
+        private var testBypassPermissionsConfirmer: (() async throws -> Void)?
         private var testEmptySessionResumer: ((String, String) async throws -> Void)?
         private var cancellationOperation: CancellationOperation?
         private var nextCancellationOperationID: UInt64 = 1
@@ -1545,10 +1558,13 @@ final class MockConversationSource: ConversationSource {
 
         init(
             config: EngineConfig,
-            handleBuilder: @escaping HandleBuilder = EngineConversationSource.buildDefaultHandle
+            handleBuilder: @escaping HandleBuilder = EngineConversationSource.buildDefaultHandle,
+            permissionModeRepository: PermissionModeConfigurationRepository? = nil
         ) {
             self.config = config
             self.handleBuilder = handleBuilder
+            self.permissionModeRepository = permissionModeRepository
+                ?? PermissionModeConfigurationRepository()
             // Seed the chip from the mock catalog only as a placeholder until the
             // engine's `ModelList` lands (SHIP-BLOCKER #2). The REAL active model is
             // `activeModelId`, set below from the (possibly empty) configured id and
@@ -1560,6 +1576,8 @@ final class MockConversationSource: ConversationSource {
             // Out-of-band model state: the configured id (empty ⇒ engine default,
             // filled by the first `ModelList`). Never a branded mock id here.
             self.model.activeModelId = config.model
+            self.model.bypassPermissionsWarningSuppressed = self.permissionModeRepository
+                .bypassWarningSuppressed()
         }
 
         // MARK: ConversationSource
@@ -2177,6 +2195,15 @@ final class MockConversationSource: ConversationSource {
             }
             let handle = try await ensureHandle()
             try await handle.submit(command: command)
+        }
+
+        private func confirmBypassPermissionsForCurrentSession() async throws {
+            if let testBypassPermissionsConfirmer {
+                try await testBypassPermissionsConfirmer()
+                return
+            }
+            let handle = try await ensureHandle()
+            try await handle.confirmBypassPermissions()
         }
 
         private func operationForCancelling(turnId: UInt64) -> CancellationOperation {
@@ -4413,6 +4440,12 @@ final class MockConversationSource: ConversationSource {
             testCommandSubmitter = submitter
         }
 
+        func setBypassPermissionsConfirmerForTesting(
+            _ confirmer: (() async throws -> Void)?
+        ) {
+            testBypassPermissionsConfirmer = confirmer
+        }
+
         func setEmptySessionResumerForTesting(
             _ resumer: ((String, String) async throws -> Void)?
         ) {
@@ -5188,14 +5221,41 @@ final class MockConversationSource: ConversationSource {
         }
 
         func setPermissionMode(_ mode: String) {
+            guard mode != "bypassPermissions" else {
+                model.controlsError = "Confirm Full Access from the conversation controls."
+                return
+            }
             let previous = model.requestedPermissionMode
             model.requestedPermissionMode = mode
             model.controlsPending = true
+            model.controlsError = nil
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    let handle = try await self.ensureHandle()
-                    try await handle.submit(command: .setPermissionMode(mode: mode))
+                    try await self.submitCommand(.setPermissionMode(mode: mode))
+                    self.model.controlsPending = false
+                } catch {
+                    self.model.requestedPermissionMode = previous
+                    self.model.controlsPending = false
+                    self.model.controlsError = error.localizedDescription
+                }
+            }
+        }
+
+        func confirmAndSetBypassPermissions(suppressWarning: Bool) {
+            let previous = model.requestedPermissionMode
+            model.requestedPermissionMode = "bypassPermissions"
+            model.controlsPending = true
+            model.controlsError = nil
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.confirmBypassPermissionsForCurrentSession()
+                    try await self.submitCommand(.setPermissionMode(mode: "bypassPermissions"))
+                    if suppressWarning {
+                        self.permissionModeRepository.setBypassWarningSuppressed(true)
+                        self.model.bypassPermissionsWarningSuppressed = true
+                    }
                     self.model.controlsPending = false
                 } catch {
                     self.model.requestedPermissionMode = previous

@@ -89,7 +89,7 @@ struct LXISHRunRequest: Codable {
     var network: String
     var resourceLimits: LXISHResourceLimits?
     var mounts: [LXISHMountSpec]?
-
+    var includeDefaultMounts: Bool?
 
     enum CodingKeys: String, CodingKey {
         case command
@@ -101,6 +101,7 @@ struct LXISHRunRequest: Codable {
         case network
         case resourceLimits = "resource_limits"
         case mounts
+        case includeDefaultMounts = "include_default_mounts"
     }
 }
 
@@ -118,7 +119,6 @@ struct LXISHPtyWriteRequest: Codable {
     var sessionId: String
     var dataBase64: String
 
-
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case dataBase64 = "data_base64"
@@ -130,7 +130,6 @@ struct LXISHPtyResizeRequest: Codable {
     var cols: UInt16
     var rows: UInt16
 
-
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case cols
@@ -140,7 +139,6 @@ struct LXISHPtyResizeRequest: Codable {
 
 struct LXISHPtyCloseRequest: Codable {
     var sessionId: String
-
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -369,8 +367,21 @@ struct LXISHRuntimeMountPlanner {
 
     static func effectiveMounts(
         requestedMounts: [LXISHMountSpec],
-        config: LXISHNativeConfig
+        config: LXISHNativeConfig,
+        includeDefaultMounts: Bool = true
     ) -> [LXISHMountSpec] {
+        guard includeDefaultMounts else {
+            return requestedMounts.map { mount in
+                LXISHMountSpec(
+                    hostPath: URL(fileURLWithPath: mount.hostPath, isDirectory: true)
+                        .standardizedFileURL
+                        .path,
+                    guestPath: mount.guestPath,
+                    readOnly: mount.readOnly,
+                    purpose: mount.purpose
+                )
+            }
+        }
         let workspaceGuestPath = LXISHGuestPaths.workspace(config.stableWorkspaceId)
         var mounts: [LXISHMountSpec] = [
             LXISHMountSpec(
@@ -405,6 +416,50 @@ struct LXISHRuntimeMountPlanner {
             )
         }
         return mounts
+    }
+}
+
+enum LXISHExecutionMountScope {
+    static func withMounts<T>(
+        runtimeMounts: inout [LXISHMountSpec],
+        requestedMounts: [LXISHMountSpec]?,
+        includeDefaultMounts: Bool,
+        apply: ([LXISHMountSpec], Bool) throws -> Void,
+        body: () throws -> T
+    ) throws -> T {
+        if includeDefaultMounts {
+            runtimeMounts = requestedMounts ?? runtimeMounts
+            try apply(runtimeMounts, true)
+            return try body()
+        }
+
+        let persistentMounts = runtimeMounts
+        runtimeMounts = requestedMounts ?? []
+
+        do {
+            try apply(runtimeMounts, false)
+            let result = try body()
+            runtimeMounts = persistentMounts
+            do {
+                try apply(persistentMounts, true)
+            } catch {
+                throw LXISHBridgeError.io(
+                    "isolated run completed but failed to restore runtime mounts: \(error.localizedDescription)"
+                )
+            }
+            return result
+        } catch {
+            let executionError = error
+            runtimeMounts = persistentMounts
+            do {
+                try apply(persistentMounts, true)
+            } catch {
+                throw LXISHBridgeError.io(
+                    "\(executionError.localizedDescription); failed to restore runtime mounts after isolated run: \(error.localizedDescription)"
+                )
+            }
+            throw executionError
+        }
     }
 }
 
@@ -1439,7 +1494,7 @@ private final class LXISHNativeCoordinator {
             do {
                 try runtime.kernel.boot(withRootPath: config.rootfsURL.path)
                 runtime.kernelBooted = true
-                try self.applyMountsIfNeeded(to: &runtime)
+                try self.applyMountsIfNeeded(requestedMounts: runtime.mounts, to: &runtime)
             } catch {
                 throw LXISHBridgeError.unavailable(error.localizedDescription)
             }
@@ -1465,7 +1520,6 @@ private final class LXISHNativeCoordinator {
             let executionPolicy = try self.executionPolicy(for: request)
             let environment = self.preparedEnvironment(from: request.env, cwd: request.cwd, config: config)
             _ = try self.rootfsManager.installIfNeeded(for: config)
-            runtime.mounts = request.mounts ?? runtime.mounts
             guard LXISHKernelRuntimeBridge.isDeviceBridgeAvailable(),
                   LXISHShellExecutorRuntimeBridge.isDeviceBridgeAvailable()
             else {
@@ -1480,33 +1534,48 @@ private final class LXISHNativeCoordinator {
             }
             try runtime.kernel.boot(withRootPath: config.rootfsURL.path)
             runtime.kernelBooted = true
-            try self.applyMountsIfNeeded(to: &runtime)
             try self.validateEnvironment(environment)
-            let result = try runtime.executor.runExecutable(
-                request.command,
-                arguments: request.args,
-                environment: environment,
-                stdin: request.stdin,
-                cwd: request.cwd,
-                timeout: self.timeoutSeconds(from: request),
-                networkPolicy: executionPolicy.networkPolicy,
-                memoryLimitBytes: executionPolicy.memoryLimitBytes
+            var runtimeMounts = runtime.mounts
+            defer { runtime.mounts = runtimeMounts }
+            return try LXISHExecutionMountScope.withMounts(
+                runtimeMounts: &runtimeMounts,
+                requestedMounts: request.mounts,
+                includeDefaultMounts: request.includeDefaultMounts ?? true,
+                apply: { mounts, includeDefaultMounts in
+                    try self.applyMountsIfNeeded(
+                        requestedMounts: mounts,
+                        to: &runtime,
+                        includeDefaultMounts: includeDefaultMounts
+                    )
+                },
+                body: {
+                    let result = try runtime.executor.runExecutable(
+                        request.command,
+                        arguments: request.args,
+                        environment: environment,
+                        stdin: request.stdin,
+                        cwd: request.cwd,
+                        timeout: self.timeoutSeconds(from: request),
+                        networkPolicy: executionPolicy.networkPolicy,
+                        memoryLimitBytes: executionPolicy.memoryLimitBytes
+                    )
+                    if result.errorCode == -5 {
+                        throw LXISHBridgeError.resourceLimitExceeded(result.stderrText)
+                    }
+                    return [
+                        "result": LXISHRunResultPayload(
+                            stdout: result.stdoutText,
+                            stderr: result.stderrText,
+                            exitCode: result.exitCode,
+                            timedOut: result.errorCode == -3,
+                            cancelled: result.errorCode == -4,
+                            durationSeconds: result.durationSeconds,
+                            networkPolicyEnforced: executionPolicy.networkPolicy != 0,
+                            memoryLimitEnforced: executionPolicy.memoryLimitBytes != nil
+                        )
+                    ]
+                }
             )
-            if result.errorCode == -5 {
-                throw LXISHBridgeError.resourceLimitExceeded(result.stderrText)
-            }
-            return [
-                "result": LXISHRunResultPayload(
-                    stdout: result.stdoutText,
-                    stderr: result.stderrText,
-                    exitCode: result.exitCode,
-                    timedOut: result.errorCode == -3,
-                    cancelled: result.errorCode == -4,
-                    durationSeconds: result.durationSeconds,
-                    networkPolicyEnforced: executionPolicy.networkPolicy != 0,
-                    memoryLimitEnforced: executionPolicy.memoryLimitBytes != nil
-                )
-            ]
         }
     }
 
@@ -1530,7 +1599,7 @@ private final class LXISHNativeCoordinator {
             }
             try runtime.kernel.boot(withRootPath: config.rootfsURL.path)
             runtime.kernelBooted = true
-            try self.applyMountsIfNeeded(to: &runtime)
+            try self.applyMountsIfNeeded(requestedMounts: runtime.mounts, to: &runtime)
             try self.validateEnvironment(environment)
 
             let processId = UUID().uuidString.lowercased()
@@ -1656,7 +1725,7 @@ private final class LXISHNativeCoordinator {
             }
             try runtime.kernel.boot(withRootPath: config.rootfsURL.path)
             runtime.kernelBooted = true
-            try self.applyMountsIfNeeded(to: &runtime)
+            try self.applyMountsIfNeeded(requestedMounts: runtime.mounts, to: &runtime)
             if runtime.ptySessionId != nil {
                 throw LXISHBridgeError.unavailable("only one interactive PTY session is supported per managed root")
             }
@@ -1873,10 +1942,15 @@ private final class LXISHNativeCoordinator {
         }
     }
 
-    private func applyMountsIfNeeded(to runtime: inout RuntimeState) throws {
+    private func applyMountsIfNeeded(
+        requestedMounts: [LXISHMountSpec],
+        to runtime: inout RuntimeState,
+        includeDefaultMounts: Bool = true
+    ) throws {
         let mounts = LXISHRuntimeMountPlanner.effectiveMounts(
-            requestedMounts: runtime.mounts,
-            config: runtime.config
+            requestedMounts: requestedMounts,
+            config: runtime.config,
+            includeDefaultMounts: includeDefaultMounts
         )
         try ensureHostEndpointsExist(mounts)
         try ensureGuestMountParentsExist(mounts, runtime: &runtime)
@@ -1899,13 +1973,12 @@ private final class LXISHNativeCoordinator {
     /// under `data/`.
     ///
     /// `fakefs_bind_mount` registers exactly the path it binds and none of its
-    /// parents, so a mount at `/opt/lingxi/local-app-runtime/node_modules`
-    /// left `/opt/lingxi/local-app-runtime` unknown to the guest and every
-    /// lookup through it returned ENOENT — which is how a Next build died on
-    /// `lstat '/opt/lingxi/local-app-runtime'` while the leaf symlink sat
-    /// right there on disk. Mount points one level under a directory baked
-    /// into the rootfs image (`/workspace/<id>`) were the only ones that ever
-    /// worked, and they worked by accident.
+    /// parents, so a build mount such as
+    /// `/var/lingxi/local-app-build/<id>/store/project` would otherwise leave
+    /// its intermediate directories unknown to the guest and every lookup
+    /// through them would return ENOENT. Mount points one level under a
+    /// directory baked into the rootfs image (`/workspace/<id>`) were the only
+    /// ones that ever worked, and they worked by accident.
     ///
     /// Creating the parents with `FileManager` — which is what this used to do
     /// — is worse than doing nothing. `fakefs_mkdir` calls the host `mkdir`

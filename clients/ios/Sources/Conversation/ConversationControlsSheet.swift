@@ -15,8 +15,10 @@ struct ConversationControlsSheet: View {
     let permissionOptions: [ConversationPermissionOption]
     let controlsPending: Bool
     let controlsError: String?
+    let bypassWarningSuppressed: Bool
     let onSelectReasoning: (String) -> Void
     let onSelectPermission: (String) -> Void
+    let onConfirmBypassPermissions: (Bool) -> Void
     let onDismiss: () -> Void
 
     @State private var budgetText = ""
@@ -62,8 +64,14 @@ struct ConversationControlsSheet: View {
                 Section("Permission") {
                     ForEach(permissionOptions) { option in
                         Button {
-                            if option.id == "dontAsk" || option.id == "bypassPermissions" {
+                            guard option.id != permissionMode else { return }
+                            if Self.requiresRiskConfirmation(
+                                for: option.id,
+                                bypassWarningSuppressed: bypassWarningSuppressed
+                            ) {
                                 pendingRiskMode = option.id
+                            } else if option.id == "bypassPermissions" {
+                                onConfirmBypassPermissions(false)
                             } else {
                                 onSelectPermission(option.id)
                             }
@@ -100,12 +108,41 @@ struct ConversationControlsSheet: View {
             set: { if !$0 { pendingRiskMode = nil } }
         )) {
             Button("Cancel", role: .cancel) { pendingRiskMode = nil }
-            Button("Confirm", role: .destructive) {
-                if let mode = pendingRiskMode { onSelectPermission(mode) }
-                pendingRiskMode = nil
+            if pendingRiskMode == "bypassPermissions" {
+                Button("Enter Full Access", role: .destructive) {
+                    onConfirmBypassPermissions(false)
+                    pendingRiskMode = nil
+                }
+                Button("Don't warn again", role: .destructive) {
+                    onConfirmBypassPermissions(true)
+                    pendingRiskMode = nil
+                }
+            } else {
+                Button("Confirm", role: .destructive) {
+                    if let mode = pendingRiskMode { onSelectPermission(mode) }
+                    pendingRiskMode = nil
+                }
             }
         } message: {
-            Text("This mode can allow higher-risk operations without a prompt.")
+            if pendingRiskMode == "bypassPermissions" {
+                Text("Full access stops all permission prompts. LingXi may run commands that modify or delete local files, or send data to external services. Use it only in a disposable environment you trust.")
+            } else {
+                Text("This mode can allow higher-risk operations without a prompt.")
+            }
+        }
+    }
+
+    static func requiresRiskConfirmation(
+        for mode: String,
+        bypassWarningSuppressed: Bool
+    ) -> Bool {
+        switch mode {
+        case "dontAsk":
+            return true
+        case "bypassPermissions":
+            return !bypassWarningSuppressed
+        default:
+            return false
         }
     }
 

@@ -6,7 +6,7 @@
 //! stdio or remote transport surface.
 
 use async_trait::async_trait;
-use local_apps::AppService;
+use local_apps::{AppError, AppService};
 use protocol::McpConnectionId;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -53,10 +53,10 @@ pub trait LocalAppsMcpHost: Send + Sync {
     /// `agent.post` — the app's own timer posting while the agent reads is
     /// the INTENDED usage, not an exotic interleaving.
     async fn read_app_events(&self, input: Value) -> Result<Value, String>;
-    /// Initialize host metadata and the repository-verified offline fallback
-    /// for a freshly created app. The workflow performs the normal official
-    /// Vite CLI scaffold through the existing Mobile Linux Shell.
-    async fn scaffold_app(&self, app_id: String) -> Result<(), String>;
+    /// Initialize host metadata and the host-owned scaffold for a freshly
+    /// created app so the workflow can edit source immediately without any
+    /// package-manager or template bootstrap step.
+    async fn scaffold_app(&self, record: local_apps::AppRecord) -> Result<(), String>;
 }
 
 /// Live source of the CURRENT conversation session uuid, attached by the
@@ -462,7 +462,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "create",
-                "Create a local app record and host metadata. The local-app-build workflow uses the official Vite CLI in an empty staging source root when the local-app Node/npm toolchain is available (react by default, react-ts only for confirmed TypeScript), copies it into the app workspace without overwriting source, and otherwise reuses existing source or the repository-verified .lingxi/vite-fallback while reporting the toolchain-unavailable reason. Generate under src/ (or app/ for the explicit fallback), use npm dependency operations only when that toolchain is available, then call build and preview via manage_runtime.",
+                "Create a local app record and host metadata, then let the host scaffold the workspace before generation. The local-app-build workflow assumes the project root and dependencies are already pinned by the host, edits only app/source roots, builds offline, and serves the promoted dist via manage_runtime.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
                     "name":{"type":"string","minLength":1,"maxLength":200}
@@ -678,43 +678,26 @@ impl LocalAppsMcpTransport {
                 // `SessionIdProvider`. `None` (provider unattached, e.g. a
                 // bare test transport) simply records no origin.
                 let conversation_id = self.session_id.get().and_then(|provider| provider());
-                let record = match service.create_app(name, brief, conversation_id).await {
+                let host = match self.host() {
+                    Ok(host) => Arc::clone(host),
+                    Err(error) => return Ok(Self::tool_error(error.to_string())),
+                };
+                let initializer_host = Arc::clone(&host);
+                let record = match service
+                    .create_app_with_initializer(name, brief, conversation_id, move |record| {
+                        let host = Arc::clone(&initializer_host);
+                        async move { host.scaffold_app(record).await.map_err(AppError::Io) }
+                    })
+                    .await
+                {
                     Ok(record) => record,
                     Err(error) => return Ok(Self::app_error(error)),
                 };
-                // Best-effort scaffold, mirroring the old trigger-authoring
-                // semantics: the record already committed above, so a
-                // missing host capability (or a scaffold failure) does NOT
-                // fail this call — it is reported in the result instead,
-                // and the agent can retry by calling `build` (whose
-                // scaffold-dependent failure names the gap) or recreating.
-                let mut scaffolded = false;
-                let mut warning: Option<String> = None;
-                if let Ok(host) = self.host() {
-                    match host.scaffold_app(record.id.clone()).await {
-                        Ok(()) => scaffolded = true,
-                        Err(error) => {
-                            tracing::warn!(
-                                app_id = %record.id,
-                                error = %error,
-                                "local-apps MCP create: workspace scaffold failed"
-                            );
-                            warning = Some(format!("workspace scaffold failed: {error}"));
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        app_id = %record.id,
-                        "local-apps host capability unavailable; workspace was not \
-                         scaffolded from MCP create"
-                    );
-                    warning =
-                        Some("host capability unavailable; workspace was not scaffolded".into());
-                }
                 // v3 Phase 4: pin the init session through the connection-
                 // scoped minter (fork of the origin chat, or an empty
-                // anchor). Best-effort like the scaffold: the boot backfill
-                // repairs a missing pin.
+                // anchor). Session pinning remains best-effort because boot
+                // backfill can repair it; unlike the required scaffold, it is
+                // not part of the buildability transaction.
                 let mut init_session_id: Option<String> = None;
                 if let Some(minter) = self.init_session_minter.get() {
                     match minter(record.clone()).await {
@@ -746,15 +729,8 @@ impl LocalAppsMcpTransport {
                 }
                 let mut result = json!({
                     "app": record,
-                    "scaffolded": scaffolded,
-                    "next_step": self.host.get().map_or_else(
-                        || crate::local_apps_host::create_next_step_guidance(None),
-                        |host| host.create_next_step(),
-                    )
+                    "next_step": host.create_next_step(),
                 });
-                if let (Some(object), Some(warning)) = (result.as_object_mut(), warning) {
-                    object.insert("warning".into(), Value::String(warning));
-                }
                 if let (Some(object), Some(init_id)) = (result.as_object_mut(), init_session_id) {
                     object.insert("init_session_id".into(), Value::String(init_id));
                 }
@@ -985,7 +961,7 @@ mod tests {
     use super::*;
     use local_apps::mailbox::{load_mailbox, save_mailbox, AppMailbox};
     use local_apps::test_support::FixedClock;
-    use local_apps::{AppLayout, NoopAppEventObserver};
+    use local_apps::{AppLayout, AppService, NoopAppEventObserver};
     use tempfile::TempDir;
 
     /// A transport over a real store with one app whose mailbox holds
@@ -1185,13 +1161,15 @@ mod tests {
         assert!(
             create
                 .description
-                .contains("when the local-app Node/npm toolchain is available"),
-            "create must only require the Vite CLI when the toolchain is available: {}",
+                .contains("host scaffold the workspace before generation"),
+            "create must describe the host-scaffolded workspace contract: {}",
             create.description
         );
         assert!(
-            create.description.contains("toolchain-unavailable reason"),
-            "create must describe the toolchain-unavailable fallback path: {}",
+            create
+                .description
+                .contains("dependencies are already pinned by the host"),
+            "create must describe the pinned dependency contract: {}",
             create.description
         );
         let descriptions = tools
@@ -1207,6 +1185,12 @@ mod tests {
         assert!(
             !descriptions.contains("five-step") && !descriptions.contains("five step"),
             "no tool description should promise a removed five-step flow: {descriptions}"
+        );
+        assert!(
+            !descriptions.contains("npm create vite")
+                && !descriptions.contains("npm install")
+                && !descriptions.contains("offline-fallback"),
+            "tool descriptions must not promise removed creation or dependency flows: {descriptions}"
         );
         let list = tools
             .iter()
@@ -1502,6 +1486,16 @@ mod tests {
         (transport, service)
     }
 
+    async fn reload_service(root: &std::path::Path) -> AppService {
+        AppService::load(
+            root,
+            Arc::new(local_apps::test_support::FixedClock::new(1)),
+            Arc::new(local_apps::NoopAppEventObserver),
+        )
+        .await
+        .expect("reload app service")
+    }
+
     /// PINS the truth Task 10 was required to confront: `create` now takes a
     /// real, caller-supplied `brief`, and a caller-supplied `name` is
     /// honored rather than silently overwritten with the brief (or vice
@@ -1532,6 +1526,12 @@ mod tests {
         );
         let root = tempfile::tempdir().unwrap();
         let (transport, _service) = attached_transport(root.path()).await;
+        assert!(transport
+            .attach_host(Arc::new(RecordingScaffoldHost {
+                calls: StdMutex::new(Vec::new()),
+                failure: None,
+            }))
+            .is_ok());
         let created = transport
             .call("create", json!({"name": NAME, "brief": BRIEF}))
             .await
@@ -1552,6 +1552,12 @@ mod tests {
     async fn create_takes_a_brief_instead_of_a_template() {
         let root = tempfile::tempdir().unwrap();
         let (transport, _service) = attached_transport(root.path()).await;
+        assert!(transport
+            .attach_host(Arc::new(RecordingScaffoldHost {
+                calls: StdMutex::new(Vec::new()),
+                failure: None,
+            }))
+            .is_ok());
         let result = transport
             .call("create", json!({ "brief": "一个记事本 app" }))
             .await
@@ -1566,6 +1572,7 @@ mod tests {
     /// the `create` tool and panics if ever called.
     struct RecordingScaffoldHost {
         calls: StdMutex<Vec<String>>,
+        failure: Option<&'static str>,
     }
 
     #[async_trait]
@@ -1601,22 +1608,24 @@ mod tests {
         async fn read_app_events(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
-        async fn scaffold_app(&self, app_id: String) -> Result<(), String> {
-            self.calls.lock().expect("lock").push(app_id);
-            Ok(())
+        async fn scaffold_app(&self, record: local_apps::AppRecord) -> Result<(), String> {
+            self.calls.lock().expect("lock").push(record.id);
+            self.failure.map_or(Ok(()), |message| Err(message.into()))
         }
     }
 
     /// `create` must reach the attached host's `scaffold_app` with the NEW
-    /// app's id — the tool's own description claims the workspace exists
-    /// afterwards, so an agent that believed it and started editing files
-    /// would otherwise write into a directory nothing scaffolded.
+    /// app's id before the record becomes visible — the tool's own
+    /// description claims the workspace exists afterwards, so an agent that
+    /// believed it and started editing files would otherwise write into a
+    /// directory nothing scaffolded.
     #[tokio::test]
     async fn create_scaffolds_via_the_attached_host() {
         let root = tempfile::tempdir().unwrap();
         let (transport, _service) = attached_transport(root.path()).await;
         let host = Arc::new(RecordingScaffoldHost {
             calls: StdMutex::new(Vec::new()),
+            failure: None,
         });
         assert!(transport
             .attach_host(host.clone() as Arc<dyn LocalAppsMcpHost>)
@@ -1628,48 +1637,76 @@ mod tests {
             .expect("create");
         let structured = result.structured_content.expect("structured");
         let app_id = structured["app"]["id"].as_str().expect("id").to_string();
-        assert_eq!(structured["scaffolded"], true);
+        assert!(structured.get("scaffolded").is_none());
         assert_eq!(structured["next_step"], "host-specific next step");
 
         assert_eq!(
             host.calls.lock().expect("lock").as_slice(),
             &[app_id],
-            "create must scaffold the workspace for the app it just persisted"
+            "create must scaffold the workspace for the app it is preparing to commit"
         );
     }
 
-    /// A `create` call still succeeds and returns the persisted record even
-    /// when NO host capability is attached (e.g. a build wiring gap) — the
-    /// record is real; the missing scaffold is reported in the result
-    /// instead of failing the call.
+    /// A missing host is a pre-commit creation failure, not a degraded app
+    /// shape. No app record or index entry should become visible.
     #[tokio::test]
-    async fn create_still_succeeds_when_no_host_is_attached_to_scaffold() {
+    async fn create_fails_before_commit_when_no_host_is_attached_to_scaffold() {
         let root = tempfile::tempdir().unwrap();
         let (transport, service) = attached_transport(root.path()).await;
         let result = transport
             .call("create", json!({ "brief": "一个记事本 app" }))
             .await
-            .expect("create must not fail just because the scaffold couldn't run");
-        let structured = result.structured_content.expect("structured");
-        let app_id = structured["app"]["id"].as_str().expect("id").to_string();
-        assert_eq!(structured["scaffolded"], false);
+            .expect("tool transport returns a structured error");
+        assert!(result.is_error);
+        assert!(result.structured_content.is_none());
+        assert!(service.list_apps().await.is_empty());
         assert!(
-            structured["warning"].as_str().is_some(),
-            "a missed scaffold must be reported, not silent: {structured}"
+            !root.path().join("apps/index.json").exists(),
+            "hostless create must not commit index.json"
         );
-        let next_step = structured["next_step"].as_str().expect("next_step");
-        assert_eq!(
-            next_step,
-            crate::local_apps_host::create_next_step_guidance(None),
-            "the hostless create path must use the canonical capability-neutral guidance"
+        let reloaded = reload_service(root.path()).await;
+        assert!(
+            reloaded.list_apps().await.is_empty(),
+            "hostless create must stay invisible after reload"
         );
-        assert_eq!(
-            service
-                .record(&app_id)
-                .await
-                .expect("record")
-                .workflow_state,
-            local_apps::AppWorkflowState::Draft
+    }
+
+    #[tokio::test]
+    async fn create_fails_before_commit_when_required_scaffold_materialization_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, service) = attached_transport(root.path()).await;
+        let host = Arc::new(RecordingScaffoldHost {
+            calls: StdMutex::new(Vec::new()),
+            failure: Some("disk full"),
+        });
+        assert!(transport
+            .attach_host(host.clone() as Arc<dyn LocalAppsMcpHost>)
+            .is_ok());
+
+        let result = transport
+            .call("create", json!({ "brief": "一个记事本 app" }))
+            .await
+            .expect("tool transport returns a structured error");
+
+        assert!(result.is_error);
+        assert!(result.structured_content.is_none());
+        let calls = host.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        let app_id = calls[0].clone();
+        drop(calls);
+        assert!(service.list_apps().await.is_empty());
+        assert!(
+            !root.path().join("apps/index.json").exists(),
+            "failed scaffold must not commit index.json"
+        );
+        assert!(
+            !root.path().join("apps").join(&app_id).exists(),
+            "failed scaffold must clean the exact unindexed app directory"
+        );
+        let reloaded = reload_service(root.path()).await;
+        assert!(
+            reloaded.list_apps().await.is_empty(),
+            "failed scaffold must stay invisible after reload"
         );
     }
 
@@ -1681,6 +1718,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let lingxi_home = root.path().join(".lingxi-home");
         let (transport, service) = attached_transport(root.path()).await;
+        assert!(transport
+            .attach_host(Arc::new(RecordingScaffoldHost {
+                calls: StdMutex::new(Vec::new()),
+                failure: None,
+            }))
+            .is_ok());
         assert!(transport.attach_lingxi_home(lingxi_home.clone()).is_ok());
 
         let orphan_path = Arc::new(StdMutex::new(None::<std::path::PathBuf>));
@@ -1762,6 +1805,12 @@ mod tests {
     async fn list_reports_truncation_instead_of_claiming_a_complete_library() {
         let root = tempfile::tempdir().unwrap();
         let (transport, _service) = attached_transport(root.path()).await;
+        assert!(transport
+            .attach_host(Arc::new(RecordingScaffoldHost {
+                calls: StdMutex::new(Vec::new()),
+                failure: None,
+            }))
+            .is_ok());
         for index in 0..3 {
             transport
                 .call(

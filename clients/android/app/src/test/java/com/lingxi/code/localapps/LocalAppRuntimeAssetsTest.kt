@@ -1,5 +1,8 @@
 package com.lingxi.code.localapps
 
+import java.io.File
+import java.nio.file.Files
+import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -12,36 +15,22 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.json.JSONArray
+import org.json.JSONObject
 
 class LocalAppRuntimeAssetsTest {
-    /** The object is a process singleton; every test must see a cold process. */
     @Before
     fun reset() {
         LocalAppRuntimeAssets.resetForTests()
     }
 
-    /**
-     * …and so must every test class that follows. Gradle gives this module ONE
-     * JVM — app/build.gradle.kts's `testOptions` sets neither `forkEvery` nor
-     * `maxParallelForks` — and `LocalAppsViewModel.toUiGeneration` now reads
-     * this singleton for every FAILED generation job, so a root left staged
-     * here would silently append a runtime notice to another class's `detail`.
-     * Resetting in @Before alone cannot prevent that; only this can.
-     */
     @After
     fun resetAgain() {
         LocalAppRuntimeAssets.resetForTests()
     }
 
-    /**
-     * `prepare` is evaluated inside the `viewModel { initializer { … } }` block
-     * that Compose runs on the MAIN thread, so a cold first launch must not
-     * park it for the length of a ~200 MB asset extraction. The fake stage
-     * returns on its own so a regression fails the assertions instead of
-     * hanging the suite.
-     */
     @Test
-    fun `a cold staging run does not block the caller past its budget`() {
+    fun `a cold staging run returns the promised root without blocking on extraction`() {
         val started = CountDownLatch(1)
         val runs = AtomicInteger()
         val stage = {
@@ -52,83 +41,81 @@ class LocalAppRuntimeAssetsTest {
         }
 
         val begin = System.nanoTime()
-        val first = LocalAppRuntimeAssets.prepareWithin(BUDGET_MS, stage)
+        val first = LocalAppRuntimeAssets.prepareWithin(BUDGET_MS, STAGED_ROOT, stage)
         val elapsedMs = (System.nanoTime() - begin) / 1_000_000
 
-        assertNull("a staging run that outlives the budget must not be awaited", first)
+        assertEquals(STAGED_ROOT, first)
         assertTrue("caller was parked for ${elapsedMs}ms", elapsedMs < STAGE_MS / 2)
         assertTrue("staging must actually have started", started.await(5, TimeUnit.SECONDS))
+        assertEquals(LocalAppRuntimeStaging.Staging, LocalAppRuntimeAssets.stagingStatus())
 
-        // The same run keeps going; a later engine build joins it rather than
-        // extracting the tree a second time.
-        val second = LocalAppRuntimeAssets.prepareWithin(10_000) { error("must not re-stage") }
+        val second =
+            LocalAppRuntimeAssets.prepareWithin(10_000, STAGED_ROOT) { error("must not re-stage") }
         assertEquals(STAGED_ROOT, second)
         assertEquals(1, runs.get())
-
-        // Memoised once it succeeded.
-        assertEquals(STAGED_ROOT, LocalAppRuntimeAssets.prepareWithin(0) { error("must not re-stage") })
+        assertEquals(LocalAppRuntimeStaging.Ready, awaitStatus { it == LocalAppRuntimeStaging.Ready })
+        assertEquals(
+            STAGED_ROOT,
+            LocalAppRuntimeAssets.prepareWithin(0, STAGED_ROOT) { error("must not re-stage") },
+        )
     }
 
-    /**
-     * The failure this file exists for: the caller that timed out has already
-     * handed `null` to the engine, and the engine cannot take a root later. So
-     * the surface must be able to say WHICH of the two no-runtime states it is
-     * in — still extracting, or nothing to extract — rather than leaving the
-     * user with the engine's "stage local-app-runtime first".
-     */
     @Test
-    fun `a timed-out cold launch reads as staging, not as a missing runtime`() {
+    fun `a promised root that later fails reads as unavailable and still retries`() {
         val release = CountDownLatch(1)
+        val runs = AtomicInteger()
 
-        assertNull(
-            LocalAppRuntimeAssets.prepareWithin(BUDGET_MS) {
+        assertEquals(
+            STAGED_ROOT,
+            LocalAppRuntimeAssets.prepareWithin(BUDGET_MS, STAGED_ROOT) {
+                runs.incrementAndGet()
                 assertTrue(release.await(10, TimeUnit.SECONDS))
-                STAGED_ROOT
+                null
             },
         )
         assertEquals(LocalAppRuntimeStaging.Staging, LocalAppRuntimeAssets.stagingStatus())
 
         release.countDown()
-
-        // Nothing calls `prepare` again here, which is the production reality:
-        // it has exactly one call site and no completion callback. The status
-        // must still notice the run finished, and must say a restart is what
-        // makes the staged tree reachable.
         assertEquals(
-            LocalAppRuntimeStaging.StagedAfterNullHandout,
-            awaitStatus { it != LocalAppRuntimeStaging.Staging },
+            LocalAppRuntimeStaging.Unavailable,
+            awaitStatus { it == LocalAppRuntimeStaging.Unavailable },
         )
+
+        assertEquals(
+            STAGED_ROOT,
+            LocalAppRuntimeAssets.prepareWithin(10_000, STAGED_ROOT) {
+                runs.incrementAndGet()
+                STAGED_ROOT
+            },
+        )
+        assertEquals(2, runs.get())
+        assertEquals(LocalAppRuntimeStaging.Ready, LocalAppRuntimeAssets.stagingStatus())
     }
 
-    /**
-     * A run that yields nothing (asset absent, extraction failed) is a
-     * different message from a run still in progress: no amount of waiting
-     * helps, so it must not be reported as "still preparing".
-     */
     @Test
-    fun `a run that produces no runtime reads as unavailable and still retries`() {
+    fun `a run that produces no runtime without a promised root reads as unavailable and retries`() {
         val runs = AtomicInteger()
 
         assertNull(LocalAppRuntimeAssets.prepareWithin(10_000) { runs.incrementAndGet(); null })
         assertEquals(LocalAppRuntimeStaging.Unavailable, LocalAppRuntimeAssets.stagingStatus())
 
-        // The empty result is not memoised, so the next engine build re-stages
-        // — and once that succeeds the status stops claiming it is unavailable.
         assertEquals(
             STAGED_ROOT,
-            LocalAppRuntimeAssets.prepareWithin(10_000) { runs.incrementAndGet(); STAGED_ROOT },
+            LocalAppRuntimeAssets.prepareWithin(10_000, STAGED_ROOT) {
+                runs.incrementAndGet()
+                STAGED_ROOT
+            },
         )
         assertEquals(2, runs.get())
-        assertEquals(
-            LocalAppRuntimeStaging.StagedAfterNullHandout,
-            LocalAppRuntimeAssets.stagingStatus(),
-        )
+        assertEquals(LocalAppRuntimeStaging.Ready, LocalAppRuntimeAssets.stagingStatus())
     }
 
-    /** The warm path: the engine gets the root, so there is nothing to say. */
     @Test
     fun `a runtime staged before the first caller reads as ready and adds no notice`() {
-        assertEquals(STAGED_ROOT, LocalAppRuntimeAssets.prepareWithin(10_000) { STAGED_ROOT })
+        assertEquals(
+            STAGED_ROOT,
+            LocalAppRuntimeAssets.prepareWithin(10_000, STAGED_ROOT) { STAGED_ROOT },
+        )
 
         assertEquals(LocalAppRuntimeStaging.Ready, LocalAppRuntimeAssets.stagingStatus())
         assertNull(LocalAppRuntimeAssets.noticeFor(LocalAppRuntimeAssets.stagingStatus()))
@@ -136,37 +123,49 @@ class LocalAppRuntimeAssetsTest {
         assertNull(LocalAppRuntimeAssets.generationDetail(null, failed = true))
     }
 
-    /**
-     * Idle is the JVM/unit-host case (nothing ever asked for the runtime) and
-     * must stay silent; the three no-runtime states must each say something,
-     * and something different, or the surface cannot tell them apart.
-     */
     @Test
-    fun `each no-runtime state carries its own explanation and the others carry none`() {
+    fun `a memoized runtime does not reload the asset manifest plan`() {
+        assertEquals(
+            STAGED_ROOT,
+            LocalAppRuntimeAssets.prepareWithin(10_000, STAGED_ROOT) { STAGED_ROOT },
+        )
+        var planReads = 0
+
+        val result =
+            LocalAppRuntimeAssets.prepareWithinPlan(
+                budgetMs = 10_000,
+                planProvider = {
+                    planReads += 1
+                    error("the manifest plan must not be reloaded after staging succeeds")
+                },
+                stage = { error("the runtime must not be staged twice") },
+            )
+
+        assertEquals(STAGED_ROOT, result)
+        assertEquals(0, planReads)
+    }
+
+    @Test
+    fun `idle and ready stay silent while no-ready-runtime states explain themselves`() {
         assertNull(LocalAppRuntimeAssets.noticeFor(LocalAppRuntimeStaging.Idle))
         assertNull(LocalAppRuntimeAssets.noticeFor(LocalAppRuntimeStaging.Ready))
 
         val notices = listOf(
             LocalAppRuntimeStaging.Staging,
-            LocalAppRuntimeStaging.StagedAfterNullHandout,
             LocalAppRuntimeStaging.Unavailable,
         ).map { LocalAppRuntimeAssets.noticeFor(it) }
 
         notices.forEach { assertNotNull(it) }
-        assertTrue("every explanation must be non-empty", notices.all { !it.isNullOrBlank() })
-        assertEquals("the three states must not share wording", 3, notices.toSet().size)
+        assertTrue(notices.all { !it.isNullOrBlank() })
+        assertEquals(2, notices.toSet().size)
     }
 
-    /**
-     * The engine's own text stays first — the runtime is not necessarily the
-     * only thing that went wrong — and only a FAILED job is annotated, so a job
-     * still progressing is not decorated with a failure explanation.
-     */
     @Test
     fun `only a failed generation job carries the runtime explanation`() {
         val release = CountDownLatch(1)
-        assertNull(
-            LocalAppRuntimeAssets.prepareWithin(BUDGET_MS) {
+        assertEquals(
+            STAGED_ROOT,
+            LocalAppRuntimeAssets.prepareWithin(BUDGET_MS, STAGED_ROOT) {
                 assertTrue(release.await(10, TimeUnit.SECONDS))
                 STAGED_ROOT
             },
@@ -177,145 +176,317 @@ class LocalAppRuntimeAssetsTest {
 
         val annotated = LocalAppRuntimeAssets.generationDetail(ENGINE_DETAIL, failed = true)
         assertNotNull(annotated)
-        assertTrue("the engine's own message must survive", annotated!!.startsWith(ENGINE_DETAIL))
-        assertTrue("the runtime state must be explained", annotated.contains(notice))
-
-        // A failure the engine did not describe still gets the explanation.
+        assertTrue(annotated!!.startsWith(ENGINE_DETAIL))
+        assertTrue(annotated.contains(notice))
         assertEquals(notice, LocalAppRuntimeAssets.generationDetail(null, failed = true))
 
         release.countDown()
     }
 
-    /**
-     * [LocalAppRuntimeStaging.StagedAfterNullHandout] latches on "a caller was
-     * handed null", which is NOT "the live engine holds no root": the first
-     * engine build can fail before it reaches `profile_apps`
-     * (`build_mobile_inner_with_ask` is `?`-propagated at host.rs:5422-5430,
-     * ahead of :5447), so nothing is memoised, and the reconnect that follows
-     * takes the staged root and generates apps normally. The flag cannot be
-     * cleared on that evidence — a later `prepare` returning the root does not
-     * un-memoise a broker that already took `null` — so the copy must not
-     * diagnose the failure or hand the user a restart as THE fix. It must give
-     * them the discriminator instead, and this test pins that shape: a
-     * condition, and both of its branches.
-     */
     @Test
-    fun `the staged-late notice states a condition instead of diagnosing the failure`() {
-        stageAfterANullHandout()
-        assertEquals(
-            LocalAppRuntimeStaging.StagedAfterNullHandout,
-            LocalAppRuntimeAssets.stagingStatus(),
-        )
-
-        val annotated = LocalAppRuntimeAssets.generationDetail(ENGINE_DETAIL, failed = true)!!
-        assertTrue("the engine's own message must survive", annotated.startsWith(ENGINE_DETAIL))
-        assertFalse(
-            "the notice must not assert that the live engine predates the runtime",
-            annotated.contains("本次启动的引擎是在它就绪之前建立的"),
-        )
-        assertTrue("the restart must be offered under a condition", annotated.contains("如果"))
-        assertTrue("and the other branch must be named", annotated.contains("否则"))
-        assertTrue("the remedy must still be reachable", annotated.contains("重启"))
-
-        // The two states that ARE certain keep their unconditional wording:
-        // both are read with no staged root, so the live engine has none.
-        assertFalse(
-            LocalAppRuntimeAssets.noticeFor(LocalAppRuntimeStaging.Staging)!!.contains("如果"),
-        )
-        assertFalse(
-            LocalAppRuntimeAssets.noticeFor(LocalAppRuntimeStaging.Unavailable)!!.contains("如果"),
-        )
-    }
-
-    /**
-     * [LocalAppRuntimeStaging.StagedAfterNullHandout] latches for the whole
-     * process and cannot be cleared (see the test above), so keying the notice
-     * on the STATE alone pinned a restart instruction to every later failure in
-     * a process where the runtime is staged and apps generate normally — an LLM
-     * parse error, a validation failure, anything. Whether staging is implicated
-     * has to be read off THAT failure, and the only evidence available is the
-     * engine's own text.
-     */
-    @Test
-    fun `a staged-late process annotates only the failure that names the runtime`() {
-        stageAfterANullHandout()
-        assertEquals(
-            LocalAppRuntimeStaging.StagedAfterNullHandout,
-            LocalAppRuntimeAssets.stagingStatus(),
-        )
-
-        // Untouched — not merely un-annotated: no notice and no blank-line join.
-        assertEquals(LLM_DETAIL, LocalAppRuntimeAssets.generationDetail(LLM_DETAIL, failed = true))
-        // A failure the engine did not describe is not evidence against the
-        // runtime either, and must not be blamed on it.
-        assertNull(LocalAppRuntimeAssets.generationDetail(null, failed = true))
-
-        // The failure this notice exists for still carries it.
-        val annotated = LocalAppRuntimeAssets.generationDetail(ENGINE_DETAIL, failed = true)!!
-        assertTrue("the engine's own message must survive", annotated.startsWith(ENGINE_DETAIL))
-        assertTrue(
-            "a runtime failure must still be explained",
-            annotated.contains(
-                LocalAppRuntimeAssets.noticeFor(
-                    LocalAppRuntimeStaging.StagedAfterNullHandout,
-                )!!,
-            ),
-        )
-    }
-
-    /**
-     * The gate above is scoped to the one uncertain state, and must not leak
-     * into the two certain ones. While [LocalAppRuntimeStaging.Staging] or
-     * [LocalAppRuntimeStaging.Unavailable] is readable, no root is staged — and
-     * a staged root only ever goes absent -> present — so it was absent when
-     * this process's engine was built too. Whatever the proximate cause of a
-     * given failure, the retry the user would otherwise reach for is guaranteed
-     * to die at Building, so both states keep annotating everything.
-     */
-    @Test
-    fun `a process with no staged root annotates a failure that never names the runtime`() {
+    fun `a process with no ready root annotates failures even when they never name the runtime`() {
         assertNull(LocalAppRuntimeAssets.prepareWithin(10_000) { null })
         assertEquals(LocalAppRuntimeStaging.Unavailable, LocalAppRuntimeAssets.stagingStatus())
         assertTrue(
-            "an unavailable runtime must still explain an unrelated failure",
             LocalAppRuntimeAssets.generationDetail(LLM_DETAIL, failed = true)!!
                 .contains(LocalAppRuntimeAssets.noticeFor(LocalAppRuntimeStaging.Unavailable)!!),
         )
 
         val release = CountDownLatch(1)
-        assertNull(
-            LocalAppRuntimeAssets.prepareWithin(BUDGET_MS) {
+        assertEquals(
+            STAGED_ROOT,
+            LocalAppRuntimeAssets.prepareWithin(BUDGET_MS, STAGED_ROOT) {
                 assertTrue(release.await(10, TimeUnit.SECONDS))
                 STAGED_ROOT
             },
         )
         assertEquals(LocalAppRuntimeStaging.Staging, LocalAppRuntimeAssets.stagingStatus())
         assertTrue(
-            "a still-staging runtime must still explain an unrelated failure",
             LocalAppRuntimeAssets.generationDetail(LLM_DETAIL, failed = true)!!
                 .contains(LocalAppRuntimeAssets.noticeFor(LocalAppRuntimeStaging.Staging)!!),
         )
         release.countDown()
     }
 
-    /**
-     * The process this file exists for: a caller times out and takes `null`, the
-     * run finishes anyway, and the NEXT engine build gets the root — so local
-     * apps may be perfectly healthy while the flag stays latched.
-     */
-    private fun stageAfterANullHandout() {
-        val release = CountDownLatch(1)
-        assertNull(
-            LocalAppRuntimeAssets.prepareWithin(BUDGET_MS) {
-                assertTrue(release.await(10, TimeUnit.SECONDS))
-                STAGED_ROOT
+    @Test
+    fun `a matching manifest without a regular vite file is not ready`() {
+        val parent = Files.createTempDirectory("local-app-runtime-ready").toFile()
+        val root =
+            File(parent, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .apply { mkdirs() }
+        root.deleteOnExit()
+        File(root, "runtime-manifest.json").writeText("manifest")
+
+        assertFalse(LocalAppRuntimeAssets.runtimeIsReady(root, "manifest"))
+
+        val viteDir = File(root, "node_modules/vite/bin").apply { mkdirs() }
+        File(viteDir, "vite.js").mkdir()
+        assertFalse(LocalAppRuntimeAssets.runtimeIsReady(root, "manifest"))
+
+        File(viteDir, "vite.js").deleteRecursively()
+        File(viteDir, "vite.js").writeText("console.log('vite')")
+        assertFalse(LocalAppRuntimeAssets.runtimeIsReady(root, "manifest"))
+        assertTrue(LocalAppRuntimeAssets.publishReadyMarker(root))
+        assertTrue(LocalAppRuntimeAssets.runtimeIsReady(root, "manifest"))
+
+        parent.deleteRecursively()
+    }
+
+    @Test
+    fun `a throwing plan provider fails soft instead of crashing prepare`() {
+        var sawNullPlan = false
+
+        val result = LocalAppRuntimeAssets.prepareWithinPlan(
+            budgetMs = 10_000,
+            planProvider = { error("boom") },
+            stage = { plan ->
+                sawNullPlan = plan == null
+                null
             },
         )
-        release.countDown()
-        assertEquals(
-            STAGED_ROOT,
-            LocalAppRuntimeAssets.prepareWithin(10_000) { error("must not re-stage") },
+
+        assertNull(result)
+        assertTrue(sawNullPlan)
+        assertEquals(LocalAppRuntimeStaging.Unavailable, LocalAppRuntimeAssets.stagingStatus())
+    }
+
+    @Test
+    fun `a failed promote leaves staging intact and never copies into destination`() {
+        val parent = Files.createTempDirectory("local-app-runtime-promote").toFile()
+        val destination = File(parent, "live").apply {
+            mkdirs()
+            File(this, "old.txt").writeText("old")
+        }
+        val staging = File(parent, "live.staging").apply {
+            mkdirs()
+            File(this, "new.txt").writeText("new")
+        }
+
+        val published =
+            LocalAppRuntimeAssets.replaceAtomically(staging, destination) { _, _ -> false }
+
+        assertFalse(published)
+        assertTrue(staging.exists())
+        assertTrue(File(staging, "new.txt").isFile)
+        assertFalse(destination.exists())
+
+        parent.deleteRecursively()
+    }
+
+    @Test
+    fun `failure marker writes a bounded reason and clears on recovery`() {
+        val parent = Files.createTempDirectory("local-app-runtime-failure-marker").toFile()
+        val destination =
+            File(parent, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        val longReason = buildString { repeat(600) { append('x') } }
+
+        assertTrue(LocalAppRuntimeAssets.publishReadyMarker(destination))
+        LocalAppRuntimeAssets.publishFailureMarker(destination, longReason)
+        val marker = LocalAppRuntimeAssets.failureMarkerFor(destination)
+
+        assertTrue(marker.isFile)
+        assertTrue(marker.readText().length <= 512)
+        assertFalse(LocalAppRuntimeAssets.readyMarkerFor(destination).exists())
+
+        LocalAppRuntimeAssets.deleteFailureMarker(destination)
+        assertFalse(marker.exists())
+
+        parent.deleteRecursively()
+    }
+
+    @Test
+    fun `inventory validation enforces schema platform and file hashes`() {
+        val root = Files.createTempDirectory("local-app-runtime-inventory").toFile()
+        writeInventoryFixture(root)
+
+        val manifest = runtimeManifestJson(root, platform = "android")
+        assertTrue(LocalAppRuntimeAssets.runtimeInventoryIsValid(root, manifest))
+
+        File(root, "runtime-policy.json").writeText("tampered")
+        assertFalse(LocalAppRuntimeAssets.runtimeInventoryIsValid(root, manifest))
+        assertFalse(
+            LocalAppRuntimeAssets.runtimeInventoryIsValid(
+                root,
+                runtimeManifestJson(root, platform = "ios"),
+            ),
         )
+
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `inventory validation rejects manifests that omit required runtime files`() {
+        val root = Files.createTempDirectory("local-app-runtime-required").toFile()
+        writeInventoryFixture(root)
+
+        val manifest =
+            runtimeManifestJson(
+                root = root,
+                platform = "android",
+                dropPaths = setOf("runtime.spdx.json"),
+            )
+
+        assertFalse(LocalAppRuntimeAssets.runtimeInventoryIsValid(root, manifest))
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `inventory validation rejects manifests with invalid path components`() {
+        val root = Files.createTempDirectory("local-app-runtime-invalid-paths").toFile()
+        writeInventoryFixture(root)
+
+        val manifest =
+            runtimeManifestJson(
+                root = root,
+                platform = "android",
+                pathOverrides =
+                    mapOf(
+                        "runtime-policy.json" to "dir/../runtime-policy.json",
+                    ),
+            )
+
+        assertFalse(LocalAppRuntimeAssets.runtimeInventoryIsValid(root, manifest))
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `inventory validation rejects extra files outside the manifest closure`() {
+        val root = Files.createTempDirectory("local-app-runtime-extra-file").toFile()
+        writeInventoryFixture(root)
+        File(root, "extra.txt").writeText("unexpected")
+
+        val manifest = runtimeManifestJson(root, platform = "android", dropPaths = setOf("extra.txt"))
+
+        assertFalse(LocalAppRuntimeAssets.runtimeInventoryIsValid(root, manifest))
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `inventory validation rejects file entries backed by symlinks and prepare fails soft`() {
+        val root = Files.createTempDirectory("local-app-runtime-file-symlink").toFile()
+        writeInventoryFixture(root)
+        val externalTarget = Files.createTempFile("local-app-runtime-target", ".json").toFile()
+        externalTarget.writeText(File(root, "runtime-policy.json").readText())
+        File(root, "runtime-policy.json").delete()
+        Files.createSymbolicLink(
+            File(root, "runtime-policy.json").toPath(),
+            externalTarget.toPath(),
+        )
+        val manifest = runtimeManifestJson(root, platform = "android")
+
+        assertFalse(LocalAppRuntimeAssets.runtimeInventoryIsValid(root, manifest))
+        assertEquals(
+            root.absolutePath,
+            LocalAppRuntimeAssets.prepareWithinPlan(
+                budgetMs = 10_000,
+                planProvider = {
+                    LocalAppRuntimeAssets.RuntimePlan(
+                        expectedManifest = manifest,
+                        destination = root,
+                    )
+                },
+                stage = { plan ->
+                    if (
+                        plan != null &&
+                        LocalAppRuntimeAssets.runtimeInventoryIsValid(
+                            root = plan.destination,
+                            manifestJson = plan.expectedManifest,
+                        )
+                    ) {
+                        plan.destination.absolutePath
+                    } else {
+                        null
+                    }
+                },
+            ),
+        )
+        assertEquals(
+            LocalAppRuntimeStaging.Unavailable,
+            awaitStatus { it == LocalAppRuntimeStaging.Unavailable },
+        )
+
+        root.deleteRecursively()
+        externalTarget.delete()
+    }
+
+    @Test
+    fun `manifest changes produce different promised destinations`() {
+        val container = File("/tmp/local-app-runtime")
+
+        val first = LocalAppRuntimeAssets.destinationForManifest(container, "manifest-a")
+        val second = LocalAppRuntimeAssets.destinationForManifest(container, "manifest-b")
+
+        assertTrue(first.parentFile == container)
+        assertTrue(second.parentFile == container)
+        assertFalse(first.absolutePath == second.absolutePath)
+    }
+
+    @Test
+    fun `sealed runtime files become read-only while the tree stays removable`() {
+        val root = Files.createTempDirectory("local-app-runtime-seal").toFile()
+        val nestedDir = File(root, "node_modules/vite/bin").apply { mkdirs() }
+        val file = File(nestedDir, "vite.js").apply { writeText("console.log('vite')") }
+
+        LocalAppRuntimeAssets.sealRegularFilesReadOnly(root)
+
+        assertFalse(Files.isWritable(file.toPath()))
+        assertTrue(nestedDir.list() != null)
+        assertTrue(root.deleteRecursively())
+    }
+
+    @Test
+    fun `ready marker lifecycle gates readiness and cleanup removes obsolete markers`() {
+        val parent = Files.createTempDirectory("local-app-runtime-ready-marker").toFile()
+        val keep =
+            File(parent, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        val obsolete =
+            File(parent, "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210")
+        File(keep, "node_modules/vite/bin").mkdirs()
+        File(keep, "node_modules/vite/bin/vite.js").writeText("vite")
+        File(keep, "runtime-manifest.json").writeText("manifest")
+        obsolete.mkdirs()
+        LocalAppRuntimeAssets.publishReadyMarker(keep)
+        LocalAppRuntimeAssets.publishReadyMarker(obsolete)
+        LocalAppRuntimeAssets.publishFailureMarker(obsolete, "stale")
+
+        assertTrue(LocalAppRuntimeAssets.runtimeIsReady(keep, "manifest"))
+
+        LocalAppRuntimeAssets.cleanupObsoleteDigests(parent, keep.name)
+
+        assertTrue(LocalAppRuntimeAssets.readyMarkerFor(keep).isFile)
+        assertFalse(obsolete.exists())
+        assertFalse(LocalAppRuntimeAssets.readyMarkerFor(obsolete).exists())
+        assertFalse(LocalAppRuntimeAssets.failureMarkerFor(obsolete).exists())
+
+        LocalAppRuntimeAssets.deleteReadyMarker(keep)
+        assertFalse(LocalAppRuntimeAssets.runtimeIsReady(keep, "manifest"))
+
+        parent.deleteRecursively()
+    }
+
+    @Test
+    fun `corrupt ready markers do not satisfy readiness`() {
+        val parent = Files.createTempDirectory("local-app-runtime-corrupt-ready").toFile()
+        val destination =
+            File(parent, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        File(destination, "node_modules/vite/bin").mkdirs()
+        File(destination, "node_modules/vite/bin/vite.js").writeText("vite")
+        File(destination, "runtime-manifest.json").writeText("manifest")
+
+        assertTrue(LocalAppRuntimeAssets.publishReadyMarker(destination))
+        assertTrue(LocalAppRuntimeAssets.runtimeIsReady(destination, "manifest"))
+
+        LocalAppRuntimeAssets.readyMarkerFor(destination).writeText("wrong-digest")
+        assertFalse(LocalAppRuntimeAssets.runtimeIsReady(destination, "manifest"))
+        assertTrue(LocalAppRuntimeAssets.publishReadyMarker(destination))
+        assertTrue(LocalAppRuntimeAssets.runtimeIsReady(destination, "manifest"))
+
+        LocalAppRuntimeAssets.readyMarkerFor(destination).writeText(destination.name + "\n")
+        assertFalse(LocalAppRuntimeAssets.runtimeIsReady(destination, "manifest"))
+        assertTrue(LocalAppRuntimeAssets.publishReadyMarker(destination))
+        assertTrue(LocalAppRuntimeAssets.runtimeIsReady(destination, "manifest"))
+
+        parent.deleteRecursively()
     }
 
     private fun awaitStatus(
@@ -331,36 +502,73 @@ class LocalAppRuntimeAssetsTest {
         return status
     }
 
+    private fun writeInventoryFixture(root: File) {
+        File(root, "node_modules/vite/bin").mkdirs()
+        File(root, "node_modules/@rolldown/binding-linux-arm64-musl").mkdirs()
+        File(root, "node_modules/lightningcss-linux-arm64-musl").mkdirs()
+        File(root, "node_modules/vite/bin/vite.js").writeText("vite")
+        File(
+            root,
+            "node_modules/@rolldown/binding-linux-arm64-musl/rolldown-binding.linux-arm64-musl.node",
+        ).writeText("rolldown")
+        File(
+            root,
+            "node_modules/lightningcss-linux-arm64-musl/lightningcss.linux-arm64-musl.node",
+        ).writeText("lightningcss")
+        File(root, "runtime-policy.json").writeText("policy")
+        File(root, "runtime-pins.json").writeText("pins")
+        File(root, "runtime.spdx.json").writeText("sbom")
+    }
+
+    private fun runtimeManifestJson(
+        root: File,
+        platform: String,
+        dropPaths: Set<String> = emptySet(),
+        pathOverrides: Map<String, String> = emptyMap(),
+    ): String {
+        val files =
+            root.walkTopDown()
+                .filter(File::isFile)
+                .filterNot { it.relativeTo(root).invariantSeparatorsPath == "runtime-manifest.json" }
+                .map { file ->
+                    val relative = file.relativeTo(root).invariantSeparatorsPath
+                    JSONObject()
+                        .put("path", pathOverrides[relative] ?: relative)
+                        .put("kind", "file")
+                        .put("size_bytes", file.length())
+                        .put("sha256", sha256(file.readText()))
+                }
+                .filterNot { it.getString("path") in dropPaths }
+                .toList()
+                .sortedBy { it.getString("path") }
+
+        val manifest =
+            JSONObject()
+            .put("schema_version", 1)
+            .put("platform", platform)
+            .put("read_only", true)
+            .put("files", JSONArray(files))
+            .toString()
+        File(root, "runtime-manifest.json").writeText(manifest)
+        return manifest
+    }
+
+    private fun sha256(text: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(text.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
     companion object {
         const val BUDGET_MS = 150L
         const val STAGE_MS = 2_000L
-        const val STAGED_ROOT = "/data/user/0/com.lingxi.code/files/local-app-runtime"
-        /**
-         * A real failed-job `detail`, not a paraphrase — the notice is now gated
-         * on this text, so a fixture that only resembles it would prove nothing.
-         *
-         * The clause is `LocalAppsHostBroker::fixed_runtime_mount`
-         * (engine-mobile/src/local_apps_host.rs:241); the prefix is
-         * `AppError::NotYetAvailable`'s `#[error("not yet available: {0}")]`
-         * (local-apps/src/error.rs:64), which is what the fixed Vite build's
-         * `.map_err(AppError::NotYetAvailable)` produces and what `fail_job`
-         * writes into `last_error` verbatim. Preview start reaches the same
-         * clause under `io error: ` instead; both are covered by keying on the
-         * clause rather than on either prefix.
-         */
+        const val STAGED_ROOT =
+            "/data/user/0/com.lingxi.code/files/local-app-runtime/" +
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         const val ENGINE_DETAIL =
             "not yet available: verified local-app Node runtime is unavailable; " +
                 "stage local-app-runtime first"
         const val LLM_DETAIL = "生成失败：模型返回的方案无法解析，请重试。"
 
-        /**
-         * The executable half of the @After above, and the only place the leak
-         * is observable from inside this class (@Before hides it from every
-         * method here, and the class that would see it lives in another file).
-         * Drop the @After and the last method to run leaves a staged root, so
-         * this reads StagedAfterNullHandout and the class goes red — instead of
-         * some later class failing for a reason that has nothing to do with it.
-         */
         @JvmStatic
         @AfterClass
         fun assertProcessSingletonLeftCold() {

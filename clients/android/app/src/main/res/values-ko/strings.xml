@@ -1150,8 +1150,7 @@
     <string name="local_apps_runtime_log_recovery">복구: %1$s</string>
     <string name="local_apps_runtime_log_status">상태: %1$s</string>
     <string name="local_apps_runtime_log_title">실행 로그</string>
-    <string name="local_apps_runtime_notice_staged_after_null">로컬 앱 런타임이 준비되었지만, 이번 시작 중 한 번의 엔진 빌드에서 이를 받지 못했습니다. 엔진은 시작할 때 한 번만 런타임 경로를 읽습니다. 실패 원인이 런타임을 사용할 수 없어서라면 앱을 재시작한 후 다시 시도해 주세요. 그렇지 않다면 이번 실패는 런타임과 관련이 없습니다.</string>
-    <string name="local_apps_runtime_notice_staging">로컬 앱 런타임이 아직 최초 준비 중입니다. 엔진은 시작할 때 한 번만 런타임 경로를 읽으므로, 준비가 끝나면 앱을 재시작해야 앱을 생성할 수 있습니다.</string>
+    <string name="local_apps_runtime_notice_staging">로컬 앱 런타임이 아직 최초 준비 중입니다. 준비가 끝나면 앱 생성만 다시 시도해 주세요.</string>
     <string name="local_apps_runtime_notice_unavailable">로컬 앱 런타임 준비에 실패했습니다(설치 패키지에 런타임이 없거나 압축 해제에 실패). 이번 실행에서는 앱을 생성할 수 없습니다.</string>
     <string name="local_apps_section_permissions_logs">권한/로그</string>
     <string name="local_apps_source_browser_notice">1 MiB 이하의 텍스트 소스 코드만 표시됩니다. 심볼릭 링크, 빌드 결과물, 비공개 디렉터리는 제외됩니다. 의존성 파일은 편집할 수 있지만, 지원되지 않는 버전은 빌드 검증 시 거부됩니다.</string>

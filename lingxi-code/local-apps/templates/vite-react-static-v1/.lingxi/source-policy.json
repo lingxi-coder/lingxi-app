@@ -10,12 +10,11 @@
   ],
   "host_managed_paths": [
     ".lingxi",
+    "LINGXI.md",
     "index.html",
     "vite.config.mjs",
     "package.json",
     "package-lock.json",
-    "app/main.jsx",
-    "app/globals.css",
     "lib/device-context.js",
     "lib/lingxi-bridge.js",
     "lib/platform-adapter.js",

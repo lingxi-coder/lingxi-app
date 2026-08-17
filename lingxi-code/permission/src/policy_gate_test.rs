@@ -1857,6 +1857,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interactive_confirmation_unlocks_bypass_for_the_current_session() {
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Deny {
+                reason: "prompt-denied".into(),
+            }),
+        );
+
+        assert!(gate.can_request_bypass_permissions());
+        assert!(gate.set_permission_mode("bypassPermissions").await.is_err());
+
+        gate.confirm_bypass_permissions()
+            .expect("interactive acknowledgement unlocks bypass mode");
+        gate.set_permission_mode("bypassPermissions")
+            .await
+            .expect("confirmed bypass mode is accepted");
+        assert_eq!(
+            gate.check("Write", &serde_json::json!({})).await,
+            PermissionDecision::Allow
+        );
+
+        gate.set_permission_mode("plan")
+            .await
+            .expect("the user can leave bypass mode");
+        assert!(matches!(
+            gate.check("Write", &serde_json::json!({})).await,
+            PermissionDecision::Deny { .. }
+        ));
+        assert!(gate.set_permission_mode("bypassPermissions").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn restored_session_bypass_does_not_require_a_new_live_confirmation() {
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Deny {
+                reason: "prompt-denied".into(),
+            }),
+        );
+
+        gate.restore_session_permission_mode("bypassPermissions")
+            .await
+            .expect("a session's persisted bypass mode restores");
+        assert_eq!(
+            gate.check("Write", &serde_json::json!({})).await,
+            PermissionDecision::Allow
+        );
+    }
+
+    #[tokio::test]
     async fn set_permission_mode_rejects_auto_when_disabled_by_settings() {
         // `Nle`: auto is gated by `!P0()`; the `disableAutoMode` killswitch
         // (auto_mode_disabled) makes `One()` return "settings".

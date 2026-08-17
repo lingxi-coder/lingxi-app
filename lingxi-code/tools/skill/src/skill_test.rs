@@ -55,12 +55,15 @@ mod tests {
     }
 
     #[test]
-    fn normalize_strips_single_leading_slash_and_trims() {
+    fn normalize_strips_one_invocation_prefix_and_trims() {
         assert_eq!(normalize_skill_name("/commit"), "commit");
         assert_eq!(normalize_skill_name("  /commit  "), "commit");
+        assert_eq!(normalize_skill_name("$commit"), "commit");
+        assert_eq!(normalize_skill_name("  $commit  "), "commit");
         assert_eq!(normalize_skill_name("commit"), "commit");
-        // Only a single leading slash is stripped.
+        // Only a single invocation prefix is stripped.
         assert_eq!(normalize_skill_name("//commit"), "/commit");
+        assert_eq!(normalize_skill_name("$$commit"), "$commit");
     }
 
     #[test]
@@ -109,6 +112,30 @@ mod tests {
         assert_eq!(loader.seen.lock().unwrap().as_deref(), Some("commit"));
         // commandName is the normalized name + inline status.
         assert_eq!(out.data["commandName"], json!("commit"));
+        assert_eq!(out.data["status"], json!("inline"));
+        assert_eq!(out.data["success"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn dollar_prefixed_skill_is_normalized_before_lookup() {
+        let loader = Arc::new(CapturingLoader {
+            seen: std::sync::Mutex::new(None),
+            desc: Some(prompt_desc("frontend-design")),
+        });
+        let tool = SkillTool::with_loader(shell_test_ctx(dummy_out()), loader.clone());
+        let out = tool
+            .call(
+                json!({"skill": "$frontend-design"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("the coordinator shorthand resolves");
+        assert_eq!(
+            loader.seen.lock().unwrap().as_deref(),
+            Some("frontend-design")
+        );
+        assert_eq!(out.data["commandName"], json!("frontend-design"));
         assert_eq!(out.data["status"], json!("inline"));
         assert_eq!(out.data["success"], json!(true));
     }

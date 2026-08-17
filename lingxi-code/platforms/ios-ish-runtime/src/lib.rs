@@ -31,6 +31,12 @@ const LINGXI_DOT_DIR: &str = ".lingxi";
 // the three mount-contract call sites read unchanged.
 const LOCAL_APP_BUILD_GUEST_ROOT: &str = traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT;
 
+#[derive(Clone, Copy)]
+enum ForegroundMountMode {
+    Merged,
+    RequestOnly,
+}
+
 /// Immutable iSH runtime identity and path configuration supplied by the iOS
 /// framework bridge.
 #[derive(Debug, Clone)]
@@ -412,9 +418,10 @@ impl IosIshRuntime {
         &self,
         request: &LinuxCommandRequest,
         mounts: &[MountSpec],
+        include_default_mounts: bool,
     ) -> Result<LinuxCommandResult, MobileLinuxError> {
         let config_json = self.native_config_json()?;
-        let payload = RunRequestPayload::from_request(request, mounts);
+        let payload = RunRequestPayload::from_request(request, mounts, include_default_mounts);
         let json = serde_json::to_string(&payload)
             .map_err(|error| MobileLinuxError::Io(format!("serialize run request: {error}")))?;
         let native_lock = self.state.native_lock.clone();
@@ -434,7 +441,7 @@ impl IosIshRuntime {
         mounts: &[MountSpec],
     ) -> Result<NativeProcessStart, MobileLinuxError> {
         let config_json = self.native_config_json()?;
-        let payload = RunRequestPayload::from_request(request, mounts);
+        let payload = RunRequestPayload::from_request(request, mounts, true);
         let request_json = serde_json::to_string(&payload).map_err(|error| {
             MobileLinuxError::Io(format!("serialize background request: {error}"))
         })?;
@@ -614,11 +621,17 @@ impl IosIshRuntime {
         &self,
         request: LinuxCommandRequest,
         lifecycle_status: MobileLinuxTaskStatus,
+        mount_mode: ForegroundMountMode,
     ) -> Result<(LinuxCommandResult, String, Arc<TaskControl>), MobileLinuxError> {
         validate_request(&request)?;
         self.boot().await?;
-        let mounts = self.merged_mounts(&request.mounts)?;
-        self.apply_mounts(&mounts).await?;
+        let mounts = match mount_mode {
+            ForegroundMountMode::Merged => self.merged_mounts(&request.mounts)?,
+            ForegroundMountMode::RequestOnly => self.isolated_mounts(&request.mounts)?,
+        };
+        if matches!(mount_mode, ForegroundMountMode::Merged) {
+            self.apply_mounts(&mounts).await?;
+        }
         let (task_id, task) = self.create_task(
             if matches!(lifecycle_status, MobileLinuxTaskStatus::Backgrounded) {
                 "bg"
@@ -628,19 +641,27 @@ impl IosIshRuntime {
             display_command(&request.command, &request.args),
             lifecycle_status,
         );
-        match self.run_native_request(&request, &mounts).await {
+        let native_result = self
+            .run_native_request(
+                &request,
+                &mounts,
+                matches!(mount_mode, ForegroundMountMode::Merged),
+            )
+            .await;
+        match native_result {
             Ok(result) => {
                 self.emit_result_frames(&task_id, &result);
                 Ok((result, task_id, task))
             }
             Err(error) => {
-                self.emit_runtime_error(Some(task_id.clone()), error.to_string());
+                let detail = error.to_string();
+                self.emit_runtime_error(Some(task_id.clone()), detail.clone());
                 self.finish_task(
                     &task_id,
                     &task,
                     MobileLinuxTaskStatus::Failed,
                     None,
-                    Some(error.to_string()),
+                    Some(detail),
                 );
                 Err(error)
             }
@@ -686,6 +707,26 @@ impl IosIshRuntime {
             } else {
                 mounts.push(normalized);
             }
+        }
+        Ok(mounts)
+    }
+
+    fn isolated_mounts(
+        &self,
+        request_mounts: &[MountSpec],
+    ) -> Result<Vec<MountSpec>, MobileLinuxError> {
+        if request_mounts.len() != 1
+            || !matches!(request_mounts[0].purpose, MountPurpose::LocalAppBuild)
+        {
+            return Err(MobileLinuxError::InvalidRequest(
+                "isolated local-app execution requires exactly one LocalAppBuild mount".to_string(),
+            ));
+        }
+        let mut mounts: Vec<MountSpec> = Vec::with_capacity(request_mounts.len());
+        for mount in request_mounts {
+            let normalized = validate_mount(mount, &self.state.config)?;
+            mounts.retain(|existing| existing.guest_path != normalized.guest_path);
+            mounts.push(normalized);
         }
         Ok(mounts)
     }
@@ -1032,7 +1073,48 @@ impl MobileLinuxRuntime for IosIshRuntime {
         request: LinuxCommandRequest,
     ) -> Result<LinuxCommandResult, MobileLinuxError> {
         let (result, task_id, task) = self
-            .run_inner(request, MobileLinuxTaskStatus::Running)
+            .run_inner(
+                request,
+                MobileLinuxTaskStatus::Running,
+                ForegroundMountMode::Merged,
+            )
+            .await?;
+        let cancelled = task.cancel_requested.load(Ordering::Acquire);
+        let status = if cancelled {
+            MobileLinuxTaskStatus::Cancelled
+        } else if result.timed_out {
+            MobileLinuxTaskStatus::TimedOut
+        } else if result.cancelled {
+            MobileLinuxTaskStatus::Cancelled
+        } else if result.exit_code == 0 {
+            MobileLinuxTaskStatus::Completed
+        } else {
+            MobileLinuxTaskStatus::Failed
+        };
+        self.finish_task(
+            &task_id,
+            &task,
+            status,
+            (!result.timed_out && !cancelled).then_some(result.exit_code),
+            if cancelled || result.cancelled {
+                Some("command cancelled".to_string())
+            } else {
+                result.timed_out.then(|| "command timed out".to_string())
+            },
+        );
+        Ok(result)
+    }
+
+    async fn run_isolated(
+        &self,
+        request: LinuxCommandRequest,
+    ) -> Result<LinuxCommandResult, MobileLinuxError> {
+        let (result, task_id, task) = self
+            .run_inner(
+                request,
+                MobileLinuxTaskStatus::Running,
+                ForegroundMountMode::RequestOnly,
+            )
             .await?;
         let cancelled = task.cancel_requested.load(Ordering::Acquire);
         let status = if cancelled {
@@ -1492,10 +1574,15 @@ struct RunRequestPayload {
     network: &'static str,
     resource_limits: traits::ResourceLimits,
     mounts: Vec<MountPayload>,
+    include_default_mounts: bool,
 }
 
 impl RunRequestPayload {
-    fn from_request(request: &LinuxCommandRequest, mounts: &[MountSpec]) -> Self {
+    fn from_request(
+        request: &LinuxCommandRequest,
+        mounts: &[MountSpec],
+        include_default_mounts: bool,
+    ) -> Self {
         Self {
             command: request.command.clone(),
             args: request.args.clone(),
@@ -1510,6 +1597,7 @@ impl RunRequestPayload {
             },
             resource_limits: request.resource_limits,
             mounts: mounts.iter().map(MountPayload::from_mount).collect(),
+            include_default_mounts,
         }
     }
 }
@@ -2104,30 +2192,9 @@ fn validate_mount(
         return Err(MobileLinuxError::InvalidRequest(
             "only workspace mounts may target the managed workspace guest path".to_string(),
         ));
-    } else if let Some(app_id) = parse_local_app_build_node_modules_guest_path(&mount.guest_path) {
-        // The fixed local-app build mounts the app-owned dependency tree as a
-        // read-only companion mount below the managed build root. It remains
-        // an `External` mount because its host endpoint is the app workspace,
-        // not the generated build directory. Keep this exception exact: no
-        // other child of the managed build root may be supplied by a caller.
-        let expected_host_path = normalize_host_path(
-            &config
-                .app_sandbox_root
-                .join("apps")
-                .join(app_id)
-                .join("workspace")
-                .join("node_modules"),
-            "local-app dependency host_path",
-        )?;
-        if !mount.read_only || host_path != expected_host_path {
-            return Err(MobileLinuxError::InvalidRequest(
-                "local-app dependency mount must be the read-only app workspace node_modules"
-                    .to_string(),
-            ));
-        }
     } else if guest_path_has_prefix(&mount.guest_path, LOCAL_APP_BUILD_GUEST_ROOT) {
         return Err(MobileLinuxError::InvalidRequest(
-            "only local-app build mounts may target the managed local-app build guest path"
+            "local-app build guest path accepts only one root mount; nested mounts are forbidden"
                 .to_string(),
         ));
     }
@@ -2169,37 +2236,23 @@ fn parse_local_app_build_guest_path(path: &str) -> Result<(&str, &str), MobileLi
         .and_then(|suffix| suffix.strip_prefix('/'))
         .ok_or_else(|| {
             MobileLinuxError::InvalidRequest(format!(
-                "local-app build guest_path must be {LOCAL_APP_BUILD_GUEST_ROOT}/<app-id>/<channel>"
+                "local-app build guest_path must be {LOCAL_APP_BUILD_GUEST_ROOT}/<app-id>/<channel>/project"
             ))
         })?;
     let mut segments = relative.split('/');
     let app_id = segments.next().unwrap_or_default();
     let channel = segments.next().unwrap_or_default();
+    let project = segments.next().unwrap_or_default();
     if segments.next().is_some()
         || !is_valid_local_app_id(app_id)
         || !matches!(channel, "store" | "full")
+        || project != traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR
     {
         return Err(MobileLinuxError::InvalidRequest(format!(
-            "local-app build guest_path must be {LOCAL_APP_BUILD_GUEST_ROOT}/<app-id>/<store|full>"
+            "local-app build guest_path must be {LOCAL_APP_BUILD_GUEST_ROOT}/<app-id>/<store|full>/project"
         )));
     }
     Ok((app_id, channel))
-}
-
-fn parse_local_app_build_node_modules_guest_path(path: &str) -> Option<&str> {
-    let relative = path
-        .strip_prefix(LOCAL_APP_BUILD_GUEST_ROOT)
-        .and_then(|suffix| suffix.strip_prefix('/'))?;
-    let mut segments = relative.split('/');
-    let app_id = segments.next()?;
-    let channel = segments.next()?;
-    if segments.next()? != "node_modules" || segments.next().is_some() {
-        return None;
-    }
-    if !is_valid_local_app_id(app_id) || !matches!(channel, "store" | "full") {
-        return None;
-    }
-    Some(app_id)
 }
 
 fn is_valid_local_app_id(value: &str) -> bool {
@@ -2756,6 +2809,19 @@ mod tests {
     }
 
     #[test]
+    fn run_request_payload_marks_isolated_runs_as_request_only() {
+        let request = command_request();
+        let payload = RunRequestPayload::from_request(&request, &[], false);
+        let json = serde_json::to_value(&payload).expect("serialize payload");
+
+        assert_eq!(
+            json.get("include_default_mounts")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn workspace_mount_accepts_the_managed_workspace_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("app");
@@ -2812,6 +2878,98 @@ mod tests {
             mounts[1].host_path,
             config.managed_root.join("persistent/root")
         );
+    }
+
+    #[test]
+    fn merged_mounts_keep_default_workspace_and_home_binds() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("app");
+        let config = test_config(&root);
+        let runtime = IosIshRuntime::new(config.clone());
+        let host_path = root
+            .join("apps")
+            .join("abcd1234")
+            .join("build")
+            .join("store");
+        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
+        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
+        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
+        fs::create_dir_all(&host_path).expect("create build root");
+
+        let mounts = runtime
+            .merged_mounts(&[MountSpec {
+                host_path,
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
+                read_only: false,
+                purpose: MountPurpose::LocalAppBuild,
+            }])
+            .expect("merged mounts");
+        assert_eq!(mounts.len(), 3);
+        assert!(mounts
+            .iter()
+            .any(|mount| mount.guest_path == "/workspace/default"));
+        assert!(mounts.iter().any(|mount| mount.guest_path == "/root"));
+        assert!(mounts.iter().any(|mount| {
+            mount.guest_path == "/var/lingxi/local-app-build/abcd1234/store/project"
+                && matches!(mount.purpose, MountPurpose::LocalAppBuild)
+        }));
+    }
+
+    #[test]
+    fn isolated_mounts_exclude_default_workspace_and_home_binds() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("app");
+        let config = test_config(&root);
+        let runtime = IosIshRuntime::new(config.clone());
+        let host_path = root
+            .join("apps")
+            .join("abcd1234")
+            .join("build")
+            .join("store");
+        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
+        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
+        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
+        fs::create_dir_all(&host_path).expect("create build root");
+
+        let mounts = runtime
+            .isolated_mounts(&[MountSpec {
+                host_path,
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
+                read_only: false,
+                purpose: MountPurpose::LocalAppBuild,
+            }])
+            .expect("isolated mounts");
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(
+            mounts[0].guest_path,
+            "/var/lingxi/local-app-build/abcd1234/store/project"
+        );
+        assert!(matches!(mounts[0].purpose, MountPurpose::LocalAppBuild));
+    }
+
+    #[test]
+    fn isolated_mounts_reject_empty_or_non_build_requests() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("app");
+        let config = test_config(&root);
+        let runtime = IosIshRuntime::new(config.clone());
+        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
+        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
+        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
+
+        assert!(matches!(
+            runtime.isolated_mounts(&[]),
+            Err(MobileLinuxError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            runtime.isolated_mounts(&[MountSpec {
+                host_path: config.workspace_host_path.clone(),
+                guest_path: config.workspace_guest_path(),
+                read_only: false,
+                purpose: MountPurpose::Workspace,
+            }]),
+            Err(MobileLinuxError::InvalidRequest(_))
+        ));
     }
 
     #[test]
@@ -2891,7 +3049,7 @@ mod tests {
         let mount = validate_mount(
             &MountSpec {
                 host_path,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store".to_string(),
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
                 read_only: false,
                 purpose: MountPurpose::LocalAppBuild,
             },
@@ -2901,7 +3059,7 @@ mod tests {
 
         assert_eq!(
             mount.guest_path,
-            "/var/lingxi/local-app-build/abcd1234/store"
+            "/var/lingxi/local-app-build/abcd1234/store/project"
         );
     }
 
@@ -2923,7 +3081,7 @@ mod tests {
         let mount = validate_mount(
             &MountSpec {
                 host_path: host_path.clone(),
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store".to_string(),
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
                 read_only: false,
                 purpose: MountPurpose::LocalAppBuild,
             },
@@ -2937,12 +3095,12 @@ mod tests {
         );
         assert_eq!(
             mount.guest_path,
-            "/var/lingxi/local-app-build/abcd1234/store"
+            "/var/lingxi/local-app-build/abcd1234/store/project"
         );
     }
 
     #[test]
-    fn local_app_build_dependency_mount_accepts_the_app_workspace_node_modules() {
+    fn local_app_build_mount_rejects_nested_dependency_mounts() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("app");
         let config = test_config(&root);
@@ -2956,79 +3114,18 @@ mod tests {
         fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
         fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
 
-        let mount = validate_mount(
+        let error = validate_mount(
             &MountSpec {
                 host_path,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store/node_modules".to_string(),
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project/node_modules"
+                    .to_string(),
                 read_only: true,
                 purpose: MountPurpose::External,
             },
             &config,
         )
-        .expect("app workspace dependencies are a valid build companion mount");
-
-        assert_eq!(
-            mount.guest_path,
-            "/var/lingxi/local-app-build/abcd1234/store/node_modules"
-        );
-    }
-
-    #[test]
-    fn local_app_build_dependency_mount_rejects_other_children_and_writable_mounts() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join("app");
-        let config = test_config(&root);
-        let dependencies = root
-            .join("apps")
-            .join("abcd1234")
-            .join("workspace")
-            .join("node_modules");
-        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
-        fs::create_dir_all(dependencies.clone()).expect("create app dependencies");
-        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
-
-        let writable = validate_mount(
-            &MountSpec {
-                host_path: dependencies.clone(),
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store/node_modules".to_string(),
-                read_only: false,
-                purpose: MountPurpose::External,
-            },
-            &config,
-        )
-        .expect_err("dependency mount must be read-only");
-        assert!(matches!(writable, MobileLinuxError::InvalidRequest(_)));
-
-        let wrong_host = root
-            .join("apps")
-            .join("other123")
-            .join("workspace")
-            .join("node_modules");
-        fs::create_dir_all(wrong_host.clone()).expect("create sibling dependencies");
-        let sibling = validate_mount(
-            &MountSpec {
-                host_path: wrong_host,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store/node_modules".to_string(),
-                read_only: true,
-                purpose: MountPurpose::External,
-            },
-            &config,
-        )
-        .expect_err("dependency mount must stay bound to the same app");
-        assert!(matches!(sibling, MobileLinuxError::InvalidRequest(_)));
-
-        let other_child = validate_mount(
-            &MountSpec {
-                host_path: dependencies,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store/cache".to_string(),
-                read_only: true,
-                purpose: MountPurpose::External,
-            },
-            &config,
-        )
-        .expect_err("arbitrary build-root children must remain blocked");
-        assert!(matches!(other_child, MobileLinuxError::InvalidRequest(_)));
+        .expect_err("nested app build mounts must be rejected");
+        assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));
     }
 
     #[test]
@@ -3061,7 +3158,7 @@ mod tests {
         let outside_host = validate_mount(
             &MountSpec {
                 host_path: root.join("apps").join("other").join("build").join("store"),
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store".to_string(),
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
                 read_only: false,
                 purpose: MountPurpose::LocalAppBuild,
             },
@@ -3073,7 +3170,7 @@ mod tests {
         let invalid_channel = validate_mount(
             &MountSpec {
                 host_path: valid_host,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/debug".to_string(),
+                guest_path: "/var/lingxi/local-app-build/abcd1234/debug/project".to_string(),
                 read_only: false,
                 purpose: MountPurpose::LocalAppBuild,
             },
@@ -3110,7 +3207,7 @@ mod tests {
             let error = validate_mount(
                 &MountSpec {
                     host_path: invalid_host,
-                    guest_path: "/var/lingxi/local-app-build/abcd1234/store".to_string(),
+                    guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
                     read_only: false,
                     purpose: MountPurpose::LocalAppBuild,
                 },
@@ -3132,7 +3229,7 @@ mod tests {
         let error = validate_mount(
             &MountSpec {
                 host_path: wrong_app_staging,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store".to_string(),
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
                 read_only: false,
                 purpose: MountPurpose::LocalAppBuild,
             },
@@ -3161,7 +3258,7 @@ mod tests {
         let error = validate_mount(
             &MountSpec {
                 host_path: staging_link,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store".to_string(),
+                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
                 read_only: false,
                 purpose: MountPurpose::LocalAppBuild,
             },

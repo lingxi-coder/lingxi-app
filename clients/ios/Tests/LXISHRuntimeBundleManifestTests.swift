@@ -16,6 +16,17 @@ private func testLXISHNetworkPolicyForContext(_ context: UInt64) -> Int32
 final class LXISHRuntimeBundleManifestTests: XCTestCase {
     private var temporaryRoot: URL!
 
+    private enum StubFailure: LocalizedError {
+        case boom
+
+        var errorDescription: String? {
+            switch self {
+            case .boom:
+                return "boom"
+            }
+        }
+    }
+
     override func setUpWithError() throws {
         temporaryRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("ios-ish-runtime-tests-\(UUID().uuidString)", isDirectory: true)
@@ -437,6 +448,131 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         )
     }
 
+    func testRuntimeMountPlannerCanExcludeManagedHomeAndWorkspaceForIsolatedRequests() {
+        let config = LXISHNativeConfig(
+            managedRoot: temporaryRoot.appendingPathComponent("managed-root-isolated", isDirectory: true).path,
+            workspaceHostPath: temporaryRoot.appendingPathComponent("workspace-host-isolated", isDirectory: true).path,
+            stableWorkspaceId: "12345678-1234-4abc-8def-1234567890ab",
+            abi: "arm64",
+            rootfsVersion: "3.24.1",
+            archiveSha256: String(repeating: "a", count: 64),
+            authorizationFile: nil
+        )
+
+        let mounts = LXISHRuntimeMountPlanner.effectiveMounts(
+            requestedMounts: [
+                LXISHMountSpec(
+                    hostPath: temporaryRoot.appendingPathComponent("build-root/../build-root", isDirectory: true).path,
+                    guestPath: "/var/lingxi/local-app-build/abcd1234/store/project",
+                    readOnly: false,
+                    purpose: "local_app_build"
+                )
+            ],
+            config: config,
+            includeDefaultMounts: false
+        )
+
+        XCTAssertEqual(mounts.count, 1)
+        XCTAssertEqual(mounts[0].guestPath, "/var/lingxi/local-app-build/abcd1234/store/project")
+        XCTAssertEqual(
+            mounts[0].hostPath,
+            temporaryRoot.appendingPathComponent("build-root", isDirectory: true).path
+        )
+    }
+
+    func testExecutionMountScopeRestoresPersistentMountsAfterIsolatedSuccess() throws {
+        var runtimeMounts = [
+            LXISHMountSpec(hostPath: "/host/home", guestPath: "/root", readOnly: false, purpose: "home"),
+            LXISHMountSpec(
+                hostPath: "/host/workspace",
+                guestPath: "/workspace/12345678-1234-4abc-8def-1234567890ab",
+                readOnly: false,
+                purpose: "workspace"
+            ),
+        ]
+        let requestedMounts = [
+            LXISHMountSpec(
+                hostPath: "/host/build",
+                guestPath: "/var/lingxi/local-app-build/abcd1234/store/project",
+                readOnly: false,
+                purpose: "local_app_build"
+            )
+        ]
+        var applied: [([String], Bool)] = []
+
+        let result = try LXISHExecutionMountScope.withMounts(
+            runtimeMounts: &runtimeMounts,
+            requestedMounts: requestedMounts,
+            includeDefaultMounts: false,
+            apply: { mounts, includeDefaultMounts in
+                applied.append((mounts.map(\.guestPath), includeDefaultMounts))
+            },
+            body: { "ok" }
+        )
+
+        XCTAssertEqual(result, "ok")
+        XCTAssertEqual(runtimeMounts.map(\.guestPath), [
+            "/root",
+            "/workspace/12345678-1234-4abc-8def-1234567890ab",
+        ])
+        XCTAssertEqual(applied.count, 2)
+        XCTAssertEqual(applied[0].0, ["/var/lingxi/local-app-build/abcd1234/store/project"])
+        XCTAssertFalse(applied[0].1)
+        XCTAssertEqual(applied[1].0, [
+            "/root",
+            "/workspace/12345678-1234-4abc-8def-1234567890ab",
+        ])
+        XCTAssertTrue(applied[1].1)
+    }
+
+    func testExecutionMountScopeRestoresPersistentMountsAfterIsolatedFailure() {
+        var runtimeMounts = [
+            LXISHMountSpec(hostPath: "/host/home", guestPath: "/root", readOnly: false, purpose: "home"),
+            LXISHMountSpec(
+                hostPath: "/host/workspace",
+                guestPath: "/workspace/12345678-1234-4abc-8def-1234567890ab",
+                readOnly: false,
+                purpose: "workspace"
+            ),
+        ]
+        let requestedMounts = [
+            LXISHMountSpec(
+                hostPath: "/host/build",
+                guestPath: "/var/lingxi/local-app-build/abcd1234/store/project",
+                readOnly: false,
+                purpose: "local_app_build"
+            )
+        ]
+        var applied: [([String], Bool)] = []
+
+        XCTAssertThrowsError(
+            try LXISHExecutionMountScope.withMounts(
+                runtimeMounts: &runtimeMounts,
+                requestedMounts: requestedMounts,
+                includeDefaultMounts: false,
+                apply: { mounts, includeDefaultMounts in
+                    applied.append((mounts.map(\.guestPath), includeDefaultMounts))
+                },
+                body: { throw StubFailure.boom }
+            )
+        ) { error in
+            XCTAssertEqual(error.localizedDescription, "boom")
+        }
+
+        XCTAssertEqual(runtimeMounts.map(\.guestPath), [
+            "/root",
+            "/workspace/12345678-1234-4abc-8def-1234567890ab",
+        ])
+        XCTAssertEqual(applied.count, 2)
+        XCTAssertEqual(applied[0].0, ["/var/lingxi/local-app-build/abcd1234/store/project"])
+        XCTAssertFalse(applied[0].1)
+        XCTAssertEqual(applied[1].0, [
+            "/root",
+            "/workspace/12345678-1234-4abc-8def-1234567890ab",
+        ])
+        XCTAssertTrue(applied[1].1)
+    }
+
     func testBootDiscardsLegacyPersistedRequestMounts() throws {
         let managedRoot = temporaryRoot.appendingPathComponent("managed-root-stale-mounts", isDirectory: true)
         try FileManager.default.createDirectory(at: managedRoot, withIntermediateDirectories: true)
@@ -458,7 +594,7 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
             ),
             LXISHMountSpec(
                 hostPath: "/private/var/mobile/Containers/Data/Application/CURRENT/Library/Application Support/LingxiCode/apps/old-app/build/store",
-                guestPath: "/var/lingxi/local-app-build/old-app/store",
+                guestPath: "/var/lingxi/local-app-build/old-app/store/project",
                 readOnly: false,
                 purpose: "local_app_build"
             ),
@@ -621,12 +757,12 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         // A bind mount needs a directory on BOTH sides. Only the host side was
         // created, so every local-app build mount attached to nothing.
         let build = LXISHRuntimeMountPlanner.guestMountPointURL(
-            for: "/var/lingxi/local-app-build/abcd1234/store",
+            for: "/var/lingxi/local-app-build/abcd1234/store/project",
             under: dataRoot
         )
         XCTAssertEqual(
             build?.standardizedFileURL.path,
-            "/managed/alpine-rootfs/data/var/lingxi/local-app-build/abcd1234/store"
+            "/managed/alpine-rootfs/data/var/lingxi/local-app-build/abcd1234/store/project"
         )
 
         XCTAssertEqual(
@@ -640,21 +776,20 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
     /// parents, so the parents are the runtime's job — and getting the set
     /// wrong is invisible until a guest lookup walks through one of them.
     ///
-    /// These are the two real mounts a local-app build issues. The Next build
-    /// died on `lstat '/opt/lingxi/local-app-runtime'`: only `/opt/lingxi`
-    /// ships in the rootfs image, and the leaf `…/node_modules` was registered
-    /// by the bind, leaving exactly the middle component unknown to the guest.
+    /// Keep the fixtures neutral here: the local-app build now uses a single
+    /// project mount, but the helper still needs to handle multiple unrelated
+    /// bind roots deterministically.
     func testGuestMountParentsCoverEveryAncestorButNotTheMountPoint() {
         let mounts = [
             LXISHMountSpec(
-                hostPath: "/host/app/local-app-runtime/node_modules",
-                guestPath: "/opt/lingxi/local-app-runtime/node_modules",
+                hostPath: "/host/cache/assets",
+                guestPath: "/srv/assets/cache",
                 readOnly: true,
-                purpose: "shared"
+                purpose: "cache"
             ),
             LXISHMountSpec(
                 hostPath: "/host/data/apps/abcd1234/build/store",
-                guestPath: "/var/lingxi/local-app-build/abcd1234/store",
+                guestPath: "/var/lingxi/local-app-build/abcd1234/store/project",
                 readOnly: false,
                 purpose: "local_app_build"
             )
@@ -663,13 +798,13 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         XCTAssertEqual(
             LXISHRuntimeMountPlanner.guestMountParents(of: mounts),
             [
-                "/opt",
+                "/srv",
                 "/var",
-                "/opt/lingxi",
+                "/srv/assets",
                 "/var/lingxi",
-                "/opt/lingxi/local-app-runtime",
                 "/var/lingxi/local-app-build",
-                "/var/lingxi/local-app-build/abcd1234"
+                "/var/lingxi/local-app-build/abcd1234",
+                "/var/lingxi/local-app-build/abcd1234/store"
             ],
             "shallowest first, deduplicated, and never the mount point itself"
         )
@@ -695,6 +830,12 @@ final class LXISHRuntimeBundleManifestTests: XCTestCase {
         XCTAssertEqual(LXISHGuestPaths.scratch, ["/tmp", "/var/tmp"])
         XCTAssertEqual(LXISHGuestPaths.workspaceRoot, "/workspace")
         XCTAssertEqual(LXISHGuestPaths.workspace("abc-123"), "/workspace/abc-123")
+        XCTAssertEqual(LXISHGuestPaths.localAppBuildRoot, "/var/lingxi/local-app-build")
+        XCTAssertEqual(LXISHGuestPaths.localAppBuildProjectDirectory, "project")
+        XCTAssertEqual(
+            LXISHGuestPaths.localAppBuildProject(appId: "abc-123", channel: "store"),
+            "/var/lingxi/local-app-build/abc-123/store/project"
+        )
     }
 
     func testGuestMountPointRefusesPathsThatWouldEscapeTheDataTree() throws {

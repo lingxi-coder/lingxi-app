@@ -23,9 +23,9 @@ use traits::mobile_linux::LinuxEnforcementReceipt;
 use traits::{
     LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
     MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
-    MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, MountSpec,
-    NetworkPolicy, ProcessStreamSink, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState,
-    RootfsStatus, SandboxBackend,
+    MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, MountPurpose,
+    MountSpec, NetworkPolicy, ProcessStreamSink, PtyOpenRequest, PtySessionHandle, PtySize,
+    RootfsState, RootfsStatus, SandboxBackend,
 };
 
 const MAX_EVENTS: usize = 4096;
@@ -35,12 +35,15 @@ const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const REAP_BUDGET: Duration = Duration::from_secs(2);
 const ENFORCEMENT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(3);
 const MEMORY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const LOCAL_APP_BUILD_STATE_ROOT: &str = ".lingxi-build-state";
 
 #[derive(Debug, Clone)]
 /// Paths and immutable identity expected by one managed Android PRoot runtime.
 pub struct AndroidProotRuntimeConfig {
     /// App-private directory containing `active`, `staged`, `bin`, and `tmp`.
     pub managed_root: PathBuf,
+    /// Canonical app sandbox root (`Context.filesDir`) that owns app build roots.
+    pub app_sandbox_root: PathBuf,
     /// Guest ABI label (`arm64-v8a` or `x86_64`).
     pub abi: String,
     /// Version directory selected below `staged`.
@@ -95,6 +98,12 @@ struct SpawnedChild {
     child: Child,
     enforcement: LinuxEnforcementReceipt,
     memory_limit_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+enum ForegroundMountMode {
+    Merged,
+    RequestOnly,
 }
 
 struct RuntimeState {
@@ -287,22 +296,130 @@ impl AndroidProotRuntime {
         )))
     }
 
-    fn combined_mounts(
+    fn execution_mounts(
         &self,
         request_mounts: &[MountSpec],
+        mode: ForegroundMountMode,
     ) -> Result<Vec<MountSpec>, MobileLinuxError> {
-        let mut mounts = self
-            .state
-            .mounts
-            .read()
-            .expect("mobile-linux mounts rwlock")
-            .clone();
+        if matches!(mode, ForegroundMountMode::RequestOnly) {
+            validate_isolated_local_app_mounts(
+                request_mounts,
+                &self.state.config.managed_root,
+                &self.state.config.app_sandbox_root,
+            )?;
+        }
+        let mut mounts = match mode {
+            ForegroundMountMode::Merged => self
+                .state
+                .mounts
+                .read()
+                .expect("mobile-linux mounts rwlock")
+                .clone(),
+            ForegroundMountMode::RequestOnly => Vec::with_capacity(request_mounts.len()),
+        };
         for mount in request_mounts {
             validate_mount(mount, &self.state.config.managed_root)?;
             mounts.retain(|existing| existing.guest_path != mount.guest_path);
             mounts.push(mount.clone());
         }
         Ok(mounts)
+    }
+
+    async fn spawn_child_with_mounts(
+        &self,
+        request: &LinuxCommandRequest,
+        mounts: &[MountSpec],
+        isolated_local_app_build_mounts: Option<&[MountSpec]>,
+    ) -> Result<SpawnedChild, MobileLinuxError> {
+        validate_request(request, isolated_local_app_build_mounts)?;
+        let memory_limit_bytes = requested_memory_limit_bytes(request)?;
+        if memory_limit_bytes.is_some() {
+            ensure_process_group_rss_available()?;
+        }
+        let receipt_policy = enforced_network_policy_name(request.network);
+        let receipt_path = if receipt_policy.is_some() {
+            let path = self.state.config.managed_root.join("tmp").join(format!(
+                "network-policy-receipt-{}",
+                self.state.next_id.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|error| {
+                    MobileLinuxError::Io(format!(
+                        "create network enforcement receipt {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            Some(path)
+        } else {
+            None
+        };
+        let mut command = match self.build_command(
+            request,
+            request.cwd.as_deref(),
+            &request.env,
+            mounts,
+            receipt_path.as_deref(),
+        ) {
+            Ok(command) => command,
+            Err(error) => {
+                if let Some(path) = receipt_path.as_deref() {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(error);
+            }
+        };
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(path) = receipt_path.as_deref() {
+                    let _ = fs::remove_file(path);
+                }
+                return Err(MobileLinuxError::Io(format!("spawn PRoot: {error}")));
+            }
+        };
+        let network_policy_enforced = if let Some(path) = receipt_path.as_deref() {
+            match wait_for_network_policy_receipt(
+                &mut child,
+                path,
+                receipt_policy.expect("restricted policy has receipt name"),
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    if let Some(pid) = child.id() {
+                        terminate_group(pid, Signal::SIGKILL);
+                    }
+                    let _ = child.wait().await;
+                    let _ = fs::remove_file(path);
+                    return Err(error);
+                }
+            }
+        } else {
+            false
+        };
+        if let Some(path) = receipt_path {
+            let _ = fs::remove_file(path);
+        }
+        if let Some(input) = &request.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(input.as_bytes())
+                    .await
+                    .map_err(|error| MobileLinuxError::Io(format!("write stdin: {error}")))?;
+            }
+        }
+        Ok(SpawnedChild {
+            child,
+            enforcement: LinuxEnforcementReceipt {
+                network_policy_enforced,
+                memory_limit_enforced: memory_limit_bytes.is_some(),
+            },
+            memory_limit_bytes,
+        })
     }
 
     fn build_command(
@@ -513,110 +630,29 @@ impl AndroidProotRuntime {
         &self,
         request: &LinuxCommandRequest,
     ) -> Result<SpawnedChild, MobileLinuxError> {
-        validate_request(request)?;
-        let memory_limit_bytes = requested_memory_limit_bytes(request)?;
-        if memory_limit_bytes.is_some() {
-            ensure_process_group_rss_available()?;
-        }
-        let mounts = self.combined_mounts(&request.mounts)?;
-        let receipt_policy = enforced_network_policy_name(request.network);
-        let receipt_path = if receipt_policy.is_some() {
-            let path = self.state.config.managed_root.join("tmp").join(format!(
-                "network-policy-receipt-{}",
-                self.state.next_id.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .map_err(|error| {
-                    MobileLinuxError::Io(format!(
-                        "create network enforcement receipt {}: {error}",
-                        path.display()
-                    ))
-                })?;
-            Some(path)
-        } else {
-            None
-        };
-        let mut command = match self.build_command(
-            request,
-            request.cwd.as_deref(),
-            &request.env,
-            &mounts,
-            receipt_path.as_deref(),
-        ) {
-            Ok(command) => command,
-            Err(error) => {
-                if let Some(path) = receipt_path.as_deref() {
-                    let _ = fs::remove_file(path);
-                }
-                return Err(error);
-            }
-        };
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                if let Some(path) = receipt_path.as_deref() {
-                    let _ = fs::remove_file(path);
-                }
-                return Err(MobileLinuxError::Io(format!("spawn PRoot: {error}")));
-            }
-        };
-        let network_policy_enforced = if let Some(path) = receipt_path.as_deref() {
-            match wait_for_network_policy_receipt(
-                &mut child,
-                path,
-                receipt_policy.expect("restricted policy has receipt name"),
-            )
-            .await
-            {
-                Ok(()) => true,
-                Err(error) => {
-                    if let Some(pid) = child.id() {
-                        terminate_group(pid, Signal::SIGKILL);
-                    }
-                    let _ = child.wait().await;
-                    let _ = fs::remove_file(path);
-                    return Err(error);
-                }
-            }
-        } else {
-            false
-        };
-        if let Some(path) = receipt_path {
-            let _ = fs::remove_file(path);
-        }
-        if let Some(input) = &request.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(input.as_bytes())
-                    .await
-                    .map_err(|error| MobileLinuxError::Io(format!("write stdin: {error}")))?;
-            }
-        }
-        Ok(SpawnedChild {
-            child,
-            enforcement: LinuxEnforcementReceipt {
-                network_policy_enforced,
-                memory_limit_enforced: memory_limit_bytes.is_some(),
-            },
-            memory_limit_bytes,
-        })
+        let mounts = self.execution_mounts(&request.mounts, ForegroundMountMode::Merged)?;
+        self.spawn_child_with_mounts(request, &mounts, None).await
     }
 
     async fn run_inner(
         &self,
         request: LinuxCommandRequest,
         sink: Option<Arc<dyn ProcessStreamSink>>,
+        mount_mode: ForegroundMountMode,
     ) -> Result<LinuxCommandResult, MobileLinuxError> {
         self.boot().await?;
+        let mounts = self.execution_mounts(&request.mounts, mount_mode)?;
         let (id, task) = self.create_task(
             "task",
             display_command(&request.command, &request.args),
             MobileLinuxTaskStatus::Running,
         );
-        let spawned = match self.spawn_child(&request).await {
+        let isolated_local_app_build_mounts =
+            matches!(mount_mode, ForegroundMountMode::RequestOnly).then_some(mounts.as_slice());
+        let spawned = match self
+            .spawn_child_with_mounts(&request, &mounts, isolated_local_app_build_mounts)
+            .await
+        {
             Ok(spawned) => spawned,
             Err(error) => {
                 self.finish_task(
@@ -874,7 +910,16 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
         &self,
         request: LinuxCommandRequest,
     ) -> Result<LinuxCommandResult, MobileLinuxError> {
-        self.run_inner(request, None).await
+        self.run_inner(request, None, ForegroundMountMode::Merged)
+            .await
+    }
+
+    async fn run_isolated(
+        &self,
+        request: LinuxCommandRequest,
+    ) -> Result<LinuxCommandResult, MobileLinuxError> {
+        self.run_inner(request, None, ForegroundMountMode::RequestOnly)
+            .await
     }
 
     async fn run_streaming(
@@ -882,7 +927,8 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
         request: LinuxCommandRequest,
         sink: Arc<dyn ProcessStreamSink>,
     ) -> Result<LinuxCommandResult, MobileLinuxError> {
-        self.run_inner(request, Some(sink)).await
+        self.run_inner(request, Some(sink), ForegroundMountMode::Merged)
+            .await
     }
 
     async fn spawn_background(
@@ -1065,7 +1111,7 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
     ) -> Result<PtySessionHandle, MobileLinuxError> {
         self.boot().await?;
         validate_pty_request(&request)?;
-        let mounts = self.combined_mounts(&request.mounts)?;
+        let mounts = self.execution_mounts(&request.mounts, ForegroundMountMode::Merged)?;
         let (program, args, env) = self.build_pty_invocation(
             &request.command,
             &request.args,
@@ -1352,7 +1398,10 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
     }
 }
 
-fn validate_request(request: &LinuxCommandRequest) -> Result<(), MobileLinuxError> {
+fn validate_request(
+    request: &LinuxCommandRequest,
+    isolated_local_app_build_mounts: Option<&[MountSpec]>,
+) -> Result<(), MobileLinuxError> {
     if request.command.trim().is_empty() || request.command.as_bytes().contains(&0) {
         return Err(MobileLinuxError::InvalidRequest(
             "command must not be empty or contain NUL".to_string(),
@@ -1372,7 +1421,7 @@ fn validate_request(request: &LinuxCommandRequest) -> Result<(), MobileLinuxErro
             ));
         }
     }
-    validate_env_map(&request.env)
+    validate_env_map(&request.env, isolated_local_app_build_mounts)
 }
 
 fn validate_pty_request(request: &PtyOpenRequest) -> Result<(), MobileLinuxError> {
@@ -1393,7 +1442,7 @@ fn validate_pty_request(request: &PtyOpenRequest) -> Result<(), MobileLinuxError
         }
     }
     validate_guest_path(request.cwd.as_deref().unwrap_or("/root"))?;
-    validate_env_map(&request.env)
+    validate_env_map(&request.env, None)
 }
 
 fn validate_mount(mount: &MountSpec, managed_root: &Path) -> Result<(), MobileLinuxError> {
@@ -1425,7 +1474,138 @@ fn validate_mount(mount: &MountSpec, managed_root: &Path) -> Result<(), MobileLi
     Ok(())
 }
 
-fn validate_env_map(env: &BTreeMap<String, String>) -> Result<(), MobileLinuxError> {
+fn validate_isolated_local_app_mounts(
+    mounts: &[MountSpec],
+    managed_root: &Path,
+    app_sandbox_root: &Path,
+) -> Result<(), MobileLinuxError> {
+    if mounts.len() != 1 {
+        return Err(MobileLinuxError::InvalidRequest(
+            "isolated local-app execution requires exactly one LocalAppBuild mount".to_string(),
+        ));
+    }
+    let mount = &mounts[0];
+    if !matches!(mount.purpose, MountPurpose::LocalAppBuild) {
+        return Err(MobileLinuxError::InvalidRequest(
+            "isolated local-app execution accepts only a LocalAppBuild mount".to_string(),
+        ));
+    }
+    let host_path = mount.host_path.canonicalize().map_err(|error| {
+        MobileLinuxError::InvalidRequest(format!(
+            "mount host path is unavailable ({}): {error}",
+            mount.host_path.display()
+        ))
+    })?;
+    let managed_root = managed_root
+        .canonicalize()
+        .unwrap_or_else(|_| managed_root.to_path_buf());
+    if host_path.starts_with(&managed_root) || managed_root.starts_with(&host_path) {
+        return Err(MobileLinuxError::InvalidRequest(
+            "mount must not expose the managed rootfs".to_string(),
+        ));
+    }
+    let (app_id, channel) = parse_local_app_build_guest_path(&mount.guest_path)?;
+    let sandbox_root = app_sandbox_root
+        .canonicalize()
+        .unwrap_or_else(|_| app_sandbox_root.to_path_buf());
+    let expected = sandbox_root
+        .join("apps")
+        .join(app_id)
+        .join("build")
+        .join(channel);
+    if host_path != expected && !local_app_build_host_path_matches(&host_path, &expected, channel) {
+        return Err(MobileLinuxError::InvalidRequest(format!(
+            "local-app build mount host_path must match {} or its .{channel}.staging-<numeric nonce> sibling (got {})",
+            expected.display(),
+            host_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn local_app_build_host_path_matches(
+    host_path: &Path,
+    expected_host_path: &Path,
+    channel: &str,
+) -> bool {
+    if host_path == expected_host_path {
+        return true;
+    }
+    if host_path.parent() != expected_host_path.parent() {
+        return false;
+    }
+    let staging_prefix = format!(".{channel}.staging-");
+    let Some(nonce) = host_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(staging_prefix.as_str()))
+    else {
+        return false;
+    };
+    !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn parse_local_app_build_guest_path(path: &str) -> Result<(&str, &str), MobileLinuxError> {
+    let relative = path
+        .strip_prefix(traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+        .ok_or_else(|| {
+            MobileLinuxError::InvalidRequest(format!(
+                "local-app build guest_path must be {}/<app-id>/<channel>/project",
+                traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT
+            ))
+        })?;
+    let mut segments = relative.split('/');
+    let app_id = segments.next().unwrap_or_default();
+    let channel = segments.next().unwrap_or_default();
+    let project = segments.next().unwrap_or_default();
+    if segments.next().is_some()
+        || !is_valid_local_app_id(app_id)
+        || !matches!(channel, "store" | "full")
+        || project != traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR
+    {
+        return Err(MobileLinuxError::InvalidRequest(format!(
+            "local-app build guest_path must be {}/<app-id>/<store|full>/project",
+            traits::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT
+        )));
+    }
+    Ok((app_id, channel))
+}
+
+fn is_valid_local_app_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+fn validate_env_map(
+    env: &BTreeMap<String, String>,
+    isolated_local_app_build_mounts: Option<&[MountSpec]>,
+) -> Result<(), MobileLinuxError> {
+    let fixed_local_app_build_env = isolated_local_app_build_mounts
+        .map(expected_local_app_build_env)
+        .transpose()?;
+    if let Some(expected_env) = fixed_local_app_build_env.as_ref() {
+        for (key, expected_value) in expected_env {
+            match env.get(key) {
+                Some(value) if value == expected_value => {}
+                Some(_) => {
+                    return Err(MobileLinuxError::InvalidRequest(format!(
+                        "isolated local-app build environment variable {key} must equal {expected_value}"
+                    )))
+                }
+                None => {
+                    return Err(MobileLinuxError::InvalidRequest(format!(
+                        "isolated local-app build requires environment variable {key}"
+                    )))
+                }
+            }
+        }
+    }
     for (key, value) in env {
         if key.is_empty() || key.contains('=') || key.as_bytes().contains(&0) {
             return Err(MobileLinuxError::InvalidRequest(format!(
@@ -1437,22 +1617,77 @@ fn validate_env_map(env: &BTreeMap<String, String>) -> Result<(), MobileLinuxErr
                 "environment variable value contains NUL: {key}"
             )));
         }
-        if matches!(
-            key.as_str(),
-            "HOME"
-                | "PATH"
-                | "LD_PRELOAD"
-                | "LD_LIBRARY_PATH"
-                | "PROOT_LOADER"
-                | "PROOT_LOADER_32"
-                | "PROOT_TMP_DIR"
-        ) {
+        if let Some(expected_value) = fixed_local_app_build_env
+            .as_ref()
+            .and_then(|expected| expected.get(key))
+        {
+            debug_assert_eq!(value, expected_value);
+            continue;
+        }
+        if is_host_reserved_env_var(key) {
             return Err(MobileLinuxError::InvalidRequest(format!(
                 "host-reserved environment variable: {key}"
             )));
         }
     }
     Ok(())
+}
+
+fn expected_local_app_build_env(
+    mounts: &[MountSpec],
+) -> Result<BTreeMap<String, String>, MobileLinuxError> {
+    if mounts.len() != 1 {
+        return Err(MobileLinuxError::InvalidRequest(
+            "isolated local-app execution requires exactly one LocalAppBuild mount".to_string(),
+        ));
+    }
+    let mount = &mounts[0];
+    if !matches!(mount.purpose, MountPurpose::LocalAppBuild) {
+        return Err(MobileLinuxError::InvalidRequest(
+            "isolated local-app execution accepts only a LocalAppBuild mount".to_string(),
+        ));
+    }
+    parse_local_app_build_guest_path(&mount.guest_path)?;
+    let build_state_root = format!("{}/{LOCAL_APP_BUILD_STATE_ROOT}", mount.guest_path);
+    Ok(BTreeMap::from([
+        ("HOME".into(), format!("{build_state_root}/home")),
+        ("TMPDIR".into(), format!("{build_state_root}/tmp")),
+        ("TMP".into(), format!("{build_state_root}/tmp")),
+        ("TEMP".into(), format!("{build_state_root}/tmp")),
+        (
+            "XDG_CACHE_HOME".into(),
+            format!("{build_state_root}/xdg-cache"),
+        ),
+        (
+            "XDG_CONFIG_HOME".into(),
+            format!("{build_state_root}/xdg-config"),
+        ),
+        (
+            "XDG_DATA_HOME".into(),
+            format!("{build_state_root}/xdg-data"),
+        ),
+        (
+            "NPM_CONFIG_CACHE".into(),
+            format!("{build_state_root}/npm-cache"),
+        ),
+        (
+            "npm_config_cache".into(),
+            format!("{build_state_root}/npm-cache"),
+        ),
+    ]))
+}
+
+fn is_host_reserved_env_var(key: &str) -> bool {
+    matches!(
+        key,
+        "HOME"
+            | "PATH"
+            | "LD_PRELOAD"
+            | "LD_LIBRARY_PATH"
+            | "PROOT_LOADER"
+            | "PROOT_LOADER_32"
+            | "PROOT_TMP_DIR"
+    )
 }
 
 fn validate_guest_path(path: &str) -> Result<(), MobileLinuxError> {
@@ -1904,6 +2139,7 @@ mod tests {
         }
         let runtime = AndroidProotRuntime::new(AndroidProotRuntimeConfig {
             managed_root: managed,
+            app_sandbox_root: temp.path().join("sandbox"),
             abi: "x86_64".to_string(),
             rootfs_version: "test".to_string(),
             archive_sha256: None,
@@ -1931,6 +2167,52 @@ mod tests {
             resource_limits: Default::default(),
             mounts: vec![],
         }
+    }
+
+    fn local_app_build_host(temp: &TempDir, app_id: &str, channel: &str) -> PathBuf {
+        let path = temp
+            .path()
+            .join("sandbox")
+            .join("apps")
+            .join(app_id)
+            .join("build")
+            .join(channel);
+        fs::create_dir_all(&path).expect("local-app build host");
+        path
+    }
+
+    fn fixed_local_app_build_env(
+        app_id: &str,
+        channel: &str,
+    ) -> (String, BTreeMap<String, String>) {
+        let project_guest_path = format!("/var/lingxi/local-app-build/{app_id}/{channel}/project");
+        let build_state_root = format!("{project_guest_path}/.lingxi-build-state");
+        let mut env = BTreeMap::new();
+        env.insert("HOME".into(), format!("{build_state_root}/home"));
+        env.insert("TMPDIR".into(), format!("{build_state_root}/tmp"));
+        env.insert("TMP".into(), format!("{build_state_root}/tmp"));
+        env.insert("TEMP".into(), format!("{build_state_root}/tmp"));
+        env.insert(
+            "XDG_CACHE_HOME".into(),
+            format!("{build_state_root}/xdg-cache"),
+        );
+        env.insert(
+            "XDG_CONFIG_HOME".into(),
+            format!("{build_state_root}/xdg-config"),
+        );
+        env.insert(
+            "XDG_DATA_HOME".into(),
+            format!("{build_state_root}/xdg-data"),
+        );
+        env.insert(
+            "NPM_CONFIG_CACHE".into(),
+            format!("{build_state_root}/npm-cache"),
+        );
+        env.insert(
+            "npm_config_cache".into(),
+            format!("{build_state_root}/npm-cache"),
+        );
+        (project_guest_path, env)
     }
 
     #[test]
@@ -1976,6 +2258,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp");
         let runtime = AndroidProotRuntime::new(AndroidProotRuntimeConfig {
             managed_root: temp.path().join("missing"),
+            app_sandbox_root: temp.path().join("sandbox"),
             abi: "x86_64".to_string(),
             rootfs_version: "test".to_string(),
             archive_sha256: None,
@@ -2001,6 +2284,182 @@ mod tests {
             }])
             .await;
         assert!(matches!(result, Err(MobileLinuxError::InvalidRequest(_))));
+    }
+
+    #[test]
+    fn merged_execution_mounts_keep_configured_binds() {
+        let (temp, runtime) = runtime();
+        let workspace_host = temp.path().join("workspace");
+        let build_host = local_app_build_host(&temp, "app", "store");
+        fs::create_dir_all(&workspace_host).expect("workspace host");
+        runtime
+            .state
+            .mounts
+            .write()
+            .expect("mounts rwlock")
+            .push(MountSpec {
+                host_path: workspace_host,
+                guest_path: "/workspace/default".to_string(),
+                read_only: false,
+                purpose: MountPurpose::Workspace,
+            });
+        let mounts = runtime
+            .execution_mounts(
+                &[MountSpec {
+                    host_path: build_host,
+                    guest_path: "/var/lingxi/local-app-build/app/store/project".to_string(),
+                    read_only: false,
+                    purpose: MountPurpose::LocalAppBuild,
+                }],
+                ForegroundMountMode::Merged,
+            )
+            .expect("merged mounts");
+        assert_eq!(mounts.len(), 2);
+        assert!(mounts
+            .iter()
+            .any(|mount| mount.guest_path == "/workspace/default"));
+        assert!(mounts.iter().any(|mount| {
+            mount.guest_path == "/var/lingxi/local-app-build/app/store/project"
+                && matches!(mount.purpose, MountPurpose::LocalAppBuild)
+        }));
+    }
+
+    #[test]
+    fn isolated_execution_mounts_drop_configured_binds_but_keep_request_mounts() {
+        let (temp, runtime) = runtime();
+        let workspace_host = temp.path().join("workspace");
+        let build_host = local_app_build_host(&temp, "app", "store");
+        fs::create_dir_all(&workspace_host).expect("workspace host");
+        runtime
+            .state
+            .mounts
+            .write()
+            .expect("mounts rwlock")
+            .push(MountSpec {
+                host_path: workspace_host,
+                guest_path: "/workspace/default".to_string(),
+                read_only: false,
+                purpose: MountPurpose::Workspace,
+            });
+        let mounts = runtime
+            .execution_mounts(
+                &[MountSpec {
+                    host_path: build_host,
+                    guest_path: "/var/lingxi/local-app-build/app/store/project".to_string(),
+                    read_only: false,
+                    purpose: MountPurpose::LocalAppBuild,
+                }],
+                ForegroundMountMode::RequestOnly,
+            )
+            .expect("isolated mounts");
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(
+            mounts[0].guest_path,
+            "/var/lingxi/local-app-build/app/store/project"
+        );
+        assert!(matches!(mounts[0].purpose, MountPurpose::LocalAppBuild));
+    }
+
+    #[test]
+    fn isolated_execution_mounts_require_exactly_one_local_app_build_mount() {
+        let (temp, runtime) = runtime();
+        let build_host = local_app_build_host(&temp, "app", "store");
+        let extra_host = temp.path().join("workspace");
+        fs::create_dir_all(&extra_host).expect("workspace host");
+
+        let error = runtime
+            .execution_mounts(
+                &[
+                    MountSpec {
+                        host_path: build_host.clone(),
+                        guest_path: "/var/lingxi/local-app-build/app/store/project".to_string(),
+                        read_only: false,
+                        purpose: MountPurpose::LocalAppBuild,
+                    },
+                    MountSpec {
+                        host_path: extra_host,
+                        guest_path: "/workspace/default".to_string(),
+                        read_only: false,
+                        purpose: MountPurpose::Workspace,
+                    },
+                ],
+                ForegroundMountMode::RequestOnly,
+            )
+            .expect_err("extra mounts must be rejected");
+        assert!(error
+            .to_string()
+            .contains("exactly one LocalAppBuild mount"));
+    }
+
+    #[test]
+    fn isolated_execution_mounts_reject_wrong_host_or_guest_shape() {
+        let (temp, runtime) = runtime();
+        let wrong_guest_host = local_app_build_host(&temp, "app", "store");
+        let error = runtime
+            .execution_mounts(
+                &[MountSpec {
+                    host_path: wrong_guest_host,
+                    guest_path: "/workspace/default".to_string(),
+                    read_only: false,
+                    purpose: MountPurpose::LocalAppBuild,
+                }],
+                ForegroundMountMode::RequestOnly,
+            )
+            .expect_err("wrong guest path must be rejected");
+        assert!(error.to_string().contains("guest_path must be"));
+
+        let wrong_host = temp
+            .path()
+            .join("sandbox")
+            .join("apps")
+            .join("other")
+            .join("build")
+            .join("store");
+        fs::create_dir_all(&wrong_host).expect("wrong host");
+        let error = runtime
+            .execution_mounts(
+                &[MountSpec {
+                    host_path: wrong_host,
+                    guest_path: "/var/lingxi/local-app-build/app/store/project".to_string(),
+                    read_only: false,
+                    purpose: MountPurpose::LocalAppBuild,
+                }],
+                ForegroundMountMode::RequestOnly,
+            )
+            .expect_err("wrong host app id must be rejected");
+        assert!(error.to_string().contains(&format!(
+            "{}/apps/app/build/store",
+            runtime.state.config.app_sandbox_root.display()
+        )));
+    }
+
+    #[test]
+    fn isolated_execution_mounts_reject_same_suffix_outside_app_sandbox_root() {
+        let (temp, runtime) = runtime();
+        let wrong_host = temp
+            .path()
+            .join("other-root")
+            .join("apps")
+            .join("app")
+            .join("build")
+            .join("store");
+        fs::create_dir_all(&wrong_host).expect("wrong host");
+
+        let error = runtime
+            .execution_mounts(
+                &[MountSpec {
+                    host_path: wrong_host,
+                    guest_path: "/var/lingxi/local-app-build/app/store/project".to_string(),
+                    read_only: false,
+                    purpose: MountPurpose::LocalAppBuild,
+                }],
+                ForegroundMountMode::RequestOnly,
+            )
+            .expect_err("same suffix outside sandbox root must be rejected");
+        assert!(error.to_string().contains(&format!(
+            "{}/apps/app/build/store",
+            runtime.state.config.app_sandbox_root.display()
+        )));
     }
 
     #[tokio::test]
@@ -2101,11 +2560,95 @@ mod tests {
     fn loopback_only_is_admitted_for_sockaddr_aware_proot_enforcement() {
         let mut request = request();
         request.network = NetworkPolicy::LoopbackOnly;
-        validate_request(&request).expect("LoopbackOnly is supported");
+        validate_request(&request, None).expect("LoopbackOnly is supported");
         assert_eq!(
             enforced_network_policy_name(request.network),
             Some("loopback_only")
         );
+    }
+
+    #[test]
+    fn ordinary_requests_reject_build_state_env_overrides() {
+        let mut request = request();
+        request.env.insert(
+            "HOME".into(),
+            "/var/lingxi/local-app-build/app/store/project/.lingxi-build-state/home".into(),
+        );
+        let error =
+            validate_request(&request, None).expect_err("ordinary requests must reject HOME");
+        assert!(error
+            .to_string()
+            .contains("host-reserved environment variable"));
+    }
+
+    #[tokio::test]
+    async fn isolated_local_app_build_accepts_fixed_build_env() {
+        let (temp, runtime) = runtime();
+        let build_host = local_app_build_host(&temp, "app", "store");
+        let (project_guest_path, env) = fixed_local_app_build_env("app", "store");
+        let mut request = request();
+        request.command = "/bin/sh".into();
+        request.args = vec![
+            "-c".into(),
+            "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s' \
+$HOME \"$TMPDIR\" \"$TMP\" \"$TEMP\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\" \
+\"$XDG_DATA_HOME\" \"$NPM_CONFIG_CACHE\" \"$npm_config_cache\""
+                .into(),
+        ];
+        request.cwd = Some(project_guest_path.clone());
+        request.env = env.clone();
+        request.mounts = vec![MountSpec {
+            host_path: build_host,
+            guest_path: project_guest_path,
+            read_only: false,
+            purpose: MountPurpose::LocalAppBuild,
+        }];
+
+        let result = runtime.run_isolated(request).await.expect("isolated run");
+        let stdout_lines: Vec<_> = result.stdout.lines().collect();
+        assert_eq!(stdout_lines.len(), env.len());
+        let expected = [
+            "HOME",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "NPM_CONFIG_CACHE",
+            "npm_config_cache",
+        ]
+        .into_iter()
+        .map(|key| {
+            env.get(key)
+                .expect("fixed local-app build env key")
+                .as_str()
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(stdout_lines, expected);
+    }
+
+    #[test]
+    fn isolated_local_app_build_rejects_incomplete_fixed_build_env() {
+        let (project_guest_path, fixed_env) = fixed_local_app_build_env("app", "store");
+        for missing_key in fixed_env.keys() {
+            let mut request = request();
+            request.cwd = Some(project_guest_path.clone());
+            request.env = fixed_env.clone();
+            request.env.remove(missing_key);
+            request.mounts = vec![MountSpec {
+                host_path: PathBuf::from("/tmp/lingxi-local-app-build"),
+                guest_path: project_guest_path.clone(),
+                read_only: false,
+                purpose: MountPurpose::LocalAppBuild,
+            }];
+
+            let error = validate_request(&request, Some(&request.mounts))
+                .expect_err("isolated builds require the complete fixed environment");
+            assert!(error.to_string().contains(&format!(
+                "isolated local-app build requires environment variable {missing_key}"
+            )));
+        }
     }
 
     #[tokio::test]

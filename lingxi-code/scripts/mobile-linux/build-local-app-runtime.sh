@@ -19,8 +19,9 @@ usage() {
 Usage: build-local-app-runtime.sh --platform <ios|android> --variant <name> [--output <dir>]
 
 Build the local-app Node runtime inside a digest-pinned Alpine 3.24 arm64/musl
-container using the frozen Vite lockfile, then stage a read-only runtime tree
-under a client build directory.
+container using the frozen Vite lockfile, then stage a read-only host seed
+under a client build directory. Builds copy its dependencies into a disposable
+project snapshot instead of mounting this tree into the guest.
 EOF
 }
 
@@ -82,18 +83,11 @@ trap cleanup EXIT
 cp "${TEMPLATE_DIR}/package.json" "${WORKDIR}/package.json"
 cp "${TEMPLATE_DIR}/package-lock.json" "${WORKDIR}/package-lock.json"
 
-# Which native slices survive the prune is PLATFORM-DEPENDENT, and the answer is
-# owned by stage-local-app-runtime.py — the very next step, which rejects a tree
-# that carries anything else *or* is missing anything it expects. iOS ships the
-# arm64/musl slice alone (devices and Apple Silicon simulators are both arm64);
-# one Android asset tree serves every ABI in the APK, so it keeps the full
-# pinned set. Pruning unconditionally to arm64, as this used to, built a tree
-# `--platform android` could never stage.
-#
-# Read from the staging script rather than re-listing here: a second hand-kept
-# copy of this set is exactly how the two would drift apart.
-expected_native_slices() {
-  python3 - "${STAGE_SCRIPT}" "${PLATFORM}" "$1" <<'PY'
+# The exact native package closure is platform-dependent and owned by
+# stage-local-app-runtime.py. Read it from there instead of keeping a second
+# hand-maintained copy in shell.
+expected_native_packages() {
+  python3 - "${STAGE_SCRIPT}" "$1" "$2" "$3" <<'PY'
 import importlib.util
 import pathlib
 import sys
@@ -106,19 +100,39 @@ staging = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(staging)
 
 platform = sys.argv[2]
-names, scope = staging.expected_rolldown_bindings_for(platform), "@rolldown/"
+family = sys.argv[3]
+selector = sys.argv[4]
+names = staging.expected_native_packages_for(platform, family)
 if not names:
-    raise SystemExit(f"no rolldown packages expected for platform {platform}")
-print(" ".join(sorted(name.removeprefix(scope) for name in names)))
+    raise SystemExit(f"no {family} packages expected for platform {platform}")
+if selector == "arm64":
+    names = {name: version for name, version in names.items() if "arm64" in name}
+elif selector == "x64":
+    names = {name: version for name, version in names.items() if "x64" in name}
+elif selector != "all":
+    raise SystemExit(f"unknown native package selector: {selector}")
+if not names:
+    raise SystemExit(f"no {family} packages matched selector {selector} for platform {platform}")
+if family == "rolldown":
+    print(" ".join(sorted(name.removeprefix("@rolldown/") for name in names)))
+else:
+    print(" ".join(sorted(names)))
 PY
 }
 
-KEEP_ROLLDOWN="$(expected_native_slices rolldown)"
+if [[ "${PLATFORM}" == "android" ]]; then
+  X64_ROLLDOWN="$(expected_native_packages android rolldown x64)"
+  X64_LIGHTNINGCSS="$(expected_native_packages android lightningcss x64)"
+else
+  X64_ROLLDOWN=""
+  X64_LIGHTNINGCSS=""
+fi
 
 "${CONTAINER_RUNTIME}" run --rm --platform linux/arm64 \
   -v "${WORKDIR}:/work" \
   -w /work \
-  -e "KEEP_ROLLDOWN=${KEEP_ROLLDOWN}" \
+  -e "X64_ROLLDOWN=${X64_ROLLDOWN}" \
+  -e "X64_LIGHTNINGCSS=${X64_LIGHTNINGCSS}" \
   "${IMAGE}" \
   sh -lc "
     set -euo pipefail
@@ -126,41 +140,49 @@ KEEP_ROLLDOWN="$(expected_native_slices rolldown)"
     test \"\$(node --version)\" = 'v24.18.1'
     test \"\$(npm --version)\" = '11.12.1'
     test \"\$(npx --version)\" = '11.12.1'
-    npm ci --ignore-scripts --no-audit --no-fund --loglevel=error
 
-    # \$1 scope dir, \$2 directory-name prefix, \$3 space-separated keep list.
-    prune_native_slices() {
-      for slice in \"node_modules/\$1/\$2\"*; do
-        [ -d \"\$slice\" ] || continue
-        name=\"\${slice##*/}\"
-        case \" \$3 \" in
-          *\" \$name \"*) ;;
-          *) rm -rf \"\$slice\" ;;
-        esac
-      done
-      for slice in \"node_modules/\$1/\$2\"*; do
-        [ -d \"\$slice\" ] || continue
-        name=\"\${slice##*/}\"
-        case \" \$3 \" in
-          *\" \$name \"*) ;;
-          *)
-            echo \"unexpected \$1 native slice survived the prune: \$name\" >&2
-            exit 1
-            ;;
-        esac
-      done
+    mkdir -p /work/targets/arm64 /work/targets/x64
+    cp package.json package-lock.json /work/targets/arm64/
+    cp package.json package-lock.json /work/targets/x64/
+
+    install_target_tree() {
+      target_root=\"\$1\"
+      target_cpu=\"\$2\"
+      (
+        cd \"\$target_root\"
+        npm_config_os=linux npm_config_cpu=\"\$target_cpu\" npm_config_libc=musl \
+          npm ci --ignore-scripts --no-audit --no-fund --loglevel=error
+        test ! -e node_modules/next
+        test ! -e node_modules/@next
+        rm -f node_modules/.package-lock.json
+      )
     }
 
-    prune_native_slices '@rolldown' 'binding-' \"\$KEEP_ROLLDOWN\"
+    merge_native_package() {
+      source_root=\"\$1\"
+      dest_root=\"\$2\"
+      package_name=\"\$3\"
+      src=\"\$source_root/node_modules/\$package_name\"
+      dst=\"\$dest_root/node_modules/\$package_name\"
+      test -d \"\$src\"
+      mkdir -p \"\$(dirname \"\$dst\")\"
+      rm -rf \"\$dst\"
+      cp -R \"\$src\" \"\$dst\"
+    }
 
-    for name in \$KEEP_ROLLDOWN; do
-      test -d \"node_modules/@rolldown/\$name\"
-      test -f \"node_modules/@rolldown/\$name/rolldown-binding.\${name#binding-}.node\"
-    done
-    test ! -e node_modules/next
-    test ! -e node_modules/@next
+    install_target_tree /work/targets/arm64 arm64
+    if [ -n \"\$X64_ROLLDOWN\" ] || [ -n \"\$X64_LIGHTNINGCSS\" ]; then
+      install_target_tree /work/targets/x64 x64
+      for name in \$X64_ROLLDOWN; do
+        merge_native_package /work/targets/x64 /work/targets/arm64 \"@rolldown/\$name\"
+      done
+      for name in \$X64_LIGHTNINGCSS; do
+        merge_native_package /work/targets/x64 /work/targets/arm64 \"\$name\"
+      done
+    fi
 
-    rm -f node_modules/.package-lock.json
+    rm -rf /work/node_modules
+    mv /work/targets/arm64/node_modules /work/node_modules
   "
 
 LOCK_SHA_AFTER="$(shasum -a 256 "${WORKDIR}/package-lock.json" | awk '{print $1}')"

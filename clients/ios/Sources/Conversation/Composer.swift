@@ -29,8 +29,10 @@ struct Composer: View {
     var permissionOptions: [ConversationPermissionOption] = []
     var controlsPending: Bool = false
     var controlsError: String? = nil
+    var bypassWarningSuppressed: Bool = false
     var onSelectReasoning: (String) -> Void = { _ in }
     var onSelectPermission: (String) -> Void = { _ in }
+    var onConfirmBypassPermissions: (Bool) -> Void = { _ in }
     /// Previously-picked refs, most-recent-first, pinned above the provider
     /// sections in the picker. Owned by the caller (see ChatView) because it
     /// outlives any one composer instance.
@@ -99,8 +101,10 @@ struct Composer: View {
         permissionOptions: [ConversationPermissionOption] = [],
         controlsPending: Bool = false,
         controlsError: String? = nil,
+        bypassWarningSuppressed: Bool = false,
         onSelectReasoning: @escaping (String) -> Void = { _ in },
         onSelectPermission: @escaping (String) -> Void = { _ in },
+        onConfirmBypassPermissions: @escaping (Bool) -> Void = { _ in },
         recentModels: [String] = [],
         draft: Binding<String>,
         onSend: @escaping (String) -> Void,
@@ -137,8 +141,10 @@ struct Composer: View {
         self.permissionOptions = permissionOptions
         self.controlsPending = controlsPending
         self.controlsError = controlsError
+        self.bypassWarningSuppressed = bypassWarningSuppressed
         self.onSelectReasoning = onSelectReasoning
         self.onSelectPermission = onSelectPermission
+        self.onConfirmBypassPermissions = onConfirmBypassPermissions
         self.recentModels = recentModels
         self._draft = draft
         self.onSend = onSend
@@ -358,8 +364,10 @@ struct Composer: View {
                 permissionOptions: permissionOptions,
                 controlsPending: controlsPending,
                 controlsError: controlsError,
+                bypassWarningSuppressed: bypassWarningSuppressed,
                 onSelectReasoning: { value in onSelectReasoning(value) },
                 onSelectPermission: { value in onSelectPermission(value) },
+                onConfirmBypassPermissions: onConfirmBypassPermissions,
                 onDismiss: { controlsOpen = false }
             )
         }

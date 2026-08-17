@@ -221,8 +221,8 @@ pub fn initial_permission_mode_from_cli(
     // rejected above rather than being resurrected by this fallback.
     let fallback = if bypass_was_blocked
         || (settings.default_mode == Some(PermissionMode::Auto)
-        && !settings.auto_default_from_trusted
-        ) {
+            && !settings.auto_default_from_trusted)
+    {
         PermissionMode::Default
     } else {
         PermissionMode::Auto

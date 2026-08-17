@@ -17,8 +17,9 @@ memoization, monolithic components, and platform conditionals scattered
 through JSX. Put platform differences behind token/adapter modules supplied by
 the confirmed design spec.
 
-Use `motion/react` only for purposeful motion and honor reduced motion. Use
-`lucide-react` only for ordinary UI icons; do not turn icons into generated
-bitmap assets. Load [references/react-checklist.md](references/react-checklist.md)
-for a final pass. This skill does not install packages: the Dependencies phase
-must show and obtain approval for every requested package.
+Use CSS or the Web Animations API only for purposeful motion and honor reduced
+motion. Use accessible inline SVG or CSS for ordinary UI icons; do not turn
+icons into generated bitmap assets. Load [references/react-checklist.md](references/react-checklist.md)
+for a final pass. This skill does not install packages or change root
+infrastructure; stay within the host-scaffolded dependency set for the current
+local app.

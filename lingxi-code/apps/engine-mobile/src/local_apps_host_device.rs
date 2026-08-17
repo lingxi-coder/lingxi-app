@@ -271,7 +271,7 @@ impl LocalAppsHostBroker {
             None | Some("back") => CameraPosition::Back,
             Some("front") => CameraPosition::Front,
             Some(other) => {
-                return Err(invalid(format!("camera must be front|back, got {other:?}")))
+                return Err(invalid(format!("camera must be front|back, got {other:?}")));
             }
         };
         let allow_editing = payload
@@ -363,7 +363,7 @@ impl LocalAppsHostBroker {
                 return Err(BridgeFailure::coded(
                     "audio_session_busy",
                     "another recording is already starting",
-                ))
+                ));
             }
         };
 
@@ -896,9 +896,12 @@ mod tests {
             .await
             .expect("create app");
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
-        let static_out = root.path().join(layout.build_rel(false)).join("out");
-        std::fs::create_dir_all(&static_out).expect("static out");
-        std::fs::write(static_out.join("index.html"), "<html>ok</html>").expect("index");
+        let static_dist = root
+            .path()
+            .join(layout.build_rel(false))
+            .join(crate::local_apps_build::VITE_OUTPUT_DIR);
+        std::fs::create_dir_all(&static_dist).expect("static dist");
+        std::fs::write(static_dist.join("index.html"), "<html>ok</html>").expect("index");
         Harness {
             _root: root,
             broker,

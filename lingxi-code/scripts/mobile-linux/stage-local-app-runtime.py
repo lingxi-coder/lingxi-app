@@ -17,7 +17,10 @@ _VERIFY = importlib.util.module_from_spec(_VERIFY_SPEC)
 _VERIFY_SPEC.loader.exec_module(_VERIFY)
 
 EXPECTED_DEPENDENCIES = _VERIFY.EXPECTED_DEPENDENCIES
-EXPECTED_ROLLDOWN_BINDINGS = _VERIFY.EXPECTED_ROLLDOWN_BINDINGS
+EXPECTED_LIGHTNINGCSS_VERSION = _VERIFY.EXPECTED_LIGHTNINGCSS_VERSION
+EXPECTED_ROLLDOWN_VERSION = _VERIFY.EXPECTED_ROLLDOWN_VERSION
+expected_native_binary_for = _VERIFY.expected_native_binary_for
+expected_native_packages_for = _VERIFY.expected_native_packages_for
 fail = _VERIFY.fail
 load_json = _VERIFY.load_json
 validate_apk_pins = _VERIFY.validate_apk_pins
@@ -47,16 +50,9 @@ def validate_symlinks(root: pathlib.Path) -> None:
         except (OSError, ValueError) as exc:
             fail(f"node_modules symlink escapes or is broken: {path}: {exc}")
 
-def expected_rolldown_bindings_for(platform: str) -> dict[str, str]:
-    if platform == "ios":
-        name = "@rolldown/binding-linux-arm64-musl"
-        return {name: EXPECTED_ROLLDOWN_BINDINGS[name]}
-    return dict(EXPECTED_ROLLDOWN_BINDINGS)
-
-
 def validate_node_modules(
     root: pathlib.Path,
-    allowed_rolldown_bindings: dict[str, str],
+    platform: str,
 ) -> None:
     if not root.is_dir() or root.is_symlink():
         fail(f"node_modules input is missing or unsafe: {root}")
@@ -76,9 +72,14 @@ def validate_node_modules(
     vite_binary = root / "vite" / "bin" / "vite.js"
     if not vite_binary.is_file() or vite_binary.is_symlink():
         fail("runtime node_modules is missing the fixed Vite CLI")
-    allowed_rolldown_dirs = {
-        name.removeprefix("@rolldown/") for name in allowed_rolldown_bindings
-    }
+    rolldown = load_json(root / "rolldown" / "package.json")
+    if rolldown.get("version") != EXPECTED_ROLLDOWN_VERSION:
+        fail(f"runtime node_modules did not resolve rolldown@{EXPECTED_ROLLDOWN_VERSION}")
+    lightningcss = load_json(root / "lightningcss" / "package.json")
+    if lightningcss.get("version") != EXPECTED_LIGHTNINGCSS_VERSION:
+        fail(f"runtime node_modules did not resolve lightningcss@{EXPECTED_LIGHTNINGCSS_VERSION}")
+    allowed_rolldown_bindings = expected_native_packages_for(platform, "rolldown")
+    allowed_rolldown_dirs = {name.removeprefix("@rolldown/") for name in allowed_rolldown_bindings}
     rolldown_roots = (
         [path for path in (root / "@rolldown").iterdir()]
         if (root / "@rolldown").is_dir()
@@ -92,8 +93,36 @@ def validate_node_modules(
         package = load_json(package_root / "package.json")
         if package.get("version") != version:
             fail(f"runtime node_modules did not resolve {name}@{version}")
+        binary = package_root / expected_native_binary_for(name)
         native_bindings = list(package_root.glob("*.node"))
-        if len(native_bindings) != 1 or native_bindings[0].is_symlink():
+        if (
+            len(native_bindings) != 1
+            or native_bindings[0].is_symlink()
+            or native_bindings[0].name != binary.name
+            or not binary.is_file()
+        ):
+            fail(f"runtime node_modules must contain one real native binding for {name}")
+    allowed_lightningcss_bindings = expected_native_packages_for(platform, "lightningcss")
+    lightningcss_roots = [path for path in root.iterdir() if path.is_dir()]
+    for path in lightningcss_roots:
+        if (
+            path.name.startswith("lightningcss-")
+            and path.name not in allowed_lightningcss_bindings
+        ):
+            fail(f"runtime node_modules resolved an unexpected Lightning CSS binding: {path.name}")
+    for name, version in allowed_lightningcss_bindings.items():
+        package_root = root / name
+        package = load_json(package_root / "package.json")
+        if package.get("version") != version:
+            fail(f"runtime node_modules did not resolve {name}@{version}")
+        binary = package_root / expected_native_binary_for(name)
+        native_bindings = list(package_root.glob("*.node"))
+        if (
+            len(native_bindings) != 1
+            or native_bindings[0].is_symlink()
+            or native_bindings[0].name != binary.name
+            or not binary.is_file()
+        ):
             fail(f"runtime node_modules must contain one real native binding for {name}")
     bin_dir = root / ".bin"
     for name in ("corepack", "npm", "npx", "pnpm", "yarn"):
@@ -117,8 +146,8 @@ def make_read_only(root: pathlib.Path) -> None:
                 path.chmod(0o555)
         current.chmod(0o555)
     # Keep the staging root writable by its owner so it can be atomically
-    # renamed or replaced. The guest still receives a read-only mount and all
-    # bundled descendants remain immutable on the host.
+    # renamed or replaced. Bundled descendants remain immutable host inputs;
+    # builds copy them into a disposable project rather than mounting them.
     root.chmod(0o755)
 
 
@@ -188,8 +217,9 @@ def main() -> None:
     validate_source_policy(template, pins)
     validate_sbom(repo, template)
     validate_runtime_policy(repo)
-    allowed_rolldown_bindings = expected_rolldown_bindings_for(args.platform)
-    validate_node_modules(node_modules, allowed_rolldown_bindings)
+    allowed_rolldown_bindings = expected_native_packages_for(args.platform, "rolldown")
+    allowed_lightningcss_bindings = expected_native_packages_for(args.platform, "lightningcss")
+    validate_node_modules(node_modules, args.platform)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = pathlib.Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
@@ -228,6 +258,7 @@ def main() -> None:
             "read_only": True,
             "package_lock_sha256": sha256(template / "package-lock.json"),
             "resolved_rolldown_bindings": sorted(allowed_rolldown_bindings),
+            "resolved_lightningcss_bindings": sorted(allowed_lightningcss_bindings),
             "files": inventory(temporary),
         }
         (temporary / "runtime-manifest.json").write_text(
@@ -242,7 +273,7 @@ def main() -> None:
         if temporary.exists():
             remove_tree(temporary)
 
-    print(f"staged read-only local-app runtime: {output}")
+    print(f"staged verified read-only local-app runtime seed: {output}")
 
 
 if __name__ == "__main__":

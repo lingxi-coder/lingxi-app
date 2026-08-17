@@ -893,7 +893,7 @@ impl PermissionPolicy {
                 }
             }
         }
-        // Host-owned local-app metadata is a hard deny for leased workflows.
+        // The local-app source boundary is a hard deny for leased workflows.
         // Place this before shell exact-allow and the generic allow/mode
         // branches so a broad `Edit(./**)` or `Bash(...)` rule cannot turn the
         // generated workspace metadata into agent-writable state. Explicit
@@ -2729,10 +2729,11 @@ fn deny_with_mode(mode: PermissionMode) -> PermissionResult {
 fn deny_workspace_host_owned(tool_name: &str) -> PermissionResult {
     PermissionResult::Deny {
         reason: PermissionDecisionReason::Other {
-            reason: format!("{tool_name} cannot modify host-owned local-app workspace metadata"),
+            reason: format!("{tool_name} is outside the local-app source editing boundary"),
         },
         explanation: Some(
-            "Host-owned local-app workspace metadata cannot be modified by an agent.".to_string(),
+            "Local-app writes must use structured file tools; host-managed build files and non-inspection shell commands are protected."
+                .to_string(),
         ),
         metadata: PermissionMetadata::default(),
     }

@@ -1156,8 +1156,7 @@
     <string name="local_apps_runtime_log_recovery">Recovery: %1$s</string>
     <string name="local_apps_runtime_log_status">Status: %1$s</string>
     <string name="local_apps_runtime_log_title">Runtime log</string>
-    <string name="local_apps_runtime_notice_staged_after_null">The local-app runtime is ready, but during this launch one engine build failed to pick it up. The engine reads the runtime path only once at launch: if the failure was caused by the runtime being unavailable, restart the app and try again; otherwise this failure is unrelated to the runtime.</string>
-    <string name="local_apps_runtime_notice_staging">The local-app runtime is still being prepared for the first time. The engine reads the runtime path only once at launch, so you\'ll need to restart the app after preparation finishes before you can generate apps.</string>
+    <string name="local_apps_runtime_notice_staging">The local-app runtime is still being prepared for the first time. Wait for preparation to finish, then retry app generation directly.</string>
     <string name="local_apps_runtime_notice_unavailable">The local-app runtime failed to prepare (the install package has no runtime, or extraction failed); apps can\'t be generated during this launch.</string>
     <string name="local_apps_section_permissions_logs">Permissions/Logs</string>
     <string name="local_apps_source_browser_notice">Only text source under 1 MiB is shown; symlinks, build artifacts, and private directories are excluded. Dependency files are editable, but unsupported versions are rejected during build verification.</string>

@@ -1,32 +1,44 @@
 {
   "schema_version": 1,
   "node_executable": "/usr/bin/node",
-  "vite_executable": "/opt/lingxi/local-app-runtime/node_modules/vite/bin/vite.js",
-  "node_modules_mount": {
+  "vite_executable": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js",
+  "dependency_snapshot": {
     "source": "bundled:local-app-runtime/node_modules",
-    "target": "/opt/lingxi/local-app-runtime/node_modules",
-    "read_only": true
+    "materialize_into": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules",
+    "guest_mount": "forbidden",
+    "selection_policy": "verified_runtime_only"
   },
-  "scaffold": {
-    "primary": "official_create_vite_cli",
-    "target": "empty_staging_source_root",
-    "javascript_command": "npm create vite@latest . -- --template react --no-interactive",
-    "typescript_command": "npm create vite@latest . -- --template react-ts --no-interactive",
-    "shell": "existing_mobile_linux_shell",
-    "offline_fallback": ".lingxi/vite-fallback",
-    "fallback_only_when": "registry_or_network_unavailable"
+  "build_mount": {
+    "kind": "LocalAppBuild",
+    "count": 1,
+    "host_path_policy": "staging_or_store_root",
+    "guest_path": "/var/lingxi/local-app-build/{app_id}/{channel}/project",
+    "writable": true
   },
   "commands": {
     "vite_static_build": {
       "argv": [
         "/usr/bin/node",
         "--max-old-space-size={build_node_old_space_size_mib}",
-        "/opt/lingxi/local-app-runtime/node_modules/vite/bin/vite.js",
-        "build"
+        "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js",
+        "build",
+        "--outDir",
+        "dist",
+        "--emptyOutDir"
       ],
+      "cwd": "/var/lingxi/local-app-build/{app_id}/{channel}/project",
+      "output_dir": "dist",
       "environment": {
         "NODE_ENV": "production",
-        "NODE_PATH": "/opt/lingxi/local-app-runtime/node_modules"
+        "HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/home",
+        "TMPDIR": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/tmp",
+        "TMP": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/tmp",
+        "TEMP": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/tmp",
+        "XDG_CACHE_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-cache",
+        "XDG_CONFIG_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-config",
+        "XDG_DATA_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-data",
+        "NPM_CONFIG_CACHE": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/npm-cache",
+        "npm_config_cache": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/npm-cache"
       },
       "network_policy": "disabled",
       "memory_limit_policy": "physical_memory_tier",
@@ -83,7 +95,7 @@
     "header_source": "clients/ios/Sources/LinuxRuntimeNative/LXISHExecutionPolicy.h",
     "header_source_sha256": "c92b7af0f20412c8a8622fe408c757637df9ca98f7e2930d6e80660670fa91dc",
     "ish_patch_source": "clients/ios/Sources/LinuxRuntimeNative/patches/ish-socket-network-policy.patch",
-    "ish_patch_source_sha256": "f4ea9b396b7dfd4f9f9d15507fc680ccc40a596be85042792f442eac85d21c79",
+    "ish_patch_source_sha256": "2122d7284c98fc88c6b8b72570c64297d299ab7a941a20f3a879c6465003834f",
     "hook_version": 1,
     "supported_network_policies": [
       "disabled",
@@ -93,13 +105,8 @@
     "runtime_memory_limit_bytes": 838860800,
     "watchdog_interval_ms": 250,
     "memory_accounting": "guest_backed_pages_by_execution_context",
+    "local_app_build_mount_layout": "single_root_materialized_snapshot",
+    "nested_bind_mount_resolution": "longest_guest_prefix",
     "platform": "iphoneos"
-  },
-  "package_manager_policy": {
-    "interactive_terminal_apk": true,
-    "generation_jobs": false,
-    "mcp": false,
-    "npm_family_present": true,
-    "npm_scope": "app_workspace_shell_approval"
   }
 }

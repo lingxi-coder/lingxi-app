@@ -14,6 +14,20 @@ import org.junit.Test
 
 class LinuxRuntimeStateTest {
     @Test
+    fun mobile_linux_config_carries_app_sandbox_root() {
+        val config = mobileLinuxConfig(
+            managedRoot = "/tmp/mobile-linux",
+            appSandboxRoot = "/tmp",
+            workspaceHostPath = "/tmp/workspaces/default",
+            stableWorkspaceId = "default",
+            abi = "arm64-v8a",
+            mode = LinuxRuntimeMode.MobileLinux,
+        )
+
+        assertEquals("/tmp", config.appSandboxRoot)
+    }
+
+    @Test
     fun missing_mobile_linux_rootfs_exposes_install_without_terminal() {
         val capability = MobileLinuxCapabilityFfi(
             available = true,

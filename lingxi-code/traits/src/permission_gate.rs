@@ -765,6 +765,26 @@ pub trait PermissionGate: Send + Sync {
         Ok(())
     }
 
+    /// Whether the host may present `bypassPermissions` as a selectable mode.
+    /// A policy gate keeps this false when an administrator/settings killswitch
+    /// disables the mode; a host-side risk acknowledgement can still be needed
+    /// before [`Self::set_permission_mode`] accepts the transition.
+    ///
+    /// The default is `false` so prompt-only gates never advertise a bypass
+    /// control they cannot enforce.
+    fn can_request_bypass_permissions(&self) -> bool {
+        false
+    }
+
+    /// Record an explicit interactive acknowledgement before allowing a live
+    /// transition into `bypassPermissions`.
+    ///
+    /// The default rejects the request: only policy-backed gates can safely
+    /// retain this acknowledgement and apply it to subsequent authorization.
+    fn confirm_bypass_permissions(&self) -> Result<(), String> {
+        Err("Bypass Permissions mode is not available for this session".to_string())
+    }
+
     /// Set or clear the LIVE per-MCP-server permission-mode override used by
     /// Claude's control-channel `set_mcp_permission_mode_override` surface.
     ///

@@ -1244,7 +1244,12 @@
   ],
   "local_app_runtime": {
     "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/package-lock.json",
-    "lockfile_sha256": "7843ba0515800c536cbfff5154ffd2e563874a57e4983ee4de35f10cfa2216de",
+    "lockfile_sha256": "1f38c3832edbcac5a60036ee10f45789dff56739ff76242293b73b9dd2fe9d81",
+    "lightningcss": "1.33.0",
+    "lightningcss_bindings": {
+      "lightningcss-linux-arm64-musl": "1.33.0",
+      "lightningcss-linux-x64-musl": "1.33.0"
+    },
     "node": "24.18.1",
     "react": "19.2.8",
     "react_dom": "19.2.8",

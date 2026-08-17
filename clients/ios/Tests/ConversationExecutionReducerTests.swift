@@ -20,14 +20,93 @@ import SwiftUI
             formatted: "$0.00"
         )
 
-        private func makeSource() -> EngineConversationSource {
+        private func makeSource(
+            permissionModeRepository: PermissionModeConfigurationRepository? = nil
+        ) -> EngineConversationSource {
             let config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
                 projectCwd: nil)
-            return EngineConversationSource(config: config)
+            return EngineConversationSource(
+                config: config,
+                permissionModeRepository: permissionModeRepository
+            )
+        }
+
+        func testBypassPermissionsIsSelectableBeforeRiskConfirmation() {
+            let source = makeSource()
+            let bypass = source.model.permissionOptions.first { $0.id == "bypassPermissions" }
+
+            XCTAssertEqual(bypass?.available, true)
+            XCTAssertNil(bypass?.disabledReason)
+        }
+
+        func testBypassWarningIsSkippedOnlyAfterUserSuppressesIt() {
+            XCTAssertTrue(ConversationControlsSheet.requiresRiskConfirmation(
+                for: "bypassPermissions",
+                bypassWarningSuppressed: false
+            ))
+            XCTAssertFalse(ConversationControlsSheet.requiresRiskConfirmation(
+                for: "bypassPermissions",
+                bypassWarningSuppressed: true
+            ))
+            XCTAssertTrue(ConversationControlsSheet.requiresRiskConfirmation(
+                for: "dontAsk",
+                bypassWarningSuppressed: true
+            ))
+        }
+
+        func testBypassWarningPreferencePersists() throws {
+            let suiteName = "PermissionModeRepositoryTests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer {
+                defaults.removePersistentDomain(forName: suiteName)
+            }
+            let repository = PermissionModeConfigurationRepository(defaults: defaults)
+            repository.setBypassWarningSuppressed(true)
+
+            XCTAssertTrue(PermissionModeConfigurationRepository(defaults: defaults)
+                .bypassWarningSuppressed())
+        }
+
+        func testConfirmingBypassSendsTheSessionModeCommand() async throws {
+            let suiteName = "BypassSessionTests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer {
+                defaults.removePersistentDomain(forName: suiteName)
+            }
+            let repository = PermissionModeConfigurationRepository(defaults: defaults)
+            let source = makeSource(permissionModeRepository: repository)
+            var confirmations = 0
+            var submitted: [ClientCommand] = []
+            source.setBypassPermissionsConfirmerForTesting { confirmations += 1 }
+            source.setCommandSubmitterForTesting { command in submitted.append(command) }
+
+            source.confirmAndSetBypassPermissions(suppressWarning: true)
+            await waitForSubmittedCommands(1, commands: submitted)
+
+            XCTAssertEqual(confirmations, 1)
+            guard case .setPermissionMode(mode: "bypassPermissions")? = submitted.first else {
+                return XCTFail("expected a bypass permission-mode command")
+            }
+            XCTAssertTrue(repository.bypassWarningSuppressed())
+            XCTAssertFalse(source.model.controlsPending)
+        }
+
+        func testNormalPermissionModeSendsTheSessionModeCommand() async {
+            let source = makeSource()
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in submitted.append(command) }
+
+            source.setPermissionMode("plan")
+            await waitForSubmittedCommands(1, commands: submitted)
+
+            guard case .setPermissionMode(mode: "plan")? = submitted.first else {
+                return XCTFail("expected a plan permission-mode command")
+            }
+            XCTAssertFalse(source.model.controlsPending)
         }
 
         private func flushTasks(_ count: Int = 4) async {

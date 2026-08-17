@@ -336,10 +336,10 @@ mod tests {
         assert_eq!(
             second
                 .host
-                .fixed_runtime_mount()
-                .expect("refreshed mount")
-                .host_path,
-            runtime_root.join("node_modules")
+                .await_fixed_runtime_root(std::time::Duration::ZERO)
+                .await
+                .expect("refreshed runtime root"),
+            runtime_root
         );
     }
 }

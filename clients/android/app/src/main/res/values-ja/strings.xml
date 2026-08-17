@@ -1150,8 +1150,7 @@
     <string name="local_apps_runtime_log_recovery">復旧：%1$s</string>
     <string name="local_apps_runtime_log_status">状態：%1$s</string>
     <string name="local_apps_runtime_log_title">実行ログ</string>
-    <string name="local_apps_runtime_notice_staged_after_null">ローカルアプリのランタイムは準備できていますが、今回の起動中に一度、エンジンのビルドがそれを取得できませんでした。エンジンは起動時に一度だけランタイムパスを読み込みます。失敗の原因がランタイムの利用不可によるものであれば、アプリを再起動してから再試行してください。それ以外の場合、今回の失敗はランタイムとは無関係です。</string>
-    <string name="local_apps_runtime_notice_staging">ローカルアプリのランタイムは、まだ初回の準備中です。エンジンは起動時に一度だけランタイムパスを読み込むため、準備が完了したらアプリを再起動しないとアプリを生成できません。</string>
+    <string name="local_apps_runtime_notice_staging">ローカルアプリのランタイムは、まだ初回の準備中です。準備が完了したら、そのままアプリ生成を再試行してください。</string>
     <string name="local_apps_runtime_notice_unavailable">ローカルアプリのランタイムの準備に失敗しました（インストールパッケージにランタイムが含まれていないか、展開に失敗しました）。今回の起動ではアプリを生成できません。</string>
     <string name="local_apps_section_permissions_logs">権限／ログ</string>
     <string name="local_apps_source_browser_notice">1 MiB 以内のテキストソースコードのみを表示します。シンボリックリンク、ビルド成果物、非公開ディレクトリは除外されています。依存関係ファイルは編集できますが、サポート対象外のバージョンはビルド検証時に拒否されます。</string>

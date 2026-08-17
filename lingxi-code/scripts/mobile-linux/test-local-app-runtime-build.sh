@@ -40,13 +40,15 @@ cp -R "${REPO_ROOT}/lingxi-code/local-apps/templates/vite-react-static-v1/." "${
     node -e \"fetch('https://registry.npmjs.org/vite').then(r=>{if(!r.ok)process.exit(1);return r.body.cancel()}).catch(()=>process.exit(1))\"
     for iteration in \$(seq 1 8); do node -e \"process.stdout.write(JSON.stringify({ok:true}))\" >/dev/null; done
     node -e \"const chunks=Array.from({length:16},()=>Buffer.alloc(8*1024*1024,7));if(chunks.reduce((n,b)=>n+b.length,0)!==134217728)process.exit(1)\"
-    npm ci --ignore-scripts --no-audit --no-fund --loglevel=error
-    find node_modules/@rolldown -maxdepth 1 -mindepth 1 -type d -name 'binding-*' ! -name 'binding-linux-arm64-musl' -exec rm -rf {} +
+    npm_config_os=linux npm_config_cpu=arm64 npm_config_libc=musl npm ci --ignore-scripts --no-audit --no-fund --loglevel=error
     test -f node_modules/@rolldown/binding-linux-arm64-musl/rolldown-binding.linux-arm64-musl.node
+    test -f node_modules/lightningcss-linux-arm64-musl/lightningcss.linux-arm64-musl.node
+    test ! -e node_modules/@rolldown/binding-linux-arm64-gnu
+    test ! -e node_modules/lightningcss-linux-arm64-gnu
     test ! -e node_modules/next
     test ! -e node_modules/@next
     NODE_ENV=production node node_modules/vite/bin/vite.js build
-    test -f out/index.html
+    test -f dist/index.html
   "
 
 # `npm ci` ran against the WORKDIR copy, so the frozen-dependency assertion has
@@ -56,9 +58,13 @@ LOCK_SHA_AFTER="$(shasum -a 256 "${WORKDIR}/package-lock.json" | awk '{print $1}
 PKG_SHA_AFTER="$(shasum -a 256 "${WORKDIR}/package.json" | awk '{print $1}')"
 test "${LOCK_SHA_BEFORE}" = "${LOCK_SHA_AFTER}"
 test "${PKG_SHA_BEFORE}" = "${PKG_SHA_AFTER}"
-test -f "${WORKDIR}/out/index.html"
+test -f "${WORKDIR}/dist/index.html"
 test -f "${WORKDIR}/node_modules/@rolldown/binding-linux-arm64-musl/rolldown-binding.linux-arm64-musl.node"
+test -f "${WORKDIR}/node_modules/lightningcss-linux-arm64-musl/lightningcss.linux-arm64-musl.node"
+test ! -e "${WORKDIR}/node_modules/@rolldown/binding-linux-arm64-gnu"
+test ! -e "${WORKDIR}/node_modules/lightningcss-linux-arm64-gnu"
 test ! -e "${WORKDIR}/node_modules/@rolldown/binding-linux-x64-musl"
+test ! -e "${WORKDIR}/node_modules/lightningcss-linux-x64-musl"
 test ! -e "${WORKDIR}/node_modules/next"
 test ! -e "${WORKDIR}/node_modules/@next"
 
@@ -69,7 +75,9 @@ CONTAINER_RUNTIME="${CONTAINER_RUNTIME}" "${BUILD_SCRIPT}" --platform ios --vari
 test -f "${OUTPUT_ROOT}/runtime-manifest.json"
 test -f "${OUTPUT_ROOT}/node_modules/vite/bin/vite.js"
 test -f "${OUTPUT_ROOT}/node_modules/@rolldown/binding-linux-arm64-musl/rolldown-binding.linux-arm64-musl.node"
+test -f "${OUTPUT_ROOT}/node_modules/lightningcss-linux-arm64-musl/lightningcss.linux-arm64-musl.node"
 test ! -e "${OUTPUT_ROOT}/node_modules/@rolldown/binding-linux-x64-musl"
+test ! -e "${OUTPUT_ROOT}/node_modules/lightningcss-linux-x64-musl"
 test ! -e "${OUTPUT_ROOT}/node_modules/next"
 test ! -e "${OUTPUT_ROOT}/node_modules/@next"
 test ! -w "${OUTPUT_ROOT}/node_modules/vite/package.json"
@@ -82,7 +90,37 @@ import sys
 root = pathlib.Path(sys.argv[1])
 manifest = json.loads((root / "runtime-manifest.json").read_text(encoding="utf-8"))
 assert manifest["resolved_rolldown_bindings"] == ["@rolldown/binding-linux-arm64-musl"], manifest
+assert manifest["resolved_lightningcss_bindings"] == ["lightningcss-linux-arm64-musl"], manifest
 assert manifest["read_only"] is True, manifest
+PY
+
+ANDROID_OUTPUT_ROOT="${REPO_ROOT}/clients/android/app/build/local-app-runtime-test-${RANDOM}"
+trap 'chmod -R u+w "${OUTPUT_ROOT}" "${OUTPUT_WRAPPER}" "${WORKDIR}" "${ANDROID_OUTPUT_ROOT}" 2>/dev/null || true; rm -rf "${OUTPUT_ROOT}" "${OUTPUT_WRAPPER}" "${WORKDIR}" "${ANDROID_OUTPUT_ROOT}"' EXIT
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME}" "${BUILD_SCRIPT}" --platform android --variant play --output "${ANDROID_OUTPUT_ROOT}"
+test -f "${ANDROID_OUTPUT_ROOT}/runtime-manifest.json"
+test -f "${ANDROID_OUTPUT_ROOT}/node_modules/@rolldown/binding-linux-arm64-musl/rolldown-binding.linux-arm64-musl.node"
+test -f "${ANDROID_OUTPUT_ROOT}/node_modules/@rolldown/binding-linux-x64-musl/rolldown-binding.linux-x64-musl.node"
+test -f "${ANDROID_OUTPUT_ROOT}/node_modules/lightningcss-linux-arm64-musl/lightningcss.linux-arm64-musl.node"
+test -f "${ANDROID_OUTPUT_ROOT}/node_modules/lightningcss-linux-x64-musl/lightningcss.linux-x64-musl.node"
+test ! -e "${ANDROID_OUTPUT_ROOT}/node_modules/@rolldown/binding-linux-arm64-gnu"
+test ! -e "${ANDROID_OUTPUT_ROOT}/node_modules/@rolldown/binding-linux-x64-gnu"
+test ! -e "${ANDROID_OUTPUT_ROOT}/node_modules/lightningcss-linux-arm64-gnu"
+test ! -e "${ANDROID_OUTPUT_ROOT}/node_modules/lightningcss-linux-x64-gnu"
+python3 - "${ANDROID_OUTPUT_ROOT}" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads((root / "runtime-manifest.json").read_text(encoding="utf-8"))
+assert manifest["resolved_rolldown_bindings"] == [
+    "@rolldown/binding-linux-arm64-musl",
+    "@rolldown/binding-linux-x64-musl",
+], manifest
+assert manifest["resolved_lightningcss_bindings"] == [
+    "lightningcss-linux-arm64-musl",
+    "lightningcss-linux-x64-musl",
+], manifest
 PY
 
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME}" "${IOS_BUILD_SCRIPT}" --variant store --output "${OUTPUT_WRAPPER}"

@@ -31,13 +31,12 @@ const DEEP_RESEARCH: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
 /// The v3 local-app build segment: the `create-local-app` skill has the agent
 /// gather requirements interactively in the MAIN session (AskUserQuestion),
 /// then hand the confirmed spec to this workflow, which runs the deterministic
-/// design/dependency/generate/build/verify sequence. Deliberately
+/// design/generate/build/verify sequence. Deliberately
 /// model-invocable (`manual_only: false`): the skill instructs the model to
 /// call it by name.
 const LOCAL_APP_BUILD: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
     name: "local-app-build",
-    description:
-        "Design, dependency-check, generate, offline-build, and verify a confirmed local app.",
+    description: "Design, generate, offline-build, and verify a confirmed local app.",
     script: include_str!("local_app_build_workflow.js"),
     manual_only: false,
 };
@@ -103,19 +102,18 @@ mod tests {
         );
         workflow::validate_meta(descriptor.script).expect("valid built-in metadata");
         workflow::check_determinism(descriptor.script).expect("deterministic built-in");
-        for phase in ["Design", "Dependencies", "Generate", "Build", "Verify"] {
+        for phase in ["Design", "Generate", "Build", "Verify"] {
             assert!(
                 descriptor.script.contains(&format!("title: '{phase}'")),
                 "missing {phase} phase"
             );
         }
-        let phase_positions =
-            ["Design", "Dependencies", "Generate", "Build", "Verify"].map(|phase| {
-                descriptor
-                    .script
-                    .find(&format!("title: '{phase}'"))
-                    .expect("phase position")
-            });
+        let phase_positions = ["Design", "Generate", "Build", "Verify"].map(|phase| {
+            descriptor
+                .script
+                .find(&format!("title: '{phase}'"))
+                .expect("phase position")
+        });
         assert!(
             phase_positions.windows(2).all(|pair| pair[0] < pair[1]),
             "local-app phases must stay ordered"
@@ -132,13 +130,11 @@ mod tests {
             "app/, src/, components/, lib/, styles/, public/",
             "lib/lingxi-bridge.js",
             "window.lingxi.v1",
-            "existing Shell tool",
+            "Do not run npm, npx, node",
+            "package.json, package-lock.json, index.html, vite.config.*",
+            "host has already scaffolded the workspace",
+            "fixed by the host-owned scaffold",
             "existing Git capability",
-            "npm install",
-            "npm uninstall",
-            "npm ci",
-            "package-lock digest",
-            "network/command approval",
             "mcp__local_apps__build",
             "mcp__local_apps__manage_runtime",
             "two allowed repair rounds",
@@ -146,11 +142,6 @@ mod tests {
             "Browser is also required for mobile-sized viewports",
             "inspect_ui/act_on_ui/read_logs",
             "degraded_verification",
-            "npm create vite@latest . -- --template react --no-interactive",
-            "npm create vite@latest . -- --template react-ts --no-interactive",
-            ".lingxi/vite-fallback/",
-            "offline-fallback",
-            "scaffold_mode",
             "records[].document",
             "mcp__local_apps__query_data",
             "localStorage must never be authoritative",
@@ -186,9 +177,7 @@ mod tests {
                     .map(|prompt| {
                         captured_prompts.borrow_mut().push(prompt.clone());
                         if prompt.contains("Act as the local app design lead") {
-                            r#"{"targets":[{"os":"android","form_factor":"phone"}],"scaffold_mode":"existing","template":"react-ts","summary":"designed"}"#.to_string()
-                        } else if prompt.contains("Manage dependencies for local app") {
-                            "dependencies-ready".to_string()
+                            r#"{"targets":[{"os":"android","form_factor":"phone"}],"summary":"designed"}"#.to_string()
                         } else if prompt.contains("Generate the complete React implementation") {
                             "generated".to_string()
                         } else if prompt.contains("Build local app") {
@@ -214,8 +203,8 @@ mod tests {
                 .expect("workflow returns JSON");
         assert_eq!(result["ok"], true);
         assert_eq!(result["preview_url"], "http://preview/first");
-        assert_eq!(result["scaffold_mode"], "existing");
-        assert_eq!(result["template"], "react-ts");
+        assert!(result.get("scaffold_mode").is_none());
+        assert!(result.get("template").is_none());
         assert_eq!(result["repair_rounds"], 0);
         assert_eq!(
             prompts_seen
@@ -246,9 +235,7 @@ mod tests {
                             .borrow_mut()
                             .push((prompt.clone(), option.clone()));
                         if prompt.contains("Act as the local app design lead") {
-                            r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"scaffold_mode":"official-cli","template":"react","summary":"designed"}"#.to_string()
-                        } else if prompt.contains("Manage dependencies for local app") {
-                            "dependencies-ready".to_string()
+                            r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"summary":"designed"}"#.to_string()
                         } else if prompt.contains("Generate the complete React implementation") {
                             "generated".to_string()
                         } else if prompt.contains("Build local app") {
@@ -287,8 +274,8 @@ mod tests {
                 .expect("workflow returns JSON");
         assert_eq!(result["ok"], true);
         assert_eq!(result["preview_url"], "http://preview/repaired");
-        assert_eq!(result["scaffold_mode"], "official-cli");
-        assert_eq!(result["template"], "react");
+        assert!(result.get("scaffold_mode").is_none());
+        assert!(result.get("template").is_none());
         assert_eq!(result["repair_rounds"], 1);
         assert_eq!(verification_round.get(), 2);
 
@@ -342,9 +329,7 @@ mod tests {
                     .iter()
                     .map(|prompt| {
                         if prompt.contains("Act as the local app design lead") {
-                            r#"{"targets":[{"os":"android","form_factor":"phone"}],"scaffold_mode":"existing","template":"react","summary":"designed"}"#.to_string()
-                        } else if prompt.contains("Manage dependencies for local app") {
-                            "dependencies-ready".to_string()
+                            r#"{"targets":[{"os":"android","form_factor":"phone"}],"summary":"designed"}"#.to_string()
                         } else if prompt.contains("Generate the complete React implementation") {
                             "generated".to_string()
                         } else if prompt.contains("Build local app") {
@@ -398,8 +383,6 @@ mod tests {
     fn local_app_reply(prompt: &str, dead: &str) -> String {
         let anchor = if prompt.contains("Act as the local app design lead") {
             "design"
-        } else if prompt.contains("Manage dependencies for local app") {
-            "dependencies"
         } else if prompt.contains("Generate the complete React implementation") {
             "generate"
         } else if prompt.contains("Build local app") {
@@ -417,7 +400,10 @@ mod tests {
             return workflow::WF_NULL_SENTINEL.to_string();
         }
         match anchor {
-            "design" => r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"scaffold_mode":"existing","template":"react","summary":"designed"}"#.to_string(),
+            "design" => {
+                r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"summary":"designed"}"#
+                    .to_string()
+            }
             "build" | "rebuild" => r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#.to_string(),
             "verify" => r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string(),
             other => other.to_string(),
@@ -432,7 +418,6 @@ mod tests {
     fn local_app_build_throws_when_any_phase_agent_dies() {
         for (dead, expected) in [
             ("design", "the design step"),
-            ("dependencies", "the dependency step"),
             ("generate", "the source-generation step"),
             ("build", "initial build"),
         ] {

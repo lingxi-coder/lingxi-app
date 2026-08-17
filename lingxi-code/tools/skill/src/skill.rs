@@ -595,11 +595,21 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
     bus.log_event(SKILL_FAILED, md).await;
 }
 
-/// Trim `skill` and strip a single leading `/` (TS `:356`, `:366-372`).
+/// Trim `skill` and strip one invocation prefix (`/` or `$`).
+///
+/// The canonical `Skill` tool contract passes the bare name, but the mobile
+/// local-app coordinator describes specialist skills using the `$name`
+/// shorthand. Normalize that shorthand at the tool boundary so the model's
+/// invocation syntax cannot turn an otherwise registered skill into an
+/// `Unknown skill` lookup.
 /// Returns the normalized command name (may be empty if input was blank).
 fn normalize_skill_name(skill: &str) -> String {
     let trimmed = skill.trim();
-    trimmed.strip_prefix('/').unwrap_or(trimmed).to_string()
+    trimmed
+        .strip_prefix('/')
+        .or_else(|| trimmed.strip_prefix('$'))
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 /// Sanitize a normalized skill name for the `SKILL_INVOKED` telemetry

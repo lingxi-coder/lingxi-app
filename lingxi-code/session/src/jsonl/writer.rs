@@ -355,6 +355,24 @@ impl JsonlWriter {
         self.append_side_record(&value).await
     }
 
+    /// Persist the active permission mode for this transcript's session.
+    ///
+    /// The mode is session metadata, not a user-wide default: reopening this
+    /// transcript restores its last selected mode without changing other
+    /// sessions. The active writer path is the source of the bare session UUID.
+    pub async fn append_permission_mode(&self, permission_mode: &str) -> Result<(), WriterError> {
+        let Some(session_id) = self.session_id_from_path() else {
+            return Ok(());
+        };
+        self.metadata_state.lock().await.permission_mode = Some(permission_mode.to_string());
+        let value = serde_json::json!({
+            "type": "permission-mode",
+            "permissionMode": permission_mode,
+            "sessionId": session_id,
+        });
+        self.append_side_record(&value).await
+    }
+
     /// Append an `agent-setting` metadata line for `session_id` — the persisted
     /// main-thread `--agent` selection (`agentSetting` = the agent's `agentType`)
     /// so a later `--resume` (with no `--agent`) can re-adopt it. 1:1 with
@@ -788,6 +806,32 @@ mod tests {
         assert_eq!(value["customTitle"], "新对话");
         assert_eq!(value["sessionId"], session_id);
         assert_eq!(value["mobileEmptySession"], 1);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn append_permission_mode_round_trips_through_transcript_metadata() {
+        let tmp = std::env::temp_dir()
+            .join(format!("lingxi-writer-permission-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let session_path = tmp.join(format!("{session_id}.jsonl"));
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(session_path.clone(), fs);
+
+        writer
+            .append_permission_mode("bypassPermissions")
+            .await
+            .expect("append permission mode");
+
+        let raw = std::fs::read_to_string(&session_path).expect("read back");
+        let routed = crate::jsonl::route_lines(&raw);
+        assert_eq!(
+            routed.permission_modes.get(session_id).map(String::as_str),
+            Some("bypassPermissions")
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

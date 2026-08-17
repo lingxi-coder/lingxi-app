@@ -7,7 +7,8 @@ TOOL="${SCRIPT_DIR}/verify-local-app-supply-chain.py"
 TEMPLATE="${REPO_ROOT}/lingxi-code/local-apps/templates/vite-react-static-v1"
 TEMP_ROOT="$(mktemp -d)"
 STAGED_OUTPUT="${REPO_ROOT}/clients/android/app/build/local-app-supply-chain-test-${RANDOM}"
-trap 'chmod -R u+w "${TEMP_ROOT}" "${STAGED_OUTPUT}" 2>/dev/null || true; rm -rf "${TEMP_ROOT}" "${STAGED_OUTPUT}"' EXIT
+IOS_STAGED_OUTPUT="${REPO_ROOT}/clients/ios/build/local-app-supply-chain-test-${RANDOM}"
+trap 'chmod -R u+w "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}" 2>/dev/null || true; rm -rf "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}"' EXIT
 
 python3 "${TOOL}" --repo-root "${REPO_ROOT}"
 
@@ -17,12 +18,24 @@ import pathlib
 import sys
 
 policy = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-package_policy = policy["package_manager_policy"]
-assert package_policy["npm_family_present"] is True
-assert package_policy["npm_scope"] == "app_workspace_shell_approval"
-assert package_policy["generation_jobs"] is False
-assert package_policy["mcp"] is False
 assert "next_executable" not in policy
+assert "node_modules_mount" not in policy
+assert "scaffold" not in policy
+assert "package_manager_policy" not in policy
+assert policy["vite_executable"] == "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js"
+assert policy["dependency_snapshot"] == {
+    "source": "bundled:local-app-runtime/node_modules",
+    "materialize_into": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules",
+    "guest_mount": "forbidden",
+    "selection_policy": "verified_runtime_only",
+}
+assert policy["build_mount"] == {
+    "kind": "LocalAppBuild",
+    "count": 1,
+    "host_path_policy": "staging_or_store_root",
+    "guest_path": "/var/lingxi/local-app-build/{app_id}/{channel}/project",
+    "writable": True,
+}
 commands = policy["commands"]
 assert sorted(commands) == ["vite_static_build"]
 command = commands["vite_static_build"]
@@ -30,6 +43,22 @@ assert command["network_policy"] == "disabled"
 assert command["memory_limit_policy"] == "physical_memory_tier"
 assert "memory_limit_bytes" not in command
 assert command["argv"][1] == "--max-old-space-size={build_node_old_space_size_mib}"
+assert command["argv"][2] == "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js"
+assert command["argv"][-4:] == ["build", "--outDir", "dist", "--emptyOutDir"]
+assert command["cwd"] == "/var/lingxi/local-app-build/{app_id}/{channel}/project"
+assert command["output_dir"] == "dist"
+assert command["environment"] == {
+    "NODE_ENV": "production",
+    "HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/home",
+    "TMPDIR": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/tmp",
+    "TMP": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/tmp",
+    "TEMP": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/tmp",
+    "XDG_CACHE_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-cache",
+    "XDG_CONFIG_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-config",
+    "XDG_DATA_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-data",
+    "NPM_CONFIG_CACHE": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/npm-cache",
+    "npm_config_cache": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/npm-cache",
+}
 limits = policy["limits"]
 assert limits["build_node_old_space_percent"] == 75
 assert limits["build_memory_tiers"] == [
@@ -62,6 +91,8 @@ assert ish_policy["runtime_memory_limit_bytes"] == 838860800
 assert "memory_limit_bytes" not in ish_policy
 assert ish_policy["watchdog_interval_ms"] == 250
 assert ish_policy["memory_accounting"] == "guest_backed_pages_by_execution_context"
+assert ish_policy["local_app_build_mount_layout"] == "single_root_materialized_snapshot"
+assert ish_policy["nested_bind_mount_resolution"] == "longest_guest_prefix"
 PY
 
 cp -R "${TEMPLATE}" "${TEMP_ROOT}/vite-compressed-size"
@@ -115,7 +146,7 @@ if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/depende
 fi
 
 cp -R "${TEMPLATE}" "${TEMP_ROOT}/network-bypass"
-printf '\nfetch("https://example.com");\n' >> "${TEMP_ROOT}/network-bypass/app/page.jsx"
+printf '\nfetch("https://example.com");\n' >> "${TEMP_ROOT}/network-bypass/app/main.jsx"
 if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/network-bypass"; then
   echo "expected direct network access to fail validation" >&2
   exit 1
@@ -166,8 +197,12 @@ mkdir -p \
   "${NODE_MODULES}/vite/bin" \
   "${NODE_MODULES}/react" \
   "${NODE_MODULES}/react-dom" \
+  "${NODE_MODULES}/rolldown" \
   "${NODE_MODULES}/@rolldown/binding-linux-arm64-musl" \
-  "${NODE_MODULES}/@rolldown/binding-linux-x64-musl"
+  "${NODE_MODULES}/@rolldown/binding-linux-x64-musl" \
+  "${NODE_MODULES}/lightningcss" \
+  "${NODE_MODULES}/lightningcss-linux-arm64-musl" \
+  "${NODE_MODULES}/lightningcss-linux-x64-musl"
 python3 - "${NODE_MODULES}" <<'PY'
 import json
 import pathlib
@@ -178,8 +213,12 @@ packages = {
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "vite": "8.2.1",
+    "rolldown": "1.2.3",
+    "lightningcss": "1.33.0",
     "@rolldown/binding-linux-arm64-musl": "1.2.3",
     "@rolldown/binding-linux-x64-musl": "1.2.3",
+    "lightningcss-linux-arm64-musl": "1.33.0",
+    "lightningcss-linux-x64-musl": "1.33.0",
 }
 for name, version in packages.items():
     package = root.joinpath(*name.split("/"))
@@ -190,6 +229,8 @@ for name, version in packages.items():
 (root / "vite/bin/vite.js").write_text("#!/usr/bin/env node\n", encoding="utf-8")
 (root / "@rolldown/binding-linux-arm64-musl/rolldown-binding.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "@rolldown/binding-linux-x64-musl/rolldown-binding.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
+(root / "lightningcss-linux-arm64-musl/lightningcss.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
+(root / "lightningcss-linux-x64-musl/lightningcss.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 PY
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \
@@ -200,6 +241,21 @@ python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
 test -f "${STAGED_OUTPUT}/runtime-manifest.json"
 test ! -w "${STAGED_OUTPUT}/node_modules/vite/package.json"
 test ! -e "${STAGED_OUTPUT}/node_modules/@next"
+python3 - "${STAGED_OUTPUT}/runtime-manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert manifest["resolved_rolldown_bindings"] == [
+    "@rolldown/binding-linux-arm64-musl",
+    "@rolldown/binding-linux-x64-musl",
+], manifest
+assert manifest["resolved_lightningcss_bindings"] == [
+    "lightningcss-linux-arm64-musl",
+    "lightningcss-linux-x64-musl",
+], manifest
+PY
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${NODE_MODULES}" \
@@ -237,6 +293,27 @@ if python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   echo "expected staged runtime to reject Next/SWC drift" >&2
   exit 1
 fi
+
+IOS_NODE_MODULES="${TEMP_ROOT}/node_modules-ios"
+cp -R "${NODE_MODULES}" "${IOS_NODE_MODULES}"
+rm -rf \
+  "${IOS_NODE_MODULES}/@rolldown/binding-linux-x64-musl" \
+  "${IOS_NODE_MODULES}/lightningcss-linux-x64-musl"
+python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+  --repo-root "${REPO_ROOT}" \
+  --node-modules "${IOS_NODE_MODULES}" \
+  --output "${IOS_STAGED_OUTPUT}" \
+  --platform ios \
+  --variant store
+python3 - "${IOS_STAGED_OUTPUT}/runtime-manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert manifest["resolved_rolldown_bindings"] == ["@rolldown/binding-linux-arm64-musl"], manifest
+assert manifest["resolved_lightningcss_bindings"] == ["lightningcss-linux-arm64-musl"], manifest
+PY
 
 # The iOS bundle install step. The staged tree is 0555/0444, so a second build
 # cannot `rm -rf` the previous copy without first restoring write permission —

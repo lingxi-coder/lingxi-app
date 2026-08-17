@@ -104,8 +104,7 @@ impl Drop for LlmInflightGuard {
     }
 }
 
-const REASON_LLM: &str =
-    "应用请求调用你配置的 AI 模型来实现应用内功能。调用走你当前选择的模型与密钥，会消耗你的模型用量/费用。";
+const REASON_LLM: &str = "应用请求调用你配置的 AI 模型来实现应用内功能。调用走你当前选择的模型与密钥，会消耗你的模型用量/费用。";
 
 fn invalid(message: impl Into<String>) -> BridgeFailure {
     BridgeFailure::coded("llm_request_invalid", message.into())
@@ -206,7 +205,7 @@ impl LocalAppsHostBroker {
                 other => {
                     return Err(invalid(format!(
                         "message role must be user|assistant, got {other:?}"
-                    )))
+                    )));
                 }
             };
             let content = match raw.get("content") {
@@ -388,7 +387,7 @@ impl LocalAppsHostBroker {
         let outcome = match outcome {
             Err(_) => return Err(BridgeFailure::coded("timeout", "the model call timed out")),
             Ok(Err(error)) => {
-                return Err(BridgeFailure::coded("llm_unavailable", error.to_string()))
+                return Err(BridgeFailure::coded("llm_unavailable", error.to_string()));
             }
             Ok(Ok(outcome)) => outcome,
         };

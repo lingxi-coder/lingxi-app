@@ -11,12 +11,11 @@ struct PermissionModePage: View {
         RadioOption(value: "plan", label: "计划模式", sub: "允许分析和读取，修改操作需要确认。"),
         RadioOption(value: "auto", label: "自动（Auto）", sub: "由模型/Provider 安全门控决定是否自动放行。"),
         RadioOption(value: "dontAsk", label: "不询问（Dont Ask）", sub: "不弹窗；未明确允许的操作直接拒绝。"),
-        RadioOption(value: "bypassPermissions", label: "绕过权限（Bypass）", sub: "跳过大部分权限检查，仅在确认后使用。"),
     ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SettingsSection(label: "权限模式", footer: "自动模式会按当前模型和策略安全降级；auto-model 不是有效模式。") {
+            SettingsSection(label: "权限模式", footer: "自动模式会按当前模型和策略安全降级；当前选择会随会话保存。完整访问仅能从会话控制中确认启用。") {
                 RadioList(options: options, value: Binding(
                     get: { store.permissionMode },
                     set: { mode in

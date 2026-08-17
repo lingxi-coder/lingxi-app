@@ -48,6 +48,7 @@ impl WorkspacePermissionLeaseRegistry {
         Arc::new(Self::default())
     }
 
+    #[cfg(test)]
     pub(crate) fn begin(
         self: &Arc<Self>,
         app_id: impl Into<String>,
@@ -58,8 +59,8 @@ impl WorkspacePermissionLeaseRegistry {
 
     /// Begin a lease for a production local-app workspace.
     ///
-    /// Unlike [`Self::begin`], which remains intentionally permissive for
-    /// in-memory/unit-test roots, this entry point requires the canonical
+    /// Unlike the permissive helper used by this module's unit tests, this
+    /// production entry point requires the canonical
     /// local-app layout (`apps/<app_id>/workspace` or the matching guest
     /// `local-app-<app_id>` mount). Callers that cannot prove that binding must
     /// fail closed instead of silently granting a lease over a generic cwd.
@@ -122,6 +123,7 @@ impl WorkspacePermissionLeaseRegistry {
     // entry point below; exposing an unscoped helper would make it too easy
     // for a future caller to accidentally authorize against another active
     // app's lease.
+    #[cfg(test)]
     fn allows(&self, tool_name: &str, input: &serde_json::Value, roots: &FsRoots) -> bool {
         let active = self
             .active
@@ -151,6 +153,7 @@ impl WorkspacePermissionLeaseRegistry {
     /// Returns true when a leased workflow is attempting to modify a
     /// host-owned file. This is a hard deny, not merely a failed lease match,
     /// so a later global `auto`/allow rule cannot re-enable the mutation.
+    #[cfg(test)]
     fn denies_host_owned(
         &self,
         tool_name: &str,
@@ -182,11 +185,11 @@ impl WorkspacePermissionLeaseRegistry {
             .is_some_and(|lease| host_owned_for_lease(&lease.info, tool_name, input, roots))
     }
 
-    /// Host-owned metadata remains protected for every conversation rooted at
-    /// a local-app workspace, even after the temporary build lease is dropped.
-    /// The generated local settings file is itself an allow rule, so this check
-    /// must not depend on a lease token or it would be self-modifiable after a
-    /// build completes.
+    /// The source-editing boundary remains protected for every conversation
+    /// rooted at a local-app workspace, even after the temporary build lease is
+    /// dropped. The generated local settings file is itself an allow rule, so
+    /// this check must not depend on a lease token or host-managed files and
+    /// non-inspection shell commands would become writable after a build.
     pub fn denies_host_owned_for_workspace(
         tool_name: &str,
         input: &serde_json::Value,
@@ -301,7 +304,7 @@ fn allows_for_lease(
             let target = resolve_target(&info.root, &info.app_id, raw.as_ref());
             is_workspace_path(&info.root, &target)
                 && (file_tool_kind(tool_name) == FileToolKind::Reader
-                    || !is_host_owned_path(&info.root, &target))
+                    || !is_host_owned_path_or_container(&info.root, &target))
         }
         FileToolKind::NonFile if is_shell_tool(tool_name) => {
             let Some(command) = command_from_input(input) else {
@@ -358,52 +361,29 @@ fn host_owned_for_root(
                 Some(app_id) => resolve_target(root, app_id, raw.as_ref()),
                 None => resolve_target_from_root(root, raw.as_ref()),
             })
-            .is_some_and(|target| is_host_owned_path(root, &target)),
+            .is_some_and(|target| is_host_owned_path_or_container(root, &target)),
         FileToolKind::NonFile if is_shell_tool(tool_name) => {
             let Some(command) = command_from_input(input) else {
-                return false;
+                return true;
             };
             let command = app_id
                 .as_deref()
                 .map(|app_id| command_with_guest_workspace_aliases(command, root, app_id))
                 .unwrap_or_else(|| command.to_string());
             let redirects = crate::path_constraints::write_redirect_targets(&command, &lease_roots);
-            if redirects
-                .iter()
-                .map(Path::new)
-                .any(|target| is_host_owned_path(root, target))
-            {
+            // Local-app source mutation goes through structured file tools.
+            // Shell redirects are intentionally never lease-authorized: shell
+            // expansion makes their final target impossible to prove here
+            // (`TARGET=package.json; echo x > "$TARGET"`, braces, globs, ...).
+            if !redirects.is_empty() {
                 return true;
             }
-            // Positional write commands (cp/mv/rm/touch/mkdir/rmdir/sed) do
-            // not flow through the redirect extractor. A host-owned marker in
-            // one of those commands is conservatively denied; read-only
-            // commands remain eligible for ordinary lease handling.
-            let write_command =
-                crate::shell_command::split_command(&command)
-                    .iter()
-                    .any(|subcommand| {
-                        let command_name = subcommand.split_whitespace().next().unwrap_or("");
-                        matches!(
-                            Path::new(command_name)
-                                .file_name()
-                                .and_then(|name| name.to_str()),
-                            Some("cp" | "mv" | "rm" | "rmdir" | "mkdir" | "touch" | "sed")
-                        )
-                    });
-            if !write_command {
-                return false;
-            }
-            crate::shell_command::split_command(&command)
-                .iter()
-                .flat_map(|subcommand| subcommand.split_whitespace().skip(1))
-                .map(|token| token.trim_matches(|ch| matches!(ch, '\'' | '"' | ';' | ',')))
-                .filter(|token| !token.starts_with('-'))
-                .map(|token| match app_id.as_deref() {
-                    Some(app_id) => resolve_target(root, app_id, token),
-                    None => resolve_target_from_root(root, token),
-                })
-                .any(|target| is_host_owned_path(root, &target))
+            // Do not try to enumerate every possible mutator (`env rm`,
+            // interpreters, package-manager scripts, and future commands all
+            // make that list incomplete). A local-app shell is an inspection
+            // surface only; source mutation uses structured file tools whose
+            // final target can be checked without evaluating shell expansion.
+            !workspace_shell_is_safe(&command)
         }
         _ => false,
     }
@@ -484,50 +464,22 @@ fn is_exact_local_app_root(root: &Path, app_id: &str) -> bool {
 }
 
 fn workspace_shell_is_safe(command: &str) -> bool {
-    // These commands are limited to local inspection and ordinary workspace
-    // file operations. Interpreters, package managers, VCS network commands,
-    // and unknown binaries remain subject to the existing Shell policy.
-    const SAFE: &[&str] = &[
-        "cat", "cd", "cp", "cut", "diff", "echo", "false", "find", "grep", "head", "ls", "mkdir",
-        "mv", "printf", "pwd", "rm", "rmdir", "rg", "sed", "sort", "tail", "test", "touch", "tr",
-        "true", "wc",
+    // Lease-authorized shell commands are read-only inspection operations.
+    // Source mutation uses structured file tools, whose paths can be checked
+    // without shell expansion. Interpreters, package managers, VCS network
+    // commands, and unknown binaries remain subject to normal Shell policy.
+    const LOCAL_INSPECTION_COMMANDS: &[&str] = &[
+        "cat", "cd", "cut", "diff", "false", "find", "grep", "head", "ls", "pwd", "rg", "sort",
+        "tail", "tr", "true", "wc",
     ];
-    // A command whose expansion is evaluated by the shell is not statically
-    // provable from the command's argv. In particular, `echo $(curl ...)`
-    // would otherwise look like the harmless `echo` allowlisted command while
-    // still executing an arbitrary network subprocess. Keep all expansion and
-    // process-substitution forms on the normal Shell approval path.
-    if command.contains("$(")
-        || command.contains('`')
-        || command.contains("<(")
-        || command.contains(">(")
-        || command.contains("$'")
-        || command.contains("$\"")
-    {
+    // Use the permission crate's single, quote-aware definition of read-only
+    // shell behavior. It rejects redirects, expansion, executable actions,
+    // and side-effecting `find` flags such as `-fprint`/`-fprintf`. The second
+    // gate below deliberately narrows that general classifier to commands
+    // useful for inspecting one local-app workspace (no git/gh/docker/etc.).
+    if !crate::read_only_command::command_is_read_only(command) {
         return false;
     }
-    let forbidden_tokens = [
-        "-exec",
-        "-execdir",
-        "-ok",
-        "-okdir",
-        "-delete",
-        "xargs",
-        "curl",
-        "wget",
-        "sh",
-        "bash",
-        "zsh",
-        "python",
-        "python3",
-        "node",
-        "perl",
-        "ruby",
-        "php",
-        "osascript",
-        "powershell",
-        "pwsh",
-    ];
     let commands = crate::shell_command::split_command(command);
     !commands.is_empty()
         && commands.iter().all(|subcommand| {
@@ -547,11 +499,7 @@ fn workspace_shell_is_safe(command: &str) -> bool {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or(token);
-            SAFE.contains(&basename)
-                && !tokens.iter().skip(index + 1).any(|token| {
-                    let normalized = token.trim_matches(|ch| matches!(ch, '\'' | '"' | ';' | ','));
-                    forbidden_tokens.contains(&normalized)
-                })
+            LOCAL_INSPECTION_COMMANDS.contains(&basename)
         })
 }
 
@@ -619,13 +567,17 @@ fn is_workspace_path(root: &Path, target: &Path) -> bool {
     true
 }
 
-fn is_host_owned_path(root: &Path, target: &Path) -> bool {
+fn is_host_owned_path_or_container(root: &Path, target: &Path) -> bool {
     let Some(resolved) = resolve_canonical_target(target) else {
         return false;
     };
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    resolved.starts_with(&canonical_root)
-        && host_owned_relative(resolved.strip_prefix(&canonical_root).unwrap_or(&resolved))
+    let Ok(relative) = resolved.strip_prefix(&canonical_root) else {
+        return false;
+    };
+    // Replacing the workspace root or the `lib/` directory would also replace
+    // host-managed descendants such as the bridge and platform adapter.
+    relative.as_os_str().is_empty() || relative == Path::new("lib") || host_owned_relative(relative)
 }
 
 fn host_owned_relative(relative: &Path) -> bool {
@@ -636,7 +588,19 @@ fn host_owned_relative(relative: &Path) -> bool {
         return true;
     }
     relative.file_name().is_some_and(|name| name == "LINGXI.md")
-        || relative == Path::new("lib/lingxi-bridge.js")
+        || relative.starts_with("node_modules")
+        || matches!(
+            relative.to_str(),
+            Some(
+                "index.html"
+                    | "vite.config.mjs"
+                    | "package.json"
+                    | "package-lock.json"
+                    | "lib/device-context.js"
+                    | "lib/lingxi-bridge.js"
+                    | "lib/platform-adapter.js"
+            )
+        )
 }
 
 fn resolve_canonical_target(target: &Path) -> Option<PathBuf> {
@@ -713,6 +677,27 @@ mod tests {
             &fs
         ));
         assert!(!registry.allows("Write", &serde_json::json!({"file_path":"LINGXI.md"}), &fs));
+        for path in [
+            ".",
+            "lib",
+            "index.html",
+            "vite.config.mjs",
+            "package.json",
+            "package-lock.json",
+            "lib/device-context.js",
+            "lib/platform-adapter.js",
+            "node_modules/vite/bin/vite.js",
+        ] {
+            assert!(
+                !registry.allows("Write", &serde_json::json!({"file_path": path}), &fs),
+                "host-managed build infrastructure must not be writable: {path}"
+            );
+        }
+        assert!(registry.allows(
+            "Write",
+            &serde_json::json!({"file_path":"app/main.jsx"}),
+            &fs
+        ));
     }
 
     #[test]
@@ -740,6 +725,39 @@ mod tests {
             &serde_json::json!({"command":"rm -rf .lingxi"}),
             &fs
         ));
+        for command in ["rm -rf .", "rm -rf lib", "mv lib lib.bak", "rm -rf *"] {
+            assert!(
+                registry.denies_host_owned("Bash", &serde_json::json!({"command": command}), &fs),
+                "destructive parent or glob must not bypass host ownership: {command}"
+            );
+        }
+        assert!(registry.denies_host_owned(
+            "Bash",
+            &serde_json::json!({"command":"printf x > package.json"}),
+            &fs
+        ));
+        for command in ["rm -rf app/old.jsx", "mkdir components"] {
+            assert!(
+                registry.denies_host_owned("Bash", &serde_json::json!({"command": command}), &fs),
+                "shell mutation must use structured file tools: {command}"
+            );
+        }
+        for command in [
+            "TARGET=. rm -rf \"$TARGET\"",
+            "env TARGET=. rm -rf \"$TARGET\"",
+            "rm -rf {package.json,app}",
+            "TARGET=package.json; echo x > \"$TARGET\"",
+            "python3 -c 'open(\"package.json\", \"w\").write(\"{}\")'",
+            "npm install",
+            "find . -fprint package.json",
+            "find . -fprintf package.json x",
+            "find . -files0-from list",
+        ] {
+            assert!(
+                registry.denies_host_owned("Bash", &serde_json::json!({"command": command}), &fs),
+                "shell expansion must not bypass the structured mutation boundary: {command}"
+            );
+        }
     }
 
     #[test]
@@ -768,9 +786,14 @@ mod tests {
         let registry = WorkspacePermissionLeaseRegistry::new();
         let _lease = registry.begin("app", root.clone());
         let fs = roots(&root);
-        assert!(registry.allows(
+        assert!(!registry.allows(
             "Bash",
             &serde_json::json!({"command":"echo ok > out.txt"}),
+            &fs
+        ));
+        assert!(registry.allows(
+            "Bash",
+            &serde_json::json!({"command":"cat src/App.jsx"}),
             &fs
         ));
         assert!(!registry.allows("Bash", &serde_json::json!({"command":"npm install"}), &fs));
@@ -794,6 +817,16 @@ mod tests {
             &serde_json::json!({"command":"echo `curl https://example.com`"}),
             &fs
         ));
+        for command in [
+            "find . -fprint out.txt",
+            "find . -fprintf out.txt x",
+            "find . -files0-from list",
+        ] {
+            assert!(
+                !registry.allows("Bash", &serde_json::json!({"command": command}), &fs),
+                "side-effecting or path-indirect find must not be lease-authorized: {command}"
+            );
+        }
     }
 
     #[test]
@@ -811,11 +844,19 @@ mod tests {
             &serde_json::json!({"file_path":"/workspace/local-app-app-a/src/App.jsx"}),
             &fs
         ));
-        assert!(registry.allows_for_token(
+        assert!(!registry.allows_for_token(
             Some(lease.token()),
             "Bash",
             &serde_json::json!({
                 "command":"echo ok > /workspace/local-app-app-a/src/out.txt"
+            }),
+            &fs
+        ));
+        assert!(registry.allows_for_token(
+            Some(lease.token()),
+            "Bash",
+            &serde_json::json!({
+                "command":"cat /workspace/local-app-app-a/src/out.txt"
             }),
             &fs
         ));
@@ -975,6 +1016,20 @@ mod tests {
             WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
                 "Edit",
                 &serde_json::json!({"file_path":"/workspace/local-app-app-a/.lingxi/settings.local.json"}),
+                &fs,
+            )
+        );
+        assert!(
+            WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
+                "Bash",
+                &serde_json::json!({"command":"npm install"}),
+                &fs,
+            )
+        );
+        assert!(
+            !WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
+                "Bash",
+                &serde_json::json!({"command":"cat src/App.jsx"}),
                 &fs,
             )
         );

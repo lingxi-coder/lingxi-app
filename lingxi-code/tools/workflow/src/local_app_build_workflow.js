@@ -1,9 +1,8 @@
 export const meta = {
   name: 'local-app-build',
-  description: 'Design, dependency-check, generate, offline-build, and verify a confirmed local app.',
+  description: 'Design, generate, offline-build, and verify a confirmed local app.',
   phases: [
     { title: 'Design' },
-    { title: 'Dependencies' },
     { title: 'Generate' },
     { title: 'Build' },
     { title: 'Verify' },
@@ -48,17 +47,16 @@ const modelOptions = requestedModel
 const CONTRACT = [
   'Workspace contract (violations break the app):',
   '- Edit ONLY files under app/, src/, components/, lib/, styles/, public/ in the current workspace.',
-  '- The normal new-app path is the official Vite CLI in a truly empty staging source root: npm create vite@latest . -- --template react --no-interactive. Use the same command with --template react-ts only when the confirmed design explicitly requires TypeScript; never ask the agent to choose a template interactively.',
-  '- The official CLI scaffold runs through the existing Mobile Linux Shell/Bash tool when it is available. Do not add a Vite wrapper, scaffold MCP, or host-side project generator. After scaffold, inject the LingXi bridge, deviceContext, platform adapter, source policy, manifest, and business UI into the app source.',
-  '- Do not overwrite an existing source root. If Shell is unavailable, reuse an existing source tree or use only the repository-verified .lingxi/vite-fallback/ copy as an explicit offline-fallback and report that direct Vite/npm commands did not run. If the official CLI cannot reach the registry, use that same offline-fallback and report the mode and reason; other CLI failures remain failures.',
-  '- Generate only editable source. Do not edit package.json/package-lock.json in the Generate phase; use the existing Shell tool in the Dependencies phase. Preserve the official Vite index.html and vite.config.* unless a confirmed host integration requires a minimal compatible edit. Keep lib/lingxi-bridge.js host-controlled.',
+  '- The host has already scaffolded the workspace and pinned the root build contract before this workflow starts. Do not run npm, npx, node, Vite scaffolds, Shell-driven package installs, or any alternate project generator in any phase.',
+  '- Root infrastructure is locked: do not edit package.json, package-lock.json, index.html, vite.config.*, host metadata under .lingxi/, lib/device-context.js, lib/lingxi-bridge.js, or lib/platform-adapter.js.',
+  '- Generate only editable source and assets. The app must fit the host-scaffolded project shape instead of trying to replace it.',
+  '- Keep Vite\'s official dist/ output default. Do not redirect build.outDir. Workspace dist/ is disposable preview output; the host excludes prior dist/, builds from an isolated project/ root with --outDir dist --emptyOutDir, and serves only build/store/dist/.',
   '- The page reaches host data/network/device ONLY through window.lingxi.v1 and the checked-in bridge adapter.',
   '- Manifest capabilities are exact enums: data_mutation, ui_control, camera, photo_library, microphone, location, notifications, llm, agent_notify. data_mutation is for conversation-agent mutate_data calls; page-owned window.lingxi.v1.data writes do not request it solely for storage.',
   '- For page storage, import queryCollection, upsertRecord, and deleteRecord from the locked bridge. Read app fields from records[].document. Never invent action/create/record mutation shapes.',
   '- localStorage must never be authoritative for a declared collection and must not hide a failed native write. Do not swallow bridge errors; surface a recoverable UI error and keep failed state retryable.',
-  '- Build is offline. Dependencies are changed only by the existing Shell tool in this app workspace, using the exact confirmed specs for npm install/uninstall/ci; Shell keeps its existing network and command approval.',
-  '- Source versioning uses ordinary workspace Git history plus the package-lock digest. Use the existing Git capability when available, otherwise standard git commands through Shell; do not add a second version store or command surface.',
-  '- A checkpoint restore compares the current and target package-lock digest, reports the difference, and uses existing Shell npm ci only when the installed tree needs reconciliation.',
+  '- Dependencies are fixed by the host-owned scaffold plus the host build materialization. This workflow may not add, remove, install, reconcile, or re-lock packages.',
+  '- Source versioning uses ordinary workspace Git history. Use the existing Git capability when available; do not add a second version store or command surface.',
   '- Data collections, network domains, capabilities, target OS, and form factor must be confirmed before source generation.',
 ].join('\n');
 
@@ -76,11 +74,9 @@ const DESIGN_RESULT_SCHEMA = {
         required: ['os', 'form_factor'],
       },
     },
-    scaffold_mode: { enum: ['official-cli', 'offline-fallback', 'existing'] },
-    template: { enum: ['react', 'react-ts'] },
     summary: { type: 'string' },
   },
-  required: ['targets', 'scaffold_mode', 'template', 'summary'],
+  required: ['targets', 'summary'],
 };
 
 const BUILD_RESULT_SCHEMA = {
@@ -160,12 +156,9 @@ const designResult = await agent(
     '',
     'Return a concrete, machine-readable design brief containing targets as an array of {os, form_factor} entries (iPhone, Android phone, iPad/tablet, Android tablet, or desktop), how each target was confirmed or inferred from the fixed Mobile Runtime Environment reminder (Host OS, Device class, Execution target, Launch mode), screen hierarchy, navigation/back behavior, complete UI states, design tokens, and the platform adapter strategy. If multiple targets are requested, describe distinct platform presentations sharing business logic.',
     'Do not treat viewport, safe-area, color-scheme, reduced-motion, or input-mode as prompt facts. Those are dynamic runtime values that the generated app must read from window.lingxi.v1.deviceContext.',
-    'Return template as exactly react or react-ts. Use react-ts only when the confirmed request/design explicitly names TypeScript; otherwise use react.',
-    'For a new app with no package.json, after the design brief is confirmed use the existing Shell tool to scaffold in a truly empty temporary source directory under the app workspace. For the default JavaScript template run exactly: npm create vite@latest . -- --template react --no-interactive. For an explicitly confirmed TypeScript app run exactly: npm create vite@latest . -- --template react-ts --no-interactive. Copy the completed staging contents into the still-empty app source root only after verifying it contains no user source files; never overwrite an existing app.',
-    'Because the app workspace already contains host metadata under .lingxi, the CLI target must be a newly created empty staging directory (for example, staging="$(mktemp -d .lingxi-vite-cli.XXXXXX)" followed by (cd "$staging" && npm create vite@latest . -- --template react --no-interactive)), not the non-empty workspace root. Clean up only that known staging directory after a successful controlled copy.',
-    'If Shell is unavailable, do not invent a replacement CLI path. Reuse an existing source tree or clean the known staging directory, copy .lingxi/vite-fallback/. into the empty source root, and record scaffold_mode=offline-fallback plus the reason that Shell was unavailable. If the registry/network is unavailable, use that same fallback and report the reason. Do not use the fallback for unrelated CLI errors, and do not claim the official CLI ran when it did not. Existing projects with package.json use their existing scaffold and report scaffold_mode=existing.',
+    'Assume the host already scaffolded the workspace and pinned the dependency/runtime contract. Design against the existing project shape; do not request package, template, scaffold, fallback, or toolchain decisions.',
     'If the confirmed brief needs an original bitmap asset (photo, illustration, texture, hero, or background), conditionally detect ImageGen; when ready, record prompt/source/use and generate under public/. If unavailable, ask once whether to configure it or skip, then continue with CSS, gradients, user assets, or a placeholder without treating ImageGen as a hard dependency. Never use ImageGen for ordinary UI icons.',
-    'The CLI scaffold is the only Design-phase source initialization. Do not install packages in this phase; Dependencies owns npm install/npm uninstall/npm ci.',
+    'Do not propose package changes or any root-file edits in the design result. The build root, package graph, and locked infra are host-owned.',
   ].join('\n'),
   {
     ...modelOptions,
@@ -177,37 +170,20 @@ const designResult = await agent(
 );
 const design = requireAgentResult(designResult, 'the design step');
 
-phase('Dependencies');
-const dependenciesResult = await agent(
-  [
-    `Manage dependencies for local app "${appId}" using the confirmed design below.`,
-    JSON.stringify(design),
-    '',
-    'Use the existing Shell tool from the current app workspace first to inspect package.json, package-lock.json, and the installed tree (for example npm ls --depth=0 --json). If Shell is unavailable, stop and report the exact dependency changes that would be required.',
-    'For a freshly scaffolded official Vite project, run ordinary npm install in this same workspace when node_modules is absent or incomplete; the manifest and lockfile remain normal app files. Show any additional exact package specs before installing them.',
-    'If the confirmed design needs packages not already present, show the exact npm package specs before executing them, then use the existing Shell tool in this workspace with npm install -- <exact shell-quoted specs> or npm uninstall -- <exact shell-quoted specs>. Stay within the existing Shell maximum timeout (600000ms). Its existing network/command approval and command logs apply; npm may execute lifecycle scripts as part of the explicitly approved command.',
-    'Optional Tailwind (tailwindcss plus @tailwindcss/vite), Motion (motion imported as motion/react), and Lucide (lucide-react) are ordinary per-app proposals, never implicit dependencies.',
-    'After a checkpoint restore, if package-lock.json differs from the current installed tree, use the same existing Shell tool in this workspace for npm ci. Do not create a wrapper, package-management abstraction, package store, SBOM, or new MCP/API surface.',
-    'Use the existing Git capability for checkpoint status, diff, and source restore operations when available; otherwise use standard git commands through Shell. Preserve app data and keep package-lock.json in the normal workspace history.',
-    'Reject empty, newline/NUL, option-like, ambiguous, or more-than-64 specs before invoking Shell; keep every displayed spec exact and never silently add a package.',
-  ].join('\n'),
-  { ...modelOptions, label: 'dependencies', phase: 'Dependencies', throwOnError: true },
-);
-const dependencies = requireAgentResult(dependenciesResult, 'the dependency step');
-
 phase('Generate');
 const generated = await agent(
   [
     'Generate the complete React implementation. Invoke $accessibility and $react-best-practices as independent reviewers while writing the source.',
-    `Implement local app "${appId}" from the confirmed request, design, and dependency snapshot:`,
+    `Implement local app "${appId}" from the confirmed request and design:`,
     confirmedSpec,
     JSON.stringify(design),
-    JSON.stringify(dependencies),
     '',
     CONTRACT,
     '',
     'When the UI persists declared collection data, use the locked upsertRecord/deleteRecord helpers and queryCollection response shape. Read only records[].document for app fields. Do not make localStorage, IndexedDB, or an in-memory cache authoritative over native collection data. Do not swallow bridge errors or convert a rejected native write into UI success.',
-    'Use platform tokens and adapters instead of scattered platform conditionals. Include loading, empty, error, success, disabled, offline, permission-denied, and reduced-motion states where relevant. Build actual copy and interaction paths, not a placeholder shell. Do not build or start anything in this phase.',
+    'Use platform tokens and adapters instead of scattered platform conditionals. Include loading, empty, error, success, disabled, offline, permission-denied, and reduced-motion states where relevant. Build actual copy and interaction paths, not a placeholder shell.',
+    'Stay inside the host-scaffolded dependency set. If a desired approach would require package or root-file changes, choose a source-only implementation instead of requesting dependency work.',
+    'Do not build, preview, run npm, or start anything in this phase.',
   ].join('\n'),
   { ...modelOptions, label: 'generate', phase: 'Generate', throwOnError: true },
 );
@@ -268,7 +244,7 @@ for (let round = 0; round <= 2; round += 1) {
       `Repair the findings from frontend-qa for local app "${appId}".`,
       JSON.stringify(verification),
       CONTRACT,
-      'Fix the smallest source-level cause. Do not install packages or edit workspace package files in the repair pass, and do not claim verification yet.',
+      'Fix the smallest source-level cause. Do not install packages, change root infra files, or edit workspace package files in the repair pass, and do not claim verification yet.',
     ].join('\n'),
     {
       ...modelOptions,
@@ -330,9 +306,7 @@ if (verification.ok !== true) {
 return {
   ok: true,
   preview_url: build.preview_url,
-  scaffold_mode: design && design.scaffold_mode,
-  template: design && design.template,
   repair_rounds: repairRounds,
   verification,
-  summary: 'Design, dependencies, generation, offline build, and frontend QA completed.',
+  summary: 'Design, generation, offline build, and frontend QA completed.',
 };

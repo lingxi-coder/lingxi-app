@@ -116,6 +116,11 @@ pub struct PolicyPermissionGate {
     /// check, mirroring claude-code reading `toolPermissionContext.mode` LIVE.
     /// Read briefly per check (the value is `Copy`, never held across an `await`).
     mode_override: std::sync::RwLock<Option<PermissionMode>>,
+    /// An explicit acknowledgement from an interactive host for this session.
+    /// This permits a live transition into `bypassPermissions` without making
+    /// the mode available to unrelated sessions or weakening the settings
+    /// killswitch.
+    bypass_permissions_confirmed: std::sync::atomic::AtomicBool,
     /// LIVE tighten-only per-MCP-server permission-mode overrides from the
     /// control channel (`set_mcp_permission_mode_override`). Keys are the
     /// normalized MCP server token used in `mcp__<server>__<tool>` names.
@@ -202,12 +207,37 @@ impl PolicyPermissionGate {
         inner.set_permission_persistence_enabled(!policy.allow_managed_permission_rules_only);
         Self {
             live_state: std::sync::RwLock::new(LivePermissionState::from_policy(&policy)),
+            bypass_permissions_confirmed: std::sync::atomic::AtomicBool::new(
+                policy.bypass_permissions_available,
+            ),
             policy,
             inner,
             mode_override: std::sync::RwLock::new(None),
             mcp_mode_overrides: std::sync::RwLock::new(std::collections::HashMap::new()),
             live_model_provider: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Restore a mode recorded by the current session's own transcript.
+    ///
+    /// A restored `bypassPermissions` mode represents a prior explicit choice
+    /// in that same session, so it is not subject to the one-shot live-entry
+    /// acknowledgement. Administrative bypass disablement remains absolute.
+    pub async fn restore_session_permission_mode(&self, mode: &str) -> Result<(), String> {
+        if parse_settable_mode(mode) != Some(PermissionMode::BypassPermissions) {
+            return PermissionGate::set_permission_mode(self, mode).await;
+        }
+        if self.policy.bypass_killswitch_active {
+            return Err(
+                "Cannot set permission mode to bypassPermissions because it is disabled by settings or configuration"
+                    .to_string(),
+            );
+        }
+        *self
+            .mode_override
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(PermissionMode::BypassPermissions);
+        Ok(())
     }
 
     /// Handle to the set-once LIVE-model cell (cycle-break): the composition root
@@ -304,7 +334,10 @@ impl PolicyPermissionGate {
         workspace_lease_token: Option<u64>,
     ) -> (PermissionMode, PermissionResult) {
         let mode = self.effective_mode_for_tool(name);
-        (mode, self.authorize_with_live_state(name, input, mode, workspace_lease_token))
+        (
+            mode,
+            self.authorize_with_live_state(name, input, mode, workspace_lease_token),
+        )
     }
 
     /// claude-code `_pt` — the RULE + SAFETY verdict for a call, with **NO MODE
@@ -1122,6 +1155,22 @@ fn read_only_default_auto_allows(name: &str, reason: &PermissionDecisionReason) 
 
 #[async_trait]
 impl PermissionGate for PolicyPermissionGate {
+    fn can_request_bypass_permissions(&self) -> bool {
+        !self.policy.bypass_killswitch_active
+    }
+
+    fn confirm_bypass_permissions(&self) -> Result<(), String> {
+        if self.policy.bypass_killswitch_active {
+            return Err(
+                "Cannot set permission mode to bypassPermissions because it is disabled by settings or configuration"
+                    .to_string(),
+            );
+        }
+        self.bypass_permissions_confirmed
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
     fn read_deny_exclude_globs(&self, cwd: &std::path::Path) -> Option<Vec<String>> {
         Some(crate::read_deny_exclude_globs(&self.live_policy(), cwd))
     }
@@ -1417,7 +1466,8 @@ impl PermissionGate for PolicyPermissionGate {
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> Result<PermissionResolution, PermissionAbort> {
-        let (mode, result) = self.effective_authorize_with_lease(name, input, ctx.workspace_lease_token);
+        let (mode, result) =
+            self.effective_authorize_with_lease(name, input, ctx.workspace_lease_token);
         self.resolve_with_mode(mode, result, name, input, ctx.is_non_interactive_session)
     }
 
@@ -1488,7 +1538,11 @@ impl PermissionGate for PolicyPermissionGate {
             if self.policy.bypass_killswitch_active {
                 return Err("Cannot set permission mode to bypassPermissions because it is disabled by settings or configuration".to_string());
             }
-            if !self.policy.bypass_permissions_available {
+            if !self.policy.bypass_permissions_available
+                && !self
+                    .bypass_permissions_confirmed
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
                 return Err("Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions".to_string());
             }
         }

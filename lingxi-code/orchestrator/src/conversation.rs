@@ -13400,7 +13400,8 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         ]
         .into_iter()
         .map(|mode| {
-            let unavailable = mode == "bypassPermissions";
+            let unavailable =
+                mode == "bypassPermissions" && !self.perms.can_request_bypass_permissions();
             traits::PermissionModeAvailability {
                 mode: mode.to_string(),
                 available: !unavailable,

@@ -36,6 +36,7 @@ use crate::types::{
     AppWorkflowState,
 };
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -664,11 +665,31 @@ impl AppService {
         brief: &str,
         conversation_id: Option<String>,
     ) -> Result<AppRecord, AppError> {
-        self.create_app_with_git(
+        self.create_app_with_initializer(name, brief, conversation_id, |_| async { Ok(()) })
+            .await
+    }
+
+    /// Create a new app record and run a pre-commit initializer after the
+    /// private on-disk skeleton exists but BEFORE the index/memory/event
+    /// commit makes the app visible.
+    pub async fn create_app_with_initializer<F, Fut>(
+        &self,
+        name: Option<&str>,
+        brief: &str,
+        conversation_id: Option<String>,
+        initializer: F,
+    ) -> Result<AppRecord, AppError>
+    where
+        F: FnOnce(AppRecord) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), AppError>> + Send + 'static,
+    {
+        self.create_app_with_git_and_workflow_model_and_initializer(
             name,
             brief,
             conversation_id,
             crate::types::DEFAULT_GIT_VERSION_CONTROL,
+            None,
+            initializer,
         )
         .await
     }
@@ -681,8 +702,15 @@ impl AppService {
         conversation_id: Option<String>,
         git_enabled: bool,
     ) -> Result<AppRecord, AppError> {
-        self.create_app_with_git_and_workflow_model(name, brief, conversation_id, git_enabled, None)
-            .await
+        self.create_app_with_git_and_workflow_model_and_initializer(
+            name,
+            brief,
+            conversation_id,
+            git_enabled,
+            None,
+            |_| async { Ok(()) },
+        )
+        .await
     }
 
     /// Create a new app with explicit Git and app-build model choices.
@@ -694,6 +722,33 @@ impl AppService {
         git_enabled: bool,
         workflow_model: Option<&str>,
     ) -> Result<AppRecord, AppError> {
+        self.create_app_with_git_and_workflow_model_and_initializer(
+            name,
+            brief,
+            conversation_id,
+            git_enabled,
+            workflow_model,
+            |_| async { Ok(()) },
+        )
+        .await
+    }
+
+    /// Create a new app with explicit Git/model choices and a pre-commit
+    /// initializer that can materialize host-owned scaffold before the app
+    /// becomes visible to reloads, snapshots, or observers.
+    pub async fn create_app_with_git_and_workflow_model_and_initializer<F, Fut>(
+        &self,
+        name: Option<&str>,
+        brief: &str,
+        conversation_id: Option<String>,
+        git_enabled: bool,
+        workflow_model: Option<&str>,
+        initializer: F,
+    ) -> Result<AppRecord, AppError>
+    where
+        F: FnOnce(AppRecord) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), AppError>> + Send + 'static,
+    {
         let trimmed_brief = brief.trim();
         if trimmed_brief.is_empty() {
             return Err(AppError::InvalidRequest(
@@ -740,44 +795,143 @@ impl AppService {
         // Completion task (see with_app): mint + persist + commit + emission
         // hand-off survive the caller's future being dropped.
         let completion = tokio::spawn(async move {
-            let persisted = Self::run_blocking(move || {
-                let id = Self::mint_app_id(&root, &existing_ids)?;
-                let mut app =
-                    AppState::create_with_git(id, name, brief, conversation_id, git_enabled, now);
-                app.record.workflow_model = workflow_model;
-                // Per-app files first; the index entry is the commit point.
-                storage::save_app_files(&root, &app)?;
-                let layout = AppLayout::new(root.clone(), app.record.id.clone())?;
-                layout.initialize()?;
-                let manifest =
-                    AppManifest::for_new_app(app.record.id.clone(), app.record.name.clone());
-                save_manifest(&layout, &manifest)?;
-                save_permissions(&layout, &AppPermissions::default())?;
-                save_workspace_permission_settings(&layout)?;
-                let mut records = existing_records;
-                records.push(app.record.clone());
-                storage::save_index_preserving(&root, &records, &known)?;
-                Ok((app, records))
-            })
-            .await;
-            match persisted {
-                Ok((app, records)) => {
-                    let record = app.record.clone();
-                    apps.push(app);
-                    drop(apps);
-                    Self::spawn_emission(
-                        observer,
-                        order,
-                        vec![AppEvent::AppsChanged { apps: records }],
+            let app = Self::run_blocking({
+                let root = root.clone();
+                move || {
+                    let id = Self::mint_app_id(&root, &existing_ids)?;
+                    let mut app = AppState::create_with_git(
+                        id,
+                        name,
+                        brief,
+                        conversation_id,
+                        git_enabled,
+                        now,
                     );
-                    Ok(record)
+                    let app_id = app.record.id.clone();
+                    app.record.workflow_model = workflow_model;
+                    let layout = AppLayout::new(root.clone(), app.record.id.clone())?;
+                    let prepared: Result<AppState, AppError> = (|| {
+                        // Per-app files first; the index entry is the commit
+                        // point, and the initializer must run on the pinned
+                        // scaffold before that point.
+                        storage::save_app_files(&root, &app)?;
+                        layout.initialize()?;
+                        let manifest = AppManifest::for_new_app(
+                            app.record.id.clone(),
+                            app.record.name.clone(),
+                        );
+                        save_manifest(&layout, &manifest)?;
+                        save_permissions(&layout, &AppPermissions::default())?;
+                        save_workspace_permission_settings(&layout)?;
+                        Ok(app)
+                    })();
+                    if let Err(ref error) = prepared {
+                        Self::best_effort_cleanup_uncommitted_create(
+                            &root,
+                            &app_id,
+                            "skeleton preparation",
+                            &error.to_string(),
+                        );
+                    }
+                    prepared
                 }
-                Err(error) => Err(error),
+            })
+            .await?;
+            let record = app.record.clone();
+            let initializer_result = match tokio::spawn(initializer(record.clone())).await {
+                Ok(result) => result,
+                Err(error) => Err(AppError::Io(format!(
+                    "create initializer task failed: {error}"
+                ))),
+            };
+            if let Err(error) = initializer_result {
+                Self::cleanup_uncommitted_create(
+                    root.clone(),
+                    record.id.clone(),
+                    "initializer",
+                    &error,
+                )
+                .await;
+                return Err(error);
             }
+            let mut records = existing_records;
+            records.push(record.clone());
+            if let Err(error) = Self::run_blocking({
+                let root = root.clone();
+                let records = records.clone();
+                let known = known.clone();
+                move || storage::save_index_preserving(&root, &records, &known)
+            })
+            .await
+            {
+                Self::cleanup_uncommitted_create(
+                    root.clone(),
+                    record.id.clone(),
+                    "index commit",
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
+            apps.push(app);
+            drop(apps);
+            Self::spawn_emission(
+                observer,
+                order,
+                vec![AppEvent::AppsChanged { apps: records }],
+            );
+            Ok(record)
         });
         completion
             .await
             .map_err(|error| AppError::Io(format!("create completion task failed: {error}")))?
+    }
+
+    fn best_effort_cleanup_uncommitted_create(
+        root: &std::path::Path,
+        app_id: &str,
+        stage: &str,
+        failure: &str,
+    ) {
+        if let Err(cleanup_error) = storage::delete_app_dir(root, app_id) {
+            tracing::warn!(
+                app_id,
+                stage,
+                failure,
+                cleanup_error = %cleanup_error,
+                "failed to clean up an uncommitted app after create failure"
+            );
+        }
+    }
+
+    async fn cleanup_uncommitted_create(
+        root: PathBuf,
+        app_id: String,
+        stage: &'static str,
+        failure: &AppError,
+    ) {
+        let failure = failure.to_string();
+        let cleanup_app_id = app_id.clone();
+        let cleanup_failure = failure.clone();
+        let cleanup = Self::run_blocking(move || {
+            Self::best_effort_cleanup_uncommitted_create(
+                &root,
+                &cleanup_app_id,
+                stage,
+                &cleanup_failure,
+            );
+            Ok(())
+        })
+        .await;
+        if let Err(cleanup_join) = cleanup {
+            tracing::warn!(
+                app_id,
+                stage,
+                failure,
+                cleanup_join = %cleanup_join,
+                "failed to run cleanup for an uncommitted app after create failure"
+            );
+        }
     }
 
     /// Mint a fresh app id that collides with neither the in-memory list nor
@@ -935,6 +1089,8 @@ mod tests {
     use crate::test_support::FixedClock;
     use crate::types::AppWorkflowState;
     use std::path::Path;
+    use std::time::Duration;
+    use tokio::time::timeout;
 
     struct Harness {
         service: AppService,
@@ -1691,6 +1847,171 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(h.service.list_apps().await.len(), 101);
+    }
+
+    #[tokio::test]
+    async fn failed_create_initializer_is_invisible_after_reload_and_emits_no_apps_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let failed_app_id = Arc::new(std::sync::Mutex::new(None::<String>));
+        let failed_app_id_for_initializer = Arc::clone(&failed_app_id);
+
+        let error = h
+            .service
+            .create_app_with_initializer(Some("Ghost"), "a test app", None, move |record| {
+                let failed_app_id = Arc::clone(&failed_app_id_for_initializer);
+                async move {
+                    *failed_app_id.lock().expect("lock app id") = Some(record.id);
+                    Err(AppError::Io("initializer failed".into()))
+                }
+            })
+            .await
+            .expect_err("initializer failure must fail the create");
+
+        let failed_app_id = failed_app_id
+            .lock()
+            .expect("lock app id")
+            .clone()
+            .expect("initializer observed a minted id");
+        assert_eq!(error.code(), AppErrorCode::Io, "{error}");
+        assert!(
+            h.service.list_apps().await.is_empty(),
+            "failed create must not publish an in-memory app"
+        );
+        assert!(
+            h.take_events().await.is_empty(),
+            "failed create must not emit AppsChanged"
+        );
+        assert!(
+            !dir.path().join("apps/index.json").exists(),
+            "the commit-point index must stay absent when the initializer fails"
+        );
+        assert!(
+            !dir.path().join("apps").join(&failed_app_id).exists(),
+            "failed create must clean the exact unindexed app directory"
+        );
+
+        let reloaded = reload_service(&h.service).await;
+        assert!(
+            reloaded.list_apps().await.is_empty(),
+            "reload must not discover the failed create"
+        );
+    }
+
+    #[tokio::test]
+    async fn panicking_create_initializer_cleans_the_uncommitted_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let failed_app_id = Arc::new(std::sync::Mutex::new(None::<String>));
+        let failed_app_id_for_initializer = Arc::clone(&failed_app_id);
+
+        let error = h
+            .service
+            .create_app_with_initializer(Some("Panic"), "a test app", None, move |record| {
+                let failed_app_id = Arc::clone(&failed_app_id_for_initializer);
+                async move {
+                    *failed_app_id.lock().expect("lock app id") = Some(record.id);
+                    panic!("initializer panicked");
+                }
+            })
+            .await
+            .expect_err("initializer panic must fail the create");
+
+        let failed_app_id = failed_app_id
+            .lock()
+            .expect("lock app id")
+            .clone()
+            .expect("initializer observed a minted id");
+        assert_eq!(error.code(), AppErrorCode::Io, "{error}");
+        assert!(h.service.list_apps().await.is_empty());
+        assert!(h.take_events().await.is_empty());
+        assert!(!dir.path().join("apps/index.json").exists());
+        assert!(
+            !dir.path().join("apps").join(&failed_app_id).exists(),
+            "initializer panic must clean the exact unindexed app directory"
+        );
+
+        let reloaded = reload_service(&h.service).await;
+        assert!(reloaded.list_apps().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropping_create_after_the_initializer_starts_still_commits_and_emits() {
+        let dir = tempfile::tempdir().unwrap();
+        let Harness { service, observer } = harness(dir.path()).await;
+        let service = Arc::new(service);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let observed_id = Arc::new(std::sync::Mutex::new(None::<String>));
+
+        let create = tokio::spawn({
+            let service = Arc::clone(&service);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            let observed_id = Arc::clone(&observed_id);
+            async move {
+                service
+                    .create_app_with_initializer(Some("Abort"), "a test app", None, move |record| {
+                        let started = Arc::clone(&started);
+                        let release = Arc::clone(&release);
+                        let observed_id = Arc::clone(&observed_id);
+                        async move {
+                            *observed_id.lock().expect("lock app id") = Some(record.id);
+                            started.notify_one();
+                            release.notified().await;
+                            Ok(())
+                        }
+                    })
+                    .await
+            }
+        });
+
+        started.notified().await;
+        create.abort();
+        let _ = create.await;
+        release.notify_one();
+
+        let committed_id = {
+            let observed_id = Arc::clone(&observed_id);
+            timeout(Duration::from_secs(5), async move {
+                loop {
+                    if let Some(app_id) = observed_id.lock().expect("lock app id").clone() {
+                        break app_id;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("initializer observed a minted id")
+        };
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if service
+                    .list_apps()
+                    .await
+                    .iter()
+                    .any(|record| record.id == committed_id)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion task commits after caller cancellation");
+        service.flush_events().await;
+
+        let apps = service.list_apps().await;
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].id, committed_id);
+        assert_eq!(
+            observer.take(),
+            vec![AppEvent::AppsChanged { apps: apps.clone() }]
+        );
+
+        let reloaded = reload_service(service.as_ref()).await;
+        assert_eq!(reloaded.list_apps().await, apps);
     }
 
     /// When the per-app batch lands but the index write fails, the

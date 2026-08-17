@@ -172,6 +172,8 @@ pub struct AndroidMobileLinuxConfigFfi {
     pub mode: MobileLinuxRuntimeModeFfi,
     /// App-private root where rootfs state is managed.
     pub managed_root: String,
+    /// Canonical app sandbox root (`Context.filesDir`) that owns app build roots.
+    pub app_sandbox_root: String,
     /// Host workspace root exposed to the guest, if any.
     pub workspace_host_path: Option<String>,
     /// Stable workspace identifier used in the guest mount path.
@@ -1563,8 +1565,9 @@ fn android_mobile_linux_runtime(
         static RUNTIMES: LazyLock<Mutex<HashMap<String, Arc<dyn traits::MobileLinuxRuntime>>>> =
             LazyLock::new(|| Mutex::new(HashMap::new()));
         let key = format!(
-            "{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             cfg.managed_root,
+            cfg.app_sandbox_root,
             cfg.abi,
             cfg.rootfs_version,
             cfg.archive_sha256.as_deref().unwrap_or_default(),
@@ -1580,6 +1583,7 @@ fn android_mobile_linux_runtime(
         let runtime = platform_android::AndroidProotRuntime::new(
             platform_android::AndroidProotRuntimeConfig {
                 managed_root: std::path::PathBuf::from(&cfg.managed_root),
+                app_sandbox_root: std::path::PathBuf::from(&cfg.app_sandbox_root),
                 abi: cfg.abi.clone(),
                 rootfs_version: cfg.rootfs_version.clone(),
                 archive_sha256: cfg.archive_sha256.clone(),
@@ -5200,6 +5204,7 @@ mod tests {
             &super::AndroidMobileLinuxConfigFfi {
                 mode: super::MobileLinuxRuntimeModeFfi::Legacy,
                 managed_root: "/tmp/mobile-linux".to_string(),
+                app_sandbox_root: "/tmp".to_string(),
                 workspace_host_path: Some("/tmp/workspaces/default".to_string()),
                 stable_workspace_id: Some("default".to_string()),
                 abi: "arm64-v8a".to_string(),
@@ -5225,6 +5230,7 @@ mod tests {
             &super::AndroidMobileLinuxConfigFfi {
                 mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
                 managed_root: "/tmp/mobile-linux".to_string(),
+                app_sandbox_root: "/tmp".to_string(),
                 workspace_host_path: Some("/tmp/workspaces/default".to_string()),
                 stable_workspace_id: Some("default".to_string()),
                 abi: "arm64-v8a".to_string(),
@@ -5250,6 +5256,7 @@ mod tests {
         let err = super::android_mobile_linux_boot(Some(super::AndroidMobileLinuxConfigFfi {
             mode: super::MobileLinuxRuntimeModeFfi::Legacy,
             managed_root: "/tmp/mobile-linux".to_string(),
+            app_sandbox_root: "/tmp".to_string(),
             workspace_host_path: Some("/tmp/workspaces/default".to_string()),
             stable_workspace_id: Some("default".to_string()),
             abi: "arm64-v8a".to_string(),
@@ -5267,6 +5274,7 @@ mod tests {
             Some(super::AndroidMobileLinuxConfigFfi {
                 mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
                 managed_root: "/tmp/mobile-linux".to_string(),
+                app_sandbox_root: "/tmp".to_string(),
                 workspace_host_path: Some("/tmp/workspaces/default".to_string()),
                 stable_workspace_id: Some("default".to_string()),
                 abi: "arm64-v8a".to_string(),

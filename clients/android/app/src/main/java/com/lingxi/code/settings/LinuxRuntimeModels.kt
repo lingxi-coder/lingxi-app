@@ -44,7 +44,6 @@ enum class LinuxRuntimeAction(@StringRes val labelRes: Int) {
 enum class LinuxRuntimeTerminalStatus { Disabled, Idle, Starting, Active }
 
 enum class LinuxRuntimeMountAccess(@StringRes val labelRes: Int) {
-    ReadOnly(R.string.settings_linux_read_only),
     ReadWrite(R.string.settings_linux_read_write),
 }
 
@@ -58,7 +57,9 @@ data class LinuxRuntimeMountUiState(
 
 data class LinuxRuntimeMountDraft(
     @StringRes val purposeLabelRes: Int = R.string.settings_linux_external_dir,
-    val access: LinuxRuntimeMountAccess = LinuxRuntimeMountAccess.ReadOnly,
+    // Android PRoot cannot enforce read-only bind mounts. Expose only the
+    // access mode the runtime can actually honor.
+    val access: LinuxRuntimeMountAccess = LinuxRuntimeMountAccess.ReadWrite,
     @StringRes val pickerSummaryRes: Int = R.string.settings_linux_saf_picker_summary,
 )
 
@@ -139,6 +140,7 @@ fun linuxRuntimeStateLabel(state: MobileLinuxRootfsStateFfi): Int =
 
 fun mobileLinuxConfig(
     managedRoot: String,
+    appSandboxRoot: String,
     workspaceHostPath: String,
     stableWorkspaceId: String,
     abi: String,
@@ -148,6 +150,7 @@ fun mobileLinuxConfig(
     AndroidMobileLinuxConfigFfi(
         mode = mode.toFfi(),
         managedRoot = managedRoot,
+        appSandboxRoot = appSandboxRoot,
         workspaceHostPath = workspaceHostPath,
         stableWorkspaceId = stableWorkspaceId,
         abi = abi,

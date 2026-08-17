@@ -101,8 +101,12 @@ struct SettingsHost: View {
             store.skillsLoaded = convo.skillsLoaded
             onRefreshMcp()
             onRefreshSkills()
+            store.permissionMode = convo.requestedPermissionMode
             store.effectivePermissionMode = convo.effectivePermissionMode
             store.permissionModeError = nil
+        }
+        .onChange(of: convo.requestedPermissionMode) { _, mode in
+            store.permissionMode = mode
         }
         .onChange(of: convo.effectivePermissionMode) { _, mode in
             store.effectivePermissionMode = mode

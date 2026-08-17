@@ -842,7 +842,6 @@ internal fun AppBridgeOperationDto.bridgeWireName(): String = when (this) {
     AppBridgeOperationDto.AGENT_CANCEL -> "agent_cancel"
     AppBridgeOperationDto.AGENT_PROFILE_PROPOSE_UPDATE -> "agent_profile_propose_update"
     AppBridgeOperationDto.BACKGROUND_SCHEDULE -> "background_schedule"
-    AppBridgeOperationDto.BACKGROUND_RESUME -> "background_resume"
 }
 
 internal fun bridgeOperationFor(wireName: String): AppBridgeOperationDto? =

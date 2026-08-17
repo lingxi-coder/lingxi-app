@@ -14,12 +14,28 @@ use std::time::Duration;
 
 const BACKGROUND_STEP_TIMEOUT: Duration = Duration::from_secs(120);
 const BACKGROUND_RETRY_DELAY_MS: u64 = 15 * 60 * 1_000;
+const BACKGROUND_RECOVERY_DELAY_MS: u64 = 15 * 60 * 1_000;
 const MAX_BACKGROUND_RESULT_BYTES: usize = 64 * 1024;
 
 impl LocalAppsHostBroker {
+    pub(crate) async fn acquire_background_process_lock(
+        &self,
+        app_id: &str,
+    ) -> Result<traits::rooted_fs::RootedFileLock, String> {
+        let root = self.root.clone();
+        let app_id = app_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            local_apps::storage::lock_app_background(&root, &app_id)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("background lock worker failed: {error}"))?
+    }
+
     /// Claim and execute every due task in the profile. Duplicate native
-    /// wake-ups are harmless: the in-memory claim set covers one process and
-    /// the persisted `Running`/journal state covers process death.
+    /// wake-ups are harmless: the in-memory claim set covers one process, the
+    /// per-app file lock covers concurrent engine instances, and the persisted
+    /// `Running`/journal state covers process death.
     pub(crate) async fn run_due_background_tasks(
         &self,
         now_ms: u64,
@@ -83,18 +99,21 @@ impl LocalAppsHostBroker {
                 continue;
             };
             for task in tasks {
-                if !matches!(
-                    task.status,
-                    BackgroundTaskStatus::Scheduled
-                        | BackgroundTaskStatus::WaitingForSystem
-                        | BackgroundTaskStatus::Running
-                ) {
-                    continue;
-                }
                 let Some(entry) = journal.iter().find(|entry| entry.task_id == task.task_id) else {
                     continue;
                 };
-                let wake = entry.next_run_at_ms.unwrap_or(now_ms);
+                let wake = match task.status {
+                    BackgroundTaskStatus::Scheduled | BackgroundTaskStatus::WaitingForSystem => {
+                        entry.next_run_at_ms.unwrap_or(now_ms)
+                    }
+                    // A crashed engine leaves `Running` with no next run. Do
+                    // not wake immediately in a loop, but retain bounded
+                    // recovery after the platform's next watchdog window.
+                    BackgroundTaskStatus::Running => entry
+                        .next_run_at_ms
+                        .unwrap_or_else(|| now_ms.saturating_add(BACKGROUND_RECOVERY_DELAY_MS)),
+                    _ => continue,
+                };
                 next = Some(next.map_or(wake, |current: u64| current.min(wake)));
             }
         }
@@ -107,27 +126,64 @@ impl LocalAppsHostBroker {
         let Ok(layout) = self.layout(app_id) else {
             return false;
         };
+        let Ok(tasks) = local_apps::background::load_tasks(&layout) else {
+            return false;
+        };
+        let Some(task) = tasks.iter().find(|task| task.task_id == task_id) else {
+            return false;
+        };
+        if matches!(
+            task.status,
+            BackgroundTaskStatus::Succeeded | BackgroundTaskStatus::Cancelled
+        ) {
+            let _ = local_apps::background::clear_cancellation(&layout, task_id);
+            return false;
+        }
+        // A running task may be inside a long LLM/network call. Write a
+        // durable marker and return immediately; the executor consumes it at
+        // the next journal boundary and persists terminal cancellation.
+        if task.status == BackgroundTaskStatus::Running {
+            if local_apps::background::request_cancellation(&layout, task_id).is_err() {
+                return false;
+            }
+            return match local_apps::background::load_tasks(&layout) {
+                Ok(latest) => match latest.iter().find(|candidate| candidate.task_id == task_id) {
+                    Some(candidate)
+                        if matches!(
+                            candidate.status,
+                            BackgroundTaskStatus::Succeeded | BackgroundTaskStatus::Cancelled
+                        ) =>
+                    {
+                        let _ = local_apps::background::clear_cancellation(&layout, task_id);
+                        false
+                    }
+                    Some(_) => true,
+                    None => false,
+                },
+                Err(_) => true,
+            };
+        }
+
+        let Ok(_process_lock) = self.acquire_background_process_lock(app_id).await else {
+            return false;
+        };
         let _guard = self.background_task_writes.lock().await;
         let Ok(mut tasks) = local_apps::background::load_tasks(&layout) else {
             return false;
         };
-        let updated_at_ms = {
-            let Some(task) = tasks.iter_mut().find(|task| task.task_id == task_id) else {
-                return false;
-            };
-            if matches!(
-                task.status,
-                BackgroundTaskStatus::Succeeded | BackgroundTaskStatus::Cancelled
-            ) {
-                return false;
-            }
-            task.status = BackgroundTaskStatus::Cancelled;
-            task.updated_at_ms = super::now_ms();
-            task.updated_at_ms
+        let Some(task) = tasks.iter_mut().find(|task| task.task_id == task_id) else {
+            return false;
         };
-        if local_apps::background::save_tasks(&layout, &tasks).is_err() {
+        if matches!(task.status, BackgroundTaskStatus::Succeeded) {
+            let _ = local_apps::background::clear_cancellation(&layout, task_id);
             return false;
         }
+        if local_apps::background::request_cancellation(&layout, task_id).is_err() {
+            return false;
+        }
+        task.status = BackgroundTaskStatus::Cancelled;
+        task.updated_at_ms = super::now_ms();
+        let updated_at_ms = task.updated_at_ms;
         let Ok(mut journal) = local_apps::background::load_journal(&layout) else {
             return false;
         };
@@ -136,21 +192,11 @@ impl LocalAppsHostBroker {
             entry.last_error = Some("cancelled by the host".into());
             entry.updated_at_ms = updated_at_ms;
         }
-        local_apps::background::save_journal(&layout, &journal).is_ok()
-    }
-
-    pub(crate) async fn run_background_task_value(
-        &self,
-        app_id: &str,
-        task_id: &str,
-        now_ms: u64,
-        force: bool,
-    ) -> Result<Value, String> {
-        let outcome = self
-            .run_background_task(app_id, task_id, now_ms, force)
-            .await;
-        serde_json::to_value(outcome)
-            .map_err(|error| format!("serialize background result: {error}"))
+        let result = local_apps::background::save_state(&layout, &tasks, &journal).is_ok();
+        if result {
+            let _ = local_apps::background::clear_cancellation(&layout, task_id);
+        }
+        result
     }
 
     async fn run_background_task(
@@ -167,9 +213,17 @@ impl LocalAppsHostBroker {
                 return outcome(app_id, task_id, "already_running", None, None, true);
             }
         }
+        let process_lock = match self.acquire_background_process_lock(app_id).await {
+            Ok(lock) => lock,
+            Err(error) => {
+                self.background_inflight.lock().await.remove(&key);
+                return outcome(app_id, task_id, "failed", None, Some(error), false);
+            }
+        };
         let result = self
             .run_background_task_inner(app_id, task_id, now_ms, force)
             .await;
+        drop(process_lock);
         self.background_inflight.lock().await.remove(&key);
         result
     }
@@ -190,6 +244,12 @@ impl LocalAppsHostBroker {
             Err(error) => return outcome(app_id, task_id, "failed", None, Some(error), false),
         };
         let (task, mut journal) = claimed;
+        if task.status == BackgroundTaskStatus::Cancelled {
+            if let Ok(layout) = self.layout(app_id) {
+                let _ = local_apps::background::clear_cancellation(&layout, task_id);
+            }
+            return outcome(app_id, task_id, "cancelled", None, None, false);
+        }
         let start_index = task
             .flow
             .steps
@@ -198,6 +258,29 @@ impl LocalAppsHostBroker {
             .unwrap_or(0);
         let mut outputs = Map::new();
         for offset in start_index..task.flow.steps.len() {
+            let layout = match self.layout(app_id) {
+                Ok(layout) => layout,
+                Err(error) => return outcome(app_id, task_id, "failed", None, Some(error), false),
+            };
+            let cancellation_requested =
+                match local_apps::background::cancellation_requested(&layout, task_id) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return outcome(
+                            app_id,
+                            task_id,
+                            "failed",
+                            None,
+                            Some(error.to_string()),
+                            false,
+                        )
+                    }
+                };
+            if cancellation_requested {
+                return self
+                    .finish_background_cancelled(app_id, task, journal, task_id)
+                    .await;
+            }
             let step = task.flow.steps[offset].clone();
             let input = match step_input(app_id, &step.input_json) {
                 Ok(input) => input,
@@ -292,6 +375,22 @@ impl LocalAppsHostBroker {
             .iter_mut()
             .find(|entry| entry.task_id == task_id)
             .ok_or_else(|| "background task has no journal entry".to_string())?;
+        if local_apps::background::cancellation_requested(&layout, task_id)
+            .map_err(|error| error.to_string())?
+        {
+            task.status = BackgroundTaskStatus::Cancelled;
+            task.updated_at_ms = now_ms;
+            entry.next_step_id = None;
+            entry.next_run_at_ms = None;
+            entry.last_error = Some("cancelled by the host".into());
+            entry.updated_at_ms = now_ms;
+            let task_snapshot = task.clone();
+            let entry_snapshot = entry.clone();
+            local_apps::background::save_state(&layout, &tasks, &journal)
+                .map_err(|error| error.to_string())?;
+            let _ = local_apps::background::clear_cancellation(&layout, task_id);
+            return Ok(Some((task_snapshot, entry_snapshot)));
+        }
         if !force && entry.next_run_at_ms.is_some_and(|next| next > now_ms) {
             return Ok(None);
         }
@@ -306,8 +405,7 @@ impl LocalAppsHostBroker {
         entry.updated_at_ms = now_ms;
         let task_snapshot = task.clone();
         let entry_snapshot = entry.clone();
-        local_apps::background::save_tasks(&layout, &tasks).map_err(|error| error.to_string())?;
-        local_apps::background::save_journal(&layout, &journal)
+        local_apps::background::save_state(&layout, &tasks, &journal)
             .map_err(|error| error.to_string())?;
         Ok(Some((task_snapshot, entry_snapshot)))
     }
@@ -320,6 +418,15 @@ impl LocalAppsHostBroker {
         outputs: Map<String, Value>,
         now_ms: u64,
     ) -> LocalAppBackgroundRunDto {
+        if self
+            .background_cancellation_requested(app_id, &task.task_id)
+            .await
+        {
+            let task_id = task.task_id.clone();
+            return self
+                .finish_background_cancelled(app_id, task, journal, &task_id)
+                .await;
+        }
         let next_run = match task.trigger {
             local_apps::BackgroundTrigger::Schedule { interval_ms } => {
                 task.status = BackgroundTaskStatus::Scheduled;
@@ -333,14 +440,21 @@ impl LocalAppsHostBroker {
             }
         };
         task.updated_at_ms = now_ms;
+        let result = Value::Object(outputs);
+        let result_json = bounded_json(&result);
         journal.next_run_at_ms = next_run;
+        journal.last_result_json = result_json.clone();
         journal.last_error = None;
         journal.updated_at_ms = now_ms;
         match self
             .persist_terminal_background_state(app_id, &task, &journal)
             .await
         {
-            Ok(true) => {}
+            Ok(true) => {
+                if let Ok(layout) = self.layout(app_id) {
+                    let _ = local_apps::background::clear_cancellation(&layout, &task.task_id);
+                }
+            }
             Ok(false) => {
                 return outcome(
                     app_id,
@@ -355,9 +469,53 @@ impl LocalAppsHostBroker {
                 return outcome(app_id, &task.task_id, "failed", None, Some(error), false);
             }
         }
-        let result = Value::Object(outputs);
-        let result_json = bounded_json(&result);
         outcome(app_id, &task.task_id, "succeeded", result_json, None, false)
+    }
+
+    async fn finish_background_cancelled(
+        &self,
+        app_id: &str,
+        mut task: local_apps::BackgroundTaskRecord,
+        mut journal: local_apps::BackgroundJournalEntry,
+        task_id: &str,
+    ) -> LocalAppBackgroundRunDto {
+        let now_ms = super::now_ms();
+        task.status = BackgroundTaskStatus::Cancelled;
+        task.updated_at_ms = now_ms;
+        journal.next_step_id = None;
+        journal.next_run_at_ms = None;
+        journal.last_error = Some("cancelled by the host".into());
+        journal.updated_at_ms = now_ms;
+        let layout = self.layout(app_id).ok();
+        let result = self
+            .persist_terminal_background_state(app_id, &task, &journal)
+            .await;
+        match result {
+            Ok(true) => {
+                if let Some(layout) = layout {
+                    let _ = local_apps::background::clear_cancellation(&layout, task_id);
+                }
+                outcome(app_id, task_id, "cancelled", None, None, false)
+            }
+            Ok(false) => outcome(
+                app_id,
+                task_id,
+                "cancelled",
+                None,
+                Some("background task state changed before cancellation was persisted".into()),
+                false,
+            ),
+            Err(error) => outcome(app_id, task_id, "failed", None, Some(error), false),
+        }
+    }
+
+    async fn background_cancellation_requested(&self, app_id: &str, task_id: &str) -> bool {
+        self.layout(app_id)
+            .ok()
+            .and_then(|layout| {
+                local_apps::background::cancellation_requested(&layout, task_id).ok()
+            })
+            .unwrap_or(false)
     }
 
     async fn finish_background_failure(
@@ -370,6 +528,14 @@ impl LocalAppsHostBroker {
         error: String,
         retryable: bool,
     ) -> LocalAppBackgroundRunDto {
+        if self
+            .background_cancellation_requested(app_id, task_id)
+            .await
+        {
+            return self
+                .finish_background_cancelled(app_id, task, journal, task_id)
+                .await;
+        }
         let now_ms = super::now_ms();
         task.status = if retryable {
             BackgroundTaskStatus::WaitingForSystem
@@ -386,7 +552,11 @@ impl LocalAppsHostBroker {
             .persist_terminal_background_state(app_id, &task, &journal)
             .await
         {
-            Ok(true) => {}
+            Ok(true) => {
+                if let Ok(layout) = self.layout(app_id) {
+                    let _ = local_apps::background::clear_cancellation(&layout, task_id);
+                }
+            }
             Ok(false) => {
                 return outcome(
                     app_id,
@@ -461,8 +631,7 @@ impl LocalAppsHostBroker {
             })?;
         *current_journal = journal.clone();
 
-        local_apps::background::save_tasks(&layout, &tasks).map_err(|error| error.to_string())?;
-        local_apps::background::save_journal(&layout, &journal_entries)
+        local_apps::background::save_state(&layout, &tasks, &journal_entries)
             .map_err(|error| error.to_string())?;
         Ok(true)
     }
@@ -826,6 +995,7 @@ mod tests {
                 flow_id: "flow-status".into(),
                 next_step_id: Some("status".into()),
                 next_run_at_ms: Some(1),
+                last_result_json: None,
                 attempt: 0,
                 last_error: None,
                 updated_at_ms: 1,
@@ -840,6 +1010,13 @@ mod tests {
         assert_eq!(tasks[0].status, BackgroundTaskStatus::Scheduled);
         let journal = local_apps::background::load_journal(&layout).expect("load journal");
         assert!(journal[0].next_run_at_ms.unwrap_or_default() > 1_000);
+        let result_json = journal[0]
+            .last_result_json
+            .as_deref()
+            .expect("successful result is persisted in the journal");
+        let result: serde_json::Value =
+            serde_json::from_str(result_json).expect("persisted result is valid JSON");
+        assert!(result.get("status").is_some());
 
         let second = broker.run_due_background_tasks(1_000).await;
         assert!(
@@ -885,6 +1062,7 @@ mod tests {
                 flow_id,
                 next_step_id: Some(step_id),
                 next_run_at_ms: Some(1),
+                last_result_json: None,
                 attempt: 0,
                 last_error: None,
                 updated_at_ms: 1,
@@ -904,5 +1082,74 @@ mod tests {
         assert!(persisted_tasks
             .iter()
             .all(|task| task.status == BackgroundTaskStatus::Scheduled));
+    }
+
+    #[tokio::test]
+    async fn running_task_does_not_schedule_an_immediate_wakeup() {
+        let (root, _service, broker, app_id) = harness().await;
+        let layout = local_apps::AppLayout::new(root.path(), app_id.clone()).expect("layout");
+        let flow = local_apps::FlowDefinition {
+            flow_id: "flow-running".into(),
+            version: 1,
+            steps: vec![local_apps::FlowStep {
+                step_id: "status".into(),
+                capability: CapabilityId::RuntimeStatus,
+                depends_on: Vec::new(),
+                input_json: "{}".into(),
+            }],
+        };
+        local_apps::background::save_tasks(
+            &layout,
+            &[BackgroundTaskRecord {
+                schema_version: RUNTIME_CONTRACT_SCHEMA_VERSION,
+                task_id: "task-running".into(),
+                app_id: app_id.clone(),
+                flow_id: flow.flow_id.clone(),
+                flow,
+                trigger: BackgroundTrigger::Schedule {
+                    interval_ms: 900_000,
+                },
+                status: BackgroundTaskStatus::Running,
+                updated_at_ms: 1,
+            }],
+        )
+        .expect("tasks");
+        local_apps::background::save_journal(
+            &layout,
+            &[BackgroundJournalEntry {
+                task_id: "task-running".into(),
+                flow_id: "flow-running".into(),
+                next_step_id: Some("status".into()),
+                next_run_at_ms: None,
+                last_result_json: None,
+                attempt: 1,
+                last_error: None,
+                updated_at_ms: 1,
+            }],
+        )
+        .expect("journal");
+
+        assert_eq!(
+            broker.next_background_wake_ms(1_000).await,
+            Some(1_000 + BACKGROUND_RECOVERY_DELAY_MS)
+        );
+
+        // Cancellation must not wait for the long-running executor lock.
+        let process_lock = broker
+            .acquire_background_process_lock(&app_id)
+            .await
+            .expect("background process lock");
+        let cancelled = tokio::time::timeout(
+            Duration::from_secs(1),
+            broker.cancel_background_task(&app_id, "task-running"),
+        )
+        .await
+        .expect("cancellation should return while lock is held");
+        assert!(cancelled);
+        assert!(
+            local_apps::background::cancellation_requested(&layout, "task-running")
+                .expect("cancellation marker")
+        );
+        drop(process_lock);
     }
 }

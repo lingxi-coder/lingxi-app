@@ -166,9 +166,10 @@ struct RootView: View {
                 notifier: UserNotificationCronNotifier(),
                 scheduler: BestEffortBackgroundCronScheduler()
             )
-            LocalAppBackgroundTaskBridge.shared.bind {
-                await executor.runLocalAppBackgroundTasks()
-            }
+            LocalAppBackgroundTaskBridge.shared.bind(
+                { await executor.runLocalAppBackgroundTasks() },
+                rescheduler: { await executor.rescheduleLocalAppBackgroundWake() }
+            )
         #else
             let cron = CronRepository(
                 appSandboxRoot: root,

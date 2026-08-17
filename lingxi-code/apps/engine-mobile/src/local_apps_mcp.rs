@@ -62,18 +62,9 @@ pub trait LocalAppsMcpHost: Send + Sync {
         let _ = input;
         Err("background scheduling is unavailable in this host build".into())
     }
-    /// Resume a journaled flow after an Android/iOS scheduler wake-up.
-    async fn background_resume(&self, input: Value) -> Result<Value, String> {
-        let _ = input;
-        Err("background resume is unavailable in this host build".into())
-    }
     /// Host-internal bridge implementation hook.
     async fn background_schedule_value(&self, input: Value) -> Result<Value, String> {
         self.background_schedule(input).await
-    }
-    /// Host-internal bridge implementation hook.
-    async fn background_resume_value(&self, input: Value) -> Result<Value, String> {
-        self.background_resume(input).await
     }
     /// Create a persistent app Agent session after the host's capability gate.
     async fn agent_session_create(&self, input: Value) -> Result<Value, String> {
@@ -842,11 +833,6 @@ impl LocalAppsMcpTransport {
                 json!({"type":"object","properties":{"app_id":app_id.clone(),"interval_ms":{"type":"integer","minimum":900000,"maximum":2592000000u64},"flow":{"type":"object"}},"required":["app_id","interval_ms","flow"],"additionalProperties":false}),
             ),
             Self::tool(
-                "background_resume",
-                "Resume one host-journaled background flow after a system wake-up.",
-                json!({"type":"object","properties":{"app_id":app_id.clone(),"task_id":{"type":"string","minLength":1,"maxLength":128}},"required":["app_id","task_id"],"additionalProperties":false}),
-            ),
-            Self::tool(
                 "list_checkpoints",
                 "List Git-backed code checkpoints for one app. Read-only and does not affect SQLite data.",
                 json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
@@ -938,11 +924,6 @@ impl LocalAppsMcpTransport {
                 "Register a bounded declarative flow for this app's system background scheduler.",
                 json!({"type":"object","properties":{"interval_ms":{"type":"integer","minimum":900000,"maximum":2592000000u64},"flow":{"type":"object"}},"required":["interval_ms","flow"],"additionalProperties":false}),
             ),
-            Self::tool(
-                &Self::dynamic_tool_name(app_id, "background_resume"),
-                "Resume one journaled background flow for this app.",
-                json!({"type":"object","properties":{"task_id":{"type":"string","minLength":1,"maxLength":128}},"required":["task_id"],"additionalProperties":false}),
-            ),
         ]
     }
 
@@ -960,7 +941,6 @@ impl LocalAppsMcpTransport {
                     | "agent_sessions_update"
                     | "agent_profile_propose_update"
                     | "background_schedule"
-                    | "background_resume"
             )
         {
             Some((app_id, operation))
@@ -1045,10 +1025,6 @@ impl LocalAppsMcpTransport {
                     }
                 }
                 "background_schedule" => match self.host()?.background_schedule(bound).await {
-                    Ok(value) => Self::result(value),
-                    Err(message) => Self::tool_error(message),
-                },
-                "background_resume" => match self.host()?.background_resume(bound).await {
                     Ok(value) => Self::result(value),
                     Err(message) => Self::tool_error(message),
                 },
@@ -1262,10 +1238,6 @@ impl LocalAppsMcpTransport {
                 Err(message) => Self::tool_error(message),
             },
             "background_schedule" => match self.host()?.background_schedule(input).await {
-                Ok(value) => Self::result(value),
-                Err(message) => Self::tool_error(message),
-            },
-            "background_resume" => match self.host()?.background_resume(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
@@ -1693,7 +1665,6 @@ mod tests {
                 "read_logs",
                 "read_app_events",
                 "background_schedule",
-                "background_resume",
                 "list_checkpoints",
                 "restore_checkpoint",
             ]

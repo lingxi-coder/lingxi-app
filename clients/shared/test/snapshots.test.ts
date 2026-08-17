@@ -468,6 +468,7 @@ const APP_CAPABILITY_KINDS = [
   'notifications',
   'llm',
   'agent_notify',
+  'background_schedule',
 ];
 
 function validateAppRuntimeDetails(v: unknown): void {
@@ -546,6 +547,7 @@ function validateAppBridgeRequest(v: unknown): void {
       'post_notification',
       'llm_chat',
       'agent_post',
+      'background_schedule',
     ].includes(o['operation'] as string),
   );
   if ('payload_json' in o) assert.ok(isString(o['payload_json']));

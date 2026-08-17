@@ -42,8 +42,9 @@
 //! [`save_index_preserving`] holds it across its re-read + merge + write, so
 //! two service instances over one root cannot clobber each other's index
 //! entries. Per-app build promotion, checkpoint mutation, and deletion share
-//! `apps/<id>/build.lock`, so a second engine process cannot rename or reset a
-//! workspace while another process is copying/building it. Deletion is
+//! `apps/<id>/build.lock`, while host-owned background task claims use the
+//! independent `apps/<id>/background.lock`, so a second engine process cannot
+//! execute the same durable flow concurrently. Deletion is
 //! rename-to-trash: `apps/<id>` is atomically renamed
 //! into `apps/.trash/<id>-<nonce>` (the commit point AND the tombstone —
 //! `rename` never follows the final component, and a racing create cannot
@@ -86,6 +87,10 @@ pub const INDEX_LOCK_FILE: &str = "index.lock";
 /// Per-app advisory lock serializing build promotion and physical deletion.
 /// This is a runtime artifact, not a persisted document.
 pub const BUILD_LOCK_FILE: &str = "build.lock";
+/// Per-app advisory lock serializing host-owned background task claim and
+/// terminal state transitions across foreground/headless engine instances.
+/// This is a runtime artifact, not a persisted document.
+pub const BACKGROUND_LOCK_FILE: &str = "background.lock";
 /// Tombstone directory for deleted app dirs (`apps/.trash`). Never a legal
 /// app id (ids cannot start with `.`), invisible to the index-driven
 /// [`load_all`], swept best-effort at load.
@@ -165,6 +170,12 @@ pub fn build_lock_rel(app_id: &str) -> PathBuf {
     app_dir_rel(app_id).join(BUILD_LOCK_FILE)
 }
 
+/// Root-relative path of the per-app background execution lock.
+#[must_use]
+pub fn background_lock_rel(app_id: &str) -> PathBuf {
+    app_dir_rel(app_id).join(BACKGROUND_LOCK_FILE)
+}
+
 /// Take the advisory lock shared by local-app builds and physical deletion.
 ///
 /// Callers must hold this lock for the complete operation that mutates or
@@ -205,6 +216,48 @@ pub fn lock_app_build(root: &Path, app_id: &str) -> Result<rooted_fs::RootedFile
     })
 }
 
+/// Take the advisory lock shared by host-owned background execution.
+///
+/// This lock is independent from `build.lock`: a long-running headless step
+/// must not block an unrelated build, while two engine instances must never
+/// claim the same durable task.
+pub fn lock_app_background(
+    root: &Path,
+    app_id: &str,
+) -> Result<rooted_fs::RootedFileLock, AppError> {
+    ids::validate_app_id(app_id)?;
+    let app_dir = rooted_fs::checked_join(root, &app_dir_rel(app_id))
+        .map_err(|error| AppError::from_fs("lock app background", &error))?;
+    match std::fs::symlink_metadata(&app_dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(AppError::StorageCorrupt(format!(
+                "{} is not a real directory",
+                app_dir.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppError::NotFound(format!("app {app_id}")));
+        }
+        Err(error) => {
+            return Err(AppError::Io(format!(
+                "inspect {} before locking: {error}",
+                app_dir.display()
+            )));
+        }
+    }
+    rooted_fs::lock_exclusive(
+        root,
+        &background_lock_rel(app_id),
+        rooted_fs::PRIVATE_DIR_MODE,
+        rooted_fs::PRIVATE_FILE_MODE,
+    )
+    .map_err(|error| match error {
+        FsError::NotFound(_) => AppError::NotFound(format!("app {app_id}")),
+        other => AppError::from_fs("lock app background", &other),
+    })
+}
+
 fn lock_app_build_if_present(
     root: &Path,
     app_id: &str,
@@ -214,6 +267,28 @@ fn lock_app_build_if_present(
         .map_err(|error| AppError::from_fs("lock app deletion", &error))?;
     match std::fs::symlink_metadata(&app_dir) {
         Ok(metadata) if metadata.is_dir() => match lock_app_build(root, app_id) {
+            Ok(lock) => Ok(Some(lock)),
+            Err(AppError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        },
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AppError::Io(format!(
+            "inspect {} before deleting: {error}",
+            app_dir.display()
+        ))),
+    }
+}
+
+fn lock_app_background_if_present(
+    root: &Path,
+    app_id: &str,
+) -> Result<Option<rooted_fs::RootedFileLock>, AppError> {
+    ids::validate_app_id(app_id)?;
+    let app_dir = rooted_fs::checked_join(root, &app_dir_rel(app_id))
+        .map_err(|error| AppError::from_fs("lock app background deletion", &error))?;
+    match std::fs::symlink_metadata(&app_dir) {
+        Ok(metadata) if metadata.is_dir() => match lock_app_background(root, app_id) {
             Ok(lock) => Ok(Some(lock)),
             Err(AppError::NotFound(_)) => Ok(None),
             Err(error) => Err(error),
@@ -785,7 +860,8 @@ pub fn save_dependency_record(
     write_doc(root, &dependency_rel(&dependency.app_id), dependency)
 }
 
-/// Remove `apps/<id>`: serialize against any in-flight build, then
+/// Remove `apps/<id>`: serialize against any in-flight build or background
+/// task, then
 /// rename-to-trash first (the commit point — see
 /// [`trash_app_dir`]), then recursively remove the trash entry. A removal
 /// failure AFTER the rename still leaves the id fully out of the `apps/`
@@ -819,6 +895,7 @@ pub fn trash_app_dir(root: &Path, app_id: &str) -> Result<Option<PathBuf>, AppEr
     // Keep the lock through the rename commit point. Once the directory is in
     // `.trash`, no build can resolve it through the live app path anymore and
     // the lock can be released safely before the best-effort recursive remove.
+    let _background_lock = lock_app_background_if_present(root, app_id)?;
     let _build_lock = lock_app_build_if_present(root, app_id)?;
     let apps_rel = PathBuf::from(APPS_DIR);
     let apps_dir = rooted_fs::checked_join(root, &apps_rel)
@@ -1486,6 +1563,24 @@ mod tests {
         };
         assert_eq!(err.code(), AppErrorCode::NotFound);
         assert!(!dir.path().join("apps/mmmm3333").exists());
+    }
+
+    #[test]
+    fn app_background_lock_is_confined_to_an_existing_app_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = new_app("nnnn3333");
+        save_full(dir.path(), std::slice::from_ref(&app));
+
+        let lock = lock_app_background(dir.path(), "nnnn3333").unwrap();
+        assert!(dir.path().join("apps/nnnn3333/background.lock").is_file());
+        drop(lock);
+
+        let err = match lock_app_background(dir.path(), "oooo4444") {
+            Ok(_) => panic!("missing app directory must not be created by locking"),
+            Err(error) => error,
+        };
+        assert_eq!(err.code(), AppErrorCode::NotFound);
+        assert!(!dir.path().join("apps/oooo4444").exists());
     }
 
     #[test]

@@ -154,7 +154,7 @@ Current tools:
 - `read_logs`, `read_app_events`
 - `agent_sessions_create`, `agent_sessions_list`, `agent_sessions_update`
 - `agent_profile_propose_update`
-- `background_schedule`, `background_resume`
+- `background_schedule`
 
 Important constraints:
 

@@ -416,8 +416,6 @@ pub enum AppBridgeOperationDto {
     AgentProfileProposeUpdate,
     /// Register a declarative app flow with the host background scheduler.
     BackgroundSchedule,
-    /// Resume a journaled background flow after system delivery.
-    BackgroundResume,
 }
 
 /// One host-bound bridge request. Payloads are data, never executable script.

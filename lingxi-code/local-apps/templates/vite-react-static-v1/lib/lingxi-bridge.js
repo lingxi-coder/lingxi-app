@@ -269,12 +269,3 @@ export async function scheduleBackgroundFlow(request) {
   }
   return bridge.background.schedule(request);
 }
-
-/** Resume a host-journaled flow after a system scheduler wake-up. */
-export async function resumeBackgroundFlow(request) {
-  const bridge = getLingXiBridge();
-  if (!bridge?.background?.resume) {
-    throw new Error("LingXi background scheduler is unavailable");
-  }
-  return bridge.background.resume(request);
-}

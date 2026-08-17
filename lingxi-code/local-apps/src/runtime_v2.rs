@@ -1066,6 +1066,10 @@ pub struct BackgroundJournalEntry {
     /// files omit this field and are treated as immediately runnable.
     #[serde(default)]
     pub next_run_at_ms: Option<u64>,
+    /// Bounded result of the most recent completed run, retained across
+    /// process death so native schedulers do not lose background output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_result_json: Option<String>,
     pub attempt: u32,
     pub last_error: Option<String>,
     pub updated_at_ms: u64,

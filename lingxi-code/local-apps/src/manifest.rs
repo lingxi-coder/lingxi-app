@@ -568,6 +568,7 @@ impl AppLayout {
             self.logs_rel(),
             self.app_dir_rel()
                 .join(crate::agent_sessions::AGENT_SESSION_HISTORY_DIR),
+            self.app_dir_rel().join(crate::background::CANCEL_DIR),
         ] {
             ensure_private_directory(&self.root, &relative)?;
         }

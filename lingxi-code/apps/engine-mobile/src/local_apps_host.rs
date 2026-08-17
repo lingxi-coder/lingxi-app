@@ -2019,10 +2019,6 @@ impl LocalAppsHostBroker {
                 .background_schedule_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
-            AppBridgeOperationDto::BackgroundResume => self
-                .background_resume_value(Value::Object(input))
-                .await
-                .map_err(BridgeFailure::from),
             _ => Err("unsupported bridge operation for this engine version".into()),
         }
     }
@@ -2063,7 +2059,6 @@ impl LocalAppsHostBroker {
             AppBridgeOperationDto::BackgroundSchedule => {
                 local_apps::CapabilityId::BackgroundSchedule
             }
-            AppBridgeOperationDto::BackgroundResume => local_apps::CapabilityId::BackgroundResume,
             _ => return Err("unsupported bridge operation for runtime v2 context".into()),
         };
         let layout = self.layout(&request.app_id)?;
@@ -3053,6 +3048,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .await
             .map_err(|e| e.to_string())?;
         let layout = self.layout(&app_id)?;
+        let _process_lock = self.acquire_background_process_lock(&app_id).await?;
         let _guard = self.background_task_writes.lock().await;
         let mut tasks = local_apps::background::load_tasks(&layout).map_err(|e| e.to_string())?;
         if tasks.len() >= 32 {
@@ -3071,7 +3067,6 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             updated_at_ms: now,
         };
         tasks.push(task.clone());
-        local_apps::background::save_tasks(&layout, &tasks).map_err(|e| e.to_string())?;
         let mut journal =
             local_apps::background::load_journal(&layout).map_err(|e| e.to_string())?;
         journal.retain(|entry| entry.task_id != task_id);
@@ -3080,23 +3075,13 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             flow_id: flow.flow_id,
             next_step_id: flow.steps.first().map(|step| step.step_id.clone()),
             next_run_at_ms: Some(now.saturating_add(interval_ms)),
+            last_result_json: None,
             attempt: 0,
             last_error: None,
             updated_at_ms: now,
         });
-        local_apps::background::save_journal(&layout, &journal).map_err(|e| e.to_string())?;
+        local_apps::background::save_state(&layout, &tasks, &journal).map_err(|e| e.to_string())?;
         Ok(json!({"task": task, "scheduled": true, "scheduler": "host-journal"}))
-    }
-
-    async fn background_resume_value(&self, input: Value) -> Result<Value, String> {
-        let app_id = required_string(&input, "app_id")?.to_string();
-        let task_id = required_string(&input, "task_id")?.to_string();
-        self.service()?
-            .record(&app_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        self.run_background_task_value(&app_id, &task_id, now_ms(), true)
-            .await
     }
 
     async fn agent_session_create(&self, input: Value) -> Result<Value, String> {
@@ -3117,10 +3102,6 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
 
     async fn background_schedule(&self, input: Value) -> Result<Value, String> {
         self.background_schedule_value(input).await
-    }
-
-    async fn background_resume(&self, input: Value) -> Result<Value, String> {
-        self.background_resume_value(input).await
     }
 
     async fn scaffold_app(&self, record: local_apps::AppRecord) -> Result<(), String> {

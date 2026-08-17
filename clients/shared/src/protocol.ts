@@ -884,7 +884,8 @@ export type AppBridgeOperationDto =
   | 'agent_send'
   | 'agent_stream'
   | 'agent_cancel'
-  | 'agent_profile_propose_update';
+  | 'agent_profile_propose_update'
+  | 'background_schedule';
 
 /** One host-bound, data-only bridge request (local_apps.rs `AppBridgeRequestDto`). */
 export interface AppBridgeRequestDto {
@@ -1079,7 +1080,8 @@ export type AppCapabilityKindDto =
   | 'location'
   | 'notifications'
   | 'llm'
-  | 'agent_notify';
+  | 'agent_notify'
+  | 'background_schedule';
 
 /** A capability approval request surfaced by the host (local_apps.rs `AppCapabilityRequestDto`). */
 export interface AppCapabilityRequestDto {

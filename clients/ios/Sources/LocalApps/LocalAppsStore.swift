@@ -100,6 +100,7 @@ final class LocalAppsStore {
 
     #if canImport(engine_mobileFFI)
         @ObservationIgnored private var submitCommand: ((ClientCommand) async throws -> Void)?
+        @ObservationIgnored private var pendingBackgroundScheduleRequests: Set<String> = []
     #endif
 
     init(websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry? = nil) {
@@ -454,7 +455,6 @@ final class LocalAppsStore {
             case ("agent", "cancel"): operation = .agentCancel
             case ("agent", "profileProposeUpdate"): operation = .agentProfileProposeUpdate
             case ("background", "schedule"): operation = .backgroundSchedule
-            case ("background", "resume"): operation = .backgroundResume
             default: operation = nil
             }
             guard let operation else {
@@ -465,6 +465,10 @@ final class LocalAppsStore {
                     error: String(localized: "local_apps_error_bridge_unsupported")
                 )
                 return
+            }
+            let isBackgroundSchedule = operation == .backgroundSchedule
+            if isBackgroundSchedule {
+                pendingBackgroundScheduleRequests.insert(request.id)
             }
             let submitted = await send(
                 .executeAppBridgeRequest(
@@ -477,6 +481,7 @@ final class LocalAppsStore {
                 )
             )
             if !submitted {
+                pendingBackgroundScheduleRequests.remove(request.id)
                 LocalAppWebViewRegistry.shared.resolveBridge(
                     appID: request.appID,
                     requestID: request.id,
@@ -680,6 +685,7 @@ final class LocalAppsStore {
                 )
 
             case let .appBridgeResponse(response):
+                let rescheduleBackground = pendingBackgroundScheduleRequests.remove(response.requestId) != nil
                 LocalAppWebViewRegistry.shared.resolveBridge(
                     appID: response.appId,
                     requestID: response.requestId,
@@ -687,6 +693,9 @@ final class LocalAppsStore {
                     error: response.ok ? nil : (response.error ?? String(localized: "local_apps_error_bridge_failed")),
                     code: response.errorCode
                 )
+                if rescheduleBackground {
+                    LocalAppBackgroundTaskBridge.shared.rescheduleAfterForegroundMutation()
+                }
 
             // Stream frames are consumed by the app bridge/session stream
             // owner; the library store must remain exhaustive without
@@ -881,6 +890,7 @@ final class LocalAppBackgroundTaskBridge: @unchecked Sendable {
     private let lock = NSLock()
     private var registered = false
     private var handler: Handler?
+    private var rescheduler: Handler?
     private var waiters: [UUID: CheckedContinuation<Handler?, Never>] = [:]
 
     func registerAtLaunch() {
@@ -902,19 +912,33 @@ final class LocalAppBackgroundTaskBridge: @unchecked Sendable {
                     await self?.runHandler()
                     processing.setTaskCompleted(success: !Task.isCancelled)
                 }
-                processing.expirationHandler = { worker.cancel() }
+                processing.expirationHandler = {
+                    worker.cancel()
+                    self?.schedule(
+                        earliestAtMs: UInt64(Date().timeIntervalSince1970 * 1000) + 15 * 60 * 1_000
+                    )
+                }
             }
         #endif
         schedule(earliestAtMs: UInt64(Date().timeIntervalSince1970 * 1000) + 15 * 60 * 1_000)
     }
 
-    func bind(_ handler: @escaping Handler) {
+    func bind(_ handler: @escaping Handler, rescheduler: Handler? = nil) {
         lock.lock()
         self.handler = handler
+        self.rescheduler = rescheduler
         let continuations = Array(waiters.values)
         waiters.removeAll()
         lock.unlock()
         continuations.forEach { $0.resume(returning: handler) }
+    }
+
+    func rescheduleAfterForegroundMutation() {
+        lock.lock()
+        let rescheduler = self.rescheduler
+        lock.unlock()
+        guard let rescheduler else { return }
+        Task { await rescheduler() }
     }
 
     func schedule(earliestAtMs: UInt64?) {

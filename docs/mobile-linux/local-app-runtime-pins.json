@@ -1234,17 +1234,15 @@
   },
   "forbidden_executables": [
     "/usr/bin/corepack",
-    "/usr/bin/pnpm",
     "/usr/bin/yarn"
   ],
   "forbidden_packages": [
     "corepack",
-    "pnpm",
     "yarn"
   ],
   "local_app_runtime": {
-    "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/package-lock.json",
-    "lockfile_sha256": "1f38c3832edbcac5a60036ee10f45789dff56739ff76242293b73b9dd2fe9d81",
+    "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/pnpm-lock.yaml",
+    "lockfile_sha256": "55d99d5d89e6f227460e1ef5c608bf0015e0cc5af25757159a5d52320e6785ad",
     "lightningcss": "1.33.0",
     "lightningcss_bindings": {
       "lightningcss-linux-arm64-musl": "1.33.0",
@@ -1253,13 +1251,23 @@
     "node": "24.18.1",
     "react": "19.2.8",
     "react_dom": "19.2.8",
-    "rolldown": "1.2.3",
+    "rolldown": "1.2.4",
     "rolldown_bindings": {
-      "@rolldown/binding-linux-arm64-musl": "1.2.3",
-      "@rolldown/binding-linux-x64-musl": "1.2.3"
+      "@rolldown/binding-linux-arm64-musl": "1.2.4",
+      "@rolldown/binding-linux-x64-musl": "1.2.4"
+    },
+    "tailwindcss_oxide": "4.3.3",
+    "tailwindcss_oxide_bindings": {
+      "@tailwindcss/oxide-linux-arm64-musl": "4.3.3",
+      "@tailwindcss/oxide-linux-x64-musl": "4.3.3"
     },
     "template": "lingxi-code/local-apps/templates/vite-react-static-v1",
     "vite": "8.2.1"
+  },
+  "pnpm": {
+    "version": "11.22.0",
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-11.22.0.tgz",
+    "sha512": "H/hwxMYTPf2I+yr8Rt0T1H8JyXlLQ4xv20fKmMrzvBY4HuC+k6CRuOOCTPAfiJ9G19niCRD7C+GrD7W6qA3WIQ=="
   },
   "release_ready": false,
   "runtime_packages": {

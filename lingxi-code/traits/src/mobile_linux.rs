@@ -44,6 +44,9 @@ pub mod guest_paths {
     pub const WORKSPACE_ROOT: &str = "/workspace";
     /// Root of the local-app build channels.
     pub const LOCAL_APP_BUILD_ROOT: &str = "/var/lingxi/local-app-build";
+    /// Host-owned pnpm content-addressable store used only during dependency
+    /// installation. It is never mounted for Vite builds or generated code.
+    pub const LOCAL_APP_DEPENDENCY_STORE: &str = "/var/lingxi/local-app-dependency-store";
     /// The project-root leaf below a local-app build channel.
     pub const LOCAL_APP_BUILD_PROJECT_DIR: &str = "project";
 
@@ -77,6 +80,10 @@ pub mod guest_paths {
             assert_eq!(super::SCRATCH, &["/tmp", "/var/tmp"]);
             assert_eq!(super::WORKSPACE_ROOT, "/workspace");
             assert_eq!(super::LOCAL_APP_BUILD_ROOT, "/var/lingxi/local-app-build");
+            assert_eq!(
+                super::LOCAL_APP_DEPENDENCY_STORE,
+                "/var/lingxi/local-app-dependency-store"
+            );
             assert_eq!(super::LOCAL_APP_BUILD_PROJECT_DIR, "project");
             assert_eq!(super::workspace("abc-123"), "/workspace/abc-123");
             assert_eq!(

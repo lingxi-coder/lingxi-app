@@ -595,7 +595,7 @@ fn host_owned_relative(relative: &Path) -> bool {
                 "index.html"
                     | "vite.config.mjs"
                     | "package.json"
-                    | "package-lock.json"
+                    | "pnpm-lock.yaml"
                     | "lib/device-context.js"
                     | "lib/lingxi-bridge.js"
                     | "lib/platform-adapter.js"
@@ -683,7 +683,7 @@ mod tests {
             "index.html",
             "vite.config.mjs",
             "package.json",
-            "package-lock.json",
+            "pnpm-lock.yaml",
             "lib/device-context.js",
             "lib/platform-adapter.js",
             "node_modules/vite/bin/vite.js",

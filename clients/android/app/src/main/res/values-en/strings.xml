@@ -614,7 +614,7 @@
     <string name="local_apps_section_permissions">Permissions</string>
     <string name="local_apps_section_preview">Preview</string>
     <string name="local_apps_source">Source</string>
-    <string name="local_apps_source_detail">View and edit the full text source; symlinks, build artifacts, and paths outside the workspace aren\'t shown. Changes to pinned dependencies can be saved, but build validation will reject unsupported versions or installs.</string>
+    <string name="local_apps_source_detail">View and edit the full text source; symlinks, build artifacts, and paths outside the workspace aren\'t shown. Dependency manifests are host-managed and locked to the template, so unsupported package edits or installs will fail validation.</string>
     <string name="local_apps_source_empty">No editable source yet</string>
     <string name="local_apps_source_error_title">Source Error</string>
     <string name="local_apps_source_loading">Loading source…</string>
@@ -1345,7 +1345,7 @@
     <string name="settings_skill_seed_css_doctor_desc">Diagnoses layout issues and provides fixes</string>
     <string name="settings_skill_seed_polish_name">English Polishing</string>
     <string name="settings_skill_seed_polish_desc">Chinese-to-English writing polish that preserves the original meaning</string>
-    <string name="settings_skill_bundled_create_local_app_desc">Orchestrates the design, dependencies, generation, build, and verification of a local app</string>
+    <string name="settings_skill_bundled_create_local_app_desc">Orchestrates the design, scaffold, generation, build, and verification of a local app</string>
     <string name="settings_skill_bundled_frontend_design_desc">Designs a native frontend direction for the target platform and form factor</string>
     <string name="settings_skill_bundled_frontend_qa_desc">Validates UI and interactions with Browser and the native WebView</string>
     <string name="settings_skill_bundled_accessibility_desc">Checks semantics, keyboard access, touch targets, contrast, and dynamic type</string>

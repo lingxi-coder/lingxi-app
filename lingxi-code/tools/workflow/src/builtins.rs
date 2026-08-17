@@ -36,7 +36,7 @@ const DEEP_RESEARCH: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
 /// call it by name.
 const LOCAL_APP_BUILD: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
     name: "local-app-build",
-    description: "Design, generate, offline-build, and verify a confirmed local app.",
+    description: "Design, generate, build, and verify a confirmed local app.",
     script: include_str!("local_app_build_workflow.js"),
     manual_only: false,
 };
@@ -131,12 +131,13 @@ mod tests {
             "lib/lingxi-bridge.js",
             "window.lingxi.v1",
             "Do not run npm, npx, node",
-            "package.json, package-lock.json, index.html, vite.config.*",
+            "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, index.html, vite.config.*",
             "host has already scaffolded the workspace",
-            "fixed by the host-owned scaffold",
+            "fixed by the host-owned template and lockfile set",
             "existing Git capability",
             "mcp__local_apps__build",
             "mcp__local_apps__manage_runtime",
+            "host may prepare the workspace dependencies when needed",
             "two allowed repair rounds",
             "conditionally detect ImageGen",
             "Browser is also required for mobile-sized viewports",

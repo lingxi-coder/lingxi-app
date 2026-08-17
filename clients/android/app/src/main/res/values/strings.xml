@@ -634,7 +634,7 @@
     <string name="local_apps_section_permissions">权限</string>
     <string name="local_apps_section_preview">预览</string>
     <string name="local_apps_source">源码</string>
-    <string name="local_apps_source_detail">可查看和编辑完整文本源码；符号链接、构建产物和工作区外路径不会显示。修改固定依赖可以保存，但构建验证会拒绝不受支持的版本或安装操作。</string>
+    <string name="local_apps_source_detail">可查看和编辑完整文本源码；符号链接、构建产物和工作区外路径不会显示。依赖清单由宿主按模板锁定并管理，因此不受支持的包修改或安装会在验证时失败。</string>
     <string name="local_apps_source_empty">暂无可编辑源码</string>
     <string name="local_apps_source_error_title">源码错误</string>
     <string name="local_apps_source_loading">正在读取源码…</string>
@@ -1365,7 +1365,7 @@
     <string name="settings_skill_seed_css_doctor_desc">诊断布局问题并给出修复</string>
     <string name="settings_skill_seed_polish_name">英文润色</string>
     <string name="settings_skill_seed_polish_desc">中→英写作润色，保留原意</string>
-    <string name="settings_skill_bundled_create_local_app_desc">编排设计、依赖、生成、构建和验证本地应用</string>
+    <string name="settings_skill_bundled_create_local_app_desc">编排本地应用的设计、脚手架、生成、构建和验证</string>
     <string name="settings_skill_bundled_frontend_design_desc">为目标平台和 form factor 设计原生前端方向</string>
     <string name="settings_skill_bundled_frontend_qa_desc">用 Browser 与原生 WebView 验证界面和交互</string>
     <string name="settings_skill_bundled_accessibility_desc">检查语义、键盘、触控、对比度和动态字体</string>

@@ -14,6 +14,10 @@ use traits::rooted_fs::{self, AtomicWriteOptions};
 use traits::FsError;
 
 const MAX_PERMISSIONS_BYTES: u64 = 512 * 1024;
+const LOCAL_APP_WORKSPACE_PERMISSION_SETTINGS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/templates/vite-react-static-v1/.lingxi/settings.local.json"
+));
 
 /// The initial workspace-local rules written when a local app is created.
 ///
@@ -253,23 +257,10 @@ pub fn save_permissions(layout: &AppLayout, permissions: &AppPermissions) -> Res
 /// grant and does not change the global permission mode.
 pub fn save_workspace_permission_settings(layout: &AppLayout) -> Result<(), AppError> {
     layout.initialize()?;
-    let body = serde_json::json!({
-        "permissions": {
-            "allow": LOCAL_APP_WORKSPACE_PERMISSION_RULES,
-            // The workspace grant is intentionally broad for source files, but
-            // host-owned metadata must never become model-writable just because
-            // this file is loaded as a local-settings allow rule.
-            "deny": ["Edit(./.lingxi/**)", "Edit(./LINGXI.md)", "Edit(./lib/lingxi-bridge.js)"],
-        }
-    });
-    let mut bytes = serde_json::to_vec_pretty(&body).map_err(|error| {
-        AppError::Io(format!("serialize workspace permission settings: {error}"))
-    })?;
-    bytes.push(b'\n');
     rooted_fs::atomic_write(
         layout.root(),
         &layout.workspace_settings_local_rel(),
-        &bytes,
+        LOCAL_APP_WORKSPACE_PERMISSION_SETTINGS,
         AtomicWriteOptions::default(),
     )
     .map_err(|error| AppError::from_fs("write workspace permission settings", &error))
@@ -384,9 +375,14 @@ mod tests {
             value["permissions"]["deny"],
             serde_json::json!([
                 "Edit(./.lingxi/**)",
+                "Edit(./.gitignore)",
                 "Edit(./LINGXI.md)",
                 "Edit(./lib/lingxi-bridge.js)"
             ])
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(layout.workspace_settings_local_rel())).unwrap(),
+            LOCAL_APP_WORKSPACE_PERMISSION_SETTINGS
         );
     }
 }

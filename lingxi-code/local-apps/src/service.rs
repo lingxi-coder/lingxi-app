@@ -32,10 +32,10 @@ use crate::permissions::{save_permissions, save_workspace_permission_settings, A
 use crate::state::AppState;
 use crate::storage;
 use crate::types::{
-    AppCheckpoint, AppCheckpointKind, AppRecord, AppRuntimeMode, AppRuntimeRecord, AppRuntimeState,
-    AppWorkflowState,
+    AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppRecord,
+    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -138,6 +138,7 @@ pub struct AppService {
     /// index rewrites. Plain sync mutex: locked only for short synchronous
     /// sections, never across an await.
     retired_ids: Arc<std::sync::Mutex<BTreeSet<String>>>,
+    dependencies: Arc<Mutex<HashMap<String, AppDependencyRecord>>>,
 }
 
 impl AppService {
@@ -176,6 +177,13 @@ impl AppService {
             })
             .await?
         };
+        let dependencies = apps
+            .iter()
+            .map(|app| {
+                storage::load_dependency_record(&root, &app.record)
+                    .map(|dependency| (app.record.id.clone(), dependency))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
         Ok(Self {
             root,
             clock,
@@ -183,6 +191,7 @@ impl AppService {
             state: Arc::new(Mutex::new(apps)),
             emit_order: Arc::new(Mutex::new(())),
             retired_ids: Arc::new(std::sync::Mutex::new(BTreeSet::new())),
+            dependencies: Arc::new(Mutex::new(dependencies)),
         })
     }
 
@@ -511,6 +520,120 @@ impl AppService {
         Ok(apps[idx].runtime.clone())
     }
 
+    /// The dependency-install record of one app.
+    pub async fn dependency_record(&self, app_id: &str) -> Result<AppDependencyRecord, AppError> {
+        let apps = self.state.lock().await;
+        let _ = Self::position(&apps, app_id)?;
+        let dependencies = self.dependencies.lock().await;
+        dependencies.get(app_id).cloned().ok_or_else(|| {
+            AppError::StorageCorrupt(format!("app {app_id} is missing dependencies.json state"))
+        })
+    }
+
+    async fn update_dependency_record(
+        &self,
+        app_id: &str,
+        op: impl FnOnce(&mut AppDependencyRecord, u64) -> Result<(), AppError>,
+    ) -> Result<AppDependencyRecord, AppError> {
+        let now = self.now_ms();
+        let apps = self.state.lock().await;
+        let _ = Self::position(&apps, app_id)?;
+        let mut dependencies = self.dependencies.lock().await;
+        let mut working = dependencies.get(app_id).cloned().ok_or_else(|| {
+            AppError::StorageCorrupt(format!("app {app_id} is missing dependencies.json state"))
+        })?;
+        op(&mut working, now)?;
+        let root = self.root.clone();
+        let persisted = working.clone();
+        Self::run_blocking(move || storage::save_dependency_record(&root, &persisted)).await?;
+        dependencies.insert(app_id.to_string(), working.clone());
+        Ok(working)
+    }
+
+    /// Move one app back to the dependency queue.
+    pub async fn queue_dependency_install(
+        &self,
+        app_id: &str,
+    ) -> Result<AppDependencyRecord, AppError> {
+        self.update_dependency_record(app_id, |dependency, now| {
+            dependency.state = AppDependencyState::Queued;
+            dependency.last_error = None;
+            dependency.updated_at_ms = now;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Mark that the host has started an install attempt.
+    pub async fn start_dependency_install(
+        &self,
+        app_id: &str,
+    ) -> Result<AppDependencyRecord, AppError> {
+        self.update_dependency_record(app_id, |dependency, now| {
+            if matches!(dependency.state, AppDependencyState::Installing) {
+                return Err(AppError::InvalidRequest(format!(
+                    "app {app_id} dependency install is already running"
+                )));
+            }
+            dependency.state = AppDependencyState::Installing;
+            dependency.install_attempts = dependency.install_attempts.saturating_add(1);
+            dependency.last_error = None;
+            dependency.updated_at_ms = now;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Mark one app's dependencies ready.
+    pub async fn complete_dependency_install(
+        &self,
+        app_id: &str,
+    ) -> Result<AppDependencyRecord, AppError> {
+        self.complete_dependency_install_with_metadata(app_id, None, None)
+            .await
+    }
+
+    /// Mark dependencies ready and persist the exact lock/toolchain identity
+    /// that produced the app-local tree. Older records remain readable and
+    /// are deliberately treated as stale by the mobile host.
+    pub async fn complete_dependency_install_with_metadata(
+        &self,
+        app_id: &str,
+        lockfile_sha256: Option<String>,
+        toolchain_key: Option<String>,
+    ) -> Result<AppDependencyRecord, AppError> {
+        self.update_dependency_record(app_id, |dependency, now| {
+            dependency.state = AppDependencyState::Ready;
+            dependency.last_error = None;
+            dependency.lockfile_sha256 = lockfile_sha256;
+            dependency.toolchain_key = toolchain_key;
+            dependency.updated_at_ms = now;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Persist a failed dependency install attempt.
+    pub async fn fail_dependency_install(
+        &self,
+        app_id: &str,
+        last_error: impl Into<String>,
+    ) -> Result<AppDependencyRecord, AppError> {
+        let last_error = last_error.into();
+        ensure_within(
+            "dependency last_error",
+            last_error.len(),
+            MAX_TEXT_VALUE_BYTES,
+        )?;
+        self.update_dependency_record(app_id, move |dependency, now| {
+            dependency.state = AppDependencyState::Failed;
+            dependency.last_error = Some(last_error);
+            dependency.updated_at_ms = now;
+            Ok(())
+        })
+        .await
+    }
+
     /// Git-backed checkpoints of one app, newest first.
     pub async fn list_checkpoints(&self, app_id: &str) -> Result<Vec<AppCheckpoint>, AppError> {
         if !self.git_version_control_enabled(app_id).await? {
@@ -792,6 +915,7 @@ impl AppService {
         let known = self.known_ids(&apps);
         let root = self.root.clone();
         let observer = Arc::clone(&self.observer);
+        let dependencies = Arc::clone(&self.dependencies);
         // Completion task (see with_app): mint + persist + commit + emission
         // hand-off survive the caller's future being dropped.
         let completion = tokio::spawn(async move {
@@ -823,6 +947,10 @@ impl AppService {
                         save_manifest(&layout, &manifest)?;
                         save_permissions(&layout, &AppPermissions::default())?;
                         save_workspace_permission_settings(&layout)?;
+                        storage::save_dependency_record(
+                            &root,
+                            &storage::default_dependency_record(&app.record.id, now),
+                        )?;
                         Ok(app)
                     })();
                     if let Err(ref error) = prepared {
@@ -874,6 +1002,10 @@ impl AppService {
                 return Err(error);
             }
             apps.push(app);
+            dependencies.lock().await.insert(
+                record.id.clone(),
+                storage::default_dependency_record(&record.id, now),
+            );
             drop(apps);
             Self::spawn_emission(
                 observer,
@@ -987,6 +1119,7 @@ impl AppService {
         let root = self.root.clone();
         let observer = Arc::clone(&self.observer);
         let retired = Arc::clone(&self.retired_ids);
+        let dependencies = Arc::clone(&self.dependencies);
         let app_id = app_id.to_string();
         let completion = tokio::spawn(async move {
             {
@@ -1001,6 +1134,7 @@ impl AppService {
                 retired.insert(app_id.clone());
             }
             apps.remove(idx);
+            dependencies.lock().await.remove(&app_id);
             drop(apps);
             Self::spawn_emission(
                 observer,
@@ -1087,6 +1221,7 @@ mod tests {
     use crate::error::AppErrorCode;
     use crate::events::{NoopAppEventObserver, RecordingAppEventObserver};
     use crate::test_support::FixedClock;
+    use crate::types::AppDependencyState;
     use crate::types::AppWorkflowState;
     use std::path::Path;
     use std::time::Duration;
@@ -1742,6 +1877,62 @@ mod tests {
                 .workflow_model
                 .as_deref(),
             Some("deepseek/deepseek-v4-flash")
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_records_persist_their_state_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("Deps"), "a test app", None)
+            .await
+            .expect("create");
+
+        let queued = h
+            .service
+            .dependency_record(&record.id)
+            .await
+            .expect("queued");
+        assert_eq!(queued.state, AppDependencyState::Queued);
+        assert_eq!(queued.install_attempts, 0);
+
+        let installing = h
+            .service
+            .start_dependency_install(&record.id)
+            .await
+            .expect("installing");
+        assert_eq!(installing.state, AppDependencyState::Installing);
+        assert_eq!(installing.install_attempts, 1);
+
+        let failed = h
+            .service
+            .fail_dependency_install(&record.id, "offline")
+            .await
+            .expect("failed");
+        assert_eq!(failed.state, AppDependencyState::Failed);
+        assert_eq!(failed.last_error.as_deref(), Some("offline"));
+
+        h.service
+            .queue_dependency_install(&record.id)
+            .await
+            .expect("requeue");
+        let ready = h
+            .service
+            .complete_dependency_install(&record.id)
+            .await
+            .expect("ready");
+        assert_eq!(ready.state, AppDependencyState::Ready);
+
+        let reloaded = reload_service(&h.service).await;
+        assert_eq!(
+            reloaded
+                .dependency_record(&record.id)
+                .await
+                .expect("reloaded")
+                .state,
+            AppDependencyState::Ready
         );
     }
 

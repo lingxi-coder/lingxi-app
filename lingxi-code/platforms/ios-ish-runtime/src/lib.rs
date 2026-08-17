@@ -715,11 +715,21 @@ impl IosIshRuntime {
         &self,
         request_mounts: &[MountSpec],
     ) -> Result<Vec<MountSpec>, MobileLinuxError> {
-        if request_mounts.len() != 1
-            || !matches!(request_mounts[0].purpose, MountPurpose::LocalAppBuild)
-        {
+        let build_count = request_mounts
+            .iter()
+            .filter(|mount| matches!(mount.purpose, MountPurpose::LocalAppBuild))
+            .count();
+        let store_count = request_mounts
+            .iter()
+            .filter(|mount| {
+                matches!(mount.purpose, MountPurpose::Shared)
+                    && mount.guest_path
+                        == traits::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
+            })
+            .count();
+        if build_count != 1 || store_count > 1 || request_mounts.len() != 1 + store_count {
             return Err(MobileLinuxError::InvalidRequest(
-                "isolated local-app execution requires exactly one LocalAppBuild mount".to_string(),
+                "isolated local-app execution requires exactly one LocalAppBuild mount and at most one validated dependency store mount".to_string(),
             ));
         }
         let mut mounts: Vec<MountSpec> = Vec::with_capacity(request_mounts.len());
@@ -2176,17 +2186,40 @@ fn validate_mount(
                 .join(channel),
             "local-app build host_path",
         )?;
-        if !local_app_build_host_path_matches(&host_path, &expected_host_path, channel) {
+        let workspace_host_path = normalize_host_path(
+            &config
+                .app_sandbox_root
+                .join("apps")
+                .join(app_id)
+                .join("workspace"),
+            "local-app workspace host_path",
+        )?;
+        if host_path != workspace_host_path
+            && !local_app_build_host_path_matches(&host_path, &expected_host_path, channel)
+        {
             // Both paths, always. A guard that prints only what it WANTED
             // leaves the reader to guess what it got — and the two differ
             // here by a prefix (`/var` vs `/private/var`), a stale container
             // UUID, or a channel mismatch, which are three different bugs
             // that read identically without the actual value.
             return Err(MobileLinuxError::InvalidRequest(format!(
-                "local-app build mount host_path must be {} or its matching .{channel}.staging-<numeric nonce> sibling (got {})",
-                expected_host_path.display(),
+                "local-app build mount host_path must be {} or workspace {} or its matching .{channel}.staging-<numeric nonce> sibling (got {})",
+                expected_host_path.display(), workspace_host_path.display(),
                 host_path.display()
             )));
+        }
+    } else if matches!(mount.purpose, MountPurpose::Shared)
+        && mount.guest_path == traits::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
+    {
+        let expected_root = normalize_host_path(
+            &config.app_sandbox_root.join("dependency-cache"),
+            "dependency store host root",
+        )?;
+        if !host_path.starts_with(&expected_root) {
+            return Err(MobileLinuxError::InvalidRequest(
+                "dependency store mount must remain inside the app sandbox dependency-cache"
+                    .to_string(),
+            ));
         }
     } else if mount.guest_path == config.workspace_guest_path() {
         return Err(MobileLinuxError::InvalidRequest(

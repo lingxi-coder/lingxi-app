@@ -40,7 +40,6 @@ FIXED_PACKAGE_VERSIONS = dict(_PINS["runtime_packages"])
 # them listed here would have made a correctly-built rootfs fail verification.
 FORBIDDEN_PACKAGE_MANAGER_PATHS = [
     "/usr/bin/corepack",
-    "/usr/bin/pnpm",
     "/usr/bin/yarn",
 ]
 

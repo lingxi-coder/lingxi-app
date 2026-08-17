@@ -24,15 +24,16 @@ assert "scaffold" not in policy
 assert "package_manager_policy" not in policy
 assert policy["vite_executable"] == "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js"
 assert policy["dependency_snapshot"] == {
-    "source": "bundled:local-app-runtime/node_modules",
+    "source": "embedded:vite-react-static-v1/pnpm-lock.yaml",
     "materialize_into": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules",
     "guest_mount": "forbidden",
-    "selection_policy": "verified_runtime_only",
+    "selection_policy": "locked_template_only",
+    "install_command": "pnpm install --frozen-lockfile --ignore-scripts --no-runtime --prefer-offline",
 }
 assert policy["build_mount"] == {
     "kind": "LocalAppBuild",
     "count": 1,
-    "host_path_policy": "staging_or_store_root",
+    "host_path_policy": "workspace_or_staging_or_store_root",
     "guest_path": "/var/lingxi/local-app-build/{app_id}/{channel}/project",
     "writable": True,
 }
@@ -56,8 +57,6 @@ assert command["environment"] == {
     "XDG_CACHE_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-cache",
     "XDG_CONFIG_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-config",
     "XDG_DATA_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-data",
-    "NPM_CONFIG_CACHE": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/npm-cache",
-    "npm_config_cache": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/npm-cache",
 }
 limits = policy["limits"]
 assert limits["build_node_old_space_percent"] == 75
@@ -119,7 +118,7 @@ if python3 "${TOOL}" --repo-root "${REPO_ROOT}" \
 fi
 
 python3 "${SCRIPT_DIR}/generate-local-app-sbom.py" \
-  --lock "${TEMPLATE}/package-lock.json" \
+  --lock "${TEMPLATE}/pnpm-lock.yaml" \
   --output "${TEMP_ROOT}/local-app-runtime.spdx.json"
 cmp "${TEMP_ROOT}/local-app-runtime.spdx.json" \
   "${REPO_ROOT}/docs/mobile-linux/sbom/local-app-runtime.spdx.json"
@@ -167,9 +166,9 @@ if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/path-es
 fi
 
 cp -R "${TEMPLATE}" "${TEMP_ROOT}/lock-drift"
-printf '\n' >> "${TEMP_ROOT}/lock-drift/package-lock.json"
+printf '\n' >> "${TEMP_ROOT}/lock-drift/pnpm-lock.yaml"
 if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/lock-drift"; then
-  echo "expected package-lock byte drift to fail validation" >&2
+  echo "expected pnpm-lock byte drift to fail validation" >&2
   exit 1
 fi
 
@@ -193,44 +192,47 @@ if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/externa
 fi
 
 NODE_MODULES="${TEMP_ROOT}/node_modules"
-mkdir -p \
-  "${NODE_MODULES}/vite/bin" \
-  "${NODE_MODULES}/react" \
-  "${NODE_MODULES}/react-dom" \
-  "${NODE_MODULES}/rolldown" \
-  "${NODE_MODULES}/@rolldown/binding-linux-arm64-musl" \
-  "${NODE_MODULES}/@rolldown/binding-linux-x64-musl" \
-  "${NODE_MODULES}/lightningcss" \
-  "${NODE_MODULES}/lightningcss-linux-arm64-musl" \
-  "${NODE_MODULES}/lightningcss-linux-x64-musl"
-python3 - "${NODE_MODULES}" <<'PY'
+mkdir -p "${NODE_MODULES}"
+python3 - "${NODE_MODULES}" "${TOOL}" <<'PY'
+import importlib.util
 import json
 import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
-packages = {
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "vite": "8.2.1",
-    "rolldown": "1.2.3",
+source = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("local_app_supply_chain", source)
+if spec is None or spec.loader is None:
+    raise SystemExit(f"cannot load {source}")
+verify = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verify)
+packages = dict(verify.EXPECTED_DEPENDENCIES)
+packages.update({
+    "rolldown": "1.2.4",
     "lightningcss": "1.33.0",
-    "@rolldown/binding-linux-arm64-musl": "1.2.3",
-    "@rolldown/binding-linux-x64-musl": "1.2.3",
+    "@tailwindcss/oxide": "4.3.3",
+    "@rolldown/binding-linux-arm64-musl": "1.2.4",
+    "@rolldown/binding-linux-x64-musl": "1.2.4",
     "lightningcss-linux-arm64-musl": "1.33.0",
     "lightningcss-linux-x64-musl": "1.33.0",
-}
+    "@tailwindcss/oxide-linux-arm64-musl": "4.3.3",
+    "@tailwindcss/oxide-linux-x64-musl": "4.3.3",
+})
 for name, version in packages.items():
     package = root.joinpath(*name.split("/"))
+    package.mkdir(parents=True, exist_ok=True)
     (package / "package.json").write_text(
         json.dumps({"name": name, "version": version}),
         encoding="utf-8",
     )
+(root / "vite/bin").mkdir(parents=True, exist_ok=True)
 (root / "vite/bin/vite.js").write_text("#!/usr/bin/env node\n", encoding="utf-8")
 (root / "@rolldown/binding-linux-arm64-musl/rolldown-binding.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "@rolldown/binding-linux-x64-musl/rolldown-binding.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "lightningcss-linux-arm64-musl/lightningcss.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "lightningcss-linux-x64-musl/lightningcss.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
+(root / "@tailwindcss/oxide-linux-arm64-musl/tailwindcss-oxide.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
+(root / "@tailwindcss/oxide-linux-x64-musl/tailwindcss-oxide.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 PY
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \
@@ -254,6 +256,10 @@ assert manifest["resolved_rolldown_bindings"] == [
 assert manifest["resolved_lightningcss_bindings"] == [
     "lightningcss-linux-arm64-musl",
     "lightningcss-linux-x64-musl",
+], manifest
+assert manifest["resolved_oxide_bindings"] == [
+    "@tailwindcss/oxide-linux-arm64-musl",
+    "@tailwindcss/oxide-linux-x64-musl",
 ], manifest
 PY
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
@@ -298,7 +304,8 @@ IOS_NODE_MODULES="${TEMP_ROOT}/node_modules-ios"
 cp -R "${NODE_MODULES}" "${IOS_NODE_MODULES}"
 rm -rf \
   "${IOS_NODE_MODULES}/@rolldown/binding-linux-x64-musl" \
-  "${IOS_NODE_MODULES}/lightningcss-linux-x64-musl"
+  "${IOS_NODE_MODULES}/lightningcss-linux-x64-musl" \
+  "${IOS_NODE_MODULES}/@tailwindcss/oxide-linux-x64-musl"
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${IOS_NODE_MODULES}" \
@@ -313,6 +320,7 @@ import sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert manifest["resolved_rolldown_bindings"] == ["@rolldown/binding-linux-arm64-musl"], manifest
 assert manifest["resolved_lightningcss_bindings"] == ["lightningcss-linux-arm64-musl"], manifest
+assert manifest["resolved_oxide_bindings"] == ["@tailwindcss/oxide-linux-arm64-musl"], manifest
 PY
 
 # The iOS bundle install step. The staged tree is 0555/0444, so a second build

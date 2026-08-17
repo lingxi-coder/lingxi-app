@@ -3,15 +3,16 @@
   "node_executable": "/usr/bin/node",
   "vite_executable": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js",
   "dependency_snapshot": {
-    "source": "bundled:local-app-runtime/node_modules",
+    "source": "embedded:vite-react-static-v1/pnpm-lock.yaml",
     "materialize_into": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules",
     "guest_mount": "forbidden",
-    "selection_policy": "verified_runtime_only"
+    "selection_policy": "locked_template_only",
+    "install_command": "pnpm install --frozen-lockfile --ignore-scripts --no-runtime --prefer-offline"
   },
   "build_mount": {
     "kind": "LocalAppBuild",
     "count": 1,
-    "host_path_policy": "staging_or_store_root",
+    "host_path_policy": "workspace_or_staging_or_store_root",
     "guest_path": "/var/lingxi/local-app-build/{app_id}/{channel}/project",
     "writable": true
   },
@@ -36,9 +37,7 @@
         "TEMP": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/tmp",
         "XDG_CACHE_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-cache",
         "XDG_CONFIG_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-config",
-        "XDG_DATA_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-data",
-        "NPM_CONFIG_CACHE": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/npm-cache",
-        "npm_config_cache": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/npm-cache"
+        "XDG_DATA_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-data"
       },
       "network_policy": "disabled",
       "memory_limit_policy": "physical_memory_tier",

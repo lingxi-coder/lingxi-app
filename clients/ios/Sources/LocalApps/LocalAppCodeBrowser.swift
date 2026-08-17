@@ -90,7 +90,7 @@ final class LocalAppCodeBrowser {
         "css", "html", "js", "json", "jsx", "md", "mjs", "svg", "ts", "tsx", "txt",
     ]
     private static let editableNames: Set<String> = [
-        ".gitignore", ".npmrc", "next.config.js", "next.config.mjs", "package-lock.json", "package.json",
+        ".gitignore", ".npmrc", "next.config.js", "next.config.mjs", "pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json",
     ]
     private static let maximumEditableBytes = 1_048_576
 

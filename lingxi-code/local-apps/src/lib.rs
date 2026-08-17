@@ -60,6 +60,7 @@ pub use permissions::{
 pub use service::AppService;
 pub use state::{runtime_transition_allowed, AppState};
 pub use types::{
-    AppCheckpoint, AppCheckpointKind, AppRecord, AppRuntimeMode, AppRuntimeRecord, AppRuntimeState,
-    AppWorkflowState, APPS_SCHEMA_VERSION, DEFAULT_GIT_VERSION_CONTROL,
+    AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppRecord,
+    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState, APPS_SCHEMA_VERSION,
+    DEFAULT_GIT_VERSION_CONTROL,
 };

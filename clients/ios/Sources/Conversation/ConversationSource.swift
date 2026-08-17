@@ -2652,7 +2652,7 @@ final class MockConversationSource: ConversationSource {
                     makeIosMobileLinuxConfig($0, appSandboxRoot: config.appSandboxRoot)
                 },
                 localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
-                localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot,
+                localAppsRuntimeRoot: nil,
                 physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
                 hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
             )

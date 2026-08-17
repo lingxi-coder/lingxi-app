@@ -101,7 +101,7 @@ python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null || {
   echo "verify-tree must accept the shipped npm/npx" >&2
   exit 1
 }
-for forbidden in corepack pnpm yarn; do
+for forbidden in corepack yarn; do
   touch "${fixture_root}/usr/bin/${forbidden}"
   if python3 "${tool}" verify-tree --root "${fixture_root}"; then
     echo "expected verify-tree to reject ${forbidden} in the runtime image" >&2

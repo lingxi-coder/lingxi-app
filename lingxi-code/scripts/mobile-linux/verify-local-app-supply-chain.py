@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import base64
 import hashlib
 import json
 import pathlib
@@ -9,22 +8,69 @@ import sys
 
 
 EXPECTED_DEPENDENCIES = {
+    "@hookform/resolvers": "5.9.0",
+    "@radix-ui/react-accordion": "1.2.20",
+    "@radix-ui/react-alert-dialog": "1.1.23",
+    "@radix-ui/react-aspect-ratio": "1.1.15",
+    "@radix-ui/react-avatar": "1.2.6",
+    "@radix-ui/react-checkbox": "1.3.11",
+    "@radix-ui/react-collapsible": "1.1.20",
+    "@radix-ui/react-context-menu": "2.3.7",
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-dropdown-menu": "2.1.24",
+    "@radix-ui/react-hover-card": "1.1.23",
+    "@radix-ui/react-label": "2.1.15",
+    "@radix-ui/react-popover": "1.1.23",
+    "@radix-ui/react-progress": "1.1.16",
+    "@radix-ui/react-radio-group": "1.4.7",
+    "@radix-ui/react-scroll-area": "1.2.18",
+    "@radix-ui/react-select": "2.3.7",
+    "@radix-ui/react-separator": "1.1.15",
+    "@radix-ui/react-slider": "1.4.7",
+    "@radix-ui/react-slot": "1.3.3",
+    "@radix-ui/react-switch": "1.3.7",
+    "@radix-ui/react-tabs": "1.1.21",
+    "@radix-ui/react-toggle": "1.1.18",
+    "@radix-ui/react-toggle-group": "1.1.19",
+    "@radix-ui/react-tooltip": "1.2.16",
+    "@tailwindcss/vite": "4.3.3",
+    "@tanstack/react-query": "5.101.4",
+    "@tanstack/react-virtual": "3.14.9",
+    "@vitejs/plugin-react": "6.0.4",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.31.0",
+    "motion": "13.1.0",
+    "next-themes": "0.4.6",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "react-hook-form": "7.85.0",
+    "react-router-dom": "7.18.2",
+    "sonner": "2.0.8",
+    "tailwind-merge": "3.6.0",
+    "tailwindcss": "4.3.3",
+    "tw-animate-css": "1.4.0",
     "vite": "8.2.1",
+    "zod": "4.4.3",
+    "zustand": "5.0.15",
 }
+EXPECTED_OVERRIDES = {"lightningcss": "1.33.0"}
 EXPECTED_SCRIPTS = {
     "build": "vite build",
     "dev": "vite",
     "preview": "vite preview",
 }
 EXPECTED_ROLLDOWN_BINDINGS = {
-    "@rolldown/binding-linux-arm64-musl": "1.2.3",
-    "@rolldown/binding-linux-x64-musl": "1.2.3",
+    "@rolldown/binding-linux-arm64-musl": "1.2.4",
+    "@rolldown/binding-linux-x64-musl": "1.2.4",
 }
 EXPECTED_LIGHTNINGCSS_BINDINGS = {
     "lightningcss-linux-arm64-musl": "1.33.0",
     "lightningcss-linux-x64-musl": "1.33.0",
+}
+EXPECTED_OXIDE_BINDINGS = {
+    "@tailwindcss/oxide-linux-arm64-musl": "4.3.3",
+    "@tailwindcss/oxide-linux-x64-musl": "4.3.3",
 }
 EXPECTED_NATIVE_PACKAGE_BINARIES = {
     "@rolldown/binding-linux-arm64-musl": "rolldown-binding.linux-arm64-musl.node",
@@ -35,34 +81,25 @@ EXPECTED_NATIVE_PACKAGE_BINARIES = {
     "lightningcss-linux-x64-musl": "lightningcss.linux-x64-musl.node",
     "lightningcss-linux-arm64-gnu": "lightningcss.linux-arm64-gnu.node",
     "lightningcss-linux-x64-gnu": "lightningcss.linux-x64-gnu.node",
+    "@tailwindcss/oxide-linux-arm64-musl": "tailwindcss-oxide.linux-arm64-musl.node",
+    "@tailwindcss/oxide-linux-x64-musl": "tailwindcss-oxide.linux-x64-musl.node",
+    "@tailwindcss/oxide-linux-arm64-gnu": "tailwindcss-oxide.linux-arm64-gnu.node",
+    "@tailwindcss/oxide-linux-x64-gnu": "tailwindcss-oxide.linux-x64-gnu.node",
 }
-EXPECTED_NATIVE_PACKAGE_LIBC = {
-    "@rolldown/binding-linux-arm64-musl": "musl",
-    "@rolldown/binding-linux-x64-musl": "musl",
-    "@rolldown/binding-linux-arm64-gnu": "glibc",
-    "@rolldown/binding-linux-x64-gnu": "glibc",
-    "lightningcss-linux-arm64-musl": "musl",
-    "lightningcss-linux-x64-musl": "musl",
-    "lightningcss-linux-arm64-gnu": "glibc",
-    "lightningcss-linux-x64-gnu": "glibc",
-}
-EXPECTED_ROLLDOWN_VERSION = "1.2.3"
+EXPECTED_ROLLDOWN_VERSION = "1.2.4"
 EXPECTED_LIGHTNINGCSS_VERSION = "1.33.0"
+EXPECTED_OXIDE_VERSION = "4.3.3"
 EXPECTED_WRITABLE_ROOTS = ["app", "components", "lib", "styles", "public"]
 VITE_EXPECTED_WRITABLE_ROOTS = EXPECTED_WRITABLE_ROOTS + ["src"]
 FORBIDDEN_ROUTE_FILES = {"route.js", "route.jsx", "route.ts", "route.tsx"}
 
-# Package-manager policy for the *rootfs* APK closure. npm and npx are now
-# first-class members of the shipped developer environment, so only the
-# alternative managers stay out — keeping them would give the guest three ways
-# to resolve a dependency tree and make the lockfile contract unenforceable.
-# The separate node_modules-scope list in stage-local-app-runtime.py still
-# forbids npm, because a vendored copy inside the app's own node_modules is a
-# different thing from the interpreter's package manager.
-FORBIDDEN_PACKAGE_NAMES = {"corepack", "pnpm", "yarn"}
+# Package-manager policy for the *rootfs* APK closure. npm remains available
+# for terminal users, while the host-owned local-app installer uses the pinned
+# pnpm tarball. Only managers that are not part of the supported toolchain stay
+# out of the rootfs closure.
+FORBIDDEN_PACKAGE_NAMES = {"corepack", "yarn"}
 FORBIDDEN_EXECUTABLES = {
     "/usr/bin/corepack",
-    "/usr/bin/pnpm",
     "/usr/bin/yarn",
 }
 APK_VERSION_RE = re.compile(r"[0-9][0-9A-Za-z._]*(?:_[a-z]+[0-9]*)?-r[0-9]+")
@@ -104,6 +141,9 @@ def expected_native_packages_for(platform: str, family: str) -> dict[str, str]:
     elif family == "lightningcss":
         bindings = EXPECTED_LIGHTNINGCSS_BINDINGS
         arm64 = "lightningcss-linux-arm64-musl"
+    elif family == "oxide":
+        bindings = EXPECTED_OXIDE_BINDINGS
+        arm64 = "@tailwindcss/oxide-linux-arm64-musl"
     else:
         fail(f"unknown native package family: {family}")
     if platform == "ios":
@@ -315,84 +355,38 @@ def expected_node(pins: dict) -> str:
 
 def validate_lock(template: pathlib.Path, pins: dict) -> None:
     package_json = load_json(template / "package.json")
-    lock = load_json(template / "package-lock.json")
+    lock_path = template / "pnpm-lock.yaml"
+    lock_text = lock_path.read_text(encoding="utf-8")
     EXPECTED_NODE = expected_node(pins)
     if package_json.get("engines") != {"node": EXPECTED_NODE}:
         fail("template package.json must pin Node exactly")
+    if package_json.get("overrides") != EXPECTED_OVERRIDES:
+        fail("template package.json must pin the deduplicated native CSS override")
     if package_json.get("dependencies") != EXPECTED_DEPENDENCIES:
         fail("template package.json dependencies must match the fixed runtime")
     if package_json.get("scripts") != EXPECTED_SCRIPTS:
         fail("template package.json must expose the standard Vite scripts only")
 
-    packages = lock.get("packages")
-    if not isinstance(packages, dict):
-        fail("package-lock.json missing packages")
-    root = packages.get("")
-    if not isinstance(root, dict) or root.get("dependencies") != EXPECTED_DEPENDENCIES:
-        fail("package-lock root dependencies diverged")
-    if root.get("engines") != {"node": EXPECTED_NODE}:
-        fail("package-lock root Node pin diverged")
-
-    for path, package in packages.items():
-        if path == "":
-            continue
-        if not isinstance(package, dict) or not isinstance(package.get("version"), str):
-            fail(f"package-lock entry has no exact version: {path}")
-        integrity = package.get("integrity")
-        if not isinstance(integrity, str) or re.fullmatch(r"sha512-[A-Za-z0-9+/]+={0,2}", integrity) is None:
-            fail(f"package-lock entry has no npm SHA-512 integrity: {path}")
-        try:
-            base64.b64decode(integrity.removeprefix("sha512-"), validate=True)
-        except ValueError as exc:
-            fail(f"package-lock integrity is invalid for {path}: {exc}")
-
+    if not re.search(r"^lockfileVersion:\s*['\"]?9\.0['\"]?\s*$", lock_text, re.MULTILINE):
+        fail("pnpm-lock.yaml must use lockfileVersion 9")
+    if "importers:" not in lock_text or "packages:" not in lock_text or "snapshots:" not in lock_text:
+        fail("pnpm-lock.yaml is missing importers/packages/snapshots")
+    if "package-lock.json" in lock_text or "next@" in lock_text:
+        fail("pnpm-lock.yaml contains retired npm/Next package metadata")
     for name, version in EXPECTED_DEPENDENCIES.items():
-        entry = packages.get(f"node_modules/{name}")
-        if not isinstance(entry, dict) or entry.get("version") != version:
-            fail(f"package-lock did not resolve {name}@{version}")
-    if "node_modules/next" in packages or any(
-        path.startswith("node_modules/@next/") for path in packages
-    ):
-        fail("package-lock must not retain Next.js or SWC packages")
-    rolldown = packages.get("node_modules/rolldown")
-    if not isinstance(rolldown, dict) or rolldown.get("version") != EXPECTED_ROLLDOWN_VERSION:
-        fail(f"package-lock did not pin rolldown@{EXPECTED_ROLLDOWN_VERSION}")
-    for name, version in EXPECTED_ROLLDOWN_BINDINGS.items():
-        entry = packages.get(f"node_modules/{name}")
-        if not isinstance(entry, dict) or entry.get("version") != version:
-            fail(f"package-lock did not pin {name}@{version}")
-        if entry.get("libc") != [EXPECTED_NATIVE_PACKAGE_LIBC[name]]:
-            fail(f"package-lock did not pin {name} libc={EXPECTED_NATIVE_PACKAGE_LIBC[name]}")
+        pattern = rf"(?ms)^\s+['\"]?{re.escape(name)}['\"]?:\s*\n\s+specifier:\s*{re.escape(version)}\b"
+        if not re.search(pattern, lock_text):
+            fail(f"pnpm-lock importer did not pin {name}@{version}")
     for name, version in {
-        "@rolldown/binding-linux-arm64-gnu": EXPECTED_ROLLDOWN_VERSION,
-        "@rolldown/binding-linux-x64-gnu": EXPECTED_ROLLDOWN_VERSION,
+        "rolldown": EXPECTED_ROLLDOWN_VERSION,
+        "lightningcss": EXPECTED_LIGHTNINGCSS_VERSION,
+        "@tailwindcss/oxide": EXPECTED_OXIDE_VERSION,
+        **EXPECTED_ROLLDOWN_BINDINGS,
+        **EXPECTED_LIGHTNINGCSS_BINDINGS,
+        **EXPECTED_OXIDE_BINDINGS,
     }.items():
-        entry = packages.get(f"node_modules/{name}")
-        if not isinstance(entry, dict) or entry.get("version") != version:
-            fail(f"package-lock did not pin {name}@{version}")
-        if entry.get("libc") != [EXPECTED_NATIVE_PACKAGE_LIBC[name]]:
-            fail(f"package-lock did not pin {name} libc={EXPECTED_NATIVE_PACKAGE_LIBC[name]}")
-    lightningcss = packages.get("node_modules/lightningcss")
-    if (
-        not isinstance(lightningcss, dict)
-        or lightningcss.get("version") != EXPECTED_LIGHTNINGCSS_VERSION
-    ):
-        fail(f"package-lock did not pin lightningcss@{EXPECTED_LIGHTNINGCSS_VERSION}")
-    for name, version in EXPECTED_LIGHTNINGCSS_BINDINGS.items():
-        entry = packages.get(f"node_modules/{name}")
-        if not isinstance(entry, dict) or entry.get("version") != version:
-            fail(f"package-lock did not pin {name}@{version}")
-        if entry.get("libc") != [EXPECTED_NATIVE_PACKAGE_LIBC[name]]:
-            fail(f"package-lock did not pin {name} libc={EXPECTED_NATIVE_PACKAGE_LIBC[name]}")
-    for name, version in {
-        "lightningcss-linux-arm64-gnu": EXPECTED_LIGHTNINGCSS_VERSION,
-        "lightningcss-linux-x64-gnu": EXPECTED_LIGHTNINGCSS_VERSION,
-    }.items():
-        entry = packages.get(f"node_modules/{name}")
-        if not isinstance(entry, dict) or entry.get("version") != version:
-            fail(f"package-lock did not pin {name}@{version}")
-        if entry.get("libc") != [EXPECTED_NATIVE_PACKAGE_LIBC[name]]:
-            fail(f"package-lock did not pin {name} libc={EXPECTED_NATIVE_PACKAGE_LIBC[name]}")
+        if not re.search(rf"^\s*['\"]?{re.escape(name)}@{re.escape(version)}['\"]?:\s*$", lock_text, re.MULTILINE):
+            fail(f"pnpm-lock packages did not pin {name}@{version}")
 
     runtime = pins.get("local_app_runtime")
     expected_runtime = {
@@ -405,19 +399,19 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
         "rolldown_bindings": EXPECTED_ROLLDOWN_BINDINGS,
         "lightningcss": EXPECTED_LIGHTNINGCSS_VERSION,
         "lightningcss_bindings": EXPECTED_LIGHTNINGCSS_BINDINGS,
-        "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/package-lock.json",
+        "tailwindcss_oxide": EXPECTED_OXIDE_VERSION,
+        "tailwindcss_oxide_bindings": EXPECTED_OXIDE_BINDINGS,
+        "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/pnpm-lock.yaml",
         # Checked against the file on disk rather than a literal, so a lockfile
         # edit that forgets to refresh the pin is caught as drift instead of
         # being frozen into a constant that has to be hand-updated in lockstep.
-        "lockfile_sha256": hashlib.sha256(
-            (template / "package-lock.json").read_bytes()
-        ).hexdigest(),
+        "lockfile_sha256": hashlib.sha256(lock_path.read_bytes()).hexdigest(),
     }
     if runtime != expected_runtime:
         fail("local-app runtime pin manifest diverged from the template lock")
-    lock_digest = hashlib.sha256((template / "package-lock.json").read_bytes()).hexdigest()
+    lock_digest = hashlib.sha256(lock_path.read_bytes()).hexdigest()
     if lock_digest != runtime["lockfile_sha256"]:
-        fail("package-lock bytes diverged from the pinned SHA-256")
+        fail("pnpm-lock.yaml bytes diverged from the pinned SHA-256")
 
 
 def validate_workspace_sources(
@@ -444,7 +438,13 @@ def validate_workspace_sources(
     allowed_top_level = (
         set(writable_roots)
         | top_level_files
-        | {".lingxi", "package-lock.json", "package.json"}
+        | {
+            ".gitignore",
+            ".lingxi",
+            "package.json",
+            "pnpm-lock.yaml",
+            "pnpm-workspace.yaml",
+        }
     )
     for path in template.rglob("*"):
         if path.is_symlink():
@@ -471,23 +471,52 @@ def validate_source_policy(template: pathlib.Path, pins: dict) -> None:
     validate_workspace_sources(
         template,
         writable_roots=VITE_EXPECTED_WRITABLE_ROOTS,
-        top_level_files={"index.html", "vite.config.mjs"},
+        top_level_files={
+            "components.json",
+            "index.html",
+            "jsconfig.json",
+            "vite.config.mjs",
+        },
         description="app template",
     )
     source_policy = load_json(template / ".lingxi" / "source-policy.json")
     if source_policy.get("host_managed_paths") != [
         ".lingxi",
+        ".gitignore",
         "LINGXI.md",
+        "components.json",
         "index.html",
+        "jsconfig.json",
         "vite.config.mjs",
         "package.json",
-        "package-lock.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
         "lib/device-context.js",
         "lib/lingxi-bridge.js",
         "lib/platform-adapter.js",
+        "lib/lingxi-provider.jsx",
+        "styles/foundation.css",
         "node_modules",
     ]:
         fail("app template host-managed paths diverged from build enforcement")
+    gitignore = (template / ".gitignore").read_text(encoding="utf-8").splitlines()
+    if "node_modules/" not in gitignore or "dist/" not in gitignore:
+        fail("app template must ignore per-app dependencies and build output")
+    if (template / "package-lock.json").exists():
+        fail("retired package-lock.json must not be shipped in the app template")
+    workspace_permissions = load_json(template / ".lingxi" / "settings.local.json")
+    if workspace_permissions != {
+        "permissions": {
+            "allow": ["Read(./**)", "Edit(./**)"],
+            "deny": [
+                "Edit(./.lingxi/**)",
+                "Edit(./.gitignore)",
+                "Edit(./LINGXI.md)",
+                "Edit(./lib/lingxi-bridge.js)",
+            ],
+        }
+    }:
+        fail("app template workspace read/edit permissions diverged")
     if "package_install" not in source_policy.get("forbidden_features", []):
         fail("app template must forbid package installation during generation")
     config = (template / "vite.config.mjs").read_text(encoding="utf-8")
@@ -512,13 +541,14 @@ def validate_source_policy(template: pathlib.Path, pins: dict) -> None:
     if manifest != {
         "schema_version": 1,
         "template_id": "vite-react-static-v1",
-        "template_version": 1,
+        "template_version": 2,
         "runtime_compatibility": ["store-static"],
         "dependencies": {
             "node": expected_node(pins),
             "react": EXPECTED_DEPENDENCIES["react"],
             "react-dom": EXPECTED_DEPENDENCIES["react-dom"],
             "vite": EXPECTED_DEPENDENCIES["vite"],
+            "tailwindcss": EXPECTED_DEPENDENCIES["tailwindcss"],
         },
         "capabilities": {"collections": [], "network_domains": []},
     }:
@@ -527,7 +557,7 @@ def validate_source_policy(template: pathlib.Path, pins: dict) -> None:
     if design_spec != {
         "schema_version": 1,
         "template_id": "vite-react-static-v1",
-        "template_version": 1,
+        "template_version": 2,
         "answers": {},
         "legacy_fields": {},
     }:
@@ -541,37 +571,18 @@ def validate_sbom(repo: pathlib.Path, template: pathlib.Path) -> None:
     packages = sbom.get("packages")
     if not isinstance(packages, list):
         fail("local-app runtime SBOM missing packages")
-    lock = load_json(template / "package-lock.json")
-    lock_entries = {path: package for path, package in lock["packages"].items() if path}
-    if len(packages) != len(lock_entries):
-        fail(
-            "local-app runtime SBOM package count diverged from package-lock "
-            f"(sbom={len(packages)}, lock={len(lock_entries)})"
-        )
-    sbom_by_path = {}
-    for package in packages:
-        if not isinstance(package, dict):
-            fail("local-app runtime SBOM packages must be objects")
-        source_info = package.get("sourceInfo")
-        prefix = "npm package-lock path: "
-        if not isinstance(source_info, str) or not source_info.startswith(prefix):
-            fail("local-app runtime SBOM package is missing its lock path")
-        path = source_info.removeprefix(prefix)
-        if path in sbom_by_path:
-            fail(f"duplicate package-lock path in SBOM: {path}")
-        sbom_by_path[path] = package
-    if set(sbom_by_path) != set(lock_entries):
-        fail("local-app runtime SBOM paths diverged from package-lock")
-
-    for path, lock_entry in lock_entries.items():
-        sbom_entry = sbom_by_path[path]
-        name = path.rsplit("node_modules/", 1)[1]
-        if sbom_entry.get("name") != name or sbom_entry.get("versionInfo") != lock_entry.get("version"):
-            fail(f"SBOM identity does not match package-lock: {path}")
-        expected_hex = base64.b64decode(lock_entry["integrity"].split("-", 1)[1]).hex()
-        checksums = sbom_entry.get("checksums", [])
-        if {"algorithm": "SHA512", "checksumValue": expected_hex} not in checksums:
-            fail(f"SBOM checksum does not match package-lock integrity: {path}")
+    if len(packages) != 1 or not isinstance(packages[0], dict):
+        fail("local-app runtime SBOM must contain one pnpm lockfile package")
+    lock_digest = hashlib.sha256((template / "pnpm-lock.yaml").read_bytes()).hexdigest()
+    package = packages[0]
+    if (
+        package.get("name") != "lingxi-local-app-template"
+        or package.get("versionInfo") != "pnpm-lock.yaml"
+        or package.get("sourceInfo") != f"pnpm lockfile sha256: {lock_digest}"
+        or {"algorithm": "SHA256", "checksumValue": lock_digest}
+        not in package.get("checksums", [])
+    ):
+        fail("local-app runtime SBOM does not match pnpm-lock.yaml")
 
 
 def validate_runtime_policy(repo: pathlib.Path) -> None:
@@ -584,7 +595,6 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
     guest_xdg_cache_root = f"{guest_build_state_root}/xdg-cache"
     guest_xdg_config_root = f"{guest_build_state_root}/xdg-config"
     guest_xdg_data_root = f"{guest_build_state_root}/xdg-data"
-    guest_npm_cache_root = f"{guest_build_state_root}/npm-cache"
     vite_binary = f"{build_root}/node_modules/vite/bin/vite.js"
     if policy.get("schema_version") != 1:
         fail("local-app runtime policy must use schema_version 1")
@@ -598,17 +608,18 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
         fail("local-app runtime policy must not pin create-vite scaffolding policy")
     dependency_snapshot = policy.get("dependency_snapshot")
     if dependency_snapshot != {
-        "source": "bundled:local-app-runtime/node_modules",
+        "source": "embedded:vite-react-static-v1/pnpm-lock.yaml",
         "materialize_into": f"{build_root}/node_modules",
         "guest_mount": "forbidden",
-        "selection_policy": "verified_runtime_only",
+        "selection_policy": "locked_template_only",
+        "install_command": "pnpm install --frozen-lockfile --ignore-scripts --no-runtime --prefer-offline",
     }:
         fail("local-app dependency snapshot policy diverged")
     build_mount = policy.get("build_mount")
     if build_mount != {
         "kind": "LocalAppBuild",
         "count": 1,
-        "host_path_policy": "staging_or_store_root",
+        "host_path_policy": "workspace_or_staging_or_store_root",
         "guest_path": build_root,
         "writable": True,
     }:
@@ -636,8 +647,6 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
             "XDG_CACHE_HOME": guest_xdg_cache_root,
             "XDG_CONFIG_HOME": guest_xdg_config_root,
             "XDG_DATA_HOME": guest_xdg_data_root,
-            "NPM_CONFIG_CACHE": guest_npm_cache_root,
-            "npm_config_cache": guest_npm_cache_root,
         }
         or vite_build.get("network_policy") != "disabled"
         or vite_build.get("memory_limit_policy") != "physical_memory_tier"

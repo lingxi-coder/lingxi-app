@@ -10,14 +10,20 @@
   ],
   "host_managed_paths": [
     ".lingxi",
+    ".gitignore",
     "LINGXI.md",
+    "components.json",
     "index.html",
+    "jsconfig.json",
     "vite.config.mjs",
     "package.json",
-    "package-lock.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
     "lib/device-context.js",
     "lib/lingxi-bridge.js",
     "lib/platform-adapter.js",
+    "lib/lingxi-provider.jsx",
+    "styles/foundation.css",
     "node_modules"
   ],
   "forbidden_path_segments": [

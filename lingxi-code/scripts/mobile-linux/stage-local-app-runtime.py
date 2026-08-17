@@ -18,6 +18,7 @@ _VERIFY_SPEC.loader.exec_module(_VERIFY)
 
 EXPECTED_DEPENDENCIES = _VERIFY.EXPECTED_DEPENDENCIES
 EXPECTED_LIGHTNINGCSS_VERSION = _VERIFY.EXPECTED_LIGHTNINGCSS_VERSION
+EXPECTED_OXIDE_VERSION = _VERIFY.EXPECTED_OXIDE_VERSION
 EXPECTED_ROLLDOWN_VERSION = _VERIFY.EXPECTED_ROLLDOWN_VERSION
 expected_native_binary_for = _VERIFY.expected_native_binary_for
 expected_native_packages_for = _VERIFY.expected_native_packages_for
@@ -78,6 +79,9 @@ def validate_node_modules(
     lightningcss = load_json(root / "lightningcss" / "package.json")
     if lightningcss.get("version") != EXPECTED_LIGHTNINGCSS_VERSION:
         fail(f"runtime node_modules did not resolve lightningcss@{EXPECTED_LIGHTNINGCSS_VERSION}")
+    oxide = load_json(root / "@tailwindcss" / "oxide" / "package.json")
+    if oxide.get("version") != EXPECTED_OXIDE_VERSION:
+        fail(f"runtime node_modules did not resolve @tailwindcss/oxide@{EXPECTED_OXIDE_VERSION}")
     allowed_rolldown_bindings = expected_native_packages_for(platform, "rolldown")
     allowed_rolldown_dirs = {name.removeprefix("@rolldown/") for name in allowed_rolldown_bindings}
     rolldown_roots = (
@@ -112,6 +116,30 @@ def validate_node_modules(
             fail(f"runtime node_modules resolved an unexpected Lightning CSS binding: {path.name}")
     for name, version in allowed_lightningcss_bindings.items():
         package_root = root / name
+        package = load_json(package_root / "package.json")
+        if package.get("version") != version:
+            fail(f"runtime node_modules did not resolve {name}@{version}")
+        binary = package_root / expected_native_binary_for(name)
+        native_bindings = list(package_root.glob("*.node"))
+        if (
+            len(native_bindings) != 1
+            or native_bindings[0].is_symlink()
+            or native_bindings[0].name != binary.name
+            or not binary.is_file()
+        ):
+            fail(f"runtime node_modules must contain one real native binding for {name}")
+    allowed_oxide_bindings = expected_native_packages_for(platform, "oxide")
+    oxide_roots = (
+        [path for path in (root / "@tailwindcss").iterdir()]
+        if (root / "@tailwindcss").is_dir()
+        else []
+    )
+    allowed_oxide_dirs = {name.removeprefix("@tailwindcss/") for name in allowed_oxide_bindings}
+    for path in oxide_roots:
+        if path.name.startswith("oxide-") and path.name not in allowed_oxide_dirs:
+            fail(f"runtime node_modules resolved an unexpected Tailwind Oxide binding: @tailwindcss/{path.name}")
+    for name, version in allowed_oxide_bindings.items():
+        package_root = root / pathlib.PurePosixPath(name)
         package = load_json(package_root / "package.json")
         if package.get("version") != version:
             fail(f"runtime node_modules did not resolve {name}@{version}")
@@ -219,6 +247,7 @@ def main() -> None:
     validate_runtime_policy(repo)
     allowed_rolldown_bindings = expected_native_packages_for(args.platform, "rolldown")
     allowed_lightningcss_bindings = expected_native_packages_for(args.platform, "lightningcss")
+    allowed_oxide_bindings = expected_native_packages_for(args.platform, "oxide")
     validate_node_modules(node_modules, args.platform)
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -256,9 +285,10 @@ def main() -> None:
             "platform": args.platform,
             "variant": args.variant,
             "read_only": True,
-            "package_lock_sha256": sha256(template / "package-lock.json"),
+            "pnpm_lock_sha256": sha256(template / "pnpm-lock.yaml"),
             "resolved_rolldown_bindings": sorted(allowed_rolldown_bindings),
             "resolved_lightningcss_bindings": sorted(allowed_lightningcss_bindings),
+            "resolved_oxide_bindings": sorted(allowed_oxide_bindings),
             "files": inventory(temporary),
         }
         (temporary / "runtime-manifest.json").write_text(

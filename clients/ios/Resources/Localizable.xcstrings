@@ -25887,31 +25887,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "可查看和编辑完整文本源码；符号链接、构建产物和工作区外路径不会显示。修改固定依赖可以保存，但构建验证会拒绝不受支持的版本或安装操作。"
+            "value": "可查看和编辑完整文本源码；符号链接、构建产物和工作区外路径不会显示。依赖清单由宿主按模板锁定并管理，因此不受支持的包修改或安装会在验证时失败。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "可檢視和編輯完整文字原始碼；符號連結、建置產物和工作區外路徑不會顯示。修改固定依賴可以儲存，但建置驗證會拒絕不受支援的版本或安裝操作。"
+            "value": "可檢視和編輯完整文字原始碼；符號連結、建置產物和工作區外路徑不會顯示。依賴清單由宿主依模板鎖定並管理，因此不受支援的套件修改或安裝會在驗證時失敗。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "View and edit the full text source; symlinks, build artifacts, and paths outside the workspace aren't shown. Changes to pinned dependencies can be saved, but build validation will reject unsupported versions or installs."
+            "value": "View and edit the full text source; symlinks, build artifacts, and paths outside the workspace aren't shown. Dependency manifests are host-managed and locked to the template, so unsupported package edits or installs will fail validation."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "完全なテキストソースコードの閲覧・編集ができます。シンボリックリンク、ビルド成果物、ワークスペース外のパスは表示されません。固定された依存関係の変更は保存できますが、サポート対象外のバージョンやインストール操作はビルド検証で拒否されます。"
+            "value": "完全なテキストソースコードの閲覧・編集ができます。シンボリックリンク、ビルド成果物、ワークスペース外のパスは表示されません。依存マニフェストはホストがテンプレートに合わせて固定管理するため、未対応のパッケージ編集やインストールは検証で失敗します。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "전체 텍스트 소스 코드를 보고 편집할 수 있습니다. 심볼릭 링크, 빌드 결과물, 작업 공간 밖의 경로는 표시되지 않습니다. 고정 의존성 수정 사항은 저장할 수 있지만, 빌드 검증에서 지원되지 않는 버전이나 설치 작업은 거부됩니다."
+            "value": "전체 텍스트 소스 코드를 보고 편집할 수 있습니다. 심볼릭 링크, 빌드 결과물, 작업 공간 밖의 경로는 표시되지 않습니다. 의존성 매니페스트는 호스트가 템플릿 기준으로 잠가 관리하므로, 지원되지 않는 패키지 수정이나 설치는 검증에서 실패합니다."
           }
         }
       }
@@ -49278,31 +49278,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "编排设计、依赖、生成、构建和验证本地应用"
+            "value": "编排本地应用的设计、脚手架、生成、构建和验证"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "編排設計、依賴、生成、建置和驗證本地應用"
+            "value": "編排本地應用的設計、腳手架、生成、建置和驗證"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Orchestrates the design, dependencies, generation, build, and verification of a local app"
+            "value": "Orchestrates the design, scaffold, generation, build, and verification of a local app"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ローカルアプリの設計、依存関係、生成、ビルド、検証を一貫して進行"
+            "value": "ローカルアプリの設計、スキャフォールド、生成、ビルド、検証を一貫して進行"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "로컬 앱의 설계, 의존성, 생성, 빌드, 검증을 통합 진행"
+            "value": "로컬 앱의 설계, 스캐폴드, 생성, 빌드, 검증을 통합 진행"
           }
         }
       }

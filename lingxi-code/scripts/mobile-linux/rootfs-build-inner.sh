@@ -15,6 +15,7 @@
 #   LINGXI_ALPINE_BRANCH    e.g. v3.24
 #   LINGXI_PACKAGES         space-separated `name=version` list
 #   LINGXI_ROOTFS_SHA256    expected minirootfs digest (empty to trust the CDN's)
+#   LINGXI_PNPM_VERSION/URL/SHA512  pinned pnpm CLI package metadata
 #
 # Outputs (under /out/<arch>/):
 #   rootfs.tar.gz       installed rootfs, ready for fakefsify
@@ -28,6 +29,9 @@ ALPINE_VERSION="${LINGXI_ALPINE_VERSION:?LINGXI_ALPINE_VERSION required}"
 ALPINE_BRANCH="${LINGXI_ALPINE_BRANCH:?LINGXI_ALPINE_BRANCH required}"
 PKGS="${LINGXI_PACKAGES:?LINGXI_PACKAGES required}"
 EXPECTED_ROOTFS_SHA="${LINGXI_ROOTFS_SHA256:-}"
+PNPM_VERSION="${LINGXI_PNPM_VERSION:?LINGXI_PNPM_VERSION required}"
+PNPM_URL="${LINGXI_PNPM_URL:?LINGXI_PNPM_URL required}"
+PNPM_SHA512="${LINGXI_PNPM_SHA512:?LINGXI_PNPM_SHA512 required}"
 PINS_JSON=/pins.json
 CDN=https://dl-cdn.alpinelinux.org/alpine
 
@@ -206,7 +210,7 @@ PY
 
 echo "[rootfs:${ARCH}] verifying required binaries"
 MISSING=""
-for f in usr/bin/node usr/bin/npm usr/bin/npx usr/bin/git usr/bin/python3 usr/bin/pip3 usr/bin/virtualenv usr/bin/ssh; do
+for f in usr/bin/node usr/bin/npm usr/bin/npx usr/bin/pnpm usr/bin/git usr/bin/python3 usr/bin/pip3 usr/bin/virtualenv usr/bin/ssh; do
   [ -e "${TARGET}/$f" ] || [ -L "${TARGET}/$f" ] || MISSING="${MISSING} $f"
 done
 if [ -n "${MISSING}" ]; then
@@ -215,6 +219,23 @@ if [ -n "${MISSING}" ]; then
 fi
 
 apk --root "${TARGET}" info -v 2>/dev/null | sort > "${OUT}/installed.txt"
+
+echo "[rootfs:${ARCH}] installing pinned pnpm ${PNPM_VERSION}"
+PNPM_TARBALL="${OUT}/pnpm-${PNPM_VERSION}.tgz"
+curl -sSfL -o "${PNPM_TARBALL}" "${PNPM_URL}"
+actual_pnpm_sha512="$(sha512sum "${PNPM_TARBALL}" | awk '{print $1}')"
+expected_pnpm_sha512="$(printf '%s' "${PNPM_SHA512}" | base64 -d | od -An -tx1 | tr -d ' \n')"
+actual_pnpm_sha512_hex="$(printf '%s' "${actual_pnpm_sha512}" | tr '[:lower:]' '[:upper:]')"
+expected_pnpm_sha512_hex="$(printf '%s' "${expected_pnpm_sha512}" | tr '[:lower:]' '[:upper:]')"
+if [ "${actual_pnpm_sha512_hex}" != "${expected_pnpm_sha512_hex}" ]; then
+  echo "[rootfs:${ARCH}] pnpm tarball SHA-512 mismatch" >&2
+  exit 1
+fi
+PNPM_DIR="${TARGET}/usr/lib/node_modules/pnpm"
+mkdir -p "${PNPM_DIR}"
+tar -xzf "${PNPM_TARBALL}" -C "${PNPM_DIR}" --strip-components=1
+ln -s ../lib/node_modules/pnpm/bin/pnpm.mjs "${TARGET}/usr/bin/pnpm"
+rm -f "${PNPM_TARBALL}"
 
 echo "[rootfs:${ARCH}] emitting closure manifest"
 python3 - "${PINS_JSON}" "${ARCH}" "${OUT}/closure.json" <<'PY'

@@ -1,6 +1,6 @@
 export const meta = {
   name: 'local-app-build',
-  description: 'Design, generate, offline-build, and verify a confirmed local app.',
+  description: 'Design, generate, build, and verify a confirmed local app.',
   phases: [
     { title: 'Design' },
     { title: 'Generate' },
@@ -47,15 +47,15 @@ const modelOptions = requestedModel
 const CONTRACT = [
   'Workspace contract (violations break the app):',
   '- Edit ONLY files under app/, src/, components/, lib/, styles/, public/ in the current workspace.',
-  '- The host has already scaffolded the workspace and pinned the root build contract before this workflow starts. Do not run npm, npx, node, Vite scaffolds, Shell-driven package installs, or any alternate project generator in any phase.',
-  '- Root infrastructure is locked: do not edit package.json, package-lock.json, index.html, vite.config.*, host metadata under .lingxi/, lib/device-context.js, lib/lingxi-bridge.js, or lib/platform-adapter.js.',
-  '- Generate only editable source and assets. The app must fit the host-scaffolded project shape instead of trying to replace it.',
+  '- The host has already scaffolded the workspace, checked in the locked package manifests, and pinned the root build contract before this workflow starts. Do not run npm, npx, node, Vite scaffolds, Shell-driven package installs, or any alternate project generator in any phase.',
+  '- Root infrastructure is locked: do not edit package.json, pnpm-lock.yaml, pnpm-workspace.yaml, index.html, vite.config.*, components.json, jsconfig.json, host metadata under .lingxi/, lib/device-context.js, lib/lingxi-bridge.js, lib/lingxi-provider.jsx, lib/platform-adapter.js, or styles/foundation.css.',
+  '- Generate only editable source and assets. Start with app/screens/home-screen.jsx, reuse the locked package set and editable components/ui sources, and preserve the lazy #/_components lab outside normal navigation unless the user asks otherwise.',
   '- Keep Vite\'s official dist/ output default. Do not redirect build.outDir. Workspace dist/ is disposable preview output; the host excludes prior dist/, builds from an isolated project/ root with --outDir dist --emptyOutDir, and serves only build/store/dist/.',
   '- The page reaches host data/network/device ONLY through window.lingxi.v1 and the checked-in bridge adapter.',
   '- Manifest capabilities are exact enums: data_mutation, ui_control, camera, photo_library, microphone, location, notifications, llm, agent_notify. data_mutation is for conversation-agent mutate_data calls; page-owned window.lingxi.v1.data writes do not request it solely for storage.',
   '- For page storage, import queryCollection, upsertRecord, and deleteRecord from the locked bridge. Read app fields from records[].document. Never invent action/create/record mutation shapes.',
   '- localStorage must never be authoritative for a declared collection and must not hide a failed native write. Do not swallow bridge errors; surface a recoverable UI error and keep failed state retryable.',
-  '- Dependencies are fixed by the host-owned scaffold plus the host build materialization. This workflow may not add, remove, install, reconcile, or re-lock packages.',
+  '- Dependencies are fixed by the host-owned template and lockfile set. The host may prepare the workspace dependencies when needed, but this workflow may not add, remove, install, reconcile, or re-lock packages itself.',
   '- Source versioning uses ordinary workspace Git history. Use the existing Git capability when available; do not add a second version store or command surface.',
   '- Data collections, network domains, capabilities, target OS, and form factor must be confirmed before source generation.',
 ].join('\n');
@@ -146,6 +146,24 @@ const VERIFICATION_RESULT_SCHEMA = {
   ],
 };
 
+const runBuildStep = async ({ headline, promptLabel, runtimeAction, logHint, resultStage }) =>
+  requirePreviewOnSuccess(await agent(
+    [
+      headline,
+      `Call mcp__local_apps__build with {"app_id":"${appId}"}.`,
+      logHint,
+      `If the build succeeds, call mcp__local_apps__manage_runtime with {"app_id":"${appId}","action":"${runtimeAction}"} and preserve the returned preview URL in preview_url. If the build or runtime step fails, return preview_url as an empty string.`,
+      CONTRACT,
+    ].join('\n'),
+    {
+      ...modelOptions,
+      label: promptLabel,
+      phase: 'Build',
+      schema: BUILD_RESULT_SCHEMA,
+      throwOnError: true,
+    },
+  ), resultStage);
+
 phase('Design');
 const designResult = await agent(
   [
@@ -156,7 +174,7 @@ const designResult = await agent(
     '',
     'Return a concrete, machine-readable design brief containing targets as an array of {os, form_factor} entries (iPhone, Android phone, iPad/tablet, Android tablet, or desktop), how each target was confirmed or inferred from the fixed Mobile Runtime Environment reminder (Host OS, Device class, Execution target, Launch mode), screen hierarchy, navigation/back behavior, complete UI states, design tokens, and the platform adapter strategy. If multiple targets are requested, describe distinct platform presentations sharing business logic.',
     'Do not treat viewport, safe-area, color-scheme, reduced-motion, or input-mode as prompt facts. Those are dynamic runtime values that the generated app must read from window.lingxi.v1.deviceContext.',
-    'Assume the host already scaffolded the workspace and pinned the dependency/runtime contract. Design against the existing project shape; do not request package, template, scaffold, fallback, or toolchain decisions.',
+    'Assume the host already scaffolded the workspace and pinned the package/runtime contract. Design against the existing project shape; do not request package, template, scaffold, fallback, or toolchain decisions.',
     'If the confirmed brief needs an original bitmap asset (photo, illustration, texture, hero, or background), conditionally detect ImageGen; when ready, record prompt/source/use and generate under public/. If unavailable, ask once whether to configure it or skip, then continue with CSS, gradients, user assets, or a placeholder without treating ImageGen as a hard dependency. Never use ImageGen for ordinary UI icons.',
     'Do not propose package changes or any root-file edits in the design result. The build root, package graph, and locked infra are host-owned.',
   ].join('\n'),
@@ -193,22 +211,14 @@ const generated = await agent(
 requireAgentResult(generated, 'the source-generation step');
 
 phase('Build');
-let build = requirePreviewOnSuccess(await agent(
-  [
-    `Build local app "${appId}" with the host-owned offline builder.`,
-    `Call mcp__local_apps__build with {"app_id":"${appId}"}.`,
-    'If it fails, inspect mcp__local_apps__read_logs with log="build", fix only editable source files, and retry the build once in this phase. Do not run npm or enable network during build.',
-    `When green, call mcp__local_apps__manage_runtime with {"app_id":"${appId}","action":"start"} and return its preview URL in preview_url. On build or runtime failure, return preview_url as an empty string.`,
-    CONTRACT,
-  ].join('\n'),
-  {
-    ...modelOptions,
-    label: 'build',
-    phase: 'Build',
-    schema: BUILD_RESULT_SCHEMA,
-    throwOnError: true,
-  },
-), 'initial build');
+let build = await runBuildStep({
+  headline: `Build local app "${appId}" with the host-owned builder.`,
+  promptLabel: 'build',
+  runtimeAction: 'start',
+  logHint:
+    'If it fails, inspect mcp__local_apps__read_logs with log="build", fix only editable source files, and retry the build once in this phase. The host may prepare locked workspace dependencies as part of build recovery; do not run npm yourself or request alternate package flows.',
+  resultStage: 'initial build',
+});
 
 phase('Verify');
 let verification = null;
@@ -253,22 +263,14 @@ for (let round = 0; round <= 2; round += 1) {
       throwOnError: true,
     },
   );
-  build = requirePreviewOnSuccess(await agent(
-    [
-      `Rebuild local app "${appId}" after repair round ${repairRounds}.`,
-      `Call mcp__local_apps__build with {"app_id":"${appId}"}; build is offline and may not invoke npm.`,
-      `If the build succeeds, call mcp__local_apps__manage_runtime with {"app_id":"${appId}","action":"restart"} so the repaired build is served, and preserve the restarted runtime preview URL in preview_url. If the build fails, read the build log and do not restart the runtime.`,
-      'Return one combined build/runtime result with ok, preview_url, and summary. On build failure, return preview_url as an empty string.',
-      CONTRACT,
-    ].join('\n'),
-    {
-      ...modelOptions,
-      label: `rebuild-${repairRounds}`,
-      phase: 'Verify',
-      schema: BUILD_RESULT_SCHEMA,
-      throwOnError: true,
-    },
-  ), `rebuild ${repairRounds}`);
+  build = await runBuildStep({
+    headline: `Rebuild local app "${appId}" after repair round ${repairRounds}.`,
+    promptLabel: `rebuild-${repairRounds}`,
+    runtimeAction: 'restart',
+    logHint:
+      'Let the host manage any locked dependency preparation needed for the build. If the build fails, read the build log, fix only editable source files, and do not restart the runtime.',
+    resultStage: `rebuild ${repairRounds}`,
+  });
 }
 
 // The task's terminal status comes from whether this SCRIPT throws — an `Ok`
@@ -308,5 +310,5 @@ return {
   preview_url: build.preview_url,
   repair_rounds: repairRounds,
   verification,
-  summary: 'Design, generation, offline build, and frontend QA completed.',
+  summary: 'Design, generation, build, and frontend QA completed.',
 };

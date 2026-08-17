@@ -112,8 +112,6 @@ android {
         // binaries into the repository.
         getByName("play").assets.srcDir("build/generated/mobileLinux/play/assets")
         getByName("direct").assets.srcDir("build/generated/mobileLinux/direct/assets")
-        getByName("play").assets.srcDir("build/generated/localApps/play/assets")
-        getByName("direct").assets.srcDir("build/generated/localApps/direct/assets")
     }
 
     testOptions {
@@ -122,39 +120,6 @@ android {
         // off an emulator. Instrumented (androidTest) UI tests need a device.
         unitTests.isReturnDefaultValues = true
     }
-}
-
-val localAppNodeModules = providers.environmentVariable("LINGXI_LOCAL_APP_NODE_MODULES")
-listOf("play", "direct").forEach { distribution ->
-    val capitalized = distribution.replaceFirstChar(Char::uppercaseChar)
-    val stageTask = tasks.register<Exec>("stage${capitalized}LocalAppRuntime") {
-        group = "build setup"
-        val output = layout.buildDirectory.dir("generated/localApps/$distribution/assets/local-app-runtime")
-        outputs.dir(output)
-        val nodeModules = localAppNodeModules.orNull
-        if (nodeModules.isNullOrBlank()) {
-            commandLine("true")
-        } else {
-            commandLine(
-                rootProject.file("scripts/stage-local-app-runtime.sh").absolutePath,
-                "--variant", distribution,
-                "--node-modules", nodeModules,
-            )
-        }
-        doFirst {
-            val releaseRequested = gradle.taskGraph.allTasks.any {
-                it.name.contains(capitalized) && it.name.contains("Release")
-            }
-            if (nodeModules.isNullOrBlank()) {
-                if (releaseRequested) {
-                    error("LINGXI_LOCAL_APP_NODE_MODULES is required for $distribution release builds")
-                }
-                logger.warn("Local-app runtime is not staged; generation is unavailable in this debug build")
-            }
-        }
-    }
-    tasks.matching { it.name.startsWith("merge$capitalized") && it.name.endsWith("Assets") }
-        .configureEach { dependsOn(stageTask) }
 }
 
 listOf("play", "direct").forEach { distribution ->

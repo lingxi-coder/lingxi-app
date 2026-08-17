@@ -95,36 +95,6 @@ targets:
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"
     preBuildScripts:
-      - name: Stage local app runtime
-        basedOnDependencyAnalysis: false
-        script: |
-          set -e
-          case "${CONFIGURATION}" in
-            Full*) VARIANT="full" ;;
-            *) VARIANT="store" ;;
-          esac
-          STAGED="${SRCROOT}/build/local-app-runtime/${VARIANT}"
-          if [ -n "${LINGXI_LOCAL_APP_NODE_MODULES:-}" ]; then
-            "${SRCROOT}/scripts/stage-local-app-runtime.sh" \
-              --variant "${VARIANT}" \
-              --node-modules "${LINGXI_LOCAL_APP_NODE_MODULES}"
-          fi
-          "${SRCROOT}/scripts/validate-local-app-build-assets.sh" \
-            --configuration "${CONFIGURATION}" \
-            --platform "${PLATFORM_NAME}" \
-            --staged "${STAGED}" \
-            --rootfs-manifest "${SRCROOT}/build/linux-runtime/openminis/manifest.json"
-          if [ -d "${STAGED}" ]; then
-            DESTINATION="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/local-app-runtime"
-            # The removal-and-copy lives in a script so that
-            # lingxi-code/scripts/mobile-linux/test-local-app-supply-chain.sh
-            # can run it; nothing can execute a build-phase body.
-            "${SRCROOT}/scripts/install-staged-local-app-runtime.sh" \
-              --staged "${STAGED}" \
-              --destination "${DESTINATION}"
-          else
-            echo "warning: Local-app runtime is not staged; generation is unavailable in this Store debug build"
-          fi
       - name: Stage Alpine rootfs
         basedOnDependencyAnalysis: false
         script: |

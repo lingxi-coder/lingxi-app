@@ -8,7 +8,7 @@ This document is the working handoff for LingXi's on-device local application fe
 
 Local Apps lets the conversation agent create, edit, build, run, inspect, and checkpoint a React application inside the mobile product. The agent owns product design and source generation. The host owns storage, permissions, scaffold materialization, the production build, runtime lifecycle, native capabilities, and the bridge exposed to the page.
 
-The current architecture is deterministic. App creation starts from a host-generated pinned Vite scaffold, the agent edits source files only, and the build step materializes verified runtime dependencies into a disposable single-root project snapshot before invoking a local Vite executable.
+The current architecture is deterministic. App creation starts from a host-generated pinned Vite scaffold, the agent edits source files only, and the host installs locked dependencies into that app's persistent workspace through the isolated mobile runtime before invoking the project-local Vite executable.
 
 Non-goals:
 
@@ -28,7 +28,7 @@ flowchart TD
     S --> W["local-app-build workflow"]
     W --> D["Design: frontend-design"]
     D --> G["Generate: source edits only"]
-    G --> I["Host materializes verified runtime deps into disposable build snapshot"]
+    G --> I["Host runs locked pnpm install into app-local workspace/node_modules"]
     I --> B["Host-owned offline build"]
     B --> R["Host runtime on loopback"]
     R --> Q["Browser QA when available"]
@@ -42,7 +42,7 @@ flowchart TD
 The important ownership boundary is:
 
 - The model proposes and writes app source.
-- The host creates the pinned Vite scaffold, materializes verified runtime dependencies, and performs fixed offline builds.
+- The host creates the pinned Vite scaffold, installs locked dependencies per app, and performs fixed offline builds.
 - The agent does not run package-manager commands during creation.
 - The engine controls the runtime.
 - The native WebView is the authority for platform identity and host capability access.
@@ -57,7 +57,7 @@ The important ownership boundary is:
 | Workflow registration/tests | `lingxi-code/tools/workflow/src/builtins.rs` | Built-in registration and real QuickJS regression tests |
 | MCP surface | `lingxi-code/apps/engine-mobile/src/local_apps_mcp.rs` | Fixed in-process `local_apps` tool catalog and input validation |
 | Host broker | `lingxi-code/apps/engine-mobile/src/local_apps_host.rs` | Runtime, build coordination, logs, checkpoints, native bridge permissions, UI inspection/actions |
-| Builder | `lingxi-code/apps/engine-mobile/src/local_apps_build.rs` | Vite validation, deterministic dependency snapshotting, single-root build mounts, offline builds |
+| Builder | `lingxi-code/apps/engine-mobile/src/local_apps_build.rs` | Vite validation, app-local dependency readiness, single-root build mounts, offline builds |
 | Mobile composition | `lingxi-code/apps/engine-mobile/src/lib.rs`, `host.rs`, `workflow_support.rs` | Registers the workflow, MCP transport, Shell, runtime, and FFI seams |
 | Shared domain | `lingxi-code/local-apps/src/` | Manifest, app/runtime records, SQLite data, permissions, mailbox, atomic storage, Git checkpoints |
 | Wire protocol | `lingxi-code/client-protocol/src/local_apps.rs`, `clients/shared/src/protocol.ts` | DTOs, commands, events, compatibility snapshots |
@@ -84,10 +84,15 @@ When a new local app is created, the host writes a pinned Vite scaffold into the
 
 The agent edits source files only. `package.json`, lockfiles, `index.html`, Vite configuration, `.lingxi/` metadata, source policy, and the three files under `lib/` supplied by the host remain host-controlled boundaries.
 
-The build step materializes the verified bundled runtime dependency seed into a
-disposable single-root project snapshot and then builds that snapshot locally.
-Workspace `node_modules` is ignored and excluded; creation never attempts to
-repair or extend dependencies by fetching packages.
+The host queues `pnpm install --frozen-lockfile --ignore-scripts --no-runtime
+--prefer-offline` after scaffolding. It runs inside the isolated mobile Linux
+runtime with the app workspace as the sole writable `LocalAppBuild` mount and a
+profile-level pnpm content store mounted separately; each app still owns its
+own `workspace/node_modules`. The install is staged under
+`.lingxi-build-state/dependency-staging` and atomically promoted, so a failed
+install never replaces the last working dependency tree. `dependencies.json`
+records queued/installing/ready/failed state and a failed install can be
+retried with `install_dependencies`.
 
 Generated apps use the pinned React/Vite dependency set and browser/CSS
 primitives instead of adding Tailwind, Motion, Lucide, or other npm packages.
@@ -108,23 +113,21 @@ if a broad user shell allow rule exists.
 - defaults an otherwise empty workspace to Vite;
 - runs with `NetworkPolicy::Disabled` and a 30-minute timeout;
 - selects a 2/3/4 GiB process budget from physical memory and assigns 75% to Node old space;
-- materializes verified runtime dependencies into a disposable single-root project snapshot;
+- waits for app-local dependency state to become ready (and retries failed installs);
 - uses one writable build mount that stays compatible with Android PRoot and iSH;
 - invokes the project-local `node_modules/vite/bin/vite.js` executable when it is present;
 - does not rely on `NODE_PATH`;
-- redirects `HOME`, temporary directories, XDG state, and npm cache/config paths into build-private state inside that disposable snapshot;
-- writes build output outside the editable workspace;
+- redirects `HOME`, temporary directories, and XDG state into build-private state inside the app workspace;
+- writes build output into a fixed private staging directory and publishes only `dist/` atomically after validation;
+- records a source/dependency provenance key and skips Vite when the exact validated build is already published;
+- caps the per-app build log at 1 MiB and removes stale promotion/dependency staging artifacts;
 - publishes only `dist/` atomically after validation.
 
-On Android, the bundled dependency seed is staged into a content-addressed
-app-private directory. Staging is single-flight and verifies an exact manifest
-inventory, file sizes and hashes, the Vite entry point, pins, policy, SBOM, and
-the musl native binaries for Rolldown and Lightning CSS. Only after validation
-and atomic promotion does staging publish the sibling digest `.ready` marker
-accepted by the engine; a sibling terminal `.failed` marker makes the wait fail
-immediately instead of repeatedly timing out. A missing or corrupt ready marker
-forces a full revalidation before it can be repaired. No npm executable or
-shared runtime mount participates in a local-app build.
+The mobile runtime bundle contains Node, npm, and the pinned pnpm CLI plus
+policy metadata; it does not provide a shared `node_modules` mount. Dependency
+installation and the Vite build use the app-workspace mount, while only the
+pnpm content-addressed store is shared at profile scope. No app can read or
+mutate another app's `node_modules`.
 
 The isolated execution contract is the same on both mobile platforms: exactly
 one writable `LocalAppBuild` mount and no implicit workspace/home mount.
@@ -182,7 +185,11 @@ apps/<id>/workspace/.lingxi/app.json
 apps/<id>/workspace/.lingxi/app.manifest.json
 ```
 
-`apps/<id>/workspace/` is the persistent source project root. A production build materializes it into a disposable guest build `project/` snapshot, omits workspace `dist/`, and forces Vite's official `dist/` output. The validated staging snapshot is promoted to `build/store/`; the runtime never serves workspace output or staging paths.
+`apps/<id>/workspace/` is the persistent source project root and contains the
+app-owned `node_modules/` plus private `.lingxi-build-state/`. A production
+build mounts this workspace directly, writes Vite output to private build state,
+validates it, and atomically promotes `dist/` to `build/store/`; the runtime
+never serves workspace output or staging paths.
 
 Writes in the shared domain use rooted paths and atomic persistence. `AppService` is the source of truth and emits domain events that the engine lowers into client events.
 
@@ -196,7 +203,7 @@ The manifest declares:
 
 Device context validates OS/form-factor pairs rather than accepting arbitrary strings.
 
-Checkpoints are ordinary workspace Git commits plus the `package-lock.json` digest. They do not snapshot SQLite data. Restore behavior:
+Checkpoints are ordinary workspace Git commits plus the dependency lock digest. They do not snapshot SQLite data. Restore behavior:
 
 - unchanged lock digest: restore source, rebuild, and return to the previous running/stopped state;
 - dependency state changed: restore source, then rebuild through the host materialization path before returning to the previous running/stopped state;
@@ -242,7 +249,7 @@ Generated source may be edited only under:
 - `styles/`
 - `public/`
 
-The pinned Vite scaffold owns ordinary project files through host creation and host-side dependency materialization. During source generation, `package.json`, lockfiles, `index.html`, Vite configuration, `.lingxi/` metadata, source policy, `lib/device-context.js`, `lib/lingxi-bridge.js`, and `lib/platform-adapter.js` are host-controlled boundaries. The workspace root and `lib/` container are also protected so a parent-directory replacement cannot remove those descendants.
+The pinned Vite scaffold owns ordinary project files through host creation and host-side dependency materialization. Template v2 bundles the JSX Vite/Tailwind foundation, the editable `radix-nova` shadcn/ui component sources, default providers, a neutral adaptive theme, and the lazy `#/_components` lab. During source generation, `package.json`, lockfiles, `components.json`, `jsconfig.json`, `index.html`, Vite configuration, `.lingxi/` metadata, source policy, `lib/device-context.js`, `lib/lingxi-bridge.js`, `lib/lingxi-provider.jsx`, `lib/platform-adapter.js`, and `styles/foundation.css` are host-controlled boundaries. The workspace root, `lib/`, and `styles/` containers are also protected so a parent-directory replacement cannot remove those descendants.
 
 If the editable-root contract changes, update all of the following together:
 
@@ -261,7 +268,7 @@ The intended acceptance matrix is:
 | --- | --- |
 | Workflow | Structured design/build/verification outputs; no repair after first success; repair → rebuild → restart → reverify; repaired URL propagated; successful build without URL rejected |
 | Creation | host-generated pinned Vite scaffold; source-only agent edits; no package install during creation |
-| Builder | Vite-only validation; local Vite executable; disposable single-root build snapshot; one writable build mount; memory budgets |
+| Builder | Vite-only validation; workspace-local Vite executable; one writable build mount; memory budgets |
 | Checkpoint restore | source restore plus host-side dependency materialization; no package-manager reconciliation step |
 | Shared domain | manifest validation, atomic storage, runtime transitions, data bounds, checkpoint behavior |
 | Protocol | command/event snapshots and version guard |
@@ -299,7 +306,7 @@ Acceptance evidence recorded on 2026-08-15:
 - `cargo test -p permission workspace_lease --lib`: 16 passed.
 - The isolated-execution suites passed: traits 1, Android 4, iOS-ish 2, and Android AAR 4 tests.
 - Android Play and Direct product-flavor tests for runtime staging/readiness and mount settings completed with `BUILD SUCCESSFUL` (52 tasks).
-- A fresh copy of the pinned template completed `npm ci --ignore-scripts`, reported 0 audit vulnerabilities, and built with Vite 8.2.1 into `dist/`.
+- A fresh copy of the pinned template completed `pnpm install --frozen-lockfile --ignore-scripts --no-runtime` and built with Vite 8.2.1 into `dist/`.
 - `test-local-app-supply-chain.sh` passed every structural, negative, staging, pin, and SBOM test while continuing to report the release-rootfs provenance gap below.
 - Targeted Rust `cargo fmt --check`, `cargo check -p engine-mobile --features uniffi`, and `git diff --check` passed on the final tree (existing warning-only diagnostics remain non-fatal).
 
@@ -324,7 +331,7 @@ Do not convert these gaps into claims of completed native QA.
 
 - Read the bounded build log with `read_logs`.
 - Confirm a Vite config is present and no retired Next config remains.
-- Confirm the disposable single-root build snapshot was materialized successfully.
+- Confirm the app-local dependency install reached `ready` and the workspace mount was used directly.
 - Confirm the project-local Vite CLI exists.
 - Confirm `NODE_PATH` is not being used to locate runtime modules.
 - Do not solve a production build failure by enabling network.
@@ -339,7 +346,7 @@ Do not convert these gaps into claims of completed native QA.
 
 - Inspect the build log and verified runtime-seed availability.
 - Rebuild through the host materialization path rather than a package-manager command.
-- Confirm the host re-pinned build infrastructure before materializing the snapshot.
+- Confirm the host re-pinned build infrastructure before invoking Vite.
 
 ### Phone/tablet presentation is wrong
 
@@ -368,9 +375,9 @@ Before merging a Local Apps change:
 1. **Duplicated native bootstrap code.** iOS and Android intentionally inject platform-owned JavaScript, but their large bridge bootstraps can drift. Consider a generated/shared source with platform substitutions, provided native form-factor injection and platform-specific message transport remain explicit and testable.
 2. **Prompt contracts are operational APIs.** Skill/workflow wording controls destructive boundaries and tool order. Keep contract anchors and QuickJS tests; avoid relying only on prose review.
 3. **End-to-end runtime evidence is still thin.** Add a deterministic test fixture that forces the first QA pass to fail, rebuilds, restarts, and proves the second WebView inspection uses the new artifact/URL.
-4. **Checkpoint dependency state is host-materialized.** Keep the scaffold digest, dependency snapshot, and restore markers aligned so rebuilds stay deterministic and do not drift back toward ad hoc package-manager repair steps.
+4. **Checkpoint dependency state is host-managed.** Keep the scaffold digest, lockfile, `dependencies.json`, and restore markers aligned so rebuilds stay deterministic and do not drift toward ad hoc package-manager repair steps.
 5. **Release evidence still needs an anchored rootfs digest.** The development verifier labels this as a known gap; do not treat a structurally valid dependency seed as release-rootfs provenance.
-6. **PRoot/iSH path isolation is not a security boundary.** The build now has one request-only host mount and redirects ordinary process state into the disposable project snapshot, but the managed guest rootfs is still shared and writable. The current contract is intentionally limited to the host-pinned Vite toolchain and locked source-only app template. Before allowing arbitrary build plugins, lifecycle scripts, or agent-selected executables, introduce a disposable rootfs/overlay (or an equivalent real container boundary) and prove that one build cannot persist changes into the next.
+6. **PRoot/iSH path isolation is not a security boundary.** The build has one request-only host mount and redirects ordinary process state into app-private build state, but the managed guest rootfs is still shared and writable. The current contract is intentionally limited to the host-pinned Node/npm/Vite toolchain and locked source-only app template. Before allowing arbitrary build plugins, lifecycle scripts, or agent-selected executables, introduce a disposable rootfs/overlay (or an equivalent real container boundary) and prove that one build cannot persist changes into the next.
 
 ## 14. Definition of done for the next owner
 
@@ -380,7 +387,7 @@ A change is done only when:
 - generated source respects editable roots and uses `window.lingxi.v1`;
 - creation uses a host-generated pinned Vite scaffold and source-only agent edits;
 - the production build remains offline and reproducible;
-- the build uses a single writable project snapshot and a local Vite executable;
+- the build uses a single writable app workspace and its local Vite executable;
 - runtime start/restart returns the preview actually verified;
 - iOS, Android, phone, and tablet behavior are verified at the level claimed;
 - checkpoint restore cannot silently reuse stale dependencies;

@@ -40,6 +40,9 @@ pub trait LocalAppsMcpHost: Send + Sync {
     /// flow): replaces the build source, runs the fixed Vite/Next build under
     /// the runtime's resource budget, and stamps the app `ready` on success.
     async fn build_app(&self, input: Value) -> Result<Value, String>;
+    /// Start or retry the host-owned dependency install task for one app's
+    /// workspace-local `node_modules`.
+    async fn install_dependencies(&self, input: Value) -> Result<Value, String>;
     /// Update the app manifest's declared `collections` / `allowed_domains` /
     /// `capabilities` (v3: the plan-derived reconciliation is gone; the agent
     /// declares schema explicitly). Destructive data migrations still require
@@ -457,12 +460,12 @@ impl LocalAppsMcpTransport {
             list,
             Self::tool(
                 "get",
-                "Get one local app's record, runtime and checkpoints. Read-only.",
+                "Get one local app's record, runtime, dependency install state and checkpoints. Read-only.",
                 json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "create",
-                "Create a local app record and host metadata, then let the host scaffold the workspace before generation. The local-app-build workflow assumes the project root and dependencies are already pinned by the host, edits only app/source roots, builds offline, and serves the promoted dist via manage_runtime.",
+                "Create a local app record and host metadata, then let the host scaffold the workspace before generation. The host also queues a locked workspace-local `pnpm install` in the background; the app remains editable while dependencies prepare.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
                     "name":{"type":"string","minLength":1,"maxLength":200}
@@ -477,6 +480,11 @@ impl LocalAppsMcpTransport {
                 "build",
                 "Build the app workspace with the offline toolchain (30-minute budget). On success the app is marked ready; start or restart the runtime afterwards to serve the new build. On failure the error summary names what to fix; build logs are under read_logs.",
                 json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "install_dependencies",
+                "Start or retry the host-managed `pnpm install` task that prepares this app's workspace-local `node_modules`. Use `wait=true` when you need the final dependency state before continuing.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"wait":{"type":"boolean"}},"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "create_checkpoint",
@@ -661,12 +669,16 @@ impl LocalAppsMcpTransport {
                 let runtime = service.runtime_record(app_id).await.map_err(|error| {
                     McpError::Internal(format!("failed to read runtime: {error}"))
                 })?;
+                let dependencies = service.dependency_record(app_id).await.map_err(|error| {
+                    McpError::Internal(format!("failed to read dependencies: {error}"))
+                })?;
                 let checkpoints = service.list_checkpoints(app_id).await.map_err(|error| {
                     McpError::Internal(format!("failed to list checkpoints: {error}"))
                 })?;
                 Self::result(json!({
                     "app": record,
                     "runtime": runtime,
+                    "dependencies": dependencies,
                     "checkpoints": checkpoints
                 }))
             }
@@ -734,6 +746,19 @@ impl LocalAppsMcpTransport {
                 if let (Some(object), Some(init_id)) = (result.as_object_mut(), init_session_id) {
                     object.insert("init_session_id".into(), Value::String(init_id));
                 }
+                let background_host = Arc::clone(&host);
+                let background_app_id = record.id.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = background_host
+                        .install_dependencies(json!({
+                            "app_id": background_app_id,
+                            "wait": false,
+                        }))
+                        .await
+                    {
+                        tracing::warn!(app_id = %record.id, error = %error, "local-app dependency install did not start");
+                    }
+                });
                 Self::result(result)
             }
             "manage_runtime" => match self.host()?.manage_runtime(input).await {
@@ -741,6 +766,10 @@ impl LocalAppsMcpTransport {
                 Err(message) => Self::tool_error(message),
             },
             "build" => match self.host()?.build_app(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "install_dependencies" => match self.host()?.install_dependencies(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
@@ -1188,7 +1217,7 @@ mod tests {
         );
         assert!(
             !descriptions.contains("npm create vite")
-                && !descriptions.contains("npm install")
+                && !descriptions.contains("`npm install`")
                 && !descriptions.contains("offline-fallback"),
             "tool descriptions must not promise removed creation or dependency flows: {descriptions}"
         );
@@ -1601,6 +1630,9 @@ mod tests {
         }
         async fn build_app(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
+        }
+        async fn install_dependencies(&self, _input: Value) -> Result<Value, String> {
+            Ok(json!({"ok": true}))
         }
         async fn update_manifest(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")

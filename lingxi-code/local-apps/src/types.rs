@@ -101,6 +101,40 @@ impl fmt::Display for AppRuntimeState {
     }
 }
 
+/// Workspace dependency install state for one app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppDependencyState {
+    /// The workspace exists but its app-local `node_modules` have not been
+    /// prepared yet.
+    Queued,
+    /// A host-owned install task is currently preparing `node_modules`.
+    Installing,
+    /// The app-local dependency tree is ready for use.
+    Ready,
+    /// The last install attempt failed; `last_error` explains why.
+    Failed,
+}
+
+impl AppDependencyState {
+    /// Canonical `snake_case` name (the persisted/wire value).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Installing => "installing",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for AppDependencyState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One app as listed in `apps/index.json` (and mirrored into the app's
 /// `workspace/.lingxi/app.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +248,32 @@ pub struct AppRuntimeRecord {
     pub updated_at_ms: u64,
 }
 
+/// Per-app dependency-install record persisted at `apps/<id>/dependencies.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDependencyRecord {
+    /// Persisted schema version ([`APPS_SCHEMA_VERSION`]).
+    pub schema_version: u32,
+    /// App the record belongs to.
+    pub app_id: String,
+    /// Current dependency install state.
+    pub state: AppDependencyState,
+    /// SHA-256 of the host-managed dependency lockfile used for the install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lockfile_sha256: Option<String>,
+    /// Toolchain identity (for example `pnpm@11.22.0/node@24.18.1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain_key: Option<String>,
+    /// Monotonic count of attempted installs.
+    #[serde(default)]
+    pub install_attempts: u32,
+    /// Last install failure, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// Last mutation time, epoch milliseconds.
+    pub updated_at_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +291,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AppRuntimeState::Stopped).unwrap(),
             "\"stopped\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AppDependencyState::Installing).unwrap(),
+            "\"installing\""
         );
         assert_eq!(
             serde_json::to_string(&AppCheckpointKind::PreRestore).unwrap(),

@@ -57,7 +57,7 @@ fi
 
 # Every version below comes from the pins. Nothing in this script may introduce
 # a second copy — that divergence is exactly what took the release gate red.
-read -r ALPINE_VERSION ALPINE_BRANCH ROOTFS_SHA PACKAGES < <(
+read -r ALPINE_VERSION ALPINE_BRANCH ROOTFS_SHA PACKAGES PNPM_VERSION PNPM_URL PNPM_SHA512 < <(
   python3 - "${PINS}" "${ARCH}" <<'PY'
 import json, pathlib, sys
 
@@ -70,7 +70,9 @@ if not minirootfs:
 packages = " ".join(
     f"{name}={version}" for name, version in sorted(pins["runtime_packages"].items())
 )
-print(alpine["version"], alpine["branch"], minirootfs["sha256"], packages)
+pnpm = pins["pnpm"]
+print(alpine["version"], alpine["branch"], minirootfs["sha256"], packages,
+      pnpm["version"], pnpm["url"], pnpm["sha512"])
 PY
 )
 
@@ -85,6 +87,9 @@ mkdir -p "${OUTPUT}"
   -e LINGXI_ALPINE_BRANCH="${ALPINE_BRANCH}" \
   -e LINGXI_ROOTFS_SHA256="${ROOTFS_SHA}" \
   -e LINGXI_PACKAGES="${PACKAGES}" \
+  -e LINGXI_PNPM_VERSION="${PNPM_VERSION}" \
+  -e LINGXI_PNPM_URL="${PNPM_URL}" \
+  -e LINGXI_PNPM_SHA512="${PNPM_SHA512}" \
   -v "${INNER}:/inner.sh:ro" \
   -v "${PINS}:/pins.json:ro" \
   -v "${OUTPUT}:/out" \

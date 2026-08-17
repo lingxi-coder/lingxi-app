@@ -5,6 +5,7 @@
 //! ```text
 //! apps/index.json                          — { schemaVersion, apps }
 //! apps/<app-id>/runtime.json               — AppRuntimeRecord
+//! apps/<app-id>/dependencies.json          — AppDependencyRecord
 //! apps/<app-id>/workspace/.lingxi/app.json — { schemaVersion, app } mirror
 //! ```
 //!
@@ -54,7 +55,10 @@
 use crate::error::AppError;
 use crate::ids;
 use crate::state::AppState;
-use crate::types::{AppRecord, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION};
+use crate::types::{
+    AppDependencyRecord, AppDependencyState, AppRecord, AppRuntimeRecord, AppRuntimeState,
+    APPS_SCHEMA_VERSION,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -88,6 +92,8 @@ pub const BUILD_LOCK_FILE: &str = "build.lock";
 pub const TRASH_DIR: &str = ".trash";
 /// Per-app runtime record.
 pub const RUNTIME_FILE: &str = "runtime.json";
+/// Per-app dependency-install record.
+pub const DEPENDENCY_FILE: &str = "dependencies.json";
 /// Per-app workspace directory (the Next.js project root).
 pub const WORKSPACE_DIR: &str = "workspace";
 /// App-scoped state directory inside the workspace (`.lingxi`).
@@ -227,6 +233,12 @@ pub fn runtime_rel(app_id: &str) -> PathBuf {
     app_dir_rel(app_id).join(RUNTIME_FILE)
 }
 
+/// Root-relative path of `apps/<id>/dependencies.json`.
+#[must_use]
+pub fn dependency_rel(app_id: &str) -> PathBuf {
+    app_dir_rel(app_id).join(DEPENDENCY_FILE)
+}
+
 /// Root-relative path of `apps/<id>/workspace`.
 #[must_use]
 pub fn workspace_dir_rel(app_id: &str) -> PathBuf {
@@ -238,6 +250,38 @@ pub fn workspace_dir_rel(app_id: &str) -> PathBuf {
 #[must_use]
 pub fn workspace_rel_str(app_id: &str) -> String {
     format!("{APPS_DIR}/{app_id}/{WORKSPACE_DIR}")
+}
+
+/// The dependency record used for a newly-created app or a legacy app whose
+/// dependency file predates this record.
+#[must_use]
+pub fn default_dependency_record(app_id: &str, now_ms: u64) -> AppDependencyRecord {
+    AppDependencyRecord {
+        schema_version: APPS_SCHEMA_VERSION,
+        app_id: app_id.to_string(),
+        state: AppDependencyState::Queued,
+        lockfile_sha256: None,
+        toolchain_key: None,
+        install_attempts: 0,
+        last_error: None,
+        updated_at_ms: now_ms,
+    }
+}
+
+fn derived_dependency_record(root: &Path, record: &AppRecord) -> AppDependencyRecord {
+    let vite = root
+        .join(workspace_dir_rel(&record.id))
+        .join("node_modules/vite/bin/vite.js");
+    let state = match std::fs::symlink_metadata(&vite) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            AppDependencyState::Ready
+        }
+        _ => AppDependencyState::Queued,
+    };
+    AppDependencyRecord {
+        state,
+        ..default_dependency_record(&record.id, record.updated_at_ms)
+    }
 }
 
 /// Root-relative path of `apps/<id>/workspace/.lingxi/app.json`.
@@ -473,6 +517,34 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
     Ok(apps)
 }
 
+/// Load one app's dependency record. Missing files are derived for backwards
+/// compatibility and become durable the next time the host updates them.
+pub fn load_dependency_record(
+    root: &Path,
+    record: &AppRecord,
+) -> Result<AppDependencyRecord, AppError> {
+    let dependency_rel = dependency_rel(&record.id);
+    match rooted_fs::read_to_string_limited(root, &dependency_rel, MAX_DOC_BYTES) {
+        Ok(body) => {
+            let dependency: AppDependencyRecord = serde_json::from_str(&body).map_err(|error| {
+                AppError::StorageCorrupt(format!("{}: {error}", dependency_rel.display()))
+            })?;
+            ensure_schema_version(&dependency_rel, dependency.schema_version)?;
+            if dependency.app_id != record.id {
+                return Err(AppError::StorageCorrupt(format!(
+                    "{} claims app id {:?} but belongs to app {:?}",
+                    dependency_rel.display(),
+                    dependency.app_id,
+                    record.id
+                )));
+            }
+            Ok(dependency)
+        }
+        Err(FsError::NotFound(_)) => Ok(derived_dependency_record(root, record)),
+        Err(error) => Err(load_read_error(&dependency_rel, &error)),
+    }
+}
+
 /// Enforce the documented `workspace_rel` invariant — EXACT equality with
 /// `apps/<id>/workspace` (finding 7). Applied to index records and the
 /// `app.json` mirror at load, so repair can never launder a tampered value
@@ -702,6 +774,14 @@ pub fn save_app_files(root: &Path, app: &AppState) -> Result<(), AppError> {
 /// Atomically persist `apps/<id>/runtime.json`.
 pub fn save_runtime(root: &Path, app_id: &str, runtime: &AppRuntimeRecord) -> Result<(), AppError> {
     write_doc(root, &runtime_rel(app_id), runtime)
+}
+
+/// Atomically persist `apps/<id>/dependencies.json`.
+pub fn save_dependency_record(
+    root: &Path,
+    dependency: &AppDependencyRecord,
+) -> Result<(), AppError> {
+    write_doc(root, &dependency_rel(&dependency.app_id), dependency)
 }
 
 /// Remove `apps/<id>`: serialize against any in-flight build, then

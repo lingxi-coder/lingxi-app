@@ -32,7 +32,6 @@ import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.SpeechFfiException
 import com.lingxi.code.bindings.WorkflowProgressDto
 import com.lingxi.code.bindings.buildAndroidEngineWithMobileLinux
-import com.lingxi.code.localapps.LocalAppRuntimeAssets
 import com.lingxi.code.location.AndroidLocationAdapter
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.voice.audio.AndroidSttAdapter
@@ -302,7 +301,7 @@ fun buildVoiceEngine(
                     workspace = projectWorkspace,
                 ),
                 localAppsFullRuntime = BuildConfig.MOBILE_LINUX_FULL,
-                localAppsRuntimeRoot = LocalAppRuntimeAssets.prepare(appContext),
+                localAppsRuntimeRoot = null,
                 physicalMemoryBytes = runCatching {
                     val memoryInfo = ActivityManager.MemoryInfo()
                     val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager

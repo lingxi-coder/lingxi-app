@@ -27,28 +27,35 @@ Local-app runtime pins:
 
 - `nodejs 24.18.1-r0`
 - `git 2.54.0-r0`
-- `npm 11.12.1-r0` (including `npx`) is present only for a user-opened
-  interactive terminal. `corepack`, `yarn`, and `pnpm` remain excluded.
-- `node_modules` is built off-device from the committed lockfile and retained
-  as a verified, read-only host seed. Each build materializes that seed into
-  its disposable project snapshot; it is never exposed as a shared guest
-  mount, and neither generated code nor MCP jobs may install dependencies.
+- `npm 11.12.1-r0` (including `npx`) remains available for user terminals;
+  the host-owned dependency job uses the pinned `pnpm 11.22.0` CLI installed
+  from its integrity-pinned npm tarball. `corepack` and `yarn` remain excluded.
+- The app template is text-only: it contains the committed package manifest
+  and lockfile but no `node_modules`. Each app runs a host-owned, locked
+  `pnpm install --frozen-lockfile --ignore-scripts --no-runtime --prefer-offline`
+  inside the isolated runtime, writing dependencies to its own workspace and
+  using a host-owned cache mount only for that install. Generated code cannot
+  invoke package managers.
+- No app bundle carries a prebuilt local-app dependency seed; Node and the
+  pinned pnpm CLI live in the rootfs and dependencies are materialized on first
+  use per workspace.
 
-`docs/mobile-linux/local-app-runtime-pins.json` records the exact APK and npm
+`docs/mobile-linux/local-app-runtime-pins.json` records the exact APK, npm, and pnpm
 pins. The structural verifier accepts an explicitly recorded upstream gap, but
 the `--release` gate remains closed until x86_64's fully hashed closure has also
 passed an offline install on a native x86_64 or qemu-backed host. This prevents
 development checks from treating artifact hashes alone as executable evidence.
 
 `docs/mobile-linux/local-app-runtime-policy.json` is the executable contract:
-the host invokes the snapshot-local Vite CLI through `/usr/bin/node`, exposes
+the host invokes the workspace-local Vite CLI through `/usr/bin/node`, exposes
 only one writable build-project mount, binds production servers to loopback,
 and enforces build/start timeouts. Build process trees receive 2048/3072/4096 MiB
 for devices with `<6`/`6–<8`/`>=8` GiB of physical memory, with Node old-space
 fixed to 75% of that budget; Full runtime process trees remain limited to 800
-MiB. Generated jobs, MCP, and local-app runtime commands never invoke npm or
-npx; those executables belong exclusively to the user-opened interactive
-terminal.
+MiB. The host-owned dependency job is the only product path allowed to invoke
+pnpm; generated jobs and MCP source-edit operations never invoke package
+managers or npx.
+User interactive terminals remain separately permission-gated.
 
 Policy decisions:
 

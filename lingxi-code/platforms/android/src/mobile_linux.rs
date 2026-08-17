@@ -1479,17 +1479,36 @@ fn validate_isolated_local_app_mounts(
     managed_root: &Path,
     app_sandbox_root: &Path,
 ) -> Result<(), MobileLinuxError> {
-    if mounts.len() != 1 {
+    let build_mounts: Vec<_> = mounts
+        .iter()
+        .filter(|mount| matches!(mount.purpose, MountPurpose::LocalAppBuild))
+        .collect();
+    let store_mounts: Vec<_> = mounts
+        .iter()
+        .filter(|mount| {
+            matches!(mount.purpose, MountPurpose::Shared)
+                && mount.guest_path == traits::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
+        })
+        .collect();
+    if build_mounts.len() != 1 || mounts.len() != 1 + store_mounts.len() || store_mounts.len() > 1 {
         return Err(MobileLinuxError::InvalidRequest(
-            "isolated local-app execution requires exactly one LocalAppBuild mount".to_string(),
+            "isolated local-app execution requires exactly one LocalAppBuild mount and at most one validated dependency store mount".to_string(),
         ));
     }
-    let mount = &mounts[0];
-    if !matches!(mount.purpose, MountPurpose::LocalAppBuild) {
-        return Err(MobileLinuxError::InvalidRequest(
-            "isolated local-app execution accepts only a LocalAppBuild mount".to_string(),
-        ));
+    for mount in &store_mounts {
+        let host = mount.host_path.canonicalize().map_err(|error| {
+            MobileLinuxError::InvalidRequest(format!(
+                "dependency store mount is unavailable ({}): {error}",
+                mount.host_path.display()
+            ))
+        })?;
+        if !host.starts_with(app_sandbox_root) {
+            return Err(MobileLinuxError::InvalidRequest(
+                "dependency store mount must remain inside the app sandbox".to_string(),
+            ));
+        }
     }
+    let mount = build_mounts[0];
     let host_path = mount.host_path.canonicalize().map_err(|error| {
         MobileLinuxError::InvalidRequest(format!(
             "mount host path is unavailable ({}): {error}",
@@ -1513,10 +1532,14 @@ fn validate_isolated_local_app_mounts(
         .join(app_id)
         .join("build")
         .join(channel);
-    if host_path != expected && !local_app_build_host_path_matches(&host_path, &expected, channel) {
+    let workspace = sandbox_root.join("apps").join(app_id).join("workspace");
+    if host_path != workspace
+        && host_path != expected
+        && !local_app_build_host_path_matches(&host_path, &expected, channel)
+    {
         return Err(MobileLinuxError::InvalidRequest(format!(
-            "local-app build mount host_path must match {} or its .{channel}.staging-<numeric nonce> sibling (got {})",
-            expected.display(),
+            "local-app build mount host_path must match {} or workspace {} or its .{channel}.staging-<numeric nonce> sibling (got {})",
+            expected.display(), workspace.display(),
             host_path.display()
         )));
     }
@@ -1636,17 +1659,12 @@ fn validate_env_map(
 fn expected_local_app_build_env(
     mounts: &[MountSpec],
 ) -> Result<BTreeMap<String, String>, MobileLinuxError> {
-    if mounts.len() != 1 {
-        return Err(MobileLinuxError::InvalidRequest(
-            "isolated local-app execution requires exactly one LocalAppBuild mount".to_string(),
-        ));
-    }
-    let mount = &mounts[0];
-    if !matches!(mount.purpose, MountPurpose::LocalAppBuild) {
-        return Err(MobileLinuxError::InvalidRequest(
-            "isolated local-app execution accepts only a LocalAppBuild mount".to_string(),
-        ));
-    }
+    let mount = mounts
+        .iter()
+        .find(|mount| matches!(mount.purpose, MountPurpose::LocalAppBuild))
+        .ok_or_else(|| {
+            MobileLinuxError::InvalidRequest("missing LocalAppBuild mount".to_string())
+        })?;
     parse_local_app_build_guest_path(&mount.guest_path)?;
     let build_state_root = format!("{}/{LOCAL_APP_BUILD_STATE_ROOT}", mount.guest_path);
     Ok(BTreeMap::from([
@@ -1665,14 +1683,6 @@ fn expected_local_app_build_env(
         (
             "XDG_DATA_HOME".into(),
             format!("{build_state_root}/xdg-data"),
-        ),
-        (
-            "NPM_CONFIG_CACHE".into(),
-            format!("{build_state_root}/npm-cache"),
-        ),
-        (
-            "npm_config_cache".into(),
-            format!("{build_state_root}/npm-cache"),
         ),
     ]))
 }
@@ -2204,14 +2214,6 @@ mod tests {
             "XDG_DATA_HOME".into(),
             format!("{build_state_root}/xdg-data"),
         );
-        env.insert(
-            "NPM_CONFIG_CACHE".into(),
-            format!("{build_state_root}/npm-cache"),
-        );
-        env.insert(
-            "npm_config_cache".into(),
-            format!("{build_state_root}/npm-cache"),
-        );
         (project_guest_path, env)
     }
 
@@ -2590,9 +2592,9 @@ mod tests {
         request.command = "/bin/sh".into();
         request.args = vec![
             "-c".into(),
-            "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s' \
+            "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s' \
 $HOME \"$TMPDIR\" \"$TMP\" \"$TEMP\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\" \
-\"$XDG_DATA_HOME\" \"$NPM_CONFIG_CACHE\" \"$npm_config_cache\""
+\"$XDG_DATA_HOME\""
                 .into(),
         ];
         request.cwd = Some(project_guest_path.clone());
@@ -2615,8 +2617,6 @@ $HOME \"$TMPDIR\" \"$TMP\" \"$TEMP\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\" \
             "XDG_CACHE_HOME",
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
-            "NPM_CONFIG_CACHE",
-            "npm_config_cache",
         ]
         .into_iter()
         .map(|key| {

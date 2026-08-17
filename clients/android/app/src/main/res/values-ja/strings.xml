@@ -614,7 +614,7 @@
     <string name="local_apps_section_permissions">権限</string>
     <string name="local_apps_section_preview">プレビュー</string>
     <string name="local_apps_source">ソースコード</string>
-    <string name="local_apps_source_detail">完全なテキストソースコードの閲覧・編集ができます。シンボリックリンク、ビルド成果物、ワークスペース外のパスは表示されません。固定された依存関係の変更は保存できますが、サポート対象外のバージョンやインストール操作はビルド検証で拒否されます。</string>
+    <string name="local_apps_source_detail">完全なテキストソースコードの閲覧・編集ができます。シンボリックリンク、ビルド成果物、ワークスペース外のパスは表示されません。依存マニフェストはホストがテンプレートに合わせて固定管理するため、未対応のパッケージ編集やインストールは検証で失敗します。</string>
     <string name="local_apps_source_empty">編集可能なソースコードはまだありません</string>
     <string name="local_apps_source_error_title">ソースコードエラー</string>
     <string name="local_apps_source_loading">ソースコードを読み込み中…</string>
@@ -1339,7 +1339,7 @@
     <string name="settings_skill_seed_css_doctor_desc">レイアウトの問題を診断し、修正方法を提示</string>
     <string name="settings_skill_seed_polish_name">英文校正</string>
     <string name="settings_skill_seed_polish_desc">中国語から英語への文章を、原意を保ったまま校正</string>
-    <string name="settings_skill_bundled_create_local_app_desc">ローカルアプリの設計、依存関係、生成、ビルド、検証を一貫して進行</string>
+    <string name="settings_skill_bundled_create_local_app_desc">ローカルアプリの設計、スキャフォールド、生成、ビルド、検証を一貫して進行</string>
     <string name="settings_skill_bundled_frontend_design_desc">対象プラットフォームとフォームファクターに合わせてネイティブフロントエンドの方向性を設計</string>
     <string name="settings_skill_bundled_frontend_qa_desc">Browser とネイティブ WebView で UI と操作を検証</string>
     <string name="settings_skill_bundled_accessibility_desc">セマンティクス、キーボード操作、タッチターゲット、コントラスト、動的文字サイズを確認</string>

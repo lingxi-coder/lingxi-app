@@ -135,7 +135,7 @@ class LocalAppCodeBrowser(
             "css", "html", "js", "json", "jsx", "md", "mjs", "svg", "ts", "tsx", "txt",
         )
         val editableNames = setOf(
-            ".gitignore", ".npmrc", "next.config.js", "next.config.mjs", "package-lock.json", "package.json",
+            ".gitignore", ".npmrc", "next.config.js", "next.config.mjs", "pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json",
         )
     }
 }

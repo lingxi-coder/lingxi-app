@@ -15,12 +15,13 @@ use client_protocol::local_apps::{
 };
 use futures_util::StreamExt;
 use local_apps::{
-    load_manifest, load_permissions, save_permissions, AppCapability, AppDataStore, AppLayout,
-    AppPermissions, AppRuntimeMode, AppRuntimeState, AppService, DataMigrationPreview,
-    DataMutation, DataQuery, DataSortDirection, DataSortKey, PermissionDecision,
-    SessionPermissions,
+    load_manifest, load_permissions, save_permissions, AppCapability, AppDataStore,
+    AppDependencyState, AppLayout, AppPermissions, AppRuntimeMode, AppRuntimeState, AppService,
+    DataMigrationPreview, DataMutation, DataQuery, DataSortDirection, DataSortKey,
+    PermissionDecision, SessionPermissions,
 };
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
@@ -31,9 +32,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, watch, Mutex};
 use tokio::time::{sleep, timeout, Duration};
-use traits::MobileLinuxRuntime;
-#[cfg(test)]
-use traits::MountSpec;
+use traits::mobile_linux::guest_paths;
+use traits::{
+    LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
+};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UI_TIMEOUT: Duration = Duration::from_secs(2 * 60);
@@ -42,6 +44,9 @@ const MAX_STATIC_ASSET_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_NETWORK_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const STATIC_ACCEPT_RETRY: Duration = Duration::from_millis(50);
 const RUNTIME_SEED_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const DEPENDENCY_INSTALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const DEPENDENCY_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const PNPM_TOOLCHAIN_KEY: &str = "pnpm@11.22.0/node@24.18.1";
 /// Consecutive `accept()` failures that retire the static server.  A burst of
 /// ECONNABORTED/EMFILE must not, so the cap is deliberately generous
 /// (100 * 50 ms ~= 5 s of an unbroken failure); a listener whose I/O driver is
@@ -347,7 +352,7 @@ pub(crate) fn remove_app_session_file(
 }
 
 pub(crate) fn create_next_step_guidance() -> String {
-    "Run local-app-build: the workspace already contains the repository-verified Vite scaffold. Edit app/main.jsx, app/globals.css, src/, components/, styles/, public/, and any new non-host-managed lib files. Do not recreate the app scaffold or run npm in the local-app workspace. Then call build and preview via manage_runtime.".into()
+    "Run local-app-build: the workspace already contains the repository-verified Vite + Tailwind + shadcn/ui foundation. Edit app screens, app/globals.css, src/, components/, public/, and non-host-managed lib/style files. A host-owned `pnpm install` prepares workspace-local dependencies in the background; check `install_dependencies` or `get` if you need its status. Do not recreate the app scaffold or run a package-manager scaffold command. Then call build and preview via manage_runtime.".into()
 }
 
 struct LocalAppsRuntimeConfiguration {
@@ -574,6 +579,479 @@ impl LocalAppsHostBroker {
 
     fn layout(&self, app_id: &str) -> Result<AppLayout, String> {
         AppLayout::new(&self.root, app_id).map_err(|error| error.to_string())
+    }
+
+    fn app_dependency_marker(layout: &AppLayout) -> PathBuf {
+        layout
+            .root()
+            .join(layout.workspace_rel())
+            .join("node_modules/vite/bin/vite.js")
+    }
+
+    fn dependency_store_root(&self) -> PathBuf {
+        self.root
+            .join("dependency-cache")
+            .join("pnpm")
+            .join("11.22.0")
+    }
+
+    fn workspace_dependencies_ready(layout: &AppLayout) -> Result<bool, String> {
+        let vite = Self::app_dependency_marker(layout);
+        match std::fs::symlink_metadata(&vite) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+                "workspace dependency marker is invalid: {} must be a regular file",
+                vite.display()
+            )),
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(format!(
+                "inspect workspace dependency marker {}: {error}",
+                vite.display()
+            )),
+        }
+    }
+
+    fn dependency_lock_digest(layout: &AppLayout) -> Result<String, String> {
+        let workspace = layout.root().join(layout.workspace_rel());
+        let path = workspace.join("pnpm-lock.yaml");
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("read pnpm-lock.yaml {}: {error}", path.display()))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    fn dependency_inputs_match(workspace: &Path) -> Result<bool, String> {
+        for (relative, expected) in
+            crate::local_apps_build::VITE_LOCKED_FILES
+                .iter()
+                .filter(|(relative, _)| {
+                    matches!(
+                        *relative,
+                        "package.json" | "pnpm-lock.yaml" | "pnpm-workspace.yaml"
+                    )
+                })
+        {
+            let path = workspace.join(relative);
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => {
+                    return Err(format!(
+                        "inspect dependency input {}: {error}",
+                        path.display()
+                    ))
+                }
+            };
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Ok(false);
+            }
+            if std::fs::read(&path)
+                .map_err(|error| format!("read dependency input {}: {error}", path.display()))?
+                != *expected
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn prepare_dependency_staging(layout: &AppLayout) -> Result<PathBuf, String> {
+        let workspace = layout.root().join(layout.workspace_rel());
+        let state_root = workspace.join(".lingxi-build-state");
+        let staging = state_root.join("dependency-staging");
+        if let Ok(entries) = std::fs::read_dir(&state_root) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("node_modules.previous-")
+                {
+                    Self::remove_owned_path(&entry.path())?;
+                }
+            }
+        }
+        Self::remove_owned_path(&staging)?;
+        std::fs::create_dir_all(&staging)
+            .map_err(|error| format!("create dependency staging directory: {error}"))?;
+        for file in ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"] {
+            let source = workspace.join(file);
+            let metadata = std::fs::symlink_metadata(&source).map_err(|error| {
+                format!("inspect dependency input {}: {error}", source.display())
+            })?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "dependency input must be a regular file: {}",
+                    source.display()
+                ));
+            }
+            std::fs::copy(&source, staging.join(file))
+                .map_err(|error| format!("stage dependency input {}: {error}", source.display()))?;
+        }
+        Ok(staging)
+    }
+
+    fn remove_owned_path(path: &Path) -> Result<(), String> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("inspect owned path {}: {error}", path.display())),
+        };
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            std::fs::remove_dir_all(path)
+                .map_err(|error| format!("remove owned directory {}: {error}", path.display()))
+        } else {
+            std::fs::remove_file(path)
+                .map_err(|error| format!("remove owned file {}: {error}", path.display()))
+        }
+    }
+
+    fn promote_dependency_tree(workspace: &Path, staging: &Path) -> Result<(), String> {
+        let staged_node_modules = staging.join("node_modules");
+        let marker = staged_node_modules.join("vite/bin/vite.js");
+        let marker_metadata = std::fs::symlink_metadata(&marker)
+            .map_err(|error| format!("inspect staged Vite executable: {error}"))?;
+        if !marker_metadata.is_file() || marker_metadata.file_type().is_symlink() {
+            return Err(format!(
+                "staged Vite executable is not a regular file: {}",
+                marker.display()
+            ));
+        }
+        let current = workspace.join("node_modules");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let backup = workspace
+            .join(".lingxi-build-state")
+            .join(format!("node_modules.previous-{stamp}"));
+        let had_current = std::fs::symlink_metadata(&current).is_ok();
+        if had_current {
+            let metadata = std::fs::symlink_metadata(&current)
+                .map_err(|error| format!("inspect current dependencies: {error}"))?;
+            if metadata.file_type().is_symlink() {
+                return Err("workspace node_modules must not be a symlink".into());
+            }
+            std::fs::rename(&current, &backup)
+                .map_err(|error| format!("stage previous dependencies: {error}"))?;
+        }
+        if let Err(error) = std::fs::rename(&staged_node_modules, &current) {
+            if had_current {
+                let _ = std::fs::rename(&backup, &current);
+            }
+            return Err(format!("promote staged dependencies: {error}"));
+        }
+        if had_current {
+            Self::remove_owned_path(&backup)?;
+        }
+        Self::remove_owned_path(staging)
+    }
+
+    async fn install_dependencies_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let wait = input.get("wait").and_then(Value::as_bool).unwrap_or(false);
+        let dependency = self.ensure_dependency_install(&app_id, wait).await?;
+        Ok(json!({
+            "ok": dependency.state == AppDependencyState::Ready,
+            "app_id": app_id,
+            "dependencies": dependency,
+        }))
+    }
+
+    pub(crate) async fn ensure_dependency_install(
+        &self,
+        app_id: &str,
+        wait: bool,
+    ) -> Result<local_apps::AppDependencyRecord, String> {
+        let service = self.service()?;
+        service
+            .record(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let layout = self.layout(app_id)?;
+        let workspace = layout.root().join(layout.workspace_rel());
+        if !Self::dependency_inputs_match(&workspace)? {
+            let target = crate::local_apps_build::detect_build_target(&layout)
+                .map_err(|error| error.to_string())?;
+            crate::local_apps_build::restore_host_managed_files(&workspace, target)
+                .map_err(|error| error.to_string())?;
+        }
+        let dependency = service
+            .dependency_record(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let lock_digest = Self::dependency_lock_digest(&layout)?;
+        if dependency.state == AppDependencyState::Ready
+            && dependency.lockfile_sha256.as_deref() == Some(lock_digest.as_str())
+            && dependency.toolchain_key.as_deref() == Some(PNPM_TOOLCHAIN_KEY)
+            && Self::workspace_dependencies_ready(&layout)?
+        {
+            return Ok(dependency);
+        }
+        if dependency.state == AppDependencyState::Ready {
+            service
+                .queue_dependency_install(app_id)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let started = match service.start_dependency_install(app_id).await {
+            Ok(_) => true,
+            Err(local_apps::AppError::InvalidRequest(_)) => false,
+            Err(error) => return Err(error.to_string()),
+        };
+        if started {
+            let weak = self.weak_self();
+            let app_id = app_id.to_string();
+            tokio::spawn(async move {
+                let Some(host) = weak.upgrade() else {
+                    return;
+                };
+                host.run_dependency_install(app_id).await;
+            });
+        }
+        if wait {
+            return self.wait_for_dependency_install(app_id).await;
+        }
+        service
+            .dependency_record(app_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn wait_for_dependency_install(
+        &self,
+        app_id: &str,
+    ) -> Result<local_apps::AppDependencyRecord, String> {
+        let service = self.service()?;
+        timeout(DEPENDENCY_INSTALL_TIMEOUT, async {
+            loop {
+                let dependency = service
+                    .dependency_record(app_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                match dependency.state {
+                    AppDependencyState::Installing => sleep(DEPENDENCY_INSTALL_POLL_INTERVAL).await,
+                    _ => return Ok(dependency),
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            format!(
+                "workspace dependency installation is still running after {} seconds",
+                DEPENDENCY_INSTALL_TIMEOUT.as_secs()
+            )
+        })?
+    }
+
+    async fn run_dependency_install(&self, app_id: String) {
+        let service = match self.service() {
+            Ok(service) => service,
+            Err(error) => {
+                tracing::warn!(app_id = %app_id, error = %error, "dependency install lost service");
+                return;
+            }
+        };
+        let layout = match self.layout(&app_id) {
+            Ok(layout) => layout,
+            Err(error) => {
+                let _ = service
+                    .fail_dependency_install(&app_id, error.clone())
+                    .await;
+                tracing::warn!(app_id = %app_id, error = %error, "dependency install lost layout");
+                return;
+            }
+        };
+        // Serialize dependency mutation with build, checkpoint restore, and
+        // physical deletion. The lock is intentionally held across the
+        // isolated command so a delete cannot remove the workspace while pnpm
+        // is still writing its app-local node_modules tree.
+        let _build_lock = match local_apps::storage::lock_app_build(&self.root, &app_id) {
+            Ok(lock) => lock,
+            Err(error) => {
+                let message = error.to_string();
+                let _ = service
+                    .fail_dependency_install(&app_id, message.clone())
+                    .await;
+                tracing::warn!(app_id = %app_id, error = %message, "dependency install could not lock app");
+                return;
+            }
+        };
+        let Some(runtime) = self.mobile_linux() else {
+            let error = "the mobile Node runtime is unavailable for dependency installation";
+            let _ = service
+                .fail_dependency_install(&app_id, error.to_string())
+                .await;
+            tracing::warn!(app_id = %app_id, error, "dependency install has no mobile runtime");
+            return;
+        };
+        let workspace = layout.root().join(layout.workspace_rel());
+        let dependency_staging = match Self::prepare_dependency_staging(&layout) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = service
+                    .fail_dependency_install(&app_id, error.clone())
+                    .await;
+                tracing::warn!(app_id = %app_id, error = %error, "dependency install staging failed");
+                return;
+            }
+        };
+        let build_mount = MountSpec {
+            host_path: workspace.clone(),
+            guest_path: guest_paths::local_app_build_project(&app_id, "store"),
+            read_only: false,
+            purpose: MountPurpose::LocalAppBuild,
+        };
+        let dependency_store = self.dependency_store_root();
+        if let Err(error) = std::fs::create_dir_all(&dependency_store) {
+            let message = format!("create pnpm dependency store: {error}");
+            let _ = Self::remove_owned_path(&dependency_staging);
+            let _ = service
+                .fail_dependency_install(&app_id, message.clone())
+                .await;
+            tracing::warn!(app_id = %app_id, error = %message, "dependency install could not create store");
+            return;
+        }
+        let store_mount = MountSpec {
+            host_path: dependency_store,
+            guest_path: guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
+            read_only: false,
+            purpose: MountPurpose::Shared,
+        };
+        let project_guest_path = build_mount.guest_path.clone();
+        let dependency_staging_guest_path =
+            format!("{project_guest_path}/.lingxi-build-state/dependency-staging");
+        let build_state_root = format!("{project_guest_path}/.lingxi-build-state");
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("CI".into(), "1".into());
+        env.insert("HOME".into(), format!("{build_state_root}/home"));
+        env.insert("TMPDIR".into(), format!("{build_state_root}/tmp"));
+        env.insert("TMP".into(), format!("{build_state_root}/tmp"));
+        env.insert("TEMP".into(), format!("{build_state_root}/tmp"));
+        env.insert(
+            "XDG_CACHE_HOME".into(),
+            format!("{build_state_root}/xdg-cache"),
+        );
+        env.insert(
+            "XDG_CONFIG_HOME".into(),
+            format!("{build_state_root}/xdg-config"),
+        );
+        env.insert(
+            "XDG_DATA_HOME".into(),
+            format!("{build_state_root}/xdg-data"),
+        );
+        env.insert("PNPM_HOME".into(), format!("{build_state_root}/pnpm-home"));
+        env.insert(
+            "COREPACK_HOME".into(),
+            format!("{build_state_root}/corepack"),
+        );
+        let pnpm_store_root = guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string();
+        let memory_mb =
+            crate::local_apps_build::build_memory_budget_mb(self.physical_memory_bytes());
+        let resource_limits = ResourceLimits {
+            max_memory_mb: Some(memory_mb),
+            ..ResourceLimits::default()
+        };
+        let request = LinuxCommandRequest {
+            command: "/usr/bin/pnpm".into(),
+            args: vec![
+                "install".into(),
+                "--frozen-lockfile".into(),
+                "--ignore-scripts".into(),
+                "--no-runtime".into(),
+                "--prefer-offline".into(),
+                "--store-dir".into(),
+                pnpm_store_root,
+                "--reporter=append-only".into(),
+            ],
+            cwd: Some(dependency_staging_guest_path),
+            env,
+            stdin: None,
+            timeout_ms: Some(DEPENDENCY_INSTALL_TIMEOUT.as_millis() as u64),
+            network: NetworkPolicy::Allowed,
+            resource_limits,
+            mounts: vec![build_mount, store_mount],
+        };
+        let install = runtime.run_isolated(request).await;
+        let outcome = match install {
+            Ok(result) => {
+                if let Err(error) = result
+                    .enforcement
+                    .ensure_for(NetworkPolicy::Allowed, resource_limits)
+                {
+                    Err(error.to_string())
+                } else if result.timed_out || result.cancelled || result.exit_code != 0 {
+                    let detail = if !result.stderr.trim().is_empty() {
+                        result.stderr
+                    } else {
+                        result.stdout
+                    };
+                    Err(format!(
+                        "pnpm install failed (exit_code={}, timed_out={}, cancelled={}): {}",
+                        result.exit_code,
+                        result.timed_out,
+                        result.cancelled,
+                        detail.chars().take(8_000).collect::<String>()
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            Err(error) => Err(format!("dependency install worker failed: {error}")),
+        };
+        match outcome {
+            Ok(()) => {
+                if let Err(error) = Self::promote_dependency_tree(&workspace, &dependency_staging) {
+                    let _ = service
+                        .fail_dependency_install(&app_id, error.clone())
+                        .await;
+                    tracing::warn!(app_id = %app_id, error = %error, "dependency install promotion failed");
+                    return;
+                }
+                if let Err(error) = Self::workspace_dependencies_ready(&layout).and_then(|ready| {
+                    if ready {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "pnpm install finished but {} was not produced",
+                            Self::app_dependency_marker(&layout).display()
+                        ))
+                    }
+                }) {
+                    let _ = service
+                        .fail_dependency_install(&app_id, error.clone())
+                        .await;
+                    tracing::warn!(app_id = %app_id, error = %error, "dependency install verification failed");
+                    return;
+                }
+                let lock_digest = match Self::dependency_lock_digest(&layout) {
+                    Ok(digest) => digest,
+                    Err(error) => {
+                        let _ = service
+                            .fail_dependency_install(&app_id, error.clone())
+                            .await;
+                        tracing::warn!(app_id = %app_id, error = %error, "dependency lock digest failed");
+                        return;
+                    }
+                };
+                if let Err(error) = service
+                    .complete_dependency_install_with_metadata(
+                        &app_id,
+                        Some(lock_digest),
+                        Some(PNPM_TOOLCHAIN_KEY.to_string()),
+                    )
+                    .await
+                {
+                    tracing::warn!(app_id = %app_id, error = %error, "dependency install could not mark ready");
+                }
+            }
+            Err(error) => {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                let _ = service
+                    .fail_dependency_install(&app_id, error.clone())
+                    .await;
+                tracing::warn!(app_id = %app_id, error = %error, "dependency install failed");
+            }
+        }
     }
 
     pub(crate) fn physical_memory_bytes(&self) -> u64 {
@@ -1831,15 +2309,16 @@ impl LocalAppsHostBroker {
         // prompt plumbing. It sits OUTSIDE the writable roots, so the agent
         // cannot edit its own contract.
         let workspace = layout.root().join(layout.workspace_rel());
-        let setup_path = "- This workspace already contains the repository-verified Vite scaffold. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run npm in this local-app workspace.\n\
-             - Host-managed files are `package.json`, `package-lock.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, and `lib/platform-adapter.js`. Do not edit them.\n\
-             - Default editable entry points are `app/main.jsx` and `app/globals.css`. You may also edit files under `src/`, `components/`, `styles/`, `public/`, and add new helper files under `lib/` as long as you do not touch the host-managed files above.\n\
-             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds from its fixed runtime snapshot.\n";
+        let setup_path = "- This workspace already contains the repository-verified Vite + Tailwind + shadcn/ui foundation. The host prepares app-local dependencies in `workspace/node_modules`; if they are still being prepared, wait and retry the build. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
+             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `components.json`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
+             - Default editable entry points are `app/screens/home-screen.jsx` and `app/globals.css`. The preset files under `components/ui/` are app-owned and may be edited. You may also edit files under `app/`, `src/`, `components/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`. The component lab at `#/_components` is lazy-loaded and must stay outside normal navigation unless the user asks for it.\n\
+             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds from an isolated workspace mount and promotes only the validated output.\n";
         let build_preview =
             "- `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
-             (30-minute budget). The host builds from an isolated `project/` root, copies its \
-             verified `node_modules` snapshot into that project, forces the official `dist/` \
-             output, and serves only the promoted `build/store/dist/`.\n";
+             (30-minute budget). The host waits for the app-local dependency state, mounts \
+             the workspace as the sole writable `LocalAppBuild` root, runs the workspace's own \
+             `node_modules/vite`, writes into private build-state, and serves only the promoted \
+             `build/store/dist/`.\n";
         let context = format!(
             "# Local App: {name} ({id})\n\n\
              Brief: {brief}\n\n\
@@ -1891,10 +2370,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
     async fn build_app(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         // Existence gate (same shape as the UI ops above).
-        self.service()?
-            .record(&app_id)
-            .await
-            .map_err(|e| e.to_string())?;
+        let service = self.service()?;
+        service.record(&app_id).await.map_err(|e| e.to_string())?;
         let layout =
             AppLayout::new(self.root.clone(), app_id.clone()).map_err(|e| e.to_string())?;
         let builder = crate::local_apps_build::LocalAppBuilder {
@@ -1924,16 +2401,25 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 served_index.display()
             ));
         }
-        self.service()?
+        service
             .mark_ready(&app_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let dependencies = service
+            .dependency_record(&app_id)
             .await
             .map_err(|e| e.to_string())?;
         Ok(serde_json::json!({
             "ok": true,
             "app_id": app_id,
             "target": "vite-react-static-v1",
+            "dependencies": dependencies,
             "hint": "start or restart the runtime with manage_runtime to serve the new build",
         }))
+    }
+
+    async fn install_dependencies(&self, input: Value) -> Result<Value, String> {
+        self.install_dependencies_value(input).await
     }
 
     async fn update_manifest(&self, input: Value) -> Result<Value, String> {
@@ -3369,11 +3855,12 @@ mod tests {
         let (_app_id, lingxi) = scaffolded_lingxi(true, Some(runtime)).await;
         assert!(lingxi.contains("Do not run `npm create vite`"), "{lingxi}");
         assert!(
-            lingxi.contains("do not run npm in this local-app workspace"),
+            lingxi.contains("do not run a package manager in this local-app workspace"),
             "{lingxi}"
         );
         assert!(
-            lingxi.contains("Host-managed files are `package.json`, `package-lock.json`"),
+            lingxi
+                .contains("Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`"),
             "{lingxi}"
         );
         assert!(lingxi.contains("isolated `project/` root"), "{lingxi}");
@@ -3384,11 +3871,11 @@ mod tests {
     async fn scaffold_writes_capability_neutral_lingxi_when_shell_is_missing() {
         let (_app_id, lingxi) = scaffolded_lingxi(true, None).await;
         assert!(
-            lingxi.contains("repository-verified Vite scaffold"),
+            lingxi.contains("repository-verified Vite + Tailwind + shadcn/ui foundation"),
             "{lingxi}"
         );
         assert!(lingxi.contains("Do not run `npm create vite`"), "{lingxi}");
-        assert!(lingxi.contains("do not run npm in this local-app workspace"));
+        assert!(lingxi.contains("do not run a package manager in this local-app workspace"));
         assert!(!lingxi.contains("vite-fallback"), "{lingxi}");
     }
 
@@ -3409,7 +3896,7 @@ mod tests {
             std::fs::read_to_string(root.path().join(layout.workspace_rel()).join("LINGXI.md"))
                 .expect("read LINGXI.md");
 
-        assert!(lingxi.contains("do not run npm in this local-app workspace"));
+        assert!(lingxi.contains("do not run a package manager in this local-app workspace"));
         assert!(broker
             .create_next_step()
             .contains("Do not recreate the app scaffold"));

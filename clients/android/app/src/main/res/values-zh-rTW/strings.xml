@@ -614,7 +614,7 @@
     <string name="local_apps_section_permissions">權限</string>
     <string name="local_apps_section_preview">預覽</string>
     <string name="local_apps_source">原始碼</string>
-    <string name="local_apps_source_detail">可檢視和編輯完整文字原始碼；符號連結、建置產物和工作區外路徑不會顯示。修改固定依賴可以儲存，但建置驗證會拒絕不受支援的版本或安裝操作。</string>
+    <string name="local_apps_source_detail">可檢視和編輯完整文字原始碼；符號連結、建置產物和工作區外路徑不會顯示。依賴清單由宿主依模板鎖定並管理，因此不受支援的套件修改或安裝會在驗證時失敗。</string>
     <string name="local_apps_source_empty">暫無可編輯原始碼</string>
     <string name="local_apps_source_error_title">原始碼錯誤</string>
     <string name="local_apps_source_loading">正在讀取原始碼…</string>
@@ -1339,7 +1339,7 @@
     <string name="settings_skill_seed_css_doctor_desc">診斷佈局問題並給出修復</string>
     <string name="settings_skill_seed_polish_name">英文潤色</string>
     <string name="settings_skill_seed_polish_desc">中→英寫作潤色，保留原意</string>
-    <string name="settings_skill_bundled_create_local_app_desc">編排設計、依賴、生成、建置和驗證本地應用</string>
+    <string name="settings_skill_bundled_create_local_app_desc">編排本地應用的設計、腳手架、生成、建置和驗證</string>
     <string name="settings_skill_bundled_frontend_design_desc">為目標平台和 form factor 設計原生前端方向</string>
     <string name="settings_skill_bundled_frontend_qa_desc">用 Browser 與原生 WebView 驗證介面和互動</string>
     <string name="settings_skill_bundled_accessibility_desc">檢查語意、鍵盤、觸控、對比度和動態字體</string>

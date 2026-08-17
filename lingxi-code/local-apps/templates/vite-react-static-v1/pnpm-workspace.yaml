@@ -1,0 +1,7 @@
+lockfile: pnpm-lock.yaml
+nodeLinker: hoisted
+packageImportMethod: clone-or-copy
+verifyStoreIntegrity: true
+strictStorePkgContentCheck: true
+ignoreScripts: true
+preferFrozenLockfile: true

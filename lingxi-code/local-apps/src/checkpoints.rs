@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 const CHECKPOINT_REF_PREFIX: &str = "refs/lingxi/checkpoints";
 const CHECKPOINT_TRAILER: &str = "Lingxi-Checkpoint:";
 const CREATED_AT_TRAILER: &str = "Lingxi-Created-At-Ms:";
-const PACKAGE_LOCK_TRAILER: &str = "Lingxi-Package-Lock-Digest:";
-const PACKAGE_LOCK_FILE: &str = "package-lock.json";
+const DEPENDENCY_LOCK_TRAILER: &str = "Lingxi-Dependency-Lock-Digest:";
+const DEPENDENCY_LOCK_FILE: &str = "pnpm-lock.yaml";
 
 /// Git checkpoint operations scoped to a validated app workspace.
 #[derive(Debug, Clone)]
@@ -73,13 +73,14 @@ impl AppCheckpointStore {
             .map_err(git_error("read checkpoint tree"))?;
         let parent = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
         let signature = signature(created_at_ms)?;
-        let package_lock_digest = package_lock_digest(&self.workspace.join(PACKAGE_LOCK_FILE))?;
-        let package_lock_trailer = package_lock_digest
+        let dependency_lock_digest =
+            dependency_lock_digest(&self.workspace.join(DEPENDENCY_LOCK_FILE))?;
+        let dependency_lock_trailer = dependency_lock_digest
             .as_deref()
-            .map(|digest| format!("{PACKAGE_LOCK_TRAILER} {digest}\n"))
+            .map(|digest| format!("{DEPENDENCY_LOCK_TRAILER} {digest}\n"))
             .unwrap_or_default();
         let message = format!(
-            "{label}\n\n{CHECKPOINT_TRAILER} {}\n{CREATED_AT_TRAILER} {created_at_ms}\n{package_lock_trailer}",
+            "{label}\n\n{CHECKPOINT_TRAILER} {}\n{CREATED_AT_TRAILER} {created_at_ms}\n{dependency_lock_trailer}",
             kind_name(kind)
         );
         let oid = match parent.as_ref() {
@@ -110,23 +111,15 @@ impl AppCheckpointStore {
         })
     }
 
-    /// Read the package-lock digest captured by a retained checkpoint.
+    /// Read the pnpm dependency-lock digest captured by a retained checkpoint.
     /// Older checkpoints return `None`, which is treated as an explicit
     /// unknown rather than silently equivalent to the current generation.
     ///
-    /// ONE derivation, and the trailer [`Self::create`] writes is it. The
-    /// trailer records the digest of the lockfile that was ON DISK when the
-    /// checkpoint was taken; the commit tree only ever records what Git was
-    /// willing to STAGE. Those two disagree for any app whose scaffold
-    /// `.gitignore` lists `package-lock.json` — the trailer holds the real
-    /// digest while the tree lookup finds nothing, so a digest comparison
-    /// against [`Self::current_package_lock_digest`] was permanently unequal
-    /// and every restore skipped the rebuild/restart, deleted `node_modules`
-    /// and pushed the user through an `npm install` network-approval prompt.
-    ///
-    /// The tree remains the fallback, because checkpoints committed before the
-    /// trailer existed carry no trailer but do carry the blob.
-    pub fn package_lock_digest(&self, checkpoint_id: &str) -> Result<Option<String>, AppError> {
+    /// The trailer records the digest of the lockfile that was on disk when the
+    /// checkpoint was taken. Missing or malformed trailers are deliberately
+    /// treated as unknown; this format does not retain legacy lockfile fallback
+    /// behavior.
+    pub fn dependency_lock_digest(&self, checkpoint_id: &str) -> Result<Option<String>, AppError> {
         let target = parse_oid(checkpoint_id)?;
         let repo =
             Repository::open(&self.workspace).map_err(git_error("open checkpoint repository"))?;
@@ -136,30 +129,17 @@ impl AppCheckpointStore {
         if let Some(digest) = commit
             .message()
             .ok()
-            .and_then(|message| trailer(message, PACKAGE_LOCK_TRAILER))
+            .and_then(|message| trailer(message, DEPENDENCY_LOCK_TRAILER))
             .filter(|digest| is_sha256_hex(digest))
         {
             return Ok(Some(digest.to_string()));
         }
-        let tree = commit.tree().map_err(git_error("read checkpoint tree"))?;
-        let entry = match tree.get_path(Path::new(PACKAGE_LOCK_FILE)) {
-            Ok(entry) => entry,
-            Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(AppError::Io(format!(
-                    "read checkpoint package lock: {error}"
-                )))
-            }
-        };
-        let blob = repo
-            .find_blob(entry.id())
-            .map_err(git_error("read checkpoint package lock"))?;
-        Ok(Some(format!("{:x}", Sha256::digest(blob.content()))))
+        Ok(None)
     }
 
-    /// Read the package-lock digest currently present in the app workspace.
-    pub fn current_package_lock_digest(&self) -> Result<Option<String>, AppError> {
-        package_lock_digest(&self.workspace.join(PACKAGE_LOCK_FILE))
+    /// Read the pnpm dependency-lock digest currently present in the app workspace.
+    pub fn current_dependency_lock_digest(&self) -> Result<Option<String>, AppError> {
+        dependency_lock_digest(&self.workspace.join(DEPENDENCY_LOCK_FILE))
     }
 
     /// List every retained checkpoint, newest first.
@@ -535,11 +515,11 @@ fn is_sha256_hex(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn package_lock_digest(path: &Path) -> Result<Option<String>, AppError> {
+fn dependency_lock_digest(path: &Path) -> Result<Option<String>, AppError> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(format!("{:x}", Sha256::digest(bytes)))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(AppError::Io(format!("read package-lock.json: {error}"))),
+        Err(error) => Err(AppError::Io(format!("read pnpm-lock.yaml: {error}"))),
     }
 }
 
@@ -718,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_captures_and_reads_workspace_package_lock_digest() {
+    fn checkpoint_captures_and_reads_workspace_dependency_lock_digest() {
         let root = tempfile::tempdir().unwrap();
         let layout = layout(root.path());
         let workspace = root.path().join(layout.workspace_rel());
@@ -728,7 +708,7 @@ mod tests {
             br#"{"name":"demo","dependencies":{}}"#,
         )
         .unwrap();
-        let lockfile = workspace.join(PACKAGE_LOCK_FILE);
+        let lockfile = workspace.join(DEPENDENCY_LOCK_FILE);
         fs::write(&lockfile, br#"{"lockfileVersion":3,"packages":{}}"#).unwrap();
         let store = AppCheckpointStore::new(&layout);
         let checkpoint = store
@@ -738,14 +718,14 @@ mod tests {
                 4_000,
             )
             .unwrap();
-        let expected = package_lock_digest(&lockfile).unwrap().unwrap();
+        let expected = dependency_lock_digest(&lockfile).unwrap().unwrap();
         assert_eq!(
-            store.package_lock_digest(&checkpoint.id).unwrap(),
+            store.dependency_lock_digest(&checkpoint.id).unwrap(),
             Some(expected)
         );
         assert_eq!(
-            store.current_package_lock_digest().unwrap(),
-            store.package_lock_digest(&checkpoint.id).unwrap()
+            store.current_dependency_lock_digest().unwrap(),
+            store.dependency_lock_digest(&checkpoint.id).unwrap()
         );
         fs::write(
             &lockfile,
@@ -753,125 +733,11 @@ mod tests {
         )
         .unwrap();
         assert_ne!(
-            store.current_package_lock_digest().unwrap(),
-            store.package_lock_digest(&checkpoint.id).unwrap()
+            store.current_dependency_lock_digest().unwrap(),
+            store.dependency_lock_digest(&checkpoint.id).unwrap()
         );
         assert!(committed_paths(&workspace, &checkpoint.id).contains(&"package.json".into()));
-        assert!(committed_paths(&workspace, &checkpoint.id).contains(&"package-lock.json".into()));
-    }
-
-    /// The case the commit tree CANNOT answer: a scaffold whose own
-    /// `.gitignore` keeps `package-lock.json` out of the index. The lockfile is
-    /// on disk and unchanged, so a restore must see an unchanged digest — a
-    /// tree-only derivation reports `None` here, making `package_lock_changed`
-    /// permanently true, which skips the rebuild/restart, deletes
-    /// `node_modules` and forces an `npm install` network-approval prompt.
-    #[test]
-    fn package_lock_digest_survives_a_lockfile_that_git_refuses_to_track() {
-        let root = tempfile::tempdir().unwrap();
-        let layout = layout(root.path());
-        let workspace = root.path().join(layout.workspace_rel());
-        fs::create_dir_all(&workspace).unwrap();
-        fs::write(
-            workspace.join(".gitignore"),
-            "node_modules/\npackage-lock.json\n",
-        )
-        .unwrap();
-        fs::write(
-            workspace.join("package.json"),
-            br#"{"name":"demo","dependencies":{}}"#,
-        )
-        .unwrap();
-        let lockfile = workspace.join(PACKAGE_LOCK_FILE);
-        fs::write(&lockfile, br#"{"lockfileVersion":3,"packages":{}}"#).unwrap();
-
-        let store = AppCheckpointStore::new(&layout);
-        let checkpoint = store
-            .create(
-                AppCheckpointKind::GenerationValidated,
-                "ignored lock",
-                5_000,
-            )
-            .unwrap();
-
-        // Precondition: the blob really is absent from the commit tree, so this
-        // test exercises the trailer path and not the fallback.
-        assert!(
-            !committed_paths(&workspace, &checkpoint.id).contains(&"package-lock.json".into()),
-            "the ignored lockfile must not be in the checkpoint tree"
-        );
-
-        let on_disk = package_lock_digest(&lockfile).unwrap().unwrap();
-        assert_eq!(
-            store.package_lock_digest(&checkpoint.id).unwrap(),
-            Some(on_disk)
-        );
-        // The whole point: an untouched workspace compares EQUAL, so a restore
-        // rebuilds and restarts instead of wiping node_modules.
-        assert_eq!(
-            store.current_package_lock_digest().unwrap(),
-            store.package_lock_digest(&checkpoint.id).unwrap()
-        );
-        // …and a real lockfile edit is still detected.
-        fs::write(
-            &lockfile,
-            br#"{"lockfileVersion":3,"packages":{"demo":{}}}"#,
-        )
-        .unwrap();
-        assert_ne!(
-            store.current_package_lock_digest().unwrap(),
-            store.package_lock_digest(&checkpoint.id).unwrap()
-        );
-    }
-
-    /// A checkpoint written before the trailer existed carries only the blob.
-    /// The tree fallback keeps those readable.
-    #[test]
-    fn package_lock_digest_falls_back_to_the_tree_without_a_trailer() {
-        let root = tempfile::tempdir().unwrap();
-        let layout = layout(root.path());
-        let workspace = root.path().join(layout.workspace_rel());
-        fs::create_dir_all(&workspace).unwrap();
-        let lockfile = workspace.join(PACKAGE_LOCK_FILE);
-        fs::write(&lockfile, br#"{"lockfileVersion":3,"packages":{}}"#).unwrap();
-        let store = AppCheckpointStore::new(&layout);
-        let checkpoint = store
-            .create(AppCheckpointKind::GenerationValidated, "legacy", 6_000)
-            .unwrap();
-
-        // Rewrite the commit message to the PRE-TRAILER shape, keeping the tree.
-        let repo = Repository::open(&workspace).unwrap();
-        let commit = repo
-            .find_commit(parse_oid(&checkpoint.id).unwrap())
-            .unwrap();
-        let legacy_message = commit
-            .message()
-            .unwrap()
-            .lines()
-            .filter(|line| !line.starts_with(PACKAGE_LOCK_TRAILER))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!legacy_message.contains(PACKAGE_LOCK_TRAILER));
-        let legacy = commit
-            .amend(None, None, None, None, Some(&legacy_message), None)
-            .unwrap();
-
-        assert_eq!(
-            store.package_lock_digest(&legacy.to_string()).unwrap(),
-            package_lock_digest(&lockfile).unwrap()
-        );
-
-        // A garbage trailer is not trusted either: it falls through to the tree.
-        let corrupt_message = format!("corrupt\n\n{PACKAGE_LOCK_TRAILER} not-a-digest\n");
-        let corrupt = repo
-            .find_commit(legacy)
-            .unwrap()
-            .amend(None, None, None, None, Some(&corrupt_message), None)
-            .unwrap();
-        assert_eq!(
-            store.package_lock_digest(&corrupt.to_string()).unwrap(),
-            package_lock_digest(&lockfile).unwrap()
-        );
+        assert!(committed_paths(&workspace, &checkpoint.id).contains(&"pnpm-lock.yaml".into()));
     }
 
     /// The exclusion has to hold at the INDEX too, not just at checkout: a

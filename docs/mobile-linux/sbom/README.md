@@ -11,8 +11,7 @@ Required outputs for each release candidate:
 - corresponding-source pins from `docs/mobile-linux/mobile-linux-pins.json`
 - the exact GPL/LGPL texts and `docs/mobile-linux/LICENSES/NOTICE.md`
 - `local-app-runtime.spdx.json`, deterministically generated from the committed
-  Vite runtime lockfile and covering every npm package plus both Linux musl
-  Rolldown bindings
+  pnpm lockfile and pinned by its SHA-256 digest
 
 Suggested artifact layout once real release assets exist:
 
@@ -34,11 +33,11 @@ Evidence shape enforced by CI:
 An Android release must fail closed when any of these artifacts is missing or
 does not match the staged native/rootfs bytes.
 
-Regenerate and verify the local-app npm inventory with:
+Regenerate and verify the local-app pnpm lock evidence with:
 
 ```text
 python3 lingxi-code/scripts/mobile-linux/generate-local-app-sbom.py \
-  --lock lingxi-code/local-apps/templates/vite-react-static-v1/package-lock.json \
+  --lock lingxi-code/local-apps/templates/vite-react-static-v1/pnpm-lock.yaml \
   --output docs/mobile-linux/sbom/local-app-runtime.spdx.json
 bash lingxi-code/scripts/mobile-linux/test-local-app-supply-chain.sh
 ```

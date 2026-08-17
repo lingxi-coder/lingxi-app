@@ -1,9 +1,17 @@
 import SwiftUI
 
-/// One execution surface for the conversation. Agents, durable workflows,
-/// background tasks, and the model plan share one disclosure card while each
-/// reducer keeps its own stable row identity and interaction semantics.
+/// The execution footer is intentionally a flat projection of three independent
+/// sources of work. The projection owns visibility so ChatView never leaves an
+/// empty padded shell behind when a source reaches a successful terminal state.
 struct ExecutionStatusPanel: View {
+    enum Group: String, CaseIterable, Hashable, Identifiable {
+        case agents
+        case workflow
+        case todos
+
+        var id: String { rawValue }
+    }
+
     @Environment(\.theme) private var theme
 
     let agents: [ConversationAgentSummary]
@@ -16,101 +24,109 @@ struct ExecutionStatusPanel: View {
     let onSelectAgent: (String?) -> Void
     let onResumeWorkflow: (String) -> Void
 
-    @State private var collapsed = false
-
-    private var hasChildAgents: Bool {
-        agents.contains { $0.id != ConversationModel.mainAgentID }
+    static func visibleGroups(
+        agents: [ConversationAgentSummary],
+        tasks: [BackgroundTaskSnapshot],
+        todos: [ConversationPlanTask],
+        workflowResumeState: WorkflowResumeState = .idle,
+        selectedAgentID: String? = "main"
+    ) -> [Group] {
+        var groups: [Group] = []
+        if shouldShowAgents(
+            agents,
+            selectedAgentID: selectedAgentID
+        ) {
+            groups.append(.agents)
+        }
+        if TasksStatusPanel.shouldShowWorkflow(tasks, resumeState: workflowResumeState) {
+            groups.append(.workflow)
+        }
+        if todos.contains(where: { $0.state != .completed }) {
+            groups.append(.todos)
+        }
+        return groups
     }
 
-    private var attentionKey: String {
-        tasks
-            .filter { $0.status == .paused || $0.status == .failed }
-            .map { "\($0.id):\($0.status)" }
-            .sorted()
-            .joined(separator: "|")
+    static func shouldShowAgents(
+        _ agents: [ConversationAgentSummary],
+        selectedAgentID: String? = "main"
+    ) -> Bool {
+        let children = agents.filter { $0.id != ConversationModel.mainAgentID }
+        guard !children.isEmpty else { return false }
+
+        let allChildrenCompleted = children.allSatisfy {
+            AgentStatusPresentation(rawValue: $0.status) == .completed
+        }
+        guard !allChildrenCompleted else {
+            // Keep the selector alive while a child transcript is open so the
+            // user can always return to the main conversation.
+            return selectedAgentID != nil && selectedAgentID != ConversationModel.mainAgentID
+        }
+        return true
+    }
+
+    private var groups: [Group] {
+        Self.visibleGroups(
+            agents: agents,
+            tasks: tasks,
+            todos: planTasks,
+            workflowResumeState: workflowResumeState,
+            selectedAgentID: selectedAgentID
+        )
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) { collapsed.toggle() }
-            } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: tasks.contains(where: { !$0.status.isTerminal })
-                        ? "arrow.triangle.2.circlepath"
-                        : "checklist")
-                        .font(.caption)
-                        .foregroundStyle(theme.text3)
-                    Text(String(localized: "chat_execution_status"))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(theme.text)
-                    Text(summary)
-                        .font(.caption2)
-                        .foregroundStyle(theme.text3)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    Image(systemName: collapsed ? "chevron.down" : "chevron.up")
-                        .font(.caption2)
-                        .foregroundStyle(theme.text4)
+        if groups.count == 1, let group = groups.first {
+            groupContent(group)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+        } else if !groups.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(groups.enumerated()), id: \.element) { index, group in
+                    if index > 0 {
+                        Divider()
+                            .overlay(theme.border)
+                            .padding(.vertical, 8)
+                    }
+                    groupContent(group)
                 }
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("chat.execution-status.toggle")
-
-            if !collapsed {
-                if hasChildAgents {
-                    sectionLabel("chat_execution_agents")
-                    AgentStatusDock(
-                        agents: agents,
-                        selectedAgentID: $selectedAgentID,
-                        latestActivity: latestActivity,
-                        isReadOnly: isReadOnly,
-                        showsDetails: false,
-                        onSelect: onSelectAgent
-                    ) { EmptyView() }
-                }
-                if !tasks.isEmpty {
-                    sectionLabel("chat_execution_tasks")
-                    TasksStatusPanel(
-                        tasks: tasks,
-                        onResume: onResumeWorkflow,
-                        showsContainer: false,
-                        workflowResumeState: workflowResumeState
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(theme.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(theme.border, lineWidth: 1)
                     )
-                }
-                if !planTasks.isEmpty {
-                    sectionLabel("chat_execution_plan")
-                    PlanTasksPanel(tasks: planTasks, showsContainer: false)
-                }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(theme.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(theme.border, lineWidth: 1)
-                )
-        )
-        .accessibilityIdentifier("chat.execution-status")
-        .onChange(of: attentionKey) { _, _ in
-            withAnimation(.easeInOut(duration: 0.15)) { collapsed = false }
+            )
+        } else {
+            EmptyView()
         }
     }
 
-    private var summary: String {
-        let active = tasks.filter { !$0.status.isTerminal }.count
-        let agentsCount = max(0, agents.count - 1)
-        return "\(agentsCount) · \(active) · \(planTasks.count)"
-    }
-
-    private func sectionLabel(_ key: String) -> some View {
-        Text(LocalizedStringKey(key))
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(theme.text3)
-            .padding(.top, 2)
+    @ViewBuilder
+    private func groupContent(_ group: Group) -> some View {
+        switch group {
+        case .agents:
+            AgentStatusDock(
+                agents: agents,
+                selectedAgentID: $selectedAgentID,
+                latestActivity: latestActivity,
+                isReadOnly: isReadOnly,
+                onSelect: onSelectAgent
+            )
+        case .workflow:
+            TasksStatusPanel(
+                tasks: tasks,
+                onResume: onResumeWorkflow,
+                showsContainer: false,
+                workflowResumeState: workflowResumeState
+            )
+        case .todos:
+            PlanTasksPanel(tasks: planTasks, showsContainer: false)
+        }
     }
 
     init(
@@ -125,7 +141,7 @@ struct ExecutionStatusPanel: View {
         onResumeWorkflow: @escaping (String) -> Void
     ) {
         self.agents = agents
-        self._selectedAgentID = selectedAgentID
+        _selectedAgentID = selectedAgentID
         self.latestActivity = latestActivity
         self.isReadOnly = isReadOnly
         self.tasks = tasks

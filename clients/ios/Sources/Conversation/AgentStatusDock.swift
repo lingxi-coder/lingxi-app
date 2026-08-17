@@ -13,288 +13,132 @@ private extension ConversationAgentSummary {
     }
 }
 
-/// A compact, always-visible status surface for the currently selected agent.
-///
-/// The dock deliberately keeps its collapsed footprint to a single row so the
-/// transcript remains the primary surface.  The agent picker and execution
-/// details are presented only on demand.  `ConversationModel` owns the
-/// selection; this view is intentionally a pure projection and can therefore
-/// be reused by previews and the mock source.
-struct AgentStatusDock<Details: View>: View {
-    @Environment(\.theme) private var t
+/// An always-expanded, inline agent list. Selection stays in the same view so
+/// switching transcripts never opens a second-level picker or sheet.
+struct AgentStatusDock: View {
+    @Environment(\.theme) private var theme
+
+    private static let maximumVisibleRows = 5
+    private static let maxListHeight: CGFloat = 220
 
     let agents: [ConversationAgentSummary]
     @Binding var selectedAgentID: String?
     let latestActivity: String?
     let isReadOnly: Bool
-    let showsDetails: Bool
     let onSelect: (String?) -> Void
-    let details: () -> Details
 
-    @State private var isExpanded = false
-    @State private var showingPicker = false
-
-    init(
-        agents: [ConversationAgentSummary],
-        selectedAgentID: Binding<String?>,
-        latestActivity: String? = nil,
-        isReadOnly: Bool = false,
-        showsDetails: Bool = true,
-        onSelect: @escaping (String?) -> Void,
-        @ViewBuilder details: @escaping () -> Details
-    ) {
-        self.agents = agents
-        self._selectedAgentID = selectedAgentID
-        self.latestActivity = latestActivity
-        self.isReadOnly = isReadOnly
-        self.showsDetails = showsDetails
-        self.onSelect = onSelect
-        self.details = details
+    private var orderedAgents: [ConversationAgentSummary] {
+        let main = agents.filter { $0.id == ConversationModel.mainAgentID }
+        let children = agents
+            .filter { $0.id != ConversationModel.mainAgentID }
+            .sorted { lhs, rhs in
+                let lhsRunning = AgentStatusPresentation(rawValue: lhs.status) == .running
+                let rhsRunning = AgentStatusPresentation(rawValue: rhs.status) == .running
+                if lhsRunning != rhsRunning { return lhsRunning }
+                if lhs.updatedAtMs != rhs.updatedAtMs { return lhs.updatedAtMs > rhs.updatedAtMs }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+        return main + children
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Button {
-                    showingPicker = true
-                } label: {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(statusColor)
-                            .frame(width: 8, height: 8)
-                        VStack(alignment: .leading, spacing: 1) {
-                            HStack(spacing: 5) {
-                                Text(selectedName)
-                                    .font(.system(size: 12.5, weight: .semibold))
-                                    .foregroundStyle(t.text)
-                                    .lineLimit(1)
-                                if isReadOnly {
-                                    Text(String(localized: "chat_agent_read_only"))
-                                        .font(.system(size: 10, weight: .medium))
-                                        .foregroundStyle(t.text3)
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 2)
-                                        .background(t.windowBg.opacity(0.55))
-                                        .clipShape(Capsule())
-                                }
-                            }
-                            Text(displayActivity)
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(t.text3)
+            HStack(spacing: 6) {
+                Image(systemName: "person.2")
+                    .font(.caption)
+                    .foregroundStyle(theme.text3)
+                Text("chat_agent_picker_title")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(theme.text2)
+                Spacer(minLength: 0)
+            }
+            .padding(.bottom, 3)
+            .accessibilityIdentifier("conversation.agent-status")
+
+            boundedAgentRows
+        }
+    }
+
+    @ViewBuilder
+    private var boundedAgentRows: some View {
+        if orderedAgents.count > Self.maximumVisibleRows {
+            ScrollView {
+                agentRows
+            }
+            .frame(maxHeight: Self.maxListHeight)
+            .scrollBounceBehavior(.basedOnSize)
+        } else {
+            agentRows
+        }
+    }
+
+    private var agentRows: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(orderedAgents.enumerated()), id: \.element.id) { index, agent in
+                if index > 0 {
+                    Divider()
+                        .overlay(theme.border.opacity(0.7))
+                }
+                agentRow(agent)
+            }
+        }
+    }
+
+    private func agentRow(_ agent: ConversationAgentSummary) -> some View {
+        let isMain = agent.id == ConversationModel.mainAgentID
+        let selectionID: String? = isMain ? nil : agent.id
+        let activity = isMain ? (latestActivity ?? agent.latestActivity) : agent.latestActivity
+
+        return Button {
+            onSelect(selectionID)
+        } label: {
+            HStack(spacing: 9) {
+                Circle()
+                    .fill(AgentStatusPresentation(rawValue: agent.status).color(using: theme))
+                    .frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(agent.name)
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(theme.text)
+                            .lineLimit(1)
+                        if !agent.agentType.isEmpty {
+                            Text(agent.agentType)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(theme.text4)
                                 .lineLimit(1)
                         }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(String(localized: "chat_agent_picker_label"))
-                .accessibilityValue(selectedName)
-                .accessibilityIdentifier("conversation.agent-picker")
-
-                Spacer(minLength: 4)
-
-                if showsDetails {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
-                    } label: {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.up")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(t.text3)
-                            .frame(width: 36, height: 36)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(isExpanded
-                        ? String(localized: "chat_agent_details_collapse")
-                        : String(localized: "chat_agent_details_expand"))
-                    .accessibilityIdentifier("conversation.agent-status.toggle")
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 5)
-
-            if showsDetails, isExpanded {
-                details()
-                    .frame(maxHeight: 240)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(t.surface.opacity(0.82))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(t.border.opacity(0.8), lineWidth: 0.5)
-        )
-        .sheet(isPresented: $showingPicker) {
-            AgentPickerSheet(
-                agents: agents,
-                selectedAgentID: selectedAgentID,
-                onSelect: { id in
-                    onSelect(id)
-                    showingPicker = false
-                }
-            )
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
-        }
-    }
-
-    private var selectedAgent: ConversationAgentSummary? {
-        let id = selectedAgentID ?? ConversationModel.mainAgentID
-        return agents.first(where: { $0.id == id })
-    }
-
-    private var selectedName: String {
-        selectedAgent?.name ?? String(localized: "chat_agent_main")
-    }
-
-    private var displayActivity: String {
-        let activity: String
-        if let latestActivity, !latestActivity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            activity = latestActivity
-        } else if let latest = selectedAgent?.latestActivity,
-                  !latest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            activity = latest
-        } else {
-            activity = selectedAgent.map { AgentStatusPresentation(rawValue: $0.status).label }
-                ?? String(localized: "chat_agent_status_idle")
-        }
-        guard let model = selectedAgent?.modelDisplayLabel else { return activity }
-        return "\(activity) · \(model)"
-    }
-
-    private var statusColor: Color {
-        guard let selectedAgent else { return t.accent }
-        return AgentStatusPresentation(rawValue: selectedAgent.status).color(using: t)
-    }
-}
-
-/// Agent list shown from the compact dock.  The main agent is always first,
-/// followed by running agents and then historical agents in their source order.
-private struct AgentPickerSheet: View {
-    @Environment(\.theme) private var t
-
-    let agents: [ConversationAgentSummary]
-    let selectedAgentID: String?
-    let onSelect: (String?) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section(String(localized: "chat_agent_group_current")) {
-                    agentRow(
-                        nil,
-                        name: mainAgent?.name ?? String(localized: "chat_agent_main"),
-                        type: mainAgent?.agentType,
-                        model: mainAgent?.modelDisplayLabel,
-                        status: mainAgent?.status ?? "idle",
-                        activity: mainAgent?.latestActivity
-                    )
-                }
-
-                if !runningAgents.isEmpty {
-                    Section(String(localized: "chat_agent_group_running")) {
-                        ForEach(runningAgents) { agent in row(for: agent) }
-                    }
-                }
-
-                if !historicalAgents.isEmpty {
-                    Section(String(localized: "chat_agent_group_history")) {
-                        ForEach(historicalAgents) { agent in row(for: agent) }
-                    }
-                }
-            }
-            .listStyle(.insetGrouped)
-            .navigationTitle(String(localized: "chat_agent_picker_title"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(String(localized: "common_done")) { dismiss() }
-                }
-            }
-        }
-    }
-
-    private var runningAgents: [ConversationAgentSummary] {
-        agents.filter { $0.id != ConversationModel.mainAgentID && isRunning($0) }
-    }
-
-    private var historicalAgents: [ConversationAgentSummary] {
-        agents.filter { $0.id != ConversationModel.mainAgentID && !isRunning($0) }
-    }
-
-    private var mainAgent: ConversationAgentSummary? {
-        agents.first { $0.id == ConversationModel.mainAgentID }
-    }
-
-    private func row(for agent: ConversationAgentSummary) -> some View {
-        agentRow(
-            agent.id,
-            name: agent.name,
-            type: agent.agentType,
-            model: agent.modelDisplayLabel,
-            status: agent.status,
-            activity: agent.latestActivity
-        )
-    }
-
-    private func agentRow(
-        _ id: String?,
-        name: String,
-        type: String?,
-        model: String?,
-        status: String,
-        activity: String?
-    ) -> some View {
-        Button {
-            onSelect(id)
-        } label: {
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(color(for: status))
-                    .frame(width: 8, height: 8)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(name)
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(t.text)
-                        if let type, !type.isEmpty {
-                            Text(type)
-                                .font(.system(size: 11))
-                                .foregroundStyle(t.text4)
+                        if isReadOnly && selectionID == selectedAgentID {
+                            Text(String(localized: "chat_agent_read_only"))
+                                .font(.system(size: 9.5, weight: .medium))
+                                .foregroundStyle(theme.text3)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(theme.windowBg.opacity(0.55))
+                                .clipShape(Capsule())
                         }
                     }
                     Text(activityText(
                         activity,
-                        fallback: AgentStatusPresentation(rawValue: status).label,
-                        model: model
+                        fallback: AgentStatusPresentation(rawValue: agent.status).label,
+                        model: agent.modelDisplayLabel
                     ))
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(t.text3)
-                        .lineLimit(1)
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.text3)
+                    .lineLimit(1)
                 }
                 Spacer(minLength: 4)
-                if selectedAgentID == id {
+                if selectedAgentID == selectionID {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(t.accent)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(theme.accent)
                 }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .frame(minHeight: 44)
-        .accessibilityIdentifier("conversation.agent-row." + (id ?? "main"))
-    }
-
-    private func isRunning(_ agent: ConversationAgentSummary) -> Bool {
-        AgentStatusPresentation(rawValue: agent.status) == .running
-    }
-
-    private func color(for status: String) -> Color {
-        AgentStatusPresentation(rawValue: status).color(using: t)
+        .frame(minHeight: 40)
+        .accessibilityIdentifier("conversation.agent-row." + (isMain ? "main" : agent.id))
     }
 
     private func activityText(_ activity: String?, fallback: String, model: String?) -> String {
@@ -303,7 +147,6 @@ private struct AgentPickerSheet: View {
         guard let model else { return status }
         return "\(status) · \(model)"
     }
-
 }
 
 enum AgentStatusPresentation: Equatable {

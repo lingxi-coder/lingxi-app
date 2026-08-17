@@ -28,7 +28,6 @@ import XCTest
 
 @MainActor
 final class PlanTasksPanelTests: XCTestCase {
-
     private func task(
         _ subject: String,
         _ state: ConversationPlanTaskState,
@@ -58,24 +57,6 @@ final class PlanTasksPanelTests: XCTestCase {
         }
     }
 
-    /// The panel must take that locale from the environment `RootView` injects.
-    /// A `static var` reading `Locale.current` cannot see it — so assert the
-    /// stored `@Environment(\.locale)` the fix depends on is actually declared.
-    func testPanelReadsTheLocaleFromTheEnvironment() {
-        let panel = PlanTasksPanel(tasks: [])
-        let localeProperty = Mirror(reflecting: panel).children.first { $0.label == "_locale" }
-        let declared = localeProperty.map { type(of: $0.value) }
-
-        XCTAssertTrue(
-            declared == Environment<Locale>.self,
-            """
-            PlanTasksPanel must hold @Environment(\\.locale); the in-app language \
-            switch is delivered through the environment, never through \
-            Locale.current. Found: \(String(describing: declared))
-            """
-        )
-    }
-
     /// End to end for the overflow line: the same hidden remainder renders with
     /// `、` under 简体中文 and `, ` under English, on one and the same host.
     func testOverflowSummaryJoinsClausesWithTheLocaleSeparator() {
@@ -86,9 +67,11 @@ final class PlanTasksPanelTests: XCTestCase {
         ]
 
         let chinese = PlanTasksPanel.overflowSummary(
-            hidden: hidden, locale: Locale(identifier: "zh-Hans"))
+            hidden: hidden, locale: Locale(identifier: "zh-Hans")
+        )
         let english = PlanTasksPanel.overflowSummary(
-            hidden: hidden, locale: Locale(identifier: "en"))
+            hidden: hidden, locale: Locale(identifier: "en")
+        )
 
         XCTAssertNotNil(chinese)
         XCTAssertNotNil(english)

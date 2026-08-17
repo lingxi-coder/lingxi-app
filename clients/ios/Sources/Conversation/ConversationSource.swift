@@ -1189,8 +1189,8 @@ final class MockConversationSource: ConversationSource {
                         id: "ui-child",
                         name: "UI Child",
                         agentType: "worker",
-                        status: "completed",
-                        latestActivity: "Child agent completed",
+                        status: "working",
+                        latestActivity: "Child agent checking workspace",
                         updatedAtMs: 2
                     ),
                 ])

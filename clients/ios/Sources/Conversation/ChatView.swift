@@ -83,8 +83,7 @@ struct ChatView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 messageList
-                if hasChildAgents || !convo.backgroundTasks.isEmpty || !convo.planTasks.isEmpty
-                    || convo.workflowResumeState != .idle {
+                if !visibleExecutionGroups.isEmpty {
                     ExecutionStatusPanel(
                         agents: convo.agentSummaries,
                         selectedAgentID: selectedAgentBinding,
@@ -362,8 +361,14 @@ struct ChatView: View {
         visibleTimelineGroups.reduce(0) { $0 + $1.rows.count }
     }
 
-    private var hasChildAgents: Bool {
-        convo.agentSummaries.contains { $0.id != ConversationModel.mainAgentID }
+    private var visibleExecutionGroups: [ExecutionStatusPanel.Group] {
+        ExecutionStatusPanel.visibleGroups(
+            agents: convo.agentSummaries,
+            tasks: convo.backgroundTasks,
+            todos: convo.planTasks,
+            workflowResumeState: convo.workflowResumeState,
+            selectedAgentID: convo.selectedAgentID
+        )
     }
 
     private var visibleMessageDetails: [UUID: ConversationMessageDetail] {

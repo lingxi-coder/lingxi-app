@@ -23,7 +23,8 @@ import XCTest
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: "",
-                appSandboxRoot: NSTemporaryDirectory())
+                appSandboxRoot: NSTemporaryDirectory()
+            )
             return EngineConversationSource(config: config)
         }
 
@@ -132,7 +133,8 @@ import XCTest
             let source = makeSource()
 
             source.applyForTesting(.taskStatusChanged(
-                taskId: "wmo6xnbac", status: .running, originSessionId: nil))
+                taskId: "wmo6xnbac", status: .running, originSessionId: nil
+            ))
             XCTAssertEqual(source.model.backgroundTasks.map(\.id), ["wmo6xnbac"])
             XCTAssertEqual(source.model.backgroundTasks.first?.descriptionText, "")
 
@@ -171,11 +173,13 @@ import XCTest
             source.applyForTesting(.taskRow(task: row(id: "wmo6xnbac", status: .pending)))
 
             source.applyForTesting(.taskStatusChanged(
-                taskId: "wmo6xnbac", status: .running, originSessionId: nil))
+                taskId: "wmo6xnbac", status: .running, originSessionId: nil
+            ))
             XCTAssertEqual(source.model.backgroundTasks.first?.status, .running)
 
             source.applyForTesting(.taskStatusChanged(
-                taskId: "wmo6xnbac", status: .completed, originSessionId: nil))
+                taskId: "wmo6xnbac", status: .completed, originSessionId: nil
+            ))
             XCTAssertEqual(source.model.backgroundTasks.first?.status, .completed)
             XCTAssertEqual(source.model.backgroundTasks.count, 1)
             XCTAssertTrue(
@@ -202,7 +206,8 @@ import XCTest
                 let description = "workflow \(terminalSnapshotStatus)"
 
                 source.applyForTesting(.taskStatusChanged(
-                    taskId: taskID, status: terminalWireStatus, originSessionId: nil))
+                    taskId: taskID, status: terminalWireStatus, originSessionId: nil
+                ))
                 XCTAssertEqual(source.model.backgroundTasks.first?.status, terminalSnapshotStatus)
                 XCTAssertEqual(
                     source.model.backgroundTasks.first?.descriptionText,
@@ -223,7 +228,8 @@ import XCTest
                 )
 
                 source.applyForTesting(.taskStatusChanged(
-                    taskId: taskID, status: .running, originSessionId: nil))
+                    taskId: taskID, status: .running, originSessionId: nil
+                ))
                 XCTAssertEqual(
                     source.model.backgroundTasks.first?.status,
                     terminalSnapshotStatus,
@@ -270,7 +276,7 @@ import XCTest
                     phaseIndex: 0,
                     phaseTitle: "Design",
                     state: .start,
-                    queuedAtMs: 1_000
+                    queuedAtMs: 1000
                 )
             )
 
@@ -324,8 +330,8 @@ import XCTest
                     phaseIndex: 2,
                     phaseTitle: "Generate",
                     state: .done,
-                    startedAtMs: 1_000,
-                    lastProgressAtMs: 5_000,
+                    startedAtMs: 1000,
+                    lastProgressAtMs: 5000,
                     tokens: 420,
                     toolCalls: 3
                 )
@@ -341,8 +347,8 @@ import XCTest
                     phaseIndex: 2,
                     phaseTitle: "Generate",
                     state: .progress,
-                    startedAtMs: 1_000,
-                    lastProgressAtMs: 2_000,
+                    startedAtMs: 1000,
+                    lastProgressAtMs: 2000,
                     tokens: 200,
                     toolCalls: 1
                 )
@@ -366,7 +372,7 @@ import XCTest
                     index: 0,
                     title: "Design",
                     state: .done,
-                    lastProgressAtMs: 5_000,
+                    lastProgressAtMs: 5000,
                     tokens: 420,
                     toolCalls: 3
                 )
@@ -380,7 +386,7 @@ import XCTest
                     title: "Design",
                     message: "late progress beacon",
                     state: .progress,
-                    lastProgressAtMs: 6_000,
+                    lastProgressAtMs: 6000,
                     tokens: 421,
                     toolCalls: 4
                 )
@@ -396,7 +402,8 @@ import XCTest
         func testWorkflowTaskStatusStaysTerminalWhenLateProgressArrives() {
             let source = makeSource()
             source.applyForTesting(.taskStatusChanged(
-                taskId: "wf-task", status: .completed, originSessionId: nil))
+                taskId: "wf-task", status: .completed, originSessionId: nil
+            ))
 
             source.applyWorkflowProgressForTesting(
                 taskId: "wf-task",
@@ -408,7 +415,7 @@ import XCTest
                     phaseIndex: 4,
                     phaseTitle: "Verify",
                     state: .progress,
-                    lastProgressAtMs: 3_000
+                    lastProgressAtMs: 3000
                 )
             )
 
@@ -425,7 +432,7 @@ import XCTest
                     phaseIndex: 4,
                     phaseTitle: "Verify",
                     state: .done,
-                    lastProgressAtMs: 3_100
+                    lastProgressAtMs: 3100
                 )
             )
             XCTAssertEqual(source.model.backgroundTasks.first?.workflow?.agents.first?.state, .done)
@@ -442,7 +449,7 @@ import XCTest
                     message: "confirming structure",
                     phaseIndex: 0,
                     phaseTitle: "Design",
-                    lastProgressAtMs: 1_000
+                    lastProgressAtMs: 1000
                 )
             )
             let log = workflowProgress(
@@ -451,7 +458,7 @@ import XCTest
                 label: "Progress",
                 phaseIndex: 0,
                 phaseTitle: "Design",
-                lastProgressAtMs: 1_100
+                lastProgressAtMs: 1100
             )
             source.applyWorkflowProgressForTesting(taskId: "wf-task", runId: "run-1", progress: log)
             source.applyWorkflowProgressForTesting(taskId: "wf-task", runId: "run-1", progress: log)
@@ -465,14 +472,14 @@ import XCTest
                     phaseIndex: 0,
                     phaseTitle: "Design",
                     state: .progress,
-                    lastProgressAtMs: 1_200
+                    lastProgressAtMs: 1200
                 )
             )
 
             let workflow = try? XCTUnwrap(source.model.backgroundTasks.first?.workflow)
             XCTAssertEqual(workflow?.logs.count, 1)
 
-            let sections = TasksStatusPanel.workflowSections(for: workflow!, nowMs: 2_000)
+            let sections = TasksStatusPanel.workflowSections(for: workflow!, nowMs: 2000)
             XCTAssertEqual(sections.map(\.title), ["Design"])
             XCTAssertEqual(sections.first?.agents.map(\.displayTitle), ["Design agent"])
             XCTAssertEqual(sections.first?.subtitle, "reviewing hierarchy")
@@ -491,7 +498,7 @@ import XCTest
                     phaseIndex: 0,
                     phaseTitle: "Design",
                     state: .done,
-                    lastProgressAtMs: 1_000
+                    lastProgressAtMs: 1000
                 )
             )
             source.applyWorkflowProgressForTesting(
@@ -504,7 +511,7 @@ import XCTest
                     phaseIndex: 1,
                     phaseTitle: "Generate",
                     state: .progress,
-                    lastProgressAtMs: 2_000
+                    lastProgressAtMs: 2000
                 )
             )
 
@@ -529,14 +536,14 @@ import XCTest
                             title: "Design",
                             label: nil,
                             message: nil,
-                            updatedAtMs: 1_000
+                            updatedAtMs: 1000
                         ),
                     ]
                 )
             )
 
             XCTAssertEqual(
-                TasksStatusPanel.workflowCompactSummary(for: task, nowMs: 1_000),
+                TasksStatusPanel.workflowCompactSummary(for: task, nowMs: 1000),
                 "Design"
             )
         }
@@ -556,7 +563,7 @@ import XCTest
                             title: "Generate",
                             label: nil,
                             message: nil,
-                            updatedAtMs: 2_000
+                            updatedAtMs: 2000
                         ),
                     ],
                     logs: [],
@@ -576,9 +583,9 @@ import XCTest
                             state: .progress,
                             error: nil,
                             toolUseId: nil,
-                            startedAtMs: 1_000,
+                            startedAtMs: 1000,
                             queuedAtMs: 900,
-                            lastProgressAtMs: 5_000,
+                            lastProgressAtMs: 5000,
                             attempt: 2,
                             lastAttemptReason: "timeout",
                             tokens: 321,
@@ -602,9 +609,9 @@ import XCTest
                             state: .done,
                             error: nil,
                             toolUseId: nil,
-                            startedAtMs: 1_200,
-                            queuedAtMs: 1_100,
-                            lastProgressAtMs: 6_000,
+                            startedAtMs: 1200,
+                            queuedAtMs: 1100,
+                            lastProgressAtMs: 6000,
                             attempt: 1,
                             lastAttemptReason: nil,
                             tokens: 120,
@@ -614,11 +621,11 @@ import XCTest
                             promptPreview: nil
                         ),
                     ],
-                    lastUpdatedAtMs: 6_000
+                    lastUpdatedAtMs: 6000
                 )
             )
 
-            let summary = TasksStatusPanel.workflowCompactSummary(for: task, nowMs: 6_000)
+            let summary = TasksStatusPanel.workflowCompactSummary(for: task, nowMs: 6000)
             XCTAssertEqual(
                 summary,
                 [
@@ -628,7 +635,7 @@ import XCTest
                 ].joined(separator: " · ")
             )
 
-            let metrics = TasksStatusPanel.workflowAgentMetrics(task.workflow!.agents[0], nowMs: 6_000)
+            let metrics = TasksStatusPanel.workflowAgentMetrics(task.workflow!.agents[0], nowMs: 6000)
             XCTAssertEqual(
                 metrics,
                 [
@@ -709,6 +716,216 @@ import XCTest
                     paused: 1,
                     cancelled: 1
                 )
+            )
+        }
+
+        func testWorkflowStepsFlattenPhasesAndDeriveStatuses() {
+            let phases = [
+                ConversationWorkflowPhaseSnapshot(
+                    id: "phase-0", index: 0, title: "Design", label: nil, message: nil, updatedAtMs: 1
+                ),
+                ConversationWorkflowPhaseSnapshot(
+                    id: "phase-1", index: 1, title: "Build", label: nil, message: nil, updatedAtMs: 2
+                ),
+                ConversationWorkflowPhaseSnapshot(
+                    id: "phase-2", index: 2, title: "Verify", label: nil, message: nil, updatedAtMs: 3
+                ),
+            ]
+            let agents = [
+                ConversationWorkflowAgentSnapshot(
+                    id: "agent-0", index: 0, title: "designer", message: nil, label: nil,
+                    phaseIndex: 0, phaseTitle: "Design", agentId: nil, agentType: nil,
+                    model: nil, fallbackModel: nil, state: .done, error: nil, toolUseId: nil,
+                    startedAtMs: nil, queuedAtMs: nil, lastProgressAtMs: nil, attempt: nil,
+                    lastAttemptReason: nil, tokens: nil, toolCalls: nil, lastToolName: nil,
+                    lastToolSummary: nil, promptPreview: nil
+                ),
+                ConversationWorkflowAgentSnapshot(
+                    id: "agent-1", index: 1, title: "builder", message: nil, label: nil,
+                    phaseIndex: 1, phaseTitle: "Build", agentId: nil, agentType: nil,
+                    model: nil, fallbackModel: nil, state: .progress, error: nil, toolUseId: nil,
+                    startedAtMs: nil, queuedAtMs: nil, lastProgressAtMs: nil, attempt: nil,
+                    lastAttemptReason: nil, tokens: nil, toolCalls: nil, lastToolName: nil,
+                    lastToolSummary: nil, promptPreview: nil
+                ),
+            ]
+            let task = BackgroundTaskSnapshot(
+                id: "workflow-1",
+                descriptionText: "Build app",
+                status: .running,
+                workflow: ConversationWorkflowRunSnapshot(
+                    taskId: "workflow-1", runId: "run-1", phases: phases, agents: agents
+                )
+            )
+
+            let steps = TasksStatusPanel.workflowSteps(for: task, nowMs: 2)
+
+            XCTAssertEqual(steps.map(\.title), ["Design", "Build", "Verify"])
+            XCTAssertEqual(steps.map(\.state), [.completed, .running, .pending])
+            XCTAssertFalse(steps.contains { $0.title == "designer" || $0.title == "builder" })
+        }
+
+        func testTerminalTaskStatusOverridesStaleAgentProgress() {
+            let phases = [
+                ConversationWorkflowPhaseSnapshot(
+                    id: "phase-0", index: 0, title: "Design", label: nil, message: nil, updatedAtMs: 1
+                ),
+                ConversationWorkflowPhaseSnapshot(
+                    id: "phase-1", index: 1, title: "Build", label: nil, message: nil, updatedAtMs: 2
+                ),
+                ConversationWorkflowPhaseSnapshot(
+                    id: "phase-2", index: 2, title: "Verify", label: nil, message: nil, updatedAtMs: 3
+                ),
+            ]
+            let staleAgent = ConversationWorkflowAgentSnapshot(
+                id: "agent-1", index: 1, title: "builder", message: nil, label: nil,
+                phaseIndex: 1, phaseTitle: "Build", agentId: nil, agentType: nil,
+                model: nil, fallbackModel: nil, state: .progress, error: nil, toolUseId: nil,
+                startedAtMs: nil, queuedAtMs: nil, lastProgressAtMs: nil, attempt: nil,
+                lastAttemptReason: nil, tokens: nil, toolCalls: nil, lastToolName: nil,
+                lastToolSummary: nil, promptPreview: nil
+            )
+            let workflow = ConversationWorkflowRunSnapshot(
+                taskId: "workflow-1", runId: "run-1", phases: phases, agents: [staleAgent]
+            )
+
+            let completed = BackgroundTaskSnapshot(
+                id: "workflow-1", descriptionText: "Done", status: .completed, workflow: workflow
+            )
+            XCTAssertTrue(TasksStatusPanel.workflowTaskIsSuccessfullyComplete(completed))
+            XCTAssertFalse(TasksStatusPanel.shouldShowWorkflow([completed]))
+
+            let paused = BackgroundTaskSnapshot(
+                id: "workflow-1", descriptionText: "Paused", status: .paused,
+                canResume: true, workflow: workflow
+            )
+            let pausedSteps = TasksStatusPanel.workflowSteps(for: paused)
+            XCTAssertEqual(pausedSteps.map(\.state), [.completed, .paused, .pending])
+            XCTAssertEqual(pausedSteps.map(\.canResume), [false, true, false])
+
+            let failed = BackgroundTaskSnapshot(
+                id: "workflow-1", descriptionText: "Failed", status: .failed, workflow: workflow
+            )
+            XCTAssertEqual(
+                TasksStatusPanel.workflowSteps(for: failed).map(\.state),
+                [.completed, .failed, .pending]
+            )
+
+            let cancelled = BackgroundTaskSnapshot(
+                id: "workflow-1", descriptionText: "Cancelled", status: .cancelled, workflow: workflow
+            )
+            XCTAssertEqual(
+                TasksStatusPanel.workflowSteps(for: cancelled).map(\.state),
+                [.completed, .cancelled, .pending]
+            )
+        }
+
+        func testSuccessfulGroupsAreHiddenTogether() {
+            let completedWorkflow = BackgroundTaskSnapshot(
+                id: "workflow-1",
+                descriptionText: "Done",
+                status: .completed,
+                workflow: ConversationWorkflowRunSnapshot(
+                    taskId: "workflow-1",
+                    runId: "run-1",
+                    agents: [
+                        ConversationWorkflowAgentSnapshot(
+                            id: "agent-0", index: 0, title: nil, message: nil, label: nil,
+                            phaseIndex: nil, phaseTitle: nil, agentId: nil, agentType: nil,
+                            model: nil, fallbackModel: nil, state: .done, error: nil,
+                            toolUseId: nil, startedAtMs: nil, queuedAtMs: nil,
+                            lastProgressAtMs: nil, attempt: nil, lastAttemptReason: nil,
+                            tokens: nil, toolCalls: nil, lastToolName: nil,
+                            lastToolSummary: nil, promptPreview: nil
+                        ),
+                    ]
+                )
+            )
+            let agents = [
+                ConversationAgentSummary.main,
+                ConversationAgentSummary(
+                    id: "child-1", name: "Child", agentType: "worker", status: "completed"
+                ),
+            ]
+            let todos = [ConversationPlanTask(
+                taskId: "todo-1", subject: "Ship", activeForm: nil, state: .completed
+            )]
+
+            XCTAssertTrue(TasksStatusPanel.workflowTaskIsSuccessfullyComplete(completedWorkflow))
+            XCTAssertTrue(
+                ExecutionStatusPanel.visibleGroups(
+                    agents: agents,
+                    tasks: [completedWorkflow],
+                    todos: todos,
+                    selectedAgentID: ConversationModel.mainAgentID
+                ).isEmpty
+            )
+        }
+
+        func testAttentionGroupsRemainVisibleAndSelectedChildKeepsAgentList() {
+            let failedWorkflow = BackgroundTaskSnapshot(
+                id: "workflow-1", descriptionText: "Failed", status: .failed,
+                workflow: ConversationWorkflowRunSnapshot(taskId: "workflow-1", runId: "run-1")
+            )
+            let failedAgent = ConversationAgentSummary(
+                id: "child-1", name: "Child", agentType: "worker", status: "failed"
+            )
+            let todos = [ConversationPlanTask(
+                taskId: "todo-1", subject: "Fix", activeForm: nil, state: .inProgress
+            )]
+
+            XCTAssertEqual(
+                Set(ExecutionStatusPanel.visibleGroups(
+                    agents: [ConversationAgentSummary.main, failedAgent],
+                    tasks: [failedWorkflow],
+                    todos: todos,
+                    selectedAgentID: ConversationModel.mainAgentID
+                )),
+                Set([.agents, .workflow, .todos])
+            )
+
+            let completedChild = ConversationAgentSummary(
+                id: "child-1", name: "Child", agentType: "worker", status: "completed"
+            )
+            XCTAssertEqual(
+                ExecutionStatusPanel.visibleGroups(
+                    agents: [ConversationAgentSummary.main, completedChild],
+                    tasks: [],
+                    todos: [],
+                    selectedAgentID: "child-1"
+                ),
+                [.agents]
+            )
+            XCTAssertEqual(
+                ExecutionStatusPanel.visibleGroups(
+                    agents: [ConversationAgentSummary.main, completedChild],
+                    tasks: [],
+                    todos: [],
+                    selectedAgentID: ConversationModel.mainAgentID
+                ),
+                []
+            )
+        }
+
+        func testNonWorkflowTasksDoNotCreateAGroupAndActiveTodosDo() {
+            let backgroundTask = BackgroundTaskSnapshot(
+                id: "background-1", descriptionText: "Background job", status: .running
+            )
+
+            XCTAssertTrue(
+                ExecutionStatusPanel.visibleGroups(
+                    agents: [], tasks: [backgroundTask], todos: []
+                ).isEmpty
+            )
+
+            let activeTodo = ConversationPlanTask(
+                taskId: "todo-1", subject: "Ship", activeForm: nil, state: .inProgress
+            )
+            XCTAssertEqual(
+                ExecutionStatusPanel.visibleGroups(
+                    agents: [], tasks: [], todos: [activeTodo]
+                ),
+                [.todos]
             )
         }
     }

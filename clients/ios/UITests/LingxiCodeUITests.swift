@@ -213,9 +213,6 @@ final class LingxiCodeUITests: XCTestCase {
         app.launchEnvironment["LINGXI_UI_TEST_MULTI_AGENT"] = "1"
         app.launch()
 
-        let picker = app.buttons["conversation.agent-picker"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 8), app.debugDescription)
-        picker.tap()
         let childRow = app.buttons["conversation.agent-row.ui-child"]
         XCTAssertTrue(childRow.waitForExistence(timeout: 5), app.debugDescription)
         childRow.tap()
@@ -224,7 +221,6 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["conversation.agent-read-only"].exists, app.debugDescription)
         XCTAssertFalse(app.textFields["composer.input"].exists, app.debugDescription)
 
-        picker.tap()
         let mainRow = app.buttons["conversation.agent-row.main"]
         XCTAssertTrue(mainRow.waitForExistence(timeout: 5), app.debugDescription)
         mainRow.tap()

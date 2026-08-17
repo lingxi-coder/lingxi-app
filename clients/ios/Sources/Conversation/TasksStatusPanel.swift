@@ -1,9 +1,4 @@
-// TasksStatusPanel.swift — the pinned background-tasks widget.
-//
-// The mobile analog of Claude Code's workflow footer: background tasks remain
-// compact by default, but a workflow task can expand into structured
-// phase/agent progress instead of collapsing everything into one description
-// line or relying on transcript polling.
+// Flat workflow steps pinned above the composer.
 
 import SwiftUI
 
@@ -13,11 +8,35 @@ struct TasksStatusPanel: View {
     let onResume: (String) -> Void
     let showsContainer: Bool
     let workflowResumeState: WorkflowResumeState
-    @State private var collapsed = false
-    @State private var expandedTaskIDs: Set<String> = []
 
-    static let visibleFinishedLimit = 3
     private static let maxPanelHeight: CGFloat = 240
+
+    enum WorkflowStepState: String, Equatable, Hashable {
+        case pending
+        case running
+        case completed
+        case failed
+        case paused
+        case cancelled
+
+        var label: String {
+            switch self {
+            case .pending: return String(localized: "chat_plan_state_pending")
+            case .running: return String(localized: "chat_status_running")
+            case .completed: return String(localized: "chat_status_completed")
+            case .failed: return String(localized: "chat_status_failed")
+            case .paused: return String(localized: "settings_status_paused")
+            case .cancelled: return String(localized: "chat_status_cancelled")
+            }
+        }
+    }
+
+    struct WorkflowStep: Identifiable, Equatable, Hashable {
+        let id: String
+        let title: String
+        let state: WorkflowStepState
+        let canResume: Bool
+    }
 
     struct TaskCounts: Equatable {
         let total: Int
@@ -41,9 +60,167 @@ struct TasksStatusPanel: View {
         )
     }
 
-    private var active: [BackgroundTaskSnapshot] { tasks.filter { !$0.status.isTerminal } }
-    private var finished: [BackgroundTaskSnapshot] { tasks.filter { $0.status.isTerminal } }
-    private var counts: TaskCounts { Self.taskCounts(tasks) }
+    static func workflowTaskIsSuccessfullyComplete(_ task: BackgroundTaskSnapshot) -> Bool {
+        task.workflow != nil && task.status == .completed
+    }
+
+    static func shouldShowWorkflow(
+        _ tasks: [BackgroundTaskSnapshot],
+        resumeState: WorkflowResumeState = .idle
+    ) -> Bool {
+        let hasVisibleTask = tasks.contains {
+            $0.workflow != nil && !workflowTaskIsSuccessfullyComplete($0)
+        }
+        if hasVisibleTask { return true }
+        if case let .failed(taskID, _) = resumeState {
+            return tasks.contains { $0.id == taskID && $0.workflow != nil }
+        }
+        return false
+    }
+
+    static func visibleWorkflowTasks(
+        _ tasks: [BackgroundTaskSnapshot],
+        resumeState: WorkflowResumeState = .idle
+    ) -> [BackgroundTaskSnapshot] {
+        tasks.filter { task in
+            guard task.workflow != nil else { return false }
+            if !workflowTaskIsSuccessfullyComplete(task) { return true }
+            if case let .failed(taskID, _) = resumeState, taskID == task.id { return true }
+            return false
+        }
+    }
+
+    static func workflowSteps(
+        for task: BackgroundTaskSnapshot,
+        resumeState _: WorkflowResumeState = .idle,
+        nowMs: UInt64 = currentWallClockMs()
+    ) -> [WorkflowStep] {
+        guard let workflow = task.workflow else { return [] }
+        let phases = workflow.sortedPhases
+        let activeAgent = workflow.sortedAgents.first { !$0.state.isTerminal }
+        let activePosition = activeAgent.flatMap { agent in
+            phases.firstIndex { phaseMatches($0, agent: agent) }
+        } ?? phases.firstIndex {
+            $0.title == workflow.currentPhaseTitle
+        } ?? phases.indices.last
+        let terminalPosition = activePosition ?? phases.indices.last ?? 0
+
+        if phases.isEmpty {
+            let title = task.descriptionText.isEmpty
+                ? (workflow.currentPhaseTitle ?? task.id)
+                : task.descriptionText
+            return [WorkflowStep(
+                id: "workflow-\(task.id)-fallback",
+                title: title,
+                state: fallbackState(for: task, workflow: workflow),
+                canResume: task.canResume && task.status == .paused
+            )]
+        }
+
+        let result = phases.enumerated().map { position, phase in
+            let agents = workflow.sortedAgents.filter { phaseMatches(phase, agent: $0) }
+            let state = state(
+                for: task,
+                phasePosition: position,
+                terminalPosition: terminalPosition,
+                phaseAgents: agents
+            )
+            return WorkflowStep(
+                id: "workflow-\(task.id)-\(phase.id)",
+                title: phase.title,
+                state: state,
+                canResume: false
+            )
+        }
+
+        guard task.canResume, task.status == .paused else {
+            _ = nowMs
+            return result
+        }
+        guard let pausedIndex = result.lastIndex(where: { $0.state == .paused }) else {
+            _ = nowMs
+            return result
+        }
+        return result.enumerated().map { index, step in
+            guard index == pausedIndex else { return step }
+            return WorkflowStep(id: step.id, title: step.title, state: step.state, canResume: true)
+        }
+    }
+
+    private static func phaseMatches(
+        _ phase: ConversationWorkflowPhaseSnapshot,
+        agent: ConversationWorkflowAgentSnapshot
+    ) -> Bool {
+        let matchesIndex = phase.index != nil && agent.phaseIndex == phase.index
+        let matchesTitle = !matchesIndex
+            && agent.phaseIndex == nil
+            && agent.phaseTitle == phase.title
+        return matchesIndex || matchesTitle
+    }
+
+    private static func state(
+        for task: BackgroundTaskSnapshot,
+        phasePosition: Int,
+        terminalPosition: Int,
+        phaseAgents: [ConversationWorkflowAgentSnapshot]
+    ) -> WorkflowStepState {
+        if task.status == .completed { return .completed }
+        if phasePosition == terminalPosition {
+            switch task.status {
+            case .paused: return .paused
+            case .failed: return .failed
+            case .cancelled: return .cancelled
+            case .pending, .running, .completed: break
+            }
+        }
+
+        if phaseAgents.contains(where: { $0.state == .error }) { return .failed }
+        if phaseAgents.contains(where: { $0.state == .progress }) { return .running }
+        if phaseAgents.contains(where: { $0.state == .start }) { return .pending }
+        if !phaseAgents.isEmpty && phaseAgents.allSatisfy({ $0.state.isSuccessLike }) {
+            return .completed
+        }
+
+        switch task.status {
+        case .pending:
+            return .pending
+        case .running:
+            if phasePosition < terminalPosition { return .completed }
+            return phasePosition == terminalPosition ? .running : .pending
+        case .paused:
+            return phasePosition < terminalPosition ? .completed : phasePosition == terminalPosition ? .paused : .pending
+        case .completed:
+            return .completed
+        case .failed:
+            return phasePosition < terminalPosition ? .completed : phasePosition == terminalPosition ? .failed : .pending
+        case .cancelled:
+            return phasePosition < terminalPosition ? .completed : phasePosition == terminalPosition ? .cancelled : .pending
+        }
+    }
+
+    private static func fallbackState(
+        for task: BackgroundTaskSnapshot,
+        workflow: ConversationWorkflowRunSnapshot
+    ) -> WorkflowStepState {
+        switch task.status {
+        case .paused: return .paused
+        case .completed: return .completed
+        case .failed: return .failed
+        case .cancelled: return .cancelled
+        case .pending, .running: break
+        }
+        if workflow.failedAgents > 0 { return .failed }
+        if workflow.runningAgents > 0 { return .running }
+        if workflow.queuedAgents > 0 { return .pending }
+        switch task.status {
+        case .pending: return .pending
+        case .running: return .running
+        case .paused: return .paused
+        case .completed: return .completed
+        case .failed: return .failed
+        case .cancelled: return .cancelled
+        }
+    }
 
     init(
         tasks: [BackgroundTaskSnapshot],
@@ -57,33 +234,47 @@ struct TasksStatusPanel: View {
         self.workflowResumeState = workflowResumeState
     }
 
+    private var visibleTasks: [BackgroundTaskSnapshot] {
+        Self.visibleWorkflowTasks(tasks, resumeState: workflowResumeState)
+    }
+
     @ViewBuilder
-    private var panelContent: some View {
+    private var content: some View {
         VStack(alignment: .leading, spacing: 6) {
-            header
-            if !collapsed {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(active) { taskCard(for: $0) }
-                        ForEach(finished.suffix(Self.visibleFinishedLimit)) { taskCard(for: $0) }
-                        if finished.count > Self.visibleFinishedLimit {
-                            Text("chat_tasks_more_completed \(finished.count - Self.visibleFinishedLimit)")
-                                .font(.caption2)
-                                .foregroundStyle(theme.text4)
-                                .padding(.leading, 22)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: Self.maxPanelHeight)
-                .scrollBounceBehavior(.basedOnSize)
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(theme.text3)
+                Text("chat_workflow_title")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(theme.text2)
+                Spacer(minLength: 0)
             }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(visibleTasks.enumerated()), id: \.element.id) { taskIndex, task in
+                        if taskIndex > 0 {
+                            Divider()
+                                .overlay(theme.border.opacity(0.7))
+                                .padding(.vertical, 6)
+                        }
+                        workflowRows(for: task, showContext: visibleTasks.count > 1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: Self.maxPanelHeight)
+            .scrollBounceBehavior(.basedOnSize)
         }
+        .accessibilityIdentifier("chat.tasks-panel")
     }
 
     var body: some View {
-        if showsContainer {
-            panelContent
+        if visibleTasks.isEmpty {
+            EmptyView()
+        } else if showsContainer {
+            content
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .background(
@@ -94,12 +285,121 @@ struct TasksStatusPanel: View {
                                 .stroke(theme.border, lineWidth: 1)
                         )
                 )
-                .accessibilityIdentifier("chat.tasks-panel")
         } else {
-            panelContent
+            content
         }
     }
 
+    @ViewBuilder
+    private func workflowRows(
+        for task: BackgroundTaskSnapshot,
+        showContext: Bool
+    ) -> some View {
+        if showContext {
+            Text(task.descriptionText.isEmpty ? task.id : task.descriptionText)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(theme.text3)
+                .lineLimit(1)
+                .padding(.bottom, 3)
+        }
+        ForEach(Self.workflowSteps(for: task, resumeState: workflowResumeState)) { step in
+            workflowStepRow(step, task: task)
+        }
+        if case let .failed(taskID, message) = workflowResumeState, taskID == task.id {
+            Text(message)
+                .font(.caption2)
+                .foregroundStyle(theme.danger)
+                .lineLimit(3)
+                .padding(.leading, 22)
+                .padding(.top, 3)
+        }
+    }
+
+    private func workflowStepRow(
+        _ step: WorkflowStep,
+        task: BackgroundTaskSnapshot
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            statusIcon(step.state)
+                .frame(width: 14)
+            Text(step.title)
+                .font(.caption)
+                .fontWeight(step.state == .running ? .semibold : .regular)
+                .foregroundStyle(step.state == .completed ? theme.text4 : theme.text)
+                .strikethrough(step.state == .completed)
+                .lineLimit(2)
+            Spacer(minLength: 4)
+            Text(step.state.label)
+                .font(.caption2)
+                .foregroundStyle(color(for: step.state))
+                .lineLimit(1)
+            if step.canResume {
+                Button {
+                    onResume(task.id)
+                } label: {
+                    Image(systemName: "play.fill")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(theme.accent)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(isResuming(task.id))
+                .accessibilityLabel(String(localized: "chat_workflow_resume"))
+            }
+        }
+        .padding(.vertical, 3)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(step.title), \(step.state.label)")
+    }
+
+    private func isResuming(_ taskID: String) -> Bool {
+        if case let .resuming(activeTaskID) = workflowResumeState {
+            return activeTaskID == taskID
+        }
+        return false
+    }
+
+    @ViewBuilder
+    private func statusIcon(_ state: WorkflowStepState) -> some View {
+        switch state {
+        case .running:
+            ProgressView().controlSize(.mini)
+        case .pending:
+            Image(systemName: "clock")
+                .font(.caption2)
+                .foregroundStyle(theme.text3)
+        case .completed:
+            Image(systemName: "checkmark")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(theme.ok)
+        case .failed:
+            Image(systemName: "xmark")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(theme.danger)
+        case .paused:
+            Image(systemName: "pause.circle")
+                .font(.caption2)
+                .foregroundStyle(theme.text3)
+        case .cancelled:
+            Image(systemName: "minus.circle")
+                .font(.caption2)
+                .foregroundStyle(theme.text4)
+        }
+    }
+
+    private func color(for state: WorkflowStepState) -> Color {
+        switch state {
+        case .running: return theme.accent
+        case .completed: return theme.ok
+        case .failed: return theme.danger
+        case .pending, .paused: return theme.text3
+        case .cancelled: return theme.text4
+        }
+    }
+
+    // Compatibility projections retained for reducer/display tests that still
+    // validate the wire-to-model workflow grouping independently of this flat UI.
     struct WorkflowSection: Identifiable, Equatable {
         let id: String
         let title: String
@@ -169,7 +469,7 @@ struct TasksStatusPanel: View {
             ))
         }
 
-        _ = nowMs // kept explicit so tests can fix time without warning churn
+        _ = nowMs
         return sections
     }
 
@@ -237,252 +537,15 @@ struct TasksStatusPanel: View {
     }
 
     private static func currentWallClockMs() -> UInt64 {
-        UInt64(Date().timeIntervalSince1970 * 1_000)
+        UInt64(Date().timeIntervalSince1970 * 1000)
     }
 
     static func formatDuration(_ durationMs: UInt64) -> String {
-        let seconds = durationMs / 1_000
+        let seconds = durationMs / 1000
         let minutes = seconds / 60
         let remaining = seconds % 60
-        if minutes == 0 {
-            return "\(remaining)s"
-        }
+        if minutes == 0 { return "\(remaining)s" }
         return "\(minutes)m \(String(format: "%02d", remaining))s"
-    }
-
-    private var header: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.15)) { collapsed.toggle() }
-        } label: {
-            HStack(spacing: 6) {
-                if counts.running > 0 {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Image(systemName: "checklist")
-                        .font(.caption)
-                        .foregroundStyle(theme.text3)
-                }
-                Text(
-                    "chat_tasks_summary_detail \(counts.total) \(counts.succeeded) \(counts.running) \(counts.queued) \(counts.failed) \(counts.paused) \(counts.cancelled)"
-                )
-                .font(.caption)
-                .foregroundStyle(theme.text2)
-                Spacer(minLength: 0)
-                Image(systemName: collapsed ? "chevron.down" : "chevron.up")
-                    .font(.caption2)
-                    .foregroundStyle(theme.text4)
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("chat.tasks-panel.toggle")
-        .accessibilityHint(Text(collapsed ? "chat_tasks_expand_hint" : "chat_tasks_collapse_hint"))
-    }
-
-    @ViewBuilder
-    private func taskCard(for task: BackgroundTaskSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            if let workflow = task.workflow {
-                workflowTaskCard(task: task, workflow: workflow)
-            } else {
-                plainTaskRow(task)
-            }
-            if task.canResume, task.status == .paused {
-                Button {
-                    onResume(task.id)
-                } label: {
-                    Label(String(localized: "chat_workflow_resume"), systemImage: "play.fill")
-                        .font(.caption2.weight(.semibold))
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.mini)
-                .padding(.leading, 22)
-                .disabled(isResuming(task.id))
-            }
-            if case let .failed(taskID, message) = workflowResumeState, taskID == task.id {
-                Text(message)
-                    .font(.caption2)
-                    .foregroundStyle(theme.danger)
-                    .lineLimit(3)
-                    .padding(.leading, 22)
-            }
-        }
-    }
-
-    private func isResuming(_ taskID: String) -> Bool {
-        if case let .resuming(activeTaskID) = workflowResumeState {
-            return activeTaskID == taskID
-        }
-        return false
-    }
-
-    private func plainTaskRow(_ task: BackgroundTaskSnapshot) -> some View {
-        HStack(spacing: 8) {
-            statusIcon(task.status)
-                .frame(width: 14)
-            Text(task.descriptionText.isEmpty ? task.id : task.descriptionText)
-                .font(.caption)
-                .lineLimit(1)
-                .strikethrough(task.status == .completed)
-                .foregroundStyle(task.status.isTerminal ? theme.text4 : theme.text)
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func workflowTaskCard(
-        task: BackgroundTaskSnapshot,
-        workflow: ConversationWorkflowRunSnapshot
-    ) -> some View {
-        let expanded = expandedTaskIDs.contains(task.id)
-        let title = task.descriptionText.isEmpty ? task.id : task.descriptionText
-        let summary = Self.workflowCompactSummary(for: task) ?? task.status.label
-
-        return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    if expanded {
-                        expandedTaskIDs.remove(task.id)
-                    } else {
-                        expandedTaskIDs.insert(task.id)
-                    }
-                }
-            } label: {
-                HStack(alignment: .top, spacing: 8) {
-                    statusIcon(task.status)
-                        .frame(width: 14, height: 14)
-                        .padding(.top, 2)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(task.status.isTerminal ? theme.text3 : theme.text)
-                            .lineLimit(1)
-                        Text(summary)
-                            .font(.caption2)
-                            .foregroundStyle(theme.text3)
-                            .lineLimit(2)
-                    }
-                    Spacer(minLength: 0)
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.caption2)
-                        .foregroundStyle(theme.text4)
-                        .padding(.top, 2)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if expanded {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Self.workflowSections(for: workflow)) { section in
-                        workflowSection(section)
-                    }
-                }
-                .padding(.leading, 22)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-        }
-        .padding(.vertical, 2)
-    }
-
-    private func workflowSection(_ section: WorkflowSection) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                Text(section.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(theme.text)
-                    .lineLimit(1)
-                if !section.agents.isEmpty {
-                    Text("\(section.agents.filter { $0.state.isSuccessLike }.count)/\(section.agents.count)")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(theme.text4)
-                }
-            }
-            if let subtitle = section.subtitle, !subtitle.isEmpty {
-                Text(subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(theme.text3)
-                    .lineLimit(2)
-            }
-            ForEach(section.agents) { agent in
-                workflowAgentRow(agent)
-            }
-            if section.agents.isEmpty, let log = section.logs.last?.message, !log.isEmpty {
-                Text(log)
-                    .font(.caption2)
-                    .foregroundStyle(theme.text3)
-                    .lineLimit(2)
-            }
-        }
-    }
-
-    private func workflowAgentRow(_ agent: ConversationWorkflowAgentSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Circle()
-                    .fill(agentStateColor(agent.state))
-                    .frame(width: 6, height: 6)
-                Text(agent.displayTitle)
-                    .font(.caption)
-                    .foregroundStyle(theme.text)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .padding(.leading, 2)
-
-            Text(Self.workflowAgentMetrics(agent))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(theme.text3)
-                .padding(.leading, 14)
-                .lineLimit(2)
-
-            if let activity = agent.activityLine, !activity.isEmpty {
-                Text(activity)
-                    .font(.caption2)
-                    .foregroundStyle(agent.state == .error ? theme.danger : theme.text4)
-                    .padding(.leading, 14)
-                    .lineLimit(2)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func statusIcon(_ status: BackgroundTaskSnapshot.Status) -> some View {
-        switch status {
-        case .running:
-            ProgressView().controlSize(.mini)
-        case .pending:
-            Image(systemName: "clock")
-                .font(.caption2)
-                .foregroundStyle(theme.text3)
-        case .paused:
-            Image(systemName: "pause.circle")
-                .font(.caption2)
-                .foregroundStyle(theme.text3)
-        case .completed:
-            Image(systemName: "checkmark")
-                .font(.caption2)
-                .foregroundStyle(theme.ok)
-        case .failed:
-            Image(systemName: "xmark")
-                .font(.caption2)
-                .foregroundStyle(theme.danger)
-        case .cancelled:
-            Image(systemName: "minus.circle")
-                .font(.caption2)
-                .foregroundStyle(theme.text4)
-        }
-    }
-
-    private func agentStateColor(_ state: ConversationWorkflowAgentState) -> Color {
-        switch state {
-        case .done, .cached:
-            return theme.ok
-        case .error:
-            return theme.danger
-        case .start:
-            return theme.text4
-        case .progress:
-            return theme.accent
-        }
     }
 }
 

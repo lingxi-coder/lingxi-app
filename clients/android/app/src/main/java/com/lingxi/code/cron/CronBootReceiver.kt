@@ -4,6 +4,7 @@ import android.app.AlarmManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.lingxi.code.localapps.LocalAppBackgroundScheduler
 
 /**
  * System broadcasts only enqueue reconciliation. WorkManager performs storage
@@ -11,6 +12,7 @@ import android.content.Intent
  */
 class CronBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        LocalAppBackgroundScheduler.ensureWatchdog(context.applicationContext)
         when (intent.action) {
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED,

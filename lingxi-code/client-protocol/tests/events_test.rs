@@ -591,6 +591,22 @@ fn extended_local_app_events_round_trip() {
                 checkpoints: vec![],
             },
         },
+        ClientEvent::AppEvent {
+            event: AppEventDto::AppRecordChanged {
+                record: AppRecordDto {
+                    id: "habits-1a2b".to_string(),
+                    name: "Habits".to_string(),
+                    brief: "a habit tracker".to_string(),
+                    git_enabled: true,
+                    created_at_ms: 11,
+                    updated_at_ms: 22,
+                    workflow_state: client_protocol::local_apps::AppWorkflowStateDto::Ready,
+                    conversation_id: Some("conv-9".to_string()),
+                    init_session_id: Some("init-1".to_string()),
+                    workspace_rel: "apps/habits-1a2b/workspace".to_string(),
+                },
+            },
+        },
     ];
     // Pin the WIRE TAG of every inner `AppEventDto` variant, mirroring
     // `commands_test::extended_local_app_commands_round_trip`. A symmetric
@@ -602,10 +618,11 @@ fn extended_local_app_events_round_trip() {
         "app_ui_request",
         "app_capability_requested",
         "app_checkpoints_changed",
+        "app_record_changed",
     ];
     // One leaf field name per variant, so a renamed FIELD (not just a renamed
     // variant tag) is caught too.
-    let expected_leaves: [(&str, serde_json::Value); 4] = [
+    let expected_leaves: [(&str, serde_json::Value); 5] = [
         ("/event/response/result_json", serde_json::Value::from("[]")),
         ("/event/request/action", serde_json::Value::from("inspect")),
         (
@@ -613,6 +630,10 @@ fn extended_local_app_events_round_trip() {
             serde_json::Value::from("network_domain"),
         ),
         ("/event/app_id", serde_json::Value::from("habits-1a2b")),
+        (
+            "/event/record/init_session_id",
+            serde_json::Value::from("init-1"),
+        ),
     ];
     assert_eq!(
         events.len(),

@@ -159,6 +159,7 @@ class LocalAppsViewModel(
                 )
             }
             is LocalAppsAction.ResolveAuthorization -> resolveAuthorization(action.decision)
+            is LocalAppsAction.ResolveProfileProposal -> resolveProfileProposal(action.approved)
             is LocalAppsAction.UiActionHandled -> resolveCompletedUiAction(action)
             is LocalAppsAction.SelectDetailsTab -> _uiState.update { state ->
                 val appId = state.selectedAppId ?: return@update state
@@ -465,6 +466,15 @@ class LocalAppsViewModel(
     private fun reduceAppEvent(event: AppEventDto) {
         when (event) {
             is AppEventDto.AppDetailsChanged -> reduceDetails(event.details)
+            is AppEventDto.AppRecordChanged -> {
+                val prior = _uiState.value.apps.firstOrNull { it.id == event.record.id }
+                val app = event.record.toUiApp(fallbackRuntime = prior?.runtime)
+                // RecordChanged may race the initial full catalog snapshot.
+                // Upsert it and restore the canonical newest-first ordering so
+                // an incremental init-session pin cannot be dropped or leave
+                // the list sorted differently from AppsChanged.
+                upsertApp(app)
+            }
             is AppEventDto.AppBridgeResponse -> {
                 val response = event.response
                 _uiState.update { state ->
@@ -583,7 +593,31 @@ class LocalAppsViewModel(
             // and silence would be a compile error, not a no-op.
             is AppEventDto.AppLlmActivityChanged -> Unit
             is AppEventDto.AppAgentEventPosted -> Unit
+            is AppEventDto.AppProfileProposal -> _uiState.update { state ->
+                state.copy(
+                    pendingProfileProposal = LocalAppProfileProposal(
+                        appId = event.proposal.appId,
+                        approvalToken = event.proposal.approvalToken,
+                        baseRevision = event.proposal.baseRevision,
+                        currentRevision = event.proposal.currentRevision,
+                        instructions = event.proposal.instructions,
+                        reason = event.proposal.reason,
+                    ),
+                )
+            }
         }
+    }
+
+    private fun resolveProfileProposal(approved: Boolean) {
+        val proposal = _uiState.value.pendingProfileProposal ?: return
+        _uiState.update { it.copy(pendingProfileProposal = null) }
+        submit(
+            ClientCommand.ResolveAppProfileProposal(
+                appId = proposal.appId,
+                approvalToken = proposal.approvalToken,
+                approved = approved,
+            ),
+        )
     }
 
     private fun reduceDetails(details: com.lingxi.code.bindings.AppDetailsDto) {
@@ -731,6 +765,19 @@ class LocalAppsViewModel(
         }
     }
 
+    private fun upsertApp(app: LocalAppItem) {
+        _uiState.update { state ->
+            val updated = state.apps.toMutableList()
+            val index = updated.indexOfFirst { it.id == app.id }
+            if (index >= 0) {
+                updated[index] = app
+            } else {
+                updated += app
+            }
+            state.copy(apps = updated.sortedByDescending { it.updatedAtMs })
+        }
+    }
+
     private fun submit(command: ClientCommand) {
         submit { it.submitClientCommand(command) }
     }
@@ -794,6 +841,8 @@ internal fun AppBridgeOperationDto.bridgeWireName(): String = when (this) {
     AppBridgeOperationDto.AGENT_STREAM -> "agent_stream"
     AppBridgeOperationDto.AGENT_CANCEL -> "agent_cancel"
     AppBridgeOperationDto.AGENT_PROFILE_PROPOSE_UPDATE -> "agent_profile_propose_update"
+    AppBridgeOperationDto.BACKGROUND_SCHEDULE -> "background_schedule"
+    AppBridgeOperationDto.BACKGROUND_RESUME -> "background_resume"
 }
 
 internal fun bridgeOperationFor(wireName: String): AppBridgeOperationDto? =
@@ -880,6 +929,8 @@ private fun AppCapabilityKindDto.authorizationTitle(strings: LocalAppsStrings): 
         strings.resolve(R.string.local_apps_permission_llm, "允许应用调用 AI 模型？（会消耗你的模型用量）")
     AppCapabilityKindDto.AGENT_NOTIFY ->
         strings.resolve(R.string.local_apps_permission_agent_notify, "允许应用向对话助手发送事件？")
+    AppCapabilityKindDto.BACKGROUND_SCHEDULE ->
+        "允许应用在系统后台按计划运行流程？"
 }
 
 private fun LocalAppAuthorizationDecision.toBindingDecision(): AppAuthorizationDecisionDto = when (this) {

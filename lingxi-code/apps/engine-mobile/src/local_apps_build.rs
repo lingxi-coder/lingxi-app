@@ -283,6 +283,13 @@ pub(crate) struct LocalAppBuilder<'a> {
 /// workspace so app creation does not depend on `npm create`.
 pub(crate) fn scaffold_workspace(layout: &AppLayout) -> Result<(), AppError> {
     layout.initialize()?;
+    scaffold_workspace_initialized(layout)
+}
+
+/// Materialize the pinned template after the enclosing create transaction has
+/// already initialized the app layout. Keeping the initialized variant
+/// private to the host path avoids a second full directory validation pass.
+pub(crate) fn scaffold_workspace_initialized(layout: &AppLayout) -> Result<(), AppError> {
     let workspace = layout.root().join(layout.workspace_rel());
     for (relative, bytes) in VITE_LOCKED_FILES {
         write_file(&workspace, relative, bytes, true)?;

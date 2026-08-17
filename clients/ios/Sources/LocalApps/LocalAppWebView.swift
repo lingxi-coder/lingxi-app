@@ -86,10 +86,11 @@ final class LocalAppWebViewRegistry {
 
     func deliverStreamFrame(appID: String, frameJSON: String) {
         guard let controller = controllers[appID]?.value,
+              let webView = controller.webView,
               let data = frameJSON.data(using: .utf8),
               let json = String(data: data, encoding: .utf8)
         else { return }
-        controller.webView.evaluateJavaScript("window.lingxi?.__stream(\(json));")
+        webView.evaluateJavaScript("window.lingxi?.__stream(\(json));")
     }
 
     #if canImport(engine_mobileFFI)

@@ -74,6 +74,17 @@ struct LocalAppSessionPage: Hashable, Sendable {
     var nextOffset: UInt64?
 }
 
+struct LocalAppProfileProposal: Identifiable, Equatable, Sendable {
+    let appID: String
+    let approvalToken: String
+    let baseRevision: UInt64
+    let currentRevision: UInt64
+    let instructions: String
+    let reason: String
+
+    var id: String { approvalToken }
+}
+
 enum LocalAppDataFieldType: String, CaseIterable, Hashable, Sendable {
     case text
     case longText = "long_text"
@@ -163,6 +174,7 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case notifications
         case llm
         case agentNotify
+        case backgroundSchedule
         case uiAction(String)
     }
 
@@ -185,6 +197,7 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case .notifications: String(localized: "local_apps_permission_notifications")
         case .llm: String(localized: "local_apps_permission_llm")
         case .agentNotify: String(localized: "local_apps_permission_agent_notify")
+        case .backgroundSchedule: "允许应用在系统后台按计划运行流程？"
         case let .uiAction(action): String(localized: "local_apps_permission_ui_action \(action)")
         }
     }

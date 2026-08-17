@@ -632,6 +632,21 @@ function validateAppEvent(v: unknown): void {
     case 'app_details_changed':
       validateAppDetails(o['details']);
       break;
+    case 'app_record_changed':
+      validateAppRecord(o['record']);
+      break;
+    case 'app_profile_proposal': {
+      const proposal = rec(o['proposal']);
+      assert.ok(
+        isString(proposal['appId']) &&
+          isString(proposal['approvalToken']) &&
+          isNumber(proposal['baseRevision']) &&
+          isNumber(proposal['currentRevision']) &&
+          isString(proposal['instructions']) &&
+          isString(proposal['reason']),
+      );
+      break;
+    }
     case 'app_bridge_response':
       validateAppBridgeResponse(o['response']);
       break;
@@ -851,6 +866,13 @@ function validateCommand(name: string, v: unknown): void {
     case 'resolve_app_capability_request':
       assert.ok(isString(o['request_id']));
       validateAppAuthorizationDecision(o['decision']);
+      break;
+    case 'resolve_app_profile_proposal':
+      assert.ok(
+        isString(o['app_id']) &&
+          isString(o['approval_token']) &&
+          isBool(o['approved']),
+      );
       break;
     case 'restore_app_checkpoint':
       assert.ok(isString(o['app_id']) && isString(o['checkpoint_id']));
@@ -1267,7 +1289,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 46, `expected 46 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 47, `expected 47 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1294,7 +1316,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 60, `expected 60 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 62, `expected 62 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

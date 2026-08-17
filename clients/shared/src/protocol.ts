@@ -182,6 +182,12 @@ export type ClientCommand =
       request_id: string;
       decision: AppAuthorizationDecisionDto;
     }
+  | {
+      type: 'resolve_app_profile_proposal';
+      app_id: string;
+      approval_token: string;
+      approved: boolean;
+    }
   | { type: 'reset_app_permissions'; app_id: string }
   | { type: 'list_app_sessions'; app_id: string; offset?: number; limit?: number }
   | { type: 'list_app_checkpoints'; app_id: string }
@@ -1026,7 +1032,9 @@ export interface AppAgentProfileDto {
 
 export interface AppAgentProfileProposalDto {
   appId: string;
+  approvalToken: string;
   baseRevision: number;
+  currentRevision: number;
   instructions: string;
   reason: string;
 }
@@ -1096,6 +1104,8 @@ export type AppAuthorizationDecisionDto =
  */
 export type AppEventDto =
   | { type: 'app_details_changed'; details: AppDetailsDto }
+  | { type: 'app_record_changed'; record: AppRecordDto }
+  | { type: 'app_profile_proposal'; proposal: AppAgentProfileProposalDto }
   | { type: 'app_bridge_response'; response: AppBridgeResponseDto }
   | { type: 'app_ui_request'; request: AppUiRequestDto }
   | { type: 'app_capability_requested'; request: AppCapabilityRequestDto }

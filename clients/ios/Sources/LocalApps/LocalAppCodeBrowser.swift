@@ -83,16 +83,16 @@ enum LocalAppWorkspacePath {
 @Observable
 @MainActor
 final class LocalAppCodeBrowser {
-    private static let excludedDirectories: Set<String> = [
+    private nonisolated static let excludedDirectories: Set<String> = [
         ".git", ".lingxi", ".next", "build", "node_modules",
     ]
-    private static let editableExtensions: Set<String> = [
+    private nonisolated static let editableExtensions: Set<String> = [
         "css", "html", "js", "json", "jsx", "md", "mjs", "svg", "ts", "tsx", "txt",
     ]
-    private static let editableNames: Set<String> = [
+    private nonisolated static let editableNames: Set<String> = [
         ".gitignore", ".npmrc", "next.config.js", "next.config.mjs", "pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json",
     ]
-    private static let maximumEditableBytes = 1_048_576
+    private nonisolated static let maximumEditableBytes = 1_048_576
 
     private(set) var files: [LocalAppSourceFile] = []
     private(set) var selectedPath: String?
@@ -103,48 +103,30 @@ final class LocalAppCodeBrowser {
     private(set) var statusMessage: String?
 
     private let workspaceRelativePath: String
+    @ObservationIgnored private var refreshTask: Task<Void, Never>?
 
     init(workspaceRelativePath: String) {
         self.workspaceRelativePath = workspaceRelativePath
     }
 
     func refresh() {
+        refreshTask?.cancel()
         isLoading = true
-        defer { isLoading = false }
-        do {
-            let root = try workspaceRoot()
-            let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
-            guard let enumerator = FileManager.default.enumerator(
-                at: root,
-                includingPropertiesForKeys: keys,
-                options: [],
-                errorHandler: { _, _ in true }
-            ) else {
-                files = []
-                return
+        let relativePath = workspaceRelativePath
+        refreshTask = Task { [weak self] in
+            let scanTask = Task.detached(priority: .userInitiated) {
+                Self.scanFiles(relativePath: relativePath)
             }
-
-            var values: [LocalAppSourceFile] = []
-            while let url = enumerator.nextObject() as? URL {
-                let resource = try url.resourceValues(forKeys: Set(keys))
-                if resource.isSymbolicLink == true {
-                    if resource.isDirectory == true { enumerator.skipDescendants() }
-                    continue
-                }
-                if resource.isDirectory == true, Self.excludedDirectories.contains(url.lastPathComponent) {
-                    enumerator.skipDescendants()
-                    continue
-                }
-                guard resource.isRegularFile == true, resource.isSymbolicLink != true else { continue }
-                let relativePath = try safeRelativePath(for: url, root: root)
-                guard Self.isEditable(url), (resource.fileSize ?? 0) <= Self.maximumEditableBytes else { continue }
-                values.append(LocalAppSourceFile(relativePath: relativePath, size: resource.fileSize ?? 0))
+            let result = await withTaskCancellationHandler {
+                await scanTask.value
+            } onCancel: {
+                scanTask.cancel()
             }
-            files = values.sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
-            errorMessage = nil
-        } catch {
-            files = []
-            errorMessage = error.localizedDescription
+            guard let self, !Task.isCancelled else { return }
+            self.files = result.files
+            self.errorMessage = result.errorMessage
+            self.isLoading = false
+            self.refreshTask = nil
         }
     }
 
@@ -199,6 +181,51 @@ final class LocalAppCodeBrowser {
         try LocalAppWorkspacePath.validatedRoot(relativePath: workspaceRelativePath)
     }
 
+    private struct ScanResult: Sendable {
+        let files: [LocalAppSourceFile]
+        let errorMessage: String?
+    }
+
+    private nonisolated static func scanFiles(relativePath: String) -> ScanResult {
+        do {
+            let root = try LocalAppWorkspacePath.validatedRoot(relativePath: relativePath)
+            let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: keys,
+                options: [],
+                errorHandler: { _, _ in true }
+            ) else {
+                return ScanResult(files: [], errorMessage: nil)
+            }
+
+            var values: [LocalAppSourceFile] = []
+            while !Task.isCancelled, let url = enumerator.nextObject() as? URL {
+                let resource = try url.resourceValues(forKeys: Set(keys))
+                if resource.isSymbolicLink == true {
+                    if resource.isDirectory == true { enumerator.skipDescendants() }
+                    continue
+                }
+                if resource.isDirectory == true, Self.excludedDirectories.contains(url.lastPathComponent) {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                guard resource.isRegularFile == true, resource.isSymbolicLink != true else { continue }
+                let candidate = url.standardizedFileURL
+                guard Self.isDescendant(candidate, of: root) else { throw BrowserError.pathEscaped }
+                let relativePath = String(candidate.path.dropFirst(root.path.count + 1))
+                guard Self.isEditable(url), (resource.fileSize ?? 0) <= Self.maximumEditableBytes else { continue }
+                values.append(LocalAppSourceFile(relativePath: relativePath, size: resource.fileSize ?? 0))
+            }
+            return ScanResult(
+                files: values.sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending },
+                errorMessage: nil
+            )
+        } catch {
+            return ScanResult(files: [], errorMessage: error.localizedDescription)
+        }
+    }
+
     private func resolvedFileURL(relativePath: String) throws -> URL {
         let root = try workspaceRoot()
         let candidate = root.appendingPathComponent(relativePath, isDirectory: false).standardizedFileURL
@@ -210,17 +237,11 @@ final class LocalAppCodeBrowser {
         return candidate
     }
 
-    private func safeRelativePath(for url: URL, root: URL) throws -> String {
-        let candidate = url.standardizedFileURL
-        guard Self.isDescendant(candidate, of: root) else { throw BrowserError.pathEscaped }
-        return String(candidate.path.dropFirst(root.path.count + 1))
-    }
-
-    private static func isDescendant(_ candidate: URL, of root: URL) -> Bool {
+    private nonisolated static func isDescendant(_ candidate: URL, of root: URL) -> Bool {
         LocalAppWorkspacePath.isDescendant(candidate, of: root)
     }
 
-    private static func isEditable(_ url: URL) -> Bool {
+    private nonisolated static func isEditable(_ url: URL) -> Bool {
         editableNames.contains(url.lastPathComponent) || editableExtensions.contains(url.pathExtension.lowercased())
     }
 

@@ -73,6 +73,14 @@ struct LocalAppsRootView: View {
         ) { prompt in
             LocalAppPermissionSheet(store: store, prompt: prompt)
         }
+        .sheet(
+            item: Binding(
+                get: { store.pendingProfileProposal },
+                set: { _ in }
+            )
+        ) { proposal in
+            LocalAppProfileProposalSheet(store: store, proposal: proposal)
+        }
     }
 
     @ViewBuilder
@@ -95,6 +103,38 @@ struct LocalAppsRootView: View {
             )
         case let .preview(appID):
             LocalAppPreviewView(store: store, appID: appID)
+        }
+    }
+}
+
+struct LocalAppProfileProposalSheet: View {
+    @Bindable var store: LocalAppsStore
+    let proposal: LocalAppProfileProposal
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Label("local_apps_profile_proposal_title", systemImage: "text.badge.checkmark")
+                        .font(.title3.bold())
+                    Text(proposal.reason)
+                        .foregroundStyle(.secondary)
+                    Text(proposal.instructions)
+                        .font(.body)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding()
+            }
+            .navigationTitle("local_apps_profile_proposal_navigation_title")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("common_cancel") { store.resolveProfileProposal(false) }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("local_apps_profile_proposal_apply") { store.resolveProfileProposal(true) }
+                }
+            }
         }
     }
 }

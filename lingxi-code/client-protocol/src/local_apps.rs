@@ -202,8 +202,9 @@ pub struct AppDataCollectionDto {
     pub enabled_by_default: bool,
 }
 
-/// One app row — the lowered core `AppRecord`. Carried by
-/// [`AppsChanged`](crate::events::ClientEvent::AppsChanged).
+/// One app row — the lowered core `AppRecord`. Carried either by the full
+/// [`AppsChanged`](crate::events::ClientEvent::AppsChanged) snapshot or by
+/// the incremental `AppRecordChanged` event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AppRecordDto {
@@ -413,6 +414,10 @@ pub enum AppBridgeOperationDto {
     AgentCancel,
     /// Propose a user-approved App Agent Profile revision.
     AgentProfileProposeUpdate,
+    /// Register a declarative app flow with the host background scheduler.
+    BackgroundSchedule,
+    /// Resume a journaled background flow after system delivery.
+    BackgroundResume,
 }
 
 /// One host-bound bridge request. Payloads are data, never executable script.
@@ -639,7 +644,9 @@ pub struct AppAgentProfileDto {
 #[serde(rename_all = "camelCase")]
 pub struct AppAgentProfileProposalDto {
     pub app_id: String,
+    pub approval_token: String,
     pub base_revision: u64,
+    pub current_revision: u64,
     pub instructions: String,
     pub reason: String,
 }
@@ -703,6 +710,7 @@ pub enum AppCapabilityKindDto {
     Notifications,
     Llm,
     AgentNotify,
+    BackgroundSchedule,
 }
 
 /// A capability approval request surfaced by the host.
@@ -778,6 +786,14 @@ pub enum AppEventDto {
         /// Pre-serialized camelCase frame for WebView delivery on FFI clients.
         #[serde(rename = "frameJson")]
         frame_json: String,
+    },
+    /// Incremental app-record update; appended to preserve existing enum ordinals.
+    AppRecordChanged {
+        record: AppRecordDto,
+    },
+    /// A trusted client must explicitly approve or reject this proposal.
+    AppProfileProposal {
+        proposal: AppAgentProfileProposalDto,
     },
 }
 

@@ -129,6 +129,20 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         return await handle.runCronTaskIfDue(taskId: task.id, scheduledAtMs: scheduledAtMs).map(Self.map)
     }
 
+    func runLocalAppBackgroundTasks() async {
+        do {
+            let handle = try await makeHandle(scope: .global(appSandboxRoot: appSandboxRoot))
+            let now = UInt64(Date().timeIntervalSince1970 * 1000)
+            _ = await handle.runDueLocalAppBackgroundTasks(nowMs: now)
+            let next = await handle.nextLocalAppBackgroundWakeMs(nowMs: now)
+            LocalAppBackgroundTaskBridge.shared.schedule(earliestAtMs: next)
+        } catch {
+            LocalAppBackgroundTaskBridge.shared.schedule(
+                earliestAtMs: UInt64(Date().timeIntervalSince1970 * 1000) + 15 * 60 * 1_000
+            )
+        }
+    }
+
     private func makeHandle(scope: CronScope) async throws -> MobileEngineHandle {
         let (snapshot, runtime) = await MainActor.run {
             (launchSnapshot(), terminalConfig(scope))

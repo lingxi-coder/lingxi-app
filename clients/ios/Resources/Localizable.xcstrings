@@ -26222,6 +26222,33 @@
         }
       }
     },
+    "local_apps_profile_proposal_apply": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "应用 Profile" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "套用 Profile" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Apply Profile" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Profile を適用" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "프로필 적용" } }
+      }
+    },
+    "local_apps_profile_proposal_navigation_title": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "Agent Profile 建议" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "Agent Profile 建議" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Agent Profile Proposal" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Agent Profile の提案" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Agent 프로필 제안" } }
+      }
+    },
+    "local_apps_profile_proposal_title": {
+      "localizations": {
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "Agent 请求更新应用 Profile" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "Agent 要求更新應用 Profile" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Agent requests an app Profile update" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Agent がアプリ Profile の更新を要求しています" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Agent가 앱 프로필 업데이트를 요청했습니다" } }
+      }
+    },
     "local_apps_submit": {
       "localizations": {
         "zh-Hans": {

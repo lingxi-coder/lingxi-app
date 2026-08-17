@@ -183,6 +183,16 @@ data class LocalAppBridgeResult(
     val errorCode: String? = null,
 )
 
+@Immutable
+data class LocalAppProfileProposal(
+    val appId: String,
+    val approvalToken: String,
+    val baseRevision: ULong,
+    val currentRevision: ULong,
+    val instructions: String,
+    val reason: String,
+)
+
 /**
  * Details tabs. [Sessions] is FIRST and the default: an app is a conversation
  * scope now, so its session catalog is the primary surface; the runtime
@@ -217,6 +227,7 @@ data class LocalAppsUiState(
     val selectedAppId: String? = null,
     val selectedDetailsTab: LocalAppDetailsTab = LocalAppDetailsTab.Sessions,
     val pendingAuthorization: LocalAppAuthorizationRequest? = null,
+    val pendingProfileProposal: LocalAppProfileProposal? = null,
     val bridgeResults: Map<LocalAppBridgeRequestKey, LocalAppBridgeResult> = emptyMap(),
     val pendingUiAction: LocalAppPendingUiAction? = null,
     val error: String? = null,
@@ -259,6 +270,7 @@ sealed interface LocalAppsAction {
     data class BridgeRequest(val message: LocalAppBridgeMessage) : LocalAppsAction
     data class AcknowledgeBridgeResult(val appId: String, val requestId: String) : LocalAppsAction
     data class ResolveAuthorization(val decision: LocalAppAuthorizationDecision) : LocalAppsAction
+    data class ResolveProfileProposal(val approved: Boolean) : LocalAppsAction
     data class UiActionHandled(
         val requestId: String,
         val resultJson: String?,

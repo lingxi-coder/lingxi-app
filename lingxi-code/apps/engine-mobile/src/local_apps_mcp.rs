@@ -57,6 +57,24 @@ pub trait LocalAppsMcpHost: Send + Sync {
     /// `agent.post` — the app's own timer posting while the agent reads is
     /// the INTENDED usage, not an exotic interleaving.
     async fn read_app_events(&self, input: Value) -> Result<Value, String>;
+    /// Register a validated declarative flow with the host background journal.
+    async fn background_schedule(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("background scheduling is unavailable in this host build".into())
+    }
+    /// Resume a journaled flow after an Android/iOS scheduler wake-up.
+    async fn background_resume(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("background resume is unavailable in this host build".into())
+    }
+    /// Host-internal bridge implementation hook.
+    async fn background_schedule_value(&self, input: Value) -> Result<Value, String> {
+        self.background_schedule(input).await
+    }
+    /// Host-internal bridge implementation hook.
+    async fn background_resume_value(&self, input: Value) -> Result<Value, String> {
+        self.background_resume(input).await
+    }
     /// Create a persistent app Agent session after the host's capability gate.
     async fn agent_session_create(&self, input: Value) -> Result<Value, String> {
         let _ = input;
@@ -819,6 +837,16 @@ impl LocalAppsMcpTransport {
                 },"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
+                "background_schedule",
+                "Register a bounded declarative flow for the system scheduler. The host journals the flow and rejects interactive capabilities.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"interval_ms":{"type":"integer","minimum":900000,"maximum":2592000000u64},"flow":{"type":"object"}},"required":["app_id","interval_ms","flow"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "background_resume",
+                "Resume one host-journaled background flow after a system wake-up.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"task_id":{"type":"string","minLength":1,"maxLength":128}},"required":["app_id","task_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
                 "list_checkpoints",
                 "List Git-backed code checkpoints for one app. Read-only and does not affect SQLite data.",
                 json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
@@ -905,6 +933,16 @@ impl LocalAppsMcpTransport {
                 "Propose an app-specific system-prompt layer. The proposal is inert until the user approves it.",
                 json!({"type": "object", "properties": {"base_revision": {"type": "integer", "minimum": 0}, "instructions": {"type": "string", "maxLength": 32768}, "reason": {"type": "string", "maxLength": 2000}}, "required": ["instructions", "reason"], "additionalProperties": false}),
             ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "background_schedule"),
+                "Register a bounded declarative flow for this app's system background scheduler.",
+                json!({"type":"object","properties":{"interval_ms":{"type":"integer","minimum":900000,"maximum":2592000000u64},"flow":{"type":"object"}},"required":["interval_ms","flow"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "background_resume"),
+                "Resume one journaled background flow for this app.",
+                json!({"type":"object","properties":{"task_id":{"type":"string","minLength":1,"maxLength":128}},"required":["task_id"],"additionalProperties":false}),
+            ),
         ]
     }
 
@@ -921,6 +959,8 @@ impl LocalAppsMcpTransport {
                     | "agent_sessions_create"
                     | "agent_sessions_update"
                     | "agent_profile_propose_update"
+                    | "background_schedule"
+                    | "background_resume"
             )
         {
             Some((app_id, operation))
@@ -1004,6 +1044,14 @@ impl LocalAppsMcpTransport {
                         Err(message) => Self::tool_error(message),
                     }
                 }
+                "background_schedule" => match self.host()?.background_schedule(bound).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                },
+                "background_resume" => match self.host()?.background_resume(bound).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                },
                 _ => unreachable!("parse_dynamic_tool only returns supported operations"),
             });
         }
@@ -1139,8 +1187,19 @@ impl LocalAppsMcpTransport {
                     "app": record,
                     "next_step": host.create_next_step(),
                 });
-                if let (Some(object), Some(init_id)) = (result.as_object_mut(), init_session_id) {
-                    object.insert("init_session_id".into(), Value::String(init_id));
+                if let (Some(object), Some(init_id)) =
+                    (result.as_object_mut(), init_session_id.as_ref())
+                {
+                    object.insert("init_session_id".into(), Value::String(init_id.clone()));
+                }
+                if init_session_id.is_none()
+                    && service
+                        .record(&record.id)
+                        .await
+                        .map(|current| current.init_session_id.is_none())
+                        .unwrap_or(false)
+                {
+                    let _ = service.announce_record(&record.id).await;
                 }
                 Self::result(result)
             }
@@ -1199,6 +1258,14 @@ impl LocalAppsMcpTransport {
                 Err(message) => Self::tool_error(message),
             },
             "read_app_events" => match self.host()?.read_app_events(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "background_schedule" => match self.host()?.background_schedule(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "background_resume" => match self.host()?.background_resume(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
@@ -1302,7 +1369,15 @@ impl McpTransport for LocalAppsMcpTransport {
         } else {
             Self::tool_catalog()
         };
-        for record in self.service()?.list_apps().await {
+        // The conversation-scoped transport is connected while the mobile
+        // engine is still being assembled, before the profile-owned service
+        // can be attached. Its catalog is intentionally static (dynamic app
+        // namespaces are only exposed by app-scoped transports), so do not
+        // make engine bootstrap depend on the later service attachment.
+        let Some(service) = self.service.get() else {
+            return Ok(tools);
+        };
+        for record in service.list_apps().await {
             if !self.scope.allows_dynamic_app(&record.id) {
                 continue;
             }
@@ -1574,6 +1649,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn bootstrap_catalog_does_not_require_service_attachment() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let transport = LocalAppsMcpTransport::new(root.path().to_path_buf());
+        let connection = transport
+            .connect(&McpTransportSpec::InProcess {
+                registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
+            })
+            .await
+            .expect("connect before profile service attachment");
+
+        let tools = transport
+            .list_tools(&connection)
+            .await
+            .expect("static bootstrap catalog");
+        assert_eq!(
+            tools.len(),
+            LocalAppsMcpTransport::tool_catalog().len(),
+            "conversation bootstrap must expose the static catalog without a service"
+        );
+    }
+
     #[test]
     fn catalog_is_fixed_and_exposes_no_arbitrary_execution_surface() {
         let tools = LocalAppsMcpTransport::tool_catalog();
@@ -1595,6 +1692,8 @@ mod tests {
                 "act_on_ui",
                 "read_logs",
                 "read_app_events",
+                "background_schedule",
+                "background_resume",
                 "list_checkpoints",
                 "restore_checkpoint",
             ]
@@ -1853,7 +1952,8 @@ mod tests {
                 "location",
                 "notifications",
                 "llm",
-                "agent_notify"
+                "agent_notify",
+                "background_schedule"
             ]),
             "the catalog must never invite the invalid guessed capability `data`"
         );

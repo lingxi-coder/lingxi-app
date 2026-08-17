@@ -437,6 +437,17 @@ pub enum ClientCommand {
         decision: AppAuthorizationDecisionDto,
     },
 
+    /// Approve or reject a host-issued App Agent Profile proposal. The token
+    /// is minted by the engine and is never accepted from the local-app page.
+    ResolveAppProfileProposal {
+        /// App whose profile is being changed.
+        app_id: String,
+        /// One-time token from [`AppProfileProposal`](crate::local_apps::AppEventDto).
+        approval_token: String,
+        /// `true` applies the exact proposal shown by the trusted client UI.
+        approved: bool,
+    },
+
     /// Revoke every session and durable capability grant for one app. Future
     /// gated operations prompt again; the design manifest is not changed.
     ResetAppPermissions {

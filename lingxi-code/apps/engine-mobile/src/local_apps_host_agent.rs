@@ -10,7 +10,7 @@
 use super::{BridgeFailure, LocalAppsHostBroker};
 use async_trait::async_trait;
 use client_protocol::events::ClientEvent;
-use client_protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
+use client_protocol::local_apps::{AppAgentProfileProposalDto, AppCapabilityKindDto, AppEventDto};
 use local_apps::mailbox::{load_mailbox, save_mailbox};
 use local_apps::{
     AgentBudget, AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppAgentProfileProposal,
@@ -486,6 +486,27 @@ impl LocalAppsHostBroker {
         if proposal.instructions.len() > local_apps::runtime_v2::MAX_PROFILE_INSTRUCTION_BYTES {
             return Err("profile instructions exceed 32 KiB".into());
         }
+        let approval_token = self.request_id("app-profile");
+        self.pending_profile_proposals.lock().await.insert(
+            approval_token.clone(),
+            super::PendingAppProfileProposal {
+                proposal: proposal.clone(),
+            },
+        );
+        self.event_sink
+            .emit(ClientEvent::AppEvent {
+                event: AppEventDto::AppProfileProposal {
+                    proposal: AppAgentProfileProposalDto {
+                        app_id: app_id.to_string(),
+                        approval_token,
+                        base_revision: proposal.base_revision,
+                        current_revision: current.revision,
+                        instructions: proposal.instructions.clone(),
+                        reason: proposal.reason.clone(),
+                    },
+                },
+            })
+            .await;
         Ok(json!({
             "app_id": app_id,
             "current": current,
@@ -493,6 +514,54 @@ impl LocalAppsHostBroker {
             "approval_required": true,
             "applies_from_next_turn": true,
         }))
+    }
+
+    pub(crate) async fn resolve_agent_profile_proposal(
+        &self,
+        app_id: &str,
+        approval_token: &str,
+        approved: bool,
+    ) -> Result<(), String> {
+        let pending = self
+            .pending_profile_proposals
+            .lock()
+            .await
+            .remove(approval_token)
+            .ok_or_else(|| "profile proposal is unknown or already resolved".to_string())?;
+        if pending.proposal.app_id != app_id {
+            return Err("profile proposal belongs to a different app".into());
+        }
+        if !approved {
+            return Ok(());
+        }
+        let layout = self.layout(app_id)?;
+        let next = {
+            let current = local_apps::load_profile(&layout).map_err(|error| error.to_string())?;
+            local_apps::apply_approved_profile(&current, &pending.proposal, true, now_ms())
+                .map_err(|error| error.to_string())?
+        };
+        local_apps::save_profile(&layout, &next).map_err(|error| error.to_string())?;
+
+        // Existing sessions adopt the newly approved layer on their next turn;
+        // closed sessions remain terminal and retain their historical revision.
+        let _guard = self.agent_session_writes.lock().await;
+        let mut sessions = local_apps::load_sessions(&layout).map_err(|error| error.to_string())?;
+        let updated_at_ms = now_ms();
+        let mut changed = false;
+        for session in &mut sessions {
+            if session.app_id == app_id
+                && !matches!(session.status, AgentSessionStatus::Closed)
+                && session.prompt_profile_revision != next.revision
+            {
+                session.prompt_profile_revision = next.revision;
+                session.updated_at_ms = updated_at_ms;
+                changed = true;
+            }
+        }
+        if changed {
+            local_apps::save_sessions(&layout, &sessions).map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     async fn run_agent_turn_value(

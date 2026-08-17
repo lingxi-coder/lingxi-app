@@ -5555,6 +5555,17 @@ impl MobileEngineHandle {
                         "CreateApp: init-session mint failed; boot backfill will repair"
                     ),
                 }
+                // Complete the create handshake even when optional session
+                // minting failed. The incremental record event is consumed by
+                // native clients as the immediate details-page fallback.
+                if service
+                    .record(&record.id)
+                    .await
+                    .map(|current| current.init_session_id.is_none())
+                    .unwrap_or(false)
+                {
+                    let _ = service.announce_record(&record.id).await;
+                }
             }
             Err(error) => self.emit_app_failure(None, &error).await,
         }
@@ -6573,6 +6584,24 @@ impl MobileEngineHandle {
                         request_id,
                         "unknown or completed local-app capability request"
                     );
+                }
+                Ok(())
+            }
+            ClientCommand::ResolveAppProfileProposal {
+                app_id,
+                approval_token,
+                approved,
+            } => {
+                if let Err(message) = self
+                    .local_apps_host
+                    .resolve_agent_profile_proposal(&app_id, &approval_token, approved)
+                    .await
+                {
+                    self.emit_app_failure(
+                        Some(app_id),
+                        &AppError::Io(format!("resolve app profile proposal failed: {message}")),
+                    )
+                    .await;
                 }
                 Ok(())
             }
@@ -7942,6 +7971,21 @@ pub struct FiredCronJobDto {
     pub retryable: bool,
 }
 
+/// One durable local-app background task outcome returned to Android/iOS
+/// scheduler adapters. The scheduler never receives raw host paths or
+/// capability handles; it only receives an app/task identity and a bounded
+/// terminal/retry classification.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalAppBackgroundRunDto {
+    pub app_id: String,
+    pub task_id: String,
+    pub status: String,
+    pub result_json: Option<String>,
+    pub error: Option<String>,
+    pub retryable: bool,
+}
+
 /// A persisted cron job lowered for the Android management UI.
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone)]
@@ -8680,6 +8724,34 @@ impl MobileEngineHandle {
             &task,
             firer.fire(&task.id, &task.prompt).await,
         ))
+    }
+}
+
+/// FFI surface for the native Android/iOS background adapters. These methods
+/// deliberately use the same profile-owned LocalAppsHostBroker as foreground
+/// bridge/MCP calls, so a scheduler wake-up cannot create a second storage or
+/// permission boundary.
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+impl MobileEngineHandle {
+    pub async fn run_due_local_app_background_tasks(
+        &self,
+        now_ms: u64,
+    ) -> Vec<LocalAppBackgroundRunDto> {
+        self.local_apps_host
+            .run_due_background_tasks(now_ms)
+            .await
+    }
+
+    pub async fn next_local_app_background_wake_ms(&self, now_ms: u64) -> Option<u64> {
+        self.local_apps_host
+            .next_background_wake_ms(now_ms)
+            .await
+    }
+
+    pub async fn cancel_local_app_background_task(&self, app_id: String, task_id: String) -> bool {
+        self.local_apps_host
+            .cancel_background_task(&app_id, &task_id)
+            .await
     }
 }
 
@@ -10137,9 +10209,10 @@ mod tests {
             registry: rt.task_registry.clone(),
             cwd: tmp.path().to_path_buf(),
             lingxi_home: tmp.path().join(".claude"),
-            session_uuid: std::sync::Arc::new(std::sync::Mutex::new(
-                "00000000-0000-0000-0000-000000000000".to_string(),
-            )),
+            // The launcher and status sink must share the engine's live
+            // session watermark; a detached fixture uuid would correctly
+            // suppress the completion event as stale.
+            session_uuid: rt.active_session_uuid.clone(),
             checkpoints: rt.workflow_checkpoints.clone(),
             status_sink: rt.workflow_status_sink.clone(),
         };
@@ -12133,16 +12206,17 @@ mod tests {
             let events = drain_events(&handle, &listener).await;
             let rows = apps_changed_rows(&events).expect("CreateApp announces AppsChanged");
             let app_id = rows[0].id.clone();
-            // `set_init_session` re-announces with the pin; take the LAST
-            // AppsChanged row set.
+            // The create snapshot carries the new row; init-session pinning
+            // arrives as one incremental record update.
             let pinned = events
                 .iter()
-                .rev()
                 .find_map(|event| match event {
-                    Ev::AppsChanged { apps } => apps.first().cloned(),
+                    Ev::AppEvent {
+                        event: AppEventDto::AppRecordChanged { record },
+                    } if record.id == app_id => Some(record.clone()),
                     _ => None,
                 })
-                .expect("a re-announce carries the pin");
+                .expect("an incremental record update carries the pin");
             let init_id = pinned
                 .init_session_id
                 .clone()
@@ -12452,9 +12526,12 @@ mod tests {
                 })
                 .await
                 .expect("submit(ResetAppPermissions)");
-            assert_eq!(
-                local_apps::load_permissions(&layout).unwrap(),
-                local_apps::AppPermissions::default()
+            let reset = local_apps::load_permissions(&layout).unwrap();
+            assert!(reset.always_allowed_capabilities.is_empty());
+            assert!(reset.always_allowed_domains.is_empty());
+            assert!(
+                reset.grant_epoch > permissions.grant_epoch,
+                "reset must advance the grant epoch to invalidate prior leases"
             );
 
             // A record without generated build output fails honestly and never

@@ -699,6 +699,16 @@ fn current_contract_index() -> ContractIndex {
         "ClientCommand::ResolveAppCapabilityRequest.decision",
         "AppAuthorizationDecisionDto",
     );
+    put(
+        "ClientCommand::ResolveAppProfileProposal",
+        "resolve_app_profile_proposal",
+    );
+    put("ClientCommand::ResolveAppProfileProposal.app_id", "String");
+    put(
+        "ClientCommand::ResolveAppProfileProposal.approval_token",
+        "String",
+    );
+    put("ClientCommand::ResolveAppProfileProposal.approved", "bool");
 
     put(
         "ClientCommand::ResetAppPermissions",
@@ -1332,6 +1342,17 @@ fn current_contract_index() -> ContractIndex {
     put("AppBridgeResponseDto.error", "Option<String>");
     put("AppBridgeResponseDto.error_code", "Option<String>");
 
+    put("AppAgentProfileDto.app_id", "String");
+    put("AppAgentProfileDto.revision", "u64");
+    put("AppAgentProfileDto.instructions", "String");
+    put("AppAgentProfileDto.updated_at_ms", "u64");
+    put("AppAgentProfileProposalDto.app_id", "String");
+    put("AppAgentProfileProposalDto.approval_token", "String");
+    put("AppAgentProfileProposalDto.base_revision", "u64");
+    put("AppAgentProfileProposalDto.current_revision", "u64");
+    put("AppAgentProfileProposalDto.instructions", "String");
+    put("AppAgentProfileProposalDto.reason", "String");
+
     put("AppUiActionKindDto::Inspect", "inspect");
     put("AppUiActionKindDto::Click", "click");
     put("AppUiActionKindDto::Fill", "fill");
@@ -1380,6 +1401,22 @@ fn current_contract_index() -> ContractIndex {
 
     put("AppEventDto::AppDetailsChanged", "app_details_changed");
     put("AppEventDto::AppDetailsChanged.details", "AppDetailsDto");
+    put(
+        "AppEventDto::AppBridgeStreamFrame",
+        "app_bridge_stream_frame",
+    );
+    put(
+        "AppEventDto::AppBridgeStreamFrame.frame",
+        "AppBridgeStreamFrameDto",
+    );
+    put("AppEventDto::AppBridgeStreamFrame.frame_json", "String");
+    put("AppEventDto::AppRecordChanged", "app_record_changed");
+    put("AppEventDto::AppRecordChanged.record", "AppRecordDto");
+    put("AppEventDto::AppProfileProposal", "app_profile_proposal");
+    put(
+        "AppEventDto::AppProfileProposal.proposal",
+        "AppAgentProfileProposalDto",
+    );
     put("AppEventDto::AppBridgeResponse", "app_bridge_response");
     put(
         "AppEventDto::AppBridgeResponse.response",
@@ -2151,7 +2188,7 @@ fn contract_index_covers_every_dto() {
     };
     let _app_authorization_decision = AppAuthorizationDecisionDto::AllowOnce;
     // One value per `AppEventDto` variant: the envelope is a single
-    // `ClientEvent::AppEvent`, so nothing else forces these seven tags to
+    // `ClientEvent::AppEvent`, so nothing else forces these ten tags to
     // exist.
     let _app_events: Vec<AppEventDto> = vec![
         AppEventDto::AppDetailsChanged {
@@ -2179,6 +2216,40 @@ fn contract_index_covers_every_dto() {
             seq: 0,
             topic: String::new(),
             created_at_ms: 0,
+        },
+        AppEventDto::AppBridgeStreamFrame {
+            frame: client_protocol::local_apps::AppBridgeStreamFrameDto::Data {
+                app_id: String::new(),
+                request_id: String::new(),
+                stream_id: String::new(),
+                seq: 0,
+                data_json: String::new(),
+            },
+            frame_json: String::new(),
+        },
+        AppEventDto::AppRecordChanged {
+            record: AppRecordDto {
+                id: String::new(),
+                name: String::new(),
+                brief: String::new(),
+                git_enabled: false,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                workflow_state: AppWorkflowStateDto::Draft,
+                conversation_id: None,
+                init_session_id: None,
+                workspace_rel: String::new(),
+            },
+        },
+        AppEventDto::AppProfileProposal {
+            proposal: client_protocol::local_apps::AppAgentProfileProposalDto {
+                app_id: String::new(),
+                approval_token: String::new(),
+                base_revision: 0,
+                current_revision: 0,
+                instructions: String::new(),
+                reason: String::new(),
+            },
         },
     ];
 

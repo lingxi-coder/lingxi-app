@@ -27,8 +27,10 @@ use crate::checkpoints::AppCheckpointStore;
 use crate::error::AppError;
 use crate::events::{AppEvent, AppEventObserver};
 use crate::ids;
-use crate::manifest::{save_manifest, AppLayout, AppManifest};
-use crate::permissions::{save_permissions, save_workspace_permission_settings, AppPermissions};
+use crate::manifest::{AppLayout, AppManifest};
+use crate::permissions::{
+    save_permissions_initialized, save_workspace_permission_settings_initialized, AppPermissions,
+};
 use crate::state::AppState;
 use crate::storage;
 use crate::types::{
@@ -494,6 +496,23 @@ impl AppService {
         records
     }
 
+    /// Emit the current record for one app without rebuilding the full
+    /// catalog. Create callers use this as an explicit completion signal when
+    /// optional init-session minting cannot provide a pin; clients can then
+    /// leave the create spinner immediately instead of waiting on a timer.
+    pub async fn announce_record(&self, app_id: &str) -> Result<AppRecord, AppError> {
+        let order = self.acquire_emit_order().await;
+        let record = self.record(app_id).await?;
+        Self::spawn_emission(
+            Arc::clone(&self.observer),
+            order,
+            vec![AppEvent::RecordChanged {
+                record: record.clone(),
+            }],
+        );
+        Ok(record)
+    }
+
     /// The record of one app.
     pub async fn record(&self, app_id: &str) -> Result<AppRecord, AppError> {
         let apps = self.state.lock().await;
@@ -669,8 +688,8 @@ impl AppService {
     /// app's durable "set-up conversation" identity, so a second call with a
     /// DIFFERENT id is rejected (idempotent for the same id). The engine
     /// calls this right after minting the session (create) or backfilling a
-    /// missing anchor at boot. Announces `AppsChanged` so clients learn the
-    /// pin without a details round-trip.
+    /// missing anchor at boot. Emits a single-record update so clients learn
+    /// the pin without cloning and sorting the full app catalog.
     pub async fn set_init_session(&self, app_id: &str, session_id: &str) -> Result<(), AppError> {
         let session_id = session_id.to_string();
         self.with_app(app_id, move |app, now| match &app.record.init_session_id {
@@ -685,11 +704,15 @@ impl AppService {
             None => {
                 app.record.init_session_id = Some(session_id.clone());
                 app.record.updated_at_ms = now;
-                (Ok(()), Vec::new())
+                (
+                    Ok(()),
+                    vec![AppEvent::RecordChanged {
+                        record: app.record.clone(),
+                    }],
+                )
             }
         })
         .await?;
-        self.announce_apps().await;
         Ok(())
     }
 
@@ -957,9 +980,9 @@ impl AppService {
                             app.record.id.clone(),
                             app.record.name.clone(),
                         );
-                        save_manifest(&layout, &manifest)?;
-                        save_permissions(&layout, &AppPermissions::default())?;
-                        save_workspace_permission_settings(&layout)?;
+                        crate::manifest::save_manifest_initialized(&layout, &manifest)?;
+                        save_permissions_initialized(&layout, &AppPermissions::default())?;
+                        save_workspace_permission_settings_initialized(&layout)?;
                         storage::save_dependency_record(
                             &root,
                             &storage::default_dependency_record(&app.record.id, now),
@@ -1424,6 +1447,44 @@ mod tests {
             reloaded.record(&record.id).await.unwrap().workflow_state,
             AppWorkflowState::Ready
         );
+    }
+
+    #[tokio::test]
+    async fn init_session_pin_emits_one_incremental_record_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app(Some("Pinned"), "a test app", None)
+            .await
+            .unwrap();
+        let _ = h.take_events().await;
+
+        h.service
+            .set_init_session(&record.id, "init-session-1")
+            .await
+            .expect("first init-session pin");
+        let events = h.take_events().await;
+        let record_id = record.id.clone();
+        assert!(matches!(
+            &events[..],
+            [AppEvent::RecordChanged { record }]
+                if record.id == record_id
+                    && record.init_session_id.as_deref() == Some("init-session-1")
+        ));
+
+        h.service
+            .set_init_session(&record.id, "init-session-1")
+            .await
+            .expect("same init-session pin is idempotent");
+        assert!(h.take_events().await.is_empty());
+        let error = h
+            .service
+            .set_init_session(&record.id, "different-session")
+            .await
+            .expect_err("a different pin must be rejected");
+        assert_eq!(error.code(), AppErrorCode::InvalidRequest);
+        assert!(h.take_events().await.is_empty());
     }
 
     #[tokio::test]

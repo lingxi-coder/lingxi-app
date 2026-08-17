@@ -31,7 +31,7 @@ use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{
     AppCapabilityKindDto, AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto,
     AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto,
-    AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
+    AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
     AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppWorkflowStateDto, DeviceContextDto,
     DeviceInsetsDto, DeviceViewportDto,
 };
@@ -208,6 +208,11 @@ pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
         AppEvent::AppsChanged { apps } => Some(ClientEvent::AppsChanged {
             apps: lower_records(&apps),
         }),
+        AppEvent::RecordChanged { record } => Some(ClientEvent::AppEvent {
+            event: AppEventDto::AppRecordChanged {
+                record: lower_record(&record),
+            },
+        }),
         AppEvent::WorkflowChanged {
             app_id,
             state,
@@ -346,6 +351,7 @@ fn lower_capability(capability: AppCapability) -> AppCapabilityKindDto {
         AppCapability::Notifications => AppCapabilityKindDto::Notifications,
         AppCapability::Llm => AppCapabilityKindDto::Llm,
         AppCapability::AgentNotify => AppCapabilityKindDto::AgentNotify,
+        AppCapability::BackgroundSchedule => AppCapabilityKindDto::BackgroundSchedule,
     }
 }
 
@@ -688,7 +694,15 @@ mod tests {
                     apps: vec![record.clone()],
                 },
                 ClientEvent::AppsChanged {
-                    apps: vec![record_dto],
+                    apps: vec![record_dto.clone()],
+                },
+            ),
+            (
+                AppEvent::RecordChanged {
+                    record: record.clone(),
+                },
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppRecordChanged { record: record_dto },
                 },
             ),
             (

@@ -172,6 +172,10 @@ class MainActivity : ComponentActivity() {
         // builds a transient engine to query the next fire) and best-effort.
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.Default) {
             runCatching { CronAlarmScheduler.armNext(applicationContext) }
+            runCatching {
+                com.lingxi.code.localapps.LocalAppBackgroundScheduler
+                    .ensureWatchdog(applicationContext)
+            }
         }
 
         enableEdgeToEdge()

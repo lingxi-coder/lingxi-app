@@ -61,13 +61,13 @@ final class LocalAppsStore {
     }
 
     private(set) var createdAppSession: CreatedAppSession?
-    /// Created apps still waiting for their `init_session_id` pin (the
-    /// engine's second `AppsChanged` announce). A SET, not one slot: two
-    /// creates inside the fallback window would otherwise overwrite each
-    /// other, stranding the first with no landing at all.
+    /// Created apps still waiting for their `init_session_id` pin. A SET, not
+    /// one slot: two creates in flight would otherwise overwrite each other,
+    /// stranding the first with no landing at all.
     @ObservationIgnored private var awaitingInitPinAppIDs: Set<String> = []
     @ObservationIgnored private var awaitingInitPinModelOverrides: [String: String] = [:]
     private(set) var pendingPermission: LocalAppPermissionPrompt?
+    private(set) var pendingProfileProposal: LocalAppProfileProposal?
     private(set) var requestedPresentationAppID: String?
     private(set) var activeUIRequestAppID: String?
 
@@ -122,6 +122,23 @@ final class LocalAppsStore {
             submitCommand = submit
         }
 
+        func resolveProfileProposal(_ approved: Bool) {
+            guard let proposal = pendingProfileProposal else { return }
+            pendingProfileProposal = nil
+            guard let submitCommand else { return }
+            Task {
+                do {
+                    try await submitCommand(.resolveAppProfileProposal(
+                        appId: proposal.appID,
+                        approvalToken: proposal.approvalToken,
+                        approved: approved
+                    ))
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+
         func handle(event: ClientEvent) {
             switch event {
             case let .appsChanged(records):
@@ -139,33 +156,26 @@ final class LocalAppsStore {
                    let created = updatedApps.first(where: { !pendingCreation.knownAppIDs.contains($0.id) }) {
                     self.pendingCreation = nil
                     if let initSession = created.initSessionId {
-                        // The pin arrived with the first announce (fast path).
+                        // The pin arrived with the initial catalog snapshot
+                        // (fast path).
                         createdAppSession = CreatedAppSession(
                             appID: created.id, initSessionID: initSession,
                             brief: created.brief,
                             modelOverride: pendingCreation.modelOverride)
                     } else {
-                        // The engine announces twice: first the record, then
-                        // the `init_session_id` pin (`set_init_session`
-                        // re-announce). Wait briefly for the pin so creation
-                        // can land DIRECTLY in the init chat; if the mint
-                        // failed engine-side, fall back to the details page.
+                        // The host emits an incremental record update when it
+                        // pins the init session. If minting fails, use the
+                        // details-page fallback rather than blocking the
+                        // library on an arbitrary delay.
                         awaitingInitPinAppIDs.insert(created.id)
                         if let modelOverride = pendingCreation.modelOverride {
                             awaitingInitPinModelOverrides[created.id] = modelOverride
                         }
-                        let appID = created.id
-                        Task { [weak self] in
-                            try? await Task.sleep(for: .seconds(3))
-                            guard let self,
-                                  self.awaitingInitPinAppIDs.remove(appID) != nil else { return }
-                            self.awaitingInitPinModelOverrides.removeValue(forKey: appID)
-                            self.createdAppID = appID
-                        }
                     }
                 }
                 // Land the FIRST awaited app whose pin has arrived. Others
-                // stay armed for their own announce (or their own fallback).
+                // stay armed for their own record update (or their own
+                // fallback).
                 if let pinned = updatedApps.first(where: {
                     awaitingInitPinAppIDs.contains($0.id) && $0.initSessionId != nil
                 }), let initSession = pinned.initSessionId {
@@ -443,6 +453,8 @@ final class LocalAppsStore {
             case ("agent", "stream"): operation = .agentStream
             case ("agent", "cancel"): operation = .agentCancel
             case ("agent", "profileProposeUpdate"): operation = .agentProfileProposeUpdate
+            case ("background", "schedule"): operation = .backgroundSchedule
+            case ("background", "resume"): operation = .backgroundResume
             default: operation = nil
             }
             guard let operation else {
@@ -637,6 +649,36 @@ final class LocalAppsStore {
                 )
                 replaceCheckpoints(details.checkpoints, appID: summary.id)
 
+            case let .appRecordChanged(record):
+                let summary = LocalAppsProtocolAdapter.app(record)
+                upsertApp(summary)
+                if let initSession = summary.initSessionId,
+                   awaitingInitPinAppIDs.remove(summary.id) != nil {
+                    createdAppSession = CreatedAppSession(
+                        appID: summary.id,
+                        initSessionID: initSession,
+                        brief: summary.brief,
+                        modelOverride: awaitingInitPinModelOverrides.removeValue(forKey: summary.id))
+                } else if summary.initSessionId == nil,
+                          awaitingInitPinAppIDs.remove(summary.id) != nil {
+                    // Explicit completion signal for a create whose optional
+                    // init-session mint failed. The host emits this record
+                    // update, so no fixed fallback delay is needed.
+                    awaitingInitPinModelOverrides.removeValue(forKey: summary.id)
+                    createdAppID = summary.id
+                }
+                lastRefreshAt = .now
+
+            case let .appProfileProposal(proposal):
+                pendingProfileProposal = LocalAppProfileProposal(
+                    appID: proposal.appId,
+                    approvalToken: proposal.approvalToken,
+                    baseRevision: proposal.baseRevision,
+                    currentRevision: proposal.currentRevision,
+                    instructions: proposal.instructions,
+                    reason: proposal.reason
+                )
+
             case let .appBridgeResponse(response):
                 LocalAppWebViewRegistry.shared.resolveBridge(
                     appID: response.appId,
@@ -820,4 +862,107 @@ final class LocalAppsStore {
             }
         }
     #endif
+}
+
+#if canImport(BackgroundTasks)
+    import BackgroundTasks
+#endif
+
+let localAppBackgroundTaskIdentifier = "com.lingxi.code.localapps.background"
+
+/// Process-global bridge between Apple's wake-up callback and the Host-owned
+/// local-app background executor. Kept in an existing Xcode source so the
+/// store/full targets share the same explicit project membership.
+final class LocalAppBackgroundTaskBridge: @unchecked Sendable {
+    static let shared = LocalAppBackgroundTaskBridge()
+
+    typealias Handler = @Sendable () async -> Void
+
+    private let lock = NSLock()
+    private var registered = false
+    private var handler: Handler?
+    private var waiters: [UUID: CheckedContinuation<Handler?, Never>] = [:]
+
+    func registerAtLaunch() {
+        lock.lock()
+        let shouldRegister = !registered
+        registered = true
+        lock.unlock()
+        guard shouldRegister else { return }
+        #if canImport(BackgroundTasks)
+            BGTaskScheduler.shared.register(
+                forTaskWithIdentifier: localAppBackgroundTaskIdentifier,
+                using: nil
+            ) { [weak self] task in
+                guard let processing = task as? BGProcessingTask else {
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                let worker = Task {
+                    await self?.runHandler()
+                    processing.setTaskCompleted(success: !Task.isCancelled)
+                }
+                processing.expirationHandler = { worker.cancel() }
+            }
+        #endif
+        schedule(earliestAtMs: UInt64(Date().timeIntervalSince1970 * 1000) + 15 * 60 * 1_000)
+    }
+
+    func bind(_ handler: @escaping Handler) {
+        lock.lock()
+        self.handler = handler
+        let continuations = Array(waiters.values)
+        waiters.removeAll()
+        lock.unlock()
+        continuations.forEach { $0.resume(returning: handler) }
+    }
+
+    func schedule(earliestAtMs: UInt64?) {
+        #if canImport(BackgroundTasks)
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: localAppBackgroundTaskIdentifier)
+            guard let earliestAtMs else { return }
+            let request = BGProcessingTaskRequest(identifier: localAppBackgroundTaskIdentifier)
+            request.requiresNetworkConnectivity = false
+            request.requiresExternalPower = false
+            request.earliestBeginDate = Date(timeIntervalSince1970: TimeInterval(earliestAtMs) / 1000)
+            try? BGTaskScheduler.shared.submit(request)
+        #else
+            _ = earliestAtMs
+        #endif
+    }
+
+    private func runHandler() async {
+        guard let handler = await resolveHandler() else { return }
+        await handler()
+    }
+
+    private func resolveHandler() async -> Handler? {
+        lock.lock()
+        if let handler {
+            lock.unlock()
+            return handler
+        }
+        let id = UUID()
+        lock.unlock()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if let handler {
+                    lock.unlock()
+                    continuation.resume(returning: handler)
+                } else if Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(returning: nil)
+                } else {
+                    waiters[id] = continuation
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
+            lock.lock()
+            let continuation = waiters.removeValue(forKey: id)
+            lock.unlock()
+            continuation?.resume(returning: nil)
+        }
+    }
 }

@@ -67,7 +67,8 @@ use traits::Platform;
 #[cfg(feature = "uniffi")]
 pub use engine_mobile::{
     ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
-    MobileConfig, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
+    LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
+    MobileEngineHandle,
     PermissionRequestSink, ProviderConnectionTestDto,
 };
 

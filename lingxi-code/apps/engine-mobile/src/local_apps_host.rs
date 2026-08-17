@@ -79,6 +79,10 @@ enum RuntimeHandle {
     Static { shutdown: oneshot::Sender<()> },
 }
 
+pub(super) struct PendingAppProfileProposal {
+    pub(super) proposal: local_apps::AppAgentProfileProposal,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeStartStatus {
     Pending,
@@ -296,6 +300,9 @@ pub(crate) use agent_ops::{
     LocalAppsAgentExecutor,
 };
 
+#[path = "local_apps_host_background.rs"]
+mod background_ops;
+
 /// A bridge failure: human-readable message plus an optional stable machine
 /// code the page can branch on (`AppBridgeResponseDto::error_code`). Every
 /// legacy `Result<_, String>` site lowers through `From<String>` into a
@@ -411,6 +418,15 @@ pub(crate) struct LocalAppsHostBroker {
     agent_executor: OnceLock<Arc<dyn LocalAppsAgentExecutor>>,
     /// Active app Agent turns keyed by host-minted turn id.
     agent_turns: Arc<Mutex<HashMap<String, Arc<AgentTurnControl>>>>,
+    /// One-time Profile proposals awaiting an explicit trusted-client decision.
+    pending_profile_proposals: Mutex<HashMap<String, PendingAppProfileProposal>>,
+    /// Serializes background task claims and journal transitions within one
+    /// profile. The native scheduler may deliver duplicate wake-ups.
+    background_task_writes: Mutex<()>,
+    /// In-memory duplicate-delivery guard; persisted `Running` state handles
+    /// process death, while this set handles concurrent WorkManager/BGTask
+    /// deliveries in one process.
+    background_inflight: Mutex<std::collections::HashSet<String>>,
     /// Serializes `device.recordAudioStart` — and ONLY starts.
     ///
     /// Separate from `recording` because a start crosses into Swift and the
@@ -510,6 +526,9 @@ impl LocalAppsHostBroker {
             agent_session_writes: Mutex::new(()),
             agent_executor: OnceLock::new(),
             agent_turns: Arc::new(Mutex::new(HashMap::new())),
+            pending_profile_proposals: Mutex::new(HashMap::new()),
+            background_task_writes: Mutex::new(()),
+            background_inflight: Mutex::new(std::collections::HashSet::new()),
             recording_start: Mutex::new(()),
             self_ref: OnceLock::new(),
             pending_capabilities: Mutex::new(HashMap::new()),
@@ -1996,6 +2015,14 @@ impl LocalAppsHostBroker {
                 .agent_profile_propose_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
+            AppBridgeOperationDto::BackgroundSchedule => self
+                .background_schedule_value(Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
+            AppBridgeOperationDto::BackgroundResume => self
+                .background_resume_value(Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
             _ => Err("unsupported bridge operation for this engine version".into()),
         }
     }
@@ -2033,6 +2060,10 @@ impl LocalAppsHostBroker {
             AppBridgeOperationDto::AgentProfileProposeUpdate => {
                 local_apps::CapabilityId::AgentProfilePropose
             }
+            AppBridgeOperationDto::BackgroundSchedule => {
+                local_apps::CapabilityId::BackgroundSchedule
+            }
+            AppBridgeOperationDto::BackgroundResume => local_apps::CapabilityId::BackgroundResume,
             _ => return Err("unsupported bridge operation for runtime v2 context".into()),
         };
         let layout = self.layout(&request.app_id)?;
@@ -2753,7 +2784,7 @@ impl LocalAppsHostBroker {
             build_preview = build_preview,
         );
         tokio::task::spawn_blocking(move || {
-            crate::local_apps_build::scaffold_workspace(&layout)?;
+            crate::local_apps_build::scaffold_workspace_initialized(&layout)?;
             std::fs::write(workspace.join("LINGXI.md"), context).map_err(|error| {
                 local_apps::AppError::Io(format!("write workspace LINGXI.md: {error}"))
             })
@@ -2949,6 +2980,124 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
     async fn read_app_events(&self, input: Value) -> Result<Value, String> {
         self.read_app_events_value(input).await
     }
+    async fn background_schedule_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let layout = self.layout(&app_id)?;
+        let manifest = local_apps::load_manifest(&layout).map_err(|error| error.to_string())?;
+        if !manifest
+            .capabilities
+            .contains(&AppCapability::BackgroundSchedule)
+        {
+            return Err("background scheduling is not declared in the app manifest".into());
+        }
+        self.authorize_capability(
+            &app_id,
+            AppCapability::BackgroundSchedule,
+            AppCapabilityKindDto::BackgroundSchedule,
+            "应用请求在系统后台按计划运行一个流程。",
+        )
+        .await?;
+        let permissions = local_apps::load_permissions(&layout)
+            .map_err(|error| error.to_string())?;
+        if !permissions.allows(AppCapability::BackgroundSchedule) {
+            return Err("background scheduling requires durable approval".into());
+        }
+        let interval_ms = input
+            .get("interval_ms")
+            .or_else(|| input.get("intervalMs"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "interval_ms must be an integer".to_string())?;
+        if !(15 * 60 * 1_000..=30 * 24 * 60 * 60 * 1_000).contains(&interval_ms) {
+            return Err("background interval must be between 15 minutes and 30 days".into());
+        }
+        let flow_value = input
+            .get("flow")
+            .cloned()
+            .ok_or_else(|| "flow is required".to_string())?;
+        let flow: local_apps::FlowDefinition = serde_json::from_value(flow_value)
+            .map_err(|error| format!("invalid background flow: {error}"))?;
+        let registry = local_apps::CapabilityRegistry::default();
+        flow.validate(&registry)
+            .map_err(|error| format!("invalid background flow: {error}"))?;
+        for step in &flow.steps {
+            if matches!(
+                step.capability,
+                local_apps::CapabilityId::BackgroundSchedule
+                    | local_apps::CapabilityId::BackgroundResume
+            ) {
+                return Err(
+                    "background flows cannot schedule or resume another background flow".into(),
+                );
+            }
+            let descriptor = registry
+                .get(step.capability)
+                .ok_or_else(|| format!("unknown capability {}", step.capability.as_str()))?;
+            if !local_apps::allowed_for_origin(
+                local_apps::InvocationOrigin::SystemScheduler,
+                descriptor,
+            ) {
+                return Err(format!(
+                    "background flow cannot use interactive capability {}",
+                    step.capability.as_str()
+                ));
+            }
+            self.authorize_background_schedule_step(
+                &app_id,
+                step.capability,
+                &step.input_json,
+            )
+            .await?;
+        }
+        self.service()?
+            .record(&app_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let layout = self.layout(&app_id)?;
+        let _guard = self.background_task_writes.lock().await;
+        let mut tasks = local_apps::background::load_tasks(&layout).map_err(|e| e.to_string())?;
+        if tasks.len() >= 32 {
+            return Err("an app may have at most 32 background tasks".into());
+        }
+        let task_id = self.request_id("background");
+        let now = now_ms();
+        let task = local_apps::BackgroundTaskRecord {
+            schema_version: local_apps::RUNTIME_CONTRACT_SCHEMA_VERSION,
+            task_id: task_id.clone(),
+            app_id: app_id.clone(),
+            flow_id: flow.flow_id.clone(),
+            flow: flow.clone(),
+            trigger: local_apps::BackgroundTrigger::Schedule { interval_ms },
+            status: local_apps::BackgroundTaskStatus::Scheduled,
+            updated_at_ms: now,
+        };
+        tasks.push(task.clone());
+        local_apps::background::save_tasks(&layout, &tasks).map_err(|e| e.to_string())?;
+        let mut journal =
+            local_apps::background::load_journal(&layout).map_err(|e| e.to_string())?;
+        journal.retain(|entry| entry.task_id != task_id);
+        journal.push(local_apps::BackgroundJournalEntry {
+            task_id: task_id.clone(),
+            flow_id: flow.flow_id,
+            next_step_id: flow.steps.first().map(|step| step.step_id.clone()),
+            next_run_at_ms: Some(now.saturating_add(interval_ms)),
+            attempt: 0,
+            last_error: None,
+            updated_at_ms: now,
+        });
+        local_apps::background::save_journal(&layout, &journal).map_err(|e| e.to_string())?;
+        Ok(json!({"task": task, "scheduled": true, "scheduler": "host-journal"}))
+    }
+
+    async fn background_resume_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let task_id = required_string(&input, "task_id")?.to_string();
+        self.service()?
+            .record(&app_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.run_background_task_value(&app_id, &task_id, now_ms(), true)
+            .await
+    }
 
     async fn agent_session_create(&self, input: Value) -> Result<Value, String> {
         self.agent_session_create_value(input).await
@@ -2966,6 +3115,14 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.agent_profile_propose_value(input).await
     }
 
+    async fn background_schedule(&self, input: Value) -> Result<Value, String> {
+        self.background_schedule_value(input).await
+    }
+
+    async fn background_resume(&self, input: Value) -> Result<Value, String> {
+        self.background_resume_value(input).await
+    }
+
     async fn scaffold_app(&self, record: local_apps::AppRecord) -> Result<(), String> {
         self.scaffold_app_value(&record).await
     }
@@ -2977,6 +3134,13 @@ fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("missing non-empty {key:?}"))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn raise_decision(decision: AppAuthorizationDecisionDto) -> PermissionDecision {
@@ -4597,7 +4761,10 @@ mod tests {
                 .contains("Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`"),
             "{lingxi}"
         );
-        assert!(lingxi.contains("isolated `project/` root"), "{lingxi}");
+        assert!(
+            lingxi.contains("sole writable `LocalAppBuild` root"),
+            "{lingxi}"
+        );
         assert!(lingxi.contains("`build/store/dist/`"), "{lingxi}");
     }
 
@@ -4634,9 +4801,7 @@ mod tests {
         assert!(broker
             .create_next_step()
             .contains("Do not recreate the app scaffold"));
-        assert!(broker
-            .create_next_step()
-            .contains("run npm in the local-app workspace"));
+        assert!(broker.create_next_step().contains("pnpm install"));
     }
 
     /// `create_app_fixture` with a CHOSEN id, for the one test whose exercised
@@ -4676,6 +4841,15 @@ mod tests {
         let layout = AppLayout::new(root.path().to_path_buf(), app_id.to_string()).expect("layout");
         layout.initialize().expect("initialize the seeded layout");
         storage::save_app_files(root.path(), &app).expect("persist the seeded app documents");
+        local_apps::save_manifest(
+            &layout,
+            &local_apps::AppManifest::for_new_app(app.record.id.clone(), app.record.name.clone()),
+        )
+        .expect("persist the seeded manifest");
+        local_apps::save_permissions(&layout, &local_apps::AppPermissions::default())
+            .expect("persist the seeded permissions");
+        local_apps::save_workspace_permission_settings(&layout)
+            .expect("persist the seeded workspace permissions");
         storage::save_index(root.path(), std::slice::from_ref(&app.record))
             .expect("persist the seeded index");
         let static_dist = root

@@ -24,6 +24,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_sessions;
+pub mod background;
 pub mod checkpoints;
 pub mod data;
 pub mod error;

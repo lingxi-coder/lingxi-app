@@ -275,9 +275,20 @@ pub(crate) async fn profile_apps(
             {
                 profiles.remove(&root);
             }
-            return Err(AppError::Io(format!(
-                "local-app profile load failed: {error}"
-            )));
+            // Preserve typed load errors (notably `StorageCorrupt`) so the
+            // engine can degrade without turning a recoverable app-store
+            // diagnosis into a generic I/O failure. Add context only to
+            // untyped I/O failures raised while opening the profile.
+            let error = match error {
+                AppError::Io(message) if message.starts_with("local-app profile load failed:") => {
+                    AppError::Io(message)
+                }
+                AppError::Io(message) => {
+                    AppError::Io(format!("local-app profile load failed: {message}"))
+                }
+                other => other,
+            };
+            return Err(error);
         }
     };
     profile.host.refresh_runtime_configuration(
@@ -305,7 +316,8 @@ async fn evict_idle_profiles(current_root: &PathBuf) {
                 .filter(|(path, entry)| {
                     path.as_path() != current_root.as_path()
                         && entry.cell.get().is_some_and(|profile| {
-                            profile.client_events.subscriber_count() == 0
+                            Arc::strong_count(profile) == 1
+                                && profile.client_events.subscriber_count() == 0
                                 && profile.domain_events.subscriber_count() == 0
                         })
                 })
@@ -331,10 +343,18 @@ async fn evict_idle_profiles(current_root: &PathBuf) {
                 .lock()
                 .expect("local-app profile registry poisoned");
             let should_remove = profiles.get(&path).is_some_and(|entry| {
-                entry
-                    .cell
-                    .get()
-                    .is_some_and(|current| Arc::ptr_eq(current, &profile))
+                entry.cell.get().is_some_and(|current| {
+                    Arc::ptr_eq(current, &profile)
+                            // `profile` is the candidate snapshot held by this
+                            // eviction pass; a count of two means the registry
+                            // and this pass are the only owners. Re-checking
+                            // under the registry lock prevents a reconnect
+                            // that acquired the cached Arc between the first
+                            // snapshot and removal from being evicted.
+                            && Arc::strong_count(current) == 2
+                            && current.client_events.subscriber_count() == 0
+                            && current.domain_events.subscriber_count() == 0
+                })
             });
             if should_remove {
                 profiles.remove(&path);
@@ -392,6 +412,51 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(Arc::ptr_eq(&first.service, &second.service));
+    }
+
+    #[tokio::test]
+    async fn failed_profile_load_does_not_leave_a_registry_entry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("not-a-directory");
+        std::fs::write(&root, b"file").expect("file root");
+        let error = match profile_apps(
+            root.clone(),
+            Arc::new(FixedClock::new(1_000)),
+            None,
+            false,
+            None,
+            0,
+            no_op_llm(),
+            crate::local_apps_device::DeviceCapabilities::default(),
+        )
+        .await
+        {
+            Ok(_) => panic!("file root must fail to load"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), local_apps::AppErrorCode::Io);
+        assert!(!registry().lock().expect("registry").contains_key(&root));
+    }
+
+    #[tokio::test]
+    async fn idle_profile_registry_stays_bounded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for index in 0..(MAX_PROFILE_CACHE_ENTRIES + 2) {
+            let profile = profile_apps(
+                temp.path().join(format!("profile-{index}")),
+                Arc::new(FixedClock::new(1_000)),
+                None,
+                false,
+                None,
+                0,
+                no_op_llm(),
+                crate::local_apps_device::DeviceCapabilities::default(),
+            )
+            .await
+            .expect("profile");
+            drop(profile);
+        }
+        assert!(registry().lock().expect("registry").len() <= MAX_PROFILE_CACHE_ENTRIES);
     }
 
     #[tokio::test]

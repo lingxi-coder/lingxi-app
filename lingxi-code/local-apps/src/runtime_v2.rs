@@ -1037,6 +1037,7 @@ pub struct BackgroundTaskRecord {
     pub task_id: String,
     pub app_id: String,
     pub flow_id: String,
+    pub flow: FlowDefinition,
     pub trigger: BackgroundTrigger,
     pub status: BackgroundTaskStatus,
     pub updated_at_ms: u64,
@@ -1061,6 +1062,10 @@ pub struct BackgroundJournalEntry {
     pub task_id: String,
     pub flow_id: String,
     pub next_step_id: Option<String>,
+    /// Earliest time a scheduler wake-up may claim this entry. Older journal
+    /// files omit this field and are treated as immediately runnable.
+    #[serde(default)]
+    pub next_run_at_ms: Option<u64>,
     pub attempt: u32,
     pub last_error: Option<String>,
     pub updated_at_ms: u64,

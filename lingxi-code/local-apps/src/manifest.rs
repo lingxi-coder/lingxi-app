@@ -585,6 +585,23 @@ pub fn save_manifest(layout: &AppLayout, manifest: &AppManifest) -> Result<(), A
         )));
     }
     layout.initialize()?;
+    save_manifest_initialized(layout, manifest)
+}
+
+/// Persist a manifest after the caller has already initialized the complete
+/// app layout. App creation uses this to avoid repeating the same guarded
+/// directory traversal for each metadata document in one transaction.
+pub(crate) fn save_manifest_initialized(
+    layout: &AppLayout,
+    manifest: &AppManifest,
+) -> Result<(), AppError> {
+    manifest.validate()?;
+    if layout.app_id != manifest.app_id {
+        return Err(AppError::InvalidRequest(format!(
+            "manifest app id {:?} does not match layout app id {:?}",
+            manifest.app_id, layout.app_id
+        )));
+    }
     let mut body = serde_json::to_vec_pretty(manifest)
         .map_err(|error| AppError::Io(format!("serialize app manifest: {error}")))?;
     body.push(b'\n');

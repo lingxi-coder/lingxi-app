@@ -107,6 +107,7 @@ enum LocalAppsProtocolAdapter {
         case .notifications: .notifications
         case .llm: .llm
         case .agentNotify: .agentNotify
+        case .backgroundSchedule: .backgroundSchedule
         }
     }
 

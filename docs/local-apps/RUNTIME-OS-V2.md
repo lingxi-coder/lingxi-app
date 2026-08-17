@@ -57,9 +57,17 @@ Every app Agent turn assembles these layers in order:
 
 An app may propose a Profile revision. The proposal is inert until a trusted
 host UI approval path applies it; app pages cannot self-approve a prompt
-change. The apply bridge will be added together with that host UI path. Until
-then, `system_prompt_override` is not used for app customization because it
-would replace the platform prompt.
+change. The native clients receive a one-time approval token and the Host
+validates that token plus the current revision before persisting the next
+profile revision. Until a profile is approved, `system_prompt_override` is not
+used for app customization because it would replace the platform prompt.
+
+Background scheduling is currently split into two explicit layers: the Host
+validates, journals, claims, and executes the declarative flow, while Android
+WorkManager/iOS BGTaskScheduler adapters are responsible only for waking the
+process and invoking the Host background entrypoint. The persisted journal is
+the recovery boundary; it does not silently execute a flow from a foreground
+WebView callback.
 
 ## Attribution and limits
 

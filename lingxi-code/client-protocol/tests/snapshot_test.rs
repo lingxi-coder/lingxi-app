@@ -60,13 +60,13 @@ use client_protocol::listings::{
     TaskStatusDto,
 };
 use client_protocol::local_apps::{
-    AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppBridgeResponseDto,
-    AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto, AppCheckpointKindDto,
-    AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto,
-    AppErrorCodeDto, AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto,
-    AppRuntimeModeDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppRuntimeSuspensionReasonDto, AppSessionKindDto, AppSessionRowDto, AppUiActionKindDto,
-    AppUiRequestDto, AppWorkflowStateDto,
+    AppAgentProfileProposalDto, AppAuthorizationDecisionDto, AppBridgeOperationDto,
+    AppBridgeRequestDto, AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto,
+    AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto,
+    AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto, AppEventDto,
+    AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
+    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
+    AppSessionKindDto, AppSessionRowDto, AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::{
@@ -596,6 +596,29 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/app_record_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppRecordChanged {
+                    record: canonical_app_record(),
+                },
+            },
+        ),
+        (
+            "event/app_profile_proposal.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppProfileProposal {
+                    proposal: AppAgentProfileProposalDto {
+                        app_id: "habits-1a2b".to_string(),
+                        approval_token: "approval-00000001".to_string(),
+                        base_revision: 3,
+                        current_revision: 4,
+                        instructions: "Prefer compact cards".to_string(),
+                        reason: "The user asked for a denser layout".to_string(),
+                    },
+                },
+            },
+        ),
+        (
             "event/app_workflow_changed.json",
             ClientEvent::AppWorkflowChanged {
                 app_id: "habits-1a2b".to_string(),
@@ -1010,6 +1033,14 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::ResolveAppCapabilityRequest {
                 request_id: "cap-00000001".to_string(),
                 decision: AppAuthorizationDecisionDto::AllowAlways,
+            },
+        ),
+        (
+            "command/resolve_app_profile_proposal.json",
+            ClientCommand::ResolveAppProfileProposal {
+                app_id: "habits-1a2b".to_string(),
+                approval_token: "approval-00000001".to_string(),
+                approved: true,
             },
         ),
         (

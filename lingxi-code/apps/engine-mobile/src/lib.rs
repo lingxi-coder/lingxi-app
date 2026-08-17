@@ -82,8 +82,9 @@ mod local_apps_profile;
 pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
     parse_mobile_provider_config_json, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
-    FiredCronJobDto, MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, MobileRuntime,
+    FiredCronJobDto, LocalAppBackgroundRunDto, MobileBuildError, MobileConfig,
+    MobileCronStoreHandle, MobileEngineError, MobileEngineHandle, MobileOAuthSessionDto,
+    MobileOAuthStateDto, MobileRuntime,
     ProviderCatalogEntryDto, ProviderConnectionTestDto,
 };
 

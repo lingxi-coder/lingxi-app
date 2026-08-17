@@ -21,6 +21,11 @@ pub enum AppEvent {
         /// Every app record, in stored order.
         apps: Vec<AppRecord>,
     },
+    /// One app record changed without requiring a full catalog snapshot.
+    RecordChanged {
+        /// The updated app record.
+        record: AppRecord,
+    },
     /// The workflow state advanced (draft -> ready).
     WorkflowChanged {
         /// App whose workflow advanced.

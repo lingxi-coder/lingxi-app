@@ -1,0 +1,908 @@
+//! Host-owned execution for journaled local-app background flows.
+//!
+//! Native schedulers only wake this broker. They never receive a capability
+//! handle, app path, prompt, or flow source. Claiming, step execution, journal
+//! advancement, retry classification, and terminal state all stay behind the
+//! same Host boundary used by the foreground bridge.
+
+use super::LocalAppsHostBroker;
+use crate::host::LocalAppBackgroundRunDto;
+use client_protocol::local_apps::AppCapabilityKindDto;
+use local_apps::{AppCapability, BackgroundTaskStatus, CapabilityId};
+use serde_json::{json, Map, Value};
+use std::time::Duration;
+
+const BACKGROUND_STEP_TIMEOUT: Duration = Duration::from_secs(120);
+const BACKGROUND_RETRY_DELAY_MS: u64 = 15 * 60 * 1_000;
+const MAX_BACKGROUND_RESULT_BYTES: usize = 64 * 1024;
+
+impl LocalAppsHostBroker {
+    /// Claim and execute every due task in the profile. Duplicate native
+    /// wake-ups are harmless: the in-memory claim set covers one process and
+    /// the persisted `Running`/journal state covers process death.
+    pub(crate) async fn run_due_background_tasks(
+        &self,
+        now_ms: u64,
+    ) -> Vec<LocalAppBackgroundRunDto> {
+        let Some(service) = self.service().ok() else {
+            return Vec::new();
+        };
+        let records = service.records().await;
+        let mut outcomes = Vec::new();
+        for record in records {
+            let Ok(layout) = self.layout(&record.id) else {
+                continue;
+            };
+            let Ok(tasks) = local_apps::background::load_tasks(&layout) else {
+                continue;
+            };
+            for task in tasks {
+                if !matches!(
+                    task.status,
+                    BackgroundTaskStatus::Scheduled
+                        | BackgroundTaskStatus::WaitingForSystem
+                        | BackgroundTaskStatus::Running
+                ) {
+                    continue;
+                }
+                let Ok(journal) = local_apps::background::load_journal(&layout) else {
+                    continue;
+                };
+                let Some(entry) = journal.iter().find(|entry| entry.task_id == task.task_id) else {
+                    continue;
+                };
+                if entry
+                    .next_run_at_ms
+                    .is_some_and(|next_run_at_ms| next_run_at_ms > now_ms)
+                {
+                    continue;
+                }
+                outcomes.push(
+                    self.run_background_task(&record.id, &task.task_id, now_ms, false)
+                        .await,
+                );
+            }
+        }
+        outcomes
+    }
+
+    /// Return the earliest persisted wake-up so iOS can submit a precise
+    /// `earliestBeginDate`. Android uses its bounded watchdog because periodic
+    /// WorkManager is the reliable path across reboot and exact-alarm policy.
+    pub(crate) async fn next_background_wake_ms(&self, now_ms: u64) -> Option<u64> {
+        let service = self.service().ok()?;
+        let mut next = None;
+        for record in service.records().await {
+            let Ok(layout) = self.layout(&record.id) else {
+                continue;
+            };
+            let Ok(tasks) = local_apps::background::load_tasks(&layout) else {
+                continue;
+            };
+            let Ok(journal) = local_apps::background::load_journal(&layout) else {
+                continue;
+            };
+            for task in tasks {
+                if !matches!(
+                    task.status,
+                    BackgroundTaskStatus::Scheduled
+                        | BackgroundTaskStatus::WaitingForSystem
+                        | BackgroundTaskStatus::Running
+                ) {
+                    continue;
+                }
+                let Some(entry) = journal.iter().find(|entry| entry.task_id == task.task_id) else {
+                    continue;
+                };
+                let wake = entry.next_run_at_ms.unwrap_or(now_ms);
+                next = Some(next.map_or(wake, |current: u64| current.min(wake)));
+            }
+        }
+        next
+    }
+
+    /// Cancel one task from a trusted native management surface. A page may
+    /// only request cancellation through the normal capability route.
+    pub(crate) async fn cancel_background_task(&self, app_id: &str, task_id: &str) -> bool {
+        let Ok(layout) = self.layout(app_id) else {
+            return false;
+        };
+        let _guard = self.background_task_writes.lock().await;
+        let Ok(mut tasks) = local_apps::background::load_tasks(&layout) else {
+            return false;
+        };
+        let updated_at_ms = {
+            let Some(task) = tasks.iter_mut().find(|task| task.task_id == task_id) else {
+                return false;
+            };
+            if matches!(
+                task.status,
+                BackgroundTaskStatus::Succeeded | BackgroundTaskStatus::Cancelled
+            ) {
+                return false;
+            }
+            task.status = BackgroundTaskStatus::Cancelled;
+            task.updated_at_ms = super::now_ms();
+            task.updated_at_ms
+        };
+        if local_apps::background::save_tasks(&layout, &tasks).is_err() {
+            return false;
+        }
+        let Ok(mut journal) = local_apps::background::load_journal(&layout) else {
+            return false;
+        };
+        if let Some(entry) = journal.iter_mut().find(|entry| entry.task_id == task_id) {
+            entry.next_run_at_ms = None;
+            entry.last_error = Some("cancelled by the host".into());
+            entry.updated_at_ms = updated_at_ms;
+        }
+        local_apps::background::save_journal(&layout, &journal).is_ok()
+    }
+
+    pub(crate) async fn run_background_task_value(
+        &self,
+        app_id: &str,
+        task_id: &str,
+        now_ms: u64,
+        force: bool,
+    ) -> Result<Value, String> {
+        let outcome = self
+            .run_background_task(app_id, task_id, now_ms, force)
+            .await;
+        serde_json::to_value(outcome)
+            .map_err(|error| format!("serialize background result: {error}"))
+    }
+
+    async fn run_background_task(
+        &self,
+        app_id: &str,
+        task_id: &str,
+        now_ms: u64,
+        force: bool,
+    ) -> LocalAppBackgroundRunDto {
+        let key = format!("{app_id}:{task_id}");
+        {
+            let mut inflight = self.background_inflight.lock().await;
+            if !inflight.insert(key.clone()) {
+                return outcome(app_id, task_id, "already_running", None, None, true);
+            }
+        }
+        let result = self
+            .run_background_task_inner(app_id, task_id, now_ms, force)
+            .await;
+        self.background_inflight.lock().await.remove(&key);
+        result
+    }
+
+    async fn run_background_task_inner(
+        &self,
+        app_id: &str,
+        task_id: &str,
+        now_ms: u64,
+        force: bool,
+    ) -> LocalAppBackgroundRunDto {
+        let claimed = match self
+            .claim_background_task(app_id, task_id, now_ms, force)
+            .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => return outcome(app_id, task_id, "not_due", None, None, false),
+            Err(error) => return outcome(app_id, task_id, "failed", None, Some(error), false),
+        };
+        let (task, mut journal) = claimed;
+        let start_index = task
+            .flow
+            .steps
+            .iter()
+            .position(|step| journal.next_step_id.as_deref() == Some(step.step_id.as_str()))
+            .unwrap_or(0);
+        let mut outputs = Map::new();
+        for offset in start_index..task.flow.steps.len() {
+            let step = task.flow.steps[offset].clone();
+            let input = match step_input(app_id, &step.input_json) {
+                Ok(input) => input,
+                Err(error) => {
+                    return self
+                        .finish_background_failure(
+                            app_id,
+                            task_id,
+                            task,
+                            journal,
+                            step.step_id.clone(),
+                            error,
+                            false,
+                        )
+                        .await;
+                }
+            };
+            let step_result = tokio::time::timeout(
+                BACKGROUND_STEP_TIMEOUT,
+                self.execute_background_step(
+                    app_id,
+                    &step.capability,
+                    input,
+                    task_id,
+                    &step.step_id,
+                ),
+            )
+            .await
+            .map_err(|_| "background capability step timed out".to_string())
+            .and_then(|result| result);
+            let value = match step_result {
+                Ok(value) => value,
+                Err(error) => {
+                    return self
+                        .finish_background_failure(
+                            app_id,
+                            task_id,
+                            task,
+                            journal,
+                            step.step_id.clone(),
+                            error.clone(),
+                            is_retryable(&error),
+                        )
+                        .await;
+                }
+            };
+            outputs.insert(step.step_id.clone(), value);
+            journal.next_step_id = task
+                .flow
+                .steps
+                .get(offset + 1)
+                .map(|next| next.step_id.clone());
+            journal.updated_at_ms = super::now_ms();
+            if let Err(error) = self.persist_journal(app_id, &journal).await {
+                return outcome(app_id, task_id, "failed", None, Some(error), false);
+            }
+        }
+        self.finish_background_success(app_id, task, journal, outputs, now_ms)
+            .await
+    }
+
+    async fn claim_background_task(
+        &self,
+        app_id: &str,
+        task_id: &str,
+        now_ms: u64,
+        force: bool,
+    ) -> Result<
+        Option<(
+            local_apps::BackgroundTaskRecord,
+            local_apps::BackgroundJournalEntry,
+        )>,
+        String,
+    > {
+        let layout = self.layout(app_id)?;
+        let _guard = self.background_task_writes.lock().await;
+        let mut tasks =
+            local_apps::background::load_tasks(&layout).map_err(|error| error.to_string())?;
+        let task = tasks
+            .iter_mut()
+            .find(|task| task.task_id == task_id)
+            .ok_or_else(|| "background task was not found".to_string())?;
+        if matches!(
+            task.status,
+            BackgroundTaskStatus::Succeeded | BackgroundTaskStatus::Cancelled
+        ) {
+            return Ok(None);
+        }
+        let mut journal =
+            local_apps::background::load_journal(&layout).map_err(|error| error.to_string())?;
+        let entry = journal
+            .iter_mut()
+            .find(|entry| entry.task_id == task_id)
+            .ok_or_else(|| "background task has no journal entry".to_string())?;
+        if !force && entry.next_run_at_ms.is_some_and(|next| next > now_ms) {
+            return Ok(None);
+        }
+        if entry.next_step_id.is_none() {
+            entry.next_step_id = task.flow.steps.first().map(|step| step.step_id.clone());
+        }
+        task.status = BackgroundTaskStatus::Running;
+        task.updated_at_ms = now_ms;
+        entry.attempt = entry.attempt.saturating_add(1);
+        entry.next_run_at_ms = None;
+        entry.last_error = None;
+        entry.updated_at_ms = now_ms;
+        let task_snapshot = task.clone();
+        let entry_snapshot = entry.clone();
+        local_apps::background::save_tasks(&layout, &tasks).map_err(|error| error.to_string())?;
+        local_apps::background::save_journal(&layout, &journal)
+            .map_err(|error| error.to_string())?;
+        Ok(Some((task_snapshot, entry_snapshot)))
+    }
+
+    async fn finish_background_success(
+        &self,
+        app_id: &str,
+        mut task: local_apps::BackgroundTaskRecord,
+        mut journal: local_apps::BackgroundJournalEntry,
+        outputs: Map<String, Value>,
+        now_ms: u64,
+    ) -> LocalAppBackgroundRunDto {
+        let next_run = match task.trigger {
+            local_apps::BackgroundTrigger::Schedule { interval_ms } => {
+                task.status = BackgroundTaskStatus::Scheduled;
+                journal.next_step_id = task.flow.steps.first().map(|step| step.step_id.clone());
+                Some(now_ms.saturating_add(interval_ms))
+            }
+            local_apps::BackgroundTrigger::Event { .. } => {
+                task.status = BackgroundTaskStatus::Succeeded;
+                journal.next_step_id = None;
+                None
+            }
+        };
+        task.updated_at_ms = now_ms;
+        journal.next_run_at_ms = next_run;
+        journal.last_error = None;
+        journal.updated_at_ms = now_ms;
+        match self
+            .persist_terminal_background_state(app_id, &task, &journal)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return outcome(
+                    app_id,
+                    &task.task_id,
+                    "cancelled",
+                    None,
+                    Some("background task was cancelled while it was running".into()),
+                    false,
+                );
+            }
+            Err(error) => {
+                return outcome(app_id, &task.task_id, "failed", None, Some(error), false);
+            }
+        }
+        let result = Value::Object(outputs);
+        let result_json = bounded_json(&result);
+        outcome(app_id, &task.task_id, "succeeded", result_json, None, false)
+    }
+
+    async fn finish_background_failure(
+        &self,
+        app_id: &str,
+        task_id: &str,
+        mut task: local_apps::BackgroundTaskRecord,
+        mut journal: local_apps::BackgroundJournalEntry,
+        step_id: String,
+        error: String,
+        retryable: bool,
+    ) -> LocalAppBackgroundRunDto {
+        let now_ms = super::now_ms();
+        task.status = if retryable {
+            BackgroundTaskStatus::WaitingForSystem
+        } else {
+            BackgroundTaskStatus::Failed
+        };
+        task.updated_at_ms = now_ms;
+        journal.next_step_id = Some(step_id);
+        journal.next_run_at_ms =
+            retryable.then_some(now_ms.saturating_add(BACKGROUND_RETRY_DELAY_MS));
+        journal.last_error = Some(error.clone());
+        journal.updated_at_ms = now_ms;
+        match self
+            .persist_terminal_background_state(app_id, &task, &journal)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return outcome(
+                    app_id,
+                    task_id,
+                    "cancelled",
+                    None,
+                    Some("background task was cancelled while it was running".into()),
+                    false,
+                );
+            }
+            Err(persist_error) => {
+                return outcome(app_id, task_id, "failed", None, Some(persist_error), false);
+            }
+        }
+        outcome(
+            app_id,
+            task_id,
+            if retryable {
+                "waiting_for_system"
+            } else {
+                "failed"
+            },
+            None,
+            Some(error),
+            retryable,
+        )
+    }
+
+    async fn persist_journal(
+        &self,
+        app_id: &str,
+        journal: &local_apps::BackgroundJournalEntry,
+    ) -> Result<(), String> {
+        let layout = self.layout(app_id)?;
+        let _guard = self.background_task_writes.lock().await;
+        let mut entries =
+            local_apps::background::load_journal(&layout).map_err(|error| error.to_string())?;
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.task_id == journal.task_id)
+            .ok_or_else(|| "background task has no journal entry".to_string())?;
+        *entry = journal.clone();
+        local_apps::background::save_journal(&layout, &entries).map_err(|error| error.to_string())
+    }
+
+    async fn persist_terminal_background_state(
+        &self,
+        app_id: &str,
+        task: &local_apps::BackgroundTaskRecord,
+        journal: &local_apps::BackgroundJournalEntry,
+    ) -> Result<bool, String> {
+        let layout = self.layout(app_id)?;
+        let _guard = self.background_task_writes.lock().await;
+        let mut tasks =
+            local_apps::background::load_tasks(&layout).map_err(|error| error.to_string())?;
+        let current = tasks
+            .iter_mut()
+            .find(|candidate| candidate.task_id == task.task_id)
+            .ok_or_else(|| "background task was removed while it was running".to_string())?;
+        if !matches!(current.status, BackgroundTaskStatus::Running) {
+            return Ok(false);
+        }
+        *current = task.clone();
+
+        let mut journal_entries =
+            local_apps::background::load_journal(&layout).map_err(|error| error.to_string())?;
+        let current_journal = journal_entries
+            .iter_mut()
+            .find(|candidate| candidate.task_id == journal.task_id)
+            .ok_or_else(|| {
+                "background task journal was removed while it was running".to_string()
+            })?;
+        *current_journal = journal.clone();
+
+        local_apps::background::save_tasks(&layout, &tasks).map_err(|error| error.to_string())?;
+        local_apps::background::save_journal(&layout, &journal_entries)
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+
+    async fn execute_background_step(
+        &self,
+        app_id: &str,
+        capability: &CapabilityId,
+        mut input: Value,
+        task_id: &str,
+        step_id: &str,
+    ) -> Result<Value, String> {
+        let object = input
+            .as_object_mut()
+            .ok_or_else(|| "background step input must be a JSON object".to_string())?;
+        object.insert("app_id".into(), Value::String(app_id.to_string()));
+        let request_id = format!("background:{task_id}:{step_id}");
+        match capability {
+            CapabilityId::DataQuery => self.query_data_value(input).await,
+            CapabilityId::DataMutate => {
+                self.ensure_background_step_authorized(app_id, *capability, &input)
+                    .await?;
+                self.mutate_data_value(input, false).await
+            }
+            CapabilityId::RuntimeStatus => {
+                let runtime = self
+                    .service()?
+                    .runtime_record(app_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(json!(runtime))
+            }
+            CapabilityId::NetworkRequest => {
+                self.ensure_background_step_authorized(app_id, *capability, &input)
+                    .await?;
+                self.network_request(app_id, input).await
+            }
+            CapabilityId::Notifications => {
+                self.ensure_background_step_authorized(app_id, *capability, &input)
+                    .await?;
+                self.post_notification_value(app_id, &input)
+                    .await
+                    .map_err(|failure| failure.message)
+            }
+            CapabilityId::LlmComplete => {
+                self.ensure_background_step_authorized(app_id, *capability, &input)
+                    .await?;
+                self.llm_chat_value(app_id, &input)
+                    .await
+                    .map_err(|failure| failure.message)
+            }
+            CapabilityId::AgentSessionCreate => {
+                self.ensure_background_step_authorized(app_id, *capability, &input)
+                    .await?;
+                self.agent_session_create_value(input).await
+            }
+            CapabilityId::AgentSessionList => {
+                self.ensure_background_step_authorized(app_id, *capability, &input)
+                    .await?;
+                self.agent_session_list_value(input).await
+            }
+            CapabilityId::AgentSessionResume | CapabilityId::AgentSessionClose => {
+                self.ensure_background_step_authorized(app_id, *capability, &input)
+                    .await?;
+                self.agent_session_update_value(input).await
+            }
+            CapabilityId::AgentSend => {
+                self.ensure_background_step_authorized(app_id, *capability, &input)
+                    .await?;
+                self.agent_send_value(app_id, &request_id, &input)
+                    .await
+                    .map_err(|failure| failure.message)
+            }
+            CapabilityId::AgentEmit => {
+                self.ensure_background_step_authorized(app_id, *capability, &input)
+                    .await?;
+                self.agent_post_value(app_id, &input)
+                    .await
+                    .map_err(|failure| failure.message)
+            }
+            _ => Err(format!(
+                "background capability {} has no headless executor",
+                capability.as_str()
+            )),
+        }
+    }
+
+    /// Called while registering a schedule. It may show the normal foreground
+    /// approval prompt, but only durable grants are accepted for later wakes.
+    pub(crate) async fn authorize_background_schedule_step(
+        &self,
+        app_id: &str,
+        capability: CapabilityId,
+        input_json: &str,
+    ) -> Result<(), String> {
+        let input = step_input(app_id, input_json)?;
+        let (grant, wire, reason) = match capability {
+            CapabilityId::DataMutate => (
+                Some(AppCapability::DataMutation),
+                Some(AppCapabilityKindDto::DataMutation),
+                "后台流程请求修改应用数据。",
+            ),
+            CapabilityId::Notifications => (
+                Some(AppCapability::Notifications),
+                Some(AppCapabilityKindDto::Notifications),
+                "后台流程请求发送应用通知。",
+            ),
+            CapabilityId::LlmComplete
+            | CapabilityId::AgentSessionCreate
+            | CapabilityId::AgentSessionList
+            | CapabilityId::AgentSessionResume
+            | CapabilityId::AgentSessionClose
+            | CapabilityId::AgentSend => (
+                Some(AppCapability::Llm),
+                Some(AppCapabilityKindDto::Llm),
+                "后台流程请求使用应用 Agent/LLM。",
+            ),
+            CapabilityId::AgentEmit => (
+                Some(AppCapability::AgentNotify),
+                Some(AppCapabilityKindDto::AgentNotify),
+                "后台流程请求向 Agent 投递事件。",
+            ),
+            CapabilityId::NetworkRequest => {
+                let url = input
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "background network step requires url".to_string())?;
+                let parsed = reqwest::Url::parse(url)
+                    .map_err(|error| format!("invalid background network URL: {error}"))?;
+                let domain = parsed
+                    .host_str()
+                    .ok_or_else(|| "background network URL has no hostname".to_string())?
+                    .to_string();
+                self.authorize_domain(app_id, &domain).await?;
+                let layout = self.layout(app_id)?;
+                let permissions =
+                    local_apps::load_permissions(&layout).map_err(|error| error.to_string())?;
+                if !permissions.allows_domain(&domain) {
+                    return Err("background network access requires durable approval".into());
+                }
+                return Ok(());
+            }
+            CapabilityId::DataQuery | CapabilityId::RuntimeStatus => return Ok(()),
+            _ => {
+                return Err(format!(
+                    "background capability {} is not supported",
+                    capability.as_str()
+                ));
+            }
+        };
+        if let (Some(grant), Some(wire)) = (grant, wire) {
+            let layout = self.layout(app_id)?;
+            let manifest = local_apps::load_manifest(&layout).map_err(|error| error.to_string())?;
+            if !manifest.capabilities.contains(&grant) {
+                return Err(format!(
+                    "background capability {} is not declared in the app manifest",
+                    capability.as_str()
+                ));
+            }
+            self.authorize_capability(app_id, grant, wire, reason)
+                .await?;
+            let permissions =
+                local_apps::load_permissions(&layout).map_err(|error| error.to_string())?;
+            if !permissions.allows(grant) {
+                return Err("background capabilities require durable approval".into());
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_background_step_authorized(
+        &self,
+        app_id: &str,
+        capability: CapabilityId,
+        input: &Value,
+    ) -> Result<(), String> {
+        let layout = self.layout(app_id)?;
+        let manifest = local_apps::load_manifest(&layout).map_err(|error| error.to_string())?;
+        let permissions =
+            local_apps::load_permissions(&layout).map_err(|error| error.to_string())?;
+        let grant = match capability {
+            CapabilityId::DataMutate => Some(AppCapability::DataMutation),
+            CapabilityId::Notifications => Some(AppCapability::Notifications),
+            CapabilityId::LlmComplete
+            | CapabilityId::AgentSessionCreate
+            | CapabilityId::AgentSessionList
+            | CapabilityId::AgentSessionResume
+            | CapabilityId::AgentSessionClose
+            | CapabilityId::AgentSend => Some(AppCapability::Llm),
+            CapabilityId::AgentEmit => Some(AppCapability::AgentNotify),
+            CapabilityId::NetworkRequest => None,
+            CapabilityId::DataQuery | CapabilityId::RuntimeStatus => return Ok(()),
+            _ => {
+                return Err(format!(
+                    "background capability {} is not supported",
+                    capability.as_str()
+                ))
+            }
+        };
+        if let Some(grant) = grant {
+            if !manifest.capabilities.contains(&grant) || !permissions.allows(grant) {
+                return Err(format!(
+                    "background capability {} does not have a durable app grant",
+                    capability.as_str()
+                ));
+            }
+            return Ok(());
+        }
+        let url = input
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "background network step requires url".to_string())?;
+        let parsed = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
+        let domain = parsed
+            .host_str()
+            .ok_or_else(|| "background network URL has no hostname".to_string())?;
+        if !manifest
+            .allowed_domains
+            .iter()
+            .any(|allowed| allowed == domain)
+            || !permissions.allows_domain(domain)
+        {
+            return Err(format!(
+                "background network domain {domain:?} does not have a durable app grant"
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn step_input(app_id: &str, input_json: &str) -> Result<Value, String> {
+    let mut input: Value = serde_json::from_str(input_json)
+        .map_err(|error| format!("invalid background step input: {error}"))?;
+    let object = input
+        .as_object_mut()
+        .ok_or_else(|| "background step input must be a JSON object".to_string())?;
+    object.insert("app_id".into(), Value::String(app_id.to_string()));
+    Ok(input)
+}
+
+fn bounded_json(value: &Value) -> Option<String> {
+    let body = value.to_string();
+    (body.len() <= MAX_BACKGROUND_RESULT_BYTES).then_some(body)
+}
+
+fn is_retryable(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "timeout",
+        "timed out",
+        "network",
+        "connection",
+        "dns",
+        "429",
+        "rate limit",
+        "http 5",
+        "temporarily unavailable",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn outcome(
+    app_id: &str,
+    task_id: &str,
+    status: &str,
+    result_json: Option<String>,
+    error: Option<String>,
+    retryable: bool,
+) -> LocalAppBackgroundRunDto {
+    LocalAppBackgroundRunDto {
+        app_id: app_id.to_string(),
+        task_id: task_id.to_string(),
+        status: status.to_string(),
+        result_json,
+        error,
+        retryable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use client_adapter::ClientEventSink;
+    use client_protocol::events::ClientEvent;
+    use local_apps::test_support::FixedClock;
+    use local_apps::{
+        AppService, BackgroundJournalEntry, BackgroundTaskRecord, BackgroundTrigger,
+        NoopAppEventObserver, RUNTIME_CONTRACT_SCHEMA_VERSION,
+    };
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct Sink;
+
+    #[async_trait]
+    impl ClientEventSink for Sink {
+        async fn emit(&self, _event: ClientEvent) {}
+    }
+
+    async fn harness() -> (TempDir, Arc<AppService>, Arc<LocalAppsHostBroker>, String) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let service = Arc::new(
+            AppService::load(
+                root.path(),
+                Arc::new(FixedClock::new(1)),
+                Arc::new(NoopAppEventObserver),
+            )
+            .await
+            .expect("service"),
+        );
+        let broker =
+            LocalAppsHostBroker::new(root.path().to_path_buf(), Arc::new(Sink), None, false, None);
+        assert!(
+            broker.attach_service(service.clone()).is_ok(),
+            "attach service"
+        );
+        let record = service
+            .create_app(Some("Background"), "background app", None)
+            .await
+            .expect("create app");
+        (root, service, broker, record.id)
+    }
+
+    #[tokio::test]
+    async fn scheduled_runtime_status_flow_advances_and_rearms() {
+        let (root, _service, broker, app_id) = harness().await;
+        let layout = local_apps::AppLayout::new(root.path(), app_id.clone()).expect("layout");
+        let flow = local_apps::FlowDefinition {
+            flow_id: "flow-status".into(),
+            version: 1,
+            steps: vec![local_apps::FlowStep {
+                step_id: "status".into(),
+                capability: CapabilityId::RuntimeStatus,
+                depends_on: Vec::new(),
+                input_json: "{}".into(),
+            }],
+        };
+        local_apps::background::save_tasks(
+            &layout,
+            &[BackgroundTaskRecord {
+                schema_version: RUNTIME_CONTRACT_SCHEMA_VERSION,
+                task_id: "task-status".into(),
+                app_id: app_id.clone(),
+                flow_id: flow.flow_id.clone(),
+                flow,
+                trigger: BackgroundTrigger::Schedule {
+                    interval_ms: 900_000,
+                },
+                status: BackgroundTaskStatus::Scheduled,
+                updated_at_ms: 1,
+            }],
+        )
+        .expect("tasks");
+        local_apps::background::save_journal(
+            &layout,
+            &[BackgroundJournalEntry {
+                task_id: "task-status".into(),
+                flow_id: "flow-status".into(),
+                next_step_id: Some("status".into()),
+                next_run_at_ms: Some(1),
+                attempt: 0,
+                last_error: None,
+                updated_at_ms: 1,
+            }],
+        )
+        .expect("journal");
+
+        let first = broker.run_due_background_tasks(1_000).await;
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].status, "succeeded");
+        let tasks = local_apps::background::load_tasks(&layout).expect("load tasks");
+        assert_eq!(tasks[0].status, BackgroundTaskStatus::Scheduled);
+        let journal = local_apps::background::load_journal(&layout).expect("load journal");
+        assert!(journal[0].next_run_at_ms.unwrap_or_default() > 1_000);
+
+        let second = broker.run_due_background_tasks(1_000).await;
+        assert!(
+            second.is_empty(),
+            "a rearmed task must not run before its interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn finishing_one_task_preserves_sibling_tasks_and_journals() {
+        let (root, _service, broker, app_id) = harness().await;
+        let layout = local_apps::AppLayout::new(root.path(), app_id.clone()).expect("layout");
+        let mut tasks = Vec::new();
+        let mut journal = Vec::new();
+        for index in 0..2 {
+            let task_id = format!("task-{index}");
+            let flow_id = format!("flow-{index}");
+            let step_id = format!("status-{index}");
+            let flow = local_apps::FlowDefinition {
+                flow_id: flow_id.clone(),
+                version: 1,
+                steps: vec![local_apps::FlowStep {
+                    step_id: step_id.clone(),
+                    capability: CapabilityId::RuntimeStatus,
+                    depends_on: Vec::new(),
+                    input_json: "{}".into(),
+                }],
+            };
+            tasks.push(BackgroundTaskRecord {
+                schema_version: RUNTIME_CONTRACT_SCHEMA_VERSION,
+                task_id: task_id.clone(),
+                app_id: app_id.clone(),
+                flow_id: flow_id.clone(),
+                flow,
+                trigger: BackgroundTrigger::Schedule {
+                    interval_ms: 900_000,
+                },
+                status: BackgroundTaskStatus::Scheduled,
+                updated_at_ms: 1,
+            });
+            journal.push(BackgroundJournalEntry {
+                task_id,
+                flow_id,
+                next_step_id: Some(step_id),
+                next_run_at_ms: Some(1),
+                attempt: 0,
+                last_error: None,
+                updated_at_ms: 1,
+            });
+        }
+        local_apps::background::save_tasks(&layout, &tasks).expect("tasks");
+        local_apps::background::save_journal(&layout, &journal).expect("journal");
+
+        let outcomes = broker.run_due_background_tasks(1_000).await;
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(|outcome| outcome.status == "succeeded"));
+        let persisted_tasks = local_apps::background::load_tasks(&layout).expect("load tasks");
+        let persisted_journal =
+            local_apps::background::load_journal(&layout).expect("load journal");
+        assert_eq!(persisted_tasks.len(), 2);
+        assert_eq!(persisted_journal.len(), 2);
+        assert!(persisted_tasks
+            .iter()
+            .all(|task| task.status == BackgroundTaskStatus::Scheduled));
+    }
+}

@@ -58,6 +58,8 @@ pub enum AppCapability {
     Llm,
     /// Post events into the conversation-facing app mailbox.
     AgentNotify,
+    /// Register a declarative flow with the system background scheduler.
+    BackgroundSchedule,
 }
 
 impl AppCapability {
@@ -65,7 +67,7 @@ impl AppCapability {
     ///
     /// The MCP schema serializes this list through Serde, so its advertised
     /// strings cannot drift from manifest and permission decoding.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::DataMutation,
         Self::UiControl,
         Self::Camera,
@@ -75,6 +77,7 @@ impl AppCapability {
         Self::Notifications,
         Self::Llm,
         Self::AgentNotify,
+        Self::BackgroundSchedule,
     ];
 }
 
@@ -259,6 +262,16 @@ pub fn load_permissions(layout: &AppLayout) -> Result<AppPermissions, AppError> 
 pub fn save_permissions(layout: &AppLayout, permissions: &AppPermissions) -> Result<(), AppError> {
     permissions.validate()?;
     layout.initialize()?;
+    save_permissions_initialized(layout, permissions)
+}
+
+/// Persist grants after the caller has already initialized the complete app
+/// layout. Used by the create transaction to avoid duplicate directory checks.
+pub(crate) fn save_permissions_initialized(
+    layout: &AppLayout,
+    permissions: &AppPermissions,
+) -> Result<(), AppError> {
+    permissions.validate()?;
     let mut body = serde_json::to_vec_pretty(permissions)
         .map_err(|error| AppError::Io(format!("serialize app permissions: {error}")))?;
     body.push(b'\n');
@@ -286,6 +299,14 @@ pub fn save_permissions(layout: &AppLayout, permissions: &AppPermissions) -> Res
 /// grant and does not change the global permission mode.
 pub fn save_workspace_permission_settings(layout: &AppLayout) -> Result<(), AppError> {
     layout.initialize()?;
+    save_workspace_permission_settings_initialized(layout)
+}
+
+/// Write workspace permission settings after layout initialization has
+/// already been performed by the enclosing create transaction.
+pub(crate) fn save_workspace_permission_settings_initialized(
+    layout: &AppLayout,
+) -> Result<(), AppError> {
     rooted_fs::atomic_write(
         layout.root(),
         &layout.workspace_settings_local_rel(),
@@ -336,7 +357,8 @@ mod tests {
                 "location",
                 "notifications",
                 "llm",
-                "agent_notify"
+                "agent_notify",
+                "background_schedule"
             ])
         );
         for (capability, wire) in [
@@ -349,6 +371,7 @@ mod tests {
             (AppCapability::Notifications, "\"notifications\""),
             (AppCapability::Llm, "\"llm\""),
             (AppCapability::AgentNotify, "\"agent_notify\""),
+            (AppCapability::BackgroundSchedule, "\"background_schedule\""),
         ] {
             assert_eq!(serde_json::to_string(&capability).unwrap(), wire);
         }

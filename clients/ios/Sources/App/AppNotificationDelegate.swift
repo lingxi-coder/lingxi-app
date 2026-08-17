@@ -20,6 +20,7 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
             taskIdentifier: cronBackgroundTaskIdentifier,
             registrar: Self.cronBackgroundRegistrarFactory()
         )
+        LocalAppBackgroundTaskBridge.shared.registerAtLaunch()
         return true
     }
 

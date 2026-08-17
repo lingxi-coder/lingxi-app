@@ -146,7 +146,38 @@ fun LocalAppsScreen(
         state.pendingAuthorization?.let { request ->
             AuthorizationDialog(request = request, onAction = onAction)
         }
+        state.pendingProfileProposal?.let { proposal ->
+            ProfileProposalDialog(proposal = proposal, onAction = onAction)
+        }
     }
+}
+
+@Composable
+private fun ProfileProposalDialog(
+    proposal: LocalAppProfileProposal,
+    onAction: (LocalAppsAction) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = { onAction(LocalAppsAction.ResolveProfileProposal(false)) },
+        title = { Text("应用 Agent 请求更新指令") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(proposal.reason)
+                Text(proposal.instructions)
+                Text("版本 ${proposal.currentRevision} → ${proposal.currentRevision + 1uL}")
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onAction(LocalAppsAction.ResolveProfileProposal(true)) }) {
+                Text("应用")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { onAction(LocalAppsAction.ResolveProfileProposal(false)) }) {
+                Text(stringResource(R.string.local_apps_deny))
+            }
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

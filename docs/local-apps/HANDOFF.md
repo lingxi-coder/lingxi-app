@@ -152,6 +152,9 @@ Current tools:
 - `query_data`, `mutate_data`
 - `inspect_ui`, `act_on_ui`
 - `read_logs`, `read_app_events`
+- `agent_sessions_create`, `agent_sessions_list`, `agent_sessions_update`
+- `agent_profile_propose_update`
+- `background_schedule`, `background_resume`
 
 Important constraints:
 
@@ -164,6 +167,13 @@ Important constraints:
 - `read_logs` is bounded to the app-owned log directory.
 - app events are untrusted data from `agent.post`, never instructions.
 - every restore requires explicit user confirmation.
+- Agent Profile proposals are inert until a trusted native client applies a
+  one-time approval token; the page never receives the token.
+- Background flows are declarative, bounded, non-interactive, and journaled.
+  Android WorkManager and iOS BGTaskScheduler only wake the Host; the Host
+  claims and executes each flow step through the capability router, persists
+  the next step before continuing, and records retryable versus terminal
+  failures.
 
 When adding or changing a tool, update the Rust catalog, broker implementation, skill/workflow prompt, tests, client protocol if externally visible, protocol snapshots, and this document together.
 

@@ -137,24 +137,42 @@ pub struct LocalAppsMcpTransport {
     connections: StdMutex<HashSet<McpConnectionId>>,
 }
 
-/// Per-turn limits for an app-owned Agent's host calls. The app Agent only
+/// Session limits for an app-owned Agent's host calls. The app Agent only
 /// receives an app-scoped transport, so one dynamic MCP invocation represents
-/// one MCP call and one host bridge call at this boundary.
+/// one MCP call and one host bridge call at this boundary. The current turn's
+/// increments are mirrored into a separate usage state for persistence.
 #[derive(Debug)]
-struct AgentCallBudget {
+pub(crate) struct AgentCallBudget {
     max_bridge_calls: u32,
     max_mcp_calls: u32,
     bridge_calls: AtomicU32,
     mcp_calls: AtomicU32,
+    turn_usage: StdMutex<Option<Arc<crate::local_apps_host::AgentTurnUsageState>>>,
 }
 
 impl AgentCallBudget {
     fn new(max_bridge_calls: u32, max_mcp_calls: u32) -> Self {
+        Self::with_used(max_bridge_calls, max_mcp_calls, 0, 0)
+    }
+
+    fn with_used(
+        max_bridge_calls: u32,
+        max_mcp_calls: u32,
+        bridge_calls_used: u32,
+        mcp_calls_used: u32,
+    ) -> Self {
         Self {
             max_bridge_calls,
             max_mcp_calls,
-            bridge_calls: AtomicU32::new(0),
-            mcp_calls: AtomicU32::new(0),
+            bridge_calls: AtomicU32::new(bridge_calls_used),
+            mcp_calls: AtomicU32::new(mcp_calls_used),
+            turn_usage: StdMutex::new(None),
+        }
+    }
+
+    pub(crate) fn start_turn(&self, usage: Arc<crate::local_apps_host::AgentTurnUsageState>) {
+        if let Ok(mut current) = self.turn_usage.lock() {
+            *current = Some(usage);
         }
     }
 
@@ -167,6 +185,12 @@ impl AgentCallBudget {
             return Err(McpError::Internal(
                 "Agent bridge call budget exhausted".into(),
             ));
+        }
+        if let Ok(current) = self.turn_usage.lock() {
+            if let Some(usage) = current.as_ref() {
+                usage.add_mcp_call();
+                usage.add_bridge_call();
+            }
         }
         Ok(())
     }
@@ -218,20 +242,28 @@ impl LocalAppsMcpTransport {
         self.scoped_for_app_inner(app_id, None)
     }
 
-    /// Create an app-scoped transport with per-turn host-call budgets.
+    /// Create an app-scoped transport with cumulative session host-call budgets.
     pub(crate) fn scoped_for_app_with_budget(
         &self,
         app_id: &str,
         max_bridge_calls: u32,
         max_mcp_calls: u32,
+        bridge_calls_used: u32,
+        mcp_calls_used: u32,
     ) -> Result<Self, String> {
         self.scoped_for_app_inner(
             app_id,
-            Some(Arc::new(AgentCallBudget::new(
+            Some(Arc::new(AgentCallBudget::with_used(
                 max_bridge_calls,
                 max_mcp_calls,
+                bridge_calls_used,
+                mcp_calls_used,
             ))),
         )
+    }
+
+    pub(crate) fn call_budget(&self) -> Option<Arc<AgentCallBudget>> {
+        self.call_budget.clone()
     }
 
     fn scoped_for_app_inner(
@@ -261,7 +293,7 @@ impl LocalAppsMcpTransport {
         }
         // A budget is deliberately never inherited from the global
         // Conversation Agent transport. It belongs to exactly one app Agent
-        // turn and is installed only by `scoped_for_app_with_budget`.
+        // session and is installed only by `scoped_for_app_with_budget`.
         if let Some(value) = call_budget {
             // `call_budget` is not a OnceLock because the scoped transport is
             // immutable after construction.
@@ -1048,6 +1080,27 @@ impl LocalAppsMcpTransport {
                     Ok(record) => record,
                     Err(error) => return Ok(Self::app_error(error)),
                 };
+                // Dependency installation is independent of init-session
+                // pinning, so start it immediately and overlap the two host
+                // operations while the create response is being assembled.
+                let background_host = Arc::clone(&host);
+                let background_app_id = record.id.clone();
+                let warning_app_id = background_app_id.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = background_host
+                        .install_dependencies(json!({
+                            "app_id": background_app_id,
+                            "wait": false,
+                        }))
+                        .await
+                    {
+                        tracing::warn!(
+                            app_id = %warning_app_id,
+                            error = %error,
+                            "local-app dependency install did not start"
+                        );
+                    }
+                });
                 // v3 Phase 4: pin the init session through the connection-
                 // scoped minter (fork of the origin chat, or an empty
                 // anchor). Session pinning remains best-effort because boot
@@ -1089,19 +1142,6 @@ impl LocalAppsMcpTransport {
                 if let (Some(object), Some(init_id)) = (result.as_object_mut(), init_session_id) {
                     object.insert("init_session_id".into(), Value::String(init_id));
                 }
-                let background_host = Arc::clone(&host);
-                let background_app_id = record.id.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = background_host
-                        .install_dependencies(json!({
-                            "app_id": background_app_id,
-                            "wait": false,
-                        }))
-                        .await
-                    {
-                        tracing::warn!(app_id = %record.id, error = %error, "local-app dependency install did not start");
-                    }
-                });
                 Self::result(result)
             }
             "manage_runtime" => match self.host()?.manage_runtime(input).await {
@@ -1374,6 +1414,20 @@ mod tests {
             .reserve()
             .expect_err("bridge limit must stop the second call");
         assert!(error.to_string().contains("bridge call budget"));
+    }
+
+    #[test]
+    fn app_agent_call_budget_resumes_from_persisted_usage() {
+        let budget = AgentCallBudget::with_used(2, 2, 1, 1);
+        let usage = Arc::new(crate::local_apps_host::AgentTurnUsageState::default());
+        budget.start_turn(usage.clone());
+        assert!(budget.reserve().is_ok());
+        assert_eq!(usage.snapshot().bridge_calls, 1);
+        assert_eq!(usage.snapshot().mcp_calls, 1);
+        let error = budget
+            .reserve()
+            .expect_err("persisted usage must count against the next call");
+        assert!(error.to_string().contains("MCP call budget"));
     }
 
     /// A transport over a real store with one app whose mailbox holds

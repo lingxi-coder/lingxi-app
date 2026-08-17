@@ -1010,6 +1010,9 @@ export interface AppAgentSessionDto {
   promptProfileRevision: number;
   budget: AppAgentBudgetDto;
   turnCount: number;
+  outputTokensUsed: number;
+  bridgeCallsUsed: number;
+  mcpCallsUsed: number;
   createdAtMs: number;
   updatedAtMs: number;
 }

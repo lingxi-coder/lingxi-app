@@ -1,4 +1,4 @@
-//! The `agent.post` operation of the `window.lingxi.v1` bridge.
+//! The `agent.post` operation of the `window.lingxi.v2` bridge.
 //!
 //! An app hands the conversation a small structured event; the assistant
 //! collects it later through the MCP `read_app_events` tool. The client-side
@@ -17,7 +17,7 @@ use local_apps::{
     AppCapability, RUNTIME_CONTRACT_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -36,11 +36,46 @@ pub(crate) trait LocalAppsAgentExecutor: Send + Sync {
         app_id: &str,
         session_id: &str,
         prompt: String,
-        budget: AgentBudget,
+        session: AgentSessionRecord,
         profile: AppAgentProfile,
         cancel: CancellationToken,
         output: Arc<AgentOutputStream>,
     ) -> Result<(), String>;
+}
+
+/// Usage counters shared by the output sink and the app-scoped MCP transport
+/// for one host-owned Agent turn. The broker snapshots this state after every
+/// outcome and persists the counters on the session record.
+#[derive(Debug, Default)]
+pub(crate) struct AgentTurnUsageState {
+    output_tokens: AtomicU64,
+    bridge_calls: AtomicU32,
+    mcp_calls: AtomicU32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AgentTurnUsage {
+    pub(crate) output_tokens: u64,
+    pub(crate) bridge_calls: u32,
+    pub(crate) mcp_calls: u32,
+}
+
+impl AgentTurnUsageState {
+    pub(crate) fn snapshot(&self) -> AgentTurnUsage {
+        AgentTurnUsage {
+            output_tokens: self.output_tokens.load(Ordering::Acquire),
+            bridge_calls: self.bridge_calls.load(Ordering::Acquire),
+            mcp_calls: self.mcp_calls.load(Ordering::Acquire),
+        }
+    }
+
+    pub(crate) fn add_bridge_call(&self) {
+        self.bridge_calls.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn add_mcp_call(&self) {
+        self.mcp_calls.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 /// Host-owned cancellation handle for one app Agent turn.
@@ -77,7 +112,7 @@ pub(crate) struct AgentOutputStream {
     stream_id: Option<String>,
     text: tokio::sync::Mutex<String>,
     next_seq: AtomicU64,
-    token_count: AtomicU64,
+    usage: Arc<AgentTurnUsageState>,
     max_tokens: Option<u32>,
     cancel: Option<CancellationToken>,
 }
@@ -107,7 +142,7 @@ impl AgentOutputStream {
             stream_id,
             text: tokio::sync::Mutex::new(String::new()),
             next_seq: AtomicU64::new(0),
-            token_count: AtomicU64::new(0),
+            usage: Arc::new(AgentTurnUsageState::default()),
             max_tokens,
             cancel,
         }
@@ -194,6 +229,14 @@ impl AgentOutputStream {
     pub(crate) fn is_streaming(&self) -> bool {
         self.stream_id.is_some()
     }
+
+    pub(crate) fn usage_state(&self) -> Arc<AgentTurnUsageState> {
+        self.usage.clone()
+    }
+
+    pub(crate) fn usage_snapshot(&self) -> AgentTurnUsage {
+        self.usage.snapshot()
+    }
 }
 
 #[async_trait]
@@ -201,16 +244,31 @@ impl OutputStream for AgentOutputStream {
     async fn emit_text(&self, text: &str) {
         if let Some(max_tokens) = self.max_tokens {
             let estimated = text.len().div_ceil(4) as u64;
-            let used = self
-                .token_count
-                .fetch_add(estimated, Ordering::AcqRel)
-                .saturating_add(estimated);
-            if used > u64::from(max_tokens) {
-                if let Some(cancel) = &self.cancel {
-                    cancel.cancel();
+            let max_tokens = u64::from(max_tokens);
+            let mut current = self.usage.output_tokens.load(Ordering::Acquire);
+            loop {
+                let remaining = max_tokens.saturating_sub(current);
+                let accepted = estimated.min(remaining);
+                match self.usage.output_tokens.compare_exchange_weak(
+                    current,
+                    current.saturating_add(accepted),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) if accepted == estimated => break,
+                    Ok(_) => {
+                        if let Some(cancel) = &self.cancel {
+                            cancel.cancel();
+                        }
+                        return;
+                    }
+                    Err(observed) => current = observed,
                 }
-                return;
             }
+        } else {
+            self.usage
+                .output_tokens
+                .fetch_add(text.len().div_ceil(4) as u64, Ordering::AcqRel);
         }
         self.text.lock().await.push_str(text);
         let Some(stream_id) = &self.stream_id else {
@@ -338,6 +396,9 @@ impl LocalAppsHostBroker {
             prompt_profile_revision: profile.revision,
             budget,
             turn_count: 0,
+            output_tokens_used: 0,
+            bridge_calls_used: 0,
+            mcp_calls_used: 0,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
         };
@@ -383,7 +444,10 @@ impl LocalAppsHostBroker {
             .find(|session| session.session_id == session_id)
             .ok_or_else(|| "Agent session was not found for this app".to_string())?;
         session.status = match action {
-            "resume" => AgentSessionStatus::Active,
+            "resume" if !matches!(session.status, AgentSessionStatus::Closed) => {
+                AgentSessionStatus::Active
+            }
+            "resume" => return Err("closed Agent sessions cannot be resumed".into()),
             "close" => AgentSessionStatus::Closed,
             _ => return Err("action must be resume or close".into()),
         };
@@ -481,6 +545,16 @@ impl LocalAppsHostBroker {
                     "Agent session is not active",
                 ));
             }
+            if session.turn_count >= session.budget.max_turns
+                || session.output_tokens_used >= u64::from(session.budget.max_tokens)
+                || session.bridge_calls_used >= session.budget.max_bridge_calls
+                || session.mcp_calls_used >= session.budget.max_mcp_calls
+            {
+                return Err(BridgeFailure::coded(
+                    "agent_budget_exhausted",
+                    "Agent session resource budget has been exhausted",
+                ));
+            }
             let profile = local_apps::load_profile(&layout)
                 .map_err(|error| BridgeFailure::coded("storage_corrupt", error.to_string()))?;
             (session, profile)
@@ -500,7 +574,11 @@ impl LocalAppsHostBroker {
             request_id,
             stream_id.clone(),
             Some(control.cancel.clone()),
-            Some(session.budget.max_tokens),
+            Some(
+                u64::from(session.budget.max_tokens)
+                    .saturating_sub(session.output_tokens_used)
+                    .min(u64::from(u32::MAX)) as u32,
+            ),
         ));
         {
             let mut active = self.agent_turns.lock().await;
@@ -520,7 +598,7 @@ impl LocalAppsHostBroker {
             app_id,
             session_id,
             prompt.to_string(),
-            session.budget.clone(),
+            session.clone(),
             profile,
             control.cancel.clone(),
             output.clone(),
@@ -535,6 +613,7 @@ impl LocalAppsHostBroker {
         };
         self.agent_turns.lock().await.remove(&turn_id);
         let cancelled = control.cancel.is_cancelled();
+        let usage = output.usage_snapshot();
         let text = output.text_snapshot().await;
         let result = match run_result {
             Ok(_) if cancelled => {
@@ -544,6 +623,8 @@ impl LocalAppsHostBroker {
                     &layout,
                     session_id,
                     true,
+                    false,
+                    usage,
                 )
                 .await
                 .map_err(BridgeFailure::from)?;
@@ -562,6 +643,8 @@ impl LocalAppsHostBroker {
                     &layout,
                     session_id,
                     false,
+                    true,
+                    usage,
                 )
                 .await
                 .map_err(BridgeFailure::from)?;
@@ -581,17 +664,19 @@ impl LocalAppsHostBroker {
                 };
                 if cancelled {
                     output.cancelled(message.clone()).await;
-                    update_agent_session_after_turn(
-                        &self.agent_session_writes,
-                        &layout,
-                        session_id,
-                        true,
-                    )
-                    .await
-                    .map_err(BridgeFailure::from)?;
                 } else {
                     output.error(code, message.clone()).await;
                 }
+                update_agent_session_after_turn(
+                    &self.agent_session_writes,
+                    &layout,
+                    session_id,
+                    cancelled,
+                    false,
+                    usage,
+                )
+                .await
+                .map_err(BridgeFailure::from)?;
                 return Err(BridgeFailure::coded(code, message));
             }
         };
@@ -798,6 +883,8 @@ async fn update_agent_session_after_turn(
     layout: &local_apps::AppLayout,
     session_id: &str,
     cancelled: bool,
+    completed: bool,
+    usage: AgentTurnUsage,
 ) -> Result<(), String> {
     let _guard = writes.lock().await;
     let mut sessions = local_apps::load_sessions(layout).map_err(|error| error.to_string())?;
@@ -805,10 +892,15 @@ async fn update_agent_session_after_turn(
         .iter_mut()
         .find(|session| session.session_id == session_id)
         .ok_or_else(|| "Agent session disappeared while its turn was running".to_string())?;
-    if cancelled {
-        session.status = AgentSessionStatus::Paused;
-    } else {
+    session.output_tokens_used = session
+        .output_tokens_used
+        .saturating_add(usage.output_tokens);
+    session.bridge_calls_used = session.bridge_calls_used.saturating_add(usage.bridge_calls);
+    session.mcp_calls_used = session.mcp_calls_used.saturating_add(usage.mcp_calls);
+    if completed {
         session.turn_count = session.turn_count.saturating_add(1);
+    } else if cancelled && !matches!(session.status, AgentSessionStatus::Closed) {
+        session.status = AgentSessionStatus::Paused;
     }
     session.updated_at_ms = now_ms();
     local_apps::save_sessions(layout, &sessions).map_err(|error| error.to_string())
@@ -824,7 +916,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentOutputStream, LocalAppsAgentExecutor};
+    use super::{update_agent_session_after_turn, AgentOutputStream, LocalAppsAgentExecutor};
     use crate::local_apps_host::LocalAppsHostBroker;
     use async_trait::async_trait;
     use client_adapter::{ClientEventSink, MockSink};
@@ -836,8 +928,9 @@ mod tests {
     use local_apps::mailbox::{load_mailbox, MAX_MAILBOX_EVENTS};
     use local_apps::test_support::FixedClock;
     use local_apps::{
-        load_manifest, load_permissions, save_manifest, save_permissions, AgentBudget,
-        AppAgentProfile, AppCapability, AppLayout, AppService, NoopAppEventObserver,
+        load_manifest, load_permissions, save_manifest, save_permissions, AgentSessionRecord,
+        AgentSessionStatus, AppAgentProfile, AppCapability, AppLayout, AppService,
+        NoopAppEventObserver,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -864,7 +957,7 @@ mod tests {
             _app_id: &str,
             _session_id: &str,
             prompt: String,
-            _budget: AgentBudget,
+            _session: AgentSessionRecord,
             _profile: AppAgentProfile,
             _cancel: CancellationToken,
             output: Arc<AgentOutputStream>,
@@ -1219,6 +1312,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_session_budget_is_cumulative_and_closed_is_terminal() {
+        let h = harness().await;
+        declare_and_grant_agent_sessions(&h);
+        assert!(h
+            .broker
+            .attach_agent_executor(Arc::new(EchoAgentExecutor))
+            .is_ok());
+        let session = h
+            .broker
+            .agent_session_create_value(json!({
+                "app_id": h.app_id,
+                "budget": {
+                    "maxTokens": 32,
+                    "maxWallMs": 120000,
+                    "maxTurns": 1,
+                    "maxBridgeCalls": 64,
+                    "maxMcpCalls": 64,
+                    "maxRecursionDepth": 16
+                }
+            }))
+            .await
+            .expect("create Agent session");
+        let session_id = session["sessionId"].as_str().expect("session id");
+
+        h.broker
+            .agent_send_value(
+                &h.app_id,
+                "request-1",
+                &json!({"sessionId": session_id, "prompt": "one"}),
+            )
+            .await
+            .expect("first turn");
+        let error = h
+            .broker
+            .agent_send_value(
+                &h.app_id,
+                "request-2",
+                &json!({"sessionId": session_id, "prompt": "two"}),
+            )
+            .await
+            .expect_err("the cumulative turn budget must stop the second turn");
+        assert_eq!(error.code, Some("agent_budget_exhausted"));
+
+        h.broker
+            .agent_session_update_value(json!({
+                "app_id": h.app_id,
+                "session_id": session_id,
+                "action": "close"
+            }))
+            .await
+            .expect("close session");
+        let error = h
+            .broker
+            .agent_session_update_value(json!({
+                "app_id": h.app_id,
+                "session_id": session_id,
+                "action": "resume"
+            }))
+            .await
+            .expect_err("closed sessions must not resume");
+        assert!(error.contains("cannot be resumed"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_does_not_reopen_a_closed_session() {
+        let h = harness().await;
+        declare_and_grant_agent_sessions(&h);
+        let session = h
+            .broker
+            .agent_session_create_value(json!({"app_id": h.app_id}))
+            .await
+            .expect("create Agent session");
+        let session_id = session["sessionId"].as_str().expect("session id");
+        h.broker
+            .agent_session_update_value(json!({
+                "app_id": h.app_id,
+                "session_id": session_id,
+                "action": "close"
+            }))
+            .await
+            .expect("close session");
+
+        update_agent_session_after_turn(
+            &h.broker.agent_session_writes,
+            &h.layout,
+            session_id,
+            true,
+            false,
+            Default::default(),
+        )
+        .await
+        .expect("persist cancellation");
+        let stored = local_apps::load_sessions(&h.layout)
+            .expect("session catalog")
+            .into_iter()
+            .find(|value| value.session_id == session_id)
+            .expect("session");
+        assert_eq!(stored.status, AgentSessionStatus::Closed);
+    }
+
+    #[tokio::test]
     async fn agent_stream_output_emits_ordered_frames_and_camel_case_json() {
         let sink = MockSink::arc();
         let output = AgentOutputStream::new(
@@ -1271,5 +1465,6 @@ mod tests {
 
         assert_eq!(output.text_snapshot().await, "12345678");
         assert!(cancel.is_cancelled());
+        assert_eq!(output.usage_snapshot().output_tokens, 2);
     }
 }

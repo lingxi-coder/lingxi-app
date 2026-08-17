@@ -94,6 +94,9 @@ final class LocalAppsStore {
     @ObservationIgnored private var runtimeLastUsedAt: [String: Date] = [:]
     @ObservationIgnored private let websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry
     @ObservationIgnored private var websiteDataCleanupTask: Task<Void, Never>?
+    /// Coalesces simultaneous library/detail refreshes into one bridge call.
+    @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    @ObservationIgnored private var detailsTasks: [String: Task<Void, Never>] = [:]
 
     #if canImport(engine_mobileFFI)
         @ObservationIgnored private var submitCommand: ((ClientCommand) async throws -> Void)?
@@ -267,6 +270,20 @@ final class LocalAppsStore {
     }
 
     func refresh() async {
+        if let refreshTask {
+            await refreshTask.value
+            return
+        }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.refreshTask = nil }
+            await self.performRefresh()
+        }
+        refreshTask = task
+        await task.value
+    }
+
+    private func performRefresh() async {
         #if canImport(engine_mobileFFI)
             guard let submitCommand else {
                 errorMessage = String(localized: "local_apps_error_engine_not_connected")
@@ -286,8 +303,19 @@ final class LocalAppsStore {
 
     func refreshAfterEngineRebind() async {
         await refresh()
-        for appID in apps.map(\.id) {
-            await getDetails(appID: appID)
+        let appIDs = apps.map(\.id)
+        // Rebind used to issue one bridge round-trip after another. Keep a
+        // small batch so large libraries do not flood the FFI queue while the
+        // visible app details still hydrate concurrently.
+        for start in stride(from: 0, to: appIDs.count, by: 8) {
+            let end = min(start + 8, appIDs.count)
+            await withTaskGroup(of: Void.self) { group in
+                for appID in appIDs[start..<end] {
+                    group.addTask { [weak self] in
+                        await self?.getDetails(appID: appID)
+                    }
+                }
+            }
         }
     }
 
@@ -303,6 +331,10 @@ final class LocalAppsStore {
         let trimmed = brief.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             errorMessage = String(localized: "local_apps_error_brief_required")
+            return false
+        }
+        guard pendingCreation == nil else {
+            errorMessage = String(localized: "local_apps_error_create_in_progress")
             return false
         }
         #if canImport(engine_mobileFFI)
@@ -333,7 +365,17 @@ final class LocalAppsStore {
 
     func getDetails(appID: String) async {
         #if canImport(engine_mobileFFI)
-            _ = await send(.getAppDetails(appId: appID))
+            if let detailsTask = detailsTasks[appID] {
+                await detailsTask.value
+                return
+            }
+            let task = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.detailsTasks[appID] = nil }
+                _ = await self.send(.getAppDetails(appId: appID))
+            }
+            detailsTasks[appID] = task
+            await task.value
         #endif
     }
 

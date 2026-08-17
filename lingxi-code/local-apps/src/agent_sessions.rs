@@ -295,6 +295,9 @@ mod tests {
             prompt_profile_revision: 0,
             budget: crate::AgentBudget::default(),
             turn_count: 0,
+            output_tokens_used: 0,
+            bridge_calls_used: 0,
+            mcp_calls_used: 0,
             created_at_ms: 1,
             updated_at_ms: 1,
         };
@@ -336,6 +339,9 @@ mod tests {
             prompt_profile_revision: 0,
             budget: crate::AgentBudget::default(),
             turn_count: 0,
+            output_tokens_used: 0,
+            bridge_calls_used: 0,
+            mcp_calls_used: 0,
             created_at_ms: 1,
             updated_at_ms: 1,
         };

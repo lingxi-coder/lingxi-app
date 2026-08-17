@@ -129,7 +129,7 @@ mod tests {
         for anchor in [
             "app/, src/, components/, lib/, styles/, public/",
             "lib/lingxi-bridge.js",
-            "window.lingxi.v1",
+            "window.lingxi.v2",
             "Do not run npm, npx, node",
             "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, index.html, vite.config.*",
             "host has already scaffolded the workspace",

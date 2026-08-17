@@ -81,7 +81,6 @@ pub enum CapabilityId {
     AgentCancel,
     AgentEmit,
     AgentProfilePropose,
-    AgentProfileApply,
     FlowExecute,
     BackgroundSchedule,
     BackgroundResume,
@@ -124,7 +123,6 @@ impl CapabilityId {
             Self::AgentCancel => "agent.cancel",
             Self::AgentEmit => "agent.emit",
             Self::AgentProfilePropose => "agent.profiles.propose-update",
-            Self::AgentProfileApply => "agent.profiles.apply-approved-update",
             Self::FlowExecute => "flow.execute",
             Self::BackgroundSchedule => "background.schedule",
             Self::BackgroundResume => "background.resume",
@@ -132,7 +130,7 @@ impl CapabilityId {
     }
 
     /// All catalog entries in deterministic identifier order.
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 35] = [
         Self::DataQuery,
         Self::DataMutate,
         Self::NetworkRequest,
@@ -165,7 +163,6 @@ impl CapabilityId {
         Self::AgentCancel,
         Self::AgentEmit,
         Self::AgentProfilePropose,
-        Self::AgentProfileApply,
         Self::FlowExecute,
         Self::BackgroundSchedule,
         Self::BackgroundResume,
@@ -370,13 +367,6 @@ fn descriptor_for(id: CapabilityId) -> CapabilityDescriptor {
             false,
             false,
         ),
-        CapabilityId::AgentProfileApply => (
-            CapabilityTransport::AppMcp,
-            CapabilityScope::Profile,
-            true,
-            false,
-            false,
-        ),
         CapabilityId::FlowExecute => (
             CapabilityTransport::AppMcp,
             CapabilityScope::Turn,
@@ -444,7 +434,6 @@ const fn description_for(id: CapabilityId) -> &'static str {
         CapabilityId::AgentCancel => "Cancel an app-owned Agent turn",
         CapabilityId::AgentEmit => "Emit a structured event to an Agent session",
         CapabilityId::AgentProfilePropose => "Propose a future App Agent Profile revision",
-        CapabilityId::AgentProfileApply => "Apply a user-approved App Agent Profile revision",
         CapabilityId::FlowExecute => "Execute a bounded declarative app flow",
         CapabilityId::BackgroundSchedule => "Schedule an authorized app background flow",
         CapabilityId::BackgroundResume => "Resume a journaled background flow",
@@ -899,6 +888,15 @@ pub struct AgentSessionRecord {
     pub prompt_profile_revision: u64,
     pub budget: AgentBudget,
     pub turn_count: u32,
+    /// Cumulative output-token estimate consumed by this session.
+    #[serde(default)]
+    pub output_tokens_used: u64,
+    /// Cumulative host bridge calls consumed by this session.
+    #[serde(default)]
+    pub bridge_calls_used: u32,
+    /// Cumulative MCP calls consumed by this session.
+    #[serde(default)]
+    pub mcp_calls_used: u32,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -937,6 +935,9 @@ impl AgentSessionRecord {
             || self.budget.max_turns > MAX_AGENT_MAX_TURNS
             || self.budget.max_bridge_calls > MAX_AGENT_MAX_BRIDGE_CALLS
             || self.budget.max_mcp_calls > MAX_AGENT_MAX_MCP_CALLS
+            || self.output_tokens_used > u64::from(self.budget.max_tokens)
+            || self.bridge_calls_used > self.budget.max_bridge_calls
+            || self.mcp_calls_used > self.budget.max_mcp_calls
         {
             return Err(RuntimeContractError::BudgetInvalid);
         }

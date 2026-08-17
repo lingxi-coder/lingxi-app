@@ -513,6 +513,19 @@ impl AppService {
             .collect()
     }
 
+    /// Snapshot the ports pinned by every other app in one state-lock pass.
+    /// Runtime start uses this as a collision set; keeping the record and
+    /// runtime lookup together avoids one linear app search per record.
+    pub async fn pinned_runtime_ports_except(&self, app_id: &str) -> Vec<(String, u16)> {
+        self.state
+            .lock()
+            .await
+            .iter()
+            .filter(|app| app.record.id != app_id)
+            .filter_map(|app| app.runtime.port.map(|port| (app.record.id.clone(), port)))
+            .collect()
+    }
+
     /// The runtime record of one app.
     pub async fn runtime_record(&self, app_id: &str) -> Result<AppRuntimeRecord, AppError> {
         let apps = self.state.lock().await;
@@ -1617,6 +1630,48 @@ mod tests {
             reloaded.port,
             Some(3010),
             "the port pin survives reconciliation"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_runtime_ports_except_reads_other_apps_in_one_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let first = h
+            .service
+            .create_app(Some("First"), "first app", None)
+            .await
+            .unwrap();
+        let second = h
+            .service
+            .create_app(Some("Second"), "second app", None)
+            .await
+            .unwrap();
+        let _ = h.take_events().await;
+        h.service
+            .update_runtime_record(
+                &first.id,
+                AppRuntimeState::Starting,
+                Some(20_001),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        h.service
+            .update_runtime_record(
+                &second.id,
+                AppRuntimeState::Starting,
+                Some(20_002),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            h.service.pinned_runtime_ports_except(&first.id).await,
+            vec![(second.id, 20_002)]
         );
     }
 

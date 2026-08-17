@@ -23,14 +23,14 @@ use local_apps::{
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, watch, Mutex};
+use tokio::sync::{oneshot, watch, Mutex, Semaphore};
 use tokio::time::{sleep, timeout, Duration};
 use traits::mobile_linux::guest_paths;
 use traits::{
@@ -41,12 +41,16 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UI_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const MAX_HTTP_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_STATIC_ASSET_BYTES: u64 = 32 * 1024 * 1024;
+const STATIC_REQUEST_CONCURRENCY: usize = 8;
+const STATIC_ASSET_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_NETWORK_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const STATIC_ACCEPT_RETRY: Duration = Duration::from_millis(50);
 const RUNTIME_SEED_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEPENDENCY_INSTALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEPENDENCY_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PNPM_TOOLCHAIN_KEY: &str = "pnpm@11.22.0/node@24.18.1";
+const DEPENDENCY_SNAPSHOT_VERSION: u8 = 1;
+const DEPENDENCY_SNAPSHOT_READY_FILE: &str = ".lingxi-dependency-ready";
 /// Consecutive `accept()` failures that retire the static server.  A burst of
 /// ECONNABORTED/EMFILE must not, so the cap is deliberately generous
 /// (100 * 50 ms ~= 5 s of an unbroken failure); a listener whose I/O driver is
@@ -60,6 +64,8 @@ const APP_PORT_WINDOW_LEN: u16 = 12_000;
 const LOCAL_APP_BRIDGE_CONTROL_BYTES: usize = 64 * 1024;
 const LOCAL_APP_BRIDGE_LLM_BYTES: usize = 8 * 1024 * 1024;
 static LOCAL_APP_BUILD_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
+static DEPENDENCY_SNAPSHOT_DIGESTS: OnceLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
+    OnceLock::new();
 const LOCAL_APP_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 #[derive(Debug)]
@@ -286,7 +292,8 @@ mod llm_ops;
 #[path = "local_apps_host_agent.rs"]
 mod agent_ops;
 pub(crate) use agent_ops::{
-    AgentOutputRouter, AgentOutputStream, AgentTurnControl, LocalAppsAgentExecutor,
+    AgentOutputRouter, AgentOutputStream, AgentTurnControl, AgentTurnUsageState,
+    LocalAppsAgentExecutor,
 };
 
 /// A bridge failure: human-readable message plus an optional stable machine
@@ -456,6 +463,9 @@ pub(crate) struct LocalAppsHostBroker {
     /// reads and the bind hop only — never across a call into client or
     /// listener code, which is the rule `AppEmissionQueue` exists to keep.
     port_allocation: Mutex<()>,
+    /// Serializes dependency snapshot publication/materialization per lock
+    /// digest so concurrent app creates do not run the same install twice.
+    dependency_snapshot_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     next_request_id: AtomicU64,
 }
 
@@ -508,6 +518,7 @@ impl LocalAppsHostBroker {
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
             port_allocation: Mutex::new(()),
+            dependency_snapshot_locks: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
         });
         // The one place an `Arc<Self>` exists; the exit watchers downgrade
@@ -553,6 +564,10 @@ impl LocalAppsHostBroker {
         LOCAL_APP_BUILD_LOCK
             .get_or_init(|| Arc::new(Mutex::new(())))
             .clone()
+    }
+
+    pub(crate) async fn has_active_runtimes(&self) -> bool {
+        !self.runtimes.lock().await.is_empty()
     }
 
     pub(crate) fn attach_llm(
@@ -618,6 +633,20 @@ impl LocalAppsHostBroker {
             .join("dependency-cache")
             .join("pnpm")
             .join("11.22.0")
+    }
+
+    fn dependency_snapshot_root(&self, lock_digest: &str) -> PathBuf {
+        self.dependency_store_root()
+            .join("snapshots")
+            .join(lock_digest)
+    }
+
+    async fn dependency_snapshot_lock(&self, lock_digest: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.dependency_snapshot_locks.lock().await;
+        locks
+            .entry(lock_digest.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     fn workspace_dependencies_ready(layout: &AppLayout) -> Result<bool, String> {
@@ -728,6 +757,170 @@ impl LocalAppsHostBroker {
             std::fs::remove_file(path)
                 .map_err(|error| format!("remove owned file {}: {error}", path.display()))
         }
+    }
+
+    fn dependency_snapshot_is_ready(
+        snapshot_root: &Path,
+        lock_digest: &str,
+    ) -> Result<bool, String> {
+        let root_metadata = match std::fs::symlink_metadata(snapshot_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "inspect dependency snapshot {}: {error}",
+                    snapshot_root.display()
+                ))
+            }
+        };
+        if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        let marker = snapshot_root.join(DEPENDENCY_SNAPSHOT_READY_FILE);
+        let marker_metadata = match std::fs::symlink_metadata(&marker) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "inspect dependency snapshot marker {}: {error}",
+                    marker.display()
+                ))
+            }
+        };
+        if !marker_metadata.is_file() || marker_metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        let marker_contents = std::fs::read_to_string(&marker)
+            .map_err(|error| format!("read dependency snapshot marker: {error}"))?;
+        let mut marker_lines = marker_contents.lines();
+        let expected_version = DEPENDENCY_SNAPSHOT_VERSION.to_string();
+        if marker_lines.next() != Some(expected_version.as_str())
+            || marker_lines.next() != Some(lock_digest)
+            || marker_lines.next() != Some(PNPM_TOOLCHAIN_KEY)
+        {
+            return Ok(false);
+        }
+        let Some(expected_tree_digest) = marker_lines.next() else {
+            return Ok(false);
+        };
+        if marker_lines.next().is_some() || expected_tree_digest.is_empty() {
+            return Ok(false);
+        }
+        let node_modules = snapshot_root.join("node_modules");
+        let node_modules_metadata = match std::fs::symlink_metadata(&node_modules) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("inspect dependency snapshot node_modules: {error}")),
+        };
+        if !node_modules_metadata.is_dir() || node_modules_metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        let digest_cached = DEPENDENCY_SNAPSHOT_DIGESTS
+            .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+            .lock()
+            .expect("dependency snapshot digest cache poisoned")
+            .get(snapshot_root)
+            .is_some_and(|digest| digest == expected_tree_digest);
+        if !digest_cached {
+            validate_dependency_tree(&node_modules)?;
+            let actual_tree_digest = dependency_tree_digest(&node_modules)?;
+            if actual_tree_digest != expected_tree_digest {
+                return Ok(false);
+            }
+            DEPENDENCY_SNAPSHOT_DIGESTS
+                .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+                .lock()
+                .expect("dependency snapshot digest cache poisoned")
+                .insert(snapshot_root.to_path_buf(), actual_tree_digest);
+        }
+        let vite = node_modules.join("vite/bin/vite.js");
+        let vite_metadata = match std::fs::symlink_metadata(&vite) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "inspect dependency snapshot Vite executable: {error}"
+                ))
+            }
+        };
+        Ok(vite_metadata.is_file() && !vite_metadata.file_type().is_symlink())
+    }
+
+    fn publish_dependency_snapshot(
+        source_node_modules: &Path,
+        snapshot_root: &Path,
+        lock_digest: &str,
+    ) -> Result<(), String> {
+        if Self::dependency_snapshot_is_ready(snapshot_root, lock_digest)? {
+            return Ok(());
+        }
+        match std::fs::symlink_metadata(snapshot_root) {
+            Ok(_) => Self::remove_owned_path(snapshot_root)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect existing dependency snapshot {}: {error}",
+                    snapshot_root.display()
+                ))
+            }
+        }
+        let parent = snapshot_root.parent().ok_or_else(|| {
+            format!(
+                "dependency snapshot has no parent: {}",
+                snapshot_root.display()
+            )
+        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create dependency snapshot parent: {error}"))?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let staging_root = parent.join(format!(".{lock_digest}.staging-{stamp}"));
+        Self::remove_owned_path(&staging_root)?;
+        std::fs::create_dir_all(&staging_root)
+            .map_err(|error| format!("create dependency snapshot staging: {error}"))?;
+        if let Err(error) =
+            clone_or_copy_tree(source_node_modules, &staging_root.join("node_modules"))
+                .and_then(|_| {
+                    let tree_digest = dependency_tree_digest(&staging_root.join("node_modules"))
+                        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+                    let marker = staging_root.join(DEPENDENCY_SNAPSHOT_READY_FILE);
+                    let expected = format!(
+                        "{DEPENDENCY_SNAPSHOT_VERSION}\n{lock_digest}\n{PNPM_TOOLCHAIN_KEY}\n{tree_digest}\n"
+                    );
+                    std::fs::write(marker, expected)
+                        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))
+                })
+                .and_then(|_| {
+                    validate_dependency_tree(&staging_root.join("node_modules"))
+                        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))
+                })
+                .and_then(|_| make_dependency_files_read_only(&staging_root.join("node_modules")))
+        {
+            let _ = Self::remove_owned_path(&staging_root);
+            return Err(format!("prepare dependency snapshot: {error}"));
+        }
+        if let Err(error) = std::fs::rename(&staging_root, snapshot_root) {
+            let _ = Self::remove_owned_path(&staging_root);
+            if snapshot_root.exists()
+                && Self::dependency_snapshot_is_ready(snapshot_root, lock_digest)?
+            {
+                return Ok(());
+            }
+            return Err(format!("publish dependency snapshot: {error}"));
+        }
+        Ok(())
+    }
+
+    fn materialize_dependency_snapshot(
+        snapshot_root: &Path,
+        staging_root: &Path,
+    ) -> Result<(), String> {
+        let destination = staging_root.join("node_modules");
+        Self::remove_owned_path(&destination)?;
+        clone_or_copy_tree(&snapshot_root.join("node_modules"), &destination)
+            .map_err(|error| format!("materialize dependency snapshot: {error}"))
     }
 
     fn promote_dependency_tree(workspace: &Path, staging: &Path) -> Result<(), String> {
@@ -868,6 +1061,44 @@ impl LocalAppsHostBroker {
         })?
     }
 
+    async fn finalize_dependency_install(
+        &self,
+        service: &Arc<AppService>,
+        layout: &AppLayout,
+        app_id: &str,
+        dependency_staging: &Path,
+        expected_lock_digest: &str,
+    ) -> Result<(), String> {
+        let workspace = layout.root().join(layout.workspace_rel());
+        // The lockfile is host-managed, but re-check it immediately before
+        // promotion so a concurrent restore/edit cannot publish a tree built
+        // for an older digest into the live workspace.
+        let before_promotion = Self::dependency_lock_digest(layout)?;
+        if before_promotion != expected_lock_digest {
+            return Err("dependency lock changed before promotion".into());
+        }
+        Self::promote_dependency_tree(&workspace, dependency_staging)?;
+        if !Self::workspace_dependencies_ready(layout)? {
+            return Err(format!(
+                "dependency install finished but {} was not produced",
+                Self::app_dependency_marker(layout).display()
+            ));
+        }
+        let actual_lock_digest = Self::dependency_lock_digest(layout)?;
+        if actual_lock_digest != expected_lock_digest {
+            return Err("dependency lock changed while installation was running".into());
+        }
+        service
+            .complete_dependency_install_with_metadata(
+                app_id,
+                Some(actual_lock_digest),
+                Some(PNPM_TOOLCHAIN_KEY.to_string()),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     async fn run_dependency_install(&self, app_id: String) {
         let service = match self.service() {
             Ok(service) => service,
@@ -901,15 +1132,20 @@ impl LocalAppsHostBroker {
                 return;
             }
         };
-        let Some(runtime) = self.mobile_linux() else {
-            let error = "the mobile Node runtime is unavailable for dependency installation";
-            let _ = service
-                .fail_dependency_install(&app_id, error.to_string())
-                .await;
-            tracing::warn!(app_id = %app_id, error, "dependency install has no mobile runtime");
-            return;
-        };
         let workspace = layout.root().join(layout.workspace_rel());
+        let lock_digest = match Self::dependency_lock_digest(&layout) {
+            Ok(digest) => digest,
+            Err(error) => {
+                let _ = service
+                    .fail_dependency_install(&app_id, error.clone())
+                    .await;
+                tracing::warn!(app_id = %app_id, error = %error, "dependency lock digest failed");
+                return;
+            }
+        };
+        let snapshot_root = self.dependency_snapshot_root(&lock_digest);
+        let snapshot_lock = self.dependency_snapshot_lock(&lock_digest).await;
+        let _snapshot_guard = snapshot_lock.lock().await;
         let dependency_staging = match Self::prepare_dependency_staging(&layout) {
             Ok(path) => path,
             Err(error) => {
@@ -919,6 +1155,54 @@ impl LocalAppsHostBroker {
                 tracing::warn!(app_id = %app_id, error = %error, "dependency install staging failed");
                 return;
             }
+        };
+        let snapshot_ready = match Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest)
+        {
+            Ok(ready) => ready,
+            Err(error) => {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                let _ = service
+                    .fail_dependency_install(&app_id, error.clone())
+                    .await;
+                tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot validation failed");
+                return;
+            }
+        };
+        if snapshot_ready {
+            if let Err(error) =
+                Self::materialize_dependency_snapshot(&snapshot_root, &dependency_staging)
+            {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                let _ = service
+                    .fail_dependency_install(&app_id, error.clone())
+                    .await;
+                tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot promotion failed");
+                return;
+            }
+            if let Err(error) = self
+                .finalize_dependency_install(
+                    &service,
+                    &layout,
+                    &app_id,
+                    &dependency_staging,
+                    &lock_digest,
+                )
+                .await
+            {
+                let _ = service
+                    .fail_dependency_install(&app_id, error.clone())
+                    .await;
+                tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot verification failed");
+            }
+            return;
+        }
+        let Some(runtime) = self.mobile_linux() else {
+            let error = "the mobile Node runtime is unavailable for dependency installation";
+            let _ = service
+                .fail_dependency_install(&app_id, error.to_string())
+                .await;
+            tracing::warn!(app_id = %app_id, error, "dependency install has no mobile runtime");
+            return;
         };
         let build_mount = MountSpec {
             host_path: workspace.clone(),
@@ -1025,48 +1309,32 @@ impl LocalAppsHostBroker {
         };
         match outcome {
             Ok(()) => {
-                if let Err(error) = Self::promote_dependency_tree(&workspace, &dependency_staging) {
+                if let Err(error) = Self::publish_dependency_snapshot(
+                    &dependency_staging.join("node_modules"),
+                    &snapshot_root,
+                    &lock_digest,
+                ) {
+                    let _ = Self::remove_owned_path(&dependency_staging);
                     let _ = service
                         .fail_dependency_install(&app_id, error.clone())
                         .await;
-                    tracing::warn!(app_id = %app_id, error = %error, "dependency install promotion failed");
+                    tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot publication failed");
                     return;
                 }
-                if let Err(error) = Self::workspace_dependencies_ready(&layout).and_then(|ready| {
-                    if ready {
-                        Ok(())
-                    } else {
-                        Err(format!(
-                            "pnpm install finished but {} was not produced",
-                            Self::app_dependency_marker(&layout).display()
-                        ))
-                    }
-                }) {
+                if let Err(error) = self
+                    .finalize_dependency_install(
+                        &service,
+                        &layout,
+                        &app_id,
+                        &dependency_staging,
+                        &lock_digest,
+                    )
+                    .await
+                {
                     let _ = service
                         .fail_dependency_install(&app_id, error.clone())
                         .await;
                     tracing::warn!(app_id = %app_id, error = %error, "dependency install verification failed");
-                    return;
-                }
-                let lock_digest = match Self::dependency_lock_digest(&layout) {
-                    Ok(digest) => digest,
-                    Err(error) => {
-                        let _ = service
-                            .fail_dependency_install(&app_id, error.clone())
-                            .await;
-                        tracing::warn!(app_id = %app_id, error = %error, "dependency lock digest failed");
-                        return;
-                    }
-                };
-                if let Err(error) = service
-                    .complete_dependency_install_with_metadata(
-                        &app_id,
-                        Some(lock_digest),
-                        Some(PNPM_TOOLCHAIN_KEY.to_string()),
-                    )
-                    .await
-                {
-                    tracing::warn!(app_id = %app_id, error = %error, "dependency install could not mark ready");
                 }
             }
             Err(error) => {
@@ -1693,16 +1961,14 @@ impl LocalAppsHostBroker {
             AppBridgeOperationDto::AgentPost => {
                 self.agent_post_value(&request.app_id, &payload).await
             }
-            AppBridgeOperationDto::AgentSessionCreate => {
-                self.agent_session_create_value(Value::Object(input))
-                    .await
-                    .map_err(BridgeFailure::from)
-            }
-            AppBridgeOperationDto::AgentSessionList => {
-                self.agent_session_list_value(Value::Object(input))
-                    .await
-                    .map_err(BridgeFailure::from)
-            }
+            AppBridgeOperationDto::AgentSessionCreate => self
+                .agent_session_create_value(Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
+            AppBridgeOperationDto::AgentSessionList => self
+                .agent_session_list_value(Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
             AppBridgeOperationDto::AgentSessionResume => {
                 input.insert("action".into(), Value::String("resume".into()));
                 self.agent_session_update_value(Value::Object(input))
@@ -1715,20 +1981,21 @@ impl LocalAppsHostBroker {
                     .await
                     .map_err(BridgeFailure::from)
             }
-            AppBridgeOperationDto::AgentSend => self
-                .agent_send_value(&request.app_id, &request.request_id, &payload)
-                .await,
-            AppBridgeOperationDto::AgentStream => self
-                .agent_stream_value(&request.app_id, &request.request_id, &payload)
-                .await,
-            AppBridgeOperationDto::AgentCancel => self
-                .agent_cancel_value(&request.app_id, &payload)
-                .await,
-            AppBridgeOperationDto::AgentProfileProposeUpdate => {
-                self.agent_profile_propose_value(Value::Object(input))
+            AppBridgeOperationDto::AgentSend => {
+                self.agent_send_value(&request.app_id, &request.request_id, &payload)
                     .await
-                    .map_err(BridgeFailure::from)
             }
+            AppBridgeOperationDto::AgentStream => {
+                self.agent_stream_value(&request.app_id, &request.request_id, &payload)
+                    .await
+            }
+            AppBridgeOperationDto::AgentCancel => {
+                self.agent_cancel_value(&request.app_id, &payload).await
+            }
+            AppBridgeOperationDto::AgentProfileProposeUpdate => self
+                .agent_profile_propose_value(Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
             _ => Err("unsupported bridge operation for this engine version".into()),
         }
     }
@@ -1744,8 +2011,9 @@ impl LocalAppsHostBroker {
             AppBridgeOperationDto::RuntimeStatus => local_apps::CapabilityId::RuntimeStatus,
             AppBridgeOperationDto::CapturePhoto => local_apps::CapabilityId::Camera,
             AppBridgeOperationDto::PickImage => local_apps::CapabilityId::PhotoLibrary,
-            AppBridgeOperationDto::RecordAudioStart
-            | AppBridgeOperationDto::RecordAudioStop => local_apps::CapabilityId::Microphone,
+            AppBridgeOperationDto::RecordAudioStart | AppBridgeOperationDto::RecordAudioStop => {
+                local_apps::CapabilityId::Microphone
+            }
             AppBridgeOperationDto::GetLocation => local_apps::CapabilityId::Location,
             AppBridgeOperationDto::TranscribeSpeech => local_apps::CapabilityId::SpeechToText,
             AppBridgeOperationDto::PostNotification => local_apps::CapabilityId::Notifications,
@@ -1758,9 +2026,7 @@ impl LocalAppsHostBroker {
             AppBridgeOperationDto::AgentSessionResume => {
                 local_apps::CapabilityId::AgentSessionResume
             }
-            AppBridgeOperationDto::AgentSessionClose => {
-                local_apps::CapabilityId::AgentSessionClose
-            }
+            AppBridgeOperationDto::AgentSessionClose => local_apps::CapabilityId::AgentSessionClose,
             AppBridgeOperationDto::AgentSend => local_apps::CapabilityId::AgentSend,
             AppBridgeOperationDto::AgentStream => local_apps::CapabilityId::AgentStream,
             AppBridgeOperationDto::AgentCancel => local_apps::CapabilityId::AgentCancel,
@@ -2467,7 +2733,7 @@ impl LocalAppsHostBroker {
              - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `mcp__local_apps__list` or `mcp__local_apps__get` to rediscover or confirm it, and do not call `mcp__local_apps__create` again.\n\
              - Edit ONLY app-owned files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
              {setup_path}\
-             - The page reaches host data/network/device ONLY through `window.lingxi.v1` \
+             - The page reaches host data/network/device ONLY through `window.lingxi.v2` \
              (see `lib/lingxi-bridge.js`).\n\
              - Declare data collections / network domains / capabilities through \
              `mcp__local_apps__update_manifest` BEFORE the page relies on them; runtime \
@@ -3144,7 +3410,8 @@ fn derived_window_slot(app_id: &str) -> u16 {
 ///
 /// Read on demand rather than kept as a registry: the records ARE the
 /// registry, and a cached copy would be one more thing to invalidate on
-/// create/delete.  One in-memory lock per app in the profile.
+/// create/delete. The service returns the record/runtime pair from one
+/// in-memory state-lock pass.
 ///
 /// Twice per start in the ordinary case, not once — the snapshot the caller
 /// reads before `bind_stable_loopback` cannot be trusted to still be true when
@@ -3152,18 +3419,7 @@ fn derived_window_slot(app_id: &str) -> u16 {
 /// read.  Every result is a snapshot; only one taken while the port in question
 /// is leased says anything durable about it.
 async fn sibling_pinned_ports(service: &AppService, app_id: &str) -> Vec<(String, u16)> {
-    let mut pinned = Vec::new();
-    for record in service.records().await {
-        if record.id == app_id {
-            continue;
-        }
-        if let Ok(runtime) = service.runtime_record(&record.id).await {
-            if let Some(port) = runtime.port {
-                pinned.push((record.id, port));
-            }
-        }
-    }
-    pinned
+    service.pinned_runtime_ports_except(app_id).await
 }
 
 /// Returns `None` on the requested shutdown, and `Some(detail)` when the
@@ -3175,32 +3431,43 @@ async fn run_static_server(
     mut shutdown: oneshot::Receiver<()>,
 ) -> Option<String> {
     let mut consecutive_errors = 0u32;
+    let request_slots = Arc::new(Semaphore::new(STATIC_REQUEST_CONCURRENCY));
     loop {
-        tokio::select! {
+        let slot = tokio::select! {
             _ = &mut shutdown => return None,
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    consecutive_errors = 0;
-                    let root = root.clone();
-                    tokio::spawn(async move {
-                        let _ = serve_static_request(stream, &root).await;
-                    });
+            acquired = Arc::clone(&request_slots).acquire_owned() => match acquired {
+                Ok(slot) => slot,
+                Err(_) => return Some("static app server request limiter closed".into()),
+            },
+        };
+        let accepted = tokio::select! {
+            _ = &mut shutdown => return None,
+            accepted = listener.accept() => accepted,
+        };
+        match accepted {
+            Ok((stream, _)) => {
+                consecutive_errors = 0;
+                let root = root.clone();
+                tokio::spawn(async move {
+                    let _slot = slot;
+                    let _ = serve_static_request(stream, &root).await;
+                });
+            }
+            Err(error) => {
+                drop(slot);
+                // ECONNABORTED / EMFILE / EINTR describe ONE would-be
+                // connection, not the listener, so a single error must not
+                // retire the loop.  A listener whose runtime's I/O driver
+                // was dropped fails EVERY poll though, and retrying that
+                // forever is a permanent busy loop behind an entry that
+                // still reports `running`.
+                consecutive_errors += 1;
+                if consecutive_errors >= STATIC_ACCEPT_ERROR_LIMIT {
+                    return Some(format!(
+                        "static app server stopped accepting connections after {consecutive_errors} consecutive failures: {error}"
+                    ));
                 }
-                Err(error) => {
-                    // ECONNABORTED / EMFILE / EINTR describe ONE would-be
-                    // connection, not the listener, so a single error must not
-                    // retire the loop.  A listener whose runtime's I/O driver
-                    // was dropped fails EVERY poll though, and retrying that
-                    // forever is a permanent busy loop behind an entry that
-                    // still reports `running`.
-                    consecutive_errors += 1;
-                    if consecutive_errors >= STATIC_ACCEPT_ERROR_LIMIT {
-                        return Some(format!(
-                            "static app server stopped accepting connections after {consecutive_errors} consecutive failures: {error}"
-                        ));
-                    }
-                    sleep(STATIC_ACCEPT_RETRY).await;
-                }
+                sleep(STATIC_ACCEPT_RETRY).await;
             }
         }
     }
@@ -3258,11 +3525,15 @@ async fn serve_static_request(mut stream: TcpStream, root: &Path) -> Result<(), 
     let mut request = vec![0u8; MAX_HTTP_REQUEST_BYTES];
     let count = stream.read(&mut request).await?;
     request.truncate(count);
-    let line = String::from_utf8_lossy(&request)
+    let request_text = String::from_utf8_lossy(&request);
+    let line = request_text.lines().next().unwrap_or_default().to_string();
+    let if_none_match = request_text
         .lines()
-        .next()
-        .unwrap_or_default()
-        .to_string();
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
+        })
+        .map(|(_, value)| value.trim().to_string());
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let raw_path = parts.next().unwrap_or_default();
@@ -3290,7 +3561,20 @@ async fn serve_static_request(mut stream: TcpStream, root: &Path) -> Result<(), 
     if path.is_dir() {
         path.push("index.html");
     }
-    let metadata = match tokio::fs::metadata(&path).await {
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(_) => {
+            return write_http(
+                &mut stream,
+                404,
+                "text/plain",
+                b"not found",
+                method == "HEAD",
+            )
+            .await;
+        }
+    };
+    let metadata = match file.metadata().await {
         Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_STATIC_ASSET_BYTES => metadata,
         _ => {
             return write_http(
@@ -3303,16 +3587,93 @@ async fn serve_static_request(mut stream: TcpStream, root: &Path) -> Result<(), 
             .await;
         }
     };
-    let body = tokio::fs::read(&path).await?;
-    debug_assert_eq!(metadata.len(), body.len() as u64);
-    write_http(
+    let served_relative = path.strip_prefix(root).unwrap_or(&path);
+    let etag = static_etag(&path, &metadata);
+    if if_none_match
+        .as_deref()
+        .is_some_and(|header| etag_matches(header, &etag))
+    {
+        return write_not_modified(&mut stream, &etag, static_cache_control(served_relative)).await;
+    }
+    write_static_file(
         &mut stream,
-        200,
+        file,
+        metadata.len(),
         content_type(&path),
-        &body,
+        static_cache_control(served_relative),
+        &etag,
         method == "HEAD",
     )
     .await
+}
+
+fn static_cache_control(path: &Path) -> &'static str {
+    if is_hashed_asset(path) {
+        "public, max-age=31536000, immutable"
+    } else if path.file_name().and_then(|name| name.to_str()) == Some("index.html") {
+        "no-cache"
+    } else {
+        "no-store"
+    }
+}
+
+fn is_hashed_asset(path: &Path) -> bool {
+    let mut components = path.components();
+    if !matches!(
+        components.next(),
+        Some(std::path::Component::Normal(component)) if component == "assets"
+    ) {
+        return false;
+    }
+    let Some(file_name) = path.file_stem().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(hash) = file_name.rsplit('-').next() else {
+        return false;
+    };
+    hash.len() >= 8 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+async fn write_static_file(
+    stream: &mut TcpStream,
+    mut file: tokio::fs::File,
+    content_length: u64,
+    content_type: &str,
+    cache_control: &str,
+    etag: &str,
+    head: bool,
+) -> Result<(), std::io::Error> {
+    let header =
+        static_response_header(200, content_type, content_length, cache_control, Some(etag));
+    stream.write_all(header.as_bytes()).await?;
+    if !head {
+        let mut buffer = vec![0u8; STATIC_ASSET_CHUNK_BYTES];
+        loop {
+            let count = file.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            stream.write_all(&buffer[..count]).await?;
+        }
+    }
+    stream.shutdown().await
+}
+
+fn etag_matches(header: &str, current: &str) -> bool {
+    header.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == current
+    })
+}
+
+async fn write_not_modified(
+    stream: &mut TcpStream,
+    etag: &str,
+    cache_control: &str,
+) -> Result<(), std::io::Error> {
+    let header = static_response_header(304, "text/plain", 0, cache_control, Some(etag));
+    stream.write_all(header.as_bytes()).await?;
+    stream.shutdown().await
 }
 
 fn safe_static_path(raw: &str) -> Option<PathBuf> {
@@ -3343,22 +3704,46 @@ async fn write_http(
     body: &[u8],
     head: bool,
 ) -> Result<(), std::io::Error> {
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        _ => "Error",
-    };
-    let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nContent-Security-Policy: {LOCAL_APP_CONTENT_SECURITY_POLICY}\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-        body.len(),
-    );
+    let header = static_response_header(status, content_type, body.len() as u64, "no-store", None);
     stream.write_all(header.as_bytes()).await?;
     if !head {
         stream.write_all(body).await?;
     }
     stream.shutdown().await
+}
+
+fn static_response_header(
+    status: u16,
+    content_type: &str,
+    content_length: u64,
+    cache_control: &str,
+    etag: Option<&str>,
+) -> String {
+    let reason = match status {
+        200 => "OK",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        _ => "Error",
+    };
+    let etag_header = etag
+        .map(|value| format!("ETag: {value}\r\n"))
+        .unwrap_or_default();
+    format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {content_length}\r\nContent-Type: {content_type}\r\nContent-Security-Policy: {LOCAL_APP_CONTENT_SECURITY_POLICY}\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nCache-Control: {cache_control}\r\n{etag_header}Connection: close\r\n\r\n"
+    )
+}
+
+fn static_etag(path: &Path, metadata: &std::fs::Metadata) -> String {
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let path_digest = Sha256::digest(path.to_string_lossy().as_bytes());
+    format!("\"{}-{}-{:x}\"", modified_ns, metadata.len(), path_digest)
 }
 
 fn content_type(path: &Path) -> &'static str {
@@ -3374,6 +3759,198 @@ fn content_type(path: &Path) -> &'static str {
         Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     }
+}
+
+fn validate_dependency_tree(root: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| format!("inspect dependency tree {}: {error}", root.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "dependency tree contains a symlink: {}",
+            root.display()
+        ));
+    }
+    if metadata.is_file() {
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "dependency tree entry is not regular: {}",
+            root.display()
+        ));
+    }
+    for entry in std::fs::read_dir(root)
+        .map_err(|error| format!("read dependency tree {}: {error}", root.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read dependency tree entry: {error}"))?;
+        validate_dependency_tree(&entry.path())?;
+    }
+    Ok(())
+}
+
+fn dependency_tree_digest(root: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    collect_dependency_files(root, Path::new(""), &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut digest = Sha256::new();
+    for (relative, path) in files {
+        digest.update(relative.as_bytes());
+        digest.update([0]);
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("read dependency tree file {}: {error}", path.display()))?;
+        digest.update(bytes);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn collect_dependency_files(
+    root: &Path,
+    relative: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| format!("inspect dependency tree {}: {error}", root.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "dependency tree contains a symlink: {}",
+            root.display()
+        ));
+    }
+    if metadata.is_file() {
+        files.push((relative.to_string_lossy().into_owned(), root.to_path_buf()));
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "dependency tree entry is not regular: {}",
+            root.display()
+        ));
+    }
+    for entry in std::fs::read_dir(root)
+        .map_err(|error| format!("read dependency tree {}: {error}", root.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read dependency tree entry: {error}"))?;
+        let child_relative = if relative.as_os_str().is_empty() {
+            PathBuf::from(entry.file_name())
+        } else {
+            relative.join(entry.file_name())
+        };
+        collect_dependency_files(&entry.path(), &child_relative, files)?;
+    }
+    Ok(())
+}
+
+fn make_dependency_files_read_only(root: &Path) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("dependency tree contains a symlink: {}", root.display()),
+        ));
+    }
+    if metadata.is_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(permissions.mode() & !0o222);
+            std::fs::set_permissions(root, permissions)?;
+        }
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(root)? {
+        make_dependency_files_read_only(&entry?.path())?;
+    }
+    Ok(())
+}
+
+fn clone_or_copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "dependency source symlink is forbidden: {}",
+                source.display()
+            ),
+        ));
+    }
+    if metadata.is_file() {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        return std::fs::copy(source, destination).map(|_| ());
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("dependency source is not regular: {}", source.display()),
+        ));
+    }
+    if try_clone_tree(source, destination).is_ok() {
+        return Ok(());
+    }
+    let _ = std::fs::remove_dir_all(destination);
+    std::fs::create_dir_all(destination)?;
+    copy_dependency_tree(source, destination)
+}
+
+fn copy_dependency_tree(source: &Path, destination: &Path) -> io::Result<()> {
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&source_path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "dependency source symlink is forbidden: {}",
+                    source_path.display()
+                ),
+            ));
+        }
+        if metadata.is_dir() {
+            std::fs::create_dir_all(&destination_path)?;
+            copy_dependency_tree(&source_path, &destination_path)?;
+        } else if metadata.is_file() {
+            std::fs::copy(&source_path, &destination_path)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "dependency source is not regular: {}",
+                    source_path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn try_clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+
+    let mut command = Command::new("cp");
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(target_os = "macos")]
+    command.args(["-R", "-c"]);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    command.args(["-R", "--reflink=always"]);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "copy-on-write clone is unavailable on this platform",
+    ));
+    command.arg("--").arg(source).arg(destination);
+    let status = command.status()?;
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("copy-on-write clone exited with {status}"),
+        ));
+    }
+    validate_dependency_tree(destination).map_err(io::Error::other)
 }
 
 fn public_ip(ip: IpAddr) -> bool {
@@ -4162,6 +4739,68 @@ mod tests {
         assert_eq!(safe_static_path("/../secret"), None);
         assert_eq!(safe_static_path("/%2e%2e/secret"), None);
         assert_eq!(safe_static_path("/assets\\secret"), None);
+    }
+
+    #[test]
+    fn static_assets_use_safe_cache_policy() {
+        assert_eq!(
+            static_cache_control(Path::new("assets/index-0123abcd.js")),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(static_cache_control(Path::new("index.html")), "no-cache");
+        assert_eq!(
+            static_cache_control(Path::new("assets/runtime.js")),
+            "no-store"
+        );
+        assert!(is_hashed_asset(Path::new(
+            "assets/nested/chunk-deadbeef.css"
+        )));
+        assert!(!is_hashed_asset(Path::new("assets/chunk-short.js")));
+    }
+
+    #[test]
+    fn if_none_match_supports_weak_lists_and_wildcard() {
+        assert!(etag_matches("W/\"abc\", \"def\"", "\"def\""));
+        assert!(etag_matches("*", "\"anything\""));
+        assert!(!etag_matches("\"old\"", "\"new\""));
+    }
+
+    #[test]
+    fn dependency_snapshot_is_atomic_and_reusable() {
+        let root = TempDir::new().expect("tempdir");
+        let source = root.path().join("install/node_modules");
+        fs::create_dir_all(source.join("vite/bin")).expect("source tree");
+        fs::write(source.join("vite/bin/vite.js"), b"vite").expect("vite marker");
+        fs::write(source.join("react.js"), b"react").expect("dependency");
+        let snapshot = root.path().join("cache/snapshot");
+        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+            .expect("publish snapshot");
+        assert!(
+            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("validate snapshot")
+        );
+
+        let staging = root.path().join("staging");
+        fs::create_dir_all(&staging).expect("staging");
+        LocalAppsHostBroker::materialize_dependency_snapshot(&snapshot, &staging)
+            .expect("materialize snapshot");
+        assert_eq!(
+            fs::read(staging.join("node_modules/react.js")).expect("materialized dependency"),
+            b"react"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dependency_snapshot_rejects_symlink_entries() {
+        let root = TempDir::new().expect("tempdir");
+        let source = root.path().join("node_modules");
+        fs::create_dir_all(&source).expect("source tree");
+        fs::write(root.path().join("outside"), b"outside").expect("outside");
+        std::os::unix::fs::symlink(root.path().join("outside"), source.join("escape"))
+            .expect("symlink");
+        let error = validate_dependency_tree(&source).expect_err("symlink must be rejected");
+        assert!(error.contains("symlink"), "{error}");
     }
 
     #[test]

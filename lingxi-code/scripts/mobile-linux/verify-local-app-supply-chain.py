@@ -827,7 +827,7 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "mcp__local_apps__query_data",
         "mcp__local_apps__mutate_data",
         "mcp__local_apps__restore_checkpoint",
-        "window.lingxi.v1",
+        "window.lingxi.v2",
         "Do not call `mcp__local_apps__list` or `mcp__local_apps__get`",
         "call `AskUserQuestion`",
         "Never ask unresolved questions in ordinary assistant text",

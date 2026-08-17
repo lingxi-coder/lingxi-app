@@ -367,7 +367,7 @@ pub struct AppDetailsDto {
     pub checkpoints: Vec<AppCheckpointDto>,
 }
 
-/// Operations accepted by the versioned `window.lingxi.v1` bridge.
+/// Operations accepted by the versioned `window.lingxi.v2` bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "snake_case")]
@@ -612,6 +612,12 @@ pub struct AppAgentSessionDto {
     pub prompt_profile_revision: u64,
     pub budget: AppAgentBudgetDto,
     pub turn_count: u32,
+    #[serde(default)]
+    pub output_tokens_used: u64,
+    #[serde(default)]
+    pub bridge_calls_used: u32,
+    #[serde(default)]
+    pub mcp_calls_used: u32,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }

@@ -43,9 +43,15 @@ export function normalizeDeviceContext(value) {
       bottom: nonNegativeNumber(value.safeArea?.bottom),
       left: nonNegativeNumber(value.safeArea?.left),
     },
-    colorScheme: value.colorScheme === "dark" ? "dark" : "light",
+    colorScheme: ["dark", "light", "unknown"].includes(value.colorScheme)
+      ? value.colorScheme
+      : "unknown",
     reducedMotion: value.reducedMotion === true,
-    inputMode: value.inputMode === "pointer" ? "pointer" : "touch",
+    inputMode: ["pointer", "touch", "hybrid", "unknown"].includes(
+      value.inputMode,
+    )
+      ? value.inputMode
+      : "unknown",
   };
 }
 

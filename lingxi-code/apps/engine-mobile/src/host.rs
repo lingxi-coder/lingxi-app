@@ -88,8 +88,8 @@ use secret::CredentialManager;
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use tool_api::AnthropicRequestBuilder;
-use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_api::SessionCwd;
+use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_workflow::WorkflowLauncher as _;
 use traits::http::{
     HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
@@ -104,7 +104,7 @@ use traits::{
 use crate::{
     local_apps_host::{
         canonical_cwd_string, remove_app_session_file, AgentOutputRouter, AgentOutputStream,
-        LocalAppsAgentExecutor, LocalAppsHostBroker,
+        AgentTurnUsageState, LocalAppsAgentExecutor, LocalAppsHostBroker,
     },
     local_apps_llm::{ApiServiceModel, LocalAppsLlm},
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
@@ -534,13 +534,20 @@ struct MobileAppAgentExecutor {
     streaming_api: Arc<dyn StreamingApiClient>,
     hooks: Arc<hooks::HookExecutorImpl>,
     perms: Arc<dyn PermissionGate>,
-    memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider>,
-    cwd: std::path::PathBuf,
     config_home: std::path::PathBuf,
     apps_data_root: std::path::PathBuf,
     local_apps_mcp: Arc<LocalAppsMcpTransport>,
     mcp_tool_context: BuiltinToolContext,
-    agents: Mutex<HashMap<String, (Arc<ConversationOrchestrator>, Arc<AgentOutputRouter>)>>,
+    agents: Mutex<
+        HashMap<
+            String,
+            (
+                Arc<ConversationOrchestrator>,
+                Arc<AgentOutputRouter>,
+                Arc<crate::local_apps_mcp::AgentCallBudget>,
+            ),
+        >,
+    >,
 }
 
 fn app_agent_key(app_id: &str, session_id: &str) -> String {
@@ -555,8 +562,6 @@ impl MobileAppAgentExecutor {
         streaming_api: Arc<dyn StreamingApiClient>,
         hooks: Arc<hooks::HookExecutorImpl>,
         perms: Arc<dyn PermissionGate>,
-        memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider>,
-        cwd: std::path::PathBuf,
         config_home: std::path::PathBuf,
         apps_data_root: std::path::PathBuf,
         local_apps_mcp: Arc<LocalAppsMcpTransport>,
@@ -568,8 +573,6 @@ impl MobileAppAgentExecutor {
             streaming_api,
             hooks,
             perms,
-            memory,
-            cwd,
             config_home,
             apps_data_root,
             local_apps_mcp,
@@ -581,13 +584,24 @@ impl MobileAppAgentExecutor {
     async fn app_tools(
         &self,
         app_id: &str,
-        budget: &local_apps::AgentBudget,
-    ) -> Result<Arc<ToolRegistry>, String> {
+        session: &local_apps::AgentSessionRecord,
+    ) -> Result<
+        (
+            Arc<ToolRegistry>,
+            Arc<crate::local_apps_mcp::AgentCallBudget>,
+        ),
+        String,
+    > {
         let scoped = self.local_apps_mcp.scoped_for_app_with_budget(
             app_id,
-            budget.max_bridge_calls,
-            budget.max_mcp_calls,
+            session.budget.max_bridge_calls,
+            session.budget.max_mcp_calls,
+            session.bridge_calls_used,
+            session.mcp_calls_used,
         )?;
+        let call_budget = scoped
+            .call_budget()
+            .ok_or_else(|| "app Agent MCP budget was not attached".to_string())?;
         let registry = McpRegistry::new(Arc::new(scoped) as Arc<dyn traits::McpTransport>);
         registry
             .connect(McpServerConfig {
@@ -597,37 +611,48 @@ impl MobileAppAgentExecutor {
                 },
                 scope: McpConfigScope::Managed,
                 disabled: false,
-                timeout_ms: Some(30_000),
+                timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
                 always_load: true,
                 config_error: None,
             })
             .await
             .map_err(|error| format!("app Agent MCP bootstrap failed: {error}"))?;
-        let mut tools = ToolRegistry::new();
+        let tools = ToolRegistry::new();
         for (connection_id, handles) in
             tool_mcp::build_registered_mcp_tools(&registry, self.mcp_tool_context.clone()).await
         {
             tools.register_mcp_tools(connection_id, handles);
         }
-        Ok(Arc::new(tools))
+        Ok((Arc::new(tools), call_budget))
     }
 
     async fn get_or_create_agent(
         &self,
         app_id: &str,
         session_id: &str,
-        budget: &local_apps::AgentBudget,
-    ) -> Result<(Arc<ConversationOrchestrator>, Arc<AgentOutputRouter>), String> {
+        session: &local_apps::AgentSessionRecord,
+        usage: Arc<AgentTurnUsageState>,
+    ) -> Result<
+        (
+            Arc<ConversationOrchestrator>,
+            Arc<AgentOutputRouter>,
+            Arc<crate::local_apps_mcp::AgentCallBudget>,
+        ),
+        String,
+    > {
         let key = app_agent_key(app_id, session_id);
         if let Some(agent) = self.agents.lock().await.get(&key).cloned() {
+            agent.2.start_turn(usage);
             return Ok(agent);
         }
-        let tools = self.app_tools(app_id, budget).await?;
+        let (tools, call_budget) = self.app_tools(app_id, session).await?;
+        let layout = local_apps::AppLayout::new(self.apps_data_root.clone(), app_id)
+            .map_err(|error| error.to_string())?;
         let mut config = self.config.clone();
         config.interactive_session = false;
         config.interactive_permissions = false;
         config.system_prompt_override = None;
-        config.max_turns = budget.max_turns;
+        config.max_turns = session.budget.max_turns;
         config.enable_token_budget = false;
         config.token_budget = None;
         let output = Arc::new(AgentOutputRouter::new());
@@ -640,15 +665,13 @@ impl MobileAppAgentExecutor {
                 self.hooks.clone(),
                 self.perms.clone(),
                 output.clone(),
-                self.memory.clone(),
-                self.cwd.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                layout.root().join(layout.workspace_rel()),
             )
             .with_session_id(protocol::SessionId::new())
             .with_config_home(self.config_home.clone())
             .with_hooks_restricted(true),
         );
-        let layout = local_apps::AppLayout::new(self.apps_data_root.clone(), app_id)
-            .map_err(|error| error.to_string())?;
         let history = local_apps::load_agent_history(&layout, session_id)
             .map_err(|error| error.to_string())?
             .into_iter()
@@ -660,9 +683,10 @@ impl MobileAppAgentExecutor {
             .await
             .map_err(|error| format!("restore Agent history failed: {error}"))?;
         let mut agents = self.agents.lock().await;
+        call_budget.start_turn(usage);
         Ok(agents
             .entry(key)
-            .or_insert_with(|| (agent.clone(), output.clone()))
+            .or_insert_with(|| (agent.clone(), output.clone(), call_budget.clone()))
             .clone())
     }
 }
@@ -674,13 +698,13 @@ impl LocalAppsAgentExecutor for MobileAppAgentExecutor {
         app_id: &str,
         session_id: &str,
         prompt: String,
-        budget: local_apps::AgentBudget,
+        session: local_apps::AgentSessionRecord,
         profile: local_apps::AppAgentProfile,
         cancel: CancellationToken,
         output: Arc<AgentOutputStream>,
     ) -> Result<(), String> {
-        let (agent, router) = self
-            .get_or_create_agent(app_id, session_id, &budget)
+        let (agent, router, _call_budget) = self
+            .get_or_create_agent(app_id, session_id, &session, output.usage_state())
             .await?;
         router.set_target(output.clone()).await;
         let instructions = format!(
@@ -2300,7 +2324,7 @@ async fn build_mobile_inner_with_ask(
             },
             scope: McpConfigScope::Managed,
             disabled: false,
-            timeout_ms: Some(30_000),
+            timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
             always_load: true,
             config_error: None,
         })
@@ -3720,21 +3744,18 @@ async fn build_mobile_inner_with_ask(
         compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone()),
         150_000,
     ));
-    let app_agent_executor: Arc<dyn LocalAppsAgentExecutor> = Arc::new(
-        MobileAppAgentExecutor::new(
+    let app_agent_executor: Arc<dyn LocalAppsAgentExecutor> =
+        Arc::new(MobileAppAgentExecutor::new(
             orch_cfg.clone(),
             api_client.clone(),
             streaming_api.clone(),
             hooks.clone(),
             perms.clone(),
-            memory.clone(),
-            cwd.clone(),
             cfg.lingxi_home.clone(),
             mobile_apps_data_root(&cfg),
             local_apps_mcp.clone(),
             app_agent_mcp_tool_context,
-        ),
-    );
+        ));
 
     let mut orch_inner = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
@@ -7661,6 +7682,11 @@ fn provider_id_is_valid(value: &str) -> bool {
 }
 
 const PROVIDER_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+// Local-app build/install tools have their own multi-minute budgets. A 30s
+// MCP deadline can expire while the build is still progressing, causing the
+// caller to retry and duplicate the expensive work.
+const LOCAL_APPS_MCP_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 
 fn provider_models_endpoint(api_base: &str, provider_preset: &str) -> Result<String, &'static str> {
     let base = api_base.trim().trim_end_matches('/');

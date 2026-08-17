@@ -31,7 +31,7 @@ specification containing:
   inference for confirmation;
 - dynamic viewport, safe area, color scheme, reduced motion, and input mode
   are runtime inputs only; do not treat them as prompt facts. The generated app
-  must read them from `window.lingxi.v1.deviceContext`;
+  must read them from `window.lingxi.v2.deviceContext`;
 - pages, navigation/back semantics, complete states, data/permissions;
 - design direction, platform tokens, responsive/adaptive behavior, and any
   source-only implementation constraints required by the locked host scaffold;
@@ -74,7 +74,7 @@ Capabilities are a closed enum. Use only `data_mutation`, `ui_control`,
 or `agent_notify`; there is no `data` capability. `data_mutation` authorizes
 the conversation agent to call `mcp__local_apps__mutate_data`. Do not declare
 it solely because the page writes its own collection through
-`window.lingxi.v1.data.mutate`; that foreground page path is already scoped to
+`window.lingxi.v2.data.mutate`; that foreground page path is already scoped to
 its app.
 
 The host data wire contract is tagged and camel-cased. Generated source should
@@ -112,10 +112,10 @@ Resolve every requirement against the capabilities already supplied by the
 host before proposing an external API, hosted AI service, or custom
 replacement. In particular:
 
-1. Use `window.lingxi.v1.llm.chat` for AI features so the app uses the user's
+1. Use `window.lingxi.v2.llm.chat` for AI features so the app uses the user's
    locally configured model/provider, quota, privacy controls, and permission
    prompt. Do not embed provider keys or add a direct LLM SDK/API call.
-2. Use `window.lingxi.v1.data`, `device`, `network`, `runtime`, and `agent` for
+2. Use `window.lingxi.v2.data`, `device`, `network`, `runtime`, and `agent` for
    structured storage, native device operations, mediated HTTPS, device
    context, and conversation events. Reuse an available built-in skill/tool
    during generation and QA before proposing a substitute.
@@ -210,7 +210,7 @@ official `dist/` output default and do not set `build.outDir` to another path.
 `src/main.*` may be minimally adapted to import the checked-in
 bridge/deviceContext/platform adapter. The build is offline and reads a
 host-materialized dependency snapshot.
-Use only `window.lingxi.v1` for host data, network, device, and agent events.
+Use only `window.lingxi.v2` for host data, network, device, and agent events.
 The build is offline and the bridge/device context is untrusted input: validate
 it at the adapter boundary.
 

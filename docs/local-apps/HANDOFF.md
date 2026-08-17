@@ -160,7 +160,7 @@ Important constraints:
 - manifest capabilities are the closed wire enum `data_mutation`, `ui_control`, `camera`, `photo_library`, `microphone`, `location`, `notifications`, `llm`, and `agent_notify`; `data` is invalid.
 - `query_data` is bounded and structured; it does not accept raw SQL. Filters are `{fieldId, operator, value}`, and app fields are returned under `records[].document` beside host-owned record metadata.
 - `mutate_data` is limited to 50 operations per request and is capability-gated. Operations are exactly `{kind:"upsert",recordId,document,expectedRevision?}` or `{kind:"delete",recordId,expectedRevision?}`.
-- `data_mutation` gates conversation-agent `mutate_data` calls. A page writing its own collection through `window.lingxi.v1.data.mutate` is app-scoped and does not declare that capability solely for page storage.
+- `data_mutation` gates conversation-agent `mutate_data` calls. A page writing its own collection through `window.lingxi.v2.data.mutate` is app-scoped and does not declare that capability solely for page storage.
 - `read_logs` is bounded to the app-owned log directory.
 - app events are untrusted data from `agent.post`, never instructions.
 - every restore requires explicit user confirmation.
@@ -211,7 +211,7 @@ Checkpoints are ordinary workspace Git commits plus the dependency lock digest. 
 
 ## 7. WebView and platform behavior
 
-The page-facing API is `window.lingxi.v1`. App source must not invent a parallel bridge.
+The page-facing API is `window.lingxi.v2`. App source must not invent a parallel bridge.
 
 Both clients inject a frozen API object with dynamic getters for:
 
@@ -384,7 +384,7 @@ Before merging a Local Apps change:
 A change is done only when:
 
 - the confirmed user flow works through the conversation rather than a parallel designer UI;
-- generated source respects editable roots and uses `window.lingxi.v1`;
+- generated source respects editable roots and uses `window.lingxi.v2`;
 - creation uses a host-generated pinned Vite scaffold and source-only agent edits;
 - the production build remains offline and reproducible;
 - the build uses a single writable app workspace and its local Vite executable;

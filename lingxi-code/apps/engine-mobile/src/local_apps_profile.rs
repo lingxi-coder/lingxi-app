@@ -15,9 +15,21 @@ use traits::{Clock, MobileLinuxRuntime};
 
 type ProfileCell = Arc<OnceCell<Arc<ProfileApps>>>;
 
-fn registry() -> &'static Mutex<HashMap<PathBuf, ProfileCell>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, ProfileCell>>> = OnceLock::new();
+const MAX_PROFILE_CACHE_ENTRIES: usize = 8;
+
+struct RegistryEntry {
+    cell: ProfileCell,
+    last_used: u64,
+}
+
+fn registry() -> &'static Mutex<HashMap<PathBuf, RegistryEntry>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, RegistryEntry>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_registry_stamp() -> u64 {
+    static STAMP: AtomicU64 = AtomicU64::new(1);
+    STAMP.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The long-lived runtime every `ProfileApps`-owned task runs on.
@@ -69,6 +81,12 @@ impl ClientEventFanout {
             .lock()
             .expect("local-app client fanout poisoned")
             .remove(&id);
+    }
+
+    fn subscriber_count(&self) -> usize {
+        let mut sinks = self.sinks.lock().expect("local-app client fanout poisoned");
+        sinks.retain(|_, sink| sink.strong_count() > 0);
+        sinks.len()
     }
 }
 
@@ -206,10 +224,18 @@ pub(crate) async fn profile_apps(
         let mut profiles = registry()
             .lock()
             .expect("local-app profile registry poisoned");
-        profiles
-            .entry(root.clone())
-            .or_insert_with(|| Arc::new(OnceCell::new()))
-            .clone()
+        let stamp = next_registry_stamp();
+        let cell = {
+            let entry = profiles
+                .entry(root.clone())
+                .or_insert_with(|| RegistryEntry {
+                    cell: Arc::new(OnceCell::new()),
+                    last_used: stamp,
+                });
+            entry.last_used = stamp;
+            entry.cell.clone()
+        };
+        cell
     };
     // Clone every connection/build-scoped input BEFORE the (maybe-never-run)
     // init closure consumes its copy. A cached profile retains the durable
@@ -219,11 +245,12 @@ pub(crate) async fn profile_apps(
     let refresh_devices = devices.clone();
     let refresh_mobile_linux = mobile_linux.clone();
     let refresh_runtime_root = runtime_root.clone();
-    let profile = cell
+    let load_root = root.clone();
+    let profile = match cell
         .get_or_try_init(|| async move {
             worker_runtime()
                 .spawn(ProfileApps::load(
-                    root,
+                    load_root,
                     clock,
                     mobile_linux,
                     full_runtime,
@@ -236,7 +263,23 @@ pub(crate) async fn profile_apps(
                 .map_err(|error| AppError::Io(format!("local-app profile load failed: {error}")))?
         })
         .await
-        .cloned()?;
+    {
+        Ok(profile) => profile.clone(),
+        Err(error) => {
+            let mut profiles = registry()
+                .lock()
+                .expect("local-app profile registry poisoned");
+            if profiles
+                .get(&root)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.cell, &cell))
+            {
+                profiles.remove(&root);
+            }
+            return Err(AppError::Io(format!(
+                "local-app profile load failed: {error}"
+            )));
+        }
+    };
     profile.host.refresh_runtime_configuration(
         refresh_mobile_linux,
         refresh_runtime_root,
@@ -244,7 +287,65 @@ pub(crate) async fn profile_apps(
     );
     profile.llm.replace(refresh_llm);
     profile.device.replace(refresh_devices);
+    evict_idle_profiles(&root).await;
     Ok(profile)
+}
+
+async fn evict_idle_profiles(current_root: &PathBuf) {
+    loop {
+        let candidates = {
+            let profiles = registry()
+                .lock()
+                .expect("local-app profile registry poisoned");
+            if profiles.len() <= MAX_PROFILE_CACHE_ENTRIES {
+                return;
+            }
+            let mut candidates: Vec<_> = profiles
+                .iter()
+                .filter(|(path, entry)| {
+                    path.as_path() != current_root.as_path()
+                        && entry.cell.get().is_some_and(|profile| {
+                            profile.client_events.subscriber_count() == 0
+                                && profile.domain_events.subscriber_count() == 0
+                        })
+                })
+                .filter_map(|(path, entry)| {
+                    entry
+                        .cell
+                        .get()
+                        .map(|profile| (path.clone(), Arc::clone(profile), entry.last_used))
+                })
+                .collect();
+            candidates.sort_by_key(|(_, _, last_used)| *last_used);
+            candidates
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        let mut removed = false;
+        for (path, profile, _) in candidates {
+            if profile.host.has_active_runtimes().await {
+                continue;
+            }
+            let mut profiles = registry()
+                .lock()
+                .expect("local-app profile registry poisoned");
+            let should_remove = profiles.get(&path).is_some_and(|entry| {
+                entry
+                    .cell
+                    .get()
+                    .is_some_and(|current| Arc::ptr_eq(current, &profile))
+            });
+            if should_remove {
+                profiles.remove(&path);
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]

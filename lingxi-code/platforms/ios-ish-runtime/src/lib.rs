@@ -23,6 +23,7 @@ use traits::{
 };
 
 const MAX_EVENTS: usize = 4096;
+const MAX_STREAM_CAPTURE_BYTES: usize = 256 * 1024;
 const PTY_IDLE_POLL: Duration = Duration::from_millis(25);
 const BACKGROUND_IDLE_POLL: Duration = Duration::from_millis(25);
 const BACKGROUND_REAP_BUDGET: Duration = Duration::from_secs(3);
@@ -1180,12 +1181,11 @@ impl MobileLinuxRuntime for IosIshRuntime {
                 }
                 let sink_result = match event.kind {
                     MobileLinuxEventKind::StdoutLine { line } => {
-                        stdout.push_str(&line);
-                        stdout.push('\n');
+                        append_capped_stdout(&mut stdout, &line);
                         sink.stdout_line(line).await
                     }
                     MobileLinuxEventKind::StderrChunk { chunk } => {
-                        stderr.extend_from_slice(&chunk);
+                        append_capped_bytes(&mut stderr, &chunk);
                         sink.stderr_chunk(chunk).await
                     }
                     _ => Ok(()),
@@ -1541,6 +1541,26 @@ impl MobileLinuxRuntime for IosIshRuntime {
                     .clone()
             }))
     }
+}
+
+fn append_capped_stdout(output: &mut String, line: &str) {
+    let remaining = MAX_STREAM_CAPTURE_BYTES.saturating_sub(output.len());
+    if remaining == 0 {
+        return;
+    }
+    let mut take = line.len().min(remaining);
+    while !line.is_char_boundary(take) {
+        take = take.saturating_sub(1);
+    }
+    output.push_str(&line[..take]);
+    if output.len() < MAX_STREAM_CAPTURE_BYTES {
+        output.push('\n');
+    }
+}
+
+fn append_capped_bytes(output: &mut Vec<u8>, chunk: &[u8]) {
+    let remaining = MAX_STREAM_CAPTURE_BYTES.saturating_sub(output.len());
+    output.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
 }
 
 /// Build the shared trait object wired to this crate's iSH runtime backend.
@@ -2839,6 +2859,18 @@ mod tests {
             resource_limits: Default::default(),
             mounts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn streaming_capture_is_bounded_without_truncating_utf8() {
+        let mut stdout = String::new();
+        append_capped_stdout(&mut stdout, &"🙂".repeat(MAX_STREAM_CAPTURE_BYTES));
+        assert!(stdout.len() <= MAX_STREAM_CAPTURE_BYTES);
+        assert!(std::str::from_utf8(stdout.as_bytes()).is_ok());
+
+        let mut stderr = Vec::new();
+        append_capped_bytes(&mut stderr, &vec![b'x'; MAX_STREAM_CAPTURE_BYTES * 2]);
+        assert_eq!(stderr.len(), MAX_STREAM_CAPTURE_BYTES);
     }
 
     #[test]

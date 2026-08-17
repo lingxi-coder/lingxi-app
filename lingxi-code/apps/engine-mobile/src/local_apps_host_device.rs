@@ -1,4 +1,4 @@
-//! Device operations of the `window.lingxi.v1` bridge (`device.*`).
+//! Device operations of the `window.lingxi.v2` bridge (`device.*`).
 //!
 //! Every operation runs the same ladder: parse+clamp the page payload →
 //! [`LocalAppsHostBroker::authorize_declared_capability`] (manifest-declared,

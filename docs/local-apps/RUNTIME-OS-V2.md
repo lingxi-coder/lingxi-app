@@ -32,7 +32,7 @@ from the tool namespace instead of accepting it as an Agent argument.
 | Native bridge | `data.query`, `network.request`, `llm.complete`, `llm.stream` | `window.lingxi.v2` → native command | Host-authorized |
 | App MCP | `app_<id>__data_query`, `app_<id>__data_mutate` | Host-owned in-process MCP | Dynamic from manifest |
 | Agent sessions | `agent.sessions.create/list/resume/close`, `agent.send/stream/cancel` | App MCP + native stream adapter | Persistent, budgeted |
-| Agent Profile | `agent.profiles.propose-update/apply-approved-update` | Host storage + user approval | Revisioned |
+| Agent Profile | `agent.profiles.propose-update` | Host storage; apply is reserved for trusted host UI | Revisioned |
 | Flows | `flow.execute` | Declarative MCP | Acyclic, bounded |
 | Background | `background.schedule/resume` | System task adapter | Journaled/resumable |
 
@@ -55,10 +55,11 @@ Every app Agent turn assembles these layers in order:
 4. session goal and memory;
 5. current turn context and app events as untrusted data.
 
-An app may propose a Profile revision. The proposal is inert until a user
-approval command applies it. The new revision is used from the next turn and
-is recorded with the turn. `system_prompt_override` is not used for app
-customization because it would replace the platform prompt.
+An app may propose a Profile revision. The proposal is inert until a trusted
+host UI approval path applies it; app pages cannot self-approve a prompt
+change. The apply bridge will be added together with that host UI path. Until
+then, `system_prompt_override` is not used for app customization because it
+would replace the platform prompt.
 
 ## Attribution and limits
 

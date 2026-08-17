@@ -20986,6 +20986,40 @@
         }
       }
     },
+    "local_apps_error_create_in_progress": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已有一个本地应用正在创建中，请稍候。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已有一個本地應用正在建立中，請稍候。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Another local app is still being created. Please wait."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "別のローカルアプリを作成中です。しばらくお待ちください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다른 로컬 앱을 생성 중입니다. 잠시 기다려 주세요."
+          }
+        }
+      }
+    },
     "local_apps_error_design_conflict": {
       "localizations": {
         "zh-Hans": {

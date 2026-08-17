@@ -1,4 +1,4 @@
-//! The `llm.chat` operation of the `window.lingxi.v1` bridge.
+//! The `llm.chat` operation of the `window.lingxi.v2` bridge.
 //!
 //! An app-initiated model call spends the USER's quota, so the ladder is
 //! stricter than the device ops': the page may not pick a model (it always

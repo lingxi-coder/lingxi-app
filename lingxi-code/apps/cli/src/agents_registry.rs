@@ -30,7 +30,59 @@
 //! reports `done`/`failed`/`stopped` even if its tempo is still `blocked`.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+
+/// On-disk keys owned by [`LiveSessionRecord`]. Merge-writes drop these then
+/// re-insert the current struct so `None` fields (e.g. `waitingFor`) clear,
+/// while unknown keys written by `upsert_identity` survive.
+const LIVE_RECORD_JSON_KEYS: &[&str] = &[
+    "pid",
+    "sessionId",
+    "cwd",
+    "startedAt",
+    "procStart",
+    "version",
+    "peerProtocol",
+    "kind",
+    "jobId",
+    "entrypoint",
+    "name",
+    "nameSource",
+    "status",
+    "waitingFor",
+    "updatedAt",
+    "statusUpdatedAt",
+    "nameSince",
+    "formerNames",
+    "messagingSocketPath",
+    "permissionClass",
+];
+
+fn persist_live_record(path: &Path, record: &LiveSessionRecord) {
+    let mut map: Map<String, Value> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str(&body).ok())
+        .unwrap_or_default();
+    for key in LIVE_RECORD_JSON_KEYS {
+        map.remove(*key);
+    }
+    let Ok(patch) = serde_json::to_value(record) else {
+        return;
+    };
+    if let Some(obj) = patch.as_object() {
+        for (key, value) in obj {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+    let tmp = path.with_extension("json.tmp");
+    if serde_json::to_vec(&map)
+        .ok()
+        .is_some_and(|bytes| std::fs::write(&tmp, bytes).is_ok())
+    {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
 
 /// `sessions/` under the config home — one `<pid>.json` per live process.
 #[must_use]
@@ -928,9 +980,7 @@ impl SessionRegistration {
         record.waiting_for = waiting_for.map(str::to_string);
         record.updated_at = Some(now_ms);
         record.status_updated_at = Some(now_ms);
-        if let Ok(s) = serde_json::to_string(record) {
-            let _ = std::fs::write(path, s);
-        }
+        persist_live_record(path, record);
     }
 
     /// Update the advertised name after a uniqueness claim or `/rename`.
@@ -955,9 +1005,7 @@ impl SessionRegistration {
         record.name_source = Some(source.to_string());
         record.name_since = Some(now_ms);
         record.updated_at = Some(now_ms);
-        if let Ok(s) = serde_json::to_string(record) {
-            let _ = std::fs::write(path, s);
-        }
+        persist_live_record(path, record);
     }
 
     /// Record the UDS inbox path (2.1.232 `messagingSocketPath`).
@@ -974,9 +1022,48 @@ impl SessionRegistration {
         };
         record.messaging_socket_path = Some(sock.display().to_string());
         record.updated_at = Some(chrono::Utc::now().timestamp_millis());
-        if let Ok(s) = serde_json::to_string(record) {
-            let _ = std::fs::write(path, s);
+        persist_live_record(path, record);
+    }
+
+    /// Keep in-memory `permissionClass` in sync with disk so the next
+    /// merge-write still has the class.
+    pub fn set_permission_class(&self, class: &str) {
+        if class != "bypass" && class != "prompting" {
+            return;
         }
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let RegistrationInner {
+            path: Some(path),
+            record: Some(record),
+        } = &mut *inner
+        else {
+            return;
+        };
+        record.permission_class = Some(class.to_string());
+        record.updated_at = Some(chrono::Utc::now().timestamp_millis());
+        persist_live_record(path, record);
+    }
+
+    /// Retarget the advertised session id after an in-process `/resume` remount.
+    pub fn set_session_id(&self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let RegistrationInner {
+            path: Some(path),
+            record: Some(record),
+        } = &mut *inner
+        else {
+            return;
+        };
+        record.session_id = Some(session_id.to_string());
+        record.updated_at = Some(chrono::Utc::now().timestamp_millis());
+        persist_live_record(path, record);
     }
 
     /// Remove the registry record NOW (idempotent; `Drop` calls the same).
@@ -1288,6 +1375,52 @@ mod tests {
         assert_eq!(unchanged.updated_at, stamped.updated_at);
         drop(reg);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn update_status_preserves_permission_class_and_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = SessionRegistration::register(tmp.path(), Some("sid-1"), Some("proj"));
+        let path = sessions_dir(tmp.path()).join(format!("{}.json", std::process::id()));
+        let read = || {
+            serde_json::from_str::<LiveSessionRecord>(&std::fs::read_to_string(&path).unwrap())
+                .unwrap()
+        };
+        reg.set_permission_class("bypass");
+        reg.set_session_id("sid-2");
+        assert_eq!(read().permission_class.as_deref(), Some("bypass"));
+        assert_eq!(read().session_id.as_deref(), Some("sid-2"));
+
+        reg.update_status("busy", None);
+        let after = read();
+        assert_eq!(after.status.as_deref(), Some("busy"));
+        assert_eq!(after.permission_class.as_deref(), Some("bypass"));
+        assert_eq!(after.session_id.as_deref(), Some("sid-2"));
+
+        reg.set_name("proj", "user");
+        let named = read();
+        assert_eq!(named.name_source.as_deref(), Some("user"));
+        assert_eq!(named.permission_class.as_deref(), Some("bypass"));
+        drop(reg);
+    }
+
+    #[test]
+    fn update_status_keeps_unknown_disk_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = SessionRegistration::register(tmp.path(), Some("sid-1"), Some("proj"));
+        let path = sessions_dir(tmp.path()).join(format!("{}.json", std::process::id()));
+        let mut obj: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        obj.as_object_mut()
+            .unwrap()
+            .insert("futureField".into(), json!("keep-me"));
+        std::fs::write(&path, serde_json::to_vec(&obj).unwrap()).unwrap();
+        reg.update_status("busy", None);
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["futureField"], "keep-me");
+        assert_eq!(after["status"], "busy");
+        drop(reg);
     }
 
     #[test]

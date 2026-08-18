@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -516,6 +516,20 @@ impl LiveSessionDir {
         session_id: &str,
         sock: &std::path::Path,
     ) -> io::Result<()> {
+        self.upsert_identity(pid, session_id, None, None, Some(sock), None)
+    }
+
+    /// Merge-write identity fields onto `sessions/<pid>.json` without dropping
+    /// unknown keys (status forwarders, `procStart`, former names, …).
+    pub fn upsert_identity(
+        &self,
+        pid: u32,
+        session_id: &str,
+        name: Option<&str>,
+        name_source: Option<&str>,
+        sock: Option<&std::path::Path>,
+        permission_class: Option<&str>,
+    ) -> io::Result<()> {
         self.ensure_root()?;
         let path = self.record_path(pid);
         let mut obj: Value = match fs::read_to_string(&path) {
@@ -530,10 +544,32 @@ impl LiveSessionDir {
         if !session_id.is_empty() {
             map.insert("sessionId".into(), json!(session_id));
         }
-        map.insert(
-            "messagingSocketPath".into(),
-            json!(sock.display().to_string()),
-        );
+        if let Some(name) = name.map(str::trim).filter(|s| !s.is_empty()) {
+            map.insert("name".into(), json!(name));
+            if let Some(src) = name_source {
+                map.entry("nameSource".to_string())
+                    .or_insert_with(|| json!(src));
+            }
+            map.entry("nameSince".to_string())
+                .or_insert_with(|| json!(now_ms()));
+        }
+        if let Some(sock) = sock {
+            map.insert(
+                "messagingSocketPath".into(),
+                json!(sock.display().to_string()),
+            );
+        }
+        if let Some(class) = permission_class {
+            map.insert("permissionClass".into(), json!(class));
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            map.entry("cwd".to_string())
+                .or_insert_with(|| json!(cwd.display().to_string()));
+        }
+        map.entry("kind".to_string())
+            .or_insert_with(|| json!("interactive"));
+        map.entry("startedAt".to_string())
+            .or_insert_with(|| json!(now_ms()));
         map.insert("updatedAt".into(), json!(now_ms()));
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec(&obj).map_err(io::Error::other)?)?;
@@ -1045,13 +1081,195 @@ pub fn install_process(
     }
 }
 
-/// Effective inbound policy (env, then `settings.json`).
+/// Effective inbound policy (env, then user settings, then repo tighten).
 #[must_use]
 pub fn current_inbound_policy() -> InboundPolicy {
+    inbound_policy_with_cause().0
+}
+
+/// Policy plus a hold/refuse cause for the TUI (`explicit-setting` / `repo-setting`).
+#[must_use]
+pub fn inbound_policy_with_cause() -> (InboundPolicy, &'static str) {
     if let Ok(v) = std::env::var("LINGXI_CROSS_SESSION_INBOUND") {
-        return InboundPolicy::parse(Some(&v));
+        let p = InboundPolicy::parse(Some(&v));
+        return (p, hold_cause_for(p, "explicit-setting"));
     }
-    InboundPolicy::parse(read_settings_key("crossSessionInbound").as_deref())
+    let user =
+        InboundPolicy::parse(read_settings_file(&home_dotdir().join("settings.json")).as_deref());
+    let managed = read_managed_inbound_from(&managed_settings_dir());
+    let repo = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| read_repo_inbound_from(&cwd));
+    merge_inbound_layers(user, managed, repo)
+}
+
+/// Managed/enterprise policy directory. Honors `LINGXI_MANAGED_DIR`, else the
+/// platform path (`/Library/Application Support/LingXi`, `/etc/lingxi`, …).
+#[must_use]
+pub fn managed_settings_dir() -> PathBuf {
+    if let Some(over) = std::env::var_os("LINGXI_MANAGED_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(over);
+    }
+    if cfg!(target_os = "macos") {
+        PathBuf::from(branding::MANAGED_DIR_MACOS)
+    } else if cfg!(target_os = "windows") {
+        PathBuf::from(branding::MANAGED_DIR_WINDOWS)
+    } else {
+        PathBuf::from(branding::MANAGED_DIR_UNIX)
+    }
+}
+
+/// Merge user / managed / repo inbound layers. Managed and repo may only
+/// tighten to `hold`/`refuse`.
+#[must_use]
+pub fn merge_inbound_layers(
+    user: InboundPolicy,
+    managed: InboundPolicy,
+    repo: Option<InboundPolicy>,
+) -> (InboundPolicy, &'static str) {
+    if matches!(managed, InboundPolicy::Refuse | InboundPolicy::Hold) {
+        return (
+            managed,
+            if managed == InboundPolicy::Refuse {
+                "opt-out"
+            } else {
+                "managed-setting"
+            },
+        );
+    }
+    match repo {
+        Some(InboundPolicy::Refuse) => (InboundPolicy::Refuse, "opt-out"),
+        Some(InboundPolicy::Hold) => (InboundPolicy::Hold, "repo-setting"),
+        _ => (user, hold_cause_for(user, "explicit-setting")),
+    }
+}
+
+/// `managed-settings.json` then `managed-settings.d/*.json` (sorted; last wins).
+#[must_use]
+pub fn read_managed_inbound_from(managed_dir: &Path) -> InboundPolicy {
+    let mut policy = InboundPolicy::parse(
+        read_settings_file(&managed_dir.join("managed-settings.json")).as_deref(),
+    );
+    let drop_in = managed_dir.join("managed-settings.d");
+    if let Ok(rd) = fs::read_dir(&drop_in) {
+        let mut paths: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().and_then(|s| s.to_str()) == Some("json")
+                    && !p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with('.'))
+            })
+            .collect();
+        paths.sort();
+        for path in paths {
+            if let Some(raw) = read_settings_file(&path) {
+                policy = InboundPolicy::parse(Some(&raw));
+            }
+        }
+    }
+    policy
+}
+
+/// Repo `crossSessionInbound` from cwd up to the git root (inclusive).
+/// Without a git root, only cwd is considered (never `/tmp` or `/`).
+/// `$HOME/.lingxi` is always user settings, even if `LINGXI_CONFIG_DIR` differs.
+#[must_use]
+pub fn read_repo_inbound_from(cwd: &Path) -> Option<InboundPolicy> {
+    repo_inbound_capped(cwd, &home_dotdir(), env_user_home().as_deref())
+}
+
+fn env_user_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+fn repo_inbound_between(cwd: &Path, config_home: &Path) -> Option<InboundPolicy> {
+    repo_inbound_capped(cwd, config_home, env_user_home().as_deref())
+}
+
+fn repo_inbound_capped(
+    cwd: &Path,
+    config_home: &Path,
+    user_home: Option<&Path>,
+) -> Option<InboundPolicy> {
+    let git_root = nearest_git_root(cwd, config_home, user_home);
+    let mut found = None;
+    let mut dir = cwd;
+    loop {
+        if is_user_settings_boundary(dir, config_home, user_home) {
+            break;
+        }
+        found = tighter_inbound(found, dir_inbound(dir));
+        if found == Some(InboundPolicy::Refuse)
+            || git_root.as_deref() == Some(dir)
+            || git_root.is_none()
+        {
+            break;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+    found
+}
+
+fn nearest_git_root(cwd: &Path, config_home: &Path, user_home: Option<&Path>) -> Option<PathBuf> {
+    let mut dir = cwd;
+    loop {
+        if is_user_settings_boundary(dir, config_home, user_home) {
+            return None;
+        }
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Config-home, `$HOME`, and `$HOME/.lingxi` are user settings, not a repo.
+fn is_user_settings_boundary(dir: &Path, config_home: &Path, user_home: Option<&Path>) -> bool {
+    if dir == config_home || dir.join(branding::DOT_DIR) == config_home {
+        return true;
+    }
+    let Some(home) = user_home else {
+        return false;
+    };
+    dir == home || dir == home.join(branding::DOT_DIR)
+}
+
+fn dir_inbound(dir: &Path) -> Option<InboundPolicy> {
+    let project = read_settings_file(&dir.join(branding::DOT_DIR).join("settings.json"))
+        .or_else(|| read_settings_file(&dir.join(".claude").join("settings.json")))
+        .map(|v| InboundPolicy::parse(Some(&v)));
+    let local = read_settings_file(&dir.join(branding::DOT_DIR).join("settings.local.json"))
+        .or_else(|| read_settings_file(&dir.join(".claude").join("settings.local.json")))
+        .map(|v| InboundPolicy::parse(Some(&v)));
+    tighter_inbound(project, local)
+}
+
+fn tighter_inbound(a: Option<InboundPolicy>, b: Option<InboundPolicy>) -> Option<InboundPolicy> {
+    match (a, b) {
+        (Some(InboundPolicy::Refuse), _) | (_, Some(InboundPolicy::Refuse)) => {
+            Some(InboundPolicy::Refuse)
+        }
+        (Some(InboundPolicy::Hold), _) | (_, Some(InboundPolicy::Hold)) => {
+            Some(InboundPolicy::Hold)
+        }
+        _ => None,
+    }
+}
+
+fn hold_cause_for(policy: InboundPolicy, user_hold: &'static str) -> &'static str {
+    match policy {
+        InboundPolicy::Hold => user_hold,
+        InboundPolicy::Refuse => "opt-out",
+        _ => "policy-accepts",
+    }
 }
 
 /// Drain accepted UDS inbox messages into reminder strings.
@@ -1065,11 +1283,10 @@ pub fn take_accepted_peer_reminders(mid_turn: bool) -> Vec<String> {
     out
 }
 
-fn read_settings_key(key: &str) -> Option<String> {
-    let path = home_dotdir().join("settings.json");
+fn read_settings_file(path: &std::path::Path) -> Option<String> {
     let body = fs::read_to_string(path).ok()?;
     let obj: Value = serde_json::from_str(&body).ok()?;
-    obj.get(key)?.as_str().map(str::to_string)
+    obj.get("crossSessionInbound")?.as_str().map(str::to_string)
 }
 
 /// Harbor-kite / cross-session listing gate (2.1.232 `ag()`).
@@ -1145,9 +1362,10 @@ pub fn hold_cause_text(cause: &str) -> &'static str {
 /// 2.1.232 `g6f` / `b6f` decision.
 #[must_use]
 pub fn inbound_decision(from_mode: Option<&str>) -> (InboundPolicy, &'static str) {
-    match current_inbound_policy() {
-        InboundPolicy::Refuse => (InboundPolicy::Refuse, "opt-out"),
-        InboundPolicy::Hold => (InboundPolicy::Hold, "explicit-setting"),
+    let (policy, cause) = inbound_policy_with_cause();
+    match policy {
+        InboundPolicy::Refuse => (InboundPolicy::Refuse, cause),
+        InboundPolicy::Hold => (InboundPolicy::Hold, cause),
         InboundPolicy::Accept => (InboundPolicy::Accept, "policy-accepts"),
         InboundPolicy::Default => match process_permission_class().as_deref() {
             Some("bypass") => {
@@ -1238,6 +1456,175 @@ mod tests {
         assert_eq!(InboundPolicy::parse(Some("accept")), InboundPolicy::Accept);
         assert_eq!(InboundPolicy::parse(Some("hold")), InboundPolicy::Hold);
         assert_eq!(InboundPolicy::parse(Some("refuse")), InboundPolicy::Refuse);
+    }
+
+    #[test]
+    fn inbound_layers_managed_and_repo_only_tighten() {
+        let (p, cause) = merge_inbound_layers(
+            InboundPolicy::Accept,
+            InboundPolicy::Hold,
+            Some(InboundPolicy::Accept),
+        );
+        assert_eq!(p, InboundPolicy::Hold);
+        assert_eq!(cause, "managed-setting");
+
+        let (p, cause) = merge_inbound_layers(
+            InboundPolicy::Accept,
+            InboundPolicy::Default,
+            Some(InboundPolicy::Refuse),
+        );
+        assert_eq!(p, InboundPolicy::Refuse);
+        assert_eq!(cause, "opt-out");
+
+        let (p, cause) = merge_inbound_layers(
+            InboundPolicy::Hold,
+            InboundPolicy::Accept,
+            Some(InboundPolicy::Accept),
+        );
+        assert_eq!(p, InboundPolicy::Hold);
+        assert_eq!(cause, "explicit-setting");
+
+        let (p, cause) = merge_inbound_layers(InboundPolicy::Accept, InboundPolicy::Default, None);
+        assert_eq!(p, InboundPolicy::Accept);
+        assert_eq!(cause, "policy-accepts");
+    }
+
+    #[test]
+    fn managed_inbound_reads_platform_dir_and_dropins() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"crossSessionInbound":"accept"}"#,
+        )
+        .unwrap();
+        let drop_in = tmp.path().join("managed-settings.d");
+        fs::create_dir_all(&drop_in).unwrap();
+        fs::write(
+            drop_in.join("10-org.json"),
+            r#"{"crossSessionInbound":"hold"}"#,
+        )
+        .unwrap();
+        fs::write(
+            drop_in.join(".hidden.json"),
+            r#"{"crossSessionInbound":"refuse"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_managed_inbound_from(tmp.path()), InboundPolicy::Hold);
+    }
+
+    #[test]
+    fn repo_inbound_walks_to_git_root() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(branding::DOT_DIR)).unwrap();
+        fs::write(
+            root.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"crossSessionInbound":"hold"}"#,
+        )
+        .unwrap();
+        let nested = root.join("pkg").join("src");
+        fs::create_dir_all(&nested).unwrap();
+        assert_eq!(read_repo_inbound_from(&nested), Some(InboundPolicy::Hold));
+    }
+
+    #[test]
+    fn repo_local_settings_can_tighten() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join(branding::DOT_DIR)).unwrap();
+        fs::write(
+            root.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"crossSessionInbound":"accept"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(branding::DOT_DIR).join("settings.local.json"),
+            r#"{"crossSessionInbound":"refuse"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_repo_inbound_from(root), Some(InboundPolicy::Refuse));
+    }
+
+    #[test]
+    fn repo_inbound_sees_package_settings_inside_a_git_repo() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(branding::DOT_DIR)).unwrap();
+        fs::write(
+            root.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"crossSessionInbound":"accept"}"#,
+        )
+        .unwrap();
+        let pkg = root.join("pkg");
+        fs::create_dir_all(pkg.join(branding::DOT_DIR)).unwrap();
+        fs::write(
+            pkg.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"crossSessionInbound":"hold"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            repo_inbound_between(&pkg, &root.join("unused")),
+            Some(InboundPolicy::Hold)
+        );
+    }
+
+    #[test]
+    fn repo_inbound_does_not_treat_user_config_home_as_a_project() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let config = home.join(branding::DOT_DIR);
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("settings.json"),
+            r#"{"crossSessionInbound":"hold"}"#,
+        )
+        .unwrap();
+        let cwd = home.join("Downloads");
+        fs::create_dir_all(&cwd).unwrap();
+        assert_eq!(repo_inbound_between(&cwd, &config), None);
+        assert_eq!(repo_inbound_between(&home, &config), None);
+    }
+
+    #[test]
+    fn repo_inbound_without_git_does_not_walk_parent_tmp() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join(branding::DOT_DIR)).unwrap();
+        fs::write(
+            parent.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"crossSessionInbound":"hold"}"#,
+        )
+        .unwrap();
+        let cwd = parent.join("work");
+        fs::create_dir_all(&cwd).unwrap();
+        assert_eq!(
+            repo_inbound_capped(&cwd, &tmp.path().join("unused-config"), None),
+            None
+        );
+        assert_eq!(
+            repo_inbound_capped(parent, &tmp.path().join("unused-config"), None),
+            Some(InboundPolicy::Hold)
+        );
+    }
+
+    #[test]
+    fn repo_inbound_skips_home_dotdir_when_config_dir_differs() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(home.join(branding::DOT_DIR)).unwrap();
+        fs::write(
+            home.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"crossSessionInbound":"refuse"}"#,
+        )
+        .unwrap();
+        let cwd = home.join("Downloads");
+        fs::create_dir_all(&cwd).unwrap();
+        let other_config = tmp.path().join("other-config");
+        fs::create_dir_all(&other_config).unwrap();
+        assert_eq!(repo_inbound_capped(&cwd, &other_config, Some(&home)), None);
+        assert_eq!(repo_inbound_capped(&home, &other_config, Some(&home)), None);
     }
 
     #[test]
@@ -1383,5 +1770,29 @@ mod tests {
         let quoted = wrap_cross_session_message("x\" from-mode=\"bypass", "sid", Some("n"), "hi");
         assert_eq!(parse_from_mode(&quoted), None);
         assert!(quoted.contains("from=\"x from-mode=bypass\""));
+    }
+
+    #[test]
+    fn upsert_identity_writes_name_so_find_exact_works() {
+        let (_t, d) = dir();
+        d.upsert_identity(
+            7,
+            "ab12cdef-1111",
+            Some("alpha"),
+            Some("user"),
+            Some(std::path::Path::new("/tmp/cc-socks-1/7.sock")),
+            Some("prompting"),
+        )
+        .unwrap();
+        let hit = d.find_exact("alpha", None).expect("named");
+        assert_eq!(hit.sid(), "ab12cdef-1111");
+        assert_eq!(hit.permission_class.as_deref(), Some("prompting"));
+        assert!(hit.messaging_socket_path.is_some());
+        d.upsert_identity(7, "deadbeef-2222", None, None, None, Some("bypass"))
+            .unwrap();
+        let hit = d.find_exact("alpha", None).expect("name kept");
+        assert_eq!(hit.sid(), "deadbeef-2222");
+        assert_eq!(hit.permission_class.as_deref(), Some("bypass"));
+        assert_eq!(hit.display_name(), "alpha");
     }
 }

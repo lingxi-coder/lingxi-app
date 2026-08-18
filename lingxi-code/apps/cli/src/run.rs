@@ -2926,7 +2926,7 @@ async fn resume_resolved_session(
         // `--resume` carries no in-session model (`None`) — it opens on the
         // config/CLI model, matching claude-code's `--resume`.
         let first = mount_resumed_tui(argv, session_id, messages, None).await;
-        return drive_tui_switch_loop(argv, first, Some(session_id)).await;
+        return drive_tui_switch_loop(argv, first, Some(session_id), None).await;
     }
 
     sink.text(&format!("Resumed session {session_id}\n")).await;
@@ -3071,9 +3071,10 @@ async fn mount_resumed_tui_inner(
         boot_notice = state.notice;
     }
     // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then
-    // launch the ratatui backend with that replayed scrollback. Resume has no
-    // SessionRegistration (fresh launches register; resume does not), so no
-    // status forwarder is threaded. A carried one-shot notice (the `/branch`
+    // launch the ratatui backend with that replayed scrollback. Cold `--resume`
+    // has no SessionRegistration (fresh launches register). In-process `/resume`
+    // remounts pass the live registration through so status + permissionClass
+    // stay on `sessions/<pid>.json`. A carried one-shot notice (the `/branch`
     // success confirmation) renders as the newest system cell.
     let mut resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
     if let Some(body) = boot_notice {
@@ -3135,8 +3136,9 @@ pub(crate) async fn drive_tui_switch_loop(
     argv: &Argv,
     first: crate::mode::RunOutcome,
     initial_session_id: Option<uuid::Uuid>,
+    registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
 ) -> i32 {
-    drive_tui_switch_loop_inner(argv, first, initial_session_id, None).await
+    drive_tui_switch_loop_inner(argv, first, initial_session_id, registration).await
 }
 
 /// Background variant that preserves the worker registration across every
@@ -3590,7 +3592,7 @@ async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
                 }
             };
             let first = mount_resumed_tui(argv, uuid, messages, None).await;
-            drive_tui_switch_loop(argv, first, Some(uuid)).await
+            drive_tui_switch_loop(argv, first, Some(uuid), None).await
         }
         Ok(Ok(None)) => {
             sink.text("Cancelled.\n").await;

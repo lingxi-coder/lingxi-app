@@ -1,7 +1,8 @@
 //! `ListAgents` (alias `ListPeers`) — 2.1.232 `zy` / `SDd`.
 //!
-//! Lists in-process teammates plus other local live sessions this process can
-//! `SendMessage` to. Cloud / Remote Control rows are omitted (carve-out).
+//! Lists other local live sessions this process can `SendMessage` to.
+//! In-process teammates are addressed by the name they were spawned with, not
+//! this list. Cloud / Remote Control rows are omitted (carve-out).
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -22,11 +23,11 @@ pub const LIST_AGENTS_TOOL_NAME: &str = "ListAgents";
 pub const LIST_PEERS_TOOL_NAME: &str = "ListPeers";
 
 const DESCRIPTION: &str = concat!(
-    "Lists agents you can SendMessage to — in-process subagents you spawned, ",
-    "other local Claude sessions on this machine. Names are the address: send with ",
-    "`SendMessage({to: \"<name>\", message: \"...\"})`, copying the name exactly as a row prints it. ",
-    "Append a row's ` [ref]` only when the bare name is not enough — two rows share it, ",
-    "or an error asks you to disambiguate."
+    "Lists other local Claude sessions on this machine you can SendMessage to. ",
+    "In-process teammates are addressed by the name they were spawned with, not this list. ",
+    "Names are the address: send with `SendMessage({to: \"<name>\", message: \"...\"})`, ",
+    "copying the name exactly as a row prints it. Append a row's ` [ref]` only when the ",
+    "bare name is not enough — two rows share it, or an error asks you to disambiguate."
 );
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {

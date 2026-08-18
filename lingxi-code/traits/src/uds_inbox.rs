@@ -641,6 +641,13 @@ fn dispatch_line(v: Value, state: &InboxState, peer_pid: Option<u32>) {
             apply_inbound(msg, state);
         }
         "control" => {
+            let Some(peer_pid) = peer_pid else {
+                return;
+            };
+            if peer_pid != std::process::id() && process_live_dir().find_by_pid(peer_pid).is_none()
+            {
+                return;
+            }
             if v.get("action").and_then(Value::as_str) == Some("peer_message_status") {
                 let status = v.get("status").and_then(Value::as_str).unwrap_or("");
                 let notice = receipt_notice(status);
@@ -684,8 +691,8 @@ fn attribute_user_message(
             .messaging_socket_path
             .as_deref()
             .filter(|s| !s.is_empty())
-            .map(|p| crate::uds_inbox::uds_address(std::path::Path::new(p)))
-            .or(from_addr);
+            .map(|p| crate::uds_inbox::uds_address(std::path::Path::new(p)));
+        let _ = from_addr;
         (
             rec.display_name().to_string(),
             rec.sid().to_string(),
@@ -740,6 +747,7 @@ fn apply_inbound(msg: PeerMessage, state: &InboxState) {
             });
         }
         InboundPolicy::Accept => {
+            send_receipt(&msg, "delivered");
             state
                 .accepted
                 .lock()
@@ -766,7 +774,7 @@ fn send_receipt(msg: &PeerMessage, status: &str) {
     let Some(path) = decode_uds_address(addr) else {
         return;
     };
-    if !is_inbox_sock_path(&path) || !path.exists() {
+    if !is_canonical_inbox_sock(&path) || !path.exists() {
         return;
     }
     let payload = json!({
@@ -1305,6 +1313,23 @@ mod tests {
         assert!(!is_cc_socks_dir_name("cc-socks-owned"));
         assert!(is_cc_socks_dir_name("cc-socks"));
         assert!(is_cc_socks_dir_name("cc-socks-501"));
+    }
+
+    #[test]
+    fn control_from_unknown_pid_is_dropped() {
+        let _g = test_guard();
+        stop_process_inbox();
+        clean_env();
+        dispatch_line(
+            serde_json::json!({
+                "type": "control",
+                "action": "peer_message_status",
+                "status": "delivered"
+            }),
+            &inbox(),
+            Some(4_294_967_294),
+        );
+        assert!(take_delivery_notices().is_empty());
     }
 
     #[test]

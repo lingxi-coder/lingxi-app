@@ -172,14 +172,18 @@ async fn run_tui(argv: &Argv) -> i32 {
     // live orchestrator directly via `tui_build`'s bridge channel; no replayed
     // scrollback (empty seed).
     let outcome = run_ratatui(tui_build, Some(session_registration.clone()), Vec::new()).await;
-    // Unlink NOW (idempotent with Drop): the status forwarders may still hold
-    // `Arc` clones inside detached tasks, and the record must not outlive the
-    // interactive session.
+    // Inbox + live record stay up across in-process `/resume` remounts (same
+    // pid). Unlink only after the switch loop exits so other sessions can
+    // still find this process by name.
+    let code = crate::run::drive_tui_switch_loop(
+        argv,
+        outcome,
+        Some(initial_session_id.as_uuid()),
+        Some(session_registration.clone()),
+    )
+    .await;
     session_registration.deregister();
-    // Follow an in-session `/resume` switch by re-mounting the chosen session
-    // in-process (writer retargeted) until the user quits. Inbox stays up
-    // across remounts (same pid); `drive_tui_switch_loop` stops it on exit.
-    crate::run::drive_tui_switch_loop(argv, outcome, Some(initial_session_id.as_uuid())).await
+    code
 }
 
 /// Bind the process UDS inbox and advertise it on the live session record.
@@ -204,13 +208,32 @@ pub(crate) fn ensure_live_messaging(
                     },
                 );
             }
-        } else if let Some(name) = user_name {
-            traits::live_sessions::set_process_name(name);
         }
     } else {
         traits::live_sessions::set_process_session_id(session_id);
         if let Some(name) = user_name.filter(|s| !s.is_empty()) {
             traits::live_sessions::set_process_name(name);
+        }
+    }
+    let mut derived_name: Option<String> = None;
+    if traits::live_sessions::process_name()
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        if let Some(derived) = user_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            })
+        {
+            traits::live_sessions::set_process_name(derived.clone());
+            derived_name = Some(derived);
         }
     }
     let path = match traits::uds_inbox::process_socket_path() {
@@ -219,14 +242,33 @@ pub(crate) fn ensure_live_messaging(
             let sock = traits::uds_inbox::default_socket_path(std::process::id());
             match traits::uds_inbox::start_process_inbox(sock) {
                 Ok(path) => path,
-                Err(_) => return,
+                Err(error) => {
+                    tracing::warn!(%error, "cross-session inbox unavailable");
+                    eprintln!("lingxi-cli: cross-session inbox unavailable: {error}");
+                    return;
+                }
             }
         }
     };
+    let name_source = derived_name.as_deref().map(|_| "derived");
     if let Some(reg) = registration {
         reg.set_messaging_socket(&path);
+        reg.set_session_id(session_id);
+        if let Some(name) = derived_name.as_deref().filter(|s| !s.trim().is_empty()) {
+            reg.set_name(name, "derived");
+        }
+        if let Some(class) = traits::live_sessions::process_permission_class() {
+            reg.set_permission_class(&class);
+        }
     }
-    let _ = dir.set_messaging_socket(std::process::id(), session_id, &path);
+    let _ = dir.upsert_identity(
+        std::process::id(),
+        session_id,
+        traits::live_sessions::process_name().as_deref(),
+        name_source,
+        Some(&path),
+        traits::live_sessions::process_permission_class().as_deref(),
+    );
 }
 
 /// (iocraft → ratatui migration) Launch the `tui-rata` interactive chat wired
@@ -471,6 +513,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let compact_orch = orchestrator.clone();
     let compact_handle = handle.clone();
     let set_mode_handle = handle.clone();
+    let set_mode_reg = registration.clone();
     let rename_orch = orchestrator.clone();
     let rename_reg = registration.clone();
     let rename_handle = handle.clone();
@@ -984,6 +1027,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         };
         let tx = set_mode_turn_tx.clone();
         let bypass_available = bypass_available;
+        let set_mode_reg = set_mode_reg.clone();
         set_mode_handle.spawn(async move {
             if let Err(e) = gate.set_permission_mode(&mode).await {
                 let _ = tx.send(tui::TurnEvent::SystemNotice {
@@ -992,6 +1036,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 });
             } else {
                 traits::live_sessions::set_process_permission_mode(&mode, bypass_available);
+                if let Some(reg) = set_mode_reg.as_ref() {
+                    reg.set_permission_class(traits::live_sessions::permission_class_for(
+                        &mode,
+                        bypass_available,
+                    ));
+                }
             }
         });
     };

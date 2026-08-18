@@ -1248,6 +1248,59 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertNil(store.pendingWidgetSetup)
         }
 
+        func testCreateDoesNotSurfaceAMissingAppGroupAsAnError() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+            store.widgetSnapshotPublisher = { _ in
+                LocalAppWidgetSnapshotStore.SnapshotError.containerUnavailable
+            }
+
+            let submitted = await store.createApp(brief: "一个记事本")
+            XCTAssertTrue(submitted)
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
+            ]))
+
+            XCTAssertNil(store.errorMessage)
+            XCTAssertEqual(store.createdAppSession?.appID, "notes")
+        }
+
+        func testAddWidgetStillArmsSetupWhenTheAppGroupIsMissing() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+            store.widgetSnapshotPublisher = { _ in
+                LocalAppWidgetSnapshotStore.SnapshotError.containerUnavailable
+            }
+
+            let submitted = await store.createApp(brief: "一个记事本", addWidget: true)
+            XCTAssertTrue(submitted)
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
+            ]))
+
+            XCTAssertNil(store.errorMessage)
+            XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
+        }
+
+        func testAddWidgetSurfacesARealSnapshotWriteFailure() async throws {
+            struct DiskFull: Error {}
+            let store = LocalAppsStore()
+            store.configure { _ in }
+            store.widgetSnapshotPublisher = { _ in DiskFull() }
+
+            let submitted = await store.createApp(brief: "一个记事本", addWidget: true)
+            XCTAssertTrue(submitted)
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
+            ]))
+
+            XCTAssertEqual(
+                store.errorMessage,
+                String(localized: "local_apps_error_widget_snapshot")
+            )
+            XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
+        }
+
         /// v3: creation should land in the INIT CHAT, and the engine
         /// announces twice — first the bare record, then the
         /// `init_session_id` pin. The claim must wait for the pin (second

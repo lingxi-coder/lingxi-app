@@ -135,13 +135,14 @@ impl WireCodec for OpenAiChatCodec {
         }
 
         let require_assistant_tool_content = self.is_deepseek_profile();
+        // DeepSeek V4 thinking is on by default (including v4-flash 极速).
+        // Any later turn that omits that turn's reasoning_content is a 400:
+        // "The reasoning_content in the thinking mode must be passed back".
+        // This is not limited to tool-call messages — generate-build and
+        // other multi-turn agents fail on a thinking+text reply too.
+        let preserve_reasoning_content =
+            self.is_kimi_profile() || self.is_deepseek_profile();
         messages.extend(request.messages.iter().flat_map(|message| {
-            let preserve_reasoning_content = self.is_kimi_profile()
-                || (self.is_deepseek_profile()
-                    && message
-                        .content
-                        .iter()
-                        .any(|block| matches!(block, ContentBlock::ToolCall { .. })));
             encode_message(
                 message,
                 preserve_reasoning_content,
@@ -795,8 +796,8 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
                 // Reasoning / RedactedThinking are intentionally NOT rejected: the stream
                 // decoder emits Reasoning blocks into history. Most chat-completions
                 // providers reject reasoning_content as input, so encode_message skips
-                // it unless a provider-specific tool-call replay path opts in.
-                // Erroring here would break turn 2+.
+                // it unless a provider-specific replay path opts in (Kimi, DeepSeek
+                // thinking). Erroring here would break turn 2+.
                 ContentBlock::ServerToolUse { .. }
                 | ContentBlock::ConnectorText { .. }
                 | ContentBlock::AdvisorToolResult { .. } => {
@@ -1152,11 +1153,11 @@ mod tests {
         assert!(body_of(&request).get("thinking").is_none());
     }
 
-    /// (b) History containing a Reasoning block (emitted by the stream decoder on a
-    /// prior turn) encodes successfully and is omitted from the outgoing messages.
+    /// (b) History containing a Reasoning block encodes successfully. Ordinary
+    /// OpenAI-compatible endpoints omit it; DeepSeek thinking must echo it.
     #[test]
-    fn reasoning_block_in_history_is_omitted_not_rejected() {
-        let mut request = LlmRequest::new("deepseek-reasoner");
+    fn reasoning_block_in_history_is_omitted_for_generic_openai() {
+        let mut request = LlmRequest::new("gpt-4o");
         request.messages.push(Message {
             role: "assistant".to_string(),
             content: vec![
@@ -1171,7 +1172,7 @@ mod tests {
             ],
         });
 
-        let codec = OpenAiChatCodec::new("https://api.deepseek.com");
+        let codec = OpenAiChatCodec::new("https://api.openai.com/v1").with_profile_name("openai");
         let provider_request = codec
             .encode_request(&request)
             .expect("reasoning block must not error");
@@ -1180,7 +1181,6 @@ mod tests {
             .get("messages")
             .and_then(Value::as_array)
             .expect("messages array");
-        // The assistant message keeps its text but never serializes the reasoning.
         let serialized = serde_json::to_string(messages).expect("serialize messages");
         assert!(serialized.contains("the answer is 42"), "text survives");
         assert!(!serialized.contains("let me think"), "reasoning is omitted");
@@ -1188,6 +1188,34 @@ mod tests {
             !serialized.contains("reasoning_content"),
             "no reasoning_content key"
         );
+    }
+
+    #[test]
+    fn deepseek_text_history_preserves_reasoning_content() {
+        let mut request = LlmRequest::new("deepseek-v4-flash");
+        request.messages.push(Message {
+            role: "assistant".to_string(),
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "let me think".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "the answer is 42".to_string(),
+                    cache_control: None,
+                },
+            ],
+        });
+
+        let encoded = OpenAiChatCodec::new("https://api.deepseek.com")
+            .encode_request(&request)
+            .expect("encode DeepSeek thinking history");
+        let messages = encoded.body_json["messages"]
+            .as_array()
+            .expect("DeepSeek messages array");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"], "the answer is 42");
+        assert_eq!(messages[0]["reasoning_content"], "let me think");
     }
 
     #[test]

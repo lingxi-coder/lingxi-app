@@ -109,6 +109,12 @@ final class LocalAppsStore {
     @ObservationIgnored private var startTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var pendingLaunchDestinations: [String: LocalAppLaunchDestination] = [:]
     @ObservationIgnored private var widgetSnapshotTask: Task<Void, Never>?
+    /// Tests replace this to simulate App Group / write failures. Production
+    /// keeps the default publisher that writes the shared snapshot file.
+    @ObservationIgnored
+    var widgetSnapshotPublisher: (LocalAppWidgetSnapshot) -> Error? = {
+        LocalAppWidgetSnapshotStore.publish($0)
+    }
 
     #if canImport(engine_mobileFFI)
         @ObservationIgnored private var submitCommand: ((ClientCommand) async throws -> Void)?
@@ -959,7 +965,7 @@ final class LocalAppsStore {
 
     private func publishWidgetSnapshotNow() {
         widgetSnapshotTask?.cancel()
-        reportWidgetSnapshotError(LocalAppWidgetSnapshotStore.publish(makeWidgetSnapshot()))
+        reportWidgetSnapshotError(widgetSnapshotPublisher(makeWidgetSnapshot()))
     }
 
     private func scheduleWidgetSnapshotPublish() {
@@ -968,13 +974,19 @@ final class LocalAppsStore {
         widgetSnapshotTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
-            reportWidgetSnapshotError(LocalAppWidgetSnapshotStore.publish(snapshot))
+            // Catalog-driven publishes are best-effort. A missing App Group
+            // (unsigned debug build, or a host without the entitlement) must
+            // not look like create/refresh failed.
+            _ = widgetSnapshotPublisher(snapshot)
             widgetSnapshotTask = nil
         }
     }
 
     private func reportWidgetSnapshotError(_ error: Error?) {
-        guard error != nil else { return }
+        guard let error else { return }
+        if error as? LocalAppWidgetSnapshotStore.SnapshotError == .containerUnavailable {
+            return
+        }
         errorMessage = String(localized: "local_apps_error_widget_snapshot")
     }
 

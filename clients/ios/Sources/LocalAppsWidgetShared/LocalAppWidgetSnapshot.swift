@@ -55,7 +55,7 @@ enum LocalAppWidgetSnapshotStore {
         load()
     }
 
-    enum SnapshotError: Error {
+    enum SnapshotError: Error, Equatable {
         case containerUnavailable
     }
 

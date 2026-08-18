@@ -4,6 +4,7 @@
 //! WebView handles.  This broker is the single trust boundary for those
 //! operations and is also used by the native client command surface.
 
+use crate::host::LocalAppBackgroundRunDto;
 use crate::local_apps_mcp::LocalAppsMcpHost;
 use async_trait::async_trait;
 use client_adapter::ClientEventSink;
@@ -51,6 +52,7 @@ const DEPENDENCY_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PNPM_TOOLCHAIN_KEY: &str = "pnpm@11.22.0/node@24.18.1";
 const DEPENDENCY_SNAPSHOT_VERSION: u8 = 1;
 const DEPENDENCY_SNAPSHOT_READY_FILE: &str = ".lingxi-dependency-ready";
+const WORKSPACE_DEPENDENCY_ATTESTATION_FILE: &str = ".lingxi-build-state/dependency-attestation";
 /// Consecutive `accept()` failures that retire the static server.  A burst of
 /// ECONNABORTED/EMFILE must not, so the cap is deliberately generous
 /// (100 * 50 ms ~= 5 s of an unbroken failure); a listener whose I/O driver is
@@ -621,6 +623,15 @@ impl LocalAppsHostBroker {
         reset.grant_epoch = current.grant_epoch.saturating_add(1).max(1);
         save_permissions(&layout, &reset).map_err(|error| error.to_string())?;
         self.session_permissions.lock().await.revoke_app(app_id);
+        for outcome in self
+            .cancel_background_tasks_for_revoked_schedule(
+                app_id,
+                "background scheduling permission was revoked",
+            )
+            .await?
+        {
+            self.emit_background_task_changed(&outcome).await;
+        }
         Ok(())
     }
 
@@ -863,18 +874,30 @@ impl LocalAppsHostBroker {
             return Ok(false);
         }
         let marker = snapshot_root.join(DEPENDENCY_SNAPSHOT_READY_FILE);
-        let expected_tree_digest = std::fs::read_to_string(&marker)
-            .map_err(|error| format!("read dependency snapshot marker: {error}"))?
-            .lines()
-            .nth(3)
-            .filter(|digest| !digest.is_empty())
-            .map(str::to_owned);
+        let expected_tree_digest = dependency_tree_digest_from_marker(&marker)?;
         let Some(expected_tree_digest) = expected_tree_digest else {
             return Ok(false);
         };
+        let expected_attestation = dependency_attestation(lock_digest, &expected_tree_digest);
+        let attestation = workspace.join(WORKSPACE_DEPENDENCY_ATTESTATION_FILE);
+        if std::fs::read_to_string(&attestation).ok().as_deref()
+            == Some(expected_attestation.as_str())
+        {
+            return Ok(true);
+        }
         let workspace_node_modules = workspace.join("node_modules");
         validate_dependency_tree(&workspace_node_modules)?;
-        Ok(dependency_tree_digest(&workspace_node_modules)? == expected_tree_digest)
+        if dependency_tree_digest(&workspace_node_modules)? != expected_tree_digest {
+            return Ok(false);
+        }
+        crate::local_apps_build::write_file(
+            workspace,
+            WORKSPACE_DEPENDENCY_ATTESTATION_FILE,
+            expected_attestation.as_bytes(),
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(true)
     }
 
     fn workspace_dependencies_ready_path(workspace: &Path) -> Result<bool, String> {
@@ -934,9 +957,7 @@ impl LocalAppsHostBroker {
                     let tree_digest = dependency_tree_digest(&staging_root.join("node_modules"))
                         .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
                     let marker = staging_root.join(DEPENDENCY_SNAPSHOT_READY_FILE);
-                    let expected = format!(
-                        "{DEPENDENCY_SNAPSHOT_VERSION}\n{lock_digest}\n{PNPM_TOOLCHAIN_KEY}\n{tree_digest}\n"
-                    );
+                    let expected = dependency_attestation(lock_digest, &tree_digest);
                     std::fs::write(marker, expected)
                         .map_err(|error| io::Error::new(io::ErrorKind::Other, error))
                 })
@@ -1140,6 +1161,18 @@ impl LocalAppsHostBroker {
         if actual_lock_digest != expected_lock_digest {
             return Err("dependency lock changed while installation was running".into());
         }
+        let snapshot_root = self.dependency_snapshot_root(expected_lock_digest);
+        let snapshot_marker = snapshot_root.join(DEPENDENCY_SNAPSHOT_READY_FILE);
+        let tree_digest = dependency_tree_digest_from_marker(&snapshot_marker)?
+            .ok_or_else(|| "dependency snapshot marker is malformed".to_string())?;
+        let attestation = dependency_attestation(expected_lock_digest, &tree_digest);
+        crate::local_apps_build::write_file(
+            &workspace,
+            WORKSPACE_DEPENDENCY_ATTESTATION_FILE,
+            attestation.as_bytes(),
+            true,
+        )
+        .map_err(|error| error.to_string())?;
         service
             .complete_dependency_install_with_metadata(
                 app_id,
@@ -2800,7 +2833,7 @@ impl LocalAppsHostBroker {
         let setup_path = "- This workspace already contains the repository-verified Vite + Tailwind + shadcn/ui foundation. The host prepares app-local dependencies in `workspace/node_modules`; if they are still being prepared, wait and retry the build. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
              - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `components.json`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
              - Default editable entry points are `app/screens/home-screen.jsx` and `app/globals.css`. The preset files under `components/ui/` are app-owned and may be edited. You may also edit files under `app/`, `src/`, `components/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`. The component lab at `#/_components` is lazy-loaded and must stay outside normal navigation unless the user asks for it.\n\
-             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds from an isolated workspace mount and promotes only the validated output.\n";
+             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n";
         let build_preview =
             "- `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
              (30-minute budget). The host waits for the app-local dependency state, mounts \
@@ -2961,6 +2994,20 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .await
             .map_err(|e| e.to_string())?;
         local_apps::save_manifest(&layout, &manifest).map_err(|e| e.to_string())?;
+        if !manifest
+            .capabilities
+            .contains(&AppCapability::BackgroundSchedule)
+        {
+            for outcome in self
+                .cancel_background_tasks_for_revoked_schedule(
+                    &app_id,
+                    "background scheduling capability was removed from the app manifest",
+                )
+                .await?
+            {
+                self.emit_background_task_changed(&outcome).await;
+            }
+        }
         Ok(serde_json::json!({
             "ok": true,
             "app_id": app_id,
@@ -3117,10 +3164,37 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         let _process_lock = self.acquire_background_process_lock(&app_id).await?;
         let _guard = self.background_task_writes.lock().await;
         let mut tasks = local_apps::background::load_tasks(&layout).map_err(|e| e.to_string())?;
-        if tasks.len() >= 32 {
-            return Err("an app may have at most 32 background tasks".into());
+        let mut journal =
+            local_apps::background::load_journal(&layout).map_err(|e| e.to_string())?;
+        if tasks.len() >= background_ops::MAX_BACKGROUND_TASKS {
+            let terminal_index = tasks
+                .iter()
+                .enumerate()
+                .filter(|(_, task)| {
+                    matches!(
+                        task.status,
+                        local_apps::BackgroundTaskStatus::Succeeded
+                            | local_apps::BackgroundTaskStatus::Failed
+                            | local_apps::BackgroundTaskStatus::Cancelled
+                    )
+                })
+                .min_by_key(|(_, task)| task.updated_at_ms)
+                .map(|(index, _)| index);
+            let Some(terminal_index) = terminal_index else {
+                return Err(format!(
+                    "an app may have at most {} active background tasks",
+                    background_ops::MAX_BACKGROUND_TASKS
+                ));
+            };
+            let removed = tasks.remove(terminal_index);
+            journal.retain(|entry| entry.task_id != removed.task_id);
         }
-        let task_id = self.request_id("background");
+        let task_id = loop {
+            let candidate = self.request_id("background");
+            if tasks.iter().all(|task| task.task_id != candidate) {
+                break candidate;
+            }
+        };
         let now = now_ms();
         let task = local_apps::BackgroundTaskRecord {
             schema_version: local_apps::RUNTIME_CONTRACT_SCHEMA_VERSION,
@@ -3133,8 +3207,6 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             updated_at_ms: now,
         };
         tasks.push(task.clone());
-        let mut journal =
-            local_apps::background::load_journal(&layout).map_err(|e| e.to_string())?;
         journal.retain(|entry| entry.task_id != task_id);
         journal.push(local_apps::BackgroundJournalEntry {
             task_id: task_id.clone(),
@@ -3147,6 +3219,17 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             updated_at_ms: now,
         });
         local_apps::background::save_state(&layout, &tasks, &journal).map_err(|e| e.to_string())?;
+        drop(_guard);
+        drop(_process_lock);
+        self.emit_background_task_changed(&LocalAppBackgroundRunDto {
+            app_id: app_id.clone(),
+            task_id: task_id.clone(),
+            status: "scheduled".into(),
+            result_json: None,
+            error: None,
+            retryable: false,
+        })
+        .await;
         Ok(json!({"task": task, "scheduled": true, "scheduler": "host-journal"}))
     }
 
@@ -3198,6 +3281,15 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .map_err(|e| e.to_string())?;
         self.background_management_layout(&app_id)?;
         let cancelled = self.cancel_background_task(&app_id, &task_id).await;
+        self.emit_background_task_changed(&LocalAppBackgroundRunDto {
+            app_id: app_id.clone(),
+            task_id: task_id.clone(),
+            status: if cancelled { "cancelled" } else { "unchanged" }.into(),
+            result_json: None,
+            error: None,
+            retryable: false,
+        })
+        .await;
         Ok(json!({"app_id": app_id, "task_id": task_id, "cancelled": cancelled}))
     }
 
@@ -3210,6 +3302,15 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .map_err(|e| e.to_string())?;
         self.background_management_layout(&app_id)?;
         let retried = self.retry_background_task(&app_id, &task_id).await?;
+        self.emit_background_task_changed(&LocalAppBackgroundRunDto {
+            app_id: app_id.clone(),
+            task_id: task_id.clone(),
+            status: if retried { "scheduled" } else { "unchanged" }.into(),
+            result_json: None,
+            error: None,
+            retryable: false,
+        })
+        .await;
         Ok(json!({"app_id": app_id, "task_id": task_id, "retried": retried}))
     }
 
@@ -4090,16 +4191,41 @@ fn validate_dependency_tree(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn dependency_attestation(lock_digest: &str, tree_digest: &str) -> String {
+    format!("{DEPENDENCY_SNAPSHOT_VERSION}\n{lock_digest}\n{PNPM_TOOLCHAIN_KEY}\n{tree_digest}\n")
+}
+
+fn dependency_tree_digest_from_marker(marker: &Path) -> Result<Option<String>, String> {
+    let contents = match std::fs::read_to_string(marker) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "read dependency marker {}: {error}",
+                marker.display()
+            ))
+        }
+    };
+    let lines: Vec<&str> = contents.lines().collect();
+    if lines.len() != 4 || lines[3].is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(lines[3].to_string()))
+}
+
 fn dependency_tree_digest(root: &Path) -> Result<String, String> {
     let mut files = Vec::new();
     collect_dependency_files(root, Path::new(""), &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
     let mut digest = Sha256::new();
+    digest.update((files.len() as u64).to_le_bytes());
     for (relative, path) in files {
-        digest.update(relative.as_bytes());
-        digest.update([0]);
+        let relative = relative.as_bytes();
         let bytes = std::fs::read(&path)
             .map_err(|error| format!("read dependency tree file {}: {error}", path.display()))?;
+        digest.update((relative.len() as u64).to_le_bytes());
+        digest.update(relative);
+        digest.update((bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     }
     Ok(format!("{:x}", digest.finalize()))
@@ -4903,6 +5029,11 @@ mod tests {
             lingxi.contains("sole writable `LocalAppBuild` root"),
             "{lingxi}"
         );
+        assert!(
+            lingxi.contains("directly from this workspace as the sole writable mount"),
+            "{lingxi}"
+        );
+        assert!(!lingxi.contains("isolated workspace mount"), "{lingxi}");
         assert!(lingxi.contains("`build/store/dist/`"), "{lingxi}");
     }
 
@@ -5099,6 +5230,45 @@ mod tests {
         assert_eq!(
             fs::read(staging.join("node_modules/react.js")).expect("materialized dependency"),
             b"react"
+        );
+
+        let workspace = root.path().join("workspace");
+        LocalAppsHostBroker::materialize_dependency_snapshot(&snapshot, &workspace)
+            .expect("materialize workspace dependencies");
+        let tree_digest = dependency_tree_digest(&workspace.join("node_modules"))
+            .expect("workspace dependency digest");
+        let attestation_path = workspace.join(WORKSPACE_DEPENDENCY_ATTESTATION_FILE);
+        fs::create_dir_all(attestation_path.parent().expect("attestation parent"))
+            .expect("attestation directory");
+        fs::write(
+            &attestation_path,
+            dependency_attestation("lock-digest", &tree_digest),
+        )
+        .expect("workspace attestation");
+        assert!(LocalAppsHostBroker::workspace_dependencies_match_snapshot(
+            &workspace,
+            &snapshot,
+            "lock-digest",
+        )
+        .expect("match attested workspace dependencies"));
+    }
+
+    #[test]
+    fn dependency_tree_digest_frames_file_boundaries() {
+        let root = TempDir::new().expect("tempdir");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        fs::create_dir_all(&first).expect("first tree");
+        fs::create_dir_all(&second).expect("second tree");
+        fs::write(first.join("a"), b"bc").expect("first file");
+        fs::write(first.join("d"), b"X").expect("first boundary file");
+        fs::write(second.join("a"), b"b").expect("second file");
+        fs::write(second.join("cd"), b"X").expect("second boundary file");
+
+        assert_ne!(
+            dependency_tree_digest(&first).expect("first digest"),
+            dependency_tree_digest(&second).expect("second digest"),
+            "path/content boundaries must be unambiguous",
         );
     }
 

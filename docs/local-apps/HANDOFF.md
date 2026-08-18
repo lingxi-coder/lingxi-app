@@ -53,7 +53,7 @@ The important ownership boundary is:
 | --- | --- | --- |
 | Coordinator skill | `skills/create-local-app/SKILL.md` | Confirmation rules, conditional ImageGen, workflow invocation, workspace and dependency boundaries |
 | Specialist skills | `skills/frontend-design/`, `skills/accessibility/`, `skills/react-best-practices/`, `skills/frontend-qa/` | Design quality, platform matrix, accessibility, React review, deterministic QA |
-| Workflow | `lingxi-code/tools/workflow/src/local_app_build_workflow.js` | Design → Generate source → Build → Verify; structured outputs; at most two repair rounds |
+| Workflow | `lingxi-code/tools/workflow/src/local_app_build_workflow.js` | Task-local fast/balanced/thorough Design → Generate source → Build → Verify; structured outputs; strategy-specific repair rounds |
 | Workflow registration/tests | `lingxi-code/tools/workflow/src/builtins.rs` | Built-in registration and real QuickJS regression tests |
 | MCP surface | `lingxi-code/apps/engine-mobile/src/local_apps_mcp.rs` | Fixed in-process `local_apps` tool catalog and input validation |
 | Host broker | `lingxi-code/apps/engine-mobile/src/local_apps_host.rs` | Runtime, build coordination, logs, checkpoints, native bridge permissions, UI inspection/actions |
@@ -172,7 +172,7 @@ Important constraints:
 
 - `inspect_ui` returns a structured DOM/accessibility snapshot and does not execute JavaScript.
 - `act_on_ui` accepts only click, fill, select, toggle, scroll, navigate, back, and reload.
-- manifest capabilities are the closed wire enum `data_mutation`, `ui_control`, `camera`, `photo_library`, `microphone`, `location`, `notifications`, `llm`, and `agent_notify`; `data` is invalid.
+- manifest capabilities are the closed wire enum `data_mutation`, `ui_control`, `camera`, `photo_library`, `microphone`, `location`, `notifications`, `llm`, `agent_notify`, and `background_schedule`; `data` is invalid. Apps that register a system background flow must declare `background_schedule`.
 - `query_data` is bounded and structured; it does not accept raw SQL. Filters are `{fieldId, operator, value}`, and app fields are returned under `records[].document` beside host-owned record metadata.
 - `mutate_data` is limited to 50 operations per request and is capability-gated. Operations are exactly `{kind:"upsert",recordId,document,expectedRevision?}` or `{kind:"delete",recordId,expectedRevision?}`.
 - `data_mutation` gates conversation-agent `mutate_data` calls. A page writing its own collection through `window.lingxi.v2.data.mutate` is app-scoped and does not declare that capability solely for page storage.

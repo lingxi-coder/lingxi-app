@@ -766,7 +766,9 @@ final class LocalAppsStore {
             case .appBackgroundTaskChanged:
                 // The durable lifecycle/result record is fetched on demand by
                 // the local app bridge/MCP status APIs.
-                break
+                // This event also covers schedules created by conversation MCP,
+                // which do not pass through the WebView mutation bookkeeping.
+                LocalAppBackgroundTaskBridge.shared.rescheduleAfterForegroundMutation()
             }
         }
 

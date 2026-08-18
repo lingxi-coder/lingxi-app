@@ -92,7 +92,9 @@ manifest update as a completed generation step.
 
 Capabilities are a closed enum. Use only `data_mutation`, `ui_control`,
 `camera`, `photo_library`, `microphone`, `location`, `notifications`, `llm`,
-or `agent_notify`; there is no `data` capability. `data_mutation` authorizes
+`agent_notify`, or `background_schedule`; there is no `data` capability.
+`background_schedule` is required when the app registers a system background
+flow. `data_mutation` authorizes
 the conversation agent to call `mcp__local_apps__mutate_data`. Do not declare
 it solely because the page writes its own collection through
 `window.lingxi.v2.data.mutate`; that foreground page path is already scoped to
@@ -191,11 +193,12 @@ The directory contract is fixed across every phase. The persistent source
 project lives at the current app workspace and is already scaffolded by the
 host with pinned root infra and dependencies before generation begins. The
 workspace `dist/` directory is disposable and must never be treated as source.
-The host build copies source into an isolated build `project/` root, excludes
-prior `dist/`, forces `vite build --outDir dist --emptyOutDir`, atomically
-promotes the validated snapshot, and serves only `build/store/dist/`. Never
-configure another `build.outDir`, inspect host staging paths, or copy generated
-output back into editable source.
+The host mounts this workspace as the sole writable build root (the guest may
+see it at the `project/` path), excludes prior
+`.lingxi-build-state/build-output/dist/`, forces `vite build --outDir dist
+--emptyOutDir`, atomically promotes the validated snapshot, and serves only
+`build/store/dist/`. Never configure another `build.outDir`, inspect host
+staging paths, or copy generated output back into editable source.
 
 1. **Design** — for `balanced` and `thorough`, invoke `$frontend-design` and
    produce/confirm platform and form factor, page structure, tokens, adapters,
@@ -212,10 +215,11 @@ output back into editable source.
    Stay within the shipped dependency set; if an idea would require package or
    root-infra changes, redesign it as a source-only implementation.
 3. **Build** — call `mcp__local_apps__build`; the host runs the production
-   `vite build --outDir dist --emptyOutDir` equivalent offline from its
-   isolated `project/` root with the fixed runtime and the app's materialized
-   dependency snapshot. `dist/` is the sole production output and the runtime
-   serves the promoted `build/store/dist/`.
+   `vite build --outDir dist --emptyOutDir` equivalent offline from the
+   workspace-backed writable mount with the fixed runtime and the app's
+   materialized dependency snapshot. The output is staged under private
+   `.lingxi-build-state/build-output/` before atomic promotion to
+   `build/store/dist/`.
 4. **Verify** — invoke `$frontend-qa`. `fast` checks the confirmed primary
    target, root render, fatal console errors, primary interaction, and native
    WebView path; `balanced` covers all confirmed targets and app states;

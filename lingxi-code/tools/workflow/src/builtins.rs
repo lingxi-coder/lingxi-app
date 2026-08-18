@@ -137,6 +137,7 @@ mod tests {
             "app/, src/, components/, lib/, styles/, public/",
             "lib/lingxi-bridge.js",
             "window.lingxi.v2",
+            "background_schedule",
             "Do not run npm, npx, node",
             "package.json, pnpm-lock.yaml, pnpm-workspace.yaml, index.html, vite.config.*",
             "host has already scaffolded the workspace",
@@ -148,6 +149,7 @@ mod tests {
             "maxRepairRounds",
             "conditionally detect ImageGen",
             "A narrow viewport alone does not prove a platform",
+            "Cover the full confirmed matrix: iPhone, Android phone, iPad portrait+landscape, Android tablet portrait+landscape, and desktop",
             "inspect_ui/act_on_ui/read_logs",
             "degraded_verification",
             "records[].document",
@@ -264,6 +266,14 @@ mod tests {
             );
             assert_eq!(result["repair_rounds"], 0, "{}", case.name);
             assert_eq!(result["agent_calls"], case.expected_calls, "{}", case.name);
+            if case.strategy == Some("thorough") {
+                assert!(
+                    run.prompts.iter().any(|prompt| prompt.contains(
+                        "Cover the full confirmed matrix: iPhone, Android phone, iPad portrait+landscape, Android tablet portrait+landscape, and desktop"
+                    )),
+                    "thorough verification must retain the full explicit target matrix"
+                );
+            }
             let expected_summary = if case.expects_design {
                 format!(
                     "{} strategy completed design, generation, build, and frontend QA.",
@@ -436,6 +446,39 @@ mod tests {
         assert!(run.prompts.is_empty());
         assert!(run.phases.is_empty());
         assert!(error.to_string().contains("unsupported strategy 123"));
+    }
+
+    #[test]
+    fn local_app_build_rejects_failed_data_roundtrip_even_when_verifier_says_ok() {
+        let run = drive_local_app_build(
+            local_app_args(Some("fast"), None, None, None),
+            |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Generate the complete React implementation")
+                            || prompt.contains("Repair the findings")
+                        {
+                            r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                .to_string()
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"failed","collections":["items"],"evidence":"query_data did not contain the written record"},"summary":"verifier incorrectly reported success"}"#
+                                .to_string()
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        );
+        let error = run
+            .outcome
+            .expect_err("failed native persistence must not return success");
+        assert!(
+            error.to_string().contains("native data round-trip failed"),
+            "unexpected workflow error: {error}"
+        );
+        assert_eq!(run.prompts.len(), 4, "fast gets one repair before failing");
     }
 
     #[test]

@@ -838,6 +838,7 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "recommended strategy",
         "task-local workflow",
         "rescore the revised",
+        "background_schedule",
     }
     missing = sorted(token for token in required_tokens if token not in text)
     if missing:
@@ -867,6 +868,7 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "Complexity score",
         "agent_calls",
         "verification_mode",
+        "background_schedule",
     }
     missing_workflow = sorted(token for token in workflow_tokens if token not in workflow)
     if missing_workflow:

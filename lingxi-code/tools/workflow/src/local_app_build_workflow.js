@@ -122,9 +122,9 @@ const CONTRACT = [
   '- The host has already scaffolded the workspace, checked in the locked package manifests, and pinned the root build contract before this workflow starts. Do not run npm, npx, node, Vite scaffolds, Shell-driven package installs, or any alternate project generator in any phase.',
   '- Root infrastructure is locked: do not edit package.json, pnpm-lock.yaml, pnpm-workspace.yaml, index.html, vite.config.*, components.json, jsconfig.json, host metadata under .lingxi/, lib/device-context.js, lib/lingxi-bridge.js, lib/lingxi-provider.jsx, lib/platform-adapter.js, or styles/foundation.css.',
   '- Generate only editable source and assets. Start with app/screens/home-screen.jsx, reuse the locked package set and editable components/ui sources, and preserve the lazy #/_components lab outside normal navigation unless the user asks otherwise.',
-  '- Keep Vite\'s official dist/ output default. Do not redirect build.outDir. Workspace dist/ is disposable preview output; the host excludes prior dist/, builds from an isolated project/ root with --outDir dist --emptyOutDir, and serves only build/store/dist/.',
+  '- Keep Vite\'s official dist/ output default. Do not redirect build.outDir. The host mounts this workspace as the sole writable build root (guest-visible as the project path), excludes prior .lingxi-build-state/build-output/dist/, runs with --outDir dist --emptyOutDir, and serves only the atomically promoted build/store/dist/.',
   '- The page reaches host data/network/device ONLY through window.lingxi.v2 and the checked-in bridge adapter.',
-  '- Manifest capabilities are exact enums: data_mutation, ui_control, camera, photo_library, microphone, location, notifications, llm, agent_notify. data_mutation is for conversation-agent mutate_data calls; page-owned window.lingxi.v2.data writes do not request it solely for storage.',
+  '- Manifest capabilities are exact enums: data_mutation, ui_control, camera, photo_library, microphone, location, notifications, llm, agent_notify, background_schedule. data_mutation is for conversation-agent mutate_data calls; page-owned window.lingxi.v2.data writes do not request it solely for storage. background_schedule is required when the app registers a system background flow.',
   '- For page storage, import queryCollection, upsertRecord, and deleteRecord from the locked bridge. Read app fields from records[].document. Never invent action/create/record mutation shapes.',
   '- localStorage must never be authoritative for a declared collection and must not hide a failed native write. Do not swallow bridge errors; surface a recoverable UI error and keep failed state retryable.',
   '- Dependencies are fixed by the host-owned template and lockfile set. The host may prepare the workspace dependencies when needed, but this workflow may not add, remove, install, reconcile, or re-lock packages itself.',
@@ -291,7 +291,7 @@ for (let round = 0; round <= strategyPolicy.maxRepairRounds; round += 1) {
       ? 'Run smoke verification for the confirmed primary target only: root render, fatal console errors, the primary interaction, and the native WebView path. Do not claim full cross-platform matrix coverage.'
       : strategyPolicy.verificationMode === 'confirmed-targets'
         ? 'Cover every confirmed target and the complete app states, navigation, accessibility basics, native WebView bridge, and primary interactions. Do not expand into unsupported targets.'
-        : 'Cover the full phone/tablet/desktop matrix in scope, Browser plus native WebView, all core interactions, error/permission/offline states, and every declared collection write path.';
+      : 'Cover the full confirmed matrix: iPhone, Android phone, iPad portrait+landscape, Android tablet portrait+landscape, and desktop when those targets are in scope. Use Browser plus native WebView, all core interactions, error/permission/offline states, and every declared collection write path.';
   verification = await runAgent(
     [
       'Invoke $frontend-qa for deterministic local-app verification.',
@@ -314,7 +314,13 @@ for (let round = 0; round <= strategyPolicy.maxRepairRounds; round += 1) {
       throwOnError: true,
     },
   );
-  if (verification && verification.ok) break;
+  const verificationFindings = Array.isArray(verification?.findings)
+    ? verification.findings
+    : [];
+  const dataRoundtripFailed = verification?.data_roundtrip?.status === 'failed';
+  if (verification?.ok === true && verificationFindings.length === 0 && !dataRoundtripFailed) {
+    break;
+  }
   if (round === strategyPolicy.maxRepairRounds) break;
   repairRounds += 1;
   phase('Generate & Build');
@@ -361,9 +367,17 @@ if (typeof build.preview_url !== 'string' || build.preview_url.length === 0) {
   );
 }
 requireAgentResult(verification, 'the verification step');
-if (verification.ok !== true) {
-  const findings = Array.isArray(verification.findings)
-    ? verification.findings.join('; ')
+const verificationFindings = Array.isArray(verification.findings)
+  ? verification.findings.slice()
+  : [];
+if (verification.data_roundtrip?.status === 'failed') {
+  verificationFindings.push(
+    `native data round-trip failed: ${verification.data_roundtrip.evidence || 'no evidence'}`,
+  );
+}
+if (verification.ok !== true || verificationFindings.length > 0) {
+  const findings = verificationFindings.length > 0
+    ? verificationFindings.join('; ')
     : verification.summary || 'no findings reported';
   throw new Error(
     `local-app-build: verification still has findings for app "${appId}" after the ${strategyPolicy.maxRepairRounds} allowed ` +

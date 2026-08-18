@@ -18,6 +18,7 @@ final class LocalAppsStore {
     private struct PendingCreation {
         let knownAppIDs: Set<String>
         let modelOverride: String?
+        let addWidget: Bool
     }
 
     private(set) var apps: [LocalAppSummary] = []
@@ -60,7 +61,15 @@ final class LocalAppsStore {
         let modelOverride: String?
     }
 
+    struct PendingWidgetSetup: Identifiable, Equatable {
+        let appID: String
+        let appName: String
+
+        var id: String { appID }
+    }
+
     private(set) var createdAppSession: CreatedAppSession?
+    private(set) var pendingWidgetSetup: PendingWidgetSetup?
     /// Created apps still waiting for their `init_session_id` pin. A SET, not
     /// one slot: two creates in flight would otherwise overwrite each other,
     /// stranding the first with no landing at all.
@@ -97,6 +106,9 @@ final class LocalAppsStore {
     /// Coalesces simultaneous library/detail refreshes into one bridge call.
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var detailsTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var startTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var pendingLaunchDestinations: [String: LocalAppLaunchDestination] = [:]
+    @ObservationIgnored private var widgetSnapshotTask: Task<Void, Never>?
 
     #if canImport(engine_mobileFFI)
         @ObservationIgnored private var submitCommand: ((ClientCommand) async throws -> Void)?
@@ -147,6 +159,7 @@ final class LocalAppsStore {
                     $0.updatedAt > $1.updatedAt
                 }
                 apps = updatedApps
+                scheduleWidgetSnapshotPublish()
                 scheduleWebsiteDataCleanup(activeAppIDs: Set(updatedApps.map(\.id)))
                 // `createApp(brief:)` sends an empty `name`, letting the engine
                 // derive the display name from the brief (`AppService::create_app`,
@@ -156,6 +169,13 @@ final class LocalAppsStore {
                 if let pendingCreation,
                    let created = updatedApps.first(where: { !pendingCreation.knownAppIDs.contains($0.id) }) {
                     self.pendingCreation = nil
+                    if pendingCreation.addWidget {
+                        pendingWidgetSetup = PendingWidgetSetup(
+                            appID: created.id,
+                            appName: created.name.isEmpty ? created.brief : created.name
+                        )
+                        publishWidgetSnapshotNow()
+                    }
                     if let initSession = created.initSessionId {
                         // The pin arrived with the initial catalog snapshot
                         // (fast path).
@@ -195,6 +215,7 @@ final class LocalAppsStore {
                     app.workflow = workflow
                     app.updatedAt = .now
                 }
+                scheduleWidgetSnapshotPublish()
                 if let detail, !detail.isEmpty { errorMessage = detail }
 
             case let .appRuntimeChanged(appId, state, details, lastError):
@@ -204,6 +225,7 @@ final class LocalAppsStore {
                     lastError: lastError,
                     knownURL: runtimes[appId]?.url
                 )
+                scheduleWidgetSnapshotPublish()
                 if state == .running, runtimeLastUsedAt[appId] == nil {
                     runtimeLastUsedAt[appId] = .now
                 }
@@ -235,17 +257,17 @@ final class LocalAppsStore {
                 values.append(item)
                 checkpoints[appId] = values.sorted { $0.createdAt > $1.createdAt }
 
-            case let .appOperationFailed(_, _, message):
+            case let .appOperationFailed(appId, _, message):
                 isRefreshing = false
                 errorMessage = message
-                // Disarm the create claim: it matches "an app id absent from
-                // the pre-create snapshot", so leaving it armed after a failed
-                // create makes the NEXT app to appear — including one the
-                // assistant creates through the MCP tool minutes later — look
-                // like the user's pending creation and yank them out of their
-                // conversation into its init chat.
-                pendingCreation = nil
-                awaitingInitPinAppIDs.removeAll()
+                // CreateApp failures carry no app id. Fail-closed: drop the
+                // in-flight create claim so a later AppsChanged cannot arm
+                // widget setup or steal landing. Per-app failures must not
+                // cancel a create that already announced and is only waiting
+                // for its init-session pin.
+                if appId == nil {
+                    pendingCreation = nil
+                }
 
             default:
                 break
@@ -271,6 +293,10 @@ final class LocalAppsStore {
         return createdAppSession
     }
 
+    func completeWidgetSetup() {
+        pendingWidgetSetup = nil
+    }
+
     func consumeRequestedPresentationAppID() -> String? {
         defer { requestedPresentationAppID = nil }
         return requestedPresentationAppID
@@ -278,6 +304,19 @@ final class LocalAppsStore {
 
     func hasPendingUIRequest(appID: String) -> Bool {
         activeUIRequestAppID == appID
+    }
+
+    func requestLaunch(appID: String, destination: LocalAppLaunchDestination) {
+        pendingLaunchDestinations[appID] = destination
+    }
+
+    func consumeLaunchDestination(appID: String) -> LocalAppLaunchDestination? {
+        defer { pendingLaunchDestinations.removeValue(forKey: appID) }
+        return pendingLaunchDestinations[appID]
+    }
+
+    func presentUnavailableAppError() {
+        errorMessage = "应用不存在或已删除"
     }
 
     func refresh() async {
@@ -337,7 +376,8 @@ final class LocalAppsStore {
     func createApp(
         brief: String,
         gitEnabled: Bool = true,
-        modelOverride: String? = nil
+        modelOverride: String? = nil,
+        addWidget: Bool = false
     ) async -> Bool {
         let trimmed = brief.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -354,7 +394,8 @@ final class LocalAppsStore {
             let workflowModel = trimmedModel.flatMap { $0.isEmpty ? nil : $0 }
             pendingCreation = PendingCreation(
                 knownAppIDs: Set(apps.map(\.id)),
-                modelOverride: workflowModel
+                modelOverride: workflowModel,
+                addWidget: addWidget
             )
             let succeeded = await send(
                 .createApp(
@@ -410,9 +451,25 @@ final class LocalAppsStore {
 
     func start(appID: String) async {
         #if canImport(engine_mobileFFI)
-            if await send(.startApp(appId: appID)) {
-                runtimeLastUsedAt[appID] = .now
+            switch runtimes[appID] {
+            case .running:
+                return
+            default:
+                break
             }
+            if let startTask = startTasks[appID] {
+                await startTask.value
+                return
+            }
+            let task = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { startTasks[appID] = nil }
+                if await send(.startApp(appId: appID)) {
+                    runtimeLastUsedAt[appID] = .now
+                }
+            }
+            startTasks[appID] = task
+            await task.value
         #endif
     }
 
@@ -444,7 +501,20 @@ final class LocalAppsStore {
             case ("device", "getLocation"): operation = .getLocation
             case ("device", "transcribeSpeech"): operation = .transcribeSpeech
             case ("device", "postNotification"): operation = .postNotification
+            case ("clipboard", "getText"): operation = .clipboardGetText
+            case ("clipboard", "setText"): operation = .clipboardSetText
+            case ("device", "share"): operation = .share
+            case ("device", "synthesizeSpeech"): operation = .synthesizeSpeech
+            case ("files", "read"): operation = .fileRead
+            case ("files", "write"): operation = .fileWrite
+            case ("device", "status"): operation = .deviceStatus
+            case ("device", "haptics"): operation = .haptics
+            case ("device", "deepLink"): operation = .deepLink
+            case ("calendar", "listEvents"): operation = .calendarListEvents
+            case ("contacts", "search"): operation = .contactsSearch
+            case ("media", "get"): operation = .mediaGet
             case ("llm", "chat"): operation = .llmChat
+            case ("llm", "stream"): operation = .llmStream
             case ("agent", "post"): operation = .agentPost
             case ("agent", "sessionCreate"): operation = .agentSessionCreate
             case ("agent", "sessionList"): operation = .agentSessionList
@@ -659,6 +729,7 @@ final class LocalAppsStore {
                     knownURL: runtimes[summary.id]?.url
                 )
                 replaceCheckpoints(details.checkpoints, appID: summary.id)
+                scheduleWidgetSnapshotPublish()
 
             case let .appRecordChanged(record):
                 let summary = LocalAppsProtocolAdapter.app(record)
@@ -679,6 +750,7 @@ final class LocalAppsStore {
                     createdAppID = summary.id
                 }
                 lastRefreshAt = .now
+                scheduleWidgetSnapshotPublish()
 
             case let .appProfileProposal(proposal):
                 pendingProfileProposal = LocalAppProfileProposal(
@@ -867,6 +939,60 @@ final class LocalAppsStore {
             apps.append(value)
         }
         apps.sort { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func makeWidgetSnapshot() -> LocalAppWidgetSnapshot {
+        LocalAppWidgetSnapshot(
+            version: LocalAppWidgetSnapshot.currentVersion,
+            apps: apps.map { app in
+                LocalAppWidgetSnapshot.App(
+                    id: app.id,
+                    name: app.name,
+                    brief: app.brief,
+                    workflow: app.workflow.rawValue,
+                    runtimeState: widgetRuntimeState(for: runtimes[app.id] ?? .stopped),
+                    updatedAtMs: Int64(app.updatedAt.timeIntervalSince1970 * 1000)
+                )
+            }
+        )
+    }
+
+    private func publishWidgetSnapshotNow() {
+        widgetSnapshotTask?.cancel()
+        reportWidgetSnapshotError(LocalAppWidgetSnapshotStore.publish(makeWidgetSnapshot()))
+    }
+
+    private func scheduleWidgetSnapshotPublish() {
+        widgetSnapshotTask?.cancel()
+        let snapshot = makeWidgetSnapshot()
+        widgetSnapshotTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            reportWidgetSnapshotError(LocalAppWidgetSnapshotStore.publish(snapshot))
+            widgetSnapshotTask = nil
+        }
+    }
+
+    private func reportWidgetSnapshotError(_ error: Error?) {
+        guard error != nil else { return }
+        errorMessage = String(localized: "local_apps_error_widget_snapshot")
+    }
+
+    private func widgetRuntimeState(for runtime: LocalAppRuntimeStatus) -> String {
+        switch runtime {
+        case .stopped:
+            return "stopped"
+        case .starting:
+            return "starting"
+        case .running:
+            return "running"
+        case .suspended:
+            return "suspended"
+        case .stopping:
+            return "stopping"
+        case .failed:
+            return "failed"
+        }
     }
 
     #if canImport(engine_mobileFFI)

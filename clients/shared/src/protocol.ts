@@ -875,7 +875,17 @@ export type AppBridgeOperationDto =
   | 'get_location'
   | 'transcribe_speech'
   | 'post_notification'
+  | 'clipboard_get_text'
+  | 'clipboard_set_text'
+  | 'share'
+  | 'synthesize_speech'
+  | 'file_read'
+  | 'file_write'
+  | 'device_status'
+  | 'haptics'
+  | 'deep_link'
   | 'llm_chat'
+  | 'llm_stream'
   | 'agent_post'
   | 'agent_session_create'
   | 'agent_session_list'
@@ -889,7 +899,10 @@ export type AppBridgeOperationDto =
   | 'background_list'
   | 'background_status'
   | 'background_cancel'
-  | 'background_retry';
+  | 'background_retry'
+  | 'calendar_list_events'
+  | 'contacts_search'
+  | 'media_get';
 
 /** One host-bound, data-only bridge request (local_apps.rs `AppBridgeRequestDto`). */
 export interface AppBridgeRequestDto {
@@ -1083,9 +1096,19 @@ export type AppCapabilityKindDto =
   | 'microphone'
   | 'location'
   | 'notifications'
+  | 'files'
+  | 'clipboard'
+  | 'share'
+  | 'text_to_speech'
+  | 'device_status'
+  | 'haptics'
+  | 'deep_link'
   | 'llm'
   | 'agent_notify'
-  | 'background_schedule';
+  | 'background_schedule'
+  | 'calendar'
+  | 'contacts'
+  | 'media';
 
 /** A capability approval request surfaced by the host (local_apps.rs `AppCapabilityRequestDto`). */
 export interface AppCapabilityRequestDto {

@@ -254,6 +254,8 @@ sealed interface LocalAppsAction {
         val gitEnabled: Boolean = true,
         /** Null follows the current conversation; otherwise a provider-qualified catalog id. */
         val workflowModel: String? = null,
+        /** Requests a home-screen Widget after the app record is created. */
+        val addWidget: Boolean = false,
     ) : LocalAppsAction
     data class OpenApp(val appId: String) : LocalAppsAction
     /**

@@ -13,11 +13,16 @@
 //! concrete handles; library crates stay `#[cfg]`-free.
 
 use crate::android_ui::AndroidUiAutomation;
+use crate::calendar::CalendarProvider;
 use crate::camera::CameraControl;
 use crate::clipboard::Clipboard;
 use crate::clock::Clock;
 use crate::computer_control::ComputerControl;
+use crate::contacts::ContactsProvider;
+use crate::deep_link::DeepLinkOpener;
+use crate::device_status::DeviceStatusProvider;
 use crate::filesystem::FileSystem;
+use crate::haptics::HapticService;
 use crate::http::HttpTransport;
 use crate::location::LocationProvider;
 use crate::mobile_linux::MobileLinuxRuntime;
@@ -79,6 +84,26 @@ pub trait Platform: Send + Sync {
     }
     /// Native system clipboard (engine-driven read/write), if available.
     fn clipboard(&self) -> Option<Arc<dyn Clipboard>> {
+        None
+    }
+    /// Non-sensitive device status, if the platform exposes it.
+    fn device_status(&self) -> Option<Arc<dyn DeviceStatusProvider>> {
+        None
+    }
+    /// Bounded haptic feedback, if the platform exposes it.
+    fn haptics(&self) -> Option<Arc<dyn HapticService>> {
+        None
+    }
+    /// External deep-link opener, if the platform exposes it.
+    fn deep_link(&self) -> Option<Arc<dyn DeepLinkOpener>> {
+        None
+    }
+    /// Native read-only calendar provider, if available.
+    fn calendar(&self) -> Option<Arc<dyn CalendarProvider>> {
+        None
+    }
+    /// Native read-only contacts provider, if available.
+    fn contacts(&self) -> Option<Arc<dyn ContactsProvider>> {
         None
     }
     /// Screen-capture + input automation backend, if available.

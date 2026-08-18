@@ -37,6 +37,7 @@
          before these Android runtime permissions are requested or consumed. -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
@@ -107,6 +108,26 @@
                     android:host="open_terminal"
                     android:scheme="lingxi" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:host="open_local_app"
+                    android:scheme="lingxi" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".localapps.widget.LocalAppWidgetConfigureActivity"
+            android:exported="true"
+            android:label="@string/local_apps_title"
+            android:theme="@style/Theme.LingXiCode">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
         </activity>
 
         <!-- Device-share layer: exposes JPEG bytes (written under
@@ -143,6 +164,22 @@
                 <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
+
+        <receiver
+            android:name=".localapps.widget.LocalAppWidgetProvider"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/local_app_widget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".localapps.widget.LocalAppWidgetPinnedReceiver"
+            android:exported="false" />
 
     </application>
 

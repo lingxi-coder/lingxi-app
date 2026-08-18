@@ -9,10 +9,17 @@
 //! 渲染不同文案、提供不同操作，绝不能混用。
 
 use async_trait::async_trait;
-use llm_client::{ApiService, ContentBlock};
+use futures_util::{Stream, StreamExt};
+use llm_client::{ApiService, ContentBlock, LlmEvent};
 use local_apps::AppError;
 use protocol::{ConversationMessage, MessageId};
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
+
+/// Pull-based provider events exposed to the Local App host. The host lowers
+/// only text deltas to the page stream; reasoning, tool and provider metadata
+/// stay inside the trusted engine boundary.
+pub type LocalAppsModelStream = Pin<Box<dyn Stream<Item = Result<LlmEvent, AppError>> + Send>>;
 
 /// Who wrote one turn of an app-initiated chat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +111,15 @@ pub trait LocalAppsModel: Send + Sync {
     /// canned text would make a broken wiring look green, so every
     /// implementation states its behaviour.
     async fn chat(&self, request: ChatRequest) -> Result<ChatOutcome, AppError>;
+
+    /// Open a bounded streaming call on behalf of a running app. Test doubles
+    /// that only cover the legacy request/response path keep the explicit
+    /// unavailable default; the production `ApiServiceModel` overrides it.
+    async fn stream(&self, _request: ChatRequest) -> Result<LocalAppsModelStream, AppError> {
+        Err(AppError::LlmUnavailable(
+            "streaming is unavailable for this model adapter".into(),
+        ))
+    }
 
     /// Update the default model/profile future calls route through —
     /// `ClientCommand::SetModel` calls this so app-initiated `llm.chat`
@@ -201,31 +217,7 @@ impl LocalAppsModel for ApiServiceModel {
             .read()
             .expect("selection lock poisoned")
             .clone();
-        let messages = request
-            .messages
-            .into_iter()
-            .map(|message| {
-                // `protocol::ContentBlock`, NOT the `llm_client` one this
-                // module otherwise names: `ConversationMessage` is the
-                // conversation vocabulary, and the two types are distinct.
-                let content: Vec<protocol::ContentBlock> =
-                    message.content.into_iter().map(chat_part_block).collect();
-                match message.role {
-                    ChatRole::User => ConversationMessage::User {
-                        id: MessageId::new(),
-                        content,
-                        is_meta: false,
-                        is_compact_summary: false,
-                        is_visible_in_transcript_only: false,
-                    },
-                    ChatRole::Assistant => ConversationMessage::Assistant {
-                        id: MessageId::new(),
-                        content,
-                        stop_reason: None,
-                    },
-                }
-            })
-            .collect();
+        let messages = lower_messages(request.messages);
         let response = self
             .service
             .messages_create_side_query(
@@ -245,6 +237,33 @@ impl LocalAppsModel for ApiServiceModel {
             text: extract_chat_text(&response.content),
             stop_reason: response.stop_reason,
         })
+    }
+
+    async fn stream(&self, request: ChatRequest) -> Result<LocalAppsModelStream, AppError> {
+        let (model, profile) = self
+            .selection
+            .read()
+            .expect("selection lock poisoned")
+            .clone();
+        let messages = lower_messages(request.messages);
+        let stream = self
+            .service
+            .messages_create_side_query_stream(
+                &model,
+                profile.as_deref(),
+                request.system.as_deref(),
+                messages,
+                vec![],
+                Some(request.max_tokens),
+                None,
+                vec![],
+                request.temperature,
+            )
+            .await
+            .map_err(|error| AppError::LlmUnavailable(format!("{error}")))?;
+        Ok(Box::pin(stream.map(|event| {
+            event.map_err(|error| AppError::LlmUnavailable(format!("{error}")))
+        })))
     }
 
     fn set_model(&self, model: String, profile: Option<String>) {
@@ -278,6 +297,35 @@ impl LocalAppsLlm {
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatOutcome, AppError> {
         self.model.chat(request).await
     }
+
+    /// Open a streaming side-query through the injected model adapter.
+    pub async fn stream(&self, request: ChatRequest) -> Result<LocalAppsModelStream, AppError> {
+        self.model.stream(request).await
+    }
+}
+
+fn lower_messages(messages: Vec<ChatMessage>) -> Vec<ConversationMessage> {
+    messages
+        .into_iter()
+        .map(|message| {
+            let content: Vec<protocol::ContentBlock> =
+                message.content.into_iter().map(chat_part_block).collect();
+            match message.role {
+                ChatRole::User => ConversationMessage::User {
+                    id: MessageId::new(),
+                    content,
+                    is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                },
+                ChatRole::Assistant => ConversationMessage::Assistant {
+                    id: MessageId::new(),
+                    content,
+                    stop_reason: None,
+                },
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

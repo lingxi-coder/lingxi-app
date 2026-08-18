@@ -592,8 +592,9 @@ impl MobileAppAgentExecutor {
         ),
         String,
     > {
-        let scoped = self.local_apps_mcp.scoped_for_app_with_budget(
+        let scoped = self.local_apps_mcp.scoped_for_app_with_budget_and_session(
             app_id,
+            &session.session_id,
             session.budget.max_bridge_calls,
             session.budget.max_mcp_calls,
             session.bridge_calls_used,
@@ -8737,15 +8738,11 @@ impl MobileEngineHandle {
         &self,
         now_ms: u64,
     ) -> Vec<LocalAppBackgroundRunDto> {
-        self.local_apps_host
-            .run_due_background_tasks(now_ms)
-            .await
+        self.local_apps_host.run_due_background_tasks(now_ms).await
     }
 
     pub async fn next_local_app_background_wake_ms(&self, now_ms: u64) -> Option<u64> {
-        self.local_apps_host
-            .next_background_wake_ms(now_ms)
-            .await
+        self.local_apps_host.next_background_wake_ms(now_ms).await
     }
 
     pub async fn cancel_local_app_background_task(&self, app_id: String, task_id: String) -> bool {
@@ -8951,6 +8948,14 @@ pub fn build_mobile_engine_inner(
             location: firer_platform.location(),
             notifications: firer_platform.notifications(),
             stt: firer_platform.stt(),
+            clipboard: firer_platform.clipboard(),
+            share: firer_platform.share(),
+            tts: firer_platform.tts(),
+            device_status: firer_platform.device_status(),
+            haptics: firer_platform.haptics(),
+            deep_link: firer_platform.deep_link(),
+            calendar: firer_platform.calendar(),
+            contacts: firer_platform.contacts(),
         },
     ));
     let (

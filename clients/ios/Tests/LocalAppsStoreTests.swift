@@ -811,6 +811,9 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertTrue(
                 source.contains("error.code = envelope.code"),
                 "a failure envelope's `code` must reach page code as `error.code`")
+            XCTAssertTrue(source.contains("const channel = pending.get(frame.requestId)?.channel"))
+            XCTAssertTrue(source.contains("streamListeners.set(listener, 'llm')"))
+            XCTAssertTrue(source.contains("streamListeners.set(listener, 'agent')"))
         }
 
         func testLlmActivityAndAgentEventsUpdateTheStore() {
@@ -1048,6 +1051,10 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertTrue(submitted.contains {
                 if case let .resolveAppUiRequest(requestId, _, _, _) = $0 { requestId == "ui-1" } else { false }
             })
+            // This fixture owns a bare controller rather than the SwiftUI
+            // representable, so no WKNavigationDelegate will deliver the
+            // didFinish callback that normally re-arms a reload.
+            controller.markReady()
 
             store.handle(event: .appEvent(event: .appUiRequest(request: AppUiRequestDto(
                 requestId: "ui-2",
@@ -1210,6 +1217,37 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertNil(conversationId)
         }
 
+        func testCreateAppWithWidgetArmsThePostCreationSetupGuide() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            let submitted = await store.createApp(brief: "一个记事本", addWidget: true)
+            XCTAssertTrue(submitted)
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
+            ]))
+
+            let setup = try XCTUnwrap(store.pendingWidgetSetup)
+            XCTAssertEqual(setup.appID, "notes")
+            XCTAssertEqual(setup.appName, "记事本")
+
+            store.completeWidgetSetup()
+            XCTAssertNil(store.pendingWidgetSetup)
+        }
+
+        func testCreateAppWithoutWidgetDoesNotArmSetupGuide() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            let submitted = await store.createApp(brief: "一个记事本")
+            XCTAssertTrue(submitted)
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
+            ]))
+
+            XCTAssertNil(store.pendingWidgetSetup)
+        }
+
         /// v3: creation should land in the INIT CHAT, and the engine
         /// announces twice — first the bare record, then the
         /// `init_session_id` pin. The claim must wait for the pin (second
@@ -1279,6 +1317,47 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertNil(
                 store.consumeCreatedAppID(),
                 "nor may the details-page fallback claim it")
+        }
+
+        func testAnEngineSideCreateFailureDoesNotArmWidgetSetup() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            let submitted = await store.createApp(brief: "一个记事本", addWidget: true)
+            XCTAssertTrue(submitted)
+            store.handle(event: .appOperationFailed(
+                appId: nil, code: .workflowStateInvalid, message: "创建失败"))
+
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "assistant-app", name: "助手的应用", initSessionId: "init-uuid-9")
+            ]))
+
+            XCTAssertNil(store.pendingWidgetSetup)
+            XCTAssertNil(store.consumeCreatedAppSession())
+            XCTAssertNil(store.consumeCreatedAppID())
+        }
+
+        func testAPerAppOperationFailureDoesNotDropTheInitPinWait() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            let submitted = await store.createApp(brief: "一个记事本")
+            XCTAssertTrue(submitted)
+            store.handle(event: .appsChanged(apps: [appRecord(id: "notes", name: "记事本")]))
+            XCTAssertNil(store.createdAppSession)
+
+            store.handle(event: .appOperationFailed(
+                appId: "notes", code: .notFound, message: "详情加载失败"))
+
+            store.handle(event: .appsChanged(apps: [
+                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
+            ]))
+
+            let created = try XCTUnwrap(
+                store.consumeCreatedAppSession(),
+                "a later per-app failure must not cancel an already-announced create")
+            XCTAssertEqual(created.appID, "notes")
+            XCTAssertEqual(created.initSessionID, "init-uuid-1")
         }
 
         /// The pin wait is a SET, not one slot. Two creates inside the 3s

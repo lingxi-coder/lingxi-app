@@ -6,6 +6,7 @@ enum LingxiAppAction: Codable, Equatable, Sendable {
     case newConversation
     case ask(String)
     case openTerminal(sessionID: String, initialCommand: String?)
+    case openLocalApp(appID: String, destination: String, autostart: Bool, source: String?)
 }
 
 enum LingxiDeepLink {
@@ -16,23 +17,49 @@ enum LingxiDeepLink {
     static func action(from url: URL) -> LingxiAppAction? {
         guard
             url.scheme?.lowercased() == "lingxi",
-            url.host?.lowercased() == "open_terminal",
+            let host = url.host?.lowercased(),
             let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else { return nil }
 
+        let items = components.queryItems ?? []
         let values = Dictionary(
-            components.queryItems?.map { ($0.name, $0.value ?? "") } ?? [],
+            items.map { ($0.name, $0.value ?? "") },
             uniquingKeysWith: { _, newest in newest }
         )
-        let sessionID = values["sessionId"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .prefix(256)
-        let command = values["initCommand"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard command?.count ?? 0 <= maximumCommandLength else { return nil }
-        return .openTerminal(
-            sessionID: sessionID.map(String.init).flatMap { $0.isEmpty ? nil : $0 } ?? "interactive",
-            initialCommand: command.flatMap { $0.isEmpty ? nil : $0 }
-        )
+
+        switch host {
+        case "open_terminal":
+            let sessionID = values["sessionId"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(256)
+            let command = values["initCommand"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard command?.count ?? 0 <= maximumCommandLength else { return nil }
+            return .openTerminal(
+                sessionID: sessionID.map(String.init).flatMap { $0.isEmpty ? nil : $0 } ?? "interactive",
+                initialCommand: command.flatMap { $0.isEmpty ? nil : $0 }
+            )
+        case "open_local_app":
+            let allowedKeys = Set(["appId", "destination", "autostart", "source"])
+            guard components.path.isEmpty || components.path == "/" else { return nil }
+            guard Set(items.map(\.name)).isSubset(of: allowedKeys) else { return nil }
+            guard
+                let rawAppID = values["appId"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                LocalAppWidgetSnapshotStore.isValidAppID(rawAppID)
+            else { return nil }
+            let destination = values["destination"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "preview"
+            guard destination == "preview" else { return nil }
+            let autostart = values["autostart"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "1"
+            guard autostart == "0" || autostart == "1" else { return nil }
+            let source = values["source"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .openLocalApp(
+                appID: rawAppID,
+                destination: destination,
+                autostart: autostart == "1",
+                source: source.flatMap { $0.isEmpty ? nil : $0 }
+            )
+        default:
+            return nil
+        }
     }
 }
 

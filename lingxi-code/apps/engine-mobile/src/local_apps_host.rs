@@ -65,6 +65,12 @@ const APP_PORT_WINDOW_FIRST: u16 = 20_000;
 const APP_PORT_WINDOW_LEN: u16 = 12_000;
 const LOCAL_APP_BRIDGE_CONTROL_BYTES: usize = 64 * 1024;
 const LOCAL_APP_BRIDGE_LLM_BYTES: usize = 8 * 1024 * 1024;
+/// File writes travel as JSON with a base64 body. The decoded file cap is
+/// [`files_ops::MAX_APP_FILE_BYTES`]; the wire envelope must be large enough
+/// for the 4/3 expansion plus a small JSON wrapper.
+const LOCAL_APP_BRIDGE_FILE_BYTES: usize = files_ops::MAX_APP_FILE_BYTES.div_ceil(3) * 4 + 1024;
+const FLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const FLOW_STEP_TIMEOUT: Duration = Duration::from_secs(60);
 static LOCAL_APP_BUILD_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
 static DEPENDENCY_SNAPSHOT_DIGESTS: OnceLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
     OnceLock::new();
@@ -288,6 +294,10 @@ impl Drop for PortLease {
 // visibility; split out purely for size. The dispatch match stays here.
 #[path = "local_apps_host_device.rs"]
 mod device_ops;
+
+// `files.read` / `files.write` — app-private file store operations.
+#[path = "local_apps_host_files.rs"]
+mod files_ops;
 
 // `llm.chat` — the app-initiated model call. A child module for the same
 // reason as `device_ops`.
@@ -1747,6 +1757,25 @@ impl LocalAppsHostBroker {
     /// matching.
     const DENIED_CAPABILITY_MESSAGE: &'static str = "user denied the local app capability";
 
+    /// Manifest-only gate for read-only capabilities that do not need a
+    /// separate user prompt. The declaration is still required so a generated
+    /// app cannot silently discover host state it did not request.
+    pub(super) fn ensure_declared_capability(
+        &self,
+        app_id: &str,
+        capability: AppCapability,
+    ) -> Result<(), BridgeFailure> {
+        let layout = self.layout(app_id)?;
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        if !manifest.capabilities.contains(&capability) {
+            return Err(BridgeFailure::coded(
+                "capability_not_declared",
+                format!("capability {capability:?} is not declared in the app manifest"),
+            ));
+        }
+        Ok(())
+    }
+
     /// Declared-then-prompt gate shared by every plan-declared capability
     /// (device, llm, agent_notify): an app may only ever be ASKED about a
     /// capability its confirmed plan declared. An undeclared capability fails
@@ -1967,8 +1996,16 @@ impl LocalAppsHostBroker {
         request: &AppBridgeRequestDto,
     ) -> Result<Value, BridgeFailure> {
         let payload_json = request.payload_json.as_deref().unwrap_or("{}");
-        let payload_limit = if matches!(request.operation, AppBridgeOperationDto::LlmChat) {
+        let payload_limit = if matches!(
+            request.operation,
+            AppBridgeOperationDto::LlmChat | AppBridgeOperationDto::LlmStream
+        ) {
             LOCAL_APP_BRIDGE_LLM_BYTES
+        } else if matches!(
+            request.operation,
+            AppBridgeOperationDto::FileRead | AppBridgeOperationDto::FileWrite
+        ) {
+            LOCAL_APP_BRIDGE_FILE_BYTES
         } else {
             LOCAL_APP_BRIDGE_CONTROL_BYTES
         };
@@ -2042,7 +2079,42 @@ impl LocalAppsHostBroker {
                 self.transcribe_speech_value(&request.app_id, &payload)
                     .await
             }
+            AppBridgeOperationDto::ClipboardGetText => {
+                self.clipboard_get_text_value(&request.app_id).await
+            }
+            AppBridgeOperationDto::ClipboardSetText => {
+                self.clipboard_set_text_value(&request.app_id, &payload)
+                    .await
+            }
+            AppBridgeOperationDto::Share => self.share_value(&request.app_id, &payload).await,
+            AppBridgeOperationDto::SynthesizeSpeech => {
+                self.synthesize_speech_value(&request.app_id, &payload)
+                    .await
+            }
+            AppBridgeOperationDto::FileRead => {
+                self.file_read_value(&request.app_id, &payload).await
+            }
+            AppBridgeOperationDto::FileWrite => {
+                self.file_write_value(&request.app_id, &payload).await
+            }
+            AppBridgeOperationDto::DeviceStatus => self.device_status_value(&request.app_id).await,
+            AppBridgeOperationDto::Haptics => self.haptics_value(&request.app_id, &payload).await,
+            AppBridgeOperationDto::DeepLink => {
+                self.deep_link_value(&request.app_id, &payload).await
+            }
+            AppBridgeOperationDto::CalendarListEvents => {
+                self.calendar_list_events_value(&request.app_id, &payload)
+                    .await
+            }
+            AppBridgeOperationDto::ContactsSearch => {
+                self.contacts_search_value(&request.app_id, &payload).await
+            }
+            AppBridgeOperationDto::MediaGet => self.media_value(&request.app_id, &payload).await,
             AppBridgeOperationDto::LlmChat => self.llm_chat_value(&request.app_id, &payload).await,
+            AppBridgeOperationDto::LlmStream => {
+                self.llm_stream_value(&request.app_id, &request.request_id, &payload)
+                    .await
+            }
             AppBridgeOperationDto::AgentPost => {
                 self.agent_post_value(&request.app_id, &payload).await
             }
@@ -2122,7 +2194,21 @@ impl LocalAppsHostBroker {
             AppBridgeOperationDto::GetLocation => local_apps::CapabilityId::Location,
             AppBridgeOperationDto::TranscribeSpeech => local_apps::CapabilityId::SpeechToText,
             AppBridgeOperationDto::PostNotification => local_apps::CapabilityId::Notifications,
+            AppBridgeOperationDto::ClipboardGetText | AppBridgeOperationDto::ClipboardSetText => {
+                local_apps::CapabilityId::Clipboard
+            }
+            AppBridgeOperationDto::Share => local_apps::CapabilityId::Share,
+            AppBridgeOperationDto::SynthesizeSpeech => local_apps::CapabilityId::TextToSpeech,
+            AppBridgeOperationDto::FileRead => local_apps::CapabilityId::FilesRead,
+            AppBridgeOperationDto::FileWrite => local_apps::CapabilityId::FilesWrite,
+            AppBridgeOperationDto::DeviceStatus => local_apps::CapabilityId::DeviceStatus,
+            AppBridgeOperationDto::Haptics => local_apps::CapabilityId::Haptics,
+            AppBridgeOperationDto::DeepLink => local_apps::CapabilityId::DeepLink,
+            AppBridgeOperationDto::CalendarListEvents => local_apps::CapabilityId::Calendar,
+            AppBridgeOperationDto::ContactsSearch => local_apps::CapabilityId::Contacts,
+            AppBridgeOperationDto::MediaGet => local_apps::CapabilityId::Media,
             AppBridgeOperationDto::LlmChat => local_apps::CapabilityId::LlmComplete,
+            AppBridgeOperationDto::LlmStream => local_apps::CapabilityId::LlmStream,
             AppBridgeOperationDto::AgentPost => local_apps::CapabilityId::AgentEmit,
             AppBridgeOperationDto::AgentSessionCreate => {
                 local_apps::CapabilityId::AgentSessionCreate
@@ -2879,6 +2965,186 @@ impl LocalAppsHostBroker {
 }
 
 impl LocalAppsHostBroker {
+    async fn flow_execute_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        self.service()?
+            .record(&app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        // Flow execution is an app-owned Agent MCP capability. The LLM grant
+        // is the host's durable/user-approved entry gate; every individual
+        // step still goes through its own capability router below.
+        self.authorize_agent_session_capability(&app_id).await?;
+        let flow_value = input
+            .get("flow")
+            .cloned()
+            .ok_or_else(|| "flow is required".to_string())?;
+        let flow: local_apps::FlowDefinition =
+            serde_json::from_value(flow_value).map_err(|error| format!("invalid flow: {error}"))?;
+        let registry = local_apps::CapabilityRegistry::default();
+        flow.validate(&registry)
+            .map_err(|error| format!("invalid flow: {error}"))?;
+        let flow_id = flow.flow_id.clone();
+        let version = flow.version;
+        let outputs = timeout(FLOW_EXECUTION_TIMEOUT, async {
+            let mut outputs = Map::new();
+            for step in flow.steps {
+                let capability = step.capability;
+                if !local_apps::allowed_for_synchronous_flow(capability) {
+                    return Err(format!(
+                        "flow capability {} is not valid for a synchronous flow",
+                        capability.as_str()
+                    ));
+                }
+                let step_input: Value =
+                    serde_json::from_str(&step.input_json).map_err(|error| {
+                        format!("flow step {} has invalid input: {error}", step.step_id)
+                    })?;
+                let value = timeout(
+                    FLOW_STEP_TIMEOUT,
+                    self.execute_flow_step(
+                        &app_id,
+                        &flow_id,
+                        &step.step_id,
+                        capability,
+                        step_input,
+                    ),
+                )
+                .await
+                .map_err(|_| format!("flow step {} timed out", step.step_id))??;
+                outputs.insert(step.step_id, value);
+            }
+            Ok::<Map<String, Value>, String>(outputs)
+        })
+        .await
+        .map_err(|_| "flow execution exceeded its wall-clock budget".to_string())??;
+        Ok(json!({
+            "flowId": flow_id,
+            "version": version,
+            "outputs": outputs,
+        }))
+    }
+
+    async fn execute_flow_step(
+        &self,
+        app_id: &str,
+        flow_id: &str,
+        step_id: &str,
+        capability: local_apps::CapabilityId,
+        mut input: Value,
+    ) -> Result<Value, String> {
+        let object = input
+            .as_object_mut()
+            .ok_or_else(|| format!("flow step {step_id} input must be a JSON object"))?;
+        object.insert("app_id".into(), Value::String(app_id.into()));
+        let request_id = format!("flow:{flow_id}:{step_id}");
+        match capability {
+            local_apps::CapabilityId::DataQuery => self.query_data_value(input).await,
+            local_apps::CapabilityId::DataMutate => self.mutate_data_value(input, true).await,
+            local_apps::CapabilityId::NetworkRequest => self.network_request(app_id, input).await,
+            local_apps::CapabilityId::RuntimeStatus => Ok(json!({
+                "app_id": app_id,
+                "runtime": self.service()?.runtime_record(app_id).await.map_err(|error| error.to_string())?,
+            })),
+            local_apps::CapabilityId::FilesRead => self
+                .file_read_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::FilesWrite => self
+                .file_write_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::Clipboard => {
+                if input.get("text").is_some() {
+                    self.clipboard_set_text_value(app_id, &input)
+                        .await
+                        .map_err(|error| error.message)
+                } else {
+                    self.clipboard_get_text_value(app_id)
+                        .await
+                        .map_err(|error| error.message)
+                }
+            }
+            local_apps::CapabilityId::Calendar => self
+                .calendar_list_events_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::Contacts => self
+                .contacts_search_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::Media => self
+                .media_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::DeviceStatus => self
+                .device_status_value(app_id)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::Haptics => self
+                .haptics_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::DeepLink => self
+                .deep_link_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::TextToSpeech => self
+                .synthesize_speech_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::Location => self
+                .get_location_value(app_id)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::Notifications => self
+                .post_notification_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::LlmComplete => self
+                .llm_chat_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::AgentSessionCreate => {
+                self.agent_session_create_value(input).await
+            }
+            local_apps::CapabilityId::AgentSessionList => {
+                self.agent_session_list_value(input).await
+            }
+            local_apps::CapabilityId::AgentSessionResume
+            | local_apps::CapabilityId::AgentSessionClose => {
+                self.agent_session_update_value(input).await
+            }
+            local_apps::CapabilityId::AgentSend => self
+                .agent_send_value(app_id, &request_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::AgentEmit => self
+                .agent_post_value(app_id, &input)
+                .await
+                .map_err(|error| error.message),
+            local_apps::CapabilityId::AgentProfilePropose => {
+                self.agent_profile_propose_value(input).await
+            }
+            local_apps::CapabilityId::AgentStream
+            | local_apps::CapabilityId::AgentCancel
+            | local_apps::CapabilityId::LlmStream
+            | local_apps::CapabilityId::FlowExecute
+            | local_apps::CapabilityId::BackgroundSchedule
+            | local_apps::CapabilityId::Camera
+            | local_apps::CapabilityId::PhotoLibrary
+            | local_apps::CapabilityId::Microphone
+            | local_apps::CapabilityId::SpeechToText
+            | local_apps::CapabilityId::Share => {
+                unreachable!("synchronous flow capabilities are filtered before step execution")
+            }
+            _ => Err(format!(
+                "flow capability {} is not supported by this host",
+                capability.as_str()
+            )),
+        }
+    }
+
     fn background_management_layout(&self, app_id: &str) -> Result<AppLayout, String> {
         let layout = self.layout(app_id)?;
         let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
@@ -3095,6 +3361,11 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
     async fn read_app_events(&self, input: Value) -> Result<Value, String> {
         self.read_app_events_value(input).await
     }
+
+    async fn read_agent_events(&self, input: Value) -> Result<Value, String> {
+        self.read_agent_events_value(input).await
+    }
+
     async fn background_schedule_value(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         let layout = self.layout(&app_id)?;
@@ -3328,6 +3599,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
 
     async fn agent_profile_propose(&self, input: Value) -> Result<Value, String> {
         self.agent_profile_propose_value(input).await
+    }
+
+    async fn flow_execute(&self, input: Value) -> Result<Value, String> {
+        self.flow_execute_value(input).await
     }
 
     async fn background_schedule(&self, input: Value) -> Result<Value, String> {

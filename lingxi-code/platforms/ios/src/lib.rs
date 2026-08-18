@@ -21,12 +21,12 @@
 use platform_common::{GuestPathFileSystem, MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
 use std::sync::Arc;
-use traits::LocationProvider;
 use traits::{
-    CameraControl, Clipboard, Clock, FileSystem, HttpTransport, MobileLinuxRuntime,
-    MobileLinuxRuntimeMode, MountPurpose, MountSpec, NotificationService, Platform, ProcessRunner,
-    Sandbox, SandboxBackend, SecureStorage, SharingService, SpeechToText, TextToSpeech,
-    UnavailableMobileLinuxRuntime, VoiceRecorder, WorktreeManager,
+    CalendarProvider, CameraControl, Clipboard, Clock, ContactsProvider, DeepLinkOpener,
+    DeviceStatusProvider, FileSystem, HapticService, HttpTransport, LocationProvider,
+    MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec, NotificationService,
+    Platform, ProcessRunner, Sandbox, SandboxBackend, SecureStorage, SharingService, SpeechToText,
+    TextToSpeech, UnavailableMobileLinuxRuntime, VoiceRecorder, WorktreeManager,
 };
 
 /// Construction inputs for [`IosPlatform`].
@@ -53,6 +53,14 @@ pub struct IosPlatformInputs {
     /// Native system clipboard (Swift impl), when wired. `None` keeps the
     /// `clipboard` tool reporting "unavailable".
     pub clipboard: Option<Arc<dyn Clipboard>>,
+    /// Native device status/haptics/deep-link services, when wired.
+    pub device_status: Option<Arc<dyn DeviceStatusProvider>>,
+    pub haptics: Option<Arc<dyn HapticService>>,
+    pub deep_link: Option<Arc<dyn DeepLinkOpener>>,
+    /// Native read-only calendar provider, when wired.
+    pub calendar: Option<Arc<dyn CalendarProvider>>,
+    /// Native read-only contacts provider, when wired.
+    pub contacts: Option<Arc<dyn ContactsProvider>>,
     /// Native iOS Keychain-backed secure store (Swift impl), when wired. `None`
     /// keeps the non-persisting development stub, which gates OAuth `/login` off
     /// (it cannot persist tokens). Inject a real store to enable subscription login.
@@ -85,6 +93,11 @@ pub struct IosPlatform {
     tts: Option<Arc<dyn TextToSpeech>>,
     notifications: Option<Arc<dyn NotificationService>>,
     clipboard: Option<Arc<dyn Clipboard>>,
+    device_status: Option<Arc<dyn DeviceStatusProvider>>,
+    haptics: Option<Arc<dyn HapticService>>,
+    deep_link: Option<Arc<dyn DeepLinkOpener>>,
+    calendar: Option<Arc<dyn CalendarProvider>>,
+    contacts: Option<Arc<dyn ContactsProvider>>,
     secure_storage: Option<Arc<dyn SecureStorage>>,
     location: Option<Arc<dyn LocationProvider>>,
     mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
@@ -162,6 +175,11 @@ impl IosPlatform {
             tts: inputs.tts,
             notifications: inputs.notifications,
             clipboard: inputs.clipboard,
+            device_status: inputs.device_status,
+            haptics: inputs.haptics,
+            deep_link: inputs.deep_link,
+            calendar: inputs.calendar,
+            contacts: inputs.contacts,
             secure_storage: inputs.secure_storage,
             location: inputs.location,
             mobile_linux: effective_runtime,
@@ -228,6 +246,21 @@ impl Platform for IosPlatform {
     }
     fn clipboard(&self) -> Option<Arc<dyn Clipboard>> {
         self.clipboard.clone()
+    }
+    fn device_status(&self) -> Option<Arc<dyn DeviceStatusProvider>> {
+        self.device_status.clone()
+    }
+    fn haptics(&self) -> Option<Arc<dyn HapticService>> {
+        self.haptics.clone()
+    }
+    fn deep_link(&self) -> Option<Arc<dyn DeepLinkOpener>> {
+        self.deep_link.clone()
+    }
+    fn calendar(&self) -> Option<Arc<dyn CalendarProvider>> {
+        self.calendar.clone()
+    }
+    fn contacts(&self) -> Option<Arc<dyn ContactsProvider>> {
+        self.contacts.clone()
     }
     fn secure_storage(&self) -> Option<Arc<dyn SecureStorage>> {
         self.secure_storage.clone()
@@ -297,6 +330,11 @@ mod tests {
             tts: None,
             notifications: None,
             clipboard: None,
+            device_status: None,
+            haptics: None,
+            deep_link: None,
+            calendar: None,
+            contacts: None,
             secure_storage: None,
             location: None,
             mobile_linux,

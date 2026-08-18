@@ -19252,6 +19252,87 @@
         }
       }
     },
+    "local_apps_create_add_widget": {
+      "localizations": {
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "创建后引导添加到主屏幕 Widget"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "建立後引導新增到主畫面 Widget"}},
+        "en": {"stringUnit": {"state": "translated", "value": "Guide me to add a Home Screen Widget after creation"}},
+        "ja": {"stringUnit": {"state": "translated", "value": "作成後にホーム画面 Widget の追加を案内"}},
+        "ko": {"stringUnit": {"state": "translated", "value": "생성 후 홈 화면 Widget 추가 안내"}}
+      }
+    },
+    "local_apps_create_add_widget_detail": {
+      "localizations": {
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "创建完成后显示添加步骤"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "建立完成後顯示新增步驟"}},
+        "en": {"stringUnit": {"state": "translated", "value": "Show the steps after the app is created"}},
+        "ja": {"stringUnit": {"state": "translated", "value": "作成後に追加手順を表示します"}},
+        "ko": {"stringUnit": {"state": "translated", "value": "앱 생성 후 추가 단계를 표시합니다"}}
+      }
+    },
+    "local_apps_widget_setup_title": {
+      "localizations": {
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "添加 Local App Widget"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "新增 Local App Widget"}},
+        "en": {"stringUnit": {"state": "translated", "value": "Add the Local App Widget"}},
+        "ja": {"stringUnit": {"state": "translated", "value": "Local App Widget を追加"}},
+        "ko": {"stringUnit": {"state": "translated", "value": "Local App Widget 추가"}}
+      }
+    },
+    "local_apps_widget_setup_message %@": {
+      "localizations": {
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "应用“%1$s”已创建。请按以下步骤把它添加到主屏幕。"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "應用程式「%1$s」已建立。請依照以下步驟將它新增到主畫面。"}},
+        "en": {"stringUnit": {"state": "translated", "value": "%1$s is ready. Follow these steps to add it to your Home Screen."}},
+        "ja": {"stringUnit": {"state": "translated", "value": "「%1$s」を作成しました。以下の手順でホーム画面に追加してください。"}},
+        "ko": {"stringUnit": {"state": "translated", "value": "%1$s이(가) 준비되었습니다. 다음 단계에 따라 홈 화면에 추가하세요."}}
+      }
+    },
+    "local_apps_widget_setup_step_1": {
+      "localizations": {
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "1. 返回设备主屏幕。"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "1. 返回裝置主畫面。"}},
+        "en": {"stringUnit": {"state": "translated", "value": "1. Return to the Home Screen."}},
+        "ja": {"stringUnit": {"state": "translated", "value": "1. ホーム画面に戻ります。"}},
+        "ko": {"stringUnit": {"state": "translated", "value": "1. 홈 화면으로 돌아갑니다."}}
+      }
+    },
+    "local_apps_widget_setup_step_2": {
+      "localizations": {
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "2. 长按空白区域，点击左上角“+”。"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "2. 長按空白處，點擊左上角「+」。"}},
+        "en": {"stringUnit": {"state": "translated", "value": "2. Touch and hold an empty area, then tap “+”."}},
+        "ja": {"stringUnit": {"state": "translated", "value": "2. 空いている場所を長押しして「+」をタップします。"}},
+        "ko": {"stringUnit": {"state": "translated", "value": "2. 빈 공간을 길게 누른 다음 “+”를 탭합니다."}}
+      }
+    },
+    "local_apps_widget_setup_step_3": {
+      "localizations": {
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "3. 搜索并选择 Lingxi 的 Local App Widget。"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "3. 搜尋並選擇 Lingxi 的 Local App Widget。"}},
+        "en": {"stringUnit": {"state": "translated", "value": "3. Find and select Lingxi’s Local App Widget."}},
+        "ja": {"stringUnit": {"state": "translated", "value": "3. Lingxi の Local App Widget を検索して選択します。"}},
+        "ko": {"stringUnit": {"state": "translated", "value": "3. Lingxi의 Local App Widget을 찾아 선택합니다."}}
+      }
+    },
+    "local_apps_widget_setup_step_4": {
+      "localizations": {
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "4. 添加后，在 Widget 配置中选择“%1$s”。"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "4. 新增後，在 Widget 設定中選擇「%1$s」。"}},
+        "en": {"stringUnit": {"state": "translated", "value": "4. After adding it, select “%1$s” in the Widget settings."}},
+        "ja": {"stringUnit": {"state": "translated", "value": "4. 追加後、Widget の設定で「%1$s」を選択します。"}},
+        "ko": {"stringUnit": {"state": "translated", "value": "4. 추가한 뒤 Widget 설정에서 “%1$s”을(를) 선택합니다."}}
+      }
+    },
+    "local_apps_widget_setup_continue": {
+      "localizations": {
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "继续"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "繼續"}},
+        "en": {"stringUnit": {"state": "translated", "value": "Continue"}},
+        "ja": {"stringUnit": {"state": "translated", "value": "続ける"}},
+        "ko": {"stringUnit": {"state": "translated", "value": "계속"}}
+      }
+    },
     "local_apps_create_model_detail": {
       "localizations": {
         "zh-Hans": {
@@ -20982,6 +21063,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "앱을 한 줄로 설명해 주세요."
+          }
+        }
+      }
+    },
+    "local_apps_error_widget_snapshot": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法更新桌面组件，App Group 容器不可用。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法更新桌面元件，App Group 容器不可用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t update the Home Screen widget. The App Group container is unavailable."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ホーム画面のウィジェットを更新できません。App Group コンテナが利用できません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "홈 화면 위젯을 업데이트할 수 없습니다. App Group 컨테이너를 사용할 수 없습니다."
           }
         }
       }

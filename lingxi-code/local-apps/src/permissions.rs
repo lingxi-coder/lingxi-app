@@ -54,6 +54,28 @@ pub enum AppCapability {
     Location,
     /// Post local notifications on the app's behalf.
     Notifications,
+    /// Read an app-private file.
+    FilesRead,
+    /// Write an app-private file.
+    FilesWrite,
+    /// Read non-sensitive device status.
+    DeviceStatus,
+    /// Trigger bounded haptic feedback.
+    Haptics,
+    /// Open an authorized external URL.
+    DeepLink,
+    /// Read or write the system clipboard.
+    Clipboard,
+    /// Open the native system share sheet.
+    Share,
+    /// Synthesize text using the native speech engine.
+    TextToSpeech,
+    /// Read calendar events through the native calendar provider.
+    Calendar,
+    /// Search contacts through the native contacts provider.
+    Contacts,
+    /// Read one app-owned retained media handle.
+    Media,
     /// Send side-query requests to the user's configured LLM.
     Llm,
     /// Post events into the conversation-facing app mailbox.
@@ -67,7 +89,7 @@ impl AppCapability {
     ///
     /// The MCP schema serializes this list through Serde, so its advertised
     /// strings cannot drift from manifest and permission decoding.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 21] = [
         Self::DataMutation,
         Self::UiControl,
         Self::Camera,
@@ -75,6 +97,17 @@ impl AppCapability {
         Self::Microphone,
         Self::Location,
         Self::Notifications,
+        Self::FilesRead,
+        Self::FilesWrite,
+        Self::DeviceStatus,
+        Self::Haptics,
+        Self::DeepLink,
+        Self::Clipboard,
+        Self::Share,
+        Self::TextToSpeech,
+        Self::Calendar,
+        Self::Contacts,
+        Self::Media,
         Self::Llm,
         Self::AgentNotify,
         Self::BackgroundSchedule,
@@ -356,6 +389,17 @@ mod tests {
                 "microphone",
                 "location",
                 "notifications",
+                "files_read",
+                "files_write",
+                "device_status",
+                "haptics",
+                "deep_link",
+                "clipboard",
+                "share",
+                "text_to_speech",
+                "calendar",
+                "contacts",
+                "media",
                 "llm",
                 "agent_notify",
                 "background_schedule"
@@ -369,6 +413,17 @@ mod tests {
             (AppCapability::Microphone, "\"microphone\""),
             (AppCapability::Location, "\"location\""),
             (AppCapability::Notifications, "\"notifications\""),
+            (AppCapability::FilesRead, "\"files_read\""),
+            (AppCapability::FilesWrite, "\"files_write\""),
+            (AppCapability::DeviceStatus, "\"device_status\""),
+            (AppCapability::Haptics, "\"haptics\""),
+            (AppCapability::DeepLink, "\"deep_link\""),
+            (AppCapability::Clipboard, "\"clipboard\""),
+            (AppCapability::Share, "\"share\""),
+            (AppCapability::TextToSpeech, "\"text_to_speech\""),
+            (AppCapability::Calendar, "\"calendar\""),
+            (AppCapability::Contacts, "\"contacts\""),
+            (AppCapability::Media, "\"media\""),
             (AppCapability::Llm, "\"llm\""),
             (AppCapability::AgentNotify, "\"agent_notify\""),
             (AppCapability::BackgroundSchedule, "\"background_schedule\""),

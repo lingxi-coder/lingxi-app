@@ -166,6 +166,82 @@ export async function postNotification(request) {
   return device("postNotification")(request);
 }
 
+export async function getClipboardText() {
+  const bridge = getLingXiBridge();
+  if (!bridge?.clipboard?.getText) {
+    throw new Error("LingXi clipboard bridge is unavailable");
+  }
+  return bridge.clipboard.getText();
+}
+
+export async function setClipboardText(text) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.clipboard?.setText) {
+    throw new Error("LingXi clipboard bridge is unavailable");
+  }
+  return bridge.clipboard.setText(text);
+}
+
+export async function shareContent(request) {
+  return device("share")(request);
+}
+
+export async function synthesizeSpeech(request) {
+  return device("synthesizeSpeech")(request);
+}
+
+export async function readFile(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.files?.read) {
+    throw new Error("LingXi file bridge is unavailable");
+  }
+  return bridge.files.read(request);
+}
+
+export async function writeFile(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.files?.write) {
+    throw new Error("LingXi file bridge is unavailable");
+  }
+  return bridge.files.write(request);
+}
+
+export async function getDeviceStatus() {
+  return device("status")({});
+}
+
+export async function triggerHaptics(style) {
+  return device("haptics")({ style });
+}
+
+export async function openDeepLink(url) {
+  return device("deepLink")({ url });
+}
+
+export async function listCalendarEvents(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.calendar?.listEvents) {
+    throw new Error("LingXi calendar bridge is unavailable");
+  }
+  return bridge.calendar.listEvents(request);
+}
+
+export async function searchContacts(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.contacts?.search) {
+    throw new Error("LingXi contacts bridge is unavailable");
+  }
+  return bridge.contacts.search(request);
+}
+
+export async function getMedia(mediaId) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.media?.get) {
+    throw new Error("LingXi media bridge is unavailable");
+  }
+  return bridge.media.get({ mediaId });
+}
+
 export function mediaObjectURL(media) {
   const binary = atob(media.base64);
   const bytes = new Uint8Array(binary.length);
@@ -183,6 +259,33 @@ export async function requestLlmChat(request) {
   return bridge.llm.chat(request);
 }
 
+/** Run a streaming side-query; subscribe with onLlmStreamFrame first. */
+export async function streamLlmChat(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.llm?.stream) {
+    throw new Error("LingXi streaming AI bridge is unavailable");
+  }
+  return bridge.llm.stream(request);
+}
+
+export function onLlmStreamFrame(listener) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.llm?.onFrame) {
+    throw new Error("LingXi streaming AI bridge is unavailable");
+  }
+  return bridge.llm.onFrame(listener);
+}
+
+/** Subscribe only to frames from app-owned Agent streams. */
+export function onAgentStreamFrame(listener) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.agent?.onFrame) {
+    throw new Error("LingXi Agent streaming bridge is unavailable");
+  }
+  return bridge.agent.onFrame(listener);
+}
+
+/** Post to the conversation Agent, or to `sessionId` for this app's Agent. */
 export async function postAgentEvent(request) {
   const bridge = getLingXiBridge();
   if (!bridge?.agent?.post) {

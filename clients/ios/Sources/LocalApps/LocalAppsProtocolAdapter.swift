@@ -105,6 +105,16 @@ enum LocalAppsProtocolAdapter {
         case .microphone: .microphone
         case .location: .location
         case .notifications: .notifications
+        case .clipboard: .clipboard
+        case .share: .share
+        case .textToSpeech: .textToSpeech
+        case .files: .files
+        case .deviceStatus: .deviceStatus
+        case .haptics: .haptics
+        case .deepLink: .deepLink
+        case .calendar: .calendar
+        case .contacts: .contacts
+        case .media: .media
         case .llm: .llm
         case .agentNotify: .agentNotify
         case .backgroundSchedule: .backgroundSchedule

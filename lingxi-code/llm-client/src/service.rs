@@ -2736,6 +2736,30 @@ impl ApiService {
             .await
     }
 
+    /// Open a session-bound streaming side query for bounded embedded clients.
+    /// This mirrors [`Self::messages_create_side_query`] while preserving the
+    /// caller's output and temperature limits on the streaming request.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn messages_create_side_query_stream(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        max_tokens: Option<u32>,
+        tool_choice: Option<crate::ToolChoice>,
+        stop_sequences: Vec<String>,
+        temperature: Option<f32>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut req =
+            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        req.tool_choice = tool_choice;
+        req.stop_sequences = stop_sequences;
+        req.temperature = temperature.map(f64::from);
+        self.drive_stream(req).await
+    }
+
     /// Non-streaming call with the **Opus-fallback** policy wired
     /// (provider-neutral). The drive logic of the orchestrator's
     /// `OrchestratorApiClient::messages_create_with_fallback`.

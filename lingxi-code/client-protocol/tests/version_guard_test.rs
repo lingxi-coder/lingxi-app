@@ -1327,7 +1327,26 @@ fn current_contract_index() -> ContractIndex {
         "AppBridgeOperationDto::PostNotification",
         "post_notification",
     );
+    put(
+        "AppBridgeOperationDto::ClipboardGetText",
+        "clipboard_get_text",
+    );
+    put(
+        "AppBridgeOperationDto::ClipboardSetText",
+        "clipboard_set_text",
+    );
+    put("AppBridgeOperationDto::Share", "share");
+    put(
+        "AppBridgeOperationDto::SynthesizeSpeech",
+        "synthesize_speech",
+    );
+    put("AppBridgeOperationDto::FileRead", "file_read");
+    put("AppBridgeOperationDto::FileWrite", "file_write");
+    put("AppBridgeOperationDto::DeviceStatus", "device_status");
+    put("AppBridgeOperationDto::Haptics", "haptics");
+    put("AppBridgeOperationDto::DeepLink", "deep_link");
     put("AppBridgeOperationDto::LlmChat", "llm_chat");
+    put("AppBridgeOperationDto::LlmStream", "llm_stream");
     put("AppBridgeOperationDto::AgentPost", "agent_post");
 
     put("AppBridgeRequestDto.request_id", "String");
@@ -1385,6 +1404,13 @@ fn current_contract_index() -> ContractIndex {
     put("AppCapabilityKindDto::Microphone", "microphone");
     put("AppCapabilityKindDto::Location", "location");
     put("AppCapabilityKindDto::Notifications", "notifications");
+    put("AppCapabilityKindDto::Files", "files");
+    put("AppCapabilityKindDto::Clipboard", "clipboard");
+    put("AppCapabilityKindDto::Share", "share");
+    put("AppCapabilityKindDto::TextToSpeech", "text_to_speech");
+    put("AppCapabilityKindDto::DeviceStatus", "device_status");
+    put("AppCapabilityKindDto::Haptics", "haptics");
+    put("AppCapabilityKindDto::DeepLink", "deep_link");
     put("AppCapabilityKindDto::Llm", "llm");
     put("AppCapabilityKindDto::AgentNotify", "agent_notify");
 

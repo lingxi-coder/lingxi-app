@@ -18,8 +18,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use traits::{
-    CameraError, CameraPosition, CapturePhotoOpts, LocationError, NotificationError,
-    NotificationRequest, SttError, SttOpts, VoiceError, VoiceRecorder, VoiceRecording,
+    CalendarError, CalendarEvent, CalendarQuery, CameraError, CameraPosition, CapturePhotoOpts,
+    ClipboardError, ContactsError, ContactsQuery, DeepLinkError, DeviceStatusError, HapticError,
+    HapticStyle, LocationError, NotificationError, NotificationRequest, ShareError, SharePayload,
+    ShareResult, SttError, SttOpts, TtsError, TtsOpts, VoiceError, VoiceRecorder, VoiceRecording,
     VoiceRecordingOpts,
 };
 
@@ -46,6 +48,15 @@ const RECORD_FORMAT: &str = "m4a";
 const NOTIFICATION_TITLE_MAX_CHARS: usize = 100;
 const NOTIFICATION_BODY_MAX_CHARS: usize = 500;
 const NOTIFICATION_TAG_MAX_LEN: usize = 64;
+const CLIPBOARD_TEXT_MAX_CHARS: usize = 100_000;
+const SHARE_TEXT_MAX_CHARS: usize = 20_000;
+const SHARE_URL_MAX_CHARS: usize = 4_096;
+const TTS_TEXT_MAX_CHARS: usize = 10_000;
+const DEEP_LINK_MAX_CHARS: usize = 4_096;
+const CALENDAR_MAX_RANGE_MS: u64 = 366 * 24 * 60 * 60 * 1_000;
+const CALENDAR_MAX_LIMIT: u32 = 100;
+const CONTACTS_QUERY_MAX_CHARS: usize = 200;
+const CONTACTS_MAX_LIMIT: u32 = 50;
 
 // First-use prompt reasons, one per capability (reach the sheet verbatim
 // through `AppCapabilityRequestDto.reason`).
@@ -55,6 +66,14 @@ const REASON_MICROPHONE: &str = "应用请求使用麦克风录音。";
 const REASON_LOCATION: &str = "应用请求获取一次当前位置。";
 const REASON_NOTIFICATIONS: &str = "应用请求发送本地通知。";
 const REASON_TRANSCRIBE: &str = "应用请求使用麦克风把你说的话转写成文字。";
+const REASON_CLIPBOARD: &str = "应用请求读取或写入系统剪贴板。";
+const REASON_SHARE: &str = "应用请求打开系统分享面板。";
+const REASON_TTS: &str = "应用请求将文字转换为语音。";
+const REASON_HAPTICS: &str = "应用请求触发一次短促的触觉反馈。";
+const REASON_DEEP_LINK: &str = "应用请求打开一个外部链接。";
+const REASON_CALENDAR: &str = "应用请求读取你指定时间范围内的日历事件。";
+const REASON_CONTACTS: &str = "应用请求搜索你的联系人信息。";
+const REASON_MEDIA: &str = "应用请求读取它自己刚刚获取的媒体内容。";
 
 /// The single in-flight `device.recordAudio*` session.
 pub(super) struct ActiveRecording {
@@ -183,6 +202,172 @@ fn map_stt_error(error: SttError) -> BridgeFailure {
         SttError::Retriable(_) => BridgeFailure::coded("retriable", message),
         SttError::Other(_) => BridgeFailure::from(message),
     }
+}
+
+fn map_clipboard_error(error: ClipboardError) -> BridgeFailure {
+    let message = error.to_string();
+    match error {
+        ClipboardError::Unsupported => BridgeFailure::coded("unsupported", message),
+        ClipboardError::Other(_) => BridgeFailure::from(message),
+    }
+}
+
+fn map_share_error(error: ShareError) -> BridgeFailure {
+    let message = error.to_string();
+    match error {
+        ShareError::Unsupported => BridgeFailure::coded("unsupported", message),
+        ShareError::Other(_) => BridgeFailure::from(message),
+    }
+}
+
+fn map_tts_error(error: TtsError) -> BridgeFailure {
+    let message = error.to_string();
+    match error {
+        TtsError::Unavailable => BridgeFailure::coded("device_unavailable", message),
+        TtsError::SynthesisFailed(_) => BridgeFailure::coded("synthesis_failed", message),
+        TtsError::Other(_) => BridgeFailure::from(message),
+    }
+}
+
+fn map_device_status_error(error: DeviceStatusError) -> BridgeFailure {
+    let message = error.to_string();
+    match error {
+        DeviceStatusError::Unavailable => BridgeFailure::coded("device_unavailable", message),
+        DeviceStatusError::Other(_) => BridgeFailure::from(message),
+    }
+}
+
+fn map_haptic_error(error: HapticError) -> BridgeFailure {
+    let message = error.to_string();
+    match error {
+        HapticError::Unavailable => BridgeFailure::coded("device_unavailable", message),
+        HapticError::Other(_) => BridgeFailure::from(message),
+    }
+}
+
+fn map_deep_link_error(error: DeepLinkError) -> BridgeFailure {
+    let message = error.to_string();
+    match error {
+        DeepLinkError::Unavailable => BridgeFailure::coded("device_unavailable", message),
+        DeepLinkError::Rejected(_) => BridgeFailure::coded("rejected", message),
+        DeepLinkError::Other(_) => BridgeFailure::from(message),
+    }
+}
+
+fn map_calendar_error(error: CalendarError) -> BridgeFailure {
+    let message = error.to_string();
+    match error {
+        CalendarError::Unavailable => BridgeFailure::coded("device_unavailable", message),
+        CalendarError::PermissionDenied => BridgeFailure::coded("permission_denied", message),
+        CalendarError::Invalid(_) => BridgeFailure::coded("invalid_request", message),
+        CalendarError::Other(_) => BridgeFailure::from(message),
+    }
+}
+
+fn map_contacts_error(error: ContactsError) -> BridgeFailure {
+    let message = error.to_string();
+    match error {
+        ContactsError::Unavailable => BridgeFailure::coded("device_unavailable", message),
+        ContactsError::PermissionDenied => BridgeFailure::coded("permission_denied", message),
+        ContactsError::Invalid(_) => BridgeFailure::coded("invalid_request", message),
+        ContactsError::Other(_) => BridgeFailure::from(message),
+    }
+}
+
+fn calendar_query(payload: &Value) -> Result<CalendarQuery, BridgeFailure> {
+    let start_ms = payload
+        .get("startMs")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("startMs must be a non-negative integer"))?;
+    let end_ms = payload
+        .get("endMs")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("endMs must be a non-negative integer"))?;
+    if end_ms <= start_ms || end_ms - start_ms > CALENDAR_MAX_RANGE_MS {
+        return Err(invalid(format!(
+            "calendar range must be 1..={CALENDAR_MAX_RANGE_MS} milliseconds"
+        )));
+    }
+    let limit = payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| u32::try_from(value).unwrap_or(u32::MAX))
+        .unwrap_or(50)
+        .clamp(1, CALENDAR_MAX_LIMIT);
+    Ok(CalendarQuery {
+        start_ms,
+        end_ms,
+        limit,
+    })
+}
+
+fn contacts_query(payload: &Value) -> Result<ContactsQuery, BridgeFailure> {
+    let query = payload
+        .get("query")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("query is required"))?
+        .trim()
+        .to_string();
+    if query.is_empty() || query.chars().count() > CONTACTS_QUERY_MAX_CHARS {
+        return Err(invalid(format!(
+            "query must be 1..={CONTACTS_QUERY_MAX_CHARS} characters"
+        )));
+    }
+    let limit = payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|value| u32::try_from(value).unwrap_or(u32::MAX))
+        .unwrap_or(20)
+        .clamp(1, CONTACTS_MAX_LIMIT);
+    Ok(ContactsQuery { query, limit })
+}
+
+fn haptic_style(value: &Value) -> Result<(HapticStyle, &'static str), BridgeFailure> {
+    let raw = value
+        .get("style")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("style is required"))?;
+    let style = match raw {
+        "light" => (HapticStyle::Light, "light"),
+        "medium" => (HapticStyle::Medium, "medium"),
+        "heavy" => (HapticStyle::Heavy, "heavy"),
+        "success" => (HapticStyle::Success, "success"),
+        "warning" => (HapticStyle::Warning, "warning"),
+        "error" => (HapticStyle::Error, "error"),
+        _ => {
+            return Err(invalid(
+                "style must be light|medium|heavy|success|warning|error",
+            ))
+        }
+    };
+    Ok(style)
+}
+
+fn validated_deep_link(value: &Value) -> Result<String, BridgeFailure> {
+    let raw = value
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("url is required"))?;
+    if raw.is_empty() || raw.chars().count() > DEEP_LINK_MAX_CHARS {
+        return Err(invalid(format!(
+            "url must be 1..={DEEP_LINK_MAX_CHARS} characters"
+        )));
+    }
+    let parsed =
+        reqwest::Url::parse(raw).map_err(|error| invalid(format!("invalid URL: {error}")))?;
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(invalid("deep links must not contain username or password"));
+    }
+    match parsed.scheme() {
+        "http" | "https" => {
+            if parsed.host_str().is_none() {
+                return Err(invalid("http(s) deep links require a host"));
+            }
+        }
+        "mailto" | "tel" => {}
+        _ => return Err(invalid("deep link scheme is not allowed")),
+    }
+    Ok(parsed.to_string())
 }
 
 fn valid_notification_tag(tag: &str) -> bool {
@@ -681,6 +866,324 @@ impl LocalAppsHostBroker {
             .map_err(map_notification_error)?;
         Ok(json!({ "posted": true, "tag": echoed_tag }))
     }
+
+    pub(super) async fn clipboard_get_text_value(
+        &self,
+        app_id: &str,
+    ) -> Result<Value, BridgeFailure> {
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::Clipboard,
+            AppCapabilityKindDto::Clipboard,
+            REASON_CLIPBOARD,
+        )
+        .await?;
+        let clipboard = self
+            .devices()?
+            .clipboard
+            .ok_or_else(|| unavailable("the clipboard"))?;
+        Ok(json!({
+            "text": clipboard.get_text().await.map_err(map_clipboard_error)?,
+        }))
+    }
+
+    pub(super) async fn clipboard_set_text_value(
+        &self,
+        app_id: &str,
+        payload: &Value,
+    ) -> Result<Value, BridgeFailure> {
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::Clipboard,
+            AppCapabilityKindDto::Clipboard,
+            REASON_CLIPBOARD,
+        )
+        .await?;
+        let text = payload
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("text is required"))?;
+        if text.chars().count() > CLIPBOARD_TEXT_MAX_CHARS {
+            return Err(invalid(format!(
+                "text must be at most {CLIPBOARD_TEXT_MAX_CHARS} characters"
+            )));
+        }
+        let clipboard = self
+            .devices()?
+            .clipboard
+            .ok_or_else(|| unavailable("the clipboard"))?;
+        clipboard
+            .set_text(text.to_string())
+            .await
+            .map_err(map_clipboard_error)?;
+        Ok(json!({ "written": true }))
+    }
+
+    pub(super) async fn share_value(
+        &self,
+        app_id: &str,
+        payload: &Value,
+    ) -> Result<Value, BridgeFailure> {
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::Share,
+            AppCapabilityKindDto::Share,
+            REASON_SHARE,
+        )
+        .await?;
+        let text = match payload.get("text") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let text = value
+                    .as_str()
+                    .ok_or_else(|| invalid("text must be a string"))?;
+                if text.chars().count() > SHARE_TEXT_MAX_CHARS {
+                    return Err(invalid(format!(
+                        "text must be at most {SHARE_TEXT_MAX_CHARS} characters"
+                    )));
+                }
+                Some(text.to_string())
+            }
+        };
+        let url = match payload.get("url") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let url = value
+                    .as_str()
+                    .ok_or_else(|| invalid("url must be a string"))?;
+                if url.chars().count() > SHARE_URL_MAX_CHARS {
+                    return Err(invalid(format!(
+                        "url must be at most {SHARE_URL_MAX_CHARS} characters"
+                    )));
+                }
+                Some(url.to_string())
+            }
+        };
+        let image_bytes = match payload.get("mediaId") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let media_id = value
+                    .as_str()
+                    .ok_or_else(|| invalid("mediaId must be a string"))?;
+                let entry = self.media_entry(app_id, media_id).ok_or_else(|| {
+                    BridgeFailure::coded(
+                        "media_not_found",
+                        format!("mediaId {media_id:?} is unknown or has expired"),
+                    )
+                })?;
+                if !entry.media_type.starts_with("image/") {
+                    return Err(invalid("mediaId must refer to an image"));
+                }
+                Some((*entry.bytes).clone())
+            }
+        };
+        if text.as_deref().is_none_or(str::is_empty)
+            && url.as_deref().is_none_or(str::is_empty)
+            && image_bytes.is_none()
+        {
+            return Err(invalid("share requires text, url, or image mediaId"));
+        }
+        let share = self
+            .devices()?
+            .share
+            .ok_or_else(|| unavailable("the system share sheet"))?;
+        let result = share
+            .share(SharePayload {
+                text,
+                image_bytes,
+                url,
+            })
+            .await
+            .map_err(map_share_error)?;
+        Ok(match result {
+            ShareResult::Success => json!({ "shared": true, "cancelled": false }),
+            ShareResult::Cancelled => json!({ "shared": false, "cancelled": true }),
+        })
+    }
+
+    pub(super) async fn synthesize_speech_value(
+        &self,
+        app_id: &str,
+        payload: &Value,
+    ) -> Result<Value, BridgeFailure> {
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::TextToSpeech,
+            AppCapabilityKindDto::TextToSpeech,
+            REASON_TTS,
+        )
+        .await?;
+        let text = payload
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("text is required"))?;
+        if text.trim().is_empty() || text.chars().count() > TTS_TEXT_MAX_CHARS {
+            return Err(invalid(format!(
+                "text must be 1..={TTS_TEXT_MAX_CHARS} characters"
+            )));
+        }
+        let voice = match payload.get("voice") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| invalid("voice must be a string"))?
+                    .to_string(),
+            ),
+        };
+        let tts = self
+            .devices()?
+            .tts
+            .ok_or_else(|| unavailable("text-to-speech"))?;
+        let audio = tts
+            .synthesize(TtsOpts {
+                text: text.to_string(),
+                voice,
+            })
+            .await
+            .map_err(map_tts_error)?;
+        self.media_envelope(
+            app_id,
+            "audio/pcm",
+            audio.pcm,
+            json!({ "sampleRateHz": audio.sample_rate_hz }),
+        )
+    }
+
+    pub(super) async fn device_status_value(&self, app_id: &str) -> Result<Value, BridgeFailure> {
+        self.ensure_declared_capability(app_id, AppCapability::DeviceStatus)?;
+        let provider = self
+            .devices()?
+            .device_status
+            .ok_or_else(|| unavailable("device status"))?;
+        serde_json::to_value(provider.status().await.map_err(map_device_status_error)?)
+            .map_err(|error| BridgeFailure::from(format!("serialize device status: {error}")))
+    }
+
+    pub(super) async fn haptics_value(
+        &self,
+        app_id: &str,
+        payload: &Value,
+    ) -> Result<Value, BridgeFailure> {
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::Haptics,
+            AppCapabilityKindDto::Haptics,
+            REASON_HAPTICS,
+        )
+        .await?;
+        let (style, wire_style) = haptic_style(payload)?;
+        let haptics = self
+            .devices()?
+            .haptics
+            .ok_or_else(|| unavailable("haptics"))?;
+        haptics.trigger(style).await.map_err(map_haptic_error)?;
+        Ok(json!({ "triggered": true, "style": wire_style }))
+    }
+
+    pub(super) async fn deep_link_value(
+        &self,
+        app_id: &str,
+        payload: &Value,
+    ) -> Result<Value, BridgeFailure> {
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::DeepLink,
+            AppCapabilityKindDto::DeepLink,
+            REASON_DEEP_LINK,
+        )
+        .await?;
+        let url = validated_deep_link(payload)?;
+        let opener = self
+            .devices()?
+            .deep_link
+            .ok_or_else(|| unavailable("deep links"))?;
+        opener
+            .open(url.clone())
+            .await
+            .map_err(map_deep_link_error)?;
+        Ok(json!({ "opened": true, "url": url }))
+    }
+
+    pub(super) async fn calendar_list_events_value(
+        &self,
+        app_id: &str,
+        payload: &Value,
+    ) -> Result<Value, BridgeFailure> {
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::Calendar,
+            AppCapabilityKindDto::Calendar,
+            REASON_CALENDAR,
+        )
+        .await?;
+        let query = calendar_query(payload)?;
+        let calendar = self
+            .devices()?
+            .calendar
+            .ok_or_else(|| unavailable("calendar"))?;
+        let events: Vec<CalendarEvent> = calendar
+            .list_events(query)
+            .await
+            .map_err(map_calendar_error)?;
+        serde_json::to_value(events)
+            .map_err(|error| BridgeFailure::from(format!("serialize calendar events: {error}")))
+    }
+
+    pub(super) async fn contacts_search_value(
+        &self,
+        app_id: &str,
+        payload: &Value,
+    ) -> Result<Value, BridgeFailure> {
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::Contacts,
+            AppCapabilityKindDto::Contacts,
+            REASON_CONTACTS,
+        )
+        .await?;
+        let query = contacts_query(payload)?;
+        let contacts = self
+            .devices()?
+            .contacts
+            .ok_or_else(|| unavailable("contacts"))?
+            .search(query)
+            .await
+            .map_err(map_contacts_error)?;
+        serde_json::to_value(contacts)
+            .map_err(|error| BridgeFailure::from(format!("serialize contacts: {error}")))
+    }
+
+    pub(super) async fn media_value(
+        &self,
+        app_id: &str,
+        payload: &Value,
+    ) -> Result<Value, BridgeFailure> {
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::Media,
+            AppCapabilityKindDto::Media,
+            REASON_MEDIA,
+        )
+        .await?;
+        let handle = payload
+            .get("mediaId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("mediaId is required"))?;
+        if handle.is_empty() || handle.len() > 128 {
+            return Err(invalid("mediaId must be 1..=128 bytes"));
+        }
+        let entry = self
+            .media_entry(app_id, handle)
+            .ok_or_else(|| BridgeFailure::coded("not_found", "mediaId is unknown or expired"))?;
+        let base64 = encode_media(&entry.bytes)?;
+        Ok(json!({
+            "mimeType": entry.media_type,
+            "base64": base64,
+            "mediaId": handle,
+            "bytes": entry.bytes.len(),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -706,8 +1209,11 @@ mod tests {
     use tempfile::TempDir;
     use tokio::time::timeout;
     use traits::{
-        CameraControl, CameraError, CapturePhotoOpts, CapturedImage, LocationError, LocationFix,
-        LocationProvider, NotificationError, NotificationRequest, NotificationService, VoiceError,
+        CalendarError, CalendarEvent, CalendarProvider, CalendarQuery, CameraControl, CameraError,
+        CapturePhotoOpts, CapturedImage, Clipboard, ClipboardError, Contact, ContactsError,
+        ContactsProvider, ContactsQuery, LocationError, LocationFix, LocationProvider,
+        NotificationError, NotificationRequest, NotificationService, ShareError, SharePayload,
+        ShareResult, SharingService, TextToSpeech, TtsAudio, TtsError, TtsOpts, VoiceError,
         VoiceRecorder, VoiceRecording, VoiceRecordingOpts,
     };
 
@@ -783,6 +1289,79 @@ mod tests {
                 .unwrap()
                 .push((max_dimension, jpeg_quality));
             self.image()
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeClipboard {
+        text: StdMutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl Clipboard for FakeClipboard {
+        async fn set_text(&self, text: String) -> Result<(), ClipboardError> {
+            *self.text.lock().unwrap() = Some(text);
+            Ok(())
+        }
+
+        async fn get_text(&self) -> Result<Option<String>, ClipboardError> {
+            Ok(self.text.lock().unwrap().clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeShare {
+        payloads: StdMutex<Vec<SharePayload>>,
+    }
+
+    #[async_trait]
+    impl SharingService for FakeShare {
+        async fn share(&self, payload: SharePayload) -> Result<ShareResult, ShareError> {
+            self.payloads.lock().unwrap().push(payload);
+            Ok(ShareResult::Success)
+        }
+    }
+
+    struct FakeTts;
+
+    #[async_trait]
+    impl TextToSpeech for FakeTts {
+        async fn synthesize(&self, opts: TtsOpts) -> Result<TtsAudio, TtsError> {
+            Ok(TtsAudio {
+                pcm: opts.text.into_bytes(),
+                sample_rate_hz: 24_000,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeCalendar {
+        queries: StdMutex<Vec<CalendarQuery>>,
+        events: Vec<CalendarEvent>,
+    }
+
+    #[async_trait]
+    impl CalendarProvider for FakeCalendar {
+        async fn list_events(
+            &self,
+            query: CalendarQuery,
+        ) -> Result<Vec<CalendarEvent>, CalendarError> {
+            self.queries.lock().unwrap().push(query);
+            Ok(self.events.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeContacts {
+        queries: StdMutex<Vec<ContactsQuery>>,
+        contacts: Vec<Contact>,
+    }
+
+    #[async_trait]
+    impl ContactsProvider for FakeContacts {
+        async fn search(&self, query: ContactsQuery) -> Result<Vec<Contact>, ContactsError> {
+            self.queries.lock().unwrap().push(query);
+            Ok(self.contacts.clone())
         }
     }
 
@@ -1055,6 +1634,114 @@ mod tests {
         let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("capability_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn calendar_events_are_bounded_and_require_calendar_capability() {
+        let calendar = Arc::new(FakeCalendar {
+            events: vec![CalendarEvent {
+                id: "event-1".into(),
+                title: "设计评审".into(),
+                start_ms: 1_000,
+                end_ms: 2_000,
+                all_day: false,
+                location: Some("会议室".into()),
+                notes: None,
+                calendar: Some("工作".into()),
+            }],
+            ..FakeCalendar::default()
+        });
+        let h = harness(DeviceCapabilities {
+            calendar: Some(calendar.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+
+        let (ok, _, _, code) = execute(
+            &h,
+            AppBridgeOperationDto::CalendarListEvents,
+            json!({"startMs": 0, "endMs": 86_400_000}),
+        )
+        .await;
+        assert!(!ok);
+        assert_eq!(code.as_deref(), Some("capability_not_declared"));
+
+        declare_and_grant(&h, AppCapability::Calendar);
+        let (ok, result, error, code) = execute(
+            &h,
+            AppBridgeOperationDto::CalendarListEvents,
+            json!({"startMs": 0, "endMs": 86_400_000, "limit": 10_000}),
+        )
+        .await;
+        assert!(ok, "{error:?} {code:?}");
+        assert_eq!(result[0]["title"], "设计评审");
+        assert_eq!(calendar.queries.lock().unwrap()[0].limit, 100);
+    }
+
+    #[tokio::test]
+    async fn contacts_search_is_trimmed_and_bounded() {
+        let contacts = Arc::new(FakeContacts {
+            contacts: vec![Contact {
+                id: "contact-1".into(),
+                display_name: "林夕".into(),
+                phones: vec!["13800000000".into()],
+                emails: vec!["lingxi@example.com".into()],
+            }],
+            ..FakeContacts::default()
+        });
+        let h = harness(DeviceCapabilities {
+            contacts: Some(contacts.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Contacts);
+
+        let (ok, result, error, code) = execute(
+            &h,
+            AppBridgeOperationDto::ContactsSearch,
+            json!({"query": "  林夕 ", "limit": 500}),
+        )
+        .await;
+        assert!(ok, "{error:?} {code:?}");
+        assert_eq!(result[0]["display_name"], "林夕");
+        let query = &contacts.queries.lock().unwrap()[0];
+        assert_eq!(query.query, "林夕");
+        assert_eq!(query.limit, 50);
+    }
+
+    #[tokio::test]
+    async fn media_get_retrieves_only_the_app_owned_handle() {
+        let camera = FakeCamera::with_bytes(vec![4, 5, 6]);
+        let h = harness(DeviceCapabilities {
+            camera: Some(camera),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Camera);
+        let (ok, capture, error, code) =
+            execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
+        assert!(ok, "{error:?} {code:?}");
+        let media_id = capture["mediaId"].as_str().expect("media id").to_string();
+
+        declare_and_grant(&h, AppCapability::Media);
+        let (ok, media, error, code) = execute(
+            &h,
+            AppBridgeOperationDto::MediaGet,
+            json!({"mediaId": media_id}),
+        )
+        .await;
+        assert!(ok, "{error:?} {code:?}");
+        assert_eq!(media["mimeType"], "image/jpeg");
+        assert_eq!(media["bytes"], 3);
+
+        let (ok, _, _, code) = execute(
+            &h,
+            AppBridgeOperationDto::MediaGet,
+            json!({"mediaId": "other-app-handle"}),
+        )
+        .await;
+        assert!(!ok);
+        assert_eq!(code.as_deref(), Some("not_found"));
     }
 
     #[tokio::test]
@@ -1621,5 +2308,67 @@ mod tests {
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("invalid_request"));
         assert!(notifications.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clipboard_share_and_tts_use_declared_native_capabilities() {
+        let clipboard = Arc::new(FakeClipboard::default());
+        let share = Arc::new(FakeShare::default());
+        let h = harness(DeviceCapabilities {
+            clipboard: Some(clipboard.clone()),
+            share: Some(share.clone()),
+            tts: Some(Arc::new(FakeTts)),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Clipboard);
+        declare_and_grant(&h, AppCapability::Share);
+        declare_and_grant(&h, AppCapability::TextToSpeech);
+
+        let (ok, result, error, code) = execute(
+            &h,
+            AppBridgeOperationDto::ClipboardSetText,
+            json!({"text": "copied"}),
+        )
+        .await;
+        assert!(ok, "{error:?} {code:?}");
+        assert_eq!(result["written"], true);
+        assert_eq!(clipboard.text.lock().unwrap().as_deref(), Some("copied"));
+
+        let (ok, result, error, code) =
+            execute(&h, AppBridgeOperationDto::ClipboardGetText, json!({})).await;
+        assert!(ok, "{error:?} {code:?}");
+        assert_eq!(result["text"], "copied");
+
+        let (ok, result, error, code) = execute(
+            &h,
+            AppBridgeOperationDto::Share,
+            json!({"text": "share me", "url": "https://example.com"}),
+        )
+        .await;
+        assert!(ok, "{error:?} {code:?}");
+        assert_eq!(result["shared"], true);
+        let payloads = share.payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].text.as_deref(), Some("share me"));
+        assert_eq!(payloads[0].url.as_deref(), Some("https://example.com"));
+        drop(payloads);
+
+        let (ok, result, error, code) = execute(
+            &h,
+            AppBridgeOperationDto::SynthesizeSpeech,
+            json!({"text": "speech", "voice": "default"}),
+        )
+        .await;
+        assert!(ok, "{error:?} {code:?}");
+        assert_eq!(result["mimeType"], "audio/pcm");
+        assert_eq!(result["sampleRateHz"], 24_000);
+        let encoded = result["base64"].as_str().expect("audio base64");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+            b"speech"
+        );
     }
 }

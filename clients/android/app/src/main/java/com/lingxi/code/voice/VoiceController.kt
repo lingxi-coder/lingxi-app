@@ -43,6 +43,7 @@ import com.lingxi.code.share.AndroidShareAdapter
 import com.lingxi.code.notify.AndroidNotificationAdapter
 import com.lingxi.code.project.ProjectWorkspace
 import com.lingxi.code.clipboard.AndroidClipboardAdapter
+import com.lingxi.code.device.AndroidDeviceControlAdapter
 import com.lingxi.code.secure.AndroidSecureStorageAdapter
 import com.lingxi.code.settings.LinuxRuntimeBridge
 import com.lingxi.code.settings.LinuxRuntimeMode
@@ -355,6 +356,7 @@ fun buildVoiceEngine(
             // persist (flips the engine's oauth_supported true). Rooted under the
             // app-private filesDir.
             secureStorage = AndroidSecureStorageAdapter(appContext),
+            deviceControl = AndroidDeviceControlAdapter(),
         )
     } catch (t: Throwable) {
         // PlatformUnavailable on a host build, or UnsatisfiedLinkError when the

@@ -14,7 +14,11 @@ class LocalAppWebViewTest {
         val expected = setOf(
             "query_data", "mutate_data", "network_request", "runtime_status",
             "capture_photo", "pick_image", "record_audio_start", "record_audio_stop",
-            "get_location", "transcribe_speech", "post_notification", "llm_chat", "agent_post",
+            "get_location", "transcribe_speech", "post_notification",
+            "clipboard_get_text", "clipboard_set_text", "share", "synthesize_speech",
+            "file_read", "file_write",
+            "device_status", "haptics", "deep_link",
+            "llm_chat", "llm_stream", "agent_post",
             "agent_session_create", "agent_session_list", "agent_session_resume",
             "agent_session_close", "agent_send", "agent_stream", "agent_cancel",
             "agent_profile_propose_update",
@@ -23,6 +27,9 @@ class LocalAppWebViewTest {
             "background_status",
             "background_cancel",
             "background_retry",
+            "calendar_list_events",
+            "contacts_search",
+            "media_get",
         )
 
         assertEquals(expected, AppBridgeOperationDto.entries.map { it.bridgeWireName() }.toSet())
@@ -108,12 +115,16 @@ class LocalAppWebViewTest {
         listOf(
             "capturePhoto", "pickImage", "recordAudioStart", "recordAudioStop", "getLocation",
             "transcribeSpeech", "postNotification", "llm_chat", "agent_post",
+            "background_schedule", "background_list", "background_status",
+            "background_cancel", "background_retry",
             "Content-Security-Policy", "XMLHttpRequest", "WebSocket", "EventSource", "sendBeacon",
             "External resources are blocked", "error.code = envelope.code",
             "const normalAnchor = attribute === 'href' && this.tagName === 'A'",
             "request_too_large", "worker-src 'none'", "deviceContext", "os: 'android'",
             "formFactor: 'tablet'", "get viewport()", "get safeArea()", "get colorScheme()",
             "get reducedMotion()", "get inputMode()",
+            "const channel = pending.get(frame.requestId)?.channel",
+            "streamListeners.set(listener, 'llm')", "streamListeners.set(listener, 'agent')",
         ).forEach { token -> assertTrue("missing bootstrap contract: $token", bootstrap.contains(token)) }
         assertFalse(bootstrap.contains("window.screen"))
         assertFalse(bootstrap.contains("addJavascriptInterface"))

@@ -68,8 +68,7 @@ use traits::Platform;
 pub use engine_mobile::{
     ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
     LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle,
-    PermissionRequestSink, ProviderConnectionTestDto,
+    MobileEngineHandle, PermissionRequestSink, ProviderConnectionTestDto,
 };
 
 /// The foreign (Kotlin) capability objects + config needed to build an
@@ -729,6 +728,11 @@ pub fn build_mobile_engine(
                 tts: None,
                 notifications: None,
                 clipboard: None,
+                device_status: None,
+                haptics: None,
+                deep_link: None,
+                calendar: None,
+                contacts: None,
                 mobile_linux: android_mobile_linux_runtime(impls.mobile_linux.as_ref()),
                 mobile_linux_workspace_root: impls
                     .mobile_linux
@@ -2438,6 +2442,168 @@ fn clipboard_error_from_ffi(e: ClipboardFfiError) -> traits::ClipboardError {
 }
 
 // ---------------------------------------------------------------------------
+// Device status / haptics / deep links — one native callback object fans out
+// to the three shared Platform seams used by Local Apps.
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum DeviceControlFfiError {
+    /// The platform cannot provide the requested operation.
+    #[error("device control unavailable")]
+    Unavailable,
+    /// The platform rejected the requested deep link or haptic style.
+    #[error("device control rejected: {message}")]
+    Rejected { message: String },
+    /// Any other native failure.
+    #[error("device control error: {message}")]
+    Other { message: String },
+}
+
+/// Native callback implemented by Kotlin for status, haptics, and deep links.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidDeviceControl: Send + Sync {
+    /// Return a JSON-encoded bounded [`traits::DeviceStatus`] record.
+    async fn status_json(&self) -> Result<String, DeviceControlFfiError>;
+    /// Trigger one host-approved style.
+    async fn trigger_haptic(&self, style: String) -> Result<(), DeviceControlFfiError>;
+    /// Open one already-validated external URL.
+    async fn open_deep_link(&self, url: String) -> Result<(), DeviceControlFfiError>;
+    /// Return JSON-encoded bounded calendar events for one query.
+    async fn calendar_json(&self, request_json: String) -> Result<String, DeviceControlFfiError>;
+    /// Return JSON-encoded bounded contacts for one search.
+    async fn contacts_json(&self, request_json: String) -> Result<String, DeviceControlFfiError>;
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct AndroidDeviceControlBridge {
+    inner: Box<dyn AndroidDeviceControl>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::DeviceStatusProvider for AndroidDeviceControlBridge {
+    async fn status(&self) -> Result<traits::DeviceStatus, traits::DeviceStatusError> {
+        let body = self
+            .inner
+            .status_json()
+            .await
+            .map_err(device_control_error)?;
+        serde_json::from_str(&body).map_err(|error| {
+            traits::DeviceStatusError::Other(format!("invalid native device status: {error}"))
+        })
+    }
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::HapticService for AndroidDeviceControlBridge {
+    async fn trigger(&self, style: traits::HapticStyle) -> Result<(), traits::HapticError> {
+        self.inner
+            .trigger_haptic(haptic_style_to_wire(style).to_string())
+            .await
+            .map_err(|error| match error {
+                DeviceControlFfiError::Unavailable => traits::HapticError::Unavailable,
+                DeviceControlFfiError::Rejected { message }
+                | DeviceControlFfiError::Other { message } => traits::HapticError::Other(message),
+            })
+    }
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::DeepLinkOpener for AndroidDeviceControlBridge {
+    async fn open(&self, url: String) -> Result<(), traits::DeepLinkError> {
+        self.inner
+            .open_deep_link(url)
+            .await
+            .map_err(device_control_error_for_deep_link)
+    }
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::CalendarProvider for AndroidDeviceControlBridge {
+    async fn list_events(
+        &self,
+        query: traits::CalendarQuery,
+    ) -> Result<Vec<traits::CalendarEvent>, traits::CalendarError> {
+        let request = serde_json::to_string(&query)
+            .map_err(|error| traits::CalendarError::Other(error.to_string()))?;
+        let body = self
+            .inner
+            .calendar_json(request)
+            .await
+            .map_err(|error| match error {
+                DeviceControlFfiError::Unavailable => traits::CalendarError::Unavailable,
+                DeviceControlFfiError::Rejected { .. } => traits::CalendarError::PermissionDenied,
+                DeviceControlFfiError::Other { message } => traits::CalendarError::Other(message),
+            })?;
+        serde_json::from_str(&body).map_err(|error| {
+            traits::CalendarError::Other(format!("invalid native calendar response: {error}"))
+        })
+    }
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::ContactsProvider for AndroidDeviceControlBridge {
+    async fn search(
+        &self,
+        query: traits::ContactsQuery,
+    ) -> Result<Vec<traits::Contact>, traits::ContactsError> {
+        let request = serde_json::to_string(&query)
+            .map_err(|error| traits::ContactsError::Other(error.to_string()))?;
+        let body = self
+            .inner
+            .contacts_json(request)
+            .await
+            .map_err(|error| match error {
+                DeviceControlFfiError::Unavailable => traits::ContactsError::Unavailable,
+                DeviceControlFfiError::Rejected { .. } => traits::ContactsError::PermissionDenied,
+                DeviceControlFfiError::Other { message } => traits::ContactsError::Other(message),
+            })?;
+        serde_json::from_str(&body).map_err(|error| {
+            traits::ContactsError::Other(format!("invalid native contacts response: {error}"))
+        })
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn haptic_style_to_wire(style: traits::HapticStyle) -> &'static str {
+    match style {
+        traits::HapticStyle::Light => "light",
+        traits::HapticStyle::Medium => "medium",
+        traits::HapticStyle::Heavy => "heavy",
+        traits::HapticStyle::Success => "success",
+        traits::HapticStyle::Warning => "warning",
+        traits::HapticStyle::Error => "error",
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn device_control_error(error: DeviceControlFfiError) -> traits::DeviceStatusError {
+    match error {
+        DeviceControlFfiError::Unavailable => traits::DeviceStatusError::Unavailable,
+        DeviceControlFfiError::Rejected { message } | DeviceControlFfiError::Other { message } => {
+            traits::DeviceStatusError::Other(message)
+        }
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn device_control_error_for_deep_link(error: DeviceControlFfiError) -> traits::DeepLinkError {
+    match error {
+        DeviceControlFfiError::Unavailable => traits::DeepLinkError::Unavailable,
+        DeviceControlFfiError::Rejected { message } => traits::DeepLinkError::Rejected(message),
+        DeviceControlFfiError::Other { message } => traits::DeepLinkError::Other(message),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Secure storage — foreign (Kotlin) Keystore callback interface + engine bridge.
 // ---------------------------------------------------------------------------
 //
@@ -3618,6 +3784,7 @@ pub fn build_android_engine(
     git: Option<AndroidGitConfigFfi>,
     git_credential_provider: Option<Box<dyn AndroidGitCredentialProvider>>,
     secure_storage: Option<Box<dyn AndroidSecureStorage>>,
+    device_control: Option<Box<dyn AndroidDeviceControl>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     build_android_engine_with_mobile_linux(
         AndroidEngineLaunchConfigFfi {
@@ -3648,6 +3815,7 @@ pub fn build_android_engine(
         git,
         git_credential_provider,
         secure_storage,
+        device_control,
     )
 }
 
@@ -3672,6 +3840,7 @@ pub fn build_android_engine_with_mobile_linux(
     git: Option<AndroidGitConfigFfi>,
     git_credential_provider: Option<Box<dyn AndroidGitCredentialProvider>>,
     secure_storage: Option<Box<dyn AndroidSecureStorage>>,
+    device_control: Option<Box<dyn AndroidDeviceControl>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let AndroidEngineLaunchConfigFfi {
         api_base,
@@ -3688,11 +3857,26 @@ pub fn build_android_engine_with_mobile_linux(
     } = config;
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
+    #[cfg(target_os = "android")]
+    let device_control = device_control.map(|inner| Arc::new(AndroidDeviceControlBridge { inner }));
     #[cfg(not(target_os = "android"))]
-    let _ = project_cwd;
+    let _ = (project_cwd, device_control);
     #[cfg(target_os = "android")]
     {
         use platform_android::{AndroidPlatform, AndroidPlatformInputs};
+        let device_status = device_control
+            .clone()
+            .map(|service| service.clone() as Arc<dyn traits::DeviceStatusProvider>);
+        let haptics = device_control
+            .clone()
+            .map(|service| service.clone() as Arc<dyn traits::HapticService>);
+        let calendar = device_control
+            .clone()
+            .map(|service| service.clone() as Arc<dyn traits::CalendarProvider>);
+        let contacts = device_control
+            .clone()
+            .map(|service| service.clone() as Arc<dyn traits::ContactsProvider>);
+        let deep_link = device_control.map(|service| service as Arc<dyn traits::DeepLinkOpener>);
         // P5b: capture the app-private files root as an owned `String` up front —
         // `app_files_root` is consumed below into `AndroidPlatformInputs`, but the
         // bundled-shell bootstrap (which must run BEFORE `shell_cfg` is built +
@@ -3797,6 +3981,11 @@ pub fn build_android_engine_with_mobile_linux(
                     inner: notifications,
                 })),
                 clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
+                device_status,
+                haptics,
+                deep_link,
+                calendar,
+                contacts,
                 mobile_linux: android_mobile_linux_runtime(local_apps_mobile_linux.as_ref()),
                 mobile_linux_workspace_root: mobile_linux
                     .as_ref()

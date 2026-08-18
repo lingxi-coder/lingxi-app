@@ -213,7 +213,8 @@ import XCTest
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
                     permissions: NoopPermissionSink(),
-                    secureStorage: nil
+                    secureStorage: nil,
+                    deviceControl: nil
                 )
             )
         }
@@ -314,7 +315,8 @@ import XCTest
                     clipboard: ClipboardImpl(),
                     permissions: NoopPermissionSink(),
                     mobileLinux: nil,
-                    secureStorage: nil)
+                    secureStorage: nil,
+                    deviceControl: nil)
             } catch {
                 XCTFail("buildIosEngine must succeed keyless (handshake), got error: \(error)")
                 return
@@ -419,7 +421,8 @@ import XCTest
                     clipboard: ClipboardImpl(),
                     permissions: NoopPermissionSink(),
                     mobileLinux: nil,
-                    secureStorage: nil)
+                    secureStorage: nil,
+                    deviceControl: nil)
             } catch {
                 XCTFail("buildIosEngine must succeed keyless with empty model, got: \(error)")
                 return

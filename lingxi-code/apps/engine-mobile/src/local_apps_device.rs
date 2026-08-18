@@ -11,7 +11,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use traits::{CameraControl, LocationProvider, NotificationService, SpeechToText, VoiceRecorder};
+use traits::{
+    CalendarProvider, CameraControl, Clipboard, ContactsProvider, DeepLinkOpener,
+    DeviceStatusProvider, HapticService, LocationProvider, NotificationService, SharingService,
+    SpeechToText, TextToSpeech, VoiceRecorder,
+};
 
 /// Per-app cap on retained media. Two default-preset photos plus a long
 /// recording fit; past that the oldest handle is evicted.
@@ -92,6 +96,14 @@ pub(crate) struct DeviceCapabilities {
     pub(crate) voice: Option<Arc<dyn VoiceRecorder>>,
     pub(crate) location: Option<Arc<dyn LocationProvider>>,
     pub(crate) notifications: Option<Arc<dyn NotificationService>>,
+    pub(crate) clipboard: Option<Arc<dyn Clipboard>>,
+    pub(crate) share: Option<Arc<dyn SharingService>>,
+    pub(crate) tts: Option<Arc<dyn TextToSpeech>>,
+    pub(crate) device_status: Option<Arc<dyn DeviceStatusProvider>>,
+    pub(crate) haptics: Option<Arc<dyn HapticService>>,
+    pub(crate) deep_link: Option<Arc<dyn DeepLinkOpener>>,
+    pub(crate) calendar: Option<Arc<dyn CalendarProvider>>,
+    pub(crate) contacts: Option<Arc<dyn ContactsProvider>>,
     /// Live microphone transcription. This — not an audio attachment — is
     /// how speech reaches the model: the conversation protocol has no audio
     /// content block, and `SpeechToText::transcribe` opens the mic for one

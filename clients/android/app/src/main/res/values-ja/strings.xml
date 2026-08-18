@@ -10,6 +10,7 @@
     <string name="local_apps_create_model_label">Workflow モデル</string>
     <string name="local_apps_create_model_section">ビルドモデル</string>
     <string name="local_apps_error_workflow_model_unavailable">選択した Workflow モデルは利用できなくなりました。別のモデルを選択してください。</string>
+    <string name="local_apps_error_create_in_progress">別のローカルアプリを作成中です。しばらくお待ちください。</string>
     <string name="local_apps_refresh">アプリを更新</string>
     <string name="local_apps_search">アプリを検索</string>
     <string name="local_apps_empty">ローカルアプリはまだありません</string>
@@ -1575,6 +1576,9 @@
     <string name="local_apps_create_brief_detail">AI がこれをもとに詳細を詰めるための質問票を作成します。</string>
     <string name="local_apps_create_brief_section">作りたいアプリを一行で説明してください</string>
     <string name="local_apps_create_git_version_control">Git でアプリのバージョンを管理する（推奨）</string>
+    <string name="local_apps_create_add_widget">作成後にホーム画面へ Widget を追加</string>
+    <string name="local_apps_create_add_widget_detail">作成完了後にシステム確認を表示します</string>
+    <string name="local_apps_widget_pin_unavailable">このランチャーは Widget の自動追加に対応していません。後で手動で追加してください。</string>
     <string name="local_apps_error_bridge_detached">アプリ画面が閉じたため、このリクエストは応答されません。</string>
     <string name="local_apps_error_bridge_payload_invalid">リクエスト内容をシリアライズできません。</string>
     <string name="local_apps_error_brief_required">アプリを一行で説明してください。</string>

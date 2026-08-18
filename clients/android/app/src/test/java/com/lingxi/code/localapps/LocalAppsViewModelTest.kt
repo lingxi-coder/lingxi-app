@@ -3,6 +3,7 @@ package com.lingxi.code.localapps
 import com.lingxi.code.bindings.AppAuthorizationDecisionDto
 import com.lingxi.code.bindings.AppBridgeResponseDto
 import com.lingxi.code.bindings.AppCapabilityKindDto
+import com.lingxi.code.bindings.AppErrorCodeDto
 import com.lingxi.code.bindings.AppCapabilityRequestDto
 import com.lingxi.code.bindings.AppRecordDto
 import com.lingxi.code.bindings.AppSessionKindDto
@@ -23,8 +24,11 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -113,6 +117,189 @@ class LocalAppsViewModelTest {
                 sent.name.isEmpty(),
             )
             assertNull("null means the workflow follows the current conversation", sent.workflowModel)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `create app with widget emits a pin request after the new record is announced`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            val brief = "一个带桌面快捷入口的记事本"
+            viewModel.onAction(LocalAppsAction.CreateFromBrief(brief, addWidget = true))
+            runCurrent()
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(appRecord(id = "widget-app", name = "记事本", brief = brief)),
+                ),
+            )
+            runCurrent()
+
+            assertEquals("widget-app", viewModel.widgetPinRequests.first())
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `engine-side create failure does not pin a later app that only shares the brief`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            val pins = mutableListOf<String>()
+            val pinJob = launch { viewModel.widgetPinRequests.collect { pins += it } }
+
+            val brief = "一个带桌面快捷入口的记事本"
+            viewModel.onAction(LocalAppsAction.CreateFromBrief(brief, addWidget = true))
+            runCurrent()
+            source.emit(
+                ClientEvent.AppOperationFailed(
+                    appId = null,
+                    code = AppErrorCodeDto.WORKFLOW_STATE_INVALID,
+                    message = "创建失败",
+                ),
+            )
+            runCurrent()
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(appRecord(id = "assistant-app", name = "助手的应用", brief = brief)),
+                ),
+            )
+            runCurrent()
+
+            assertTrue(
+                "a failed create must not pin the next app that happens to share the brief",
+                pins.isEmpty(),
+            )
+            pinJob.cancel()
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `create submit failure does not leave a widget pin claim armed`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource().apply {
+                commandFailure = IllegalStateException("engine offline")
+            }
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            val pins = mutableListOf<String>()
+            val pinJob = launch { viewModel.widgetPinRequests.collect { pins += it } }
+
+            val brief = "一个带桌面快捷入口的记事本"
+            viewModel.onAction(LocalAppsAction.CreateFromBrief(brief, addWidget = true))
+            runCurrent()
+
+            source.commandFailure = null
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(appRecord(id = "later-app", name = "记事本", brief = brief)),
+                ),
+            )
+            runCurrent()
+
+            assertTrue(viewModel.uiState.value.error?.isNotBlank() == true)
+            assertTrue(pins.isEmpty())
+            pinJob.cancel()
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `a per-app operation failure does not disarm an in-flight widget create`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            val pins = mutableListOf<String>()
+            val pinJob = launch { viewModel.widgetPinRequests.collect { pins += it } }
+
+            val brief = "一个带桌面快捷入口的记事本"
+            viewModel.onAction(LocalAppsAction.CreateFromBrief(brief, addWidget = true))
+            runCurrent()
+            source.emit(
+                ClientEvent.AppOperationFailed(
+                    appId = "other-app",
+                    code = AppErrorCodeDto.NOT_FOUND,
+                    message = "应用不存在",
+                ),
+            )
+            runCurrent()
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(appRecord(id = "widget-app", name = "记事本", brief = brief)),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(listOf("widget-app"), pins)
+            pinJob.cancel()
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `a second create while one is in flight is rejected and does not steal the pin`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            val pins = mutableListOf<String>()
+            val pinJob = launch { viewModel.widgetPinRequests.collect { pins += it } }
+
+            viewModel.onAction(
+                LocalAppsAction.CreateFromBrief("第一个记事本", addWidget = true),
+            )
+            viewModel.onAction(
+                LocalAppsAction.CreateFromBrief("第二个清单", addWidget = true),
+            )
+            runCurrent()
+
+            assertEquals(1, source.commands.filterIsInstance<ClientCommand.CreateApp>().size)
+            assertTrue(viewModel.uiState.value.error?.isNotBlank() == true)
+
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(appRecord(id = "first-app", name = "记事本", brief = "第一个记事本")),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(listOf("first-app"), pins)
+            pinJob.cancel()
         } finally {
             Dispatchers.resetMain()
         }
@@ -827,10 +1014,8 @@ class LocalAppsViewModelTest {
     }
 
     /**
-     * Claiming a just-created app opens its Details screen on the Sessions
-     * tab (there is no designer any more), and a second create in flight does
-     * not clobber the first pending claim — each `AppsChanged` ack consumes
-     * only its own FIFO entry.
+     * Concurrent creates are rejected (same as iOS). The first claim still
+     * opens Details/Sessions; a later unrelated app must not steal landing.
      */
     @Test
     fun `a second create in flight does not clobber the first pending claim`() = runTest {
@@ -847,7 +1032,9 @@ class LocalAppsViewModelTest {
             viewModel.onAction(LocalAppsAction.CreateFromBrief("笔记 B 的简介"))
             runCurrent()
 
-            // A's own creation ack arrives alone, before B's.
+            assertEquals(1, source.commands.filterIsInstance<ClientCommand.CreateApp>().size)
+            assertTrue(viewModel.uiState.value.error?.isNotBlank() == true)
+
             source.emit(
                 ClientEvent.AppsChanged(
                     listOf(appRecord(id = "a-id", name = "笔记 A", brief = "笔记 A 的简介")),
@@ -860,8 +1047,6 @@ class LocalAppsViewModelTest {
                 viewModel.uiState.value.destination,
             )
 
-            // B's own ack then arrives on its own and must still be claimed —
-            // its pending entry was not consumed by A's claim.
             source.emit(
                 ClientEvent.AppsChanged(
                     listOf(
@@ -873,7 +1058,7 @@ class LocalAppsViewModelTest {
             runCurrent()
 
             assertEquals(
-                LocalAppsDestination.Details("b-id", LocalAppDetailsTab.Sessions),
+                LocalAppsDestination.Details("a-id", LocalAppDetailsTab.Sessions),
                 viewModel.uiState.value.destination,
             )
         } finally {

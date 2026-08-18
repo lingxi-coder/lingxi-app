@@ -78,7 +78,7 @@
     },
     {
       "name": "python3",
-      "version": "3.14.5-r0",
+      "version": "3.14.7-r1",
       "license": "PSF-2.0",
       "architecture": "arm64",
       "origin": "python3"

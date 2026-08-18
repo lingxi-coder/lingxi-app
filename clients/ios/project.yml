@@ -42,12 +42,16 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: Sources
+        excludes:
+          - LocalAppsWidget/**
       # Generated UniFFI Swift bindings (reproduce via scripts/build-xcframework.sh).
       # Gitignored; compiled directly into this app target. They import the
       # per-namespace C/FFI clang modules from LingxiCodeFFI.xcframework below.
       - path: Generated
       - path: Resources
     dependencies:
+      - target: LocalAppsWidget
+        embed: true
       # UniFFI FFI static-library xcframework: exports the engine_mobile /
       # client_protocol C symbols the generated bindings call, and ships the
       # clang modulemap (module.modulemap) that defines the *FFI modules the
@@ -75,6 +79,7 @@ targets:
         INFOPLIST_FILE: Info.plist
         ENABLE_PREVIEWS: true
         GENERATE_INFOPLIST_FILE: false
+        CODE_SIGN_ENTITLEMENTS: Widget.entitlements
         MARKETING_VERSION: "2.4.1"
         CURRENT_PROJECT_VERSION: "8721"
         HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/build/linux-runtime/openminis/include $(SRCROOT)/build/linux-runtime/openminis/include/ish $(SRCROOT)/../../docs/superpowers/references/OpenMinis/src/ios/iSH $(SRCROOT)/../../docs/superpowers/references/OpenMinis/src/ios/NativeOffloads"
@@ -170,6 +175,28 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.tests
         GENERATE_INFOPLIST_FILE: true
+
+  LocalAppsWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources/LocalAppsWidget
+      - path: Sources/LocalAppsWidgetShared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.widget
+        INFOPLIST_FILE: Sources/LocalAppsWidget/Info.plist
+        GENERATE_INFOPLIST_FILE: false
+        SKIP_INSTALL: false
+        CODE_SIGN_ENTITLEMENTS: Widget.entitlements
+        MARKETING_VERSION: "2.4.1"
+        CURRENT_PROJECT_VERSION: "8721"
+      configs:
+        FullDebug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full.widget
+        FullRelease:
+          PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full.widget
 
   LingxiCodeUITests:
     type: bundle.ui-testing

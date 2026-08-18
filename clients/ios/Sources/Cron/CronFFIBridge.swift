@@ -200,7 +200,8 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             notifications: NotificationImpl(),
             clipboard: ClipboardImpl(),
             permissions: permissionSink,
-            secureStorage: SecureStorageImpl()
+            secureStorage: SecureStorageImpl(),
+            deviceControl: DeviceControlImpl()
         )
         permissionSink.attach(handle)
         return handle

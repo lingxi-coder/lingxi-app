@@ -40,6 +40,52 @@ final class AppIntegrationTests: XCTestCase {
         XCTAssertNil(LingxiDeepLink.action(from: URL(string: "lingxi://unknown")!))
     }
 
+    func testLocalAppDeepLinkParsesValidatedUnifiedRoute() {
+        let url = URL(
+            string: "lingxi://open_local_app?appId=tracker-1&destination=preview&autostart=1&source=widget"
+        )!
+
+        XCTAssertEqual(
+            LingxiDeepLink.action(from: url),
+            .openLocalApp(
+                appID: "tracker-1",
+                destination: "preview",
+                autostart: true,
+                source: "widget"
+            )
+        )
+    }
+
+    func testDeviceControlCalendarQueryDecodesHostSnakeCase() throws {
+        let query = try DeviceControlWireJSON.decodeCalendarQuery(
+            #"{"start_ms":1000,"end_ms":2000,"limit":8}"#
+        )
+        XCTAssertEqual(query.startMs, 1000)
+        XCTAssertEqual(query.endMs, 2000)
+        XCTAssertEqual(query.limit, 8)
+    }
+
+    func testDeviceControlCalendarQueryRejectsCamelCaseHostDrift() {
+        XCTAssertThrowsError(
+            try DeviceControlWireJSON.decodeCalendarQuery(
+                #"{"startMs":1000,"endMs":2000,"limit":8}"#
+            )
+        )
+    }
+
+    func testLocalAppDeepLinkRejectsInvalidIDsAndUnknownQueries() {
+        XCTAssertNil(
+            LingxiDeepLink.action(
+                from: URL(string: "lingxi://open_local_app?appId=Tracker&destination=preview&autostart=1")!
+            )
+        )
+        XCTAssertNil(
+            LingxiDeepLink.action(
+                from: URL(string: "lingxi://open_local_app?appId=tracker&destination=preview&autostart=1&extra=1")!
+            )
+        )
+    }
+
     func testMarkdownTerminalLinkKeepsAndroidCompatibleURL() {
         let expected = URL(string: "lingxi://open_terminal?sessionId=shell-8&initCommand=pwd")!
         let rendered = AIText.parseInline(

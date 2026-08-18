@@ -25,6 +25,8 @@ import com.lingxi.code.bindings.AppWorkflowStateDto
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.conversation.ConversationSource
+import com.lingxi.code.localapps.widget.LocalAppWidgetSnapshotSync
+import com.lingxi.code.localapps.widget.NoopLocalAppWidgetSnapshotSync
 import com.lingxi.code.model.DefaultSessionCatalogStrings
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.SessionCatalog
@@ -37,6 +39,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import org.json.JSONObject
 
 /**
@@ -53,6 +57,7 @@ class LocalAppsViewModel(
     private val strings: LocalAppsStrings = DefaultLocalAppsStrings,
     private val sessionStrings: SessionCatalogStrings = DefaultSessionCatalogStrings,
     private val webStorageCleanup: LocalAppWebStorageCleanup = NoopLocalAppWebStorageCleanup,
+    private val widgetSnapshotSync: LocalAppWidgetSnapshotSync = NoopLocalAppWidgetSnapshotSync,
     /** Injectable "now" so relative-time bucketing is deterministic in tests. */
     internal var nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1000L },
 ) : ViewModel() {
@@ -70,19 +75,24 @@ class LocalAppsViewModel(
     private var source: ConversationSource? = null
 
     /**
-     * Every `CreateFromBrief` still awaiting its `AppsChanged` claim, FIFO —
-     * one entry per in-flight create. Keyed on `brief` alone: `createFromBrief`
-     * sends `name = ""` and `AppService::create_app` derives the display name
-     * from the brief, so the persisted record's `name` never equals anything
-     * this ViewModel sent. See `reduceApps` for how entries are matched and
-     * consumed; two concurrent creates with an IDENTICAL brief remain
-     * ambiguous without a wire correlation id.
+     * The in-flight `CreateFromBrief` waiting for its `AppsChanged` claim.
+     * Only one create may be armed at a time (same as iOS). The claim is
+     * matched by brief among newly announced ids because `createFromBrief`
+     * sends `name = ""` and `AppService::create_app` derives the display name.
      */
-    private val pendingCreates = mutableListOf<String>()
+    private data class PendingCreate(
+        val brief: String,
+        val addWidget: Boolean,
+    )
+
+    private val pendingCreates = mutableListOf<PendingCreate>()
+    private val widgetPinRequestChannel = Channel<String>(Channel.BUFFERED)
+    val widgetPinRequests = widgetPinRequestChannel.receiveAsFlow()
     private val pendingCapabilityKinds = mutableMapOf<String, AppCapabilityKindDto>()
     private val queuedAuthorizations = ArrayDeque<LocalAppAuthorizationRequest>()
     private val uiControlGrants = mutableMapOf<String, LocalAppAuthorizationDecision>()
     private val runtimeLastUsedAt = mutableMapOf<String, Long>()
+    private val runtimeStartsInFlight = mutableSetOf<String>()
 
     /**
      * The offset each app's most recent `ListAppSessions` asked for.
@@ -136,14 +146,15 @@ class LocalAppsViewModel(
                 brief = action.brief,
                 gitEnabled = action.gitEnabled,
                 workflowModel = action.workflowModel,
+                addWidget = action.addWidget,
             )
             is LocalAppsAction.OpenApp -> openApp(action.appId)
             is LocalAppsAction.LoadAppSessions -> requestSessions(action.appId, action.offset)
-            is LocalAppsAction.StartRuntime -> {
-                runtimeLastUsedAt[action.appId] = System.currentTimeMillis()
-                submit(ClientCommand.StartApp(action.appId))
+            is LocalAppsAction.StartRuntime -> startRuntimeIfNeeded(action.appId)
+            is LocalAppsAction.StopRuntime -> {
+                runtimeStartsInFlight.remove(action.appId)
+                submit(ClientCommand.StopApp(action.appId))
             }
-            is LocalAppsAction.StopRuntime -> submit(ClientCommand.StopApp(action.appId))
             is LocalAppsAction.DeleteApp -> deleteApp(action.appId)
             is LocalAppsAction.ResetPermissions -> {
                 uiControlGrants.remove(action.appId)
@@ -197,6 +208,7 @@ class LocalAppsViewModel(
         brief: String,
         gitEnabled: Boolean,
         workflowModel: String?,
+        addWidget: Boolean,
     ) {
         val trimmedBrief = brief.trim()
         if (trimmedBrief.isEmpty()) return
@@ -212,7 +224,17 @@ class LocalAppsViewModel(
             )
             return
         }
-        pendingCreates += trimmedBrief
+        if (pendingCreates.isNotEmpty()) {
+            error(
+                strings.resolve(
+                    R.string.local_apps_error_create_in_progress,
+                    "已有一个本地应用正在创建中，请稍候。",
+                ),
+            )
+            return
+        }
+        val pending = PendingCreate(trimmedBrief, addWidget)
+        pendingCreates += pending
         submit(
             ClientCommand.CreateApp(
                 name = "",
@@ -222,7 +244,7 @@ class LocalAppsViewModel(
                 workflowModel = selectedModel,
                 conversationId = null,
             ),
-        )
+        ) { pendingCreates.remove(pending) }
     }
 
     /**
@@ -242,6 +264,53 @@ class LocalAppsViewModel(
         }
         submit(ClientCommand.GetAppDetails(appId))
         requestSessions(appId, offset = null)
+    }
+
+    fun openFromWidget(appId: String, autostart: Boolean) {
+        val app = _uiState.value.apps.firstOrNull { it.id == appId }
+        if (app == null) {
+            _uiState.update {
+                it.copy(
+                    selectedAppId = null,
+                    destination = LocalAppsDestination.Library,
+                    error = strings.resolve(R.string.local_apps_not_found, "应用不存在"),
+                )
+            }
+            return
+        }
+        submit(ClientCommand.GetAppDetails(appId))
+        requestSessions(appId, offset = null)
+        if (app.workflow != LocalAppWorkflow.Ready) {
+            _uiState.update {
+                it.copy(
+                    selectedAppId = appId,
+                    selectedDetailsTab = LocalAppDetailsTab.Sessions,
+                    destination = LocalAppsDestination.Details(appId, LocalAppDetailsTab.Sessions),
+                    error = strings.resolve(
+                        R.string.local_apps_preview_not_ready,
+                        "预览尚未准备好",
+                    ),
+                )
+            }
+            return
+        }
+        _uiState.update {
+            it.copy(
+                selectedAppId = appId,
+                selectedDetailsTab = LocalAppDetailsTab.Preview,
+                destination = LocalAppsDestination.Preview(appId),
+            )
+        }
+        if (autostart) startRuntimeIfNeeded(appId)
+    }
+
+    fun openLibrary() {
+        _uiState.update {
+            it.copy(
+                selectedAppId = null,
+                destination = LocalAppsDestination.Library,
+            )
+        }
     }
 
     private fun requestSessions(appId: String, offset: ULong?) {
@@ -441,6 +510,9 @@ class LocalAppsViewModel(
             }
             is ClientEvent.AppSessionsChanged -> reduceAppSessions(event)
             is ClientEvent.AppRuntimeChanged -> {
+                if (event.state != AppRuntimeStateDto.STARTING) {
+                    runtimeStartsInFlight.remove(event.appId)
+                }
                 if (event.state == AppRuntimeStateDto.RUNNING) {
                     runtimeLastUsedAt[event.appId] = System.currentTimeMillis()
                 }
@@ -458,7 +530,15 @@ class LocalAppsViewModel(
                     }
                 }
             }
-            is ClientEvent.AppOperationFailed -> error(event.message)
+            is ClientEvent.AppOperationFailed -> {
+                error(event.message)
+                // CreateApp failures carry no app id. Fail-closed: drop
+                // in-flight create claims so a later AppsChanged cannot pin
+                // or open the wrong app. Per-app failures keep their claims.
+                if (event.appId == null) {
+                    pendingCreates.clear()
+                }
+            }
             else -> Unit
         }
     }
@@ -562,7 +642,7 @@ class LocalAppsViewModel(
                     LocalAppAuthorizationRequest(
                         requestId = request.requestId,
                         appId = request.appId,
-                        title = request.capability.authorizationTitle(strings),
+                        title = request.capability.authorizationTitle(strings, request.reason),
                         reason = buildString {
                             append(request.reason)
                             domainSuffix?.let(::append)
@@ -661,6 +741,7 @@ class LocalAppsViewModel(
                 ),
             )
         }
+        publishWidgetSnapshot()
     }
 
     /**
@@ -720,6 +801,7 @@ class LocalAppsViewModel(
             record.toUiApp(fallbackRuntime = prior?.runtime)
         }.sortedByDescending { it.updatedAtMs }
         val liveIds = apps.mapTo(hashSetOf()) { it.id }
+        runtimeStartsInFlight.retainAll(liveIds)
         // Only an explicit DeleteApp action may journal browser-data removal.
         // A source/profile rebind can also make ids disappear from this local
         // reducer, and must never be interpreted as user-authorized deletion.
@@ -743,19 +825,20 @@ class LocalAppsViewModel(
                 loading = false,
             )
         }
+        publishWidgetSnapshot()
 
-        // Claim every app just created by [createFromBrief]: each fresh id is
-        // checked against the FIFO of pending briefs, and a match consumes its
-        // entry and opens the app — which now lands on the Details screen's
-        // Sessions tab, where the engine-pinned init conversation lives.
-        // `it.id !in oldIds` still does the real work: it stops a PRE-EXISTING
-        // app that merely shares a brief from being claimed.
+        // At most one create is armed. Claim it only when a newly announced
+        // id carries the same brief; `id !in oldIds` stops a pre-existing app
+        // that happens to share that brief from being claimed.
         val newApps = apps.filter { it.id !in oldIds }
         newApps.forEach { candidate ->
-            val matchIndex = pendingCreates.indexOfFirst { it == candidate.brief }
+            val matchIndex = pendingCreates.indexOfFirst { it.brief == candidate.brief }
             if (matchIndex >= 0) {
-                pendingCreates.removeAt(matchIndex)
+                val pendingCreate = pendingCreates.removeAt(matchIndex)
                 openApp(candidate.id)
+                if (pendingCreate.addWidget) {
+                    widgetPinRequestChannel.trySend(candidate.id)
+                }
             }
         }
     }
@@ -764,6 +847,7 @@ class LocalAppsViewModel(
         _uiState.update { state ->
             state.copy(apps = state.apps.map { if (it.id == appId) transform(it) else it })
         }
+        publishWidgetSnapshot()
     }
 
     private fun upsertApp(app: LocalAppItem) {
@@ -777,16 +861,57 @@ class LocalAppsViewModel(
             }
             state.copy(apps = updated.sortedByDescending { it.updatedAtMs })
         }
+        publishWidgetSnapshot()
     }
 
-    private fun submit(command: ClientCommand) {
-        submit { it.submitClientCommand(command) }
-    }
-
-    private fun submit(block: suspend (ConversationSource) -> Unit) {
-        val bound = source ?: return
+    private fun startRuntimeIfNeeded(appId: String) {
+        runtimeLastUsedAt[appId] = System.currentTimeMillis()
+        val runtimeState = _uiState.value.apps.firstOrNull { it.id == appId }?.runtime?.state
+            ?: _uiState.value.details[appId]?.runtime?.state
+        if (runtimeState == LocalAppRuntimeState.Running ||
+            runtimeState == LocalAppRuntimeState.Starting
+        ) {
+            return
+        }
+        if (!runtimeStartsInFlight.add(appId)) return
+        val bound = source
+        if (bound == null) {
+            runtimeStartsInFlight.remove(appId)
+            error(strings.resolve(R.string.local_apps_error_engine_unavailable, "此构建未包含本地应用引擎。"))
+            return
+        }
         viewModelScope.launch {
-            runCatching { block(bound) }.onFailure { error(it.message ?: it::class.simpleName.orEmpty()) }
+            runCatching {
+                bound.submitClientCommand(ClientCommand.StartApp(appId))
+            }.onFailure {
+                runtimeStartsInFlight.remove(appId)
+                error(it.message ?: it::class.simpleName.orEmpty())
+            }
+        }
+    }
+
+    private fun publishWidgetSnapshot() {
+        widgetSnapshotSync.publish(_uiState.value.apps)
+    }
+
+    private fun submit(command: ClientCommand, onFailure: (() -> Unit)? = null) {
+        submit(onFailure = onFailure) { it.submitClientCommand(command) }
+    }
+
+    private fun submit(
+        onFailure: (() -> Unit)? = null,
+        block: suspend (ConversationSource) -> Unit,
+    ) {
+        val bound = source
+        if (bound == null) {
+            onFailure?.invoke()
+            return
+        }
+        viewModelScope.launch {
+            runCatching { block(bound) }.onFailure {
+                onFailure?.invoke()
+                error(it.message ?: it::class.simpleName.orEmpty())
+            }
         }
     }
 
@@ -802,6 +927,7 @@ class LocalAppsViewModel(
             strings: LocalAppsStrings = DefaultLocalAppsStrings,
             sessionStrings: SessionCatalogStrings = DefaultSessionCatalogStrings,
             webStorageCleanup: LocalAppWebStorageCleanup = NoopLocalAppWebStorageCleanup,
+            widgetSnapshotSync: LocalAppWidgetSnapshotSync = NoopLocalAppWidgetSnapshotSync,
         ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
@@ -811,6 +937,7 @@ class LocalAppsViewModel(
                         strings = strings,
                         sessionStrings = sessionStrings,
                         webStorageCleanup = webStorageCleanup,
+                        widgetSnapshotSync = widgetSnapshotSync,
                     ) as T
             }
     }
@@ -832,7 +959,17 @@ internal fun AppBridgeOperationDto.bridgeWireName(): String = when (this) {
     AppBridgeOperationDto.GET_LOCATION -> "get_location"
     AppBridgeOperationDto.TRANSCRIBE_SPEECH -> "transcribe_speech"
     AppBridgeOperationDto.POST_NOTIFICATION -> "post_notification"
+    AppBridgeOperationDto.CLIPBOARD_GET_TEXT -> "clipboard_get_text"
+    AppBridgeOperationDto.CLIPBOARD_SET_TEXT -> "clipboard_set_text"
+    AppBridgeOperationDto.SHARE -> "share"
+    AppBridgeOperationDto.SYNTHESIZE_SPEECH -> "synthesize_speech"
+    AppBridgeOperationDto.FILE_READ -> "file_read"
+    AppBridgeOperationDto.FILE_WRITE -> "file_write"
+    AppBridgeOperationDto.DEVICE_STATUS -> "device_status"
+    AppBridgeOperationDto.HAPTICS -> "haptics"
+    AppBridgeOperationDto.DEEP_LINK -> "deep_link"
     AppBridgeOperationDto.LLM_CHAT -> "llm_chat"
+    AppBridgeOperationDto.LLM_STREAM -> "llm_stream"
     AppBridgeOperationDto.AGENT_POST -> "agent_post"
     AppBridgeOperationDto.AGENT_SESSION_CREATE -> "agent_session_create"
     AppBridgeOperationDto.AGENT_SESSION_LIST -> "agent_session_list"
@@ -847,6 +984,9 @@ internal fun AppBridgeOperationDto.bridgeWireName(): String = when (this) {
     AppBridgeOperationDto.BACKGROUND_STATUS -> "background_status"
     AppBridgeOperationDto.BACKGROUND_CANCEL -> "background_cancel"
     AppBridgeOperationDto.BACKGROUND_RETRY -> "background_retry"
+    AppBridgeOperationDto.CALENDAR_LIST_EVENTS -> "calendar_list_events"
+    AppBridgeOperationDto.CONTACTS_SEARCH -> "contacts_search"
+    AppBridgeOperationDto.MEDIA_GET -> "media_get"
 }
 
 internal fun bridgeOperationFor(wireName: String): AppBridgeOperationDto? =
@@ -910,7 +1050,10 @@ private fun AppRecordDto.toUiApp(
     initSessionId = initSessionId,
 )
 
-private fun AppCapabilityKindDto.authorizationTitle(strings: LocalAppsStrings): String = when (this) {
+private fun AppCapabilityKindDto.authorizationTitle(
+    strings: LocalAppsStrings,
+    reason: String,
+): String = when (this) {
     AppCapabilityKindDto.DATA_MUTATION ->
         strings.resolve(R.string.local_apps_permission_data_mutation_plain, "允许修改应用数据？")
     AppCapabilityKindDto.UI_CONTROL ->
@@ -929,12 +1072,35 @@ private fun AppCapabilityKindDto.authorizationTitle(strings: LocalAppsStrings): 
         strings.resolve(R.string.local_apps_permission_location, "允许应用获取当前位置？")
     AppCapabilityKindDto.NOTIFICATIONS ->
         strings.resolve(R.string.local_apps_permission_notifications, "允许应用发送本地通知？")
+    AppCapabilityKindDto.CLIPBOARD ->
+        "允许应用读取或写入系统剪贴板？"
+    AppCapabilityKindDto.SHARE ->
+        "允许应用打开系统分享面板？"
+    AppCapabilityKindDto.TEXT_TO_SPEECH ->
+        "允许应用将文字转换为语音？"
+    AppCapabilityKindDto.FILES -> when {
+        reason.contains("写入") -> "允许应用写入自己的私有文件？"
+        reason.contains("读取") -> "允许应用读取自己的私有文件？"
+        else -> "允许应用访问自己的私有文件？"
+    }
+    AppCapabilityKindDto.DEVICE_STATUS ->
+        "允许应用读取设备状态？"
+    AppCapabilityKindDto.HAPTICS ->
+        "允许应用触发触觉反馈？"
+    AppCapabilityKindDto.DEEP_LINK ->
+        "允许应用打开外部链接？"
     AppCapabilityKindDto.LLM ->
         strings.resolve(R.string.local_apps_permission_llm, "允许应用调用 AI 模型？（会消耗你的模型用量）")
     AppCapabilityKindDto.AGENT_NOTIFY ->
         strings.resolve(R.string.local_apps_permission_agent_notify, "允许应用向对话助手发送事件？")
     AppCapabilityKindDto.BACKGROUND_SCHEDULE ->
         "允许应用在系统后台按计划运行流程？"
+    AppCapabilityKindDto.CALENDAR ->
+        "允许应用读取指定范围内的日历事件？"
+    AppCapabilityKindDto.CONTACTS ->
+        "允许应用搜索联系人？"
+    AppCapabilityKindDto.MEDIA ->
+        "允许应用读取自己刚获取的媒体？"
 }
 
 private fun LocalAppAuthorizationDecision.toBindingDecision(): AppAuthorizationDecisionDto = when (this) {

@@ -210,7 +210,7 @@ PY
 
 echo "[rootfs:${ARCH}] verifying required binaries"
 MISSING=""
-for f in usr/bin/node usr/bin/npm usr/bin/npx usr/bin/pnpm usr/bin/git usr/bin/python3 usr/bin/pip3 usr/bin/virtualenv usr/bin/ssh; do
+for f in usr/bin/node usr/bin/npm usr/bin/npx usr/bin/git usr/bin/python3 usr/bin/pip3 usr/bin/virtualenv usr/bin/ssh; do
   [ -e "${TARGET}/$f" ] || [ -L "${TARGET}/$f" ] || MISSING="${MISSING} $f"
 done
 if [ -n "${MISSING}" ]; then
@@ -236,6 +236,11 @@ mkdir -p "${PNPM_DIR}"
 tar -xzf "${PNPM_TARBALL}" -C "${PNPM_DIR}" --strip-components=1
 ln -s ../lib/node_modules/pnpm/bin/pnpm.mjs "${TARGET}/usr/bin/pnpm"
 rm -f "${PNPM_TARBALL}"
+
+[ -x "${TARGET}/usr/bin/pnpm" ] || {
+  echo "[rootfs:${ARCH}] pinned pnpm installation produced no usr/bin/pnpm" >&2
+  exit 1
+}
 
 echo "[rootfs:${ARCH}] emitting closure manifest"
 python3 - "${PINS_JSON}" "${ARCH}" "${OUT}/closure.json" <<'PY'

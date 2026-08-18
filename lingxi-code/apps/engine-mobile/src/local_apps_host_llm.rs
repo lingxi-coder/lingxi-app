@@ -13,14 +13,18 @@
 //! engine-side (a device op produced them), so a handle skips that round trip.
 //! Small app-generated images (a canvas export) may still be sent inline.
 
-use super::{BridgeFailure, LocalAppsHostBroker};
+use super::{AgentOutputStream, BridgeFailure, LocalAppsHostBroker};
 use crate::local_apps_llm::{ChatMessage, ChatPart, ChatRequest, ChatRole};
 use base64::Engine as _;
 use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
+use futures_util::StreamExt;
+use llm_client::{ContentDelta, LlmEvent};
 use local_apps::AppCapability;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::Duration;
+use traits::OutputStream;
 
 const MAX_CHAT_MESSAGES: usize = 20;
 const MAX_SYSTEM_BYTES: usize = 8 * 1024;
@@ -159,8 +163,9 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
         payload: &Value,
+        streaming: bool,
     ) -> Result<ChatRequest, BridgeFailure> {
-        if payload.get("stream").and_then(Value::as_bool) == Some(true) {
+        if !streaming && payload.get("stream").and_then(Value::as_bool) == Some(true) {
             return Err(BridgeFailure::coded(
                 "llm_stream_unsupported",
                 "streaming answers need a host-to-page push channel that does not exist yet; \
@@ -341,7 +346,7 @@ impl LocalAppsHostBroker {
         app_id: &str,
         payload: &Value,
     ) -> Result<Value, BridgeFailure> {
-        let request = self.parse_chat_request(app_id, payload)?;
+        let request = self.parse_chat_request(app_id, payload, false)?;
         self.authorize_declared_capability(
             app_id,
             AppCapability::Llm,
@@ -410,12 +415,116 @@ impl LocalAppsHostBroker {
             "truncated": cut || stopped_at_budget,
         }))
     }
+
+    pub(super) async fn llm_stream_value(
+        &self,
+        app_id: &str,
+        request_id: &str,
+        payload: &Value,
+    ) -> Result<Value, BridgeFailure> {
+        let request = self.parse_chat_request(app_id, payload, true)?;
+        self.authorize_declared_capability(
+            app_id,
+            AppCapability::Llm,
+            AppCapabilityKindDto::Llm,
+            REASON_LLM,
+        )
+        .await?;
+        let llm = self
+            .llm
+            .get()
+            .ok_or_else(|| BridgeFailure::coded("llm_unavailable", "no model is attached"))?
+            .current();
+        if !self
+            .llm_inflight
+            .lock()
+            .expect("llm inflight set poisoned")
+            .insert(app_id.to_string())
+        {
+            return Err(BridgeFailure::coded(
+                "llm_busy",
+                "this app already has a model call in flight",
+            ));
+        }
+
+        let mut inflight = LlmInflightGuard {
+            app_id: app_id.to_string(),
+            slots: self.llm_inflight.clone(),
+            event_sink: self.event_sink.clone(),
+            armed: true,
+        };
+        let stream_id = self.request_id("llm-stream");
+        let output = Arc::new(AgentOutputStream::new(
+            self.event_sink.clone(),
+            app_id,
+            request_id,
+            Some(stream_id.clone()),
+        ));
+        self.emit_llm_activity(app_id, true).await;
+        output.started().await;
+
+        let streamed = tokio::time::timeout(CHAT_TIMEOUT, async {
+            let mut events = llm
+                .stream(request)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut stop_reason = None;
+            while let Some(event) = events.next().await {
+                match event.map_err(|error| error.to_string())? {
+                    LlmEvent::ContentBlockDelta {
+                        delta: ContentDelta::TextDelta { text },
+                        ..
+                    } => output.emit_text(&text).await,
+                    LlmEvent::MessageDelta { delta, .. } => {
+                        stop_reason = delta.stop_reason.or(stop_reason);
+                    }
+                    LlmEvent::Completed { response } => {
+                        stop_reason = response.stop_reason.clone().or(stop_reason);
+                    }
+                    LlmEvent::MessageStart { .. }
+                    | LlmEvent::ContentBlockStart { .. }
+                    | LlmEvent::ContentBlockDelta { .. }
+                    | LlmEvent::ContentBlockStop { .. }
+                    | LlmEvent::MessageStop => {}
+                }
+            }
+            Ok::<_, String>((output.text_snapshot().await, stop_reason))
+        })
+        .await;
+        inflight.release().await;
+
+        match streamed {
+            Err(_) => {
+                output.error("timeout", "the model stream timed out").await;
+                Err(BridgeFailure::coded(
+                    "timeout",
+                    "the model stream timed out",
+                ))
+            }
+            Ok(Err(error)) => {
+                output.error("llm_unavailable", error.clone()).await;
+                Err(BridgeFailure::coded("llm_unavailable", error))
+            }
+            Ok(Ok((text, stop_reason))) => {
+                output.completed().await;
+                let (text, truncated) = truncate_on_char_boundary(&text, MAX_CHAT_TEXT_BYTES);
+                Ok(json!({
+                    "streamId": stream_id,
+                    "text": text,
+                    "stopReason": stop_reason,
+                    "truncated": truncated,
+                }))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::local_apps_host::LocalAppsHostBroker;
-    use crate::local_apps_llm::{ChatOutcome, ChatPart, ChatRequest, LocalAppsLlm, LocalAppsModel};
+    use crate::local_apps_llm::{
+        ChatOutcome, ChatPart, ChatRequest, LocalAppsLlm, LocalAppsModel, LocalAppsModelStream,
+    };
     use crate::local_apps_profile::SharedLlm;
     use async_trait::async_trait;
     use base64::Engine as _;
@@ -424,6 +533,8 @@ mod tests {
     use client_protocol::local_apps::{
         AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto,
     };
+    use futures_util::stream;
+    use llm_client::{ContentDelta, LlmEvent, MessageDeltaPayload};
     use local_apps::error::AppError;
     use local_apps::test_support::FixedClock;
     use local_apps::{
@@ -439,6 +550,7 @@ mod tests {
     /// A model whose `chat` answers from a script, recording what it saw.
     struct ChatModel {
         outcome: std::sync::Mutex<Vec<Result<ChatOutcome, AppError>>>,
+        stream_events: std::sync::Mutex<Option<Vec<Result<LlmEvent, AppError>>>>,
         seen: std::sync::Mutex<Vec<ChatRequest>>,
         /// When set, `chat` never returns — for the timeout test.
         hang: bool,
@@ -451,6 +563,7 @@ mod tests {
                     text: text.to_string(),
                     stop_reason: stop_reason.map(str::to_string),
                 })]),
+                stream_events: std::sync::Mutex::new(None),
                 seen: std::sync::Mutex::new(Vec::new()),
                 hang: false,
             })
@@ -459,8 +572,18 @@ mod tests {
         fn hanging() -> Arc<Self> {
             Arc::new(Self {
                 outcome: std::sync::Mutex::new(Vec::new()),
+                stream_events: std::sync::Mutex::new(None),
                 seen: std::sync::Mutex::new(Vec::new()),
                 hang: true,
+            })
+        }
+
+        fn streaming(events: Vec<Result<LlmEvent, AppError>>) -> Arc<Self> {
+            Arc::new(Self {
+                outcome: std::sync::Mutex::new(Vec::new()),
+                stream_events: std::sync::Mutex::new(Some(events)),
+                seen: std::sync::Mutex::new(Vec::new()),
+                hang: false,
             })
         }
     }
@@ -477,6 +600,16 @@ mod tests {
                 return Err(AppError::Io("scripted chat exhausted".into()));
             }
             outcome.remove(0)
+        }
+
+        async fn stream(&self, _request: ChatRequest) -> Result<LocalAppsModelStream, AppError> {
+            let events = self
+                .stream_events
+                .lock()
+                .expect("lock")
+                .take()
+                .ok_or_else(|| AppError::Io("scripted stream exhausted".into()))?;
+            Ok(Box::pin(stream::iter(events)))
         }
     }
 
@@ -847,6 +980,97 @@ mod tests {
             "the envelope reserves `stream` for a future push channel; until it \
              exists the request must fail loudly rather than silently answer whole"
         );
+    }
+
+    #[tokio::test]
+    async fn llm_stream_emits_ordered_text_frames_and_final_response() {
+        let model = ChatModel::streaming(vec![
+            Ok(LlmEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::TextDelta {
+                    text: "第一段".into(),
+                },
+            }),
+            Ok(LlmEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::TextDelta {
+                    text: "第二段".into(),
+                },
+            }),
+            Ok(LlmEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some("end_turn".into()),
+                    stop_details: None,
+                },
+                usage: None,
+            }),
+            Ok(LlmEvent::MessageStop),
+        ]);
+        let h = harness(model).await;
+        declare_and_grant(&h);
+        let request_id = "stream-request";
+        h.broker
+            .execute_bridge(AppBridgeRequestDto {
+                request_id: request_id.into(),
+                app_id: h.app_id.clone(),
+                operation: AppBridgeOperationDto::LlmStream,
+                payload_json: Some(
+                    json!({
+                        "messages": [{"role": "user", "content": "流式回答"}],
+                        "maxTokens": 128
+                    })
+                    .to_string(),
+                ),
+            })
+            .await;
+
+        let events = h.sink.events().await;
+        let mut data = Vec::new();
+        let mut completed_seq = None;
+        let response = events
+            .into_iter()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppBridgeStreamFrame { frame, .. },
+                } => {
+                    match frame {
+                        client_protocol::local_apps::AppBridgeStreamFrameDto::Data {
+                            seq,
+                            data_json,
+                            ..
+                        } => data.push((seq, data_json)),
+                        client_protocol::local_apps::AppBridgeStreamFrameDto::Completed {
+                            seq,
+                            ..
+                        } => completed_seq = Some(seq),
+                        _ => {}
+                    }
+                    None
+                }
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppBridgeResponse { response },
+                } if response.request_id == request_id => Some(response),
+                _ => None,
+            })
+            .expect("stream response");
+        assert!(
+            response.ok,
+            "{:?} {:?}",
+            response.error, response.error_code
+        );
+        assert_eq!(data.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(completed_seq, Some(2));
+        assert_eq!(
+            data.into_iter()
+                .map(|(_, body)| serde_json::from_str::<Value>(&body).unwrap()["text"].clone())
+                .collect::<Vec<_>>(),
+            [json!("第一段"), json!("第二段")]
+        );
+        let result: Value =
+            serde_json::from_str(response.result_json.as_deref().unwrap()).expect("stream result");
+        assert_eq!(result["text"], "第一段第二段");
+        assert_eq!(result["stopReason"], "end_turn");
+        assert_eq!(activity_flags(&h).await, [true, false]);
     }
 
     #[tokio::test]

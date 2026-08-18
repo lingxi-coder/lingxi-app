@@ -36,6 +36,11 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
     var initSessionId: String? = nil
 }
 
+enum LocalAppLaunchDestination: String, Hashable, Sendable {
+    case details
+    case preview
+}
+
 /// Workflow state of an app — the v3 two-state model (protocol 5.0.0's
 /// `AppWorkflowStateDto`). The old 14-state designer/plan/generation pipeline
 /// is gone: apps are agent-driven conversations now, so an app is either a
@@ -172,6 +177,16 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case microphone
         case location
         case notifications
+        case clipboard
+        case share
+        case textToSpeech
+        case files
+        case deviceStatus
+        case haptics
+        case deepLink
+        case calendar
+        case contacts
+        case media
         case llm
         case agentNotify
         case backgroundSchedule
@@ -195,6 +210,23 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case .microphone: String(localized: "local_apps_permission_microphone")
         case .location: String(localized: "local_apps_permission_location")
         case .notifications: String(localized: "local_apps_permission_notifications")
+        case .clipboard: "允许应用读取或写入系统剪贴板？"
+        case .share: "允许应用打开系统分享面板？"
+        case .textToSpeech: "允许应用将文字转换为语音？"
+        case .files:
+            if reason.contains("写入") {
+                "允许应用写入自己的私有文件？"
+            } else if reason.contains("读取") {
+                "允许应用读取自己的私有文件？"
+            } else {
+                "允许应用访问自己的私有文件？"
+            }
+        case .deviceStatus: "允许应用读取设备状态？"
+        case .haptics: "允许应用触发触觉反馈？"
+        case .deepLink: "允许应用打开外部链接？"
+        case .calendar: "允许应用读取指定范围内的日历事件？"
+        case .contacts: "允许应用搜索联系人？"
+        case .media: "允许应用读取自己刚获取的媒体？"
         case .llm: String(localized: "local_apps_permission_llm")
         case .agentNotify: String(localized: "local_apps_permission_agent_notify")
         case .backgroundSchedule: "允许应用在系统后台按计划运行流程？"

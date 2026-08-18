@@ -2724,6 +2724,7 @@ final class MockConversationSource: ConversationSource {
                 // bridge passes nothing here (the FFI defaults it to nil):
                 // a background wake has no user present to answer an
                 // authorization sheet.
+                deviceControl: DeviceControlImpl(),
                 location: LocationImpl()
             )
         }

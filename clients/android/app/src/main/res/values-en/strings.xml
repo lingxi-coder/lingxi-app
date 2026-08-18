@@ -10,6 +10,7 @@
     <string name="local_apps_create_model_label">Workflow model</string>
     <string name="local_apps_create_model_section">Build model</string>
     <string name="local_apps_error_workflow_model_unavailable">The selected workflow model is no longer available. Choose another model.</string>
+    <string name="local_apps_error_create_in_progress">Another local app is still being created. Please wait.</string>
     <string name="local_apps_refresh">Refresh Apps</string>
     <string name="local_apps_search">Search Apps</string>
     <string name="local_apps_empty">No local apps yet</string>
@@ -1581,6 +1582,9 @@
     <string name="local_apps_create_brief_detail">The model will turn this into a short questionnaire to nail down the details.</string>
     <string name="local_apps_create_brief_section">Describe the app you want in one line</string>
     <string name="local_apps_create_git_version_control">Use Git to manage app versions (recommended)</string>
+    <string name="local_apps_create_add_widget">Add a Widget to the Home screen</string>
+    <string name="local_apps_create_add_widget_detail">The launcher will ask for confirmation after creation</string>
+    <string name="local_apps_widget_pin_unavailable">This launcher cannot add Widgets automatically. Add it manually later.</string>
     <string name="local_apps_error_bridge_detached">The app view closed; this request will not be answered.</string>
     <string name="local_apps_error_bridge_payload_invalid">The request payload could not be serialized.</string>
     <string name="local_apps_error_brief_required">Please describe your app in one line.</string>

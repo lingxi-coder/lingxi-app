@@ -50,6 +50,12 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>灵犀使用相机拍摄照片供模型分析。</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>灵犀在你授权的本地应用请求时读取日历事件。</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>灵犀在你授权的本地应用请求时读取日历事件。</string>
+	<key>NSContactsUsageDescription</key>
+	<string>灵犀在你授权的本地应用请求时搜索联系人。</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>灵犀使用麦克风进行语音心流输入。</string>
 	<key>NSPhotoLibraryUsageDescription</key>

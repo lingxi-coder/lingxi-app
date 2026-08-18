@@ -400,16 +400,16 @@ const fn description_for(id: CapabilityId) -> &'static str {
         CapabilityId::FilesWrite => "Write an app-scoped file handle",
         CapabilityId::Share => "Open the system share sheet",
         CapabilityId::Clipboard => "Read or write the app clipboard contract",
-        CapabilityId::Calendar => "Read or mutate calendar/reminder records",
-        CapabilityId::Contacts => "Read or select contacts through host UI",
-        CapabilityId::Media => "Use host media library operations",
+        CapabilityId::Calendar => "Read bounded calendar event projections",
+        CapabilityId::Contacts => "Search bounded contact projections",
+        CapabilityId::Media => "Read an app-owned retained media handle",
         CapabilityId::DeviceStatus => "Inspect non-sensitive device status",
         CapabilityId::Haptics => "Request bounded device haptics",
         CapabilityId::DeepLink => "Open an approved external deep link",
         CapabilityId::Camera => "Capture a camera image handle",
         CapabilityId::PhotoLibrary => "Pick a photo handle",
         CapabilityId::Microphone => "Record bounded microphone audio",
-        CapabilityId::SpeechToText => "Transcribe a host audio handle",
+        CapabilityId::SpeechToText => "Listen once and transcribe speech from the microphone",
         CapabilityId::TextToSpeech => "Speak text through the host voice service",
         CapabilityId::Location => "Read a one-shot location fix",
         CapabilityId::Notifications => "Post a local notification",
@@ -422,7 +422,9 @@ const fn description_for(id: CapabilityId) -> &'static str {
         CapabilityId::AgentSend => "Send a turn to an app-owned Agent session",
         CapabilityId::AgentStream => "Stream an app-owned Agent turn",
         CapabilityId::AgentCancel => "Cancel an app-owned Agent turn",
-        CapabilityId::AgentEmit => "Emit a structured event to an Agent session",
+        CapabilityId::AgentEmit => {
+            "Emit a structured event to the conversation or an app-owned Agent session"
+        }
         CapabilityId::AgentProfilePropose => "Propose a future App Agent Profile revision",
         CapabilityId::FlowExecute => "Execute a bounded declarative app flow",
         CapabilityId::BackgroundSchedule => "Schedule an authorized app background flow",
@@ -1073,6 +1075,25 @@ pub fn allowed_for_origin(origin: InvocationOrigin, descriptor: &CapabilityDescr
     ) && descriptor.interactive)
 }
 
+/// Synchronous `flow.execute` may not start UI-bound or unpaired lifecycle
+/// capabilities. Background scheduling already uses [`allowed_for_origin`].
+#[must_use]
+pub fn allowed_for_synchronous_flow(capability: CapabilityId) -> bool {
+    !matches!(
+        capability,
+        CapabilityId::FlowExecute
+            | CapabilityId::BackgroundSchedule
+            | CapabilityId::LlmStream
+            | CapabilityId::AgentStream
+            | CapabilityId::AgentCancel
+            | CapabilityId::Camera
+            | CapabilityId::PhotoLibrary
+            | CapabilityId::Microphone
+            | CapabilityId::SpeechToText
+            | CapabilityId::Share
+    )
+}
+
 fn bounded_identifier(
     name: &str,
     value: &str,
@@ -1163,6 +1184,11 @@ mod tests {
             .to_json()
             .unwrap()
             .contains("agent.sessions.create"));
+        assert!(registry
+            .get(CapabilityId::SpeechToText)
+            .expect("speech capability")
+            .description
+            .contains("microphone"));
         assert!(registry.resolve("background.resume").is_none());
     }
 
@@ -1192,6 +1218,30 @@ mod tests {
                 .get(CapabilityId::TextToSpeech)
                 .expect("registered capability")
         ));
+    }
+
+    #[test]
+    fn synchronous_flow_rejects_ui_and_unpaired_lifecycle_capabilities() {
+        for capability in [
+            CapabilityId::Camera,
+            CapabilityId::PhotoLibrary,
+            CapabilityId::Microphone,
+            CapabilityId::SpeechToText,
+            CapabilityId::Share,
+            CapabilityId::FlowExecute,
+            CapabilityId::BackgroundSchedule,
+            CapabilityId::LlmStream,
+            CapabilityId::AgentStream,
+            CapabilityId::AgentCancel,
+        ] {
+            assert!(
+                !allowed_for_synchronous_flow(capability),
+                "{capability:?} must stay out of a synchronous flow"
+            );
+        }
+        assert!(allowed_for_synchronous_flow(CapabilityId::DataQuery));
+        assert!(allowed_for_synchronous_flow(CapabilityId::Calendar));
+        assert!(allowed_for_synchronous_flow(CapabilityId::Haptics));
     }
 
     #[test]

@@ -1037,6 +1037,14 @@ struct RootView: View {
                 initialCommand: initialCommand,
                 projectID: projectStore.activeProjectId
             )
+        case let .openLocalApp(appID, destination, autostart, _):
+            Task {
+                await openLocalAppFromDeepLink(
+                    appID: appID,
+                    destination: destination,
+                    autostart: autostart
+                )
+            }
         }
     }
 
@@ -1061,6 +1069,25 @@ struct RootView: View {
         scopedPreferences.setActiveSessionID("", scope: activeScope)
         draft = draftText
         source.startNewConversation()
+    }
+
+    private func openLocalAppFromDeepLink(
+        appID: String,
+        destination _: String,
+        autostart: Bool
+    ) async {
+        await localAppsStore.refresh()
+        guard let app = localAppsStore.app(id: appID) else {
+            navigation.openLocalApps()
+            localAppsStore.presentUnavailableAppError()
+            return
+        }
+        let launchDestination: LocalAppLaunchDestination =
+            app.workflow == .ready ? .preview : .details
+        localAppsStore.requestLaunch(appID: appID, destination: launchDestination)
+        navigation.openLocalApps(appID: appID)
+        guard app.workflow == .ready, autostart else { return }
+        await localAppsStore.start(appID: appID)
     }
 }
 

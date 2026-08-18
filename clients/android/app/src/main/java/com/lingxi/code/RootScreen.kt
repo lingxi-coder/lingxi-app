@@ -29,6 +29,7 @@ import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -101,18 +102,23 @@ import com.lingxi.code.localapps.LocalAppsRoute
 import com.lingxi.code.localapps.LocalAppsViewModel
 import com.lingxi.code.localapps.localAppWorkspace
 import com.lingxi.code.localapps.localAppsStrings
+import com.lingxi.code.localapps.widget.AndroidLocalAppWidgetSnapshotSync
+import com.lingxi.code.localapps.widget.LocalAppLaunchRequest
+import com.lingxi.code.localapps.widget.LocalAppWidgetPinRequester
 import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.voice.FlowModeOverlay
 import com.lingxi.code.voice.VoiceFlowOverlay
 import com.lingxi.code.voice.rememberOrbVoiceListen
 import com.lingxi.code.voice.rememberVoiceCapture
 import android.graphics.BitmapFactory
+import android.widget.Toast
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.isActive
 
@@ -160,6 +166,10 @@ fun RootScreen(
     settingsStore: SettingsStore? = null,
     onConversationSourceChanged: (ConversationSource) -> Unit = {},
     viewModel: ChatViewModel? = null,
+    requestedLocalAppLaunch: LocalAppLaunchRequest? = null,
+    onLocalAppLaunchHandled: () -> Unit = {},
+    openLocalAppsRequest: Boolean = false,
+    onOpenLocalAppsHandled: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val projectStore: ProjectStore = viewModel(
@@ -280,10 +290,40 @@ fun RootScreen(
             strings = localAppsStrings(context),
             sessionStrings = sessionCatalogStrings(context),
             webStorageCleanup = com.lingxi.code.localapps.AndroidLocalAppWebStorageCleanup.get(appContext),
+            widgetSnapshotSync = AndroidLocalAppWidgetSnapshotSync.get(appContext),
         ),
     )
     val localAppsState by localAppsViewModel.uiState.collectAsStateWithLifecycle()
     var showingApps by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(localAppsViewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            localAppsViewModel.widgetPinRequests.collect { appId ->
+                if (!LocalAppWidgetPinRequester.request(context, appId)) {
+                    Toast.makeText(
+                        context,
+                        context.getString(R.string.local_apps_widget_pin_unavailable),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
+    LaunchedEffect(openLocalAppsRequest) {
+        if (!openLocalAppsRequest) return@LaunchedEffect
+        showingApps = true
+        localAppsViewModel.openLibrary()
+        onOpenLocalAppsHandled()
+    }
+    LaunchedEffect(requestedLocalAppLaunch, localAppsState.loading) {
+        val request = requestedLocalAppLaunch ?: return@LaunchedEffect
+        if (localAppsState.loading) return@LaunchedEffect
+        showingApps = true
+        localAppsViewModel.openFromWidget(
+            appId = request.appId,
+            autostart = request.autostart,
+        )
+        onLocalAppLaunchHandled()
+    }
     LaunchedEffect(localAppsState.pendingAuthorization, localAppsState.pendingUiAction) {
         if (localAppsState.pendingAuthorization != null || localAppsState.pendingUiAction != null) {
             showingApps = true

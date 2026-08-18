@@ -394,8 +394,28 @@ pub enum AppBridgeOperationDto {
     TranscribeSpeech,
     /// Post a local notification (`device.postNotification`).
     PostNotification,
+    /// Read plain text from the system clipboard (`clipboard.getText`).
+    ClipboardGetText,
+    /// Write plain text to the system clipboard (`clipboard.setText`).
+    ClipboardSetText,
+    /// Open the native share sheet (`device.share`).
+    Share,
+    /// Synthesize bounded text to audio (`device.synthesizeSpeech`).
+    SynthesizeSpeech,
+    /// Read an app-private file (`files.read`).
+    FileRead,
+    /// Write an app-private file (`files.write`).
+    FileWrite,
+    /// Read non-sensitive device status (`device.status`).
+    DeviceStatus,
+    /// Trigger one bounded haptic event (`device.haptics`).
+    Haptics,
+    /// Open one authorized external URL (`device.deepLink`).
+    DeepLink,
     /// One side-query chat completion against the user's model (`llm.chat`).
     LlmChat,
+    /// Stream one side-query chat completion through `AppBridgeStreamFrameDto`.
+    LlmStream,
     /// Post one event into the app's conversation mailbox (`agent.post`).
     AgentPost,
     /// Create a persistent app-owned Agent session.
@@ -424,6 +444,12 @@ pub enum AppBridgeOperationDto {
     BackgroundCancel,
     /// Requeue one failed or cancelled app-owned background task.
     BackgroundRetry,
+    /// List bounded calendar events (`calendar.listEvents`).
+    CalendarListEvents,
+    /// Search bounded contact projections (`contacts.search`).
+    ContactsSearch,
+    /// Read one media handle retained by this app (`media.get`).
+    MediaGet,
 }
 
 /// One host-bound bridge request. Payloads are data, never executable script.
@@ -714,9 +740,19 @@ pub enum AppCapabilityKindDto {
     Microphone,
     Location,
     Notifications,
+    Files,
+    Clipboard,
+    Share,
+    TextToSpeech,
+    DeviceStatus,
+    Haptics,
+    DeepLink,
     Llm,
     AgentNotify,
     BackgroundSchedule,
+    Calendar,
+    Contacts,
+    Media,
 }
 
 /// A capability approval request surfaced by the host.

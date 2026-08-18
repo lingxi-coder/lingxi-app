@@ -38,16 +38,16 @@ struct LocalAppsRootView: View {
                 onDismiss: onDismiss,
                 onOpenAppSession: onOpenCreatedAppSession
             )
-                .navigationDestination(for: LocalAppsRoute.self) { route in
-                    destination(route)
-                }
+            .navigationDestination(for: LocalAppsRoute.self) { route in
+                destination(route)
+            }
         }
         .task {
             await store.refresh()
             if let initialAppID {
-                // An inbound UI-automation request should land straight on
-                // the live preview rather than one tap short at `.details`.
-                let shouldOpenPreview = store.hasPendingUIRequest(appID: initialAppID)
+                let launchDestination = store.consumeLaunchDestination(appID: initialAppID)
+                let shouldOpenPreview = launchDestination == .preview
+                    || store.hasPendingUIRequest(appID: initialAppID)
                 path = [shouldOpenPreview ? .preview(initialAppID) : .details(initialAppID)]
             }
         }
@@ -263,6 +263,18 @@ private struct LocalAppsLibraryScreen: View {
         .onChange(of: store.createdAppID) { _, _ in openCreatedAppIfNeeded() }
         .onChange(of: store.createdAppSession) { _, _ in openCreatedInitChatIfNeeded() }
         .onAppear { openCreatedInitChatIfNeeded() }
+        .sheet(
+            item: Binding(
+                get: { store.pendingWidgetSetup },
+                set: { _ in }
+            )
+        ) { setup in
+            LocalAppWidgetSetupSheet(appName: setup.appName) {
+                store.completeWidgetSetup()
+                openCreatedInitChatIfNeeded()
+                openCreatedAppIfNeeded()
+            }
+        }
         .confirmationDialog(
             "local_apps_delete_confirm \(pendingDelete?.name ?? String(localized: "local_apps_title"))",
             isPresented: Binding(
@@ -300,6 +312,7 @@ private struct LocalAppsLibraryScreen: View {
     private func openCreatedAppIfNeeded() {
         // Fallback landing only (init-session pin never arrived): show the
         // app's details/sessions page instead of the init chat.
+        guard store.pendingWidgetSetup == nil else { return }
         guard let appID = store.consumeCreatedAppID() else { return }
         path = [.details(appID)]
     }
@@ -308,6 +321,7 @@ private struct LocalAppsLibraryScreen: View {
         // v3 target behavior: a fresh create lands DIRECTLY in the app's
         // init conversation — dismiss the cover and switch into the app
         // scope resuming the pinned init session.
+        guard store.pendingWidgetSetup == nil else { return }
         guard let created = store.consumeCreatedAppSession() else { return }
         onOpenAppSession(
             created.appID,
@@ -315,6 +329,43 @@ private struct LocalAppsLibraryScreen: View {
             created.brief,
             created.modelOverride
         )
+    }
+}
+
+private struct LocalAppWidgetSetupSheet: View {
+    let appName: String
+    let onContinue: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                Label("local_apps_widget_setup_title", systemImage: "rectangle.on.rectangle")
+                    .font(.title3.bold())
+                Text("local_apps_widget_setup_message \(appName)")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("local_apps_widget_setup_step_1")
+                    Text("local_apps_widget_setup_step_2")
+                    Text("local_apps_widget_setup_step_3")
+                    Text("local_apps_widget_setup_step_4 \(appName)")
+                }
+                .font(.body)
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("local_apps_widget_setup_title")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("local_apps_widget_setup_continue") {
+                        onContinue()
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .interactiveDismissDisabled()
     }
 }
 
@@ -396,6 +447,7 @@ struct LocalAppCreateView: View {
 
     @State var brief = ""
     @State private var gitEnabled = true
+    @State private var addWidget = false
     @State private var creating = false
     @State private var modelOverride: String?
     @State private var showingModelPicker = false
@@ -441,6 +493,10 @@ struct LocalAppCreateView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Toggle("local_apps_create_git_version_control", isOn: $gitEnabled)
+                Toggle("local_apps_create_add_widget", isOn: $addWidget)
+                Text("local_apps_create_add_widget_detail")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             Section("local_apps_create_model_section") {
                 Button {
@@ -503,7 +559,8 @@ struct LocalAppCreateView: View {
         let succeeded = await store.createApp(
             brief: brief,
             gitEnabled: gitEnabled,
-            modelOverride: modelOverride
+            modelOverride: modelOverride,
+            addWidget: addWidget
         )
         creating = false
         if succeeded, !path.isEmpty {

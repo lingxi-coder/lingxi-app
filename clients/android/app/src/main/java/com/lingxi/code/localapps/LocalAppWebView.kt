@@ -595,7 +595,13 @@ internal const val LOCAL_APP_BRIDGE_MAX_LLM_BYTES = 8 * 1024 * 1024
 internal const val LOCAL_APP_BRIDGE_MAX_IN_FLIGHT = 128
 
 internal fun localAppBridgeByteLimit(operation: String): Int =
-    if (operation == "llm_chat") LOCAL_APP_BRIDGE_MAX_LLM_BYTES else LOCAL_APP_BRIDGE_MAX_CONTROL_BYTES
+    if (operation == "llm_chat" || operation == "llm_stream") {
+        LOCAL_APP_BRIDGE_MAX_LLM_BYTES
+    } else if (operation == "file_read" || operation == "file_write") {
+        4 * 1024 * 1024
+    } else {
+        LOCAL_APP_BRIDGE_MAX_CONTROL_BYTES
+    }
 
 internal sealed interface LocalAppBridgeIngress {
     data class Accepted(val message: LocalAppBridgeMessage) : LocalAppBridgeIngress
@@ -1090,13 +1096,15 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
     return nativeSetAttribute.call(this, name, value);
   };
   const pending = new Map();
-  const streamListeners = new Set();
+  const streamListeners = new Map();
   const emitStream = frame => {
-    for (const listener of streamListeners) {
+    const channel = pending.get(frame.requestId)?.channel;
+    for (const [listener, listenerChannel] of streamListeners) {
+      if (listenerChannel !== channel) continue;
       try { listener(frame); } catch (_) { /* app listener isolation */ }
     }
   };
-  const request = (operation, payload = {}) => new Promise((resolve, reject) => {
+  const request = (operation, payload = {}, channel = null) => new Promise((resolve, reject) => {
     const requestId = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
     const handler = window.LingXiNativeV1;
     if (!handler?.postMessage) {
@@ -1115,14 +1123,15 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
       reject(error);
       return;
     }
-    const byteLimit = operation === 'llm_chat' ? 8388608 : 65536;
+    const byteLimit = operation === 'llm_chat' || operation === 'llm_stream' ? 8388608 :
+      (operation === 'file_read' || operation === 'file_write' ? 4194304 : 65536);
     if (new TextEncoder().encode(serialized).byteLength > byteLimit) {
       const error = new Error('Bridge request exceeds ' + byteLimit + ' bytes');
       error.code = 'request_too_large';
       reject(error);
       return;
     }
-    pending.set(requestId, {resolve, reject});
+    pending.set(requestId, {resolve, reject, channel});
     handler.postMessage(serialized);
   });
   const readInsets = () => {
@@ -1170,10 +1179,38 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
       recordAudioStop: () => request('record_audio_stop', {}),
       getLocation: () => request('get_location', {}),
       transcribeSpeech: (payload = {}) => request('transcribe_speech', payload),
-      postNotification: payload => request('post_notification', payload)
+      postNotification: payload => request('post_notification', payload),
+      share: (payload = {}) => request('share', payload),
+      synthesizeSpeech: (payload = {}) => request('synthesize_speech', payload),
+      status: () => request('device_status', {}),
+      haptics: style => request('haptics', { style }),
+      deepLink: url => request('deep_link', { url }),
     }),
+    clipboard: Object.freeze({
+      getText: () => request('clipboard_get_text', {}),
+      setText: text => request('clipboard_set_text', { text }),
+    }),
+        files: Object.freeze({
+          read: payload => request('file_read', payload),
+          write: payload => request('file_write', payload),
+        }),
+        calendar: Object.freeze({
+          listEvents: payload => request('calendar_list_events', payload),
+        }),
+        contacts: Object.freeze({
+          search: payload => request('contacts_search', payload),
+        }),
+        media: Object.freeze({
+          get: payload => request('media_get', payload),
+        }),
     llm: Object.freeze({
-      chat: payload => request('llm_chat', payload)
+      chat: payload => request('llm_chat', payload),
+      stream: payload => request('llm_stream', payload, 'llm'),
+      onFrame: listener => {
+        if (typeof listener !== 'function') throw new TypeError('LLM stream listener must be a function');
+        streamListeners.set(listener, 'llm');
+        return () => streamListeners.delete(listener);
+      }
     }),
     agent: Object.freeze({
       post: payload => request('agent_post', payload),
@@ -1184,16 +1221,23 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
         close: payload => request('agent_session_close', payload),
       }),
       send: payload => request('agent_send', payload),
-      stream: payload => request('agent_stream', payload),
+      stream: payload => request('agent_stream', payload, 'agent'),
       cancel: payload => request('agent_cancel', payload),
       onFrame: listener => {
         if (typeof listener !== 'function') throw new TypeError('Agent stream listener must be a function');
-        streamListeners.add(listener);
+        streamListeners.set(listener, 'agent');
         return () => streamListeners.delete(listener);
       },
       profiles: Object.freeze({
         proposeUpdate: payload => request('agent_profile_propose_update', payload),
       }),
+    }),
+    background: Object.freeze({
+      schedule: payload => request('background_schedule', payload),
+      list: (payload = {}) => request('background_list', payload),
+      status: payload => request('background_status', payload),
+      cancel: payload => request('background_cancel', payload),
+      retry: payload => request('background_retry', payload),
     })
   });
   const resolveNative = envelope => {

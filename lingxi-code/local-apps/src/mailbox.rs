@@ -17,6 +17,7 @@ use crate::error::AppError;
 use crate::manifest::AppLayout;
 use crate::types::APPS_SCHEMA_VERSION;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use traits::rooted_fs::{self, AtomicWriteOptions};
 use traits::FsError;
 
@@ -37,6 +38,10 @@ pub struct AppMailboxEvent {
     pub seq: u64,
     /// App-chosen topic, `^[a-z0-9][a-z0-9_.-]{0,63}$`.
     pub topic: String,
+    /// Optional app-owned Agent session recipient. `None` keeps the legacy
+    /// conversation mailbox semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// App-supplied JSON. Stored verbatim, never interpreted.
     pub body: serde_json::Value,
     /// Post time, epoch milliseconds.
@@ -57,6 +62,12 @@ pub struct AppMailbox {
     /// How many events the caps evicted before anyone read them.
     #[serde(default)]
     pub dropped_count: u64,
+    /// Loss counters for session-targeted events, keyed by session id.
+    #[serde(default)]
+    pub session_dropped_count: BTreeMap<String, u64>,
+    /// Independent read cursors for session-targeted event streams.
+    #[serde(default)]
+    pub session_read_seq: BTreeMap<String, u64>,
     /// Retained events, oldest first.
     #[serde(default)]
     pub events: Vec<AppMailboxEvent>,
@@ -69,6 +80,8 @@ impl Default for AppMailbox {
             next_seq: 1,
             last_read_seq: 0,
             dropped_count: 0,
+            session_dropped_count: BTreeMap::new(),
+            session_read_seq: BTreeMap::new(),
             events: Vec::new(),
         }
     }
@@ -107,6 +120,18 @@ impl AppMailbox {
         body: serde_json::Value,
         created_at_ms: u64,
     ) -> Result<u64, AppError> {
+        self.append_for_session(topic, body, created_at_ms, None)
+    }
+
+    /// Append an event for one app-owned Agent session, without mixing it into
+    /// the conversation Agent's legacy mailbox cursor.
+    pub fn append_for_session(
+        &mut self,
+        topic: &str,
+        body: serde_json::Value,
+        created_at_ms: u64,
+        session_id: Option<&str>,
+    ) -> Result<u64, AppError> {
         validate_topic(topic)?;
         let encoded = serde_json::to_vec(&body)
             .map_err(|error| AppError::InvalidRequest(format!("mailbox body: {error}")))?;
@@ -121,6 +146,7 @@ impl AppMailbox {
         self.events.push(AppMailboxEvent {
             seq,
             topic: topic.to_string(),
+            session_id: session_id.map(str::to_owned),
             body,
             created_at_ms,
         });
@@ -139,8 +165,21 @@ impl AppMailbox {
             // Only count what nobody read: an event the agent already
             // drained is not a loss, and reporting it as one would make
             // every healthy app look lossy.
-            if evicted.seq > self.last_read_seq {
-                self.dropped_count = self.dropped_count.saturating_add(1);
+            match evicted.session_id.as_deref() {
+                Some(session_id) => {
+                    let cursor = self.session_read_seq.get(session_id).copied().unwrap_or(0);
+                    if evicted.seq > cursor {
+                        let dropped = self
+                            .session_dropped_count
+                            .entry(session_id.to_string())
+                            .or_default();
+                        *dropped = dropped.saturating_add(1);
+                    }
+                }
+                None if evicted.seq > self.last_read_seq => {
+                    self.dropped_count = self.dropped_count.saturating_add(1);
+                }
+                None => {}
             }
         }
         Ok(seq)
@@ -160,7 +199,25 @@ impl AppMailbox {
         let floor = after_seq.unwrap_or(self.last_read_seq);
         self.events
             .iter()
-            .filter(|event| event.seq > floor)
+            .filter(|event| event.session_id.is_none() && event.seq > floor)
+            .take(limit)
+            .collect()
+    }
+
+    /// Read session-targeted events without advancing that session's cursor.
+    #[must_use]
+    pub fn peek_for_session(
+        &self,
+        session_id: &str,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> Vec<&AppMailboxEvent> {
+        let floor = after_seq
+            .or_else(|| self.session_read_seq.get(session_id).copied())
+            .unwrap_or(0);
+        self.events
+            .iter()
+            .filter(|event| event.session_id.as_deref() == Some(session_id) && event.seq > floor)
             .take(limit)
             .collect()
     }
@@ -181,7 +238,7 @@ impl AppMailbox {
         let taken: Vec<AppMailboxEvent> = self
             .events
             .iter()
-            .filter(|event| event.seq > self.last_read_seq)
+            .filter(|event| event.session_id.is_none() && event.seq > self.last_read_seq)
             .take(limit)
             .cloned()
             .collect();
@@ -189,6 +246,28 @@ impl AppMailbox {
             self.last_read_seq = last.seq;
         }
         taken
+    }
+
+    /// Read and advance one app Agent session's independent cursor.
+    pub fn drain_for_session(&mut self, session_id: &str, limit: usize) -> Vec<AppMailboxEvent> {
+        let floor = self.session_read_seq.get(session_id).copied().unwrap_or(0);
+        let taken: Vec<AppMailboxEvent> = self
+            .events
+            .iter()
+            .filter(|event| event.session_id.as_deref() == Some(session_id) && event.seq > floor)
+            .take(limit)
+            .cloned()
+            .collect();
+        if let Some(last) = taken.last() {
+            self.session_read_seq
+                .insert(session_id.to_string(), last.seq);
+        }
+        taken
+    }
+
+    /// Clear and return the loss count for one app Agent session.
+    pub fn take_session_dropped_count(&mut self, session_id: &str) -> u64 {
+        self.session_dropped_count.remove(session_id).unwrap_or(0)
     }
 
     fn validate(&self) -> Result<(), AppError> {
@@ -361,6 +440,29 @@ mod tests {
         let remaining = mailbox.drain(10);
         assert_eq!(remaining.len(), 1, "a drain resumes after the cursor");
         assert!(mailbox.drain(10).is_empty(), "nothing is left to drain");
+    }
+
+    #[test]
+    fn session_events_have_an_independent_cursor_and_do_not_leak_to_conversation_reads() {
+        let mut mailbox = AppMailbox::default();
+        mailbox
+            .append("conversation.note", body("conversation"), 1_000)
+            .expect("conversation append");
+        mailbox
+            .append_for_session("agent.note", body("agent"), 1_001, Some("agent-1"))
+            .expect("session append");
+
+        assert_eq!(mailbox.peek(None, 10).len(), 1);
+        assert_eq!(mailbox.peek_for_session("agent-1", None, 10).len(), 1);
+        assert_eq!(mailbox.drain(10)[0].body["text"], "conversation");
+        assert_eq!(mailbox.last_read_seq, 1);
+        assert_eq!(mailbox.session_read_seq.get("agent-1"), None);
+
+        let drained = mailbox.drain_for_session("agent-1", 10);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].body["text"], "agent");
+        assert_eq!(mailbox.session_read_seq.get("agent-1"), Some(&2));
+        assert!(mailbox.drain_for_session("agent-1", 10).is_empty());
     }
 
     #[test]

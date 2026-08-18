@@ -30,10 +30,10 @@ from the tool namespace instead of accepting it as an Agent argument.
 | Surface | Examples | Transport | State |
 | --- | --- | --- | --- |
 | Native bridge | `data.query`, `network.request`, `llm.complete`, `llm.stream` | `window.lingxi.v2` → native command | Host-authorized |
-| App MCP | `app_<id>__data_query`, `app_<id>__data_mutate` | Host-owned in-process MCP | Dynamic from manifest |
-| Agent sessions | `agent.sessions.create/list/resume/close`, `agent.send/stream/cancel` | App MCP + native stream adapter | Persistent, budgeted |
+| App MCP | `app_<id>__data_query`, `app_<id>__data_mutate`, `app_<id>__flow_execute` | Host-owned in-process MCP | Dynamic, app-id bound |
+| Agent sessions | `agent.sessions.create/list/resume/close`, `agent.send/stream/cancel`, `agent_events_read` | App MCP + native stream adapter | Persistent, budgeted |
 | Agent Profile | `agent.profiles.propose-update` | Host storage; apply is reserved for trusted host UI | Revisioned |
-| Flows | `flow.execute` | Declarative MCP | Acyclic, bounded |
+| Flows | `app_<id>__flow_execute` / `flow.execute` | Declarative MCP | Acyclic, bounded, host-routed |
 | Background | `background.schedule/resume` | System task adapter | Journaled/resumable |
 
 `agent.send/stream/cancel` now run through the existing
@@ -41,9 +41,25 @@ from the tool namespace instead of accepting it as an Agent argument.
 orchestrator and an app-scoped MCP registry; the host owns the cancellation
 token, output-token budget, MCP/bridge-call budgets, wall-clock budget, stream
 ordering, and session turn count. Stream frames are forwarded to the page
-through `window.lingxi.v2.agent.onFrame`. The session catalog and bounded
+through `window.lingxi.v2.agent.onFrame`; LLM and Agent listeners are isolated
+by stream channel, so a listener never receives the other subsystem's frames.
+The session catalog and bounded
 conversation history are stored under the app data root and replayed when the
 host recreates the live orchestrator.
+
+`agent.post` without `sessionId` targets the Conversation Agent mailbox. When
+an active app-owned `sessionId` is supplied, the event is stored in that
+session's independent inbox and exposed to that Agent as the host-bound
+`app_<id>__agent_events_read` MCP tool. Both event paths are untrusted data;
+the app Agent cannot read a sibling session's inbox.
+
+`flow.execute` is exposed only on an app-scoped MCP transport. The host binds
+the app id from the namespace, validates the flow against the v2 capability
+registry, rejects recursive/background/streaming/cancel steps, applies a
+15-minute flow and 60-second per-step wall-clock budget, and routes every
+remaining step through its normal capability authorization path. Step outputs
+are returned under their stable step ids; input JSON remains declarative and
+cannot contain executable code.
 
 ## Prompt layers
 

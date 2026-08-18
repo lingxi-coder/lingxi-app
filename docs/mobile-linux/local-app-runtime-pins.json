@@ -507,9 +507,9 @@
           "name": "pyc",
           "repository": "main",
           "role": "transitive",
-          "sha256": "aa480cd7f9f475eed1c6130df255af267341d140e40ddd0e3340cc33ec39ceb8",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/pyc-3.14.5-r0.apk",
-          "version": "3.14.5-r0"
+          "sha256": "dc3b6836f0eeaa87140d4006478e43b475ba38a1388ccf64b9725b9c1523b514",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/pyc-3.14.7-r1.apk",
+          "version": "3.14.7-r1"
         },
         {
           "arch": "aarch64",
@@ -517,9 +517,9 @@
           "name": "python3",
           "repository": "main",
           "role": "primary",
-          "sha256": "d5b84827794a6e869e3e411b02b15b2c82b59c0404c3be0981105bc267d1c7c4",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-3.14.5-r0.apk",
-          "version": "3.14.5-r0"
+          "sha256": "78a3ca29b9443ab19d3092e71f485b185badb3aea9165e59d54c257dccc98a27",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-3.14.7-r1.apk",
+          "version": "3.14.7-r1"
         },
         {
           "arch": "aarch64",
@@ -527,9 +527,9 @@
           "name": "python3-pyc",
           "repository": "main",
           "role": "transitive",
-          "sha256": "5851754490435c627986ec2cdbc90f69e417d3ac33dac96095cccb09a93c2917",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-pyc-3.14.5-r0.apk",
-          "version": "3.14.5-r0"
+          "sha256": "6fb67313dfacbcc073ff2669f89d4164ca20ff59efdf583dc6cf1f20590119c2",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-pyc-3.14.7-r1.apk",
+          "version": "3.14.7-r1"
         },
         {
           "arch": "aarch64",
@@ -537,9 +537,9 @@
           "name": "python3-pycache-pyc0",
           "repository": "main",
           "role": "transitive",
-          "sha256": "375735abbcbed4201f5619084e6b723fb4057dcb7b468ab8c835355ca8315936",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-pycache-pyc0-3.14.5-r0.apk",
-          "version": "3.14.5-r0"
+          "sha256": "5280d49c32c2d0cd4fac5cc6de8a59d1a2d962ccaa06d3657e16fc814a1f7f60",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-pycache-pyc0-3.14.7-r1.apk",
+          "version": "3.14.7-r1"
         },
         {
           "arch": "aarch64",
@@ -1113,9 +1113,9 @@
           "name": "pyc",
           "repository": "main",
           "role": "transitive",
-          "sha256": "cf22516f476361192fd7e9270fc3382043037e4c9cc072082a1c4ab474610ba1",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/pyc-3.14.5-r0.apk",
-          "version": "3.14.5-r0"
+          "sha256": "353665d585c0c54705794fea9667c6b8afe8accb525e30819e9c1d4b9383b673",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/pyc-3.14.7-r1.apk",
+          "version": "3.14.7-r1"
         },
         {
           "arch": "x86_64",
@@ -1123,9 +1123,9 @@
           "name": "python3",
           "repository": "main",
           "role": "primary",
-          "sha256": "5963c3228946f4c8c56e89f63011f9659ab29d1a0c4bec2d4c04740ee894efb3",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-3.14.5-r0.apk",
-          "version": "3.14.5-r0"
+          "sha256": "8b7e0ce40ab6f0955138e791caf3e16c8b4616befde61c840137cc1a16770985",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-3.14.7-r1.apk",
+          "version": "3.14.7-r1"
         },
         {
           "arch": "x86_64",
@@ -1133,9 +1133,9 @@
           "name": "python3-pyc",
           "repository": "main",
           "role": "transitive",
-          "sha256": "aaec365b247e2598dcec22db068971f6ca7afc64106b826404d439fc61834fa7",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-pyc-3.14.5-r0.apk",
-          "version": "3.14.5-r0"
+          "sha256": "c9da22e6f75c460ebc9d157a2c46393cd9ab6da83b6ab64044910b43a87c8df1",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-pyc-3.14.7-r1.apk",
+          "version": "3.14.7-r1"
         },
         {
           "arch": "x86_64",
@@ -1143,9 +1143,9 @@
           "name": "python3-pycache-pyc0",
           "repository": "main",
           "role": "transitive",
-          "sha256": "aa015113f2122e8706365aad37f45bac6f27f9e43ea9ab5c758ff19a239aebe8",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-pycache-pyc0-3.14.5-r0.apk",
-          "version": "3.14.5-r0"
+          "sha256": "04c6f299bd36870a78e8afe1a04e8c64673d46ad3905f84b590b36281f947bd1",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-pycache-pyc0-3.14.7-r1.apk",
+          "version": "3.14.7-r1"
         },
         {
           "arch": "x86_64",
@@ -1278,7 +1278,7 @@
     "openssh-client-default": "10.3_p1-r0",
     "py3-pip": "26.1.2-r0",
     "py3-virtualenv": "21.3.3-r0",
-    "python3": "3.14.5-r0"
+    "python3": "3.14.7-r1"
   },
   "schema_version": 2
 }

@@ -91,8 +91,9 @@ fails, repair the payload and retry before building; do not treat a failed
 manifest update as a completed generation step.
 
 Capabilities are a closed enum. Use only `data_mutation`, `ui_control`,
-`camera`, `photo_library`, `microphone`, `location`, `notifications`, `llm`,
-`agent_notify`, or `background_schedule`; there is no `data` capability.
+`camera`, `photo_library`, `microphone`, `location`, `notifications`,
+`clipboard`, `share`, `text_to_speech`, `files_read`, `files_write`, `device_status`, `haptics`, `deep_link`, `calendar`, `contacts`, `media`, `llm`, `agent_notify`, or
+`background_schedule`; there is no `data` capability.
 `background_schedule` is required when the app registers a system background
 flow. `data_mutation` authorizes
 the conversation agent to call `mcp__local_apps__mutate_data`. Do not declare
@@ -135,12 +136,20 @@ Resolve every requirement against the capabilities already supplied by the
 host before proposing an external API, hosted AI service, or custom
 replacement. In particular:
 
-1. Use `window.lingxi.v2.llm.chat` for AI features so the app uses the user's
-   locally configured model/provider, quota, privacy controls, and permission
-   prompt. Do not embed provider keys or add a direct LLM SDK/API call.
-2. Use `window.lingxi.v2.data`, `device`, `network`, `runtime`, and `agent` for
-   structured storage, native device operations, mediated HTTPS, device
-   context, and conversation events. Reuse an available built-in skill/tool
+1. Use the checked-in bridge helpers (`requestLlmChat` for complete responses or
+   `streamLlmChat` plus `onLlmStreamFrame` for ordered streaming frames) so the
+   app uses the user's locally configured model/provider, quota, privacy
+   controls, and permission prompt. Do not embed provider keys or add a direct
+   LLM SDK/API call.
+2. Use `window.lingxi.v2.data`, `device`, `clipboard`, `files`, `network`, `runtime`,
+   and `agent` for structured storage, native device operations, mediated HTTPS,
+   device context, and conversation events. The checked-in helpers
+   `getClipboardText`, `setClipboardText`, `shareContent`, and
+   `synthesizeSpeech`, `readFile`, `writeFile`, `getDeviceStatus`,
+   `triggerHaptics`, `openDeepLink`, `listCalendarEvents`, `searchContacts`,
+   and `getMedia` keep these calls on the host
+   permission path. Reuse an
+   available built-in skill/tool
    during generation and QA before proposing a substitute.
 3. Prefer platform APIs, CSS, and the existing pinned project packages over a
    new package;

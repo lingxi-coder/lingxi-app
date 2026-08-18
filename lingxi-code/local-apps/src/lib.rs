@@ -65,15 +65,15 @@ pub use permissions::{
     AppPermissions, PermissionDecision, SessionPermissions, LOCAL_APP_WORKSPACE_PERMISSION_RULES,
 };
 pub use runtime_v2::{
-    allowed_for_origin, apply_approved_profile, compose_prompt_layers, normalized_input_hash,
-    AgentBudget, AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppAgentProfileProposal,
-    BackgroundJournalEntry, BackgroundTaskRecord, BackgroundTaskStatus, BackgroundTrigger,
-    CapabilityDescriptor, CapabilityId, CapabilityRegistry, CapabilityScope, CapabilityTransport,
-    FlowDefinition, FlowStep, InvocationContext, InvocationFrame, InvocationOrigin,
-    InvocationReplayGuard, PromptLayer, PromptLayerKind, RuntimeContractError, StreamBuffer,
-    StreamFrame, StreamValidator, MAX_AGENT_MAX_BRIDGE_CALLS, MAX_AGENT_MAX_MCP_CALLS,
-    MAX_AGENT_MAX_TOKENS, MAX_AGENT_MAX_TURNS, MAX_AGENT_MAX_WALL_MS, RUNTIME_API_MAJOR,
-    RUNTIME_API_VERSION, RUNTIME_CONTRACT_SCHEMA_VERSION,
+    allowed_for_origin, allowed_for_synchronous_flow, apply_approved_profile,
+    compose_prompt_layers, normalized_input_hash, AgentBudget, AgentSessionRecord,
+    AgentSessionStatus, AppAgentProfile, AppAgentProfileProposal, BackgroundJournalEntry,
+    BackgroundTaskRecord, BackgroundTaskStatus, BackgroundTrigger, CapabilityDescriptor,
+    CapabilityId, CapabilityRegistry, CapabilityScope, CapabilityTransport, FlowDefinition,
+    FlowStep, InvocationContext, InvocationFrame, InvocationOrigin, InvocationReplayGuard,
+    PromptLayer, PromptLayerKind, RuntimeContractError, StreamBuffer, StreamFrame, StreamValidator,
+    MAX_AGENT_MAX_BRIDGE_CALLS, MAX_AGENT_MAX_MCP_CALLS, MAX_AGENT_MAX_TOKENS, MAX_AGENT_MAX_TURNS,
+    MAX_AGENT_MAX_WALL_MS, RUNTIME_API_MAJOR, RUNTIME_API_VERSION, RUNTIME_CONTRACT_SCHEMA_VERSION,
 };
 pub use service::AppService;
 pub use state::{runtime_transition_allowed, AppState};

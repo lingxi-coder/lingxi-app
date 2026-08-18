@@ -2233,7 +2233,7 @@ mod tests {
     }
 
     #[test]
-    fn the_locked_bridge_exposes_the_native_data_wire_contract() {
+    fn the_locked_bridge_exposes_the_native_wire_contract() {
         let bridge = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../local-apps/templates/vite-react-static-v1/lib/lingxi-bridge.js"
@@ -2246,6 +2246,40 @@ mod tests {
             "document",
             "export async function deleteRecord",
             "kind: \"delete\"",
+            "export async function requestLlmChat",
+            "export async function streamLlmChat",
+            "export function onLlmStreamFrame",
+            "export async function capturePhoto",
+            "export async function pickImage",
+            "export async function startRecording",
+            "export async function stopRecording",
+            "export async function getCurrentLocation",
+            "export async function transcribeSpeech",
+            "export async function postNotification",
+            "export async function getClipboardText",
+            "export async function setClipboardText",
+            "export async function shareContent",
+            "export async function synthesizeSpeech",
+            "export async function readFile",
+            "export async function writeFile",
+            "export async function getDeviceStatus",
+            "export async function triggerHaptics",
+            "export async function openDeepLink",
+            "export async function listCalendarEvents",
+            "export async function searchContacts",
+            "export async function getMedia",
+            "export async function postAgentEvent",
+            "export async function createAgentSession",
+            "export async function sendAgentTurn",
+            "export async function streamAgentTurn",
+            "export function onAgentStreamFrame",
+            "export async function cancelAgentTurn",
+            "export async function proposeAgentProfileUpdate",
+            "export async function scheduleBackgroundFlow",
+            "export async function listBackgroundTasks",
+            "export async function getBackgroundTaskStatus",
+            "export async function cancelBackgroundTask",
+            "export async function retryBackgroundTask",
         ] {
             assert!(bridge.contains(anchor), "bridge missing {anchor}");
         }

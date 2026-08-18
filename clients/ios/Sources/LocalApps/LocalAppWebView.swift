@@ -122,7 +122,9 @@ final class LocalAppBridgeBroker: NSObject, WKScriptMessageHandler {
     static let duplicateRequestIDCode = "duplicate_request_id"
     static let tooManyInFlightCode = "too_many_requests"
     static func byteLimit(namespace: String, operation: String) -> Int {
-        namespace == "llm" && operation == "chat" ? maxLLMBytes : maxControlBytes
+        if namespace == "llm" && (operation == "chat" || operation == "stream") { return maxLLMBytes }
+        if namespace == "files" && (operation == "read" || operation == "write") { return 4 * 1024 * 1024 }
+        return maxControlBytes
     }
 
     let appID: String
@@ -758,7 +760,9 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
     }
 
     static let messageHandlerNames = [
-        "lingxiData", "lingxiNetwork", "lingxiRuntime", "lingxiDevice", "lingxiLlm", "lingxiAgent",
+        "lingxiData", "lingxiNetwork", "lingxiRuntime", "lingxiDevice", "lingxiClipboard", "lingxiFiles",
+        "lingxiCalendar", "lingxiContacts", "lingxiMedia", "lingxiLlm", "lingxiAgent",
+        "lingxiBackground",
     ]
 
     @MainActor
@@ -809,13 +813,15 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         return nativeOpen.call(this, method, url, ...rest);
       };
       const pending = new Map();
-      const streamListeners = new Set();
+      const streamListeners = new Map();
       const emitStream = frame => {
-        for (const listener of streamListeners) {
+        const channel = pending.get(frame.requestId)?.channel;
+        for (const [listener, listenerChannel] of streamListeners) {
+          if (listenerChannel !== channel) continue;
           try { listener(frame); } catch (_) { /* app listener isolation */ }
         }
       };
-      const request = (namespace, operation, payload = {}) => new Promise((resolve, reject) => {
+      const request = (namespace, operation, payload = {}, channel = null) => new Promise((resolve, reject) => {
         const requestId = crypto.randomUUID();
         const handler = window.webkit?.messageHandlers?.[`lingxi${namespace}`];
         if (!handler) {
@@ -831,14 +837,15 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
           reject(error);
           return;
         }
-        const byteLimit = namespace === 'Llm' && operation === 'chat' ? 8388608 : 65536;
+        const byteLimit = namespace === 'Llm' && (operation === 'chat' || operation === 'stream') ? 8388608 :
+          (namespace === 'Files' && (operation === 'read' || operation === 'write') ? 4194304 : 65536);
         if (new TextEncoder().encode(serialized).byteLength > byteLimit) {
           const error = new Error(`Bridge request exceeds ${byteLimit} bytes`);
           error.code = 'request_too_large';
           reject(error);
           return;
         }
-        pending.set(requestId, { resolve, reject });
+        pending.set(requestId, { resolve, reject, channel });
         handler.postMessage({ requestId, operation, payload });
       });
       const readInsets = () => {
@@ -885,9 +892,37 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
           getLocation: () => request('Device', 'getLocation', {}),
           transcribeSpeech: (payload = {}) => request('Device', 'transcribeSpeech', payload),
           postNotification: payload => request('Device', 'postNotification', payload),
+          share: (payload = {}) => request('Device', 'share', payload),
+          synthesizeSpeech: (payload = {}) => request('Device', 'synthesizeSpeech', payload),
+          status: () => request('Device', 'status', {}),
+          haptics: style => request('Device', 'haptics', { style }),
+          deepLink: url => request('Device', 'deepLink', { url }),
+        }),
+        clipboard: Object.freeze({
+          getText: () => request('Clipboard', 'getText', {}),
+          setText: text => request('Clipboard', 'setText', { text }),
+        }),
+        files: Object.freeze({
+          read: payload => request('Files', 'read', payload),
+          write: payload => request('Files', 'write', payload),
+        }),
+        calendar: Object.freeze({
+          listEvents: payload => request('Calendar', 'listEvents', payload),
+        }),
+        contacts: Object.freeze({
+          search: payload => request('Contacts', 'search', payload),
+        }),
+        media: Object.freeze({
+          get: payload => request('Media', 'get', payload),
         }),
         llm: Object.freeze({
           chat: payload => request('Llm', 'chat', payload),
+          stream: payload => request('Llm', 'stream', payload, 'llm'),
+          onFrame: listener => {
+            if (typeof listener !== 'function') throw new TypeError('LLM stream listener must be a function');
+            streamListeners.set(listener, 'llm');
+            return () => streamListeners.delete(listener);
+          },
         }),
         agent: Object.freeze({
           post: payload => request('Agent', 'post', payload),
@@ -898,16 +933,23 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
             close: (payload) => request('Agent', 'sessionClose', payload),
           }),
           send: payload => request('Agent', 'send', payload),
-          stream: payload => request('Agent', 'stream', payload),
+          stream: payload => request('Agent', 'stream', payload, 'agent'),
           cancel: payload => request('Agent', 'cancel', payload),
           onFrame: listener => {
             if (typeof listener !== 'function') throw new TypeError('Agent stream listener must be a function');
-            streamListeners.add(listener);
+            streamListeners.set(listener, 'agent');
             return () => streamListeners.delete(listener);
           },
           profiles: Object.freeze({
             proposeUpdate: payload => request('Agent', 'profileProposeUpdate', payload),
           }),
+        }),
+        background: Object.freeze({
+          schedule: payload => request('Background', 'schedule', payload),
+          list: (payload = {}) => request('Background', 'list', payload),
+          status: payload => request('Background', 'status', payload),
+          cancel: payload => request('Background', 'cancel', payload),
+          retry: payload => request('Background', 'retry', payload),
         }),
       });
       const resolveNative = envelope => {

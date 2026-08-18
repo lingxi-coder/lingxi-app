@@ -10,6 +10,7 @@
     <string name="local_apps_create_model_label">Workflow 模型</string>
     <string name="local_apps_create_model_section">建置模型</string>
     <string name="local_apps_error_workflow_model_unavailable">所選 Workflow 模型已無法使用，請重新選擇。</string>
+    <string name="local_apps_error_create_in_progress">已有一個本地應用正在建立中，請稍候。</string>
     <string name="local_apps_refresh">重新整理應用</string>
     <string name="local_apps_search">搜尋應用</string>
     <string name="local_apps_empty">還沒有本地應用</string>
@@ -1575,6 +1576,9 @@
     <string name="local_apps_create_brief_detail">AI 會據此生成一份問卷，幫助細化需求。</string>
     <string name="local_apps_create_brief_section">用一句話描述你想要的應用</string>
     <string name="local_apps_create_git_version_control">使用 Git 管理應用版本（推薦）</string>
+    <string name="local_apps_create_add_widget">建立後新增到主畫面 Widget</string>
+    <string name="local_apps_create_add_widget_detail">建立完成後會請求系統確認</string>
+    <string name="local_apps_widget_pin_unavailable">目前的啟動器不支援自動新增 Widget，請稍後手動新增。</string>
     <string name="local_apps_error_bridge_detached">應用檢視已關閉，這次請求不會有結果了。</string>
     <string name="local_apps_error_bridge_payload_invalid">請求內容無法序列化。</string>
     <string name="local_apps_error_brief_required">請用一句話描述這個應用。</string>

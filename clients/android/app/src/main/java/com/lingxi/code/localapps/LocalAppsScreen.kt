@@ -252,8 +252,8 @@ private fun LocalAppsLibraryScreen(
             models = state.workflowModels,
             currentModelId = state.currentWorkflowModelId,
             onDismiss = { showCreateDialog = false },
-            onCreate = { brief, gitEnabled, workflowModel ->
-                onAction(LocalAppsAction.CreateFromBrief(brief, gitEnabled, workflowModel))
+            onCreate = { brief, gitEnabled, workflowModel, addWidget ->
+                onAction(LocalAppsAction.CreateFromBrief(brief, gitEnabled, workflowModel, addWidget))
                 showCreateDialog = false
             },
         )
@@ -271,11 +271,12 @@ private fun CreateAppDialog(
     models: List<ModelOption>,
     currentModelId: String?,
     onDismiss: () -> Unit,
-    onCreate: (String, Boolean, String?) -> Unit,
+    onCreate: (String, Boolean, String?, Boolean) -> Unit,
 ) {
     var brief by remember { mutableStateOf("") }
     var gitEnabled by remember { mutableStateOf(true) }
     var workflowModel by remember { mutableStateOf<String?>(null) }
+    var addWidget by remember { mutableStateOf(false) }
     LaunchedEffect(models, workflowModel) {
         if (workflowModel != null && models.none { it.id == workflowModel }) {
             workflowModel = null
@@ -326,12 +327,29 @@ private fun CreateAppDialog(
                     )
                     Text(stringResource(R.string.local_apps_create_git_version_control))
                 }
+                Row(
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                ) {
+                    Checkbox(
+                        checked = addWidget,
+                        onCheckedChange = { addWidget = it },
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.local_apps_create_add_widget))
+                        Text(
+                            stringResource(R.string.local_apps_create_add_widget_detail),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
             Button(
                 enabled = canSubmitBrief(brief),
-                onClick = { onCreate(brief, gitEnabled, workflowModel) },
+                onClick = { onCreate(brief, gitEnabled, workflowModel, addWidget) },
             ) {
                 Text(stringResource(R.string.local_apps_create_and_design))
             }

@@ -15,6 +15,7 @@ import com.lingxi.code.vision.CameraController
 import com.lingxi.code.share.ShareController
 import com.lingxi.code.notify.NotificationController
 import com.lingxi.code.clipboard.ClipboardController
+import com.lingxi.code.device.AndroidDeviceControlController
 import com.lingxi.code.location.LocationController
 import com.lingxi.code.voice.recorder.RecorderController
 import com.lingxi.code.offload.NativeOffloadRuntime
@@ -51,6 +52,8 @@ import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.theme.LocaleWrapper
 import com.lingxi.code.theme.ThemeMode
+import com.lingxi.code.localapps.widget.LocalAppLaunchRequest
+import com.lingxi.code.localapps.widget.LocalAppWidgetDeepLink
 import kotlinx.coroutines.launch
 
 /**
@@ -66,6 +69,9 @@ class MainActivity : ComponentActivity() {
     private val pendingCronRunId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     private val pendingTerminalArgs =
         kotlinx.coroutines.flow.MutableStateFlow<TerminalRouteArgs?>(null)
+    private val pendingLocalAppLaunch =
+        kotlinx.coroutines.flow.MutableStateFlow<LocalAppLaunchRequest?>(null)
+    private val pendingOpenLocalApps = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     // Apply the persisted in-app language to the base context before the
     // activity (and its resources) are created, so the whole surface renders
@@ -96,6 +102,11 @@ class MainActivity : ComponentActivity() {
             com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,
         )
         pendingTerminalArgs.value = intent.terminalRouteArgs()
+        pendingLocalAppLaunch.value = LocalAppWidgetDeepLink.parse(intent)
+        pendingOpenLocalApps.value = intent.getBooleanExtra(
+            LocalAppWidgetDeepLink.EXTRA_OPEN_LOCAL_APPS,
+            false,
+        )
         // Register the camera/picker launchers before the Activity is STARTED and
         // hand them to the process-global CameraController, which the UniFFI
         // AndroidCamera adapter drives across the FFI seam (the device-vision
@@ -150,6 +161,7 @@ class MainActivity : ComponentActivity() {
         // (engine-driven through tool-clipboard; no UI affordance). No manifest
         // permission is required for clipboard access.
         ClipboardController.attach(applicationContext)
+        AndroidDeviceControlController.attach(applicationContext)
         // Device-location: the engine capability gate runs first; this controller
         // then owns Android's fine/coarse runtime permission and one-shot fix.
         LocationController.attach(
@@ -201,6 +213,8 @@ class MainActivity : ComponentActivity() {
             val settingsState by settingsStore.state.collectAsState()
             val requestedCronRunId by pendingCronRunId.collectAsState()
             val requestedTerminalArgs by pendingTerminalArgs.collectAsState()
+            val requestedLocalAppLaunch by pendingLocalAppLaunch.collectAsState()
+            val requestedOpenLocalApps by pendingOpenLocalApps.collectAsState()
             val scope = rememberCoroutineScope()
             val prefs by store.prefs.collectAsState(initial = AppearancePrefs())
             val darkTheme = when (prefs.themeMode) {
@@ -242,6 +256,12 @@ class MainActivity : ComponentActivity() {
                 requestedTerminalArgs?.let {
                     openTerminal(it.sessionId, it.initCommand)
                     pendingTerminalArgs.value = null
+                }
+            }
+            LaunchedEffect(requestedLocalAppLaunch, requestedOpenLocalApps) {
+                if (requestedLocalAppLaunch != null || requestedOpenLocalApps) {
+                    settingsOpen = false
+                    terminalOpen = false
                 }
             }
             LaunchedEffect(settingsState.linuxRuntime.selectedMode) {
@@ -304,6 +324,10 @@ class MainActivity : ComponentActivity() {
                         reconnectToken = engineReconnect,
                         settingsStore = settingsStore,
                         onConversationSourceChanged = { activeConversationSource = it },
+                        requestedLocalAppLaunch = requestedLocalAppLaunch,
+                        onLocalAppLaunchHandled = { pendingLocalAppLaunch.value = null },
+                        openLocalAppsRequest = requestedOpenLocalApps,
+                        onOpenLocalAppsHandled = { pendingOpenLocalApps.value = false },
                     )
                     AnimatedVisibility(
                         visible = settingsOpen,
@@ -410,6 +434,7 @@ class MainActivity : ComponentActivity() {
         RecorderController.detach()
         NotificationController.detach()
         ClipboardController.detach()
+        AndroidDeviceControlController.detach()
         LocationController.detach()
         NativeOffloadRuntime.detach()
         super.onDestroy()
@@ -422,6 +447,11 @@ class MainActivity : ComponentActivity() {
             com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,
         )
         pendingTerminalArgs.value = intent.terminalRouteArgs()
+        pendingLocalAppLaunch.value = LocalAppWidgetDeepLink.parse(intent)
+        pendingOpenLocalApps.value = intent.getBooleanExtra(
+            LocalAppWidgetDeepLink.EXTRA_OPEN_LOCAL_APPS,
+            false,
+        )
     }
 }
 

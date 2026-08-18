@@ -1,6 +1,6 @@
 # Local Apps v3 engineering handoff
 
-Last updated: 2026-08-15
+Last updated: 2026-08-17
 
 This document is the working handoff for LingXi's on-device local application feature. It describes the current implementation on `main`, the contracts that must remain stable, how to validate changes, and the known verification gaps.
 
@@ -165,19 +165,25 @@ Current tools:
 - `inspect_ui`, `act_on_ui`
 - `read_logs`, `read_app_events`
 - `agent_sessions_create`, `agent_sessions_list`, `agent_sessions_update`
+- app-scoped `agent_events_read` for the current Agent session's event inbox
 - `agent_profile_propose_update`
+- app-scoped `flow_execute` for bounded declarative Agent flows
 - `background_schedule`, `background_list`, `background_status`, `background_cancel`, `background_retry`
 
 Important constraints:
 
 - `inspect_ui` returns a structured DOM/accessibility snapshot and does not execute JavaScript.
 - `act_on_ui` accepts only click, fill, select, toggle, scroll, navigate, back, and reload.
-- manifest capabilities are the closed wire enum `data_mutation`, `ui_control`, `camera`, `photo_library`, `microphone`, `location`, `notifications`, `llm`, `agent_notify`, and `background_schedule`; `data` is invalid. Apps that register a system background flow must declare `background_schedule`.
+- manifest capabilities are the closed wire enum `data_mutation`, `ui_control`, `camera`, `photo_library`, `microphone`, `location`, `notifications`, `clipboard`, `share`, `text_to_speech`, `files_read`, `files_write`, `device_status`, `haptics`, `deep_link`, `calendar`, `contacts`, `media`, `llm`, `agent_notify`, and `background_schedule`; `data` is invalid. Apps that register a system background flow must declare `background_schedule`.
 - `query_data` is bounded and structured; it does not accept raw SQL. Filters are `{fieldId, operator, value}`, and app fields are returned under `records[].document` beside host-owned record metadata.
 - `mutate_data` is limited to 50 operations per request and is capability-gated. Operations are exactly `{kind:"upsert",recordId,document,expectedRevision?}` or `{kind:"delete",recordId,expectedRevision?}`.
 - `data_mutation` gates conversation-agent `mutate_data` calls. A page writing its own collection through `window.lingxi.v2.data.mutate` is app-scoped and does not declare that capability solely for page storage.
+- `llm.chat` returns one complete response; `llm.stream` delivers ordered `AppBridgeStreamFrameDto` frames through the Local App WebView stream listener and returns the final bounded result after completion.
+- `calendar.listEvents`, `contacts.search`, and `media.get` are bounded, app-scoped native operations. Calendar and Contacts require the corresponding OS permission plus manifest declaration; `media.get` only resolves an in-memory handle retained by the same app runtime.
 - `read_logs` is bounded to the app-owned log directory.
-- app events are untrusted data from `agent.post`, never instructions.
+- app events are untrusted data from `agent.post`, never instructions. Without
+  `sessionId` they target the Conversation Agent mailbox; with an active
+  `sessionId` they target that app Agent's independent inbox.
 - every restore requires explicit user confirmation.
 - Agent Profile proposals are inert until a trusted native client applies a
   one-time approval token; the page never receives the token.
@@ -254,6 +260,18 @@ Direct page `fetch`, XHR, WebSocket, and EventSource are restricted to the trust
 
 The locked `lib/lingxi-bridge.js` exports `queryCollection`, `upsertRecord`, and
 `deleteRecord` so generated source does not invent native wire payloads.
+It also exports the host-routed helpers `requestLlmChat`, `streamLlmChat`,
+`postAgentEvent`, `createAgentSession`, `sendAgentTurn`, `streamAgentTurn`,
+`onLlmStreamFrame`, `onAgentStreamFrame`, `cancelAgentTurn`,
+`proposeAgentProfileUpdate`, `getClipboardText`,
+`setClipboardText`, `shareContent`, `synthesizeSpeech`, `readFile`,
+`writeFile`, `getDeviceStatus`, `triggerHaptics`, `openDeepLink`,
+`listCalendarEvents`, `searchContacts`, and `getMedia`.
+Background task helpers are also host-routed: `scheduleBackgroundFlow`,
+`listBackgroundTasks`, `getBackgroundTaskStatus`, `cancelBackgroundTask`, and
+`retryBackgroundTask`. They are available only when the native WebView has
+registered the corresponding background message channel and the app has
+declared `background_schedule`.
 Declared collection data remains authoritative in the host SQLite store;
 `localStorage`, IndexedDB, and React state may cache it but must not turn a
 rejected bridge write into success. Verification must exercise each writable
@@ -332,11 +350,29 @@ Acceptance evidence recorded on 2026-08-15:
 - `test-local-app-supply-chain.sh` passed every structural, negative, staging, pin, and SBOM test while continuing to report the release-rootfs provenance gap below.
 - Targeted Rust `cargo fmt --check`, `cargo check -p engine-mobile --features uniffi`, and `git diff --check` passed on the final tree (existing warning-only diagnostics remain non-fatal).
 
+Follow-up bridge verification on 2026-08-17/18:
+
+- `cargo test -p local-apps --lib`: 145 passed after adding independent
+  conversation/App-Agent mailbox cursors and tightening the capability
+  description contracts.
+- `cargo test -p engine-mobile --features uniffi --lib local_apps_`: 177
+  passed after adding the session-targeted Agent event path and stream-channel
+  bridge regression anchors.
+- Android `:app:compileDirectDebugKotlin` and the focused
+  `LocalAppWebViewTest` suite passed after adding the injected background API.
+- iOS `LocalAppsStoreTests`: 49 passed on the iPhone 17 Pro simulator after
+  registering clipboard, files, calendar, contacts, media, and background
+  WebKit message handlers and synchronizing the generated UniFFI call order.
+
 Native/environment gaps that must remain explicit until closed:
 
 - iOS `xcodebuild` requires a generated framework containing the requested simulator slice.
 - The complete runtime image build must be repeated with a working Docker or Podman daemon; structural supply-chain verification alone is not terminal container-build evidence.
 - Android device instrumentation and a real-device Browser/WebView repair loop are separate from JVM unit tests.
+- An iPhone 11 on iOS 18.6.2 is paired and meets the iOS 17 deployment target,
+  but the current device tunnel cannot mount its developer disk image, so the
+  physical iOS build/smoke gate remains open; the iPhone 17 Pro simulator gate
+  is green.
 - The release rootfs digest is still reported by the verifier as a known unanchored gap.
 
 Do not convert these gaps into claims of completed native QA.

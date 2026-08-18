@@ -47,6 +47,9 @@ case "${ARCH}" in
   *) echo "--arch must be aarch64 or x86_64" >&2; exit 2 ;;
 esac
 [[ -n "${OUTPUT}" ]] || OUTPUT="${REPO_ROOT}/clients/ios/build/local-app-rootfs"
+if [[ "${OUTPUT}" != /* ]]; then
+  OUTPUT="${REPO_ROOT}/${OUTPUT}"
+fi
 [[ -f "${PINS}" ]] || { echo "missing pins: ${PINS}" >&2; exit 1; }
 
 if [[ -z "${CONTAINER_RUNTIME}" ]]; then
@@ -57,7 +60,7 @@ fi
 
 # Every version below comes from the pins. Nothing in this script may introduce
 # a second copy — that divergence is exactly what took the release gate red.
-read -r ALPINE_VERSION ALPINE_BRANCH ROOTFS_SHA PACKAGES PNPM_VERSION PNPM_URL PNPM_SHA512 < <(
+IFS=$'\t' read -r ALPINE_VERSION ALPINE_BRANCH ROOTFS_SHA PACKAGES PNPM_VERSION PNPM_URL PNPM_SHA512 < <(
   python3 - "${PINS}" "${ARCH}" <<'PY'
 import json, pathlib, sys
 
@@ -72,7 +75,7 @@ packages = " ".join(
 )
 pnpm = pins["pnpm"]
 print(alpine["version"], alpine["branch"], minirootfs["sha256"], packages,
-      pnpm["version"], pnpm["url"], pnpm["sha512"])
+      pnpm["version"], pnpm["url"], pnpm["sha512"], sep="\t")
 PY
 )
 

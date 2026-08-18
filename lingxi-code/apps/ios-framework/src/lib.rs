@@ -71,9 +71,8 @@ use traits::Platform;
 pub use engine_mobile::{
     ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
     LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle,
-    MobileOAuthSessionDto, MobileOAuthStateDto, PermissionRequestSink, ProviderCatalogEntryDto,
-    ProviderConnectionTestDto,
+    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, PermissionRequestSink,
+    ProviderCatalogEntryDto, ProviderConnectionTestDto,
 };
 
 /// The foreign (Swift) capability objects + config the engine needs to build an
@@ -519,6 +518,11 @@ pub fn build_mobile_engine(
             tts: None,
             notifications: None,
             clipboard: None,
+            device_status: None,
+            haptics: None,
+            deep_link: None,
+            calendar: None,
+            contacts: None,
             secure_storage: impls.secure_storage,
             // This lower-level entry point takes no location impl, like the
             // stt/tts/notification/clipboard slots above it.
@@ -1976,6 +1980,168 @@ fn clipboard_error_from_ffi(e: ClipboardFfiError) -> traits::ClipboardError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Device status / haptics / deep links — one native callback object fans out
+// to the three shared Platform seams used by Local Apps.
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum DeviceControlFfiError {
+    /// The platform cannot provide the requested operation.
+    #[error("device control unavailable")]
+    Unavailable,
+    /// The platform rejected the requested deep link or haptic style.
+    #[error("device control rejected: {message}")]
+    Rejected { message: String },
+    /// Any other native failure.
+    #[error("device control error: {message}")]
+    Other { message: String },
+}
+
+/// Native callback implemented by Swift for status, haptics, and deep links.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosDeviceControl: Send + Sync {
+    /// Return a JSON-encoded bounded [`traits::DeviceStatus`] record.
+    async fn status_json(&self) -> Result<String, DeviceControlFfiError>;
+    /// Trigger one host-approved style.
+    async fn trigger_haptic(&self, style: String) -> Result<(), DeviceControlFfiError>;
+    /// Open one already-validated external URL.
+    async fn open_deep_link(&self, url: String) -> Result<(), DeviceControlFfiError>;
+    /// Return JSON-encoded bounded calendar events for one query.
+    async fn calendar_json(&self, request_json: String) -> Result<String, DeviceControlFfiError>;
+    /// Return JSON-encoded bounded contacts for one search.
+    async fn contacts_json(&self, request_json: String) -> Result<String, DeviceControlFfiError>;
+}
+
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosDeviceControlBridge {
+    inner: Box<dyn IosDeviceControl>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::DeviceStatusProvider for IosDeviceControlBridge {
+    async fn status(&self) -> Result<traits::DeviceStatus, traits::DeviceStatusError> {
+        let body = self
+            .inner
+            .status_json()
+            .await
+            .map_err(ios_device_control_error)?;
+        serde_json::from_str(&body).map_err(|error| {
+            traits::DeviceStatusError::Other(format!("invalid native device status: {error}"))
+        })
+    }
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::HapticService for IosDeviceControlBridge {
+    async fn trigger(&self, style: traits::HapticStyle) -> Result<(), traits::HapticError> {
+        self.inner
+            .trigger_haptic(ios_haptic_style_to_wire(style).to_string())
+            .await
+            .map_err(|error| match error {
+                DeviceControlFfiError::Unavailable => traits::HapticError::Unavailable,
+                DeviceControlFfiError::Rejected { message }
+                | DeviceControlFfiError::Other { message } => traits::HapticError::Other(message),
+            })
+    }
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::DeepLinkOpener for IosDeviceControlBridge {
+    async fn open(&self, url: String) -> Result<(), traits::DeepLinkError> {
+        self.inner
+            .open_deep_link(url)
+            .await
+            .map_err(ios_deep_link_error)
+    }
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::CalendarProvider for IosDeviceControlBridge {
+    async fn list_events(
+        &self,
+        query: traits::CalendarQuery,
+    ) -> Result<Vec<traits::CalendarEvent>, traits::CalendarError> {
+        let request = serde_json::to_string(&query)
+            .map_err(|error| traits::CalendarError::Other(error.to_string()))?;
+        let body = self
+            .inner
+            .calendar_json(request)
+            .await
+            .map_err(|error| match error {
+                DeviceControlFfiError::Unavailable => traits::CalendarError::Unavailable,
+                DeviceControlFfiError::Rejected { .. } => traits::CalendarError::PermissionDenied,
+                DeviceControlFfiError::Other { message } => traits::CalendarError::Other(message),
+            })?;
+        serde_json::from_str(&body).map_err(|error| {
+            traits::CalendarError::Other(format!("invalid native calendar response: {error}"))
+        })
+    }
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::ContactsProvider for IosDeviceControlBridge {
+    async fn search(
+        &self,
+        query: traits::ContactsQuery,
+    ) -> Result<Vec<traits::Contact>, traits::ContactsError> {
+        let request = serde_json::to_string(&query)
+            .map_err(|error| traits::ContactsError::Other(error.to_string()))?;
+        let body = self
+            .inner
+            .contacts_json(request)
+            .await
+            .map_err(|error| match error {
+                DeviceControlFfiError::Unavailable => traits::ContactsError::Unavailable,
+                DeviceControlFfiError::Rejected { .. } => traits::ContactsError::PermissionDenied,
+                DeviceControlFfiError::Other { message } => traits::ContactsError::Other(message),
+            })?;
+        serde_json::from_str(&body).map_err(|error| {
+            traits::ContactsError::Other(format!("invalid native contacts response: {error}"))
+        })
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn ios_haptic_style_to_wire(style: traits::HapticStyle) -> &'static str {
+    match style {
+        traits::HapticStyle::Light => "light",
+        traits::HapticStyle::Medium => "medium",
+        traits::HapticStyle::Heavy => "heavy",
+        traits::HapticStyle::Success => "success",
+        traits::HapticStyle::Warning => "warning",
+        traits::HapticStyle::Error => "error",
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn ios_device_control_error(error: DeviceControlFfiError) -> traits::DeviceStatusError {
+    match error {
+        DeviceControlFfiError::Unavailable => traits::DeviceStatusError::Unavailable,
+        DeviceControlFfiError::Rejected { message } | DeviceControlFfiError::Other { message } => {
+            traits::DeviceStatusError::Other(message)
+        }
+    }
+}
+
+#[cfg(feature = "uniffi")]
+fn ios_deep_link_error(error: DeviceControlFfiError) -> traits::DeepLinkError {
+    match error {
+        DeviceControlFfiError::Unavailable => traits::DeepLinkError::Unavailable,
+        DeviceControlFfiError::Rejected { message } => traits::DeepLinkError::Rejected(message),
+        DeviceControlFfiError::Other { message } => traits::DeepLinkError::Other(message),
+    }
+}
+
 /// FFI error surface for the iOS camera callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer [`traits::CameraError`].
@@ -2525,6 +2691,7 @@ pub fn build_ios_engine_with_config(
     clipboard: Box<dyn IosClipboard>,
     permissions: Box<dyn IosPermissionSink>,
     secure_storage: Option<Box<dyn IosSecureStorage>>,
+    device_control: Option<Box<dyn IosDeviceControl>>,
     // Defaulted so the two callers that have no location impl (the cron
     // bridge, the engine round-trip test) keep compiling untouched; only the
     // conversation host passes one.
@@ -2532,8 +2699,25 @@ pub fn build_ios_engine_with_config(
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge { inner: listener });
     #[cfg(target_os = "ios")]
+    let device_control = device_control.map(|inner| Arc::new(IosDeviceControlBridge { inner }));
+    #[cfg(not(target_os = "ios"))]
+    let _ = device_control;
+    #[cfg(target_os = "ios")]
     {
         use platform_ios::{IosPlatform, IosPlatformInputs};
+        let device_status = device_control
+            .clone()
+            .map(|service| service.clone() as Arc<dyn traits::DeviceStatusProvider>);
+        let haptics = device_control
+            .clone()
+            .map(|service| service.clone() as Arc<dyn traits::HapticService>);
+        let calendar = device_control
+            .clone()
+            .map(|service| service.clone() as Arc<dyn traits::CalendarProvider>);
+        let contacts = device_control
+            .clone()
+            .map(|service| service.clone() as Arc<dyn traits::ContactsProvider>);
+        let deep_link = device_control.map(|service| service as Arc<dyn traits::DeepLinkOpener>);
 
         let cfg = ios_mobile_config_from_launch_config(&config)?;
         // The app generator uses the bundled runtime independently of the
@@ -2566,6 +2750,11 @@ pub fn build_ios_engine_with_config(
                 inner: notifications,
             })),
             clipboard: Some(Arc::new(IosClipboardBridge { inner: clipboard })),
+            device_status,
+            haptics,
+            deep_link,
+            calendar,
+            contacts,
             secure_storage: secure_storage.map(|s| {
                 Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn traits::SecureStorage>
             }),
@@ -2619,6 +2808,7 @@ pub fn build_ios_engine(
     permissions: Box<dyn IosPermissionSink>,
     mobile_linux: Option<IosMobileLinuxConfigFfi>,
     secure_storage: Option<Box<dyn IosSecureStorage>>,
+    device_control: Option<Box<dyn IosDeviceControl>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     build_ios_engine_with_config(
         IosEngineLaunchConfigFfi {
@@ -2644,6 +2834,7 @@ pub fn build_ios_engine(
         clipboard,
         permissions,
         secure_storage,
+        device_control,
         None,
     )
 }

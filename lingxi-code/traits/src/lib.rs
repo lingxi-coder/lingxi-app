@@ -28,18 +28,23 @@ pub mod backgrounding;
 pub mod bg_session_forker;
 pub mod bridge;
 pub mod budget;
+pub mod calendar;
 pub mod camera;
 pub mod clipboard;
 pub mod clock;
 pub mod commands;
 pub mod computer_control;
+pub mod contacts;
 pub mod coordinator_mode;
+pub mod deep_link;
+pub mod device_status;
 pub mod effect_handler;
 pub mod env;
 pub mod file_history_sink;
 pub mod filesystem;
 pub mod fork_resume_gate;
 pub mod fork_subagent;
+pub mod haptics;
 pub mod http;
 mod live_session_words;
 pub mod live_sessions;
@@ -98,14 +103,19 @@ pub use backgrounding::{
 };
 pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 pub use budget::{BudgetEnforcerHandle, BudgetError};
+pub use calendar::{CalendarError, CalendarEvent, CalendarProvider, CalendarQuery};
 pub use camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts, CapturedImage};
 pub use clipboard::{Clipboard, ClipboardError};
 pub use clock::Clock;
 pub use commands::{SlashCommandDispatcher, SlashDispatchResult};
 pub use computer_control::{ComputerControl, ComputerError, Screenshot};
+pub use contacts::{Contact, ContactsError, ContactsProvider, ContactsQuery};
+pub use deep_link::{DeepLinkError, DeepLinkOpener};
+pub use device_status::{DeviceStatus, DeviceStatusError, DeviceStatusProvider};
 pub use effect_handler::EffectHandler;
 pub use file_history_sink::FileHistorySink;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
+pub use haptics::{HapticError, HapticService, HapticStyle};
 pub use http::{
     HttpError, HttpTransport, RawByteStreamWithMeta, ResolvedAddressOverride, WebSocketConnection,
     WebSocketConnectionWithMeta, WebSocketMessageStream, WebSocketMessageStreamWithMeta,

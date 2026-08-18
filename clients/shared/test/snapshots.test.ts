@@ -548,6 +548,10 @@ function validateAppBridgeRequest(v: unknown): void {
       'llm_chat',
       'agent_post',
       'background_schedule',
+      'background_list',
+      'background_status',
+      'background_cancel',
+      'background_retry',
     ].includes(o['operation'] as string),
   );
   if ('payload_json' in o) assert.ok(isString(o['payload_json']));
@@ -672,6 +676,16 @@ function validateAppEvent(v: unknown): void {
           isString(o['topic']) &&
           isNumber(o['created_at_ms']),
       );
+      break;
+    case 'app_background_task_changed':
+      assert.ok(
+        isString(o['app_id']) &&
+          isString(o['task_id']) &&
+          isString(o['status']) &&
+          isBool(o['retryable']),
+      );
+      if ('result_json' in o) assert.ok(isString(o['result_json']));
+      if ('error' in o) assert.ok(isString(o['error']));
       break;
     default:
       assert.fail(`unknown AppEventDto type: ${String(o['type'])}`);
@@ -1322,6 +1336,17 @@ test('every event snapshot parses as ClientEvent', () => {
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }
+});
+
+test('background task app events mirror the Rust wire contract', () => {
+  validateAppEvent({
+    type: 'app_background_task_changed',
+    app_id: 'abc12345',
+    task_id: 'background-1',
+    status: 'succeeded',
+    result_json: '{"ok":true}',
+    retryable: false,
+  });
 });
 
 test('message block_set snapshot parses as MessageDto', () => {

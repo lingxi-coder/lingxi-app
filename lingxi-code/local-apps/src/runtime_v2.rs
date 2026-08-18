@@ -83,7 +83,6 @@ pub enum CapabilityId {
     AgentProfilePropose,
     FlowExecute,
     BackgroundSchedule,
-    BackgroundResume,
 }
 
 impl CapabilityId {
@@ -125,12 +124,11 @@ impl CapabilityId {
             Self::AgentProfilePropose => "agent.profiles.propose-update",
             Self::FlowExecute => "flow.execute",
             Self::BackgroundSchedule => "background.schedule",
-            Self::BackgroundResume => "background.resume",
         }
     }
 
     /// All catalog entries in deterministic identifier order.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 34] = [
         Self::DataQuery,
         Self::DataMutate,
         Self::NetworkRequest,
@@ -165,7 +163,6 @@ impl CapabilityId {
         Self::AgentProfilePropose,
         Self::FlowExecute,
         Self::BackgroundSchedule,
-        Self::BackgroundResume,
     ];
 }
 
@@ -381,13 +378,6 @@ fn descriptor_for(id: CapabilityId) -> CapabilityDescriptor {
             false,
             false,
         ),
-        CapabilityId::BackgroundResume => (
-            CapabilityTransport::SystemBackground,
-            CapabilityScope::System,
-            false,
-            false,
-            false,
-        ),
     };
     CapabilityDescriptor {
         id,
@@ -436,7 +426,6 @@ const fn description_for(id: CapabilityId) -> &'static str {
         CapabilityId::AgentProfilePropose => "Propose a future App Agent Profile revision",
         CapabilityId::FlowExecute => "Execute a bounded declarative app flow",
         CapabilityId::BackgroundSchedule => "Schedule an authorized app background flow",
-        CapabilityId::BackgroundResume => "Resume a journaled background flow",
     }
 }
 
@@ -1174,6 +1163,7 @@ mod tests {
             .to_json()
             .unwrap()
             .contains("agent.sessions.create"));
+        assert!(registry.resolve("background.resume").is_none());
     }
 
     #[test]

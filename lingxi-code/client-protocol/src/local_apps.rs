@@ -416,6 +416,14 @@ pub enum AppBridgeOperationDto {
     AgentProfileProposeUpdate,
     /// Register a declarative app flow with the host background scheduler.
     BackgroundSchedule,
+    /// List app-owned background task lifecycle records.
+    BackgroundList,
+    /// Read one app-owned background task lifecycle record.
+    BackgroundStatus,
+    /// Cancel one app-owned background task.
+    BackgroundCancel,
+    /// Requeue one failed or cancelled app-owned background task.
+    BackgroundRetry,
 }
 
 /// One host-bound bridge request. Payloads are data, never executable script.
@@ -792,6 +800,20 @@ pub enum AppEventDto {
     /// A trusted client must explicitly approve or reject this proposal.
     AppProfileProposal {
         proposal: AppAgentProfileProposalDto,
+    },
+    /// Host-owned local-app background task outcome. The result is bounded
+    /// and optional; clients can fetch the durable record through the app's
+    /// background status/list API when they need the full lifecycle view.
+    /// Appended to preserve existing UniFFI enum ordinals.
+    AppBackgroundTaskChanged {
+        app_id: String,
+        task_id: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_json: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        retryable: bool,
     },
 }
 

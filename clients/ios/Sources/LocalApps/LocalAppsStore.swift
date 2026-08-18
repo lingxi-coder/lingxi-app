@@ -100,7 +100,7 @@ final class LocalAppsStore {
 
     #if canImport(engine_mobileFFI)
         @ObservationIgnored private var submitCommand: ((ClientCommand) async throws -> Void)?
-        @ObservationIgnored private var pendingBackgroundScheduleRequests: Set<String> = []
+        @ObservationIgnored private var pendingBackgroundMutationRequests: Set<String> = []
     #endif
 
     init(websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry? = nil) {
@@ -455,6 +455,10 @@ final class LocalAppsStore {
             case ("agent", "cancel"): operation = .agentCancel
             case ("agent", "profileProposeUpdate"): operation = .agentProfileProposeUpdate
             case ("background", "schedule"): operation = .backgroundSchedule
+            case ("background", "list"): operation = .backgroundList
+            case ("background", "status"): operation = .backgroundStatus
+            case ("background", "cancel"): operation = .backgroundCancel
+            case ("background", "retry"): operation = .backgroundRetry
             default: operation = nil
             }
             guard let operation else {
@@ -466,9 +470,11 @@ final class LocalAppsStore {
                 )
                 return
             }
-            let isBackgroundSchedule = operation == .backgroundSchedule
-            if isBackgroundSchedule {
-                pendingBackgroundScheduleRequests.insert(request.id)
+            let reschedulesBackground = operation == .backgroundSchedule
+                || operation == .backgroundCancel
+                || operation == .backgroundRetry
+            if reschedulesBackground {
+                pendingBackgroundMutationRequests.insert(request.id)
             }
             let submitted = await send(
                 .executeAppBridgeRequest(
@@ -481,7 +487,7 @@ final class LocalAppsStore {
                 )
             )
             if !submitted {
-                pendingBackgroundScheduleRequests.remove(request.id)
+                pendingBackgroundMutationRequests.remove(request.id)
                 LocalAppWebViewRegistry.shared.resolveBridge(
                     appID: request.appID,
                     requestID: request.id,
@@ -685,7 +691,7 @@ final class LocalAppsStore {
                 )
 
             case let .appBridgeResponse(response):
-                let rescheduleBackground = pendingBackgroundScheduleRequests.remove(response.requestId) != nil
+                let rescheduleBackground = pendingBackgroundMutationRequests.remove(response.requestId) != nil
                 LocalAppWebViewRegistry.shared.resolveBridge(
                     appID: response.appId,
                     requestID: response.requestId,
@@ -756,6 +762,11 @@ final class LocalAppsStore {
 
             case let .appAgentEventPosted(appId, _, _, _):
                 unreadAgentEvents[appId, default: 0] += 1
+
+            case .appBackgroundTaskChanged:
+                // The durable lifecycle/result record is fetched on demand by
+                // the local app bridge/MCP status APIs.
+                break
             }
         }
 

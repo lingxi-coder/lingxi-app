@@ -62,9 +62,45 @@ pub trait LocalAppsMcpHost: Send + Sync {
         let _ = input;
         Err("background scheduling is unavailable in this host build".into())
     }
+    /// List bounded lifecycle metadata for this app's background tasks.
+    async fn background_list(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("background task listing is unavailable in this host build".into())
+    }
+    /// Read one bounded lifecycle record for this app's background task.
+    async fn background_status(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("background task status is unavailable in this host build".into())
+    }
+    /// Cancel one app-owned background task.
+    async fn background_cancel(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("background task cancellation is unavailable in this host build".into())
+    }
+    /// Requeue one failed or cancelled app-owned background task.
+    async fn background_retry(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("background task retry is unavailable in this host build".into())
+    }
     /// Host-internal bridge implementation hook.
     async fn background_schedule_value(&self, input: Value) -> Result<Value, String> {
         self.background_schedule(input).await
+    }
+    /// Host-internal bridge implementation hook.
+    async fn background_list_value(&self, input: Value) -> Result<Value, String> {
+        self.background_list(input).await
+    }
+    /// Host-internal bridge implementation hook.
+    async fn background_status_value(&self, input: Value) -> Result<Value, String> {
+        self.background_status(input).await
+    }
+    /// Host-internal bridge implementation hook.
+    async fn background_cancel_value(&self, input: Value) -> Result<Value, String> {
+        self.background_cancel(input).await
+    }
+    /// Host-internal bridge implementation hook.
+    async fn background_retry_value(&self, input: Value) -> Result<Value, String> {
+        self.background_retry(input).await
     }
     /// Create a persistent app Agent session after the host's capability gate.
     async fn agent_session_create(&self, input: Value) -> Result<Value, String> {
@@ -833,6 +869,26 @@ impl LocalAppsMcpTransport {
                 json!({"type":"object","properties":{"app_id":app_id.clone(),"interval_ms":{"type":"integer","minimum":900000,"maximum":2592000000u64},"flow":{"type":"object"}},"required":["app_id","interval_ms","flow"],"additionalProperties":false}),
             ),
             Self::tool(
+                "background_list",
+                "List this app's bounded background task lifecycle and last results.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"task_id":{"type":"string","minLength":1,"maxLength":128},"status":{"enum":["scheduled","running","waiting_for_system","succeeded","failed","cancelled"]},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["app_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "background_status",
+                "Read one app-owned background task lifecycle record and last result.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"task_id":{"type":"string","minLength":1,"maxLength":128}},"required":["app_id","task_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "background_cancel",
+                "Cancel one app-owned background task, including a task currently inside a long-running step.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"task_id":{"type":"string","minLength":1,"maxLength":128}},"required":["app_id","task_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "background_retry",
+                "Requeue one failed or cancelled app-owned background task immediately.",
+                json!({"type":"object","properties":{"app_id":app_id,"task_id":{"type":"string","minLength":1,"maxLength":128}},"required":["app_id","task_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
                 "list_checkpoints",
                 "List Git-backed code checkpoints for one app. Read-only and does not affect SQLite data.",
                 json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
@@ -924,6 +980,26 @@ impl LocalAppsMcpTransport {
                 "Register a bounded declarative flow for this app's system background scheduler.",
                 json!({"type":"object","properties":{"interval_ms":{"type":"integer","minimum":900000,"maximum":2592000000u64},"flow":{"type":"object"}},"required":["interval_ms","flow"],"additionalProperties":false}),
             ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "background_list"),
+                "List this app's bounded background task lifecycle and last results.",
+                json!({"type":"object","properties":{"task_id":{"type":"string","minLength":1,"maxLength":128},"status":{"enum":["scheduled","running","waiting_for_system","succeeded","failed","cancelled"]},"limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":false}),
+            ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "background_status"),
+                "Read one app-owned background task lifecycle record and last result.",
+                json!({"type":"object","properties":{"task_id":{"type":"string","minLength":1,"maxLength":128}},"required":["task_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "background_cancel"),
+                "Cancel one app-owned background task.",
+                json!({"type":"object","properties":{"task_id":{"type":"string","minLength":1,"maxLength":128}},"required":["task_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                &Self::dynamic_tool_name(app_id, "background_retry"),
+                "Requeue one failed or cancelled app-owned background task immediately.",
+                json!({"type":"object","properties":{"task_id":{"type":"string","minLength":1,"maxLength":128}},"required":["task_id"],"additionalProperties":false}),
+            ),
         ]
     }
 
@@ -941,6 +1017,10 @@ impl LocalAppsMcpTransport {
                     | "agent_sessions_update"
                     | "agent_profile_propose_update"
                     | "background_schedule"
+                    | "background_list"
+                    | "background_status"
+                    | "background_cancel"
+                    | "background_retry"
             )
         {
             Some((app_id, operation))
@@ -1025,6 +1105,22 @@ impl LocalAppsMcpTransport {
                     }
                 }
                 "background_schedule" => match self.host()?.background_schedule(bound).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                },
+                "background_list" => match self.host()?.background_list(bound).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                },
+                "background_status" => match self.host()?.background_status(bound).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                },
+                "background_cancel" => match self.host()?.background_cancel(bound).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                },
+                "background_retry" => match self.host()?.background_retry(bound).await {
                     Ok(value) => Self::result(value),
                     Err(message) => Self::tool_error(message),
                 },
@@ -1238,6 +1334,22 @@ impl LocalAppsMcpTransport {
                 Err(message) => Self::tool_error(message),
             },
             "background_schedule" => match self.host()?.background_schedule(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "background_list" => match self.host()?.background_list(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "background_status" => match self.host()?.background_status(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "background_cancel" => match self.host()?.background_cancel(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "background_retry" => match self.host()?.background_retry(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
@@ -1665,6 +1777,10 @@ mod tests {
                 "read_logs",
                 "read_app_events",
                 "background_schedule",
+                "background_list",
+                "background_status",
+                "background_cancel",
+                "background_retry",
                 "list_checkpoints",
                 "restore_checkpoint",
             ]

@@ -269,3 +269,39 @@ export async function scheduleBackgroundFlow(request) {
   }
   return bridge.background.schedule(request);
 }
+
+/** List this app's bounded background task lifecycle and last results. */
+export async function listBackgroundTasks(request = {}) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.background?.list) {
+    throw new Error("LingXi background task management is unavailable");
+  }
+  return bridge.background.list(request);
+}
+
+/** Read one app-owned background task lifecycle record and last result. */
+export async function getBackgroundTaskStatus(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.background?.status) {
+    throw new Error("LingXi background task management is unavailable");
+  }
+  return bridge.background.status(request);
+}
+
+/** Cancel one app-owned background task. */
+export async function cancelBackgroundTask(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.background?.cancel) {
+    throw new Error("LingXi background task management is unavailable");
+  }
+  return bridge.background.cancel(request);
+}
+
+/** Requeue one failed or cancelled app-owned background task. */
+export async function retryBackgroundTask(request) {
+  const bridge = getLingXiBridge();
+  if (!bridge?.background?.retry) {
+    throw new Error("LingXi background task management is unavailable");
+  }
+  return bridge.background.retry(request);
+}

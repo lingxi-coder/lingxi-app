@@ -7,7 +7,7 @@
 
 use super::LocalAppsHostBroker;
 use crate::host::LocalAppBackgroundRunDto;
-use client_protocol::local_apps::AppCapabilityKindDto;
+use client_protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
 use local_apps::{AppCapability, BackgroundTaskStatus, CapabilityId};
 use serde_json::{json, Map, Value};
 use std::time::Duration;
@@ -73,10 +73,22 @@ impl LocalAppsHostBroker {
                 {
                     continue;
                 }
-                outcomes.push(
-                    self.run_background_task(&record.id, &task.task_id, now_ms, false)
-                        .await,
-                );
+                let outcome = self
+                    .run_background_task(&record.id, &task.task_id, now_ms, false)
+                    .await;
+                self.event_sink
+                    .emit(client_protocol::events::ClientEvent::AppEvent {
+                        event: AppEventDto::AppBackgroundTaskChanged {
+                            app_id: outcome.app_id.clone(),
+                            task_id: outcome.task_id.clone(),
+                            status: outcome.status.clone(),
+                            result_json: outcome.result_json.clone(),
+                            error: outcome.error.clone(),
+                            retryable: outcome.retryable,
+                        },
+                    })
+                    .await;
+                outcomes.push(outcome);
             }
         }
         outcomes
@@ -197,6 +209,89 @@ impl LocalAppsHostBroker {
             let _ = local_apps::background::clear_cancellation(&layout, task_id);
         }
         result
+    }
+
+    /// Requeue a failed or cancelled task immediately from a trusted app
+    /// management surface. A running or already successful task is never
+    /// rewound by this operation.
+    pub(crate) async fn retry_background_task(
+        &self,
+        app_id: &str,
+        task_id: &str,
+    ) -> Result<bool, String> {
+        let layout = self.layout(app_id)?;
+        let _process_lock = self.acquire_background_process_lock(app_id).await?;
+        let _guard = self.background_task_writes.lock().await;
+        let mut tasks =
+            local_apps::background::load_tasks(&layout).map_err(|error| error.to_string())?;
+        let task = tasks
+            .iter_mut()
+            .find(|task| task.task_id == task_id)
+            .ok_or_else(|| "background task was not found".to_string())?;
+        if !matches!(
+            task.status,
+            BackgroundTaskStatus::Failed
+                | BackgroundTaskStatus::WaitingForSystem
+                | BackgroundTaskStatus::Cancelled
+        ) {
+            return Ok(false);
+        }
+        let now = super::now_ms();
+        task.status = BackgroundTaskStatus::Scheduled;
+        task.updated_at_ms = now;
+        let mut journal =
+            local_apps::background::load_journal(&layout).map_err(|error| error.to_string())?;
+        let entry = journal
+            .iter_mut()
+            .find(|entry| entry.task_id == task_id)
+            .ok_or_else(|| "background task has no journal entry".to_string())?;
+        entry.next_step_id = entry
+            .next_step_id
+            .clone()
+            .or_else(|| task.flow.steps.first().map(|step| step.step_id.clone()));
+        entry.next_run_at_ms = Some(now);
+        entry.last_error = None;
+        entry.updated_at_ms = now;
+        local_apps::background::save_state(&layout, &tasks, &journal)
+            .map_err(|error| error.to_string())?;
+        let _ = local_apps::background::clear_cancellation(&layout, task_id);
+        Ok(true)
+    }
+
+    /// Build a bounded, app-scoped view of persisted background task state.
+    /// Flow inputs are deliberately omitted; callers receive only lifecycle
+    /// metadata and the bounded last result.
+    pub(crate) fn background_task_summaries(
+        layout: &local_apps::AppLayout,
+        task_id: Option<&str>,
+        status: Option<BackgroundTaskStatus>,
+        limit: usize,
+    ) -> Result<Vec<Value>, String> {
+        let tasks =
+            local_apps::background::load_tasks(layout).map_err(|error| error.to_string())?;
+        let journal =
+            local_apps::background::load_journal(layout).map_err(|error| error.to_string())?;
+        Ok(tasks
+            .iter()
+            .filter(|task| task_id.is_none_or(|value| value == task.task_id))
+            .filter(|task| status.is_none_or(|value| value == task.status))
+            .take(limit)
+            .map(|task| {
+                let entry = journal.iter().find(|entry| entry.task_id == task.task_id);
+                json!({
+                    "task_id": task.task_id,
+                    "flow_id": task.flow_id,
+                    "trigger": task.trigger,
+                    "status": task.status,
+                    "updated_at_ms": task.updated_at_ms,
+                    "next_step_id": entry.and_then(|entry| entry.next_step_id.clone()),
+                    "next_run_at_ms": entry.and_then(|entry| entry.next_run_at_ms),
+                    "attempt": entry.map(|entry| entry.attempt).unwrap_or(0),
+                    "last_error": entry.and_then(|entry| entry.last_error.clone()),
+                    "last_result_json": entry.and_then(|entry| entry.last_result_json.clone()),
+                })
+            })
+            .collect())
     }
 
     async fn run_background_task(
@@ -1082,6 +1177,73 @@ mod tests {
         assert!(persisted_tasks
             .iter()
             .all(|task| task.status == BackgroundTaskStatus::Scheduled));
+    }
+
+    #[tokio::test]
+    async fn task_management_exposes_bounded_results_and_requeues_failures() {
+        let (root, _service, broker, app_id) = harness().await;
+        let layout = local_apps::AppLayout::new(root.path(), app_id.clone()).expect("layout");
+        let flow = local_apps::FlowDefinition {
+            flow_id: "flow-management".into(),
+            version: 1,
+            steps: vec![local_apps::FlowStep {
+                step_id: "status".into(),
+                capability: CapabilityId::RuntimeStatus,
+                depends_on: Vec::new(),
+                input_json: "{}".into(),
+            }],
+        };
+        local_apps::background::save_tasks(
+            &layout,
+            &[BackgroundTaskRecord {
+                schema_version: RUNTIME_CONTRACT_SCHEMA_VERSION,
+                task_id: "task-management".into(),
+                app_id: app_id.clone(),
+                flow_id: flow.flow_id.clone(),
+                flow,
+                trigger: BackgroundTrigger::Schedule {
+                    interval_ms: 900_000,
+                },
+                status: BackgroundTaskStatus::Failed,
+                updated_at_ms: 1,
+            }],
+        )
+        .expect("tasks");
+        local_apps::background::save_journal(
+            &layout,
+            &[BackgroundJournalEntry {
+                task_id: "task-management".into(),
+                flow_id: "flow-management".into(),
+                next_step_id: Some("status".into()),
+                next_run_at_ms: Some(9_000),
+                last_result_json: Some("{\"status\":\"old\"}".into()),
+                attempt: 2,
+                last_error: Some("temporary failure".into()),
+                updated_at_ms: 1,
+            }],
+        )
+        .expect("journal");
+
+        let summaries = LocalAppsHostBroker::background_task_summaries(
+            &layout,
+            Some("task-management"),
+            Some(BackgroundTaskStatus::Failed),
+            10,
+        )
+        .expect("summaries");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0]["status"], "failed");
+        assert_eq!(summaries[0]["last_result_json"], "{\"status\":\"old\"}");
+
+        assert!(broker
+            .retry_background_task(&app_id, "task-management")
+            .await
+            .expect("retry"));
+        let tasks = local_apps::background::load_tasks(&layout).expect("reloaded tasks");
+        assert_eq!(tasks[0].status, BackgroundTaskStatus::Scheduled);
+        let journal = local_apps::background::load_journal(&layout).expect("reloaded journal");
+        assert!(journal[0].next_run_at_ms.is_some());
+        assert!(journal[0].last_error.is_none());
     }
 
     #[tokio::test]

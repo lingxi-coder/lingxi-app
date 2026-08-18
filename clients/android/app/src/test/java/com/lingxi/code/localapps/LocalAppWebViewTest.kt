@@ -19,6 +19,10 @@ class LocalAppWebViewTest {
             "agent_session_close", "agent_send", "agent_stream", "agent_cancel",
             "agent_profile_propose_update",
             "background_schedule",
+            "background_list",
+            "background_status",
+            "background_cancel",
+            "background_retry",
         )
 
         assertEquals(expected, AppBridgeOperationDto.entries.map { it.bridgeWireName() }.toSet())

@@ -17,7 +17,8 @@ use futures_util::StreamExt;
 use local_apps::{
     load_manifest, load_permissions, save_permissions, AppCapability, AppDataStore,
     AppDependencyState, AppLayout, AppPermissions, AppRuntimeMode, AppRuntimeState, AppService,
-    DataMigrationPreview, DataMutation, DataQuery, DataSortDirection, DataSortKey,
+    BackgroundTaskStatus, DataMigrationPreview, DataMutation, DataQuery, DataSortDirection,
+    DataSortKey,
     PermissionDecision, SessionPermissions,
 };
 use serde_json::{json, Map, Value};
@@ -2019,6 +2020,22 @@ impl LocalAppsHostBroker {
                 .background_schedule_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
+            AppBridgeOperationDto::BackgroundList => self
+                .background_list_value(Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
+            AppBridgeOperationDto::BackgroundStatus => self
+                .background_status_value(Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
+            AppBridgeOperationDto::BackgroundCancel => self
+                .background_cancel_value(Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
+            AppBridgeOperationDto::BackgroundRetry => self
+                .background_retry_value(Value::Object(input))
+                .await
+                .map_err(BridgeFailure::from),
             _ => Err("unsupported bridge operation for this engine version".into()),
         }
     }
@@ -2059,6 +2076,10 @@ impl LocalAppsHostBroker {
             AppBridgeOperationDto::BackgroundSchedule => {
                 local_apps::CapabilityId::BackgroundSchedule
             }
+            AppBridgeOperationDto::BackgroundList
+            | AppBridgeOperationDto::BackgroundStatus
+            | AppBridgeOperationDto::BackgroundCancel
+            | AppBridgeOperationDto::BackgroundRetry => local_apps::CapabilityId::BackgroundSchedule,
             _ => return Err("unsupported bridge operation for runtime v2 context".into()),
         };
         let layout = self.layout(&request.app_id)?;
@@ -2790,6 +2811,24 @@ impl LocalAppsHostBroker {
     }
 }
 
+impl LocalAppsHostBroker {
+    fn background_management_layout(&self, app_id: &str) -> Result<AppLayout, String> {
+        let layout = self.layout(app_id)?;
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        if !manifest
+            .capabilities
+            .contains(&AppCapability::BackgroundSchedule)
+        {
+            return Err("background task management is not declared in the app manifest".into());
+        }
+        let permissions = load_permissions(&layout).map_err(|error| error.to_string())?;
+        if !permissions.allows(AppCapability::BackgroundSchedule) {
+            return Err("background task management requires durable approval".into());
+        }
+        Ok(layout)
+    }
+}
+
 #[async_trait]
 impl LocalAppsMcpHost for LocalAppsHostBroker {
     fn create_next_step(&self) -> String {
@@ -3015,13 +3054,9 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         flow.validate(&registry)
             .map_err(|error| format!("invalid background flow: {error}"))?;
         for step in &flow.steps {
-            if matches!(
-                step.capability,
-                local_apps::CapabilityId::BackgroundSchedule
-                    | local_apps::CapabilityId::BackgroundResume
-            ) {
+            if matches!(step.capability, local_apps::CapabilityId::BackgroundSchedule) {
                 return Err(
-                    "background flows cannot schedule or resume another background flow".into(),
+                    "background flows cannot schedule another background flow".into(),
                 );
             }
             let descriptor = registry
@@ -3084,6 +3119,60 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         Ok(json!({"task": task, "scheduled": true, "scheduler": "host-journal"}))
     }
 
+    async fn background_list_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        self.service()?.record(&app_id).await.map_err(|e| e.to_string())?;
+        let layout = self.background_management_layout(&app_id)?;
+        let task_id = input.get("task_id").and_then(Value::as_str);
+        let status = input
+            .get("status")
+            .and_then(Value::as_str)
+            .map(parse_background_status)
+            .transpose()?;
+        let limit = input
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(50)
+            .clamp(1, 100) as usize;
+        let tasks = Self::background_task_summaries(&layout, task_id, status, limit)?;
+        let count = tasks.len();
+        Ok(json!({"app_id": app_id, "tasks": tasks, "count": count}))
+    }
+
+    async fn background_status_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let task_id = required_string(&input, "task_id")?.to_string();
+        let value = self
+            .background_list_value(json!({"app_id": app_id, "task_id": task_id, "limit": 1}))
+            .await?;
+        if value
+            .get("tasks")
+            .and_then(Value::as_array)
+            .is_none_or(|tasks| tasks.is_empty())
+        {
+            return Err("background task was not found".into());
+        }
+        Ok(value)
+    }
+
+    async fn background_cancel_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let task_id = required_string(&input, "task_id")?.to_string();
+        self.service()?.record(&app_id).await.map_err(|e| e.to_string())?;
+        self.background_management_layout(&app_id)?;
+        let cancelled = self.cancel_background_task(&app_id, &task_id).await;
+        Ok(json!({"app_id": app_id, "task_id": task_id, "cancelled": cancelled}))
+    }
+
+    async fn background_retry_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let task_id = required_string(&input, "task_id")?.to_string();
+        self.service()?.record(&app_id).await.map_err(|e| e.to_string())?;
+        self.background_management_layout(&app_id)?;
+        let retried = self.retry_background_task(&app_id, &task_id).await?;
+        Ok(json!({"app_id": app_id, "task_id": task_id, "retried": retried}))
+    }
+
     async fn agent_session_create(&self, input: Value) -> Result<Value, String> {
         self.agent_session_create_value(input).await
     }
@@ -3104,6 +3193,22 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.background_schedule_value(input).await
     }
 
+    async fn background_list(&self, input: Value) -> Result<Value, String> {
+        self.background_list_value(input).await
+    }
+
+    async fn background_status(&self, input: Value) -> Result<Value, String> {
+        self.background_status_value(input).await
+    }
+
+    async fn background_cancel(&self, input: Value) -> Result<Value, String> {
+        self.background_cancel_value(input).await
+    }
+
+    async fn background_retry(&self, input: Value) -> Result<Value, String> {
+        self.background_retry_value(input).await
+    }
+
     async fn scaffold_app(&self, record: local_apps::AppRecord) -> Result<(), String> {
         self.scaffold_app_value(&record).await
     }
@@ -3115,6 +3220,18 @@ fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("missing non-empty {key:?}"))
+}
+
+fn parse_background_status(value: &str) -> Result<BackgroundTaskStatus, String> {
+    match value {
+        "scheduled" => Ok(BackgroundTaskStatus::Scheduled),
+        "running" => Ok(BackgroundTaskStatus::Running),
+        "waiting_for_system" => Ok(BackgroundTaskStatus::WaitingForSystem),
+        "succeeded" => Ok(BackgroundTaskStatus::Succeeded),
+        "failed" => Ok(BackgroundTaskStatus::Failed),
+        "cancelled" => Ok(BackgroundTaskStatus::Cancelled),
+        _ => Err(format!("unsupported background task status {value:?}")),
+    }
 }
 
 fn now_ms() -> u64 {

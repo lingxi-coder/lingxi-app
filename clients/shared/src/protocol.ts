@@ -885,7 +885,11 @@ export type AppBridgeOperationDto =
   | 'agent_stream'
   | 'agent_cancel'
   | 'agent_profile_propose_update'
-  | 'background_schedule';
+  | 'background_schedule'
+  | 'background_list'
+  | 'background_status'
+  | 'background_cancel'
+  | 'background_retry';
 
 /** One host-bound, data-only bridge request (local_apps.rs `AppBridgeRequestDto`). */
 export interface AppBridgeRequestDto {
@@ -1116,6 +1120,15 @@ export type AppEventDto =
   | { type: 'app_llm_activity_changed'; app_id: string; active: boolean }
   /** An app posted a mailbox event via `agent.post`; carries no body — badge only. */
   | { type: 'app_agent_event_posted'; app_id: string; seq: number; topic: string; created_at_ms: number }
+  | {
+      type: 'app_background_task_changed';
+      app_id: string;
+      task_id: string;
+      status: string;
+      result_json?: string;
+      error?: string;
+      retryable: boolean;
+    }
   | { type: 'app_bridge_stream_frame'; frame: AppBridgeStreamFrameDto; frameJson: string };
 
 // ─────────────────────────────────────────────────────────────────────────────

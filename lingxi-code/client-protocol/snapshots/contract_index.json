@@ -59,6 +59,8 @@
   "AppCapabilityKindDto::DeepLink": "deep_link",
   "AppCapabilityKindDto::DeviceStatus": "device_status",
   "AppCapabilityKindDto::Files": "files",
+  "AppCapabilityKindDto::FilesRead": "files_read",
+  "AppCapabilityKindDto::FilesWrite": "files_write",
   "AppCapabilityKindDto::Haptics": "haptics",
   "AppCapabilityKindDto::Llm": "llm",
   "AppCapabilityKindDto::Location": "location",

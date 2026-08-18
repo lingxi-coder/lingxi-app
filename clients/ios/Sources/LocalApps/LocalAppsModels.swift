@@ -181,6 +181,8 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case share
         case textToSpeech
         case files
+        case filesRead
+        case filesWrite
         case deviceStatus
         case haptics
         case deepLink
@@ -213,6 +215,10 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case .clipboard: "允许应用读取或写入系统剪贴板？"
         case .share: "允许应用打开系统分享面板？"
         case .textToSpeech: "允许应用将文字转换为语音？"
+        case .filesRead:
+            "允许应用读取自己的私有文件？"
+        case .filesWrite:
+            "允许应用写入自己的私有文件？"
         case .files:
             if reason.contains("写入") {
                 "允许应用写入自己的私有文件？"

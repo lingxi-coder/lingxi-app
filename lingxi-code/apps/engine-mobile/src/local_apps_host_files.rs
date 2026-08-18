@@ -181,7 +181,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::FilesRead,
-            AppCapabilityKindDto::Files,
+            AppCapabilityKindDto::FilesRead,
             REASON_FILES_READ,
         )
         .await?;
@@ -216,7 +216,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::FilesWrite,
-            AppCapabilityKindDto::Files,
+            AppCapabilityKindDto::FilesWrite,
             REASON_FILES_WRITE,
         )
         .await?;

@@ -1405,6 +1405,8 @@ fn current_contract_index() -> ContractIndex {
     put("AppCapabilityKindDto::Location", "location");
     put("AppCapabilityKindDto::Notifications", "notifications");
     put("AppCapabilityKindDto::Files", "files");
+    put("AppCapabilityKindDto::FilesRead", "files_read");
+    put("AppCapabilityKindDto::FilesWrite", "files_write");
     put("AppCapabilityKindDto::Clipboard", "clipboard");
     put("AppCapabilityKindDto::Share", "share");
     put("AppCapabilityKindDto::TextToSpeech", "text_to_speech");

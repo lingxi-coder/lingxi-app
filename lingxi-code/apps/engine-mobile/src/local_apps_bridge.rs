@@ -349,7 +349,8 @@ fn lower_capability(capability: AppCapability) -> AppCapabilityKindDto {
         AppCapability::Microphone => AppCapabilityKindDto::Microphone,
         AppCapability::Location => AppCapabilityKindDto::Location,
         AppCapability::Notifications => AppCapabilityKindDto::Notifications,
-        AppCapability::FilesRead | AppCapability::FilesWrite => AppCapabilityKindDto::Files,
+        AppCapability::FilesRead => AppCapabilityKindDto::FilesRead,
+        AppCapability::FilesWrite => AppCapabilityKindDto::FilesWrite,
         AppCapability::DeviceStatus => AppCapabilityKindDto::DeviceStatus,
         AppCapability::Haptics => AppCapabilityKindDto::Haptics,
         AppCapability::DeepLink => AppCapabilityKindDto::DeepLink,
@@ -509,6 +510,19 @@ pub(crate) fn raise_origin(origin: AppCreateOriginDto) -> Result<AppCreateOrigin
 mod tests {
     use super::*;
     use local_apps::AppWorkflowState;
+
+    #[test]
+    #[test]
+    fn file_capabilities_lower_to_distinct_wire_kinds() {
+        assert_eq!(
+            serde_json::to_string(&lower_capability(AppCapability::FilesRead)).unwrap(),
+            "\"files_read\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&lower_capability(AppCapability::FilesWrite)).unwrap(),
+            "\"files_write\"",
+        );
+    }
 
     #[test]
     fn dto_and_core_agree_on_the_wire_strings() {

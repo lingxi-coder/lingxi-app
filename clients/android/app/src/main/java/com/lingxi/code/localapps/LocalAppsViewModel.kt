@@ -1078,6 +1078,10 @@ private fun AppCapabilityKindDto.authorizationTitle(
         "允许应用打开系统分享面板？"
     AppCapabilityKindDto.TEXT_TO_SPEECH ->
         "允许应用将文字转换为语音？"
+    AppCapabilityKindDto.FILES_READ ->
+        "允许应用读取自己的私有文件？"
+    AppCapabilityKindDto.FILES_WRITE ->
+        "允许应用写入自己的私有文件？"
     AppCapabilityKindDto.FILES -> when {
         reason.contains("写入") -> "允许应用写入自己的私有文件？"
         reason.contains("读取") -> "允许应用读取自己的私有文件？"

@@ -1097,6 +1097,8 @@ export type AppCapabilityKindDto =
   | 'location'
   | 'notifications'
   | 'files'
+  | 'files_read'
+  | 'files_write'
   | 'clipboard'
   | 'share'
   | 'text_to_speech'

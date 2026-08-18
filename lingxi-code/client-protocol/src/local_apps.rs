@@ -740,6 +740,8 @@ pub enum AppCapabilityKindDto {
     Microphone,
     Location,
     Notifications,
+    /// Legacy combined files prompt. New grants use [`Self::FilesRead`] /
+    /// [`Self::FilesWrite`].
     Files,
     Clipboard,
     Share,
@@ -753,6 +755,8 @@ pub enum AppCapabilityKindDto {
     Calendar,
     Contacts,
     Media,
+    FilesRead,
+    FilesWrite,
 }
 
 /// A capability approval request surfaced by the host.

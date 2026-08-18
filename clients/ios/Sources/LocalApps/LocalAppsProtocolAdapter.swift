@@ -109,6 +109,8 @@ enum LocalAppsProtocolAdapter {
         case .share: .share
         case .textToSpeech: .textToSpeech
         case .files: .files
+        case .filesRead: .filesRead
+        case .filesWrite: .filesWrite
         case .deviceStatus: .deviceStatus
         case .haptics: .haptics
         case .deepLink: .deepLink

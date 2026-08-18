@@ -180,6 +180,19 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_user_question_timeout: Option<String>,
 
+    /// Scalar field (later source wins). `dialogExpiry`: how long permission /
+    /// ask-user dialogs stay armed. 2.1.232 `_Vp`:
+    /// `["default","60s","5m","10m","never"]`. UI `"default"` is stored as
+    /// omitted (`void 0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialog_expiry: Option<String>,
+
+    /// Scalar field (later source wins). `crossSessionInbound`: accept / hold /
+    /// refuse messages from other live sessions on this machine. 2.1.232 `bVp`:
+    /// `["default","accept","hold","refuse"]`. `"default"` is stored omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_session_inbound: Option<String>,
+
     /// Command prepended to CLI self-spawns. Only user, `--settings`, managed,
     /// and the dedicated environment variables may contribute at the consumer.
     #[serde(default, skip_serializing_if = "Option::is_none")]

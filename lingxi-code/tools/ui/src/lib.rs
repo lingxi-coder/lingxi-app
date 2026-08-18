@@ -19,6 +19,7 @@
 pub mod artifact;
 pub mod ask_user_question;
 pub mod brief;
+pub mod list_agents;
 pub mod push_notification;
 pub mod send_message;
 pub mod sleep;
@@ -26,6 +27,7 @@ pub mod synthetic_output;
 pub use artifact::ArtifactTool;
 pub use ask_user_question::AskUserQuestionTool;
 pub use brief::BriefTool;
+pub use list_agents::ListAgentsTool;
 pub use push_notification::PushNotificationTool;
 pub use send_message::SendMessageTool;
 pub use sleep::SleepTool;
@@ -106,6 +108,9 @@ fn register_with_options(
     if include_send_message {
         reg.register_builtin(Arc::new(SendMessageTool::new(ctx.clone())));
     }
+    // 2.1.232 `ListAgents` (`zy`, alias `ListPeers`). `is_enabled` follows
+    // harbor-kite / a live-session process dir so headless fixtures stay empty.
+    reg.register_builtin(Arc::new(ListAgentsTool::new(ctx.clone())));
     // AskUserQuestion must NOT auto-continue by default (oracle 2.1.201): the
     // production resolver honors `askUserQuestionTimeout` (default `never` ⇒
     // block on the user). A non-interactive (`--print`) session does not expose

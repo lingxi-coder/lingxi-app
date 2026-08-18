@@ -159,6 +159,11 @@ pub struct AppCallbacks<'cb> {
     /// `TurnEnded` for a non-turn result to clear the widget's running state.
     /// `None` (tests / no registry) is a no-op.
     pub on_dispatch_slash: Box<dyn FnMut(String, CancellationToken) + 'cb>,
+    /// Executed on [`ChatOutcome::RewakePeer`]: the caller drives
+    /// `OrchestratorHandle::run_async_hook_rewake` off the render thread so
+    /// a just-delivered held peer message is injected without a synthetic
+    /// user prompt.
+    pub on_rewake_peer: Box<dyn FnMut() + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -493,6 +498,9 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::DispatchSlash(input, token) => {
                         (self.callbacks.on_dispatch_slash)(input, token);
                     }
+                    ChatOutcome::RewakePeer => {
+                        (self.callbacks.on_rewake_peer)();
+                    }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
                     ChatOutcome::SetTheme(setting) => {
@@ -742,6 +750,7 @@ pub fn run_app(
     on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
     on_task_action: impl FnMut(TaskAction),
     on_dispatch_slash: impl FnMut(String, CancellationToken),
+    on_rewake_peer: impl FnMut(),
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -794,6 +803,7 @@ pub fn run_app(
             on_sandbox_action: Box::new(on_sandbox_action),
             on_task_action: Box::new(on_task_action),
             on_dispatch_slash: Box::new(on_dispatch_slash),
+            on_rewake_peer: Box::new(on_rewake_peer),
         },
     );
     app.configure_fullscreen(
@@ -956,6 +966,7 @@ mod tests {
                 on_sandbox_action: Box::new(|_| {}),
                 on_task_action: Box::new(|_| {}),
                 on_dispatch_slash: Box::new(|_, _| {}),
+                on_rewake_peer: Box::new(|| {}),
             },
         );
         app

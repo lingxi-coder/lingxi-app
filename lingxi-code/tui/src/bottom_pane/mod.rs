@@ -23,6 +23,7 @@ pub mod connect_method_view;
 pub mod connect_picker_view;
 pub mod dialog_view;
 pub mod footer;
+pub mod held_peer_view;
 pub mod input_status;
 pub mod model_picker_view;
 mod paste_burst;
@@ -196,6 +197,9 @@ pub enum BottomPaneOutcome {
     /// Ctrl-O: the owner should toggle transcript verbose mode (and reflect
     /// the new state back via [`BottomPane::set_verbose`]).
     ToggleVerbose,
+    /// A held peer-message was delivered: start a skip-append rewake turn
+    /// so the released body is injected (`run_async_hook_rewake`).
+    RewakePeer,
     /// Ctrl-C or Esc while a task is running: the owner should cancel the
     /// turn (the interrupt-before-quit half of the layered routing policy —
     /// acceptance criterion 14).
@@ -763,6 +767,12 @@ impl BottomPane {
             .push(Box::new(ComputerAccessView::new(exchange)));
     }
 
+    /// Open the held-peer-message dialog (2.1.232 inbound hold).
+    pub fn show_held_peer(&mut self, held: traits::uds_inbox::HeldPeer) {
+        self.view_stack
+            .push(Box::new(held_peer_view::HeldPeerView::new(held)));
+    }
+
     /// Open the model picker over `rows` (an empty list renders the picker's
     /// own empty-state message — plan Phase 11 step 5).
     pub fn show_model_picker(&mut self, rows: Vec<ModelRow>) {
@@ -1321,6 +1331,7 @@ impl BottomPane {
             ViewOutcome::Rewind { message, scope } => BottomPaneOutcome::Rewind { message, scope },
             ViewOutcome::ChangeDirectory(path) => BottomPaneOutcome::ChangeDirectory(path),
             ViewOutcome::SwitchSession(uuid) => BottomPaneOutcome::SwitchSession(uuid),
+            ViewOutcome::RewakePeer => BottomPaneOutcome::RewakePeer,
         }
     }
 

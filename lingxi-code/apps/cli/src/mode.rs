@@ -135,14 +135,38 @@ async fn run_tui(argv: &Argv) -> i32 {
     // target re-mounts THIS session instead of exiting.
     let initial_session_id = tui_build.runtime.orchestrator.current_session_id().await;
     let session_registration = {
-        let name = std::env::current_dir()
+        let derived = std::env::current_dir()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
-        Arc::new(crate::agents_registry::SessionRegistration::register(
-            &crate::run::lingxi_home_dir(),
+        let user_name = argv
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let display = user_name.or(derived.as_deref());
+        let home = crate::run::lingxi_home_dir();
+        let reg = Arc::new(crate::agents_registry::SessionRegistration::register(
+            &home,
             Some(initial_session_id.to_string()).as_deref(),
-            name.as_deref(),
-        ))
+            display,
+        ));
+        let dir = traits::live_sessions::LiveSessionDir::at_live(
+            crate::agents_registry::sessions_dir(&home),
+        );
+        let claim =
+            traits::live_sessions::install_process(dir, &initial_session_id.to_string(), user_name);
+        if let Some(claim) = claim {
+            let source = if claim.notice.is_some() {
+                "collision"
+            } else {
+                "user"
+            };
+            reg.set_name(&claim.name, source);
+        } else if let Some(derived) = display {
+            traits::live_sessions::set_process_name(derived);
+        }
+        ensure_live_messaging(&initial_session_id.to_string(), user_name, Some(&reg));
+        reg
     };
     // FRESH launch: ratatui (`tui-rata`) is the only TUI backend. It drives the
     // live orchestrator directly via `tui_build`'s bridge channel; no replayed
@@ -153,10 +177,56 @@ async fn run_tui(argv: &Argv) -> i32 {
     // interactive session.
     session_registration.deregister();
     // Follow an in-session `/resume` switch by re-mounting the chosen session
-    // in-process (writer retargeted) until the user quits. A switch re-mounts
-    // WITHOUT re-registering (resume never registers, matching the existing
-    // `--resume` behavior).
+    // in-process (writer retargeted) until the user quits. Inbox stays up
+    // across remounts (same pid); `drive_tui_switch_loop` stops it on exit.
     crate::run::drive_tui_switch_loop(argv, outcome, Some(initial_session_id.as_uuid())).await
+}
+
+/// Bind the process UDS inbox and advertise it on the live session record.
+pub(crate) fn ensure_live_messaging(
+    session_id: &str,
+    user_name: Option<&str>,
+    registration: Option<&Arc<crate::agents_registry::SessionRegistration>>,
+) {
+    let home = crate::run::lingxi_home_dir();
+    let dir =
+        traits::live_sessions::LiveSessionDir::at_live(crate::agents_registry::sessions_dir(&home));
+    if traits::live_sessions::process_dir().is_none() {
+        let claim = traits::live_sessions::install_process(dir.clone(), session_id, user_name);
+        if let Some(claim) = claim {
+            if let Some(reg) = registration {
+                reg.set_name(
+                    &claim.name,
+                    if claim.notice.is_some() {
+                        "collision"
+                    } else {
+                        "user"
+                    },
+                );
+            }
+        } else if let Some(name) = user_name {
+            traits::live_sessions::set_process_name(name);
+        }
+    } else {
+        traits::live_sessions::set_process_session_id(session_id);
+        if let Some(name) = user_name.filter(|s| !s.is_empty()) {
+            traits::live_sessions::set_process_name(name);
+        }
+    }
+    let path = match traits::uds_inbox::process_socket_path() {
+        Some(existing) => existing,
+        None => {
+            let sock = traits::uds_inbox::default_socket_path(std::process::id());
+            match traits::uds_inbox::start_process_inbox(sock) {
+                Ok(path) => path,
+                Err(_) => return,
+            }
+        }
+    };
+    if let Some(reg) = registration {
+        reg.set_messaging_socket(&path);
+    }
+    let _ = dir.set_messaging_socket(std::process::id(), session_id, &path);
 }
 
 /// (iocraft → ratatui migration) Launch the `tui-rata` interactive chat wired
@@ -278,6 +348,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // captured before `tui_build` is partly consumed below).
     let initial_permission_mode = tui_build.initial_permission_mode;
     let bypass_available = tui_build.bypass_available;
+    traits::live_sessions::set_process_permission_mode(
+        initial_permission_mode.wire_str(),
+        bypass_available,
+    );
+    {
+        let sid = orchestrator.current_session_id().await.to_string();
+        ensure_live_messaging(&sid, None, registration.as_ref());
+    }
     let (bridge_rx, permission_rx, ask_user_question_rx, computer_access_rx) = match &registration {
         Some(reg) => (
             spawn_status_bridge_forwarder(tui_build.bridge_rx, reg.clone()),
@@ -394,6 +472,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let compact_handle = handle.clone();
     let set_mode_handle = handle.clone();
     let rename_orch = orchestrator.clone();
+    let rename_reg = registration.clone();
     let rename_handle = handle.clone();
     let fast_orch = orchestrator.clone();
     let fast_handle = handle.clone();
@@ -409,6 +488,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let dispatch_orch = orchestrator.clone();
     let dispatch_handle = handle.clone();
     let dispatch_turn_tx = turn_tx.clone();
+    let rewake_orch = orchestrator.clone();
+    let rewake_handle = handle.clone();
+    let rewake_turn_tx = turn_tx.clone();
     // (/sandbox) The shared toggle cell threaded into the widget + clones for
     // the off-loop settings-persistence effect (mirrors the sibling triplets).
     let sandbox_toggle = tui_build.runtime.sandbox_toggle.clone();
@@ -743,6 +825,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let on_rename = move |requested_name: String| {
         let orch = rename_orch.clone();
         let tx = rename_turn_tx.clone();
+        let rename_reg = rename_reg.clone();
         rename_handle.spawn(async move {
             let name = if requested_name.trim().is_empty() {
                 match orch.generate_session_name().await {
@@ -766,7 +849,42 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 requested_name.trim().to_string()
             };
             let (body, is_error) = match orch.rename_session(name.clone()).await {
-                Ok(()) => (format!("Session renamed to: {name}"), false),
+                Ok(()) => {
+                    let advertised = if let Some(dir) = traits::live_sessions::process_dir() {
+                        let sid = traits::live_sessions::process_session_id()
+                            .unwrap_or_default();
+                        match dir.claim_unique_name(&name, &sid, std::process::id()) {
+                            Ok(claim) => {
+                                traits::live_sessions::set_process_name(claim.name.clone());
+                                if let Some(reg) = rename_reg.as_ref() {
+                                    reg.set_name(
+                                        &claim.name,
+                                        if claim.notice.is_some() {
+                                            "collision"
+                                        } else {
+                                            "user"
+                                        },
+                                    );
+                                }
+                                if let Some(notice) = claim.notice {
+                                    let _ = tx.send(
+                                        tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                                            body: notice,
+                                            is_error: false,
+                                        },
+                                    );
+                                    claim.name
+                                } else {
+                                    claim.name
+                                }
+                            }
+                            Err(_) => name.clone(),
+                        }
+                    } else {
+                        name.clone()
+                    };
+                    (format!("Session renamed to: {advertised}"), false)
+                }
                 Err(_e) => ("Error renaming session".to_string(), true),
             };
             let _ =
@@ -865,12 +983,15 @@ pub(crate) async fn run_ratatui_with_initial_state(
             return;
         };
         let tx = set_mode_turn_tx.clone();
+        let bypass_available = bypass_available;
         set_mode_handle.spawn(async move {
             if let Err(e) = gate.set_permission_mode(&mode).await {
                 let _ = tx.send(tui::TurnEvent::SystemNotice {
                     body: format!("Could not change permission mode: {e}"),
                     is_error: true,
                 });
+            } else {
+                traits::live_sessions::set_process_permission_mode(&mode, bypass_available);
             }
         });
     };
@@ -948,6 +1069,18 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 SlashDispatchResult::NotASlashCommand => {
                     let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
                 }
+            }
+        });
+    };
+    let on_rewake_peer = move || {
+        let orch = rewake_orch.clone();
+        let tx = rewake_turn_tx.clone();
+        rewake_handle.spawn(async move {
+            if let Err(error) = orch.run_async_hook_rewake().await {
+                let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                    body: format!("Failed to deliver held peer message: {error}"),
+                    is_error: true,
+                });
             }
         });
     };
@@ -1256,6 +1389,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             on_sandbox_action,
             on_task_action,
             on_dispatch_slash,
+            on_rewake_peer,
         )
     })
     .await;

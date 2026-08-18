@@ -94,6 +94,21 @@ pub struct LiveSessionRecord {
     /// Epoch ms of the last `status` change.
     #[serde(rename = "statusUpdatedAt", skip_serializing_if = "Option::is_none")]
     pub status_updated_at: Option<i64>,
+    /// Epoch ms the current advertised name was claimed.
+    #[serde(rename = "nameSince", skip_serializing_if = "Option::is_none")]
+    pub name_since: Option<i64>,
+    /// Previous advertised names (2.1.232 uniqueness).
+    #[serde(rename = "formerNames", skip_serializing_if = "Option::is_none")]
+    pub former_names: Option<Vec<String>>,
+    /// Unix-domain inbox path (2.1.232 `messagingSocketPath`).
+    #[serde(
+        rename = "messagingSocketPath",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub messaging_socket_path: Option<String>,
+    /// Attested permission class (`bypass` / `prompting`) for inbound `g6f`.
+    #[serde(rename = "permissionClass", skip_serializing_if = "Option::is_none")]
+    pub permission_class: Option<String>,
 }
 
 /// In-flight task counters inside a job's `state.json`.
@@ -849,7 +864,8 @@ impl SessionRegistration {
             session_id: session_id.map(str::to_string),
             cwd,
             started_at: now_ms,
-            proc_start: None,
+            // Uniqueness (`c1_`) only treats records with `procStart` as holders.
+            proc_start: Some(now_ms.to_string()),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             peer_protocol: Some(1),
             kind: kind.to_string(),
@@ -861,6 +877,10 @@ impl SessionRegistration {
             waiting_for: None,
             updated_at: Some(now_ms),
             status_updated_at: Some(now_ms),
+            name_since: Some(now_ms),
+            former_names: None,
+            messaging_socket_path: None,
+            permission_class: None,
         };
         let dir = sessions_dir(config_home);
         let path = dir.join(format!("{pid}.json"));
@@ -908,6 +928,52 @@ impl SessionRegistration {
         record.waiting_for = waiting_for.map(str::to_string);
         record.updated_at = Some(now_ms);
         record.status_updated_at = Some(now_ms);
+        if let Ok(s) = serde_json::to_string(record) {
+            let _ = std::fs::write(path, s);
+        }
+    }
+
+    /// Update the advertised name after a uniqueness claim or `/rename`.
+    pub fn set_name(&self, name: &str, source: &str) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let RegistrationInner {
+            path: Some(path),
+            record: Some(record),
+        } = &mut *inner
+        else {
+            return;
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        if record.name.as_deref() != Some(name) {
+            if let Some(prev) = record.name.clone() {
+                record.former_names.get_or_insert_with(Vec::new).push(prev);
+            }
+        }
+        record.name = Some(name.to_string());
+        record.name_source = Some(source.to_string());
+        record.name_since = Some(now_ms);
+        record.updated_at = Some(now_ms);
+        if let Ok(s) = serde_json::to_string(record) {
+            let _ = std::fs::write(path, s);
+        }
+    }
+
+    /// Record the UDS inbox path (2.1.232 `messagingSocketPath`).
+    pub fn set_messaging_socket(&self, sock: &std::path::Path) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let RegistrationInner {
+            path: Some(path),
+            record: Some(record),
+        } = &mut *inner
+        else {
+            return;
+        };
+        record.messaging_socket_path = Some(sock.display().to_string());
+        record.updated_at = Some(chrono::Utc::now().timestamp_millis());
         if let Ok(s) = serde_json::to_string(record) {
             let _ = std::fs::write(path, s);
         }
@@ -1060,6 +1126,10 @@ mod tests {
             waiting_for: None,
             updated_at: None,
             status_updated_at: None,
+            name_since: None,
+            former_names: None,
+            messaging_socket_path: None,
+            permission_class: None,
         }
     }
 

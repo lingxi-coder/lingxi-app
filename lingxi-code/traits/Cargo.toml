@@ -11,7 +11,7 @@ license.workspace = true
 # than repeating string literals that could drift from the rest of the tree.
 branding.workspace = true
 protocol = { path = "../protocol" }
-uuid = "1"
+uuid = { version = "1", features = ["v4"] }
 # The LSP transport exposes its live `Arc<jsonrpc::Connection>` so the registry
 # can bridge it into an `LspClient` (lsp `ensure_server_for_file`). jsonrpc is a
 # leaf crate (no `traits` dep) → no cycle.
@@ -28,9 +28,12 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 fs2 = "0.4"
 tempfile = "3.13"
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "0.38", features = ["fs"] }
+rustix = { version = "0.38", features = ["fs", "net", "process"] }
+# Apple LOCAL_PEERPID / getpeereid — rustix 0.38 has SO_PEERCRED on Linux only.
+libc = "0.2"
 
 [dev-dependencies]
 # `#[tokio::test]` for the async default-impl test on `HttpTransport`.

@@ -830,6 +830,18 @@ fn settings_lines(
         row("└ Vim mode", on_off(vim)),
         row("└ Verbose", on_off(verbose)),
         row("└ Dynamic workflow size", workflow_size),
+        row(
+            "└ Dialog expiry",
+            tui_core::theme_persist::load_dialog_expiry()
+                .as_deref()
+                .unwrap_or("default"),
+        ),
+        row(
+            "└ Messages from your other sessions",
+            tui_core::theme_persist::load_cross_session_inbound()
+                .as_deref()
+                .unwrap_or("default"),
+        ),
     ];
     // parity 2.1.220 agents-view rows, oracle order (`defaultToAgentsView`
     // "Open agents view by default" first, then `leftArrowOpensAgents`

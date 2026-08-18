@@ -1663,8 +1663,7 @@ pub struct ConversationOrchestrator {
     pub(crate) startup_responses_websocket_prewarm:
         std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// User-approved app Agent Profile applied additively to the next turn.
-    pub(crate) app_agent_prompt_profile:
-        std::sync::RwLock<Option<AppAgentPromptProfile>>,
+    pub(crate) app_agent_prompt_profile: std::sync::RwLock<Option<AppAgentPromptProfile>>,
 }
 
 /// Everything [`ConversationOrchestrator::maybe_extract_session_memory`] needs to
@@ -2898,10 +2897,10 @@ impl ConversationOrchestrator {
     /// observability — the loop continues regardless). Mirrors claude-code's
     /// `joinPromptValues` + meta-prompt injection at query.ts ~1570-1580.
     async fn drain_mid_turn_input(&self) -> bool {
+        let mut injected = self.drain_peer_inbox(true).await;
         let Some(source) = self.mid_turn_input.get() else {
-            return false;
+            return injected;
         };
-        let mut injected = false;
         // Loop so a burst of consecutive enqueues all land before the next call.
         // The production source ([`MsgQueueMidTurnInput`]) is consume-once — it
         // REMOVES the commands it returns each call — so it self-terminates after
@@ -4965,6 +4964,21 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// guard (`r!==void 0&&!Ree(r)||e.isMeta` → `{}` for plain human input).
     async fn inject_user_message(&self, text: &str) {
         self.inject_user_text(text, false).await;
+    }
+
+    /// Drain accepted cross-session inbox lines into history as meta user-role
+    /// `<cross-session-message>` envelopes (2.1.232 `isMeta:!0`). Policy is
+    /// applied at receive; this only injects already-accepted bodies.
+    pub(crate) async fn drain_peer_inbox(&self, mid_turn: bool) -> bool {
+        let reminders = traits::live_sessions::take_accepted_peer_reminders(mid_turn);
+        if reminders.is_empty() {
+            return false;
+        }
+        for body in reminders {
+            // Peer / receipt text is never user intent (2.1.232 `isMeta:!0`).
+            self.inject_user_text(&body, true).await;
+        }
+        true
     }
 
     async fn inject_user_text(&self, text: &str, is_meta: bool) {
@@ -8211,6 +8225,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let mut turn_count: u32 = 0;
         let final_message_id;
         loop {
+            // Streaming twin already drains here (query.ts ~1570). Claude Code
+            // has one main loop; the batched print path must consume mid-turn
+            // input before max_turns / budget so a queued message is not dropped.
+            self.drain_mid_turn_input().await;
             if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
                 return Err(OrchestratorError::MaxTurnsReached {
                     max_turns: self.config.max_turns,
@@ -8583,6 +8601,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // The connect-phase streaming 413 path below reuses the same
             // reactive truncate/compact recovery loop as the batched path.
             self.maybe_compact_before_call().await;
+            // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
+            // before the outgoing snapshot is cloned from history.
+            let _ = self.drain_peer_inbox(false).await;
 
             // 2. Open the stream for this turn.
             let (mut snapshot, model, model_profile) = {
@@ -10896,7 +10917,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .app_agent_prompt_profile
             .write()
             .map_err(|_| "app Agent Profile lock is poisoned".to_string())?;
-        if profile.as_ref().is_some_and(|current| revision < current.revision) {
+        if profile
+            .as_ref()
+            .is_some_and(|current| revision < current.revision)
+        {
             return Err("app Agent Profile revision moved backwards".into());
         }
         *profile = Some(AppAgentPromptProfile {
@@ -10985,17 +11009,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         messages: &mut Vec<ConversationMessage>,
         reminder: ConversationMessage,
     ) {
-        let mut index = usize::from(
-            messages
-                .first()
-                .is_some_and(|message| {
-                    Self::is_mobile_runtime_environment_message(message)
-                        || self
-                            .mobile_runtime_environment_message
-                            .as_ref()
-                            .is_some_and(|runtime| runtime == message)
-                }),
-        );
+        let mut index = usize::from(messages.first().is_some_and(|message| {
+            Self::is_mobile_runtime_environment_message(message)
+                || self
+                    .mobile_runtime_environment_message
+                    .as_ref()
+                    .is_some_and(|runtime| runtime == message)
+        }));
         if self.mobile_runtime_environment.is_some()
             && messages.get(index).is_some_and(|message| {
                 matches!(message, ConversationMessage::User { content, .. } if content.iter().any(
@@ -12926,10 +12946,7 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
     /// orchestrator. The session id and all host-owned runtime state remain
     /// local to this orchestrator; only the ordered message transcript is
     /// adopted.
-    pub async fn restore_history(
-        &self,
-        history: Vec<ConversationMessage>,
-    ) -> Result<(), String> {
+    pub async fn restore_history(&self, history: Vec<ConversationMessage>) -> Result<(), String> {
         let mut session = self.session.lock().await;
         if !session.history.is_empty() {
             return Err("cannot restore Agent history after a turn has started".into());
@@ -13123,25 +13140,28 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
                 model,
             },
         );
-        let mandatory = raw.mandatory_selection.as_ref().map(|selection| match selection {
-            llm_client::reasoning_controls::ReasoningSelection::Automatic => {
-                traits::ReasoningSelection::Automatic
-            }
-            llm_client::reasoning_controls::ReasoningSelection::Disabled => {
-                traits::ReasoningSelection::Disabled
-            }
-            llm_client::reasoning_controls::ReasoningSelection::Enabled => {
-                traits::ReasoningSelection::Enabled
-            }
-            llm_client::reasoning_controls::ReasoningSelection::Level(id) => {
-                traits::ReasoningSelection::Level { id: id.clone() }
-            }
-            llm_client::reasoning_controls::ReasoningSelection::TokenBudget(tokens) => {
-                traits::ReasoningSelection::TokenBudget {
-                    tokens: u64::from(*tokens),
+        let mandatory = raw
+            .mandatory_selection
+            .as_ref()
+            .map(|selection| match selection {
+                llm_client::reasoning_controls::ReasoningSelection::Automatic => {
+                    traits::ReasoningSelection::Automatic
                 }
-            }
-        });
+                llm_client::reasoning_controls::ReasoningSelection::Disabled => {
+                    traits::ReasoningSelection::Disabled
+                }
+                llm_client::reasoning_controls::ReasoningSelection::Enabled => {
+                    traits::ReasoningSelection::Enabled
+                }
+                llm_client::reasoning_controls::ReasoningSelection::Level(id) => {
+                    traits::ReasoningSelection::Level { id: id.clone() }
+                }
+                llm_client::reasoning_controls::ReasoningSelection::TokenBudget(tokens) => {
+                    traits::ReasoningSelection::TokenBudget {
+                        tokens: u64::from(*tokens),
+                    }
+                }
+            });
 
         let mut available = Vec::new();
         if let Some(mandatory) = &mandatory {
@@ -13154,13 +13174,19 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
             if raw.can_enable {
                 available.push(traits::ReasoningSelection::Enabled);
             }
-            available.extend(raw.levels.iter().cloned().map(|id| {
-                traits::ReasoningSelection::Level { id }
-            }));
+            available.extend(
+                raw.levels
+                    .iter()
+                    .cloned()
+                    .map(|id| traits::ReasoningSelection::Level { id }),
+            );
         }
 
         let auto_only = available.len() == 1
-            && matches!(available.first(), Some(traits::ReasoningSelection::Automatic))
+            && matches!(
+                available.first(),
+                Some(traits::ReasoningSelection::Automatic)
+            )
             && raw.token_budget.is_none();
         traits::ReasoningControlSpec {
             available,
@@ -13192,14 +13218,13 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         let spec = Self::reasoning_spec_for_model(model, provider_id);
         let supported = match selection {
             traits::ReasoningSelection::Automatic => true,
-            traits::ReasoningSelection::TokenBudget { tokens } => spec
-                .budget_range
-                .as_ref()
-                .is_some_and(|range| {
+            traits::ReasoningSelection::TokenBudget { tokens } => {
+                spec.budget_range.as_ref().is_some_and(|range| {
                     (*tokens >= u64::from(range.min_tokens)
                         && *tokens <= u64::from(range.max_tokens))
                         || (range.supports_disabled && *tokens == 0)
-                }),
+                })
+            }
             other => spec.available.iter().any(|candidate| candidate == other),
         };
         if spec.forced && !spec.modifiable {
@@ -13251,9 +13276,12 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
                     None,
                     None,
                 ),
-                traits::ReasoningSelection::Level { id } => {
-                    (validated.clone(), ThinkingConfig::Adaptive, effort_level(id), legacy(id))
-                }
+                traits::ReasoningSelection::Level { id } => (
+                    validated.clone(),
+                    ThinkingConfig::Adaptive,
+                    effort_level(id),
+                    legacy(id),
+                ),
                 traits::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
@@ -13262,13 +13290,21 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
                 traits::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
                 }
-                traits::ReasoningSelection::Level { id } => {
-                    (validated.clone(), ThinkingConfig::Adaptive, effort_level(id), legacy(id))
-                }
+                traits::ReasoningSelection::Level { id } => (
+                    validated.clone(),
+                    ThinkingConfig::Adaptive,
+                    effort_level(id),
+                    legacy(id),
+                ),
                 traits::ReasoningSelection::Disabled => {
                     // Responses API uses the explicit `none` effort value to
                     // distinguish a user-off override from provider Auto.
-                    (validated, ThinkingConfig::Disabled, effort_level("none"), None)
+                    (
+                        validated,
+                        ThinkingConfig::Disabled,
+                        effort_level("none"),
+                        None,
+                    )
                 }
                 traits::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
@@ -13283,9 +13319,12 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
                         traits::ReasoningSelection::Automatic => {
                             (validated, ThinkingConfig::Automatic, None, None)
                         }
-                        traits::ReasoningSelection::Level { id } => {
-                            (validated.clone(), ThinkingConfig::Adaptive, effort_level(id), legacy(id))
-                        }
+                        traits::ReasoningSelection::Level { id } => (
+                            validated.clone(),
+                            ThinkingConfig::Adaptive,
+                            effort_level(id),
+                            legacy(id),
+                        ),
                         traits::ReasoningSelection::Disabled => {
                             (validated, ThinkingConfig::Disabled, None, None)
                         }
@@ -13322,21 +13361,21 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
                 }
             }
             "deepseek" => match &validated {
-                traits::ReasoningSelection::Automatic => (
-                    validated,
-                    ThinkingConfig::Automatic,
-                    None,
-                    None,
-                ),
+                traits::ReasoningSelection::Automatic => {
+                    (validated, ThinkingConfig::Automatic, None, None)
+                }
                 traits::ReasoningSelection::Disabled => (
                     validated,
                     ThinkingConfig::Disabled,
                     effort_level("off"),
                     None,
                 ),
-                traits::ReasoningSelection::Level { id } => {
-                    (validated.clone(), ThinkingConfig::Adaptive, effort_level(id), legacy(id))
-                }
+                traits::ReasoningSelection::Level { id } => (
+                    validated.clone(),
+                    ThinkingConfig::Adaptive,
+                    effort_level(id),
+                    legacy(id),
+                ),
                 traits::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
@@ -13347,12 +13386,9 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
             "kimi" | "kimi-code" => {
                 if matches!(model_lc.as_str(), "kimi-k3" | "k3" | "k3-256k") {
                     match &validated {
-                        traits::ReasoningSelection::Automatic => (
-                            validated,
-                            ThinkingConfig::Automatic,
-                            None,
-                            None,
-                        ),
+                        traits::ReasoningSelection::Automatic => {
+                            (validated, ThinkingConfig::Automatic, None, None)
+                        }
                         traits::ReasoningSelection::Level { id } => (
                             validated.clone(),
                             ThinkingConfig::Adaptive,
@@ -13371,12 +13407,9 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
                     }
                 } else {
                     match &validated {
-                        traits::ReasoningSelection::Automatic => (
-                            validated,
-                            ThinkingConfig::Automatic,
-                            None,
-                            None,
-                        ),
+                        traits::ReasoningSelection::Automatic => {
+                            (validated, ThinkingConfig::Automatic, None, None)
+                        }
                         traits::ReasoningSelection::Disabled => (
                             validated,
                             ThinkingConfig::Disabled,
@@ -13389,9 +13422,12 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
                             effort_level("on"),
                             None,
                         ),
-                        traits::ReasoningSelection::Level { id } => {
-                            (validated.clone(), ThinkingConfig::Adaptive, effort_level(id), legacy(id))
-                        }
+                        traits::ReasoningSelection::Level { id } => (
+                            validated.clone(),
+                            ThinkingConfig::Adaptive,
+                            effort_level(id),
+                            legacy(id),
+                        ),
                         traits::ReasoningSelection::TokenBudget { tokens } => (
                             validated.clone(),
                             ThinkingConfig::Enabled {
@@ -13471,7 +13507,9 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         let requested_reasoning = self.current_reasoning_selection();
         let effective_reasoning =
             Self::validate_reasoning_selection(&requested_reasoning, model, provider_id);
-        let requested_permission = self.permission_mode().unwrap_or_else(|| "default".to_string());
+        let requested_permission = self
+            .permission_mode()
+            .unwrap_or_else(|| "default".to_string());
         let effective_permission = requested_permission.clone();
         let permission_modes = [
             "default",

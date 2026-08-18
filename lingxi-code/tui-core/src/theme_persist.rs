@@ -294,6 +294,8 @@ const LEFT_ARROW_OPENS_AGENTS_KEY: &str = "leftArrowOpensAgents";
 /// whether a new session starts in the agents view. Absent ⇒ `false`
 /// (the oracle's `?? !1`).
 const DEFAULT_TO_AGENTS_VIEW_KEY: &str = "defaultToAgentsView";
+const DIALOG_EXPIRY_KEY: &str = "dialogExpiry";
+const CROSS_SESSION_INBOUND_KEY: &str = "crossSessionInbound";
 
 /// Full-screen mouse-up copies the selected text unless explicitly disabled.
 /// Inline mode never captures the mouse and therefore ignores this setting.
@@ -382,6 +384,64 @@ pub fn save_default_to_agents_view(enabled: bool) {
 /// Test seam: write the flag at an explicit path.
 pub fn save_default_to_agents_view_to(path: &Path, enabled: bool) -> std::io::Result<()> {
     save_bool_field_to(path, DEFAULT_TO_AGENTS_VIEW_KEY, enabled)
+}
+
+fn load_string_field(key: &str) -> Option<String> {
+    let body = std::fs::read_to_string(settings_path()?).ok()?;
+    let obj: Map<String, Value> = serde_json::from_str(&body).ok()?;
+    Some(obj.get(key)?.as_str()?.to_string())
+}
+
+/// Read `dialogExpiry` (`default`/`60s`/`5m`/`10m`/`never`).
+#[must_use]
+pub fn load_dialog_expiry() -> Option<String> {
+    load_string_field(DIALOG_EXPIRY_KEY)
+}
+
+/// Persist `dialogExpiry`. `"default"` deletes the key (oracle `void 0`).
+pub fn save_dialog_expiry(value: &str) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    let result = if value == "default" {
+        clear_string_field_to(&path, DIALOG_EXPIRY_KEY)
+    } else {
+        save_string_field_to(&path, DIALOG_EXPIRY_KEY, value)
+    };
+    if let Err(e) = result {
+        tracing::debug!(error = %e, "dialogExpiry persist failed (session-only)");
+    }
+}
+
+/// Read `crossSessionInbound`.
+#[must_use]
+pub fn load_cross_session_inbound() -> Option<String> {
+    load_string_field(CROSS_SESSION_INBOUND_KEY)
+}
+
+/// Persist `crossSessionInbound`. `"default"` deletes the key.
+pub fn save_cross_session_inbound(value: &str) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    let result = if value == "default" {
+        clear_string_field_to(&path, CROSS_SESSION_INBOUND_KEY)
+    } else {
+        save_string_field_to(&path, CROSS_SESSION_INBOUND_KEY, value)
+    };
+    if let Err(e) = result {
+        tracing::debug!(error = %e, "crossSessionInbound persist failed (session-only)");
+    }
+}
+
+fn clear_string_field_to(path: &Path, key: &str) -> std::io::Result<()> {
+    let mut obj: Map<String, Value> = match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
+        Err(e) => return Err(e),
+    };
+    obj.remove(key);
+    std::fs::write(path, serde_json::to_vec_pretty(&obj)?)
 }
 
 /// Shared read: a top-level bool field at an explicit path.

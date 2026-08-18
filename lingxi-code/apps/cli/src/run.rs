@@ -3166,6 +3166,13 @@ async fn drive_tui_switch_loop_inner(
     initial_session_id: Option<uuid::Uuid>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
 ) -> i32 {
+    struct InboxShutdown;
+    impl Drop for InboxShutdown {
+        fn drop(&mut self) {
+            traits::uds_inbox::stop_process_inbox();
+        }
+    }
+    let _inbox = InboxShutdown;
     let mut outcome = first;
     // The session currently driving the loop — the fallback for a failed switch.
     let mut current = initial_session_id;

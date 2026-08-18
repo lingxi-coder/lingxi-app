@@ -94,6 +94,10 @@ pub enum ViewOutcome {
         /// Which parts to restore.
         scope: RewindScope,
     },
+    /// The user delivered a held cross-session message. The owner should
+    /// start a skip-append turn (`run_async_hook_rewake`) so the inbox
+    /// drain can inject the released body.
+    RewakePeer,
 }
 
 /// Which parts of the session a `/rewind` restore should touch (claude-code

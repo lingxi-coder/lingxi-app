@@ -28,6 +28,23 @@ const SKIP_DIRS: &[&str] = &["target", "node_modules", ".git", ".lingxi"];
 #[must_use]
 pub fn file_completions(fragment: &str) -> Vec<CompletionItem> {
     let (dir_prefix, name_prefix) = split_fragment(fragment);
+    // 2.1.232: `@` also mentions another live session by name.
+    if dir_prefix.is_empty() {
+        let sessions = session_completions(name_prefix);
+        if !sessions.is_empty() && name_prefix.is_empty() {
+            return sessions;
+        }
+        if !sessions.is_empty() {
+            let mut items = sessions;
+            items.extend(if name_prefix.is_empty() {
+                Vec::new()
+            } else {
+                recursive_file_completions(name_prefix)
+            });
+            items.truncate(MAX_ENTRIES);
+            return items;
+        }
+    }
     // Prefix-less search: recursively walk the project tree.
     if dir_prefix.is_empty() && !name_prefix.is_empty() {
         return recursive_file_completions(name_prefix);
@@ -51,6 +68,23 @@ pub fn file_completions(fragment: &str) -> Vec<CompletionItem> {
         .collect();
     entries.sort();
     filter_entries(&entries, dir_prefix, name_prefix)
+}
+
+fn session_completions(prefix: &str) -> Vec<CompletionItem> {
+    let Some(dir) = traits::live_sessions::process_dir() else {
+        return Vec::new();
+    };
+    dir.complete_names(
+        prefix,
+        traits::live_sessions::process_session_id().as_deref(),
+    )
+    .into_iter()
+    .map(|name| CompletionItem {
+        label: format!("session {name}"),
+        insert: name,
+        desc: "live session".into(),
+    })
+    .collect()
 }
 
 /// Walk subdirectories looking for files whose NAME starts with `name_prefix`.

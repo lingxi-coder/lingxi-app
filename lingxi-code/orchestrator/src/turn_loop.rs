@@ -381,6 +381,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // locked turn-loop fixtures are unaffected. After a proactive compact, the
     // snapshot below reads the NEW, compacted history.
     orch.maybe_compact_before_call().await;
+    // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
+    // before the outgoing snapshot is cloned from history.
+    let _ = orch.drain_peer_inbox(false).await;
 
     // Snapshot the current session history for the API call.
     let (mut history_snapshot, model, model_profile) = {

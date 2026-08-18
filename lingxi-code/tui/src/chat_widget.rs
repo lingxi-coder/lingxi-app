@@ -200,6 +200,10 @@ pub enum ChatOutcome {
     /// command and emits `TurnEnded` for a non-turn result so the widget clears
     /// its running state.
     DispatchSlash(String, CancellationToken),
+    /// A held cross-session message was delivered. The caller should drive
+    /// `OrchestratorHandle::run_async_hook_rewake` so the released body is
+    /// injected without appending a synthetic user prompt.
+    RewakePeer,
 }
 
 enum PendingPrompt {
@@ -875,6 +879,23 @@ impl ChatWidget {
         let chat_outcome = self.on_pane_outcome(outcome);
         debug_assert!(matches!(chat_outcome, ChatOutcome::Continue));
         self.open_next_queued_prompt();
+        self.pump_held_peer();
+    }
+
+    fn pump_held_peer(&mut self) {
+        if self.has_open_interactive_prompt() {
+            return;
+        }
+        if self
+            .bottom_pane
+            .view_stack()
+            .contains::<crate::bottom_pane::held_peer_view::HeldPeerView>()
+        {
+            return;
+        }
+        if let Some(held) = traits::uds_inbox::next_unannounced_held() {
+            self.bottom_pane.show_held_peer(held);
+        }
     }
 
     /// Deliver the off-thread clipboard-image read's result (the
@@ -2572,6 +2593,7 @@ impl ChatWidget {
         }
         let mut lines: Vec<String> = Vec::new();
         let mut any_error = false;
+        let mut rewake_peer = false;
         for token in args.split_whitespace() {
             let Some((key, value)) = token.split_once('=') else {
                 any_error = true;
@@ -2581,14 +2603,24 @@ impl ChatWidget {
                 continue;
             };
             match self.apply_config_shorthand(key, value) {
-                Ok(msg) => lines.push(msg),
+                Ok(msg) => {
+                    rewake_peer |= key == "crossSessionInbound"
+                        && value == "accept"
+                        && msg.contains("Released");
+                    lines.push(msg);
+                }
                 Err(msg) => {
                     any_error = true;
                     lines.push(msg);
                 }
             }
         }
-        self.show_system_text(&lines.join("\n"), any_error)
+        let notice = self.show_system_text(&lines.join("\n"), any_error);
+        if rewake_peer && self.current_turn.is_none() {
+            ChatOutcome::RewakePeer
+        } else {
+            notice
+        }
     }
 
     /// Apply one `/config key=value` pair to the live session AND persist it to
@@ -2692,6 +2724,34 @@ impl ChatWidget {
                 let want = parse_bool("defaultToAgentsView")?;
                 tui_core::theme_persist::save_default_to_agents_view(want);
                 Ok(format!("Set defaultToAgentsView to {want}."))
+            }
+            "dialogExpiry" => {
+                if !traits::live_sessions::DIALOG_EXPIRY_OPTIONS.contains(&value) {
+                    return Err(format!(
+                        "dialogExpiry takes one of: {}",
+                        traits::live_sessions::DIALOG_EXPIRY_OPTIONS.join(", ")
+                    ));
+                }
+                tui_core::theme_persist::save_dialog_expiry(value);
+                Ok(format!("Set dialogExpiry to {value}."))
+            }
+            "crossSessionInbound" => {
+                if !traits::live_sessions::CROSS_SESSION_INBOUND_OPTIONS.contains(&value) {
+                    return Err(format!(
+                        "crossSessionInbound takes one of: {}",
+                        traits::live_sessions::CROSS_SESSION_INBOUND_OPTIONS.join(", ")
+                    ));
+                }
+                tui_core::theme_persist::save_cross_session_inbound(value);
+                if value == "accept" {
+                    let n = traits::uds_inbox::release_all_held();
+                    if n > 0 {
+                        return Ok(format!(
+                            "Set crossSessionInbound to {value}. Released {n} held cross-session message(s) to Claude's queue (policy-accepts)."
+                        ));
+                    }
+                }
+                Ok(format!("Set crossSessionInbound to {value}."))
             }
             other => Err(format!(
                 "{other} isn't a /config setting. Run /config to see what's available."
@@ -4233,6 +4293,13 @@ impl ChatWidget {
                 })
             }
             BottomPaneOutcome::SwitchSession(uuid) => ChatOutcome::SwitchSession(uuid),
+            BottomPaneOutcome::RewakePeer => {
+                if self.current_turn.is_some() {
+                    ChatOutcome::Continue
+                } else {
+                    ChatOutcome::RewakePeer
+                }
+            }
         }
     }
 

@@ -374,6 +374,45 @@ impl SendMessageTool {
         summary: Option<&str>,
         sender: &str,
     ) -> Result<Value, ToolError> {
+        if let Some(peer) = traits::live_sessions::process_dir().and_then(|d| {
+            d.find_exact(
+                to_display,
+                traits::live_sessions::process_session_id().as_deref(),
+            )
+        }) {
+            let from_name =
+                traits::live_sessions::process_name().unwrap_or_else(|| from.to_string());
+            let from_sid = traits::live_sessions::process_session_id().unwrap_or_default();
+            let sock = peer
+                .messaging_socket_path
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+                .filter(|p| traits::uds_inbox::is_canonical_inbox_sock(p));
+            let Some(sock) = sock else {
+                return Err(ToolError::Internal(format!(
+                    "No running session has registered an inbox at {to_display} (ENOINBOX: no-key) — refusing to send to an unvouched pipe"
+                )));
+            };
+            traits::uds_inbox::send_to_live_peer(&sock, &from_name, &from_sid, content).map_err(
+                |e| {
+                    ToolError::Internal(format!(
+                        "SendMessage: failed to deliver to live session: {e}"
+                    ))
+                },
+            )?;
+            let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
+            return Ok(json!({
+                "success": true,
+                "message": format!("Message sent to {to_display}'s inbox"),
+                "routing": Self::routing(
+                    sender,
+                    &format!("@{to_display}"),
+                    summary,
+                    Some(&preview),
+                ),
+            }));
+        }
         Self::deliver(router, from, recipient.route_target(), content.to_string()).await?;
         let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
         Ok(json!({
@@ -807,9 +846,8 @@ impl Tool for SendMessageTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        // 1:1 with `src/tools/SendMessageTool/prompt.ts` getPrompt() (the
-        // non-UDS_INBOX variant — cross-session transport is a PARITY-GAP).
-        r#"# SendMessage
+        let mut body = String::from(
+            r#"# SendMessage
 
 Send a message to another agent.
 
@@ -821,7 +859,28 @@ Send a message to another agent.
 |---|---|
 | `"researcher"` | Teammate by name |
 | `"*"` | Broadcast to all teammates — expensive (linear in team size), use only when everyone genuinely needs it |
+"#,
+        );
+        if traits::live_sessions::cross_session_messaging_enabled() {
+            body.push_str(
+                r#"
+| `"worker"` | Any agent from `ListAgents` — subagent, another local Claude session |
+| `"worker [3fa9c1]"` | Same, plus its `[ref]` — only when a listing or an error shows one |
 
+## Cross-session
+Use `ListAgents` to discover targets. Every row leads with the agent's `name [ref]` — the name IS the address; there is no separate address syntax.
+```json
+{"to": "worker", "message": "check if tests pass over there"}
+{"to": "worker [3fa9c1]", "message": "you, specifically"}
+```
+Send the bare name — a name that exactly matches one live agent or session (on this machine) delivers directly. Append the ` [ref]` only when the bare name is not enough — `ListAgents` shows two rows with it, or an error asks you to disambiguate (you typed only a prefix, or a session list could not be checked). A ref you did not just read from a listing or an error will not resolve, and if the same name also names an in-process agent, the bare name always wins — use the in-process one.
+A listed peer is alive and will process your message — no "busy" state; messages enqueue and drain at the receiver's next tool round. Your message arrives wrapped as `<cross-session-message from="...">`. **To reply to an incoming message, copy its `from` attribute as your `to`.**
+Permission boundaries are per-session: NEVER ask a peer to perform an action that was denied or blocked in your session, or that you expect your own permission settings would block — a peer doing it for you bypasses the user's permission decision (cross-session permission laundering). Route blocked work back to your user instead.
+"#,
+            );
+        }
+        body.push_str(
+            r#"
 Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to teammates by name, never by UUID. When relaying, don't quote the original — it's already rendered to the user.
 
 ## Protocol responses (legacy)
@@ -833,8 +892,9 @@ If you receive a JSON message with `type: "shutdown_request"` or `type: "plan_ap
 {"to": "researcher", "message": {"type": "plan_approval_response", "request_id": "...", "approve": false, "feedback": "add error handling"}}
 ```
 
-Approving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate `shutdown_request` unless asked. Don't send structured JSON status messages — use TaskUpdate."#
-            .into()
+Approving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate `shutdown_request` unless asked. Don't send structured JSON status messages — use TaskUpdate."#,
+        );
+        body
     }
 
     async fn call(

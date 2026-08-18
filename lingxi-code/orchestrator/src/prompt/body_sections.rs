@@ -195,7 +195,7 @@ When the conversation grows long, some or all of the current context is summariz
 ///
 /// `is_interactive` maps to claude-code `Hr()` (the interactive flag).
 /// `has_agent_tool` maps to `e.has(ns)` where `ns = "Agent"`.
-/// `fork_mode_enabled` maps to `Kz()` (LINGXI_FORK_SUBAGENT env).
+/// `fork_mode_enabled` maps to 2.1.232 `SPe()` (default ON when interactive).
 fn session_guidance(
     is_interactive: bool,
     has_agent_tool: bool,
@@ -231,8 +231,11 @@ fn session_guidance(
     if has_agent_tool && !lean {
         if fork_mode_enabled {
             bullets.push("Calling Agent with subagent_type: \"fork\" creates a fork \u{2014} it inherits your full conversation context, runs in the background, and keeps its tool output out of your context \u{2014} so you can keep chatting with the user while it works. Reach for it when research or multi-step implementation work would otherwise fill your context with raw output you won't need again. Other subagent_type values (or omitting it) start fresh agents with no context. **If you ARE the fork** \u{2014} execute directly; do not re-delegate.".to_string());
-        } else {
+        } else if traits::live_sessions::subagent_steer_is_default() {
             bullets.push("Use the Agent tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.".to_string());
+        } else {
+            // 2.1.232 `N7()!=="default"` short arm.
+            bullets.push("Use the Agent tool with specialized agents when the task at hand matches the agent's description. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.".to_string());
         }
     }
     if has_agent_tool && !fork_mode_enabled && !lean {
@@ -514,7 +517,7 @@ fn using_your_tools(tool_names: &[String]) -> Option<String> {
 ///   `# Session-specific guidance` `! <command>` bullet.
 /// * `has_agent_tool` — whether `"Agent"` is in the tool set. Used for the
 ///   Agent delegation bullet in `# Session-specific guidance`.
-/// * `fork_mode_enabled` — whether LINGXI_FORK_SUBAGENT is active. Selects the
+/// * `fork_mode_enabled` — whether 2.1.232 `SPe()` is active. Selects the
 ///   context-inheriting background-fork Agent guidance.
 ///
 /// **Pre-environment section order** (claude-code `J0` / `cx()` ordering):

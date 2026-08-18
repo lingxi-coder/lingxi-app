@@ -114,6 +114,7 @@ fn fixture_names_match_production_constants() {
         ("TaskStop", tool_task::task::TASK_STOP_TOOL_NAME),
         ("TaskOutput", tool_task::task::TASK_OUTPUT_TOOL_NAME),
         ("SendMessage", tool_ui::send_message::SEND_MESSAGE_TOOL_NAME),
+        ("ListAgents", tool_ui::list_agents::LIST_AGENTS_TOOL_NAME),
         // Team (2)
         ("TeamCreate", tool_team::team::TEAM_CREATE_TOOL_NAME),
         ("TeamDelete", tool_team::team::TEAM_DELETE_TOOL_NAME),

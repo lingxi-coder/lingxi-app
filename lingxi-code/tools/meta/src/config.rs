@@ -112,6 +112,10 @@ const PERMISSION_DEFAULT_MODES: &[&str] = &["default", "plan", "acceptEdits", "d
 /// enum `askUserQuestionTimeout:E.enum(["60s","5m","10m","never"])` (oracle
 /// 2.1.201). Default is `never` (block on the user; no auto-continue).
 const ASK_USER_QUESTION_TIMEOUTS: &[&str] = &["60s", "5m", "10m", "never"];
+/// `dialogExpiry` — 2.1.232 `_Vp`.
+const DIALOG_EXPIRY: &[&str] = traits::live_sessions::DIALOG_EXPIRY_OPTIONS;
+/// `crossSessionInbound` — 2.1.232 `bVp`.
+const CROSS_SESSION_INBOUND: &[&str] = traits::live_sessions::CROSS_SESSION_INBOUND_OPTIONS;
 
 /// Storage source for a setting. Both currently back to the single
 /// `~/.lingxi/settings.json` file in this Rust stub.
@@ -325,6 +329,24 @@ pub static SUPPORTED_SETTINGS: Lazy<HashMap<&'static str, SettingConfig>> = Lazy
             source: Source::Settings,
             ty: SettingType::String,
             options: Some(ASK_USER_QUESTION_TIMEOUTS),
+            path: None,
+        },
+    );
+    m.insert(
+        "dialogExpiry",
+        SettingConfig {
+            source: Source::Settings,
+            ty: SettingType::String,
+            options: Some(DIALOG_EXPIRY),
+            path: None,
+        },
+    );
+    m.insert(
+        "crossSessionInbound",
+        SettingConfig {
+            source: Source::Settings,
+            ty: SettingType::String,
+            options: Some(CROSS_SESSION_INBOUND),
             path: None,
         },
     );
@@ -933,10 +955,12 @@ mod tests {
             "language",
             "teammateMode",
             "askUserQuestionTimeout",
+            "dialogExpiry",
+            "crossSessionInbound",
         ] {
             assert!(is_supported(key), "missing setting {key}");
         }
-        assert_eq!(SUPPORTED_SETTINGS.len(), 17);
+        assert_eq!(SUPPORTED_SETTINGS.len(), 19);
     }
 
     #[test]
@@ -1009,6 +1033,24 @@ mod tests {
             )
         );
         assert!(is_supported("askUserQuestionTimeout"));
+        assert_eq!(
+            get_options_for_setting("dialogExpiry"),
+            Some(
+                vec!["default", "60s", "5m", "10m", "never"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            )
+        );
+        assert_eq!(
+            get_options_for_setting("crossSessionInbound"),
+            Some(
+                vec!["default", "accept", "hold", "refuse"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            )
+        );
         // boolean / free-string settings have no options
         assert!(get_options_for_setting("verbose").is_none());
         assert!(get_options_for_setting("model").is_none());

@@ -835,6 +835,9 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "Never declare host-owned record metadata",
         "vite build --outDir dist --emptyOutDir",
         "build/store/dist/",
+        "recommended strategy",
+        "task-local workflow",
+        "rescore the revised",
     }
     missing = sorted(token for token in required_tokens if token not in text)
     if missing:
@@ -857,6 +860,13 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "mcp__local_apps__build",
         "--outDir dist --emptyOutDir",
         "build/store/dist/",
+        "strategy?: 'fast'|'balanced'|'thorough'",
+        "'balanced'",
+        "maxRepairRounds",
+        "Selected workflow strategy",
+        "Complexity score",
+        "agent_calls",
+        "verification_mode",
     }
     missing_workflow = sorted(token for token in workflow_tokens if token not in workflow)
     if missing_workflow:

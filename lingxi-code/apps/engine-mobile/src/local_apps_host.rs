@@ -18,8 +18,7 @@ use local_apps::{
     load_manifest, load_permissions, save_permissions, AppCapability, AppDataStore,
     AppDependencyState, AppLayout, AppPermissions, AppRuntimeMode, AppRuntimeState, AppService,
     BackgroundTaskStatus, DataMigrationPreview, DataMutation, DataQuery, DataSortDirection,
-    DataSortKey,
-    PermissionDecision, SessionPermissions,
+    DataSortKey, PermissionDecision, SessionPermissions,
 };
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -670,20 +669,7 @@ impl LocalAppsHostBroker {
     }
 
     fn workspace_dependencies_ready(layout: &AppLayout) -> Result<bool, String> {
-        let vite = Self::app_dependency_marker(layout);
-        match std::fs::symlink_metadata(&vite) {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
-            Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
-                "workspace dependency marker is invalid: {} must be a regular file",
-                vite.display()
-            )),
-            Ok(_) => Ok(false),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(format!(
-                "inspect workspace dependency marker {}: {error}",
-                vite.display()
-            )),
-        }
+        Self::workspace_dependencies_ready_path(&layout.root().join(layout.workspace_rel()))
     }
 
     fn dependency_lock_digest(layout: &AppLayout) -> Result<String, String> {
@@ -866,6 +852,48 @@ impl LocalAppsHostBroker {
         Ok(vite_metadata.is_file() && !vite_metadata.file_type().is_symlink())
     }
 
+    fn workspace_dependencies_match_snapshot(
+        workspace: &Path,
+        snapshot_root: &Path,
+        lock_digest: &str,
+    ) -> Result<bool, String> {
+        if !Self::workspace_dependencies_ready_path(workspace)?
+            || !Self::dependency_snapshot_is_ready(snapshot_root, lock_digest)?
+        {
+            return Ok(false);
+        }
+        let marker = snapshot_root.join(DEPENDENCY_SNAPSHOT_READY_FILE);
+        let expected_tree_digest = std::fs::read_to_string(&marker)
+            .map_err(|error| format!("read dependency snapshot marker: {error}"))?
+            .lines()
+            .nth(3)
+            .filter(|digest| !digest.is_empty())
+            .map(str::to_owned);
+        let Some(expected_tree_digest) = expected_tree_digest else {
+            return Ok(false);
+        };
+        let workspace_node_modules = workspace.join("node_modules");
+        validate_dependency_tree(&workspace_node_modules)?;
+        Ok(dependency_tree_digest(&workspace_node_modules)? == expected_tree_digest)
+    }
+
+    fn workspace_dependencies_ready_path(workspace: &Path) -> Result<bool, String> {
+        let vite = workspace.join("node_modules/vite/bin/vite.js");
+        match std::fs::symlink_metadata(&vite) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+                "workspace dependency marker is invalid: {} must be a regular file",
+                vite.display()
+            )),
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(format!(
+                "inspect workspace dependency marker {}: {error}",
+                vite.display()
+            )),
+        }
+    }
+
     fn publish_dependency_snapshot(
         source_node_modules: &Path,
         snapshot_root: &Path,
@@ -1021,7 +1049,11 @@ impl LocalAppsHostBroker {
         if dependency.state == AppDependencyState::Ready
             && dependency.lockfile_sha256.as_deref() == Some(lock_digest.as_str())
             && dependency.toolchain_key.as_deref() == Some(PNPM_TOOLCHAIN_KEY)
-            && Self::workspace_dependencies_ready(&layout)?
+            && Self::workspace_dependencies_match_snapshot(
+                &workspace,
+                &self.dependency_snapshot_root(&lock_digest),
+                &lock_digest,
+            )?
         {
             return Ok(dependency);
         }
@@ -2079,7 +2111,9 @@ impl LocalAppsHostBroker {
             AppBridgeOperationDto::BackgroundList
             | AppBridgeOperationDto::BackgroundStatus
             | AppBridgeOperationDto::BackgroundCancel
-            | AppBridgeOperationDto::BackgroundRetry => local_apps::CapabilityId::BackgroundSchedule,
+            | AppBridgeOperationDto::BackgroundRetry => {
+                local_apps::CapabilityId::BackgroundSchedule
+            }
             _ => return Err("unsupported bridge operation for runtime v2 context".into()),
         };
         let layout = self.layout(&request.app_id)?;
@@ -3031,8 +3065,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             "应用请求在系统后台按计划运行一个流程。",
         )
         .await?;
-        let permissions = local_apps::load_permissions(&layout)
-            .map_err(|error| error.to_string())?;
+        let permissions =
+            local_apps::load_permissions(&layout).map_err(|error| error.to_string())?;
         if !permissions.allows(AppCapability::BackgroundSchedule) {
             return Err("background scheduling requires durable approval".into());
         }
@@ -3054,10 +3088,11 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         flow.validate(&registry)
             .map_err(|error| format!("invalid background flow: {error}"))?;
         for step in &flow.steps {
-            if matches!(step.capability, local_apps::CapabilityId::BackgroundSchedule) {
-                return Err(
-                    "background flows cannot schedule another background flow".into(),
-                );
+            if matches!(
+                step.capability,
+                local_apps::CapabilityId::BackgroundSchedule
+            ) {
+                return Err("background flows cannot schedule another background flow".into());
             }
             let descriptor = registry
                 .get(step.capability)
@@ -3071,12 +3106,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                     step.capability.as_str()
                 ));
             }
-            self.authorize_background_schedule_step(
-                &app_id,
-                step.capability,
-                &step.input_json,
-            )
-            .await?;
+            self.authorize_background_schedule_step(&app_id, step.capability, &step.input_json)
+                .await?;
         }
         self.service()?
             .record(&app_id)
@@ -3121,7 +3152,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
 
     async fn background_list_value(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
-        self.service()?.record(&app_id).await.map_err(|e| e.to_string())?;
+        self.service()?
+            .record(&app_id)
+            .await
+            .map_err(|e| e.to_string())?;
         let layout = self.background_management_layout(&app_id)?;
         let task_id = input.get("task_id").and_then(Value::as_str);
         let status = input
@@ -3158,7 +3192,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
     async fn background_cancel_value(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         let task_id = required_string(&input, "task_id")?.to_string();
-        self.service()?.record(&app_id).await.map_err(|e| e.to_string())?;
+        self.service()?
+            .record(&app_id)
+            .await
+            .map_err(|e| e.to_string())?;
         self.background_management_layout(&app_id)?;
         let cancelled = self.cancel_background_task(&app_id, &task_id).await;
         Ok(json!({"app_id": app_id, "task_id": task_id, "cancelled": cancelled}))
@@ -3167,7 +3204,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
     async fn background_retry_value(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         let task_id = required_string(&input, "task_id")?.to_string();
-        self.service()?.record(&app_id).await.map_err(|e| e.to_string())?;
+        self.service()?
+            .record(&app_id)
+            .await
+            .map_err(|e| e.to_string())?;
         self.background_management_layout(&app_id)?;
         let retried = self.retry_background_task(&app_id, &task_id).await?;
         Ok(json!({"app_id": app_id, "task_id": task_id, "retried": retried}))

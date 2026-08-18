@@ -76,6 +76,18 @@ The important ownership boundary is:
 4. `mcp__local_apps__update_manifest` records collections, domains, capabilities, and confirmed device context before generated source depends on them.
 5. The agent invokes the `local-app-build` workflow once.
 
+The coordinator computes a complexity recommendation from the confirmed
+specification in the same turn and shows it in the existing confirmation
+round; it does not start a classifier agent. The user can choose or override
+`fast`, `balanced`, or `thorough` for this task. `fast` skips the standalone
+design call, allows one repair round, and uses the smoke verification floor;
+`balanced` keeps the design call, allows one repair round, and verifies every
+confirmed target; `thorough` keeps the full three-stage path, allows two repair
+rounds, and runs the full verification matrix. All three retain host build,
+runtime start, preview URL, fatal smoke, and native data-roundtrip requirements.
+The choice is task-local workflow input, not persisted app state or a client
+protocol field.
+
 The persisted workflow is intentionally small: `Draft` or `Ready`. Fine-grained progress belongs to the conversation/workflow execution, not to a second durable generation state machine.
 
 ### Scaffold and dependencies

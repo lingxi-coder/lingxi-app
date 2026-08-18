@@ -31,12 +31,12 @@ const DEEP_RESEARCH: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
 /// The v3 local-app build segment: the `create-local-app` skill has the agent
 /// gather requirements interactively in the MAIN session (AskUserQuestion),
 /// then hand the confirmed spec to this workflow, which runs the deterministic
-/// design/generate/build/verify sequence. Deliberately
+/// adaptive design/generate/build/verify sequence. Deliberately
 /// model-invocable (`manual_only: false`): the skill instructs the model to
 /// call it by name.
 const LOCAL_APP_BUILD: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
     name: "local-app-build",
-    description: "Design, generate, build, and verify a confirmed local app.",
+    description: "Adaptively design, generate, build, and verify a confirmed local app.",
     script: include_str!("local_app_build_workflow.js"),
     manual_only: false,
 };
@@ -68,6 +68,7 @@ pub const BUILTIN_WORKFLOWS: BuiltinWorkflowRegistry = BuiltinWorkflowRegistry;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
@@ -119,14 +120,20 @@ mod tests {
             "local-app phases must stay ordered"
         );
         assert!(
-            descriptor
-                .script
-                .contains("for (let round = 0; round <= 2; round += 1)"),
-            "verification may run initially plus at most two repair rounds"
+            descriptor.script.contains("maxRepairRounds"),
+            "local-app strategies must pin their repair policies"
         );
         // The workspace contract must ride into EVERY agent prompt: writable
         // roots, locked files, the bridge-only rule, and the no-new-deps rule.
         for anchor in [
+            "strategy?: 'fast'|'balanced'|'thorough'",
+            "'balanced'",
+            "runDesign",
+            "verificationMode",
+            "Selected workflow strategy",
+            "Complexity score",
+            "agent_calls",
+            "verification_mode",
             "app/, src/, components/, lib/, styles/, public/",
             "lib/lingxi-bridge.js",
             "window.lingxi.v2",
@@ -138,9 +145,9 @@ mod tests {
             "mcp__local_apps__build",
             "mcp__local_apps__manage_runtime",
             "host may prepare the workspace dependencies when needed",
-            "two allowed repair rounds",
+            "maxRepairRounds",
             "conditionally detect ImageGen",
-            "Browser is also required for mobile-sized viewports",
+            "A narrow viewport alone does not prove a platform",
             "inspect_ui/act_on_ui/read_logs",
             "degraded_verification",
             "records[].document",
@@ -156,7 +163,7 @@ mod tests {
         // Fails fast without an app id rather than spawning agents blind.
         assert!(descriptor.script.contains("requires args.app_id"));
         assert_eq!(
-            descriptor.script.matches("await agent(").count(),
+            descriptor.script.matches("await runAgent(").count(),
             descriptor.script.matches("throwOnError: true").count(),
             "every local-app agent stage must surface its terminal failure reason",
         );
@@ -165,71 +172,130 @@ mod tests {
     }
 
     #[test]
-    fn local_app_build_stops_after_a_successful_first_verification() {
-        let descriptor = BUILTIN_WORKFLOWS.get("local-app-build").expect("built-in");
-        let prompts_seen = Rc::new(RefCell::new(Vec::<String>::new()));
-        let captured_prompts = prompts_seen.clone();
+    fn local_app_build_happy_path_strategy_matrix() {
+        struct Case {
+            name: &'static str,
+            strategy: Option<&'static str>,
+            expected_phases: &'static [&'static str],
+            expected_calls: usize,
+            expected_verification_mode: &'static str,
+            expects_design: bool,
+        }
 
-        let outcome = workflow::run_with_progress(
-            descriptor.script,
-            move |prompts: &[String], _options: &[String]| {
-                prompts
-                    .iter()
-                    .map(|prompt| {
-                        captured_prompts.borrow_mut().push(prompt.clone());
-                        if prompt.contains("Act as the local app design lead") {
-                            r#"{"targets":[{"os":"android","form_factor":"phone"}],"summary":"designed"}"#.to_string()
-                        } else if prompt.contains("Generate the complete React implementation") {
-                            r#"{"ok":true,"preview_url":"http://preview/first","summary":"built"}"#.to_string()
-                        } else if prompt.contains("Invoke $frontend-qa") {
-                            r#"{"ok":true,"findings":[],"checked_matrix":["android-phone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string()
-                        } else {
-                            panic!("successful workflow must not repair or rebuild: {prompt}");
-                        }
-                    })
-                    .collect()
+        for case in [
+            Case {
+                name: "missing strategy defaults to balanced",
+                strategy: None,
+                expected_phases: &["Design", "Generate & Build", "Verify"],
+                expected_calls: 3,
+                expected_verification_mode: "confirmed-targets",
+                expects_design: true,
             },
-            |_| {},
-            None,
-            false,
-            Some(r#"{"app_id":"test-app","spec":"build a test app"}"#.to_string()),
-            None,
-        )
-        .expect("local-app workflow executes");
-
-        let result: serde_json::Value =
-            serde_json::from_str(outcome.result.as_deref().expect("workflow result"))
+            Case {
+                name: "fast skips standalone design",
+                strategy: Some("fast"),
+                expected_phases: &["Generate & Build", "Verify"],
+                expected_calls: 2,
+                expected_verification_mode: "smoke",
+                expects_design: false,
+            },
+            Case {
+                name: "balanced keeps the standard three-stage flow",
+                strategy: Some("balanced"),
+                expected_phases: &["Design", "Generate & Build", "Verify"],
+                expected_calls: 3,
+                expected_verification_mode: "confirmed-targets",
+                expects_design: true,
+            },
+            Case {
+                name: "thorough preserves the full happy path",
+                strategy: Some("thorough"),
+                expected_phases: &["Design", "Generate & Build", "Verify"],
+                expected_calls: 3,
+                expected_verification_mode: "full-matrix",
+                expects_design: true,
+            },
+        ] {
+            let name = case.name;
+            let expects_design = case.expects_design;
+            let run = drive_local_app_build(
+                local_app_args(case.strategy, None, None, None),
+                move |prompts, _options| {
+                    prompts
+                        .iter()
+                        .map(|prompt| {
+                    if prompt.contains("Act as the local app design lead") {
+                        assert!(expects_design, "{name} unexpectedly invoked design");
+                        r#"{"targets":[{"os":"android","form_factor":"phone"}],"summary":"designed"}"#
+                            .to_string()
+                    } else if prompt.contains("Generate the complete React implementation") {
+                        r#"{"ok":true,"preview_url":"http://preview/first","summary":"built"}"#
+                            .to_string()
+                    } else if prompt.contains("Invoke $frontend-qa") {
+                        r#"{"ok":true,"findings":[],"checked_matrix":["android-phone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string()
+                    } else {
+                        panic!("{name} must not repair on the happy path: {prompt}");
+                    }
+                        })
+                        .collect()
+                },
+            );
+            let outcome = run.outcome.expect(case.name);
+            let result: Value = serde_json::from_str(outcome.result.as_deref().expect("result"))
                 .expect("workflow returns JSON");
-        assert_eq!(result["ok"], true);
-        assert_eq!(result["preview_url"], "http://preview/first");
-        assert!(result.get("scaffold_mode").is_none());
-        assert!(result.get("template").is_none());
-        assert_eq!(result["repair_rounds"], 0);
-        assert_eq!(
-            prompts_seen.borrow().len(),
-            3,
-            "happy path uses design, generate-build, and verify only"
-        );
-        assert_eq!(
-            prompts_seen
-                .borrow()
-                .iter()
-                .filter(|prompt| prompt.contains("Invoke $frontend-qa"))
-                .count(),
-            1
-        );
+            assert_eq!(run.prompts.len(), case.expected_calls, "{}", case.name);
+            assert_eq!(run.phases, case.expected_phases, "{}", case.name);
+            assert_eq!(result["ok"], true, "{}", case.name);
+            assert_eq!(
+                result["strategy"],
+                case.strategy.unwrap_or("balanced"),
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                result["verification_mode"], case.expected_verification_mode,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                result["preview_url"], "http://preview/first",
+                "{}",
+                case.name
+            );
+            assert_eq!(result["repair_rounds"], 0, "{}", case.name);
+            assert_eq!(result["agent_calls"], case.expected_calls, "{}", case.name);
+            let expected_summary = if case.expects_design {
+                format!(
+                    "{} strategy completed design, generation, build, and frontend QA.",
+                    case.strategy.unwrap_or("balanced")
+                )
+            } else {
+                "fast strategy completed generation, build, and frontend QA.".to_string()
+            };
+            assert_eq!(result["summary"], expected_summary, "{}", case.name);
+            assert!(result.get("scaffold_mode").is_none(), "{}", case.name);
+            assert!(result.get("template").is_none(), "{}", case.name);
+        }
     }
 
     #[test]
     fn local_app_build_repairs_rebuilds_restarts_and_reverifies_structured_results() {
-        let descriptor = BUILTIN_WORKFLOWS.get("local-app-build").expect("built-in");
         let calls = Rc::new(RefCell::new(Vec::<(String, String)>::new()));
         let captured_calls = calls.clone();
         let verification_round = Rc::new(Cell::new(0_u8));
         let next_verification_round = verification_round.clone();
-
-        let outcome = workflow::run_with_progress(
-            descriptor.script,
+        let run = drive_local_app_build(
+            local_app_args(
+                Some("balanced"),
+                Some(json!({
+                    "score": 4,
+                    "confidence": 0.9,
+                    "reasons": ["three screens", "one writable collection"],
+                    "ignored": "value"
+                })),
+                Some("deepseek/deepseek-v4-flash"),
+                None,
+            ),
             move |prompts: &[String], options: &[String]| {
                 prompts
                     .iter()
@@ -258,36 +324,49 @@ mod tests {
                     })
                     .collect()
             },
-            |_| {},
-            None,
-            false,
-            Some(
-                r#"{"app_id":"test-app","spec":"build a test app","model":"deepseek/deepseek-v4-flash"}"#
-                    .to_string(),
-            ),
-            None,
-        )
-        .expect("local-app workflow executes");
+        );
+        let outcome = run.outcome.expect("local-app workflow executes");
 
-        let result: serde_json::Value =
+        let result: Value =
             serde_json::from_str(outcome.result.as_deref().expect("workflow result"))
                 .expect("workflow returns JSON");
         assert_eq!(result["ok"], true);
+        assert_eq!(result["strategy"], "balanced");
+        assert_eq!(result["verification_mode"], "confirmed-targets");
         assert_eq!(result["preview_url"], "http://preview/repaired");
         assert!(result.get("scaffold_mode").is_none());
         assert!(result.get("template").is_none());
         assert_eq!(result["repair_rounds"], 1);
+        assert_eq!(result["agent_calls"], 5);
         assert_eq!(verification_round.get(), 2);
+        assert_eq!(
+            result["complexity"],
+            json!({
+                "score": 4,
+                "band": "medium",
+                "confidence": 0.9,
+                "reasons": ["three screens", "one writable collection"]
+            })
+        );
         assert_eq!(
             calls.borrow().len(),
             5,
             "one repair uses no standalone build agents"
         );
+        assert_eq!(
+            run.phases,
+            vec![
+                "Design".to_string(),
+                "Generate & Build".to_string(),
+                "Verify".to_string(),
+                "Generate & Build".to_string(),
+                "Verify".to_string(),
+            ]
+        );
 
         let calls = calls.borrow();
         for (_, options) in calls.iter() {
-            let options: serde_json::Value =
-                serde_json::from_str(options).expect("agent options JSON");
+            let options: Value = serde_json::from_str(options).expect("agent options JSON");
             assert_eq!(options["model"], "deepseek-v4-flash");
             assert_eq!(options["modelProfile"], "deepseek");
         }
@@ -300,8 +379,7 @@ mod tests {
                 .iter()
                 .find(|(prompt, _)| prompt.contains(prompt_anchor))
                 .unwrap_or_else(|| panic!("missing {prompt_anchor} agent call"));
-            let options: serde_json::Value =
-                serde_json::from_str(options).expect("agent options JSON");
+            let options: Value = serde_json::from_str(options).expect("agent options JSON");
             assert!(
                 options.get("schema").is_some(),
                 "{prompt_anchor} must request a structured result"
@@ -321,6 +399,163 @@ mod tests {
             .find(|(prompt, _)| prompt.contains("Repair the findings"))
             .expect("repair-build call");
         assert!(rebuild.0.contains(r#""action":"restart""#));
+    }
+
+    #[test]
+    fn local_app_build_rejects_invalid_strategy_before_any_agent_runs() {
+        for strategy in [Some("turbo"), Some("123")] {
+            let run = drive_local_app_build(
+                local_app_args(strategy, None, None, None),
+                |_prompts, _options| panic!("unsupported strategies must fail before agent()"),
+            );
+            let error = run.outcome.expect_err("unsupported strategies must fail");
+            assert!(
+                run.prompts.is_empty(),
+                "agent() must not run for invalid strategy"
+            );
+            assert!(
+                run.phases.is_empty(),
+                "phase() must not run for invalid strategy"
+            );
+            assert!(
+                error.to_string().contains("unsupported strategy"),
+                "unexpected workflow error: {error}"
+            );
+        }
+
+        let run = drive_local_app_build(
+            json!({
+                "app_id": "test-app",
+                "spec": "build a test app",
+                "strategy": 123,
+            })
+            .to_string(),
+            |_prompts, _options| panic!("non-string strategies must fail before agent()"),
+        );
+        let error = run.outcome.expect_err("non-string strategies must fail");
+        assert!(run.prompts.is_empty());
+        assert!(run.phases.is_empty());
+        assert!(error.to_string().contains("unsupported strategy 123"));
+    }
+
+    #[test]
+    fn local_app_build_fast_and_balanced_stop_after_one_repair_round() {
+        for (strategy, expected_phases, expected_calls) in [
+            (
+                "fast",
+                vec![
+                    "Generate & Build".to_string(),
+                    "Verify".to_string(),
+                    "Generate & Build".to_string(),
+                    "Verify".to_string(),
+                ],
+                4_usize,
+            ),
+            (
+                "balanced",
+                vec![
+                    "Design".to_string(),
+                    "Generate & Build".to_string(),
+                    "Verify".to_string(),
+                    "Generate & Build".to_string(),
+                    "Verify".to_string(),
+                ],
+                5_usize,
+            ),
+        ] {
+            let run = drive_local_app_build(
+                local_app_args(Some(strategy), None, None, None),
+                move |prompts, _options| {
+                    prompts
+                        .iter()
+                        .map(|prompt| {
+                            if prompt.contains("Act as the local app design lead") {
+                                r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"summary":"designed"}"#.to_string()
+                            } else if prompt.contains("Generate the complete React implementation")
+                                || prompt.contains("Repair the findings")
+                            {
+                                r#"{"ok":true,"preview_url":"http://preview/repaired","summary":"built"}"#.to_string()
+                            } else if prompt.contains("Invoke $frontend-qa") {
+                                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"needs repair"}"#.to_string()
+                            } else {
+                                panic!("unexpected prompt for {strategy}: {prompt}");
+                            }
+                        })
+                        .collect()
+                },
+            );
+            let error = run
+                .outcome
+                .expect_err("verification findings must fail the workflow");
+            assert_eq!(run.prompts.len(), expected_calls, "{strategy}");
+            assert_eq!(run.phases, expected_phases, "{strategy}");
+            assert_eq!(
+                run.prompts
+                    .iter()
+                    .filter(|prompt| prompt.contains("Repair the findings"))
+                    .count(),
+                1,
+                "{strategy} must not run a second repair cycle"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("verification still has findings")
+                    && error.to_string().contains("button is clipped"),
+                "unexpected workflow error for {strategy}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_app_build_thorough_allows_two_repairs_before_success() {
+        let verification_round = Rc::new(Cell::new(0_u8));
+        let build_round = Rc::new(Cell::new(0_u8));
+        let next_verification_round = verification_round.clone();
+        let next_build_round = build_round.clone();
+        let run = drive_local_app_build(
+            local_app_args(Some("thorough"), None, None, None),
+            move |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Act as the local app design lead") {
+                            r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"summary":"designed"}"#.to_string()
+                        } else if prompt.contains("Generate the complete React implementation") {
+                            r#"{"ok":true,"preview_url":"http://preview/initial","summary":"built"}"#.to_string()
+                        } else if prompt.contains("Repair the findings") {
+                            let round = next_build_round.get();
+                            next_build_round.set(round + 1);
+                            format!(
+                                r#"{{"ok":true,"preview_url":"http://preview/repaired-{round}","summary":"rebuilt"}}"#
+                            )
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            let round = next_verification_round.get();
+                            next_verification_round.set(round + 1);
+                            if round < 2 {
+                                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"needs repair"}"#.to_string()
+                            } else {
+                                r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string()
+                            }
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        );
+        let outcome = run.outcome.expect("thorough workflow executes");
+        let result: Value = serde_json::from_str(outcome.result.as_deref().expect("result"))
+            .expect("workflow returns JSON");
+        assert_eq!(verification_round.get(), 3);
+        assert_eq!(build_round.get(), 2);
+        assert_eq!(run.prompts.len(), 7);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["strategy"], "thorough");
+        assert_eq!(result["verification_mode"], "full-matrix");
+        assert_eq!(result["repair_rounds"], 2);
+        assert_eq!(result["agent_calls"], 7);
+        assert_eq!(result["preview_url"], "http://preview/repaired-1");
     }
 
     #[test]
@@ -364,18 +599,11 @@ mod tests {
     fn run_local_app_build(
         reply: impl Fn(&str) -> String + Clone + 'static,
     ) -> Result<String, String> {
-        let descriptor = BUILTIN_WORKFLOWS.get("local-app-build").expect("built-in");
-        workflow::run_with_progress(
-            descriptor.script,
-            move |prompts: &[String], _options: &[String]| {
-                prompts.iter().map(|prompt| reply(prompt)).collect()
-            },
-            |_| {},
-            None,
-            false,
-            Some(r#"{"app_id":"test-app","spec":"build a test app"}"#.to_string()),
-            None,
+        drive_local_app_build(
+            local_app_args(None, None, None, None),
+            move |prompts, _options| prompts.iter().map(|prompt| reply(prompt)).collect(),
         )
+        .outcome
         .map(|outcome| outcome.result.unwrap_or_default())
         .map_err(|error| error.to_string())
     }
@@ -455,13 +683,24 @@ mod tests {
     /// rounds is a FAILED build, not a Completed one with a sad summary.
     #[test]
     fn local_app_build_throws_when_verification_never_passes() {
-        let error = run_local_app_build(|prompt| {
-            if prompt.contains("Invoke $frontend-qa") {
-                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"needs repair"}"#.to_string()
-            } else {
-                local_app_reply(prompt, "")
-            }
-        })
+        let error = drive_local_app_build(
+            local_app_args(Some("thorough"), None, None, None),
+            |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Invoke $frontend-qa") {
+                            r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"needs repair"}"#.to_string()
+                        } else {
+                            local_app_reply(prompt, "")
+                        }
+                    })
+                    .collect()
+            },
+        )
+        .outcome
+        .map(|outcome| outcome.result.unwrap_or_default())
+        .map_err(|error| error.to_string())
         .expect_err("unresolved findings must fail the workflow");
         assert!(
             error.contains("verification still has findings")
@@ -498,6 +737,77 @@ mod tests {
                 error.to_string().contains("refusing to invent one"),
                 "args {args} produced the wrong error: {error}"
             );
+        }
+    }
+
+    struct LocalAppHarness {
+        outcome: Result<workflow::RunOutcome, workflow::WorkflowError>,
+        prompts: Vec<String>,
+        phases: Vec<String>,
+    }
+
+    fn local_app_args(
+        strategy: Option<&str>,
+        complexity: Option<Value>,
+        model: Option<&str>,
+        revision_prompt: Option<&str>,
+    ) -> String {
+        let mut args = json!({
+            "app_id": "test-app",
+            "spec": "build a test app",
+        });
+        let object = args.as_object_mut().expect("object");
+        if let Some(strategy) = strategy {
+            object.insert("strategy".to_string(), Value::String(strategy.to_string()));
+        }
+        if let Some(complexity) = complexity {
+            object.insert("complexity".to_string(), complexity);
+        }
+        if let Some(model) = model {
+            object.insert("model".to_string(), Value::String(model.to_string()));
+        }
+        if let Some(revision_prompt) = revision_prompt {
+            object.insert(
+                "revision_prompt".to_string(),
+                Value::String(revision_prompt.to_string()),
+            );
+        }
+        args.to_string()
+    }
+
+    fn drive_local_app_build(
+        args: String,
+        reply: impl Fn(&[String], &[String]) -> Vec<String> + 'static,
+    ) -> LocalAppHarness {
+        let descriptor = BUILTIN_WORKFLOWS.get("local-app-build").expect("built-in");
+        let prompts_seen = Rc::new(RefCell::new(Vec::<String>::new()));
+        let captured_prompts = prompts_seen.clone();
+        let phases_seen = Rc::new(RefCell::new(Vec::<String>::new()));
+        let captured_phases = phases_seen.clone();
+        let outcome = workflow::run_with_progress(
+            descriptor.script,
+            move |prompts: &[String], options: &[String]| {
+                captured_prompts
+                    .borrow_mut()
+                    .extend(prompts.iter().cloned());
+                reply(prompts, options)
+            },
+            move |progress| {
+                if let workflow::Progress::Phase { title, .. } = progress {
+                    captured_phases.borrow_mut().push(title.clone());
+                }
+            },
+            None,
+            false,
+            Some(args),
+            None,
+        );
+        let prompts = prompts_seen.borrow().clone();
+        let phases = phases_seen.borrow().clone();
+        LocalAppHarness {
+            outcome,
+            prompts,
+            phases,
         }
     }
 }

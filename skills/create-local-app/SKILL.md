@@ -39,6 +39,27 @@ specification containing:
   product requirement, plus any user-requested external exception;
 - whether original raster imagery is required.
 
+Before the final confirmation, classify the confirmed specification without
+starting another agent. Score screens/routes, data complexity, host or external
+capability groups, target count, multi-step/error-state complexity, and original
+raster assets. Use this rubric: screens 0/1/2 points for 1/2-3/4+ or nested
+routes; data 0/1/2 for none or read-only/one simple writable collection/multiple
+or concurrency-sensitive collections; capabilities +1 per distinct group up to
+3; targets +1 for multiple form factors and +1 for multiple operating systems;
+interaction/state +1 for multi-step, offline, or complex permission/error
+flows; raster assets +1. Scores 0-2 suggest `fast`, 3-5 suggest `balanced`,
+and 6+ suggest `thorough`. Multi-OS, background scheduling, or two or more
+sensitive capability groups should recommend `thorough`; confidence below 0.75
+should recommend `balanced`.
+
+Include the score, reasons, confidence, estimated agent stages, and the
+recommended strategy in the same confirmation round. Let the user select
+`fast`, `balanced`, or `thorough`; put the recommendation first and describe
+the speed/coverage trade-off in each option. This is a task-local workflow
+choice, not an app persistence field. On a revision, rescore the revised
+confirmed specification instead of inheriting a stale strategy. Never launch
+a separate classifier agent just to make this recommendation.
+
 Do not silently add a package, capability, domain, platform, or image asset.
 The same business logic may serve multiple targets, but each target must use a
 platform adapter/tokens layer rather than a width-only conditional.
@@ -152,10 +173,19 @@ pass it byte-for-byte as `args.model`; otherwise omit `model` so every phase
 inherits the current session's live provider/model selection:
 
 ```json
-{"name":"local-app-build","args":{"app_id":"<id>","spec":"<confirmed spec>","model":"<optional provider/model>"}}
+{"name":"local-app-build","args":{"app_id":"<id>","spec":"<confirmed spec>","strategy":"balanced","complexity":{"score":4,"band":"medium","confidence":0.9,"reasons":["three screens","one writable collection"]},"model":"<optional provider/model>"}}
 ```
 
-The workflow is deterministic and owns these phases in order:
+The workflow is deterministic and adapts its phases from the confirmed
+strategy. Missing strategy defaults to `balanced`; unsupported values are
+rejected before any agent starts. `fast` skips the standalone Design agent and
+uses one smoke verification pass with at most one repair; `balanced` keeps
+Design/Generate & Build/Verify with at most one repair; `thorough` keeps the
+full target matrix and at most two repairs. Every strategy still requires a
+successful host build, runtime preview URL, fatal-error smoke check, and real
+native data round-trip evidence for every writable declared collection.
+
+The workflow phases are:
 
 The directory contract is fixed across every phase. The persistent source
 project lives at the current app workspace and is already scaffolded by the
@@ -167,11 +197,12 @@ promotes the validated snapshot, and serves only `build/store/dist/`. Never
 configure another `build.outDir`, inspect host staging paths, or copy generated
 output back into editable source.
 
-1. **Design** — invoke `$frontend-design`, produce/confirm platform and form
-   factor, page structure, tokens, adapters, interactions, and asset decision.
-   Assume the project scaffold and dependency graph are already present and
-   locked by the host. Do not propose template choices, npm operations,
-   fallback scaffold modes, or root-file edits.
+1. **Design** — for `balanced` and `thorough`, invoke `$frontend-design` and
+   produce/confirm platform and form factor, page structure, tokens, adapters,
+   interactions, and asset decision. For `fast`, fold those compact decisions
+   into the Generate & Build prompt. Assume the project scaffold and dependency
+   graph are already present and locked by the host. Do not propose template
+   choices, npm operations, fallback scaffold modes, or root-file edits.
 2. **Generate** — invoke `$accessibility` and `$react-best-practices`; consume
    the host-provided LingXi bridge, `deviceContext`, source policy/manifest
    integration, and platform adapter while writing complete React source and
@@ -185,17 +216,20 @@ output back into editable source.
    isolated `project/` root with the fixed runtime and the app's materialized
    dependency snapshot. `dist/` is the sole production output and the runtime
    serves the promoted `build/store/dist/`.
-4. **Verify** — invoke `$frontend-qa`. Use Browser when available for preview,
-   screenshots, console, navigation, and core interactions, then use native
-   WebView inspect/act/log tools for bridge, data, system back, and device
-   context. For every declared collection written by a core UI path, perform
-   the real UI write and then call `mcp__local_apps__query_data`; the returned
-   `records[].document` must contain the value. A local-only value or swallowed
-   bridge failure is not persistence. Cover the phone/tablet matrix and
-   desktop when supported.
+4. **Verify** — invoke `$frontend-qa`. `fast` checks the confirmed primary
+   target, root render, fatal console errors, primary interaction, and native
+   WebView path; `balanced` covers all confirmed targets and app states;
+   `thorough` covers the full phone/tablet/desktop matrix. Use Browser when
+   available for the selected breadth, then use native WebView inspect/act/log
+   tools for bridge, data, system back, and device context. For every declared
+   collection written by a core UI path, perform the real UI write and then
+   call `mcp__local_apps__query_data`; the returned `records[].document` must
+   contain the value. A local-only value or swallowed bridge failure is not
+   persistence.
 
-On a verification finding, repair, rebuild, and re-verify at most twice. If
-issues remain, return them with evidence and the reduced verification level;
+On a verification finding, repair, rebuild, and re-verify according to the
+selected strategy: at most once for `fast`/`balanced`, twice for `thorough`.
+If issues remain, return them with evidence and the reduced verification level;
 never claim full Browser or native QA that was not run.
 
 ## Workspace and dependency boundary

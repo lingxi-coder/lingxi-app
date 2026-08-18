@@ -1,6 +1,6 @@
 export const meta = {
   name: 'local-app-build',
-  description: 'Design, generate, build, and verify a confirmed local app.',
+  description: 'Adaptively design, generate, build, and verify a confirmed local app.',
   phases: [
     { title: 'Design' },
     { title: 'Generate & Build' },
@@ -8,7 +8,7 @@ export const meta = {
   ],
 };
 
-// args: { app_id: string, spec: string|object, revision_prompt?: string, model?: string }
+// args: { app_id: string, spec: string|object, strategy?: 'fast'|'balanced'|'thorough', complexity?: object, revision_prompt?: string, model?: string }
 const input = args && typeof args === 'object' ? args : {};
 const appId = typeof input.app_id === 'string' ? input.app_id : '';
 if (!appId) {
@@ -31,6 +31,79 @@ if (
     'local-app-build requires args.spec (the spec the user confirmed) — refusing to invent one',
   );
 }
+
+const STRATEGY_POLICY = {
+  fast: {
+    runDesign: false,
+    maxRepairRounds: 1,
+    verificationMode: 'smoke',
+    label: 'fast',
+  },
+  balanced: {
+    runDesign: true,
+    maxRepairRounds: 1,
+    verificationMode: 'confirmed-targets',
+    label: 'balanced',
+  },
+  thorough: {
+    runDesign: true,
+    maxRepairRounds: 2,
+    verificationMode: 'full-matrix',
+    label: 'thorough',
+  },
+};
+
+const requestedStrategy =
+  input.strategy === undefined ||
+  input.strategy === null ||
+  (typeof input.strategy === 'string' && input.strategy.trim().length === 0)
+    ? 'balanced'
+    : typeof input.strategy === 'string'
+      ? input.strategy.trim().toLowerCase()
+      : '';
+if (!Object.prototype.hasOwnProperty.call(STRATEGY_POLICY, requestedStrategy)) {
+  throw new Error(
+    `local-app-build received unsupported strategy ${JSON.stringify(input.strategy)}; expected fast, balanced, or thorough`,
+  );
+}
+const strategyPolicy = STRATEGY_POLICY[requestedStrategy];
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const rawComplexity = input.complexity && typeof input.complexity === 'object' ? input.complexity : {};
+const rawScore = Number(rawComplexity.score);
+const complexityScore = Number.isFinite(rawScore) ? Math.round(clamp(rawScore, 0, 10)) : 0;
+const rawConfidence = Number(rawComplexity.confidence);
+const complexityConfidence = Number.isFinite(rawConfidence)
+  ? Number(clamp(rawConfidence, 0, 1).toFixed(2))
+  : 0;
+const complexityBand =
+  complexityScore <= 2 ? 'low' : complexityScore <= 5 ? 'medium' : 'high';
+const complexityReasons = Array.isArray(rawComplexity.reasons)
+  ? rawComplexity.reasons
+      .filter((reason) => typeof reason === 'string')
+      .map((reason) => reason.trim())
+      .filter(Boolean)
+      .slice(0, 6)
+      .map((reason) => reason.slice(0, 160))
+  : [];
+const complexity = {
+  score: complexityScore,
+  band: complexityBand,
+  confidence: complexityConfidence,
+  reasons: complexityReasons,
+};
+let agentCalls = 0;
+const runAgent = async (prompt, options) => {
+  agentCalls += 1;
+  return agent(prompt, options);
+};
+const strategyContext = [
+  `Selected workflow strategy: ${strategyPolicy.label}.`,
+  `Complexity score: ${complexity.score}/10 (${complexity.band}), confidence ${complexity.confidence}.`,
+  complexity.reasons.length > 0 ? `Complexity reasons: ${complexity.reasons.join('; ')}` : '',
+  `Verification mode: ${strategyPolicy.verificationMode}.`,
+].filter(Boolean).join('\n');
+log(strategyContext);
 const revision = typeof input.revision_prompt === 'string' ? input.revision_prompt : '';
 const requestedModel = typeof input.model === 'string' ? input.model.trim() : '';
 const modelSeparator = requestedModel.indexOf('/');
@@ -145,37 +218,44 @@ const VERIFICATION_RESULT_SCHEMA = {
   ],
 };
 
-phase('Design');
-const designResult = await agent(
-  [
-    'Act as the local app design lead by invoking $frontend-design.',
-    `Prepare the implementation design for local app "${appId}" from this confirmed request:`,
-    confirmedSpec,
-    revision ? `Revision feedback:\n${revision}` : '',
-    '',
-    'Return a concrete, machine-readable design brief containing targets as an array of {os, form_factor} entries (iPhone, Android phone, iPad/tablet, Android tablet, or desktop), how each target was confirmed or inferred from the fixed Mobile Runtime Environment reminder (Host OS, Device class, Execution target, Launch mode), screen hierarchy, navigation/back behavior, complete UI states, design tokens, and the platform adapter strategy. If multiple targets are requested, describe distinct platform presentations sharing business logic.',
-    'Do not treat viewport, safe-area, color-scheme, reduced-motion, or input-mode as prompt facts. Those are dynamic runtime values that the generated app must read from window.lingxi.v2.deviceContext.',
-    'Assume the host already scaffolded the workspace and pinned the package/runtime contract. Design against the existing project shape; do not request package, template, scaffold, fallback, or toolchain decisions.',
-    'If the confirmed brief needs an original bitmap asset (photo, illustration, texture, hero, or background), conditionally detect ImageGen; when ready, record prompt/source/use and generate under public/. If unavailable, ask once whether to configure it or skip, then continue with CSS, gradients, user assets, or a placeholder without treating ImageGen as a hard dependency. Never use ImageGen for ordinary UI icons.',
-    'Do not propose package changes or any root-file edits in the design result. The build root, package graph, and locked infra are host-owned.',
-  ].join('\n'),
-  {
-    ...modelOptions,
-    label: 'design',
-    phase: 'Design',
-    schema: DESIGN_RESULT_SCHEMA,
-    throwOnError: true,
-  },
-);
-const design = requireAgentResult(designResult, 'the design step');
+let design = null;
+if (strategyPolicy.runDesign) {
+  phase('Design');
+  const designResult = await runAgent(
+    [
+      'Act as the local app design lead by invoking $frontend-design.',
+      `Prepare the implementation design for local app "${appId}" from this confirmed request:`,
+      confirmedSpec,
+      strategyContext,
+      revision ? `Revision feedback:\n${revision}` : '',
+      '',
+      'Return a concrete, machine-readable design brief containing targets as an array of {os, form_factor} entries (iPhone, Android phone, iPad/tablet, Android tablet, or desktop), how each target was confirmed or inferred from the fixed Mobile Runtime Environment reminder (Host OS, Device class, Execution target, Launch mode), screen hierarchy, navigation/back behavior, complete UI states, design tokens, and the platform adapter strategy. If multiple targets are requested, describe distinct platform presentations sharing business logic.',
+      'Do not treat viewport, safe-area, color-scheme, reduced-motion, or input-mode as prompt facts. Those are dynamic runtime values that the generated app must read from window.lingxi.v2.deviceContext.',
+      'Assume the host already scaffolded the workspace and pinned the package/runtime contract. Design against the existing project shape; do not request package, template, scaffold, fallback, or toolchain decisions.',
+      'If the confirmed brief needs an original bitmap asset (photo, illustration, texture, hero, or background), conditionally detect ImageGen; when ready, record prompt/source/use and generate under public/. If unavailable, ask once whether to configure it or skip, then continue with CSS, gradients, user assets, or a placeholder without treating ImageGen as a hard dependency. Never use ImageGen for ordinary UI icons.',
+      'Do not propose package changes or any root-file edits in the design result. The build root, package graph, and locked infra are host-owned.',
+    ].join('\n'),
+    {
+      ...modelOptions,
+      label: 'design',
+      phase: 'Design',
+      schema: DESIGN_RESULT_SCHEMA,
+      throwOnError: true,
+    },
+  );
+  design = requireAgentResult(designResult, 'the design step');
+}
 
 phase('Generate & Build');
-const generated = await agent(
+const generated = await runAgent(
   [
-    'Generate the complete React implementation. Invoke $accessibility and $react-best-practices as independent reviewers while writing the source.',
+    strategyPolicy.runDesign
+      ? 'Generate the complete React implementation. Invoke $accessibility and $react-best-practices as independent reviewers while writing the source.'
+      : 'Generate the complete React implementation from the confirmed spec. Use the compact design decisions in this prompt and invoke $accessibility and $react-best-practices as independent reviewers while writing the source.',
     `Implement local app "${appId}" from the confirmed request and design:`,
     confirmedSpec,
-    JSON.stringify(design),
+    strategyContext,
+    JSON.stringify(design || { summary: 'Use the confirmed spec as the compact design brief.' }),
     '',
     CONTRACT,
     '',
@@ -202,18 +282,26 @@ let build = requirePreviewOnSuccess(generated, 'initial build');
 
 let verification = null;
 let repairRounds = 0;
-// The two allowed repair rounds are repair -> rebuild -> re-verify cycles. A remaining
-// finding is returned honestly instead of being hidden by another iteration.
-for (let round = 0; round <= 2; round += 1) {
+// Strategy-specific repair rounds are repair -> rebuild -> re-verify cycles. A
+// remaining finding is returned honestly instead of being hidden by another iteration.
+for (let round = 0; round <= strategyPolicy.maxRepairRounds; round += 1) {
   phase('Verify');
-  verification = await agent(
+  const verificationBreadth =
+    strategyPolicy.verificationMode === 'smoke'
+      ? 'Run smoke verification for the confirmed primary target only: root render, fatal console errors, the primary interaction, and the native WebView path. Do not claim full cross-platform matrix coverage.'
+      : strategyPolicy.verificationMode === 'confirmed-targets'
+        ? 'Cover every confirmed target and the complete app states, navigation, accessibility basics, native WebView bridge, and primary interactions. Do not expand into unsupported targets.'
+        : 'Cover the full phone/tablet/desktop matrix in scope, Browser plus native WebView, all core interactions, error/permission/offline states, and every declared collection write path.';
+  verification = await runAgent(
     [
       'Invoke $frontend-qa for deterministic local-app verification.',
       `Verify local app "${appId}" using the preview from the build result:`,
       JSON.stringify(build),
-      JSON.stringify(design),
+      strategyContext,
+      verificationBreadth,
+      JSON.stringify(design || { summary: 'Use the confirmed spec and generated app as the design reference.' }),
       '',
-      'Use Browser when the capability exists: preview URL, required viewport matrix, console, navigation, and core interactions. Browser is also required for mobile-sized viewports when available; a narrow viewport alone does not prove a platform. Then use the real Local App WebView inspect_ui/act_on_ui/read_logs path to verify bridge/data/device context/system back semantics. Cover iPhone, Android phone, iPad portrait+landscape, Android tablet portrait+landscape, and desktop when those targets are in scope; inject platform context separately from viewport size.',
+      'Use Browser when the capability exists for the selected verification breadth. A narrow viewport alone does not prove a platform. Then use the real Local App WebView inspect_ui/act_on_ui/read_logs path to verify bridge/data/device context/system back semantics.',
       `For every declared collection that a core UI path writes, perform that real UI action, then call mcp__local_apps__query_data with {"app_id":"${appId}","collection":"<id>"} and verify the persisted record under records[].document. A localStorage-only value, optimistic UI state, or swallowed bridge rejection is a failed data roundtrip. Return data_roundtrip.status=passed only with this host-query evidence, not_applicable only when the app has no writable collection UI, otherwise failed and set ok=false.`,
       'If Browser is unavailable, use the existing inspect_ui/act_on_ui/read_logs path and report verification as degraded rather than claiming full visual QA.',
       'Return ok, findings, checked matrix, browser_available, webview_checked, degraded_verification, and data_roundtrip {status, collections, evidence}. Do not repair source in this pass.',
@@ -227,13 +315,14 @@ for (let round = 0; round <= 2; round += 1) {
     },
   );
   if (verification && verification.ok) break;
-  if (round === 2) break;
+  if (round === strategyPolicy.maxRepairRounds) break;
   repairRounds += 1;
   phase('Generate & Build');
-  const repaired = await agent(
+  const repaired = await runAgent(
     [
       `Repair the findings from frontend-qa for local app "${appId}".`,
       JSON.stringify(verification),
+      strategyContext,
       CONTRACT,
       'Fix the smallest source-level cause. Do not install packages, change root infra files, or edit workspace package files, and do not claim verification yet.',
       `After repairing, call mcp__local_apps__build with {"app_id":"${appId}"}. Let the host prepare locked dependencies if needed. If the build fails, read the build log, fix only editable source files, and retry once.`,
@@ -277,7 +366,7 @@ if (verification.ok !== true) {
     ? verification.findings.join('; ')
     : verification.summary || 'no findings reported';
   throw new Error(
-    `local-app-build: verification still has findings for app "${appId}" after the two allowed ` +
+    `local-app-build: verification still has findings for app "${appId}" after the ${strategyPolicy.maxRepairRounds} allowed ` +
       `repair rounds${verification.degraded_verification ? ' (verification was degraded)' : ''}: ` +
       findings,
   );
@@ -285,8 +374,14 @@ if (verification.ok !== true) {
 
 return {
   ok: true,
+  strategy: requestedStrategy,
+  complexity,
+  agent_calls: agentCalls,
   preview_url: build.preview_url,
   repair_rounds: repairRounds,
+  verification_mode: strategyPolicy.verificationMode,
   verification,
-  summary: 'Design, generation, build, and frontend QA completed.',
+  summary: strategyPolicy.runDesign
+    ? `${strategyPolicy.label} strategy completed design, generation, build, and frontend QA.`
+    : `${strategyPolicy.label} strategy completed generation, build, and frontend QA.`,
 };

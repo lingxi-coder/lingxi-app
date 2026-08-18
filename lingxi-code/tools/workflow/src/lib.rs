@@ -1210,6 +1210,8 @@ mod tests {
     /// parsed by nothing.
     #[test]
     fn managed_disable_workflows_disables_the_tool() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         let ctx = ToolStaticContext::default();
         assert!(
             WorkflowTool::new(None).is_enabled(&ctx),

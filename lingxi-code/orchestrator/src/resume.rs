@@ -220,6 +220,44 @@ pub fn post_compact_skill_attachments_from_messages(
         .collect()
 }
 
+/// An in-progress run of consecutive per-block "assistant" JSONL rows that
+/// share one originating turn (see [`flush_pending_assistant`]).
+struct PendingAssistant {
+    /// Grouping key: the inner `message.id` shared by every row of the
+    /// turn (or, for legacy/malformed rows with no inner id, that row's own
+    /// top-level `uuid` — which degrades to "one row, one group", matching
+    /// pre-grouping behavior).
+    inner_key: String,
+    /// The turn's logical id, restored from `inner_key` when it parses as a
+    /// UUID (the common case); falls back to the first row's own uuid.
+    message_id: Uuid,
+    content: Vec<ContentBlock>,
+}
+
+/// Flush an accumulated per-block assistant run into `state.history` as ONE
+/// merged [`ConversationMessage::Assistant`].
+///
+/// Write-side, one assistant turn `[reasoning, tool_use A, tool_use B]` is
+/// persisted as three single-block "assistant" JSONL rows sharing one inner
+/// `message.id` (`ConversationOrchestrator::persist_assistant_per_block`).
+/// Without this merge, [`build_state_from_jsonl`] would push three SEPARATE
+/// single-block `ConversationMessage::Assistant` turns on resume — which
+/// then encode as three separate provider-wire messages instead of one. For
+/// DeepSeek's thinking mode that splits a turn's `reasoning_content` off
+/// from the `tool_calls` message it belongs to, and the provider 400s with
+/// "The reasoning_content in the thinking mode must be passed back to the
+/// API." Restoring the single-turn shape here fixes it at the source
+/// instead of papering over it in the OpenAI-chat encoder.
+fn flush_pending_assistant(state: &mut SessionState, pending: Option<PendingAssistant>) {
+    if let Some(pending) = pending {
+        state.history.push(ConversationMessage::Assistant {
+            id: MessageId::from_uuid(pending.message_id),
+            content: pending.content,
+            stop_reason: None,
+        });
+    }
+}
+
 /// Convert the replayed JSONL into a fresh [`SessionState`] + the UUID of
 /// the tail message. `type: "user" | "assistant"` lines are appended to
 /// `history`; compact-boundary system lines are rebuilt as typed protocol
@@ -234,6 +272,7 @@ fn build_state_from_jsonl(
         crate::config::DEFAULT_MODEL.to_string(),
     );
     let mut last_uuid: Option<Uuid> = None;
+    let mut pending_assistant: Option<PendingAssistant> = None;
     let mut ultracode_state = tool_workflow::UltracodeState::default();
     for m in messages {
         let Ok(msg_uuid) = Uuid::parse_str(&m.uuid) else {
@@ -245,6 +284,7 @@ fn build_state_from_jsonl(
         };
         match m.message_type.as_str() {
             "user" => {
+                flush_pending_assistant(&mut state, pending_assistant.take());
                 let content_blocks = extract_content_blocks(&m.message);
                 // Restore the `isMeta` outer-envelope flag (claude-code persists
                 // it as a top-level field; we read it back from `extra`) so a
@@ -325,11 +365,31 @@ fn build_state_from_jsonl(
                 if let Some(profile) = m.extra.get("modelProfile") {
                     state.model_profile = profile.as_str().map(str::to_owned);
                 }
-                state.history.push(ConversationMessage::Assistant {
-                    id: MessageId::from_uuid(msg_uuid),
-                    content: content_blocks,
-                    stop_reason: None,
-                });
+                // Per-block persistence (write-side) splits one assistant turn
+                // into several single-block rows sharing one inner `message.id`
+                // — merge consecutive rows with the same inner id back into one
+                // turn instead of pushing each block as its own turn (see
+                // `flush_pending_assistant`).
+                let inner_key = m
+                    .message
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| m.uuid.clone());
+                match &mut pending_assistant {
+                    Some(pending) if pending.inner_key == inner_key => {
+                        pending.content.extend(content_blocks);
+                    }
+                    _ => {
+                        flush_pending_assistant(&mut state, pending_assistant.take());
+                        let message_id = Uuid::parse_str(&inner_key).unwrap_or(msg_uuid);
+                        pending_assistant = Some(PendingAssistant {
+                            inner_key,
+                            message_id,
+                            content: content_blocks,
+                        });
+                    }
+                }
                 // Message timing is a session sidecar, not part of the frozen
                 // ConversationMessage wire shape. Legacy or malformed rows
                 // leave it absent, making time-based microcompact a safe no-op.
@@ -346,6 +406,7 @@ fn build_state_from_jsonl(
                 last_uuid = Some(msg_uuid);
             }
             _ => {
+                flush_pending_assistant(&mut state, pending_assistant.take());
                 if let Some(message) = hook_attachment_message_for_api(m, msg_uuid) {
                     state.history.push(message);
                 }
@@ -387,6 +448,7 @@ fn build_state_from_jsonl(
             }
         }
     }
+    flush_pending_assistant(&mut state, pending_assistant.take());
     (state, last_uuid, resume_runtime_metadata(messages))
 }
 

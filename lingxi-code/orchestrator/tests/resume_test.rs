@@ -577,3 +577,60 @@ async fn replay_propagates_loader_error() {
     let res = replay_session_state(&lingxi_home, &cwd, sid, fs).await;
     assert!(matches!(res, Err(ResumeError::Loader(_))));
 }
+
+#[test]
+fn resume_merges_per_block_assistant_rows_sharing_one_inner_message_id() {
+    // Regression: write-side per-block persistence
+    // (`ConversationOrchestrator::persist_assistant_per_block`) splits one
+    // assistant turn `[thinking, tool_use]` into two single-block "assistant"
+    // JSONL rows that share one inner `message.id`, with distinct top-level
+    // `uuid`s. Before this fix, `build_state_from_jsonl` pushed one
+    // `ConversationMessage::Assistant` per ROW instead of per TURN, so the
+    // reasoning block and the tool_use block ended up in two separate history
+    // turns. On the next DeepSeek-thinking request that split resurfaces as
+    // two separate provider-wire messages — the tool_calls message carries no
+    // reasoning_content, and DeepSeek 400s: "The reasoning_content in the
+    // thinking mode must be passed back to the API."
+    let sid = Uuid::new_v4();
+    let inner_id = Uuid::new_v4().to_string();
+    let messages: Vec<session::jsonl::JsonlMessage> = vec![
+        serde_json::from_value(json!({
+            "type": "assistant", "uuid": Uuid::new_v4().to_string(), "parentUuid": null,
+            "sessionId": sid.to_string(), "timestamp": "2026-08-18T00:00:00.000Z",
+            "cwd": "/tmp", "version": "0.12.0", "isSidechain": false,
+            "message": {
+                "id": inner_id, "role": "assistant", "model": "deepseek-v4-flash",
+                "content": [{"type": "thinking", "thinking": "let me think", "signature": null}]
+            }
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "type": "assistant", "uuid": Uuid::new_v4().to_string(), "parentUuid": null,
+            "sessionId": sid.to_string(), "timestamp": "2026-08-18T00:00:01.000Z",
+            "cwd": "/tmp", "version": "0.12.0", "isSidechain": false,
+            "message": {
+                "id": inner_id, "role": "assistant", "model": "deepseek-v4-flash",
+                "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}]
+            }
+        }))
+        .unwrap(),
+    ];
+
+    let state = state_from_messages(sid, &messages);
+    assert_eq!(
+        state.history.len(),
+        1,
+        "the two per-block rows must merge back into ONE assistant turn"
+    );
+    match &state.history[0] {
+        ConversationMessage::Assistant { content, .. } => {
+            assert_eq!(content.len(), 2, "merged turn keeps both blocks, in order");
+            assert!(matches!(
+                &content[0],
+                protocol::ContentBlock::Thinking { thinking, .. } if thinking == "let me think"
+            ));
+            assert!(matches!(&content[1], protocol::ContentBlock::ToolUse { .. }));
+        }
+        other => panic!("expected a merged Assistant turn, got {other:?}"),
+    }
+}

@@ -1101,6 +1101,18 @@ impl ApiService {
         if let Some(choice) = &self.forced_tool_choice {
             req.tool_choice = Some(choice.clone());
         }
+        if req.model.contains("deepseek") || req.profile.as_deref() == Some("deepseek") {
+            tracing::debug!(
+                event = "build_request",
+                model = %req.model,
+                profile = req.profile.as_deref().unwrap_or("<none>"),
+                messages = req.messages.len(),
+                tools = req.tools.len(),
+                forced_tool_choice = self.forced_tool_choice.is_some(),
+                active_tool_choice = ?req.tool_choice,
+                stream = req.stream,
+            );
+        }
         req.stream = stream;
 
         // max_tokens (DIV-3): honor the escalation override (Some) else the
@@ -1166,6 +1178,66 @@ impl ApiService {
         req.metadata = self.request_metadata.clone();
 
         Ok(req)
+    }
+
+    fn log_deepseek_prepared_request(
+        model: &str,
+        prepared: &crate::PreparedLlmCall,
+        stream: bool,
+    ) {
+        let body = &prepared.provider_request.body_json;
+        let is_deepseek = model.contains("deepseek")
+            || body
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|model| model.contains("deepseek"))
+            || prepared
+                .provider_request
+                .url
+                .contains("api.deepseek.com");
+        if !is_deepseek {
+            return;
+        }
+
+        let (message_count, messages_with_reasoning_content, last_assistant_reasoning_len) =
+            body
+                .get("messages")
+                .and_then(serde_json::Value::as_array)
+                .map_or((0usize, 0usize, 0usize), |messages| {
+                    let with_reasoning = messages
+                        .iter()
+                        .filter(|message| message.get("reasoning_content").is_some())
+                        .count();
+                    let last_assistant_reasoning_len = messages
+                        .iter()
+                        .rev()
+                        .find(|message| {
+                            message
+                                .get("role")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("assistant")
+                        })
+                        .and_then(|message| message.get("reasoning_content"))
+                        .and_then(serde_json::Value::as_str)
+                        .map_or(0, str::len);
+                    (messages.len(), with_reasoning, last_assistant_reasoning_len)
+                });
+        tracing::debug!(
+            target = "llm_client::service",
+            event = "deepseek_prepared_request",
+            stream = stream,
+            model = %model,
+            provider_url = %prepared.provider_request.url,
+            message_count = message_count,
+            messages_with_reasoning_content = messages_with_reasoning_content,
+            last_assistant_reasoning_len = last_assistant_reasoning_len,
+            tool_choice = ?body.get("tool_choice"),
+            tools = body
+                .get("tools")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, |tools| tools.len()),
+            thinking = ?body.get("thinking"),
+        );
     }
 
     /// Inject betas + User-Agent + request-id headers onto a prepared request.
@@ -2287,6 +2359,7 @@ impl ApiService {
                     return Err(e);
                 }
             };
+            Self::log_deepseek_prepared_request(&req.model, &prepared, false);
             self.inject_headers(&mut prepared, &request_id, dispatch);
 
             let resp_result = self.transport.execute(&prepared.provider_request).await;
@@ -3054,6 +3127,7 @@ impl ApiService {
                 Ok(p) => p,
                 Err(e) => return Err(e),
             };
+            Self::log_deepseek_prepared_request(&req.model, &prepared, true);
             tracing::debug!(model = %req.model, event = "request_prepared");
             self.inject_stream_headers(&mut prepared, &request_id, dispatch);
             // Captured before the move below — the dispatch degradation check

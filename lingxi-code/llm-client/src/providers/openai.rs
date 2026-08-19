@@ -123,6 +123,36 @@ impl WireCodec for OpenAiChatCodec {
         // `reasoning_effort` are encoded explicitly below.
 
         let mut messages = Vec::new();
+        let deepseek_profile = self.is_deepseek_profile();
+        let deepseek_rejects_tool_choice = self.deepseek_thinking_rejects_tool_choice(&request.model);
+        let preserve_reasoning_content = self.is_kimi_profile() || deepseek_profile;
+        let assistant_reasoning_blocks = request
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "assistant"
+                    && message
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, ContentBlock::Reasoning { .. }))
+            })
+            .count();
+
+        if deepseek_profile {
+            tracing::debug!(
+                target = "llm_client::openai",
+                model = %request.model,
+                profile = %self.profile_name.as_deref().unwrap_or("<none>"),
+                base_url = %self.base_url,
+                incoming_messages = request.messages.len(),
+                assistant_reasoning_blocks = assistant_reasoning_blocks,
+                preserve_reasoning_content = preserve_reasoning_content,
+                deepseek_rejects_tool_choice = deepseek_rejects_tool_choice,
+                has_tool_choice = request.tool_choice.is_some(),
+                tool_choice = ?request.tool_choice,
+                event = "openai_encode_request_start",
+            );
+        }
 
         if !request.system.is_empty() {
             let text = request
@@ -134,14 +164,12 @@ impl WireCodec for OpenAiChatCodec {
             messages.push(serde_json::json!({"role": "system", "content": text}));
         }
 
-        let require_assistant_tool_content = self.is_deepseek_profile();
+        let require_assistant_tool_content = deepseek_profile;
         // DeepSeek V4 thinking is on by default (including v4-flash 极速).
         // Any later turn that omits that turn's reasoning_content is a 400:
         // "The reasoning_content in the thinking mode must be passed back".
         // This is not limited to tool-call messages — generate-build and
         // other multi-turn agents fail on a thinking+text reply too.
-        let preserve_reasoning_content =
-            self.is_kimi_profile() || self.is_deepseek_profile();
         messages.extend(request.messages.iter().flat_map(|message| {
             encode_message(
                 message,
@@ -155,6 +183,42 @@ impl WireCodec for OpenAiChatCodec {
         let wire_model = legacy_deepseek.map_or(request.model.as_str(), |(model, _)| model);
         body.insert("model".to_string(), Value::String(wire_model.to_string()));
         body.insert("messages".to_string(), Value::Array(messages));
+        let (encoded_messages_with_reasoning_content, last_assistant_reasoning_len) =
+            body.get("messages")
+                .and_then(Value::as_array)
+                .map_or((0usize, 0usize), |encoded_messages| {
+                    let messages_with_reasoning = encoded_messages
+                        .iter()
+                        .filter(|value| value.get("reasoning_content").is_some())
+                        .count();
+                    let last_assistant_reasoning_len = encoded_messages
+                        .iter()
+                        .rev()
+                        .find(|value| {
+                            value.get("role").and_then(Value::as_str) == Some("assistant")
+                        })
+                        .and_then(|value| value.get("reasoning_content"))
+                        .and_then(Value::as_str)
+                        .map_or(0, str::len);
+                    (messages_with_reasoning, last_assistant_reasoning_len)
+                });
+        let (deepseek_tool_calls, deepseek_tool_calls_without_reasoning) = body
+            .get("messages")
+            .and_then(Value::as_array)
+            .map_or((0usize, 0usize), |encoded_messages| {
+                let with_tool_calls = encoded_messages
+                    .iter()
+                    .filter(|value| value.get("role").and_then(Value::as_str) == Some("assistant"))
+                    .filter(|value| value.get("tool_calls").is_some())
+                    .count();
+                let missing_reasoning = encoded_messages
+                    .iter()
+                    .filter(|value| value.get("role").and_then(Value::as_str) == Some("assistant"))
+                    .filter(|value| value.get("tool_calls").is_some())
+                    .filter(|value| value.get("reasoning_content").is_none())
+                    .count();
+                (with_tool_calls, missing_reasoning)
+            });
         if let Some((_, thinking_type)) = legacy_deepseek {
             body.insert(
                 "thinking".to_string(),
@@ -219,16 +283,48 @@ impl WireCodec for OpenAiChatCodec {
         // StructuredOutput prompt and rely on the existing local validation,
         // nudge, and bounded retry path. The retired `deepseek-chat` alias
         // explicitly disables thinking above and can still use named choice.
-        if !self.deepseek_thinking_rejects_tool_choice(&request.model) {
+        if !deepseek_rejects_tool_choice {
             if let Some(tool_choice) = &request.tool_choice {
                 body.insert("tool_choice".to_string(), encode_tool_choice(tool_choice));
             }
+        } else if request.tool_choice.is_some() {
+            tracing::debug!(
+                target = "llm_client::openai",
+                model = %request.model,
+                profile = %self.profile_name.as_deref().unwrap_or("<none>"),
+                event = "openai_encode_request_tool_choice_dropped_by_deepseek",
+            );
         }
-
         if !request.tools.is_empty() {
             body.insert(
                 "tools".to_string(),
                 Value::Array(request.tools.iter().map(encode_tool).collect()),
+            );
+        }
+        if deepseek_profile {
+            if deepseek_tool_calls_without_reasoning > 0 {
+                tracing::warn!(
+                    target = "llm_client::openai",
+                    model = %request.model,
+                    event = "openai_encode_request_deepseek_tool_call_without_reasoning_content",
+                    assistant_tool_calls_without_reasoning_content =
+                        deepseek_tool_calls_without_reasoning,
+                    assistant_tool_calls_total = deepseek_tool_calls,
+                );
+            }
+            tracing::debug!(
+                target = "llm_client::openai",
+                model = %request.model,
+                event = "openai_encode_request_end",
+                encoded_messages_with_reasoning_content =
+                    encoded_messages_with_reasoning_content,
+                last_assistant_reasoning_len = last_assistant_reasoning_len,
+                deepseek_assistant_tool_calls = deepseek_tool_calls,
+                deepseek_assistant_tool_calls_without_reasoning_content =
+                    deepseek_tool_calls_without_reasoning,
+                final_tool_choice = body.contains_key("tool_choice"),
+                thinking_field = ?body.get("thinking"),
+                tool_count = request.tools.len(),
             );
         }
 
@@ -674,28 +770,63 @@ fn encode_message(
     if !reasoning_content.is_empty() {
         let assistant_index = messages
             .iter_mut()
-            .position(|value| {
+            .rposition(|value| {
                 value.get("role").and_then(Value::as_str) == Some("assistant")
                     && value.get("tool_calls").is_some()
             })
             .or_else(|| {
-                messages.iter().position(|value| {
+                messages.iter_mut().rposition(|value| {
                     value.get("role").and_then(Value::as_str) == Some("assistant")
                 })
             });
+        let reason_len = reasoning_content.len();
         if let Some(Value::Object(assistant)) =
             assistant_index.and_then(|index| messages.get_mut(index))
         {
+            let role = assistant
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let has_tool_calls = assistant.get("tool_calls").is_some();
             assistant.insert(
                 "reasoning_content".to_string(),
                 Value::String(reasoning_content),
             );
+            if preserve_reasoning_content && message.role == "assistant" {
+                tracing::trace!(
+                    target = "llm_client::openai",
+                    role = %role,
+                    has_tool_calls = has_tool_calls,
+                    reasoning_chars = reason_len,
+                    assistant_message_index = assistant_index.unwrap_or_default(),
+                    event = "openai_encode_message_reasoning_attached_to_assistant",
+                );
+            }
         } else {
+            if preserve_reasoning_content && message.role == "assistant" {
+                tracing::warn!(
+                    target = "llm_client::openai",
+                    role = %message.role,
+                    reasoning_chars = reason_len,
+                    reason = "no_assistant_message_emitted_for_reasoning",
+                    event = "openai_encode_message_reasoning_synced_assistant_fallback",
+                );
+            }
             messages.push(serde_json::json!({
                 "role": "assistant",
                 "content": null,
                 "reasoning_content": reasoning_content,
             }));
+        }
+        if preserve_reasoning_content && message.role == "assistant" {
+            tracing::debug!(
+                target = "llm_client::openai",
+                role = %message.role,
+                reasoning_chars = reason_len,
+                assistant_message_block_count = message.content.len(),
+                event = "openai_encode_message_with_reasoning_content",
+            );
         }
     }
     messages

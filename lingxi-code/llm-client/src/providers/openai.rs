@@ -328,6 +328,55 @@ impl WireCodec for OpenAiChatCodec {
             );
         }
 
+        // DeepSeek thinking mode requires a `reasoning_content` key on EVERY
+        // assistant message positioned after the LAST `user` message. Verified
+        // against the live API (api.deepseek.com, deepseek-v4-flash):
+        //   - an empty string satisfies the check;
+        //   - assistant messages BEFORE the last user message are exempt;
+        //   - `role: "tool"` does NOT reset the window, so in an agentic tool
+        //     loop every assistant turn since the last real user message needs
+        //     the field (an earlier round missing it 400s just as the last one does);
+        //   - the constraint does not apply at all when thinking is disabled.
+        //
+        // Two shapes reach the wire without it, and both 400 with "The
+        // reasoning_content in the thinking mode must be passed back to the API.":
+        //   1. `encode_message` splits ONE assistant turn carrying text AND a
+        //      tool call into TWO wire messages (a text message, then a
+        //      tool_calls message) but attaches the turn's reasoning trace to
+        //      only one of them — so the text message goes out bare.
+        //   2. A turn whose model reply carried no reasoning block at all
+        //      (compaction, replay, or simply a reply with no trace).
+        // Backfilling the key covers both; the real trace still rides the
+        // message that owns it.
+        if deepseek_profile {
+            let thinking_disabled = body
+                .get("thinking")
+                .and_then(|thinking| thinking.get("type"))
+                .and_then(Value::as_str)
+                == Some("disabled");
+            if !thinking_disabled {
+                if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+                    let after_last_user = messages
+                        .iter()
+                        .rposition(|message| {
+                            message.get("role").and_then(Value::as_str) == Some("user")
+                        })
+                        .map_or(0, |index| index + 1);
+                    for message in messages[after_last_user..].iter_mut() {
+                        let Some(object) = message.as_object_mut() else {
+                            continue;
+                        };
+                        if object.get("role").and_then(Value::as_str) != Some("assistant") {
+                            continue;
+                        }
+                        object
+                            .entry("reasoning_content")
+                            .or_insert_with(|| Value::String(String::new()));
+                    }
+                }
+            }
+        }
+
         let mut provider_request =
             ProviderRequest::post_json(self.chat_completions_url(), Value::Object(body));
         provider_request
@@ -1174,6 +1223,145 @@ mod tests {
         );
     }
 
+    /// Every assistant message after the LAST `user` message must carry a
+    /// `reasoning_content` key when DeepSeek thinking is active.
+    ///
+    /// Verified against the live api.deepseek.com on `deepseek-v4-flash`: the
+    /// exact wire array this encoder used to produce for a
+    /// `[Reasoning, Text, ToolCall]` turn returns
+    /// `400 "The reasoning_content in the thinking mode must be passed back to
+    /// the API."`, while the same array with the key present on both assistant
+    /// messages returns 200. An empty string satisfies the check; `role: "tool"`
+    /// does NOT reset the window, so an EARLIER round missing the key 400s too.
+    ///
+    /// This asserts the invariant over EVERY assistant message rather than
+    /// spot-checking indices — the predecessor test pinned the split shape by
+    /// index and asserted `reasoning_content` was ABSENT on the text fragment,
+    /// so it could never fail on the bug it was meant to guard.
+    #[test]
+    fn deepseek_thinking_never_emits_a_bare_assistant_message_after_last_user() {
+        // The reported failing turn: reasoning + interstitial text + a tool call,
+        // then the tool result, then a second tool-calling turn that carried NO
+        // reasoning trace at all (the `E`/`G5` shapes, which 400 independently
+        // of the split).
+        let mut request = LlmRequest::new("deepseek-v4-flash");
+        request.messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "build me an app".to_string(),
+                cache_control: None,
+            }],
+        });
+        request.messages.push(Message {
+            role: "assistant".to_string(),
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "I should look at the workspace".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "Let me check the workspace context first.".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::ToolCall {
+                    id: "call_read_1".to_string(),
+                    name: "Read".to_string(),
+                    input: serde_json::json!({"file_path": "/w/LINGXI.md"}),
+                },
+            ],
+        });
+        request.messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "call_read_1".to_string(),
+                output: Value::String("file contents".to_string()),
+                is_error: false,
+                cache_control: None,
+                cache_reference: None,
+            }],
+        });
+        // A later turn with NO Reasoning block — the model simply did not emit a
+        // trace. Still after the last real `user` message, so it needs the key.
+        request.messages.push(Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::ToolCall {
+                id: "call_bash_1".to_string(),
+                name: "Bash".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+            }],
+        });
+
+        let encoded = OpenAiChatCodec::new("https://api.deepseek.com")
+            .encode_request(&request)
+            .expect("encode DeepSeek thinking history");
+        let messages = encoded.body_json["messages"]
+            .as_array()
+            .expect("DeepSeek messages array");
+
+        let last_user = messages
+            .iter()
+            .rposition(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+            .expect("a user message exists");
+        let bare: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .skip(last_user + 1)
+            .filter(|(_, m)| m.get("role").and_then(Value::as_str) == Some("assistant"))
+            .filter(|(_, m)| m.get("reasoning_content").is_none())
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            bare.is_empty(),
+            "assistant messages after the last user message must all carry a \
+             reasoning_content key; these did not: {bare:?} in {}",
+            serde_json::to_string_pretty(messages).unwrap()
+        );
+        // The turn's real trace is preserved, not clobbered by the backfill.
+        let traces: Vec<&str> = messages
+            .iter()
+            .filter_map(|m| m.get("reasoning_content").and_then(Value::as_str))
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            traces,
+            vec!["I should look at the workspace"],
+            "the real reasoning trace must survive verbatim, exactly once"
+        );
+
+        // Thinking disabled ⇒ the constraint does not apply, so no backfill.
+        // (`deepseek-chat` maps to v4-flash with thinking explicitly disabled.)
+        let disabled = OpenAiChatCodec::new("https://api.deepseek.com")
+            .encode_request(&{
+                let mut r = request.clone();
+                r.model = "deepseek-chat".to_string();
+                r
+            })
+            .expect("encode DeepSeek with thinking disabled");
+        assert_eq!(disabled.body_json["thinking"]["type"], "disabled");
+        let disabled_messages = disabled.body_json["messages"]
+            .as_array()
+            .expect("messages array");
+        assert!(
+            disabled_messages
+                .iter()
+                .any(|m| m.get("role").and_then(Value::as_str) == Some("assistant")
+                    && m.get("reasoning_content").is_none()),
+            "thinking-disabled requests must not gain the backfilled key"
+        );
+
+        // Non-DeepSeek providers sharing this codec are untouched.
+        let openai = OpenAiChatCodec::new("https://api.openai.com/v1")
+            .with_profile_name("openai")
+            .encode_request(&request)
+            .expect("encode ordinary OpenAI history");
+        assert!(
+            !serde_json::to_string(&openai.body_json["messages"])
+                .unwrap()
+                .contains("reasoning_content"),
+            "the backfill must not leak into ordinary OpenAI-compatible requests"
+        );
+    }
+
     #[test]
     fn deepseek_tool_history_preserves_reasoning_and_non_null_assistant_content() {
         let mut request = LlmRequest::new("deepseek-v4-flash");
@@ -1203,7 +1391,12 @@ mod tests {
             .as_array()
             .expect("DeepSeek messages array");
         assert_eq!(messages[0]["content"], "I will use the design skill.");
-        assert!(messages[0].get("reasoning_content").is_none());
+        // The turn's real trace rides the message that owns it (the tool_calls
+        // one); the text fragment this turn was split into gets the empty-string
+        // backfill. It previously went out with NO `reasoning_content` key at
+        // all, which the live API rejects — see
+        // `deepseek_thinking_never_emits_a_bare_assistant_message_after_last_user`.
+        assert_eq!(messages[0]["reasoning_content"], "");
         assert_eq!(messages[1]["content"], "");
         assert_eq!(messages[1]["reasoning_content"], "choose the design skill");
 

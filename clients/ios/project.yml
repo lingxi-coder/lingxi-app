@@ -131,6 +131,34 @@ targets:
             echo "error: Linux runtime manifest is missing; rebuild the Alpine runtime."
             exit 1
           fi
+          # Refuse to package a rootfs with no Node toolchain for a build that
+          # exposes local apps. This gate existed but had ZERO call sites, so a
+          # FullDebug-iphoneos build shipped local_app_runtime=false with a
+          # busybox-only rootfs: `create_local_app` then died on
+          # `/usr/bin/pnpm: not found`, no build ever produced dist/, and the
+          # preview stayed "not ready" forever. Validate the manifest actually
+          # being packaged, not the staging copy. `--rootfs-only` because no
+          # build phase populates a staged local-app node_modules tree.
+          # `|| exit 1` and not bare: every other check in this phase fails
+          # closed explicitly, so the phase does not rely on `set -e`. A
+          # swallowed non-zero here would leave the trailing `cp` as the
+          # phase's status and ship the bare rootfs anyway — exactly the
+          # zero-call-sites failure this gate exists to prevent.
+          # Scoped to Full*: `LocalAppsRuntimeDistribution.usesFullRuntime` is
+          # true only under LINGXI_FULL, so Store builds deliberately ship a
+          # rootfs without the Node toolchain. The validator itself sets
+          # REQUIRED=1 for ANY *Release, so calling it unconditionally would
+          # fail every StoreRelease device build on a rootfs it is not supposed
+          # to have.
+          case "${CONFIGURATION}" in
+            Full*)
+              "${SRCROOT}/scripts/validate-local-app-build-assets.sh" \
+                --configuration "${CONFIGURATION}" \
+                --platform "${PLATFORM_NAME}" \
+                --rootfs-only \
+                --rootfs-manifest "${DESTINATION}/linux-runtime-manifest.json" || exit 1
+              ;;
+          esac
           # iSH's FsApplyOverlay does
           #   [NSBundle bundleWithURL:[mainBundle URLForResource:@"RootfsPatch" ...]]
           # and only then checks the RESULT for nil — but URLForResource:

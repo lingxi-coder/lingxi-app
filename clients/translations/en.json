@@ -255,6 +255,7 @@
   "local_apps_retry_generate": "Retry Generation",
   "local_apps_row_actions %@": "%@ actions",
   "local_apps_runtime_failed %@": "Run failed · %@",
+  "local_apps_runtime_failed_title": "Runtime failed",
   "local_apps_runtime_footer %@": "%@ · Dependencies pinned and managed by Lingxi",
   "local_apps_runtime_mode": "Run Mode",
   "local_apps_runtime_vite": "Vite Local Server",

@@ -78,7 +78,13 @@ final class LocalAppsStore {
     private(set) var pendingPermission: LocalAppPermissionPrompt?
     private(set) var pendingProfileProposal: LocalAppProfileProposal?
     private(set) var requestedPresentationAppID: String?
-    private(set) var activeUIRequestAppID: String?
+    /// requestId → appID for every UI request still awaiting a decision.
+    ///
+    /// A MAP, not one slot: the permission queue is nine deep and multi-app, so
+    /// a single slot let app B's request overwrite app A's, and resolving
+    /// either one cleared it for both — leaving a queued request whose app no
+    /// longer routed to its preview.
+    private(set) var pendingUIRequestAppIDs: [String: String] = [:]
 
     var searchQuery = ""
 
@@ -309,7 +315,7 @@ final class LocalAppsStore {
     }
 
     func hasPendingUIRequest(appID: String) -> Bool {
-        activeUIRequestAppID == appID
+        pendingUIRequestAppIDs.values.contains(appID)
     }
 
     func requestLaunch(appID: String, destination: LocalAppLaunchDestination) {
@@ -792,8 +798,16 @@ final class LocalAppsStore {
                 LocalAppWebViewRegistry.shared.deliverStreamFrame(appID: appID, frameJSON: frameJSON)
 
             case let .appUiRequest(request):
+                // Remember what these pointed at: an overflow drop must restore
+                // them rather than clear them, so dropping app B's request does
+                // not erase app A's genuinely pending one. The LRU stamp is
+                // captured too — marking a dropped app most-recently-used would
+                // protect it from eviction while a genuinely active runtime is
+                // reclaimed instead.
+                let previousRuntimeLastUsedAt = runtimeLastUsedAt[request.appId]
+                let previousRequestedPresentationAppID = requestedPresentationAppID
                 runtimeLastUsedAt[request.appId] = .now
-                activeUIRequestAppID = request.appId
+                pendingUIRequestAppIDs[request.requestId] = request.appId
                 requestedPresentationAppID = request.appId
                 if request.action == .inspect {
                     executeUIRequest(request, decision: .allowOnce)
@@ -804,7 +818,7 @@ final class LocalAppsStore {
                         decision: LocalAppsProtocolAdapter.authorizationDecision(decision)
                     )
                 } else {
-                    enqueuePermission(
+                    let queued = enqueuePermission(
                         LocalAppPermissionPrompt(
                             id: request.requestId,
                             appID: request.appId,
@@ -814,6 +828,15 @@ final class LocalAppsStore {
                         ),
                         source: .ui(request)
                     )
+                    if !queued {
+                        // A dropped request never reaches `resolveUIRequest`,
+                        // so its entry would linger forever and force-route
+                        // every later open of this app to the preview tab,
+                        // which then renders a bare "preview isn't ready yet".
+                        pendingUIRequestAppIDs.removeValue(forKey: request.requestId)
+                        requestedPresentationAppID = previousRequestedPresentationAppID
+                        runtimeLastUsedAt[request.appId] = previousRuntimeLastUsedAt
+                    }
                 }
 
             case let .appCapabilityRequested(request):
@@ -852,23 +875,29 @@ final class LocalAppsStore {
 
         /// Strictly FIFO: the request the page issued first is answered first,
         /// because that is the one whose `fetch()` has been stalled longest.
+        /// Returns `false` when the prompt was DROPPED on overflow. Callers that
+        /// stamped per-request state before enqueuing must undo it on a drop —
+        /// a dropped request never reaches `resolveUIRequest`, so anything left
+        /// behind is never cleaned up.
+        @discardableResult
         private func enqueuePermission(
             _ prompt: LocalAppPermissionPrompt,
             source: PendingPermissionSource
-        ) {
+        ) -> Bool {
             guard pendingPermission != nil else {
                 pendingPermission = prompt
                 pendingPermissionSource = source
-                return
+                return true
             }
             guard permissionQueue.count < Self.maxQueuedPermissions else {
                 // Dropping the newest keeps every request that already has a
                 // page waiting on it; the dropped one fails closed on the
                 // engine's approval timeout.
                 errorMessage = String(localized: "local_apps_error_permission_overflow")
-                return
+                return false
             }
             permissionQueue.append((prompt: prompt, source: source))
+            return true
         }
 
         private func presentNextPermission() {
@@ -892,7 +921,7 @@ final class LocalAppsStore {
                     error: error
                 )
             )
-            activeUIRequestAppID = nil
+            pendingUIRequestAppIDs.removeValue(forKey: requestID)
         }
 
         private func executeUIRequest(

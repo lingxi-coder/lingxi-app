@@ -649,6 +649,7 @@
   "local_apps_retry_generate": "다시 생성",
   "local_apps_row_actions %@": "%@ 작업",
   "local_apps_runtime_failed %@": "실행 실패 · %@",
+  "local_apps_runtime_failed_title": "실행 실패",
   "local_apps_runtime_footer %@": "%@ · 의존성은 Lingxi가 고정 버전으로 관리합니다",
   "local_apps_runtime_mode": "실행 모드",
   "local_apps_runtime_vite": "Vite 로컬 서비스",

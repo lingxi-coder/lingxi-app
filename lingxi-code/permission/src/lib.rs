@@ -36,6 +36,7 @@ pub mod dangerous_removal;
 pub mod defaults_per_tool;
 pub mod denial_tracking;
 pub mod filesystem;
+mod model_path;
 pub mod gate;
 pub mod git_bare_repo;
 pub mod headless_gate;
@@ -135,3 +136,5 @@ pub use update::PermissionUpdate;
 pub use workspace_lease::{
     WorkspaceLeaseInfo, WorkspacePermissionLease, WorkspacePermissionLeaseRegistry,
 };
+
+pub use model_path::{FileSystemPathTranslator, ModelPathTranslator};

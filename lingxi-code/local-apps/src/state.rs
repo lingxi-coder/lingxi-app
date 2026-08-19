@@ -16,7 +16,17 @@ use crate::types::{
 
 /// True iff `from -> to` is one of the legal runtime transitions:
 /// `stopped -> starting -> running -> stopping -> stopped`,
-/// `starting -> failed`, `running -> failed`, `failed -> starting`.
+/// `starting -> failed`, `running -> failed`, `stopped -> failed`,
+/// `failed -> starting`, `failed -> stopped`, `stopping -> failed`,
+/// `failed -> stopping`.
+///
+/// `stopped -> failed` is legal because a start attempt can fail before the
+/// record ever leaves `stopped`: `start_reserved_runtime` refuses to bind
+/// without a promoted `build/store/dist/index.html`, and its siblings fail the
+/// same way with no runtime mount or a squatted permanent port. Without this
+/// edge the failure write is rejected and the reason is discarded, leaving an
+/// app that cannot start and carries no `lastError` saying why. `failed ->
+/// starting` keeps it recoverable.
 #[must_use]
 pub fn runtime_transition_allowed(from: AppRuntimeState, to: AppRuntimeState) -> bool {
     use AppRuntimeState::{Failed, Running, Starting, Stopped, Stopping};
@@ -26,7 +36,19 @@ pub fn runtime_transition_allowed(from: AppRuntimeState, to: AppRuntimeState) ->
             | (Starting, Running)
             | (Running, Stopping)
             | (Stopping, Stopped)
-            | (Starting | Running, Failed)
+            | (Stopped | Starting | Running, Failed)
+            // Teardown of a runtime that never came up: app deletion, host
+            // shutdown reconciliation, or the user pressing Stop on a row
+            // showing the failure banner. Without this the write is rejected
+            // and the state, timestamp and event are discarded — the same
+            // dropped-bookkeeping failure `stopped -> failed` was added to fix.
+            | (Failed, Stopped)
+            // A listener can die while an explicit stop is already in flight
+            // (`Stopping`), and a failed runtime can still be explicitly
+            // stopped. Both writes use `let _ =`, so rejecting them discards
+            // the state, the `lastError` and the event silently.
+            | (Stopping, Failed)
+            | (Failed, Stopping)
     )
 }
 
@@ -200,7 +222,15 @@ mod tests {
             (Stopping, Stopped),
             (Starting, Failed),
             (Running, Failed),
+            // A start attempt that fails before leaving `stopped`.
+            (Stopped, Failed),
             (Failed, Starting),
+            // Teardown of a runtime that never came up.
+            (Failed, Stopped),
+            // A listener death racing an in-flight stop, and stopping a
+            // runtime that is already failed.
+            (Stopping, Failed),
+            (Failed, Stopping),
         ];
         for from in all {
             for to in all {
@@ -261,6 +291,38 @@ mod tests {
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
         assert_eq!(a.runtime.port, Some(3005));
         assert_eq!(a.runtime.state, AppRuntimeState::Running);
+    }
+
+    /// A runtime start can fail BEFORE the record ever leaves `stopped`:
+    /// `start_reserved_runtime` refuses to bind without
+    /// `build/store/dist/index.html`, and two sibling callers (no runtime
+    /// mount, squatted permanent port) reach the same path. That failure has
+    /// to be recordable — otherwise the state, the `lastError`, and the
+    /// `RuntimeChanged` event are all discarded and nothing can ever read why
+    /// the app will not start.
+    #[test]
+    fn a_start_failure_from_stopped_persists_the_reason() {
+        let mut a = app();
+        assert_eq!(a.runtime.state, AppRuntimeState::Stopped);
+        a.set_runtime(
+            AppRuntimeState::Failed,
+            None,
+            None,
+            Some("static build output is missing index.html; generate the app first".into()),
+            42,
+        )
+        .expect("a start failure from stopped must be recordable");
+        assert_eq!(a.runtime.state, AppRuntimeState::Failed);
+        assert_eq!(
+            a.runtime.last_error.as_deref(),
+            Some("static build output is missing index.html; generate the app first")
+        );
+        assert_eq!(a.runtime.updated_at_ms, 42);
+        // The app must still be able to leave the state it just entered.
+        assert!(runtime_transition_allowed(
+            AppRuntimeState::Failed,
+            AppRuntimeState::Starting
+        ));
     }
 
     #[test]

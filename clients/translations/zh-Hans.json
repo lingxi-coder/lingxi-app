@@ -649,6 +649,7 @@
   "local_apps_retry_generate": "重试生成",
   "local_apps_row_actions %@": "%@ 操作",
   "local_apps_runtime_failed %@": "运行失败 · %@",
+  "local_apps_runtime_failed_title": "运行失败",
   "local_apps_runtime_footer %@": "%@ · 依赖由 Lingxi 固定管理",
   "local_apps_runtime_mode": "运行模式",
   "local_apps_runtime_vite": "Vite 本地服务",

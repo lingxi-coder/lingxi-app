@@ -14,6 +14,24 @@ use traits::rooted_fs::{self, AtomicWriteOptions};
 use traits::FsError;
 
 const MAX_PERMISSIONS_BYTES: u64 = 512 * 1024;
+
+/// The workspace-local permission settings written when a local app is
+/// created. These BYTES are what ships — there is deliberately no second
+/// in-Rust copy of the rule strings to drift out of step with the template.
+///
+/// Two things about the spelling are easy to get wrong:
+///
+/// - `Edit` is the Claude Code permission verb for the whole file-editing
+///   family. Verified against the 2.1.235 binary: `getPatternsByRoot` does
+///   `switch(t){case"edit":return Il;case"read":return zs}` with `Il="Edit"`,
+///   so a `Write` / `MultiEdit` / `NotebookEdit` call consults `Edit`-named
+///   rules. A `Write(...)` rule here would look right in JSON and grant
+///   nothing.
+/// - `./**` does NOT anchor to "wherever this file lives". `patternWithRootFor`
+///   strips the leading `./` and returns `root: null`, which
+///   `matchingRuleForInput` resolves as the CURRENT working directory. The
+///   grant is therefore scoped to the app workspace only because a `.localApp`
+///   session's cwd IS that workspace; it is not the `./` doing the scoping.
 const LOCAL_APP_WORKSPACE_PERMISSION_SETTINGS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/templates/vite-react-static-v1/.lingxi/settings.local.json"
@@ -26,15 +44,6 @@ fn default_grant_epoch() -> u64 {
 fn is_initial_grant_epoch(value: &u64) -> bool {
     *value == 1
 }
-
-/// The initial workspace-local rules written when a local app is created.
-///
-/// `Edit` is the Claude Code permission verb for the complete file-editing
-/// family (`Write`, `MultiEdit`, and `NotebookEdit` are evaluated through it),
-/// so using `Write` here would look right in JSON but would not grant the
-/// intended operations. The `./` prefix keeps the grant relative to the app
-/// workspace instead of broadening it to the host filesystem.
-pub const LOCAL_APP_WORKSPACE_PERMISSION_RULES: [&str; 2] = ["Read(./**)", "Edit(./**)"];
 
 /// Agent capability that requires user authorization before mutation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

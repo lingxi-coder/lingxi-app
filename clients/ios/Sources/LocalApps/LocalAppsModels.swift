@@ -141,6 +141,41 @@ enum LocalAppRuntimeStatus: Hashable, Sendable {
     }
 }
 
+/// What the pushed preview route shows when there is no live URL to load.
+///
+/// Extracted from the view so the mapping is testable. The route used to
+/// collapse `.starting`, `.stopped` and `.failed(reason)` into a single
+/// hourglass with no action and no reason, which made a runtime that had
+/// FAILED indistinguishable from one that was merely still booting — and left
+/// the user no way to retry.
+enum LocalAppPreviewPlaceholder: Equatable, Sendable {
+    /// A transition is in flight; the URL should arrive on its own.
+    case transient
+    /// The runtime failed and will not come up without action.
+    case failed(String)
+    /// The host suspended the runtime.
+    case suspended(String?)
+    /// Nothing is running and nothing is in flight.
+    case idle
+
+    /// `nil` means "there is a URL — render the web view instead".
+    static func forStatus(_ status: LocalAppRuntimeStatus?) -> LocalAppPreviewPlaceholder? {
+        switch status {
+        case let .running(url):
+            // `running` without a URL yet is still coming up, not idle.
+            url == nil ? .transient : nil
+        case .starting, .stopping:
+            .transient
+        case let .failed(reason):
+            .failed(reason)
+        case let .suspended(reason):
+            .suspended(reason)
+        case .stopped, nil:
+            .idle
+        }
+    }
+}
+
 struct LocalAppCheckpoint: Identifiable, Hashable, Sendable {
     let id: String
     let label: String

@@ -98,6 +98,275 @@ mod tests {
         assert_eq!(inner.persisted.load(Ordering::SeqCst), 0);
     }
 
+    /// Maps the device's guest workspace spelling onto its host twin, the way
+    /// `GuestPathFileSystem::translate_model_path` does on iOS.
+    struct FakeGuestTranslator;
+
+    impl crate::ModelPathTranslator for FakeGuestTranslator {
+        fn to_host(&self, model_path: &str, _write: bool) -> Option<String> {
+            model_path
+                .strip_prefix("/workspace/ws")
+                .map(|rest| format!("/proj{rest}"))
+        }
+    }
+
+    fn local_settings_policy(raw: &str) -> Arc<PermissionPolicy> {
+        let rules = crate::loader::permission_rules_from_settings_json(
+            raw,
+            PermissionRuleSource::LocalSettings,
+        )
+        .unwrap();
+        Arc::new(
+            PermissionPolicy::from_rules(PermissionMode::Default, rules).with_roots(FsRoots {
+                cwd: PathBuf::from("/proj"),
+                home: Some(PathBuf::from("/home/u")),
+                lingxi_home: PathBuf::from("/home/u/.lingxi"),
+            }),
+        )
+    }
+
+    /// The measured device bug: the model names files in GUEST coordinates
+    /// while every permission root is a HOST path, so `Edit(./**)` — the rule
+    /// the host itself writes into a local app's workspace — matches nothing
+    /// and every single write prompts.
+    #[tokio::test]
+    async fn guest_path_matches_an_allow_rule_through_its_host_twin() {
+        let policy = local_settings_policy(r#"{ "permissions": { "allow": ["Edit(./**)"] } }"#);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "should not prompt".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone())
+            .with_path_translator(Arc::new(FakeGuestTranslator));
+        assert_eq!(
+            gate.check(
+                "Write",
+                &serde_json::json!({"file_path": "/workspace/ws/src/App.jsx"})
+            )
+            .await,
+            PermissionDecision::Allow,
+            "a guest path under the workspace must match the workspace allow rule"
+        );
+        assert_eq!(inner.calls(), 0, "an allowed write must not prompt");
+    }
+
+    /// FAIL-OPEN GUARD. Rewriting the input to host coordinates and evaluating
+    /// only that form would silently drop every deny written in the
+    /// coordinates the model actually uses: `//workspace/**` resolves to root
+    /// `/` and matches the guest spelling, but can never match the host twin.
+    /// The verdict must be the strictest of both forms.
+    #[tokio::test]
+    async fn a_deny_written_in_guest_coordinates_still_wins_after_translation() {
+        let policy = local_settings_policy(
+            r#"{ "permissions": {
+                   "allow": ["Edit(./**)"],
+                   "deny": ["Edit(//workspace/ws/secrets/**)"]
+                 } }"#,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone())
+            .with_path_translator(Arc::new(FakeGuestTranslator));
+        match gate
+            .check(
+                "Write",
+                &serde_json::json!({"file_path": "/workspace/ws/secrets/key.pem"}),
+            )
+            .await
+        {
+            PermissionDecision::Deny { .. } => {}
+            PermissionDecision::Allow => {
+                panic!("a guest-coordinate deny must survive host translation")
+            }
+        }
+    }
+
+    /// REGRESSION GUARD for the dual evaluation: an allow rule written in the
+    /// coordinates the model uses must KEEP working.
+    ///
+    /// `Edit(//workspace/ws/**)` matches the guest spelling and allowed this
+    /// write before translation existed. If the gate returns the HOST verdict
+    /// whenever the guest side is not a Deny, that pre-existing allow silently
+    /// becomes a prompt — a behavior regression introduced by the fix itself.
+    /// The lattice must be: Deny from either > Allow from either > Ask.
+    #[tokio::test]
+    async fn an_allow_written_in_guest_coordinates_keeps_working() {
+        let policy =
+            local_settings_policy(r#"{ "permissions": { "allow": ["Edit(//workspace/ws/**)"] } }"#);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "should not prompt".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone())
+            .with_path_translator(Arc::new(FakeGuestTranslator));
+        assert_eq!(
+            gate.check(
+                "Write",
+                &serde_json::json!({"file_path": "/workspace/ws/src/App.jsx"})
+            )
+            .await,
+            PermissionDecision::Allow,
+            "translation must not revoke an allow that already matched the guest path"
+        );
+        assert_eq!(inner.calls(), 0, "an allowed write must not prompt");
+    }
+
+    /// Splitting one evaluation into two must not invert the ask/allow
+    /// precedence. Inside a single space `authorize_inner` walks
+    /// deny -> ask -> allow, so an explicit ASK RULE outranks an allow. If the
+    /// join instead prefers "Allow from either", the prompt the user
+    /// deliberately asked for never fires.
+    #[tokio::test]
+    async fn an_explicit_ask_rule_outranks_an_allow_in_the_other_coordinate_space() {
+        let policy = local_settings_policy(
+            r#"{ "permissions": {
+                   "allow": ["Edit(./**)"],
+                   "ask": ["Edit(//workspace/ws/src/secrets.ts)"]
+                 } }"#,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone())
+            .with_path_translator(Arc::new(FakeGuestTranslator));
+        assert_eq!(
+            gate.check(
+                "Write",
+                &serde_json::json!({"file_path": "/workspace/ws/src/secrets.ts"})
+            )
+            .await,
+            PermissionDecision::Allow,
+            "the inner gate should have been consulted"
+        );
+        assert_eq!(
+            inner.calls(),
+            1,
+            "an explicit ask rule must still reach the user, not be overridden              by an allow rule matched in the other coordinate space"
+        );
+    }
+
+    /// In `DontAsk` the policy converts an unmatched Ask into a mode Deny. That
+    /// is a FALLBACK, not a decision, so it must not short-circuit the guest
+    /// evaluation — otherwise a grant spelled only in guest coordinates turns
+    /// from Allow into Deny the moment a translator is installed.
+    #[tokio::test]
+    async fn a_mode_deny_on_the_host_form_does_not_suppress_a_guest_allow() {
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "allow": ["Edit(//workspace/ws/**)"] } }"#,
+            PermissionRuleSource::LocalSettings,
+        )
+        .unwrap();
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(PermissionMode::DontAsk, rules).with_roots(FsRoots {
+                cwd: PathBuf::from("/proj"),
+                home: Some(PathBuf::from("/home/u")),
+                lingxi_home: PathBuf::from("/home/u/.lingxi"),
+            }),
+        );
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "should not prompt".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone())
+            .with_path_translator(Arc::new(FakeGuestTranslator));
+        assert_eq!(
+            gate.check(
+                "Write",
+                &serde_json::json!({"file_path": "/workspace/ws/src/App.jsx"})
+            )
+            .await,
+            PermissionDecision::Allow,
+            "a guest-coordinate allow must survive the host form's mode Deny"
+        );
+    }
+
+    /// The guest/host fix must also cover the ENUMERATION seam. `Grep`/`Glob`
+    /// pass their own resolved base to `read_deny_exclude_globs`, which on
+    /// mobile is a GUEST path. Relativizing the deny patterns against it
+    /// escapes upward, yields zero excludes, and the search walks straight
+    /// through a `Read`-denied directory — the same coordinate mismatch the
+    /// authorize path fixes one layer up.
+    #[tokio::test]
+    async fn read_deny_excludes_are_computed_in_host_coordinates() {
+        use traits::permission_gate::PermissionGate as _;
+
+        // A ROOTED pattern: `/secrets/**` resolves to `root_path_for_source`
+        // (= roots.cwd), so it must be REBASED onto the search cwd. An
+        // unrooted `./…` pattern would be cwd-independent and could not show
+        // the defect.
+        let policy = local_settings_policy(r#"{ "permissions": { "deny": ["Read(/secrets/**)"] } }"#);
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner)
+            .with_path_translator(Arc::new(FakeGuestTranslator));
+
+        let host = gate
+            .read_deny_exclude_globs(std::path::Path::new("/proj"))
+            .unwrap_or_default();
+        assert!(
+            !host.is_empty(),
+            "sanity: the host base must already produce excludes"
+        );
+
+        let guest = gate
+            .read_deny_exclude_globs(std::path::Path::new("/workspace/ws"))
+            .unwrap_or_default();
+        assert_eq!(
+            guest, host,
+            "a guest search base must yield the same excludes as its host twin"
+        );
+    }
+
+    /// The read-deny edit guard is documented as BYPASS-IMMUNE: it must not be
+    /// overridable by an allow rule. It reports `PermissionDecisionReason::Other`,
+    /// which is not a `_pt` ask reason — so ranking it with the mode fallback
+    /// puts it BELOW `Allow`, and an allow matched in the other coordinate
+    /// space silently overrides it. The read-denied file is then written with
+    /// no prompt at all.
+    #[tokio::test]
+    async fn the_read_deny_edit_guard_is_not_overridden_by_an_allow_in_the_other_space() {
+        let policy = local_settings_policy(
+            r#"{ "permissions": {
+                   "allow": ["Edit(//workspace/ws/**)"],
+                   "deny": ["Read(./secrets/**)"]
+                 } }"#,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "prompted".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone())
+            .with_path_translator(Arc::new(FakeGuestTranslator));
+        let verdict = gate
+            .check(
+                "Write",
+                &serde_json::json!({"file_path": "/workspace/ws/secrets/key.pem"}),
+            )
+            .await;
+        assert_ne!(
+            verdict,
+            PermissionDecision::Allow,
+            "a read-denied path must never be silently writable"
+        );
+    }
+
+    /// Without a translator the gate must be byte-identical to desktop.
+    #[tokio::test]
+    async fn no_translator_leaves_the_verdict_untouched() {
+        let policy = local_settings_policy(r#"{ "permissions": { "allow": ["Edit(./**)"] } }"#);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "prompted".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        // A host path under the root still matches.
+        assert_eq!(
+            gate.check("Write", &serde_json::json!({"file_path": "/proj/src/App.jsx"}))
+                .await,
+            PermissionDecision::Allow
+        );
+        // A guest path does not — exactly today's behavior.
+        assert!(matches!(
+            gate.check(
+                "Write",
+                &serde_json::json!({"file_path": "/workspace/ws/src/App.jsx"})
+            )
+            .await,
+            PermissionDecision::Deny { .. }
+        ));
+    }
+
     fn policy_with(raw: &str, mode: PermissionMode) -> Arc<PermissionPolicy> {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,

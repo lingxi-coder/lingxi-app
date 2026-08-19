@@ -868,6 +868,63 @@ mod tests {
         ));
     }
 
+    /// The host-owned HARD DENY is reachable only through a forwarded token.
+    ///
+    /// `denies_host_owned_for_token` had no test at all, and in production the
+    /// token never arrived: `DeferredToolInvoker` inherited the trait's
+    /// delegating default and dropped it, so the `let Some(token) = token else
+    /// { return false }` early return disabled this guard entirely. Forwarding
+    /// the token (engine-mobile `workflow_support.rs`, engine-desktop `lib.rs`)
+    /// turns it on for the first time — pin both polarities so the activation
+    /// is deliberate and a future pass-through wrapper cannot silently undo it.
+    #[test]
+    fn production_host_owned_deny_requires_the_forwarded_token() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("apps/app-a/workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let registry = WorkspacePermissionLeaseRegistry::new();
+        let lease = registry.begin_local_app("app-a", &root).unwrap();
+        let fs = roots(&root);
+
+        // A host-owned file is denied outright when the token is present.
+        assert!(
+            registry.denies_host_owned_for_token(
+                Some(lease.token()),
+                "Write",
+                &serde_json::json!({"file_path":"/workspace/local-app-app-a/package.json"}),
+                &fs
+            ),
+            "a leased workflow must not rewrite host-owned package.json"
+        );
+
+        // Generated source under the same lease stays writable.
+        assert!(
+            !registry.denies_host_owned_for_token(
+                Some(lease.token()),
+                "Write",
+                &serde_json::json!({"file_path":"/workspace/local-app-app-a/src/App.jsx"}),
+                &fs
+            ),
+            "generated source is not host-owned"
+        );
+
+        // DOCUMENTS the `let Some(token) = token else { return false }` arm —
+        // it is NOT a regression anchor. This assertion stays green precisely
+        // WHEN the bug recurs, so it cannot catch a wrapper that drops the
+        // token again. The real guards are the forwarding tests in
+        // engine-mobile `workflow_support.rs` and engine-desktop `lib.rs`,
+        // which assert the token reaches the inner invoker.
+        assert!(
+            !registry.denies_host_owned_for_token(
+                None,
+                "Write",
+                &serde_json::json!({"file_path":"/workspace/local-app-app-a/package.json"}),
+                &fs
+            ),
+            "a dropped token silently disables the host-owned deny"
+        );
+    }
+
     #[test]
     fn local_app_shell_path_escape_is_hard_denied_before_global_allow_rules() {
         let dir = tempdir().unwrap();

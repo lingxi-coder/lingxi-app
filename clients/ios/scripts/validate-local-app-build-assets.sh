@@ -7,17 +7,29 @@ CONFIGURATION=""
 PLATFORM=""
 STAGED=""
 ROOTFS_MANIFEST=""
+# Judge the ROOTFS ALONE, skipping the staged local-app runtime requirement.
+# The Xcode staging phase is the only caller that runs during a real build, and
+# nothing there populates a staged node_modules tree -- commit 1a4385f09
+# deliberately removed the phase that did, recording a directive against
+# reintroducing a bundled dependency seed. Demanding it there would fail every
+# Full/Release iphoneos build, so the build wires in this scoped mode.
+ROOTFS_ONLY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --configuration) CONFIGURATION="${2:-}"; shift 2 ;;
     --platform) PLATFORM="${2:-}"; shift 2 ;;
     --staged) STAGED="${2:-}"; shift 2 ;;
     --rootfs-manifest) ROOTFS_MANIFEST="${2:-}"; shift 2 ;;
+    --rootfs-only) ROOTFS_ONLY=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-if [[ -z "${CONFIGURATION}" || -z "${PLATFORM}" || -z "${STAGED}" || -z "${ROOTFS_MANIFEST}" ]]; then
+if [[ -z "${CONFIGURATION}" || -z "${PLATFORM}" || -z "${ROOTFS_MANIFEST}" ]]; then
+  echo "usage: $0 --configuration <name> --platform <name> [--staged <dir>] [--rootfs-only] --rootfs-manifest <file>" >&2
+  exit 2
+fi
+if [[ "${ROOTFS_ONLY}" != "1" && -z "${STAGED}" ]]; then
   echo "usage: $0 --configuration <name> --platform <name> --staged <dir> --rootfs-manifest <file>" >&2
   exit 2
 fi
@@ -32,13 +44,15 @@ if [[ "${REQUIRED}" != "1" ]]; then
   exit 0
 fi
 
-for required in "${STAGED}/node_modules/vite/bin/vite.js"; do
-  if [[ ! -f "${required}" ]]; then
-    echo "error: ${CONFIGURATION} requires the staged local-app runtime: ${required}" >&2
-    echo "       Set LINGXI_LOCAL_APP_NODE_MODULES and rebuild." >&2
-    exit 1
-  fi
-done
+if [[ "${ROOTFS_ONLY}" != "1" ]]; then
+  for required in "${STAGED}/node_modules/vite/bin/vite.js"; do
+    if [[ ! -f "${required}" ]]; then
+      echo "error: ${CONFIGURATION} requires the staged local-app runtime: ${required}" >&2
+      echo "       Set LINGXI_LOCAL_APP_NODE_MODULES and rebuild." >&2
+      exit 1
+    fi
+  done
+fi
 
 if [[ "${PLATFORM}" != "iphoneos" ]]; then
   exit 0

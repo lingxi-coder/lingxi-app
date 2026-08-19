@@ -1332,6 +1332,34 @@ impl traits::tool_invoker::ToolInvoker for DeferredToolInvoker {
         }
     }
 
+    /// Forward the lease token instead of inheriting the trait's delegating
+    /// default. This wrapper sits between the lease PRODUCER
+    /// (`WorkspaceLeaseToolInvoker`) and the CONSUMER (`RegistryToolInvoker`,
+    /// which folds the token into `PermissionCheckContext`), so the default —
+    /// which drops the token and calls `invoke` — left
+    /// `workspace_lease_token` permanently `None` in production: the lease
+    /// ALLOW never fired, and neither did the paired `denies_host_owned_for_token`
+    /// hard deny.
+    async fn invoke_with_workspace_lease(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        ctx: traits::tool_invoker::SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        match self.inner.get() {
+            Some(invoker) => {
+                invoker
+                    .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
+                    .await
+            }
+            None => Err(traits::tool_invoker::ToolInvokerError::Internal(
+                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
+                    .to_string(),
+            )),
+        }
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -15840,5 +15868,83 @@ mod connected_fallback_tests {
         .expect("must reroute");
         assert_eq!(fb.model, "deepseek-reasoner");
         assert_eq!(fb.profile, "deepseek");
+    }
+}
+
+#[cfg(test)]
+mod workspace_lease_forwarding_tests {
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+
+    /// Terminal invoker that records the lease token it was dispatched with.
+    struct RecordingInvoker {
+        seen: Arc<StdMutex<Option<Option<u64>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolInvoker for RecordingInvoker {
+        async fn invoke(
+            &self,
+            _name: &str,
+            _input: serde_json::Value,
+            _ctx: SubagentInvocationContext,
+        ) -> Result<serde_json::Value, ToolInvokerError> {
+            *self.seen.lock().unwrap() = Some(None);
+            Ok(serde_json::json!({}))
+        }
+
+        async fn invoke_with_workspace_lease(
+            &self,
+            _name: &str,
+            _input: serde_json::Value,
+            _ctx: SubagentInvocationContext,
+            workspace_lease_token: Option<u64>,
+        ) -> Result<serde_json::Value, ToolInvokerError> {
+            *self.seen.lock().unwrap() = Some(workspace_lease_token);
+            Ok(serde_json::json!({}))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn bare_ctx() -> SubagentInvocationContext {
+        SubagentInvocationContext {
+            parent_agent_id: None,
+            agent_name: None,
+            team_name: None,
+            is_async: false,
+            is_non_interactive_session: false,
+            can_show_permission_prompts: false,
+            cwd: None,
+            tool_use_id: None,
+            depth: 0,
+            observer: None,
+            parent_model: None,
+            parent_model_profile: None,
+            mode_override: None,
+        }
+    }
+
+    /// Desktop sibling of the mobile guard: the deferred wrapper must forward
+    /// the lease token rather than inherit the trait's delegating default.
+    #[tokio::test]
+    async fn deferred_invoker_forwards_the_workspace_lease_token() {
+        let seen = Arc::new(StdMutex::new(None));
+        let deferred = super::DeferredToolInvoker::new();
+        deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
+
+        deferred
+            .invoke_with_workspace_lease("Read", serde_json::json!({}), bare_ctx(), Some(77))
+            .await
+            .expect("dispatch");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(Some(77)),
+            "the deferred invoker must forward the lease token, not swallow it"
+        );
     }
 }

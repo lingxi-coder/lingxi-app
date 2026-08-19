@@ -62,7 +62,7 @@ pub use manifest::{
 };
 pub use permissions::{
     load_permissions, save_permissions, save_workspace_permission_settings, AppCapability,
-    AppPermissions, PermissionDecision, SessionPermissions, LOCAL_APP_WORKSPACE_PERMISSION_RULES,
+    AppPermissions, PermissionDecision, SessionPermissions,
 };
 pub use runtime_v2::{
     allowed_for_origin, allowed_for_synchronous_flow, apply_approved_profile,

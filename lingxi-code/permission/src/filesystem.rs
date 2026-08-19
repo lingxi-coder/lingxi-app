@@ -160,12 +160,13 @@ pub fn file_tool_kind(tool_name: &str) -> FileToolKind {
     }
 }
 
-/// Extract the path a file tool operates on from its input (claude-code
-/// `tool.getPath(input)`). `NotebookEdit` uses `notebook_path`; `Glob`/`Grep`
-/// use `path` (the search root, defaulting to `cwd` when absent, as
-/// `GlobTool.getPath`/`GrepTool.getPath` do); the rest use `file_path`.
-/// Returns `None` only when a `file_path`/`notebook_path` field is absent or
-/// non-string (the tool itself would already have failed input validation).
+/// The input field a file tool declares its path in.
+///
+/// SINGLE SOURCE OF TRUTH. [`crate::model_path::rewrite_tool_input`] rewrites
+/// the same field for the guest→host translation, so a second hand-copied
+/// table would let the permission check read one field while the rewrite
+/// writes another — the gate would then silently evaluate an untranslated
+/// path with no error anywhere.
 ///
 /// NOTE on `LSP`: claude-code's `LSPTool.getPath` reads `filePath` (camel-case),
 /// but THIS port's `LSPTool` declares its field as `file_path` (snake-case,
@@ -174,17 +175,28 @@ pub fn file_tool_kind(tool_name: &str) -> FileToolKind {
 /// re-aligned to `filePath`, this mapping must follow it (else `Read(...)`
 /// rules silently stop covering `LSP`).
 #[must_use]
+pub(crate) fn input_path_field_for_tool(tool_name: &str) -> &'static str {
+    match tool_name {
+        "NotebookEdit" => "notebook_path",
+        "Glob" | "Grep" => "path",
+        // Read / Edit / Write / MultiEdit / LSP
+        _ => "file_path",
+    }
+}
+
+/// Extract the path a file tool operates on from its input (claude-code
+/// `tool.getPath(input)`). The field comes from
+/// [`input_path_field_for_tool`]; `Glob`/`Grep` default their search root to
+/// `cwd` when `path` is absent, as `GlobTool.getPath`/`GrepTool.getPath` do.
+/// Returns `None` only when a `file_path`/`notebook_path` field is absent or
+/// non-string (the tool itself would already have failed input validation).
+#[must_use]
 pub fn input_path_for_tool<'a>(
     tool_name: &str,
     input: &'a serde_json::Value,
     roots: &FsRoots,
 ) -> Option<std::borrow::Cow<'a, str>> {
-    let field = match tool_name {
-        "NotebookEdit" => "notebook_path",
-        "Glob" | "Grep" => "path",
-        // Read / Edit / Write / MultiEdit / LSP
-        _ => "file_path",
-    };
+    let field = input_path_field_for_tool(tool_name);
     match input.get(field).and_then(serde_json::Value::as_str) {
         Some(p) => Some(std::borrow::Cow::Borrowed(p)),
         // Glob/Grep default their search root to cwd when `path` is omitted.
@@ -201,6 +213,15 @@ pub fn input_path_for_tool<'a>(
 /// home; every project-scoped / runtime source resolves against the original
 /// cwd. `FlagSettings` approximates to `cwd` (the flag-settings file path is
 /// not plumbed into the port — documented).
+/// NOT a gap: the canonical-git-root refinement is deliberately absent here.
+/// Verified in 2.1.235 — the pattern root comes from `Kwu`:
+/// `Kwu(e,t){ return e==="localSettings" ? resolve(t.cwd) : CEn(e,t) }`
+/// which SHORT-CIRCUITS `localSettings` to a plain `resolve(cwd)` before `CEn`
+/// is reached. `CEn`'s `localSettings` branch (`Jct(cwd, canonicalGitRoot)`) is
+/// only consulted by `EKe`, which locates the settings FILE on disk — a
+/// different question from "what root does this rule's pattern resolve
+/// against". `CEn` sends `projectSettings`/`policySettings` to `resolve(cwd)`
+/// too, so every non-user source landing on `roots.cwd` is byte-correct.
 fn root_path_for_source(source: PermissionRuleSource, roots: &FsRoots) -> PathBuf {
     match source {
         PermissionRuleSource::UserSettings => roots.lingxi_home.clone(),
@@ -602,6 +623,7 @@ pub fn path_matches_rule_pattern(
     input_path: &str,
     pattern: &str,
     source: PermissionRuleSource,
+    behavior: crate::rule::PermissionBehavior,
     roots: &FsRoots,
 ) -> bool {
     let file_abs = expand_path(input_path, roots);
@@ -619,17 +641,48 @@ pub fn path_matches_rule_pattern(
         return false;
     }
 
-    // `ignore` treats `dir` as matching `dir` and everything under it, so the
-    // `/**` suffix is redundant and must be stripped (matchingRuleForInput).
-    let stripped = rel_pattern.strip_suffix("/**").unwrap_or(&rel_pattern);
-    if stripped.is_empty() {
-        // A bare root-anchored `/**` (also `//**` / `~/**`) strips to "".
-        // claude-code feeds that "" to `ignore().add([""])`, which DROPS the
-        // blank line (gitignore: an empty line matches no files) — so such a
-        // rule matches NOTHING in the reference. Mirror that (matching nothing
-        // is also the safe direction for ALLOW rules).
-        return false;
-    }
+    // Port of the oracle's `FTm` (matchingRuleForInput's pattern rewrite):
+    //   if (e.endsWith("/**")) { let r = e.slice(0,-3);
+    //     return /[^/]/.test(r) ? (r.includes("/")||!t||/^[!#]/.test(r) ? r : "/"+r) : "/**" }
+    //   return e
+    // where `t` is `behavior === "allow"`. `ignore` treats `dir` as matching
+    // `dir` and everything under it, so the `/**` suffix is redundant — but
+    // WHICH form replaces it depends on the rule's behavior.
+    // A bare root-anchored `/**` (also `//**` / `~/**`) would strip to "",
+    // which is not a pattern at all. claude-code never reaches that state: its
+    // `FTm` only rewrites a `/**`-suffixed pattern when the remainder contains
+    // a non-slash character (`/[^/]/.test(r)`), so `"/**"` is handed to
+    // `ignore().add()` UNCHANGED and matches every path under the root. Keep
+    // the whole pattern in that case rather than stripping it away — the empty
+    // string only ever existed on our side, and treating it as "matches
+    // nothing" silently revoked a grant the oracle honors.
+    let stripped: std::borrow::Cow<'_, str> = match rel_pattern.strip_suffix("/**") {
+        None => std::borrow::Cow::Borrowed(rel_pattern.as_str()),
+        Some(remainder) => {
+            if remainder.chars().all(|c| c == '/') {
+                // `/[^/]/.test(r)` is false (r is empty or all slashes). The
+                // oracle's false arm returns the LITERAL `"/**"`, not `e` —
+                // `return /[^/]/.test(r) ? (…) : "/**"`. For the only reachable
+                // input the two agree (`pattern_with_root` has already rewritten
+                // `//**` to `/**`), but emit the literal so a future reader
+                // porting an adjacent branch is not misled.
+                std::borrow::Cow::Borrowed("/**")
+            } else if remainder.contains('/')
+                || behavior != crate::rule::PermissionBehavior::Allow
+                || remainder.starts_with(['!', '#'])
+            {
+                // Multi-segment, non-allow, or gitignore-sigil: left UNANCHORED,
+                // so gitignore matches the pattern at any depth. Keeping deny
+                // and ask broad is the safe direction.
+                std::borrow::Cow::Borrowed(remainder)
+            } else {
+                // Single-segment ALLOW: re-anchored to the root so
+                // `Edit(src/**)` cannot authorize `<root>/vendor/src/...`.
+                std::borrow::Cow::Owned(format!("/{remainder}"))
+            }
+        }
+    };
+    let stripped = stripped.as_ref();
 
     // Match the relative path as if rooted at `/`: build a one-pattern matcher
     // anchored at `/` and test `/<relative>`. Computing the relative path
@@ -833,7 +886,16 @@ mod tests {
     }
 
     fn matches(input: &str, pattern: &str, source: PermissionRuleSource) -> bool {
-        path_matches_rule_pattern(input, pattern, source, &roots())
+        matches_with(input, pattern, source, crate::rule::PermissionBehavior::Allow)
+    }
+
+    fn matches_with(
+        input: &str,
+        pattern: &str,
+        source: PermissionRuleSource,
+        behavior: crate::rule::PermissionBehavior,
+    ) -> bool {
+        path_matches_rule_pattern(input, pattern, source, behavior, &roots())
     }
 
     #[test]
@@ -899,13 +961,22 @@ mod tests {
     }
 
     #[test]
-    fn no_leading_slash_is_unanchored() {
-        // `src/**` (no leading slash) matches `src` at ANY depth (gitignore
-        // semantics, faithful to claude-code stripping `/**`→`src`).
-        assert!(matches(
+    fn no_leading_slash_is_unanchored_for_deny() {
+        // `src/**` with no leading slash strips to the bare segment `src`,
+        // which gitignore matches at ANY depth.
+        //
+        // This holds for DENY/ASK only. The oracle's `FTm` re-anchors the same
+        // pattern to `/src` when the rule is an ALLOW (`!t` short-circuits the
+        // rewrite for every other behavior), so the allow direction stays bound
+        // to the root — see
+        // `single_segment_glob_is_anchored_for_allow_but_not_for_deny`. This
+        // test previously asserted the ALLOW case here, which is what let an
+        // allow rule reach a nested directory of the same name.
+        assert!(matches_with(
             "/proj/a/src/b.rs",
             "src/**",
-            PermissionRuleSource::ProjectSettings
+            PermissionRuleSource::ProjectSettings,
+            crate::rule::PermissionBehavior::Deny
         ));
     }
 
@@ -978,24 +1049,107 @@ mod tests {
         ));
     }
 
+    /// Oracle `FTm` re-ANCHORS a single-segment `<dir>/**` for ALLOW rules
+    /// only:
+    ///   return /[^/]/.test(r) ? (r.includes("/")||!t||/^[!#]/.test(r) ? r : "/"+r) : "/**"
+    /// with `t = (behavior === "allow")`. So `Edit(src/**)` as an ALLOW becomes
+    /// `/src` — bound to the root — while the same pattern as a DENY stays the
+    /// unanchored `src`, which gitignore matches at ANY depth.
+    ///
+    /// Dropping that asymmetry made every allow rule as broad as a deny rule:
+    /// `Edit(src/**)` would authorize `<root>/vendor/src/...`, which the user
+    /// never granted. The deny direction must stay broad.
     #[test]
-    fn bare_root_double_star_matches_nothing() {
-        // `/**` strips to "" → claude-code drops the blank `ignore` line, so
-        // such a rule matches NOTHING (faithful + safe). Same for `//**`/`~/**`.
-        assert!(!matches(
+    fn single_segment_glob_is_anchored_for_allow_but_not_for_deny() {
+        use crate::rule::PermissionBehavior::{Allow, Deny};
+
+        // ALLOW: anchored at the root.
+        assert!(matches_with(
+            "/proj/src/a.rs",
+            "src/**",
+            PermissionRuleSource::ProjectSettings,
+            Allow
+        ));
+        assert!(
+            !matches_with(
+                "/proj/vendor/src/a.rs",
+                "src/**",
+                PermissionRuleSource::ProjectSettings,
+                Allow
+            ),
+            "an allow rule must not reach a nested directory of the same name"
+        );
+
+        // DENY: unanchored, so it still catches the nested copy.
+        assert!(matches_with(
+            "/proj/src/a.rs",
+            "src/**",
+            PermissionRuleSource::ProjectSettings,
+            Deny
+        ));
+        assert!(
+            matches_with(
+                "/proj/vendor/src/a.rs",
+                "src/**",
+                PermissionRuleSource::ProjectSettings,
+                Deny
+            ),
+            "a deny rule must stay broad"
+        );
+
+        // MULTI-segment patterns skip the explicit `/` prefix (`r.includes("/")`
+        // short-circuits), but gitignore anchors any pattern containing a
+        // separator anyway — so `a/b/**` is root-bound in both directions.
+        assert!(matches_with(
+            "/proj/a/b/x.rs",
+            "a/b/**",
+            PermissionRuleSource::ProjectSettings,
+            Allow
+        ));
+        assert!(!matches_with(
+            "/proj/nested/a/b/x.rs",
+            "a/b/**",
+            PermissionRuleSource::ProjectSettings,
+            Allow
+        ));
+    }
+
+    #[test]
+    fn bare_root_double_star_matches_everything_under_its_root() {
+        // Oracle 2.1.235, read directly:
+        //   FTm(e,t){ if(e.endsWith("/**")){ let r=e.slice(0,-3);
+        //             return /[^/]/.test(r) ? … : "/**" } return e }
+        // For e="/**" the remainder r is "", `/[^/]/.test("")` is FALSE, so the
+        // pattern is returned UNCHANGED and `ignore().add("/**")` matches every
+        // path under the root. (`NTm` also passes "/**" through untouched —
+        // its guard regex is /^\s*(?:\/\*\*)?$/.)
+        //
+        // This previously asserted the opposite, on the claim that claude-code
+        // feeds "" to `ignore().add([""])` and drops it as a blank line. That
+        // claim was wrong: the "" only ever existed on OUR side, because we
+        // stripped the `/**` suffix before handing the pattern over. The test
+        // therefore certified the divergence it should have caught.
+        assert!(matches(
             "/proj/anything/deep.rs",
             "/**",
             PermissionRuleSource::ProjectSettings
         ));
-        assert!(!matches(
+        assert!(matches(
             "/etc/x",
             "//**",
             PermissionRuleSource::ProjectSettings
         ));
-        // …but a NON-empty unanchored `**` still matches everything (no strip).
+        // A NON-empty unanchored `**` still matches everything (no strip).
         assert!(matches(
             "/proj/anything/deep.rs",
             "**",
+            PermissionRuleSource::ProjectSettings
+        ));
+        // The root anchor still BOUNDS the match: `/**` rooted at the project
+        // must not reach a sibling directory outside it.
+        assert!(!matches(
+            "/elsewhere/secret.rs",
+            "/**",
             PermissionRuleSource::ProjectSettings
         ));
     }

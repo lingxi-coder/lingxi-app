@@ -2835,6 +2835,70 @@ async fn build_mobile_inner_with_ask(
     let mut resolved_permission_mode = PermissionMode::Auto;
     let mut requested_permission_mode = PermissionMode::Auto.wire_str().to_string();
     let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
+    // ONE derivation of the (host, guest) workspace pairing. `model_cwd` below
+    // is rebuilt from THIS binding rather than re-scanning the mount table —
+    // two derivations of one root is exactly how the guest/host split forked
+    // in the first place.
+    let mobile_linux_mounts = mobile_linux
+        .as_ref()
+        .map(|runtime| runtime.current_mounts())
+        .unwrap_or_default();
+    // GUEST-COORD: the permission roots must anchor on the workspace the model
+    // actually writes into. Uniqueness is a SECURITY precondition once the
+    // permission root rides on this — the iOS bridge appends requested mounts
+    // with their own `purpose` verbatim, so a second Workspace mount is
+    // reachable and a bare `.find()` would silently take table order. With 0 or
+    // >1 we keep the engine cwd, i.e. today's behavior.
+    let workspace_mounts: Vec<_> = mobile_linux_mounts
+        .iter()
+        .filter(|m| matches!(m.purpose, traits::MountPurpose::Workspace))
+        .collect();
+    let permission_cwd = match workspace_mounts.as_slice() {
+        [mount] => {
+            // BOTH sides must be canonicalized or the containment tests below
+            // compare different spellings of the same directory. `cfg.cwd`
+            // arrives from Swift without `resolvingSymlinksInPath()`, so on
+            // device it can read `/var/mobile/...` while the mount canonicalizes
+            // to `/private/var/mobile/...`. `Path::starts_with` is
+            // component-wise, so the very first component already differs, all
+            // three tests go false, and a NESTED pair takes the disjoint arm —
+            // re-rooting the permission root upward (the case the comment below
+            // says must be refused) and turning
+            // `is_local_app_workspace_root(&roots.cwd)` false, which disables
+            // `denies_host_owned_for_workspace` and `escapes_local_app_workspace`
+            // outright.
+            // Canonical forms are used ONLY to decide. BOTH returned values are
+            // raw, and that is load-bearing: `translate_model_path` resolves a
+            // guest path to `mount.host_path.join(rest)` with NO
+            // canonicalization (`traits::mobile_linux::find_guest_mount` is
+            // pure path math). Returning the canonicalized spelling here would
+            // leave `FsRoots.cwd` as `/private/var/...` while every translated
+            // path arrives as `/var/...`; `path_matches_rule_pattern`
+            // relativizes component-wise, so the first component would differ
+            // and EVERY rule would miss — the guest/host fix would be inert in
+            // exactly the disjoint case it exists for.
+            let host_canon = std::fs::canonicalize(&mount.host_path)
+                .unwrap_or_else(|_| mount.host_path.clone());
+            let cwd_canon = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+            // Re-root ONLY for the disjoint (sibling) case — the `.global`
+            // scope the on-device diagnostic printed. `.project` and
+            // `.localApp` already anchor cwd AT the workspace, so this is a
+            // no-op there. If cwd is an ANCESTOR, rules already match through
+            // it and the wider root keeps more deny coverage; if cwd is a
+            // DESCENDANT, re-rooting would widen the rule root upward. Keep
+            // cwd in both cases.
+            if host_canon == cwd_canon
+                || host_canon.starts_with(&cwd_canon)
+                || cwd_canon.starts_with(&host_canon)
+            {
+                cwd.clone()
+            } else {
+                mount.host_path.clone()
+            }
+        }
+        _ => cwd.clone(),
+    };
+
     let (perms, permission_policy_gate): (
         Arc<dyn PermissionGate>,
         Arc<permission::PolicyPermissionGate>,
@@ -2946,7 +3010,7 @@ async fn build_mobile_inner_with_ask(
         // `Read(./secrets/**)`) match the call's path. `dirs` is not a mobile dep,
         // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).
         let roots = permission::FsRoots {
-            cwd: cwd.clone(),
+            cwd: permission_cwd.clone(),
             home: std::env::var_os("HOME").map(std::path::PathBuf::from),
             lingxi_home: cfg.lingxi_home.clone(),
         };
@@ -2981,16 +3045,24 @@ async fn build_mobile_inner_with_ask(
         let policy = Arc::new(policy);
         // Resolve active Read(deny) rules to search-exclude globs before the
         // policy moves into the gate (same as the desktop composition root).
-        read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);
+        read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &permission_cwd);
         // Share the boot policy into `tool_ctx` for the prompt shell-expansion
         // gate (clone the `Arc` BEFORE `policy` moves into the gate below).
         boot_permission_policy = Some(policy.clone());
         // Grab the LIVE-model cell BEFORE coercing to `Arc<dyn PermissionGate>`;
         // filled once the orchestrator exists (below).
-        let enforcing = Arc::new(permission::PolicyPermissionGate::new(
-            policy,
-            adapter_gate.clone(),
-        ));
+        // GUEST-COORD: give the gate the SAME `translate_model_path` seam the
+        // file tools use, so the permission check and the tool can never
+        // disagree about which mount a path belongs to. `fs` only translates
+        // when a mobile-linux runtime is selected; otherwise the trait default
+        // returns `Ok(None)` and the gate is byte-identical to desktop.
+        let mut gate = permission::PolicyPermissionGate::new(policy, adapter_gate.clone());
+        if mobile_linux.is_some() {
+            gate = gate.with_path_translator(Arc::new(permission::FileSystemPathTranslator(
+                fs.clone(),
+            )));
+        }
+        let enforcing = Arc::new(gate);
         live_model_provider_cell = Some(enforcing.live_model_provider_handle());
         (enforcing.clone(), enforcing)
     };
@@ -3163,10 +3235,6 @@ async fn build_mobile_inner_with_ask(
     // containment. Legacy/unavailable runtimes serve an empty table, so this
     // adds nothing off mobile-linux.
     let mut trusted_dirs = vec![cwd.clone()];
-    let mobile_linux_mounts = mobile_linux
-        .as_ref()
-        .map(|runtime| runtime.current_mounts())
-        .unwrap_or_default();
     trusted_dirs.extend(mobile_linux_mounts.iter().map(|m| m.host_path.clone()));
     // PathAtlas S3: the MODEL-VISIBLE cwd is the guest workspace when one is
     // mounted — the same coordinate the shell already uses, so file tools and
@@ -3179,6 +3247,41 @@ async fn build_mobile_inner_with_ask(
         .find(|m| matches!(m.purpose, traits::MountPurpose::Workspace))
         .map(|m| std::path::PathBuf::from(&m.guest_path))
         .unwrap_or_else(|| cwd.clone());
+    // DIAGNOSTIC (permission coordinate audit): the model names files in
+    // `model_cwd` (GUEST) while `PermissionPolicy`'s `FsRoots.cwd` was built
+    // from `cwd` (HOST) above. When these diverge, every file-path CONTENT
+    // rule (`Edit(./**)`, `Read(src/**)`) is tested by relativizing a guest
+    // path against a host root — which escapes upward and matches nothing, so
+    // allow rules silently never fire and every write falls through to a
+    // prompt. Print BOTH values unconditionally: which one the device actually
+    // has is not decidable by reading the source (the `unwrap_or_else`
+    // fallback collapses them whenever no Workspace mount is linked).
+    //
+    // `eprintln!` and not `tracing!`: no `tracing-subscriber` is installed on
+    // mobile (it is not a dependency of engine-mobile or ios-framework, and no
+    // log-init seam is exposed to Swift), so every `tracing::warn!` in this
+    // crate is dropped on the floor on device. stderr reaches the Xcode/device
+    // console.
+    //
+    // Deliberately NOT `#[cfg(debug_assertions)]`: `build-xcframework.sh` pins
+    // `PROFILE="release"` and the workspace declares no `[profile.release]`
+    // override, so `debug_assertions` is OFF in every shipped iOS engine — a
+    // debug-gated diagnostic is compiled out of the only build that can
+    // exhibit the bug. (The `[turn-diagnostic]` prints later in this file are
+    // debug-gated and therefore already dead on device.)
+    //
+    // Env-gated rather than unconditional so it stays reachable on a release
+    // device build without becoming permanent production output: this line
+    // carries the host container path, and nothing would ever have removed it.
+    if std::env::var_os("LINGXI_PERMISSION_ROOTS_DIAGNOSTIC").is_some() {
+        eprintln!(
+            "[permission-roots-diagnostic] host_cwd={} model_cwd={} permission_cwd={} diverged={}",
+            cwd.display(),
+            model_cwd.display(),
+            permission_cwd.display(),
+            model_cwd != cwd
+        );
+    }
     let session_cwd = SessionCwd::new(model_cwd, trusted_dirs);
     let gated_shell_ctx = gate_mobile_shell_ctx(
         cfg.mobile_shell().cloned(),

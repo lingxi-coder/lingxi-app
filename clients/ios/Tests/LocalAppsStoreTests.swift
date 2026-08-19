@@ -1027,6 +1027,112 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(resolutions.map(\.1), [.allowOnce, .deny])
         }
 
+        /// The pushed preview route must tell a FAILED runtime apart from one
+        /// that is merely still starting, and must surface the failure reason —
+        /// otherwise every non-running state renders the same bare hourglass
+        /// with no reason and no way to retry.
+        func testPreviewPlaceholderDistinguishesRuntimeStates() {
+            let url = URL(string: "http://127.0.0.1:8080")!
+            XCTAssertNil(
+                LocalAppPreviewPlaceholder.forStatus(.running(url)),
+                "a live URL renders the web view, not a placeholder"
+            )
+            XCTAssertEqual(LocalAppPreviewPlaceholder.forStatus(.starting), .transient)
+            XCTAssertEqual(LocalAppPreviewPlaceholder.forStatus(.stopping), .transient)
+            XCTAssertEqual(
+                LocalAppPreviewPlaceholder.forStatus(.running(nil)),
+                .transient,
+                "running without a URL yet is still coming up"
+            )
+            XCTAssertEqual(
+                LocalAppPreviewPlaceholder.forStatus(.failed("no servable output")),
+                .failed("no servable output")
+            )
+            XCTAssertEqual(
+                LocalAppPreviewPlaceholder.forStatus(.suspended("memory pressure")),
+                .suspended("memory pressure")
+            )
+            XCTAssertEqual(LocalAppPreviewPlaceholder.forStatus(.stopped), .idle)
+            XCTAssertEqual(LocalAppPreviewPlaceholder.forStatus(nil), .idle)
+        }
+
+        /// `activeUIRequestAppID` was a SINGLE slot serving a multi-app queue:
+        /// app B's request overwrote app A's, and resolving either one cleared
+        /// it for both. A's request stays queued but `hasPendingUIRequest`
+        /// reports false, so opening A never routes to the preview and its
+        /// stalled call never gets its UI shown.
+        func testPendingUiRequestsAreTrackedPerApp() async {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            for (index, appID) in ["app-a", "app-b"].enumerated() {
+                store.handle(event: .appEvent(event: .appUiRequest(request: AppUiRequestDto(
+                    requestId: "req-\(index)",
+                    appId: appID,
+                    action: .reload,
+                    target: nil,
+                    value: nil
+                ))))
+            }
+            XCTAssertTrue(store.hasPendingUIRequest(appID: "app-a"))
+            XCTAssertTrue(
+                store.hasPendingUIRequest(appID: "app-b"),
+                "a second app's request must not erase the first"
+            )
+
+            // Resolve whichever prompt is on screen; the other app is still pending.
+            await store.resolvePendingPermission(.deny)
+            let stillPending = store.hasPendingUIRequest(appID: "app-a")
+                || store.hasPendingUIRequest(appID: "app-b")
+            XCTAssertTrue(
+                stillPending,
+                "resolving one app's request must not clear the other's"
+            )
+        }
+
+        /// A UI request that is DROPPED on permission-queue overflow must not
+        /// leave a `pendingUIRequestAppIDs` entry pointing at its app.
+        ///
+        /// `.appUiRequest` records the request before enqueuing, but
+        /// `enqueuePermission` returns early once the queue is full — and the
+        /// entry is removed only in `resolveUIRequest`, which a dropped request
+        /// never reaches. The entry then sticks forever, and
+        /// `hasPendingUIRequest` force-routes every later open of that app to
+        /// the preview tab, which renders a bare "preview isn't ready yet".
+        func testDroppedUiRequestDoesNotLeaveAStickyPendingFlag() async {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            // One request becomes the presented prompt; the next eight fill the
+            // queue to `maxQueuedPermissions`.
+            for index in 0...8 {
+                store.handle(event: .appEvent(event: .appUiRequest(request: AppUiRequestDto(
+                    requestId: "filler-\(index)",
+                    appId: "filler-app",
+                    action: .reload,
+                    target: nil,
+                    value: nil
+                ))))
+            }
+            XCTAssertNotNil(store.pendingPermission, "the first request should be presented")
+
+            // This one overflows and is dropped. It belongs to a DIFFERENT app,
+            // so nothing is pending for `victim-app` afterwards.
+            store.handle(event: .appEvent(event: .appUiRequest(request: AppUiRequestDto(
+                requestId: "overflowed",
+                appId: "victim-app",
+                action: .reload,
+                target: nil,
+                value: nil
+            ))))
+            XCTAssertNotNil(store.errorMessage, "overflow should surface an error")
+
+            XCTAssertFalse(
+                store.hasPendingUIRequest(appID: "victim-app"),
+                "a dropped UI request must not leave a sticky pending flag"
+            )
+        }
+
         func testUiActionGrantIsRememberedForSubsequentRequests() async throws {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []

@@ -572,6 +572,17 @@ struct LocalAppPreviewView: View {
         store.runtimes[appID]?.url
     }
 
+    /// Every non-running state used to collapse into one hourglass with no
+    /// reason and no action, so a FAILED runtime looked identical to one that
+    /// was still booting and the user had no way to retry.
+    private var placeholder: LocalAppPreviewPlaceholder? {
+        LocalAppPreviewPlaceholder.forStatus(store.runtimes[appID])
+    }
+
+    private var startButton: some View {
+        Button("common_start") { Task { await store.start(appID: appID) } }
+    }
+
     var body: some View {
         Group {
             if let url = previewURL {
@@ -583,7 +594,38 @@ struct LocalAppPreviewView: View {
                     }
                 )
             } else {
-                ContentUnavailableView("local_apps_preview_not_ready", systemImage: "hourglass")
+                switch placeholder {
+                case .transient, .none:
+                    ContentUnavailableView {
+                        Label("local_apps_preview_not_ready", systemImage: "hourglass")
+                    } description: {
+                        ProgressView()
+                    }
+                case let .failed(reason):
+                    ContentUnavailableView {
+                        Label("local_apps_runtime_failed_title", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(reason)
+                    } actions: {
+                        Button("common_retry") { Task { await store.start(appID: appID) } }
+                    }
+                case let .suspended(reason):
+                    ContentUnavailableView {
+                        Label("local_apps_runtime_suspended_plain", systemImage: "pause.circle")
+                    } description: {
+                        if let reason { Text(reason) }
+                    } actions: {
+                        startButton
+                    }
+                case .idle:
+                    ContentUnavailableView {
+                        Label("local_apps_preview_not_running", systemImage: "safari")
+                    } description: {
+                        Text("local_apps_preview_not_running_detail")
+                    } actions: {
+                        startButton
+                    }
+                }
             }
         }
         .navigationTitle("local_apps_section_preview")

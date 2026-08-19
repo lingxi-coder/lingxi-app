@@ -649,6 +649,7 @@
   "local_apps_retry_generate": "生成を再試行",
   "local_apps_row_actions %@": "%@ の操作",
   "local_apps_runtime_failed %@": "実行失敗 · %@",
+  "local_apps_runtime_failed_title": "実行に失敗しました",
   "local_apps_runtime_footer %@": "%@ · 依存関係は Lingxi が固定管理",
   "local_apps_runtime_mode": "実行モード",
   "local_apps_runtime_vite": "Vite ローカルサービス",

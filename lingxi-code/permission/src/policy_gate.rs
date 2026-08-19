@@ -139,6 +139,10 @@ pub struct PolicyPermissionGate {
     /// permission state, then diverges only through
     /// [`Self::apply_permission_update`].
     live_state: std::sync::RwLock<LivePermissionState>,
+    /// MOBILE DIVERGENCE (guest/host coordinate split). `None` on every
+    /// non-mobile composition root, which makes the whole feature unreachable
+    /// from engine-desktop / tui / cli / bridge-server.
+    path_translator: Option<Arc<dyn crate::model_path::ModelPathTranslator>>,
 }
 
 impl PolicyPermissionGate {
@@ -215,7 +219,19 @@ impl PolicyPermissionGate {
             mode_override: std::sync::RwLock::new(None),
             mcp_mode_overrides: std::sync::RwLock::new(std::collections::HashMap::new()),
             live_model_provider: Arc::new(std::sync::OnceLock::new()),
+            path_translator: None,
         }
+    }
+
+    /// Install the guest→host translator (mobile only). Without it the gate is
+    /// byte-identical to the desktop behavior.
+    #[must_use]
+    pub fn with_path_translator(
+        mut self,
+        translator: Arc<dyn crate::model_path::ModelPathTranslator>,
+    ) -> Self {
+        self.path_translator = Some(translator);
+        self
     }
 
     /// Restore a mode recorded by the current session's own transcript.
@@ -495,6 +511,44 @@ impl PolicyPermissionGate {
         (mode, verdict)
     }
 
+    /// A DECIDED deny (matched rule / safety check), the strongest verdict.
+    const RANK_DECIDED_DENY: u8 = 4;
+
+    /// Rank a verdict so the two coordinate spaces can be joined WITHOUT
+    /// inverting the precedence each space applies internally.
+    ///
+    /// `authorize_inner` walks deny -> ask -> allow, so inside one space an
+    /// explicit ask RULE outranks an allow rule. Joining on "Deny > Allow >
+    /// Ask" would silently let an allow matched in one space override an ask
+    /// rule the user deliberately wrote in the other, and the prompt would
+    /// never fire.
+    ///
+    /// Verdicts whose reason is the MODE rank LOWEST: they are the
+    /// no-rule-matched fallback (an unmatched Ask, or the Deny that `DontAsk`
+    /// rewrites it into), not a decision about this path.
+    fn coordinate_rank(result: &PermissionResult) -> u8 {
+        match result {
+            PermissionResult::Deny { reason, .. }
+                if !matches!(reason, PermissionDecisionReason::PermissionMode { .. }) =>
+            {
+                Self::RANK_DECIDED_DENY
+            }
+            // EVERY ask that came from a rule or a guard, not just the `_pt`
+            // ones. `ask_edit_read_deny_covered` is documented BYPASS-IMMUNE
+            // and reports `Other`, so ranking it with the mode fallback would
+            // put it BELOW `Allow` and let an allow matched in the other
+            // coordinate space silently write a read-denied file.
+            PermissionResult::Ask { reason, .. }
+                if !matches!(reason, PermissionDecisionReason::PermissionMode { .. }) =>
+            {
+                3
+            }
+            PermissionResult::Allow { .. } => 2,
+            // Mode fallback: an unmatched Ask, or a `DontAsk` mode Deny.
+            _ => 1,
+        }
+    }
+
     /// Does this ask reason correspond to one of `_pt`'s ask arms?
     /// `MFo(reason)` = a matched rule whose behavior is `ask` (recursing into
     /// `subcommandResults`), `W9(reason)` = `safetyCheck`, plus `sandboxOverride`.
@@ -525,12 +579,88 @@ impl PolicyPermissionGate {
         mode: PermissionMode,
         workspace_lease_token: Option<u64>,
     ) -> PermissionResult {
-        self.live_policy().authorize_with_mode_and_workspace_lease(
+        // GUEST-COORD (mobile DIVERGENCE). The model names files in guest
+        // coordinates while every root in `FsRoots` is a host path, so a rule
+        // like `Edit(./**)` relativizes the target to `../…` and matches
+        // nothing. Rewrite the tool's declared path field onto its host twin
+        // FOR THE DURATION OF THIS EVALUATION ONLY: the rewritten value is a
+        // local. `permission` only ever emits `updated_input: None`, so the
+        // prompt transport, the `updatedInput` back-flow, and the tool body
+        // all keep seeing the model's own coordinates.
+        let policy = self.live_policy();
+        let Some(rewritten) = self
+            .path_translator
+            .as_ref()
+            .and_then(|t| crate::model_path::rewrite_tool_input(t.as_ref(), name, input))
+        else {
+            // Desktop, non-file tools, relative paths, host-coordinate paths,
+            // and fenced guest regions: one evaluation, byte-identical to the
+            // pre-existing behavior.
+            return policy.authorize_with_mode_and_workspace_lease(
+                name,
+                input,
+                mode,
+                workspace_lease_token,
+            );
+        };
+
+        // UNION OF BOTH COORDINATE SPACES, with the lattice
+        //     Deny (either) > Allow (either) > Ask.
+        //
+        // Evaluating only the host form would be a net FAIL-OPEN for any rule
+        // written in the coordinates the model actually uses:
+        // `Deny(Edit(//workspace/**))` resolves against root `/` and matches
+        // the guest spelling today, but can never match the host twin. So the
+        // ORIGINAL guest form is re-evaluated and a Deny from either side wins.
+        //
+        // Symmetrically, an ALLOW that already matched the guest path must
+        // keep working — returning the host verdict whenever the guest side is
+        // merely not-a-Deny would turn such a grant into a prompt, a
+        // regression introduced by the fix itself.
+        //
+        // `Ask` never wins on its own: it is the no-rule-matched fallback, and
+        // a guest path failing to match is precisely the bug being repaired.
+        // Letting it veto would make the host Allow unreachable and leave
+        // every write prompting.
+        let host_verdict = policy.authorize_with_mode_and_workspace_lease(
+            name,
+            &rewritten,
+            mode,
+            workspace_lease_token,
+        );
+        // COST, accepted: a file-tool call whose path actually needs
+        // translation walks the rule set twice and deep-clones the tool input
+        // (a `Write`'s `content` included). Both are inherent to joining two
+        // coordinate spaces — the guest form cannot be evaluated without the
+        // original input, and a rule may read any field. It is bounded to
+        // mobile, to file tools, and to absolute guest paths under a mount;
+        // a decided deny on the host form short-circuits the second walk.
+        //
+        // A DECIDED deny is final and skips the second walk. A deny that merely
+        // reflects the MODE is not a decision — `DontAsk` rewrites every
+        // unmatched Ask into one — and must not pre-empt the guest evaluation,
+        // or a grant spelled only in guest coordinates would flip from Allow to
+        // Deny the moment a translator is installed.
+        if Self::coordinate_rank(&host_verdict) == Self::RANK_DECIDED_DENY {
+            return host_verdict;
+        }
+        let guest_verdict = policy.authorize_with_mode_and_workspace_lease(
             name,
             input,
             mode,
             workspace_lease_token,
-        )
+        );
+        // Ties go to the GUEST form. Equal rank means both spaces decided the
+        // same way, so the verdicts are interchangeable in strength — but only
+        // the guest one carries paths the model actually used. `ask_plan_mutation`
+        // embeds the target path in its prompt, and that prompt is surfaced
+        // verbatim as the headless deny reason, so preferring host here would
+        // report a host container path the model never named.
+        if Self::coordinate_rank(&host_verdict) > Self::coordinate_rank(&guest_verdict) {
+            host_verdict
+        } else {
+            guest_verdict
+        }
     }
 
     fn live_policy(&self) -> PermissionPolicy {
@@ -1172,7 +1302,20 @@ impl PermissionGate for PolicyPermissionGate {
     }
 
     fn read_deny_exclude_globs(&self, cwd: &std::path::Path) -> Option<Vec<String>> {
-        Some(crate::read_deny_exclude_globs(&self.live_policy(), cwd))
+        // GUEST-COORD (mobile DIVERGENCE), the ENUMERATION half of the fix.
+        // `Grep`/`Glob` pass their OWN resolved search base, which on mobile is
+        // a guest path. A ROOTED deny pattern (`Read(/secrets/**)`) is rebased
+        // onto that base by `relativize_for_cwd`; relativizing a host pattern
+        // root against a guest base escapes upward, returns `None`, and the
+        // walk proceeds with ZERO exclusions straight through a Read-denied
+        // directory. Translate to the host twin first, exactly as the authorize
+        // path does. (Unrooted patterns are cwd-independent and unaffected.)
+        let translated = self.path_translator.as_ref().and_then(|t| {
+            t.to_host(&cwd.to_string_lossy(), false)
+                .map(std::path::PathBuf::from)
+        });
+        let base = translated.as_deref().unwrap_or(cwd);
+        Some(crate::read_deny_exclude_globs(&self.live_policy(), base))
     }
 
     fn check_noninteractive_with_allow_rules(

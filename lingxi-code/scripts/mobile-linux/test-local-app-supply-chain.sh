@@ -381,6 +381,40 @@ printf '{"local_app_runtime":true}\n' > "${ROOTFS_MANIFEST}"
   --staged "${TEMP_ROOT}/install-src/absent" \
   --rootfs-manifest "${TEMP_ROOT}/missing-manifest.json"
 
+# --rootfs-only judges the ROOTFS ALONE. The Xcode staging phase has no staged
+# local-app node_modules tree (commit 1a4385f09 removed the phase that built
+# one, on purpose), so the full validator can never run there. This scoped mode
+# is what the build wires in. Assert the EXACT exit code: an unrecognized flag
+# also exits non-zero, which would make a bare `if ! ...` pass for the wrong
+# reason and certify a validator that never understood the request.
+printf '{"local_app_runtime":false}\n' > "${ROOTFS_MANIFEST}"
+set +e
+"${RUNTIME_ASSET_VALIDATOR}" \
+  --configuration FullDebug \
+  --platform iphoneos \
+  --rootfs-only \
+  --rootfs-manifest "${ROOTFS_MANIFEST}"
+rootfs_only_rc=$?
+set -e
+if [ "${rootfs_only_rc}" -ne 1 ]; then
+  echo "expected --rootfs-only to REJECT a bare rootfs with exit 1, got ${rootfs_only_rc}" >&2
+  exit 1
+fi
+
+printf '{"local_app_runtime":true}\n' > "${ROOTFS_MANIFEST}"
+"${RUNTIME_ASSET_VALIDATOR}" \
+  --configuration FullDebug \
+  --platform iphoneos \
+  --rootfs-only \
+  --rootfs-manifest "${ROOTFS_MANIFEST}"
+
+# A simulator build stays exempt even in rootfs-only mode.
+"${RUNTIME_ASSET_VALIDATOR}" \
+  --configuration FullDebug \
+  --platform iphonesimulator \
+  --rootfs-only \
+  --rootfs-manifest "${TEMP_ROOT}/missing-manifest.json"
+
 ROOTFS_PINS="${TEMP_ROOT}/rootfs-pins"
 mkdir -p "${ROOTFS_PINS}"
 printf 'package-augmented rootfs fixture\n' > "${ROOTFS_PINS}/rootfs.tar.gz"

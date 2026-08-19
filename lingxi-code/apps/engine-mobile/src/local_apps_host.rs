@@ -2714,13 +2714,17 @@ impl LocalAppsHostBroker {
             let _ = gate.send(RuntimeStartStatus::Failed(detail.clone()));
         }
         // Same rule as `stop_runtime`'s failed kill: this bookkeeping write must
-        // never mask the real failure.  Three callers reach here BEFORE the
-        // record leaves `stopped` (no runtime mount, no static build, and the
-        // squatted permanent port), and `stopped -> failed` is not an edge the
-        // transition table has — propagating that rejection replaced the only
-        // actionable detail the caller gets with "invalid runtime transition
-        // stopped -> failed".  The detail still reaches every concurrent waiter
-        // through the gate above, and the record keeps a state it can leave.
+        // never mask the real failure, so its result stays discarded.
+        //
+        // Three callers reach here BEFORE the record leaves `stopped` (no
+        // runtime mount, no static build, and the squatted permanent port).
+        // `stopped -> failed` is now a legal edge (`local_apps::state::
+        // runtime_transition_allowed`), added precisely so this write lands:
+        // while it was rejected, the state, the `lastError`, and the
+        // `RuntimeChanged` event were all discarded, leaving an app that could
+        // not start and carried no recorded reason. The detail also reaches
+        // every concurrent waiter through the gate above, and `failed ->
+        // starting` keeps the record recoverable.
         if let Ok(service) = self.service() {
             let _ = service
                 .update_runtime_record(
@@ -2916,16 +2920,22 @@ impl LocalAppsHostBroker {
         // prompt plumbing. It sits OUTSIDE the writable roots, so the agent
         // cannot edit its own contract.
         let workspace = layout.root().join(layout.workspace_rel());
-        let setup_path = "- This workspace already contains the repository-verified Vite + Tailwind + shadcn/ui foundation. The host prepares app-local dependencies in `workspace/node_modules`; if they are still being prepared, wait and retry the build. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
+        let setup_path = "- This workspace already contains the repository-verified Vite + Tailwind + shadcn/ui foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
              - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `components.json`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
              - Default editable entry points are `app/screens/home-screen.jsx` and `app/globals.css`. The preset files under `components/ui/` are app-owned and may be edited. You may also edit files under `app/`, `src/`, `components/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`. The component lab at `#/_components` is lazy-loaded and must stay outside normal navigation unless the user asks for it.\n\
              - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n";
-        let build_preview =
+        // `format!`, not a bare `&str`: this string is interpolated into the
+        // enclosing `format!` as a VALUE, so its own `{{` and `{id}` would be
+        // copied through verbatim and the agent would read a malformed example
+        // of the one call it is required to make.
+        let build_preview = format!(
             "- `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
              (30-minute budget). The host waits for the app-local dependency state, mounts \
              the workspace as the sole writable `LocalAppBuild` root, runs the workspace's own \
              `node_modules/vite`, writes into private build-state, and serves only the promoted \
-             `build/store/dist/`.\n";
+             `build/store/dist/`.\n",
+            id = record.id,
+        );
         let context = format!(
             "# Local App: {name} ({id})\n\n\
              Brief: {brief}\n\n\
@@ -2944,6 +2954,27 @@ impl LocalAppsHostBroker {
              - `mcp__local_apps__manage_runtime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
              — serve the built output and return the preview url.\n\
              - `mcp__local_apps__read_logs {{\"app_id\":\"{id}\",\"log\":\"build\"}}` — build log.\n\
+             - `mcp__local_apps__install_dependencies {{\"app_id\":\"{id}\",\"wait\":true}}` \
+             — dependency state; `lastError` names why an install failed.\n\n\
+             ### When a build fails\n\
+             `mcp__local_apps__build` is the ONLY build path in this workspace, so \
+             do NOT try a different build command, package manager, or scaffold tool — \
+             there is nothing else to fall back to and improvising cannot succeed. Instead:\n\
+             1. Read the failure: `mcp__local_apps__read_logs {{\"app_id\":\"{id}\",\"log\":\"build\"}}`.\n\
+             2. A `not yet available` build means dependencies are not ready. Call \
+             `mcp__local_apps__install_dependencies {{\"app_id\":\"{id}\",\"wait\":true}}` and read \
+             its `lastError`.\n\
+             3. If the cause is your source, fix it and build again.\n\
+             4. If the cause is the HOST — a missing toolchain, a failed dependency install, \
+             an unavailable runtime — report it to the user and stop. Those cannot be worked \
+             around from inside this workspace, and retrying will not clear them.\n\n\
+             ## Verify\n\
+             - `mcp__local_apps__inspect_ui` / `mcp__local_apps__act_on_ui` — read and drive \
+             the running preview.\n\
+             - `mcp__local_apps__query_data {{\"app_id\":\"{id}\",\"collection\":\"<collection_id>\"}}` \
+             — after a UI write, confirm the value reached native storage: it must appear in \
+             `records[].document`. A value that exists only in page state is NOT persistence.\n\
+             - `mcp__local_apps__read_logs {{\"app_id\":\"{id}\",\"log\":\"runtime\"}}` — runtime log.\n\
              - After the user confirms a working state, record it with \
              `mcp__local_apps__create_checkpoint`.\n",
             name = record.name,
@@ -5291,6 +5322,57 @@ mod tests {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
         let (_app_id, lingxi) = scaffolded_lingxi(true, Some(runtime)).await;
         assert!(lingxi.contains("Do not run `npm create vite`"), "{lingxi}");
+        // The contract is READ BY A MODEL as a set of examples to copy. An
+        // unsubstituted placeholder or a doubled brace is a malformed call the
+        // agent will faithfully reproduce, get a schema error from, and then
+        // start improvising around — which is exactly the build flailing this
+        // file exists to prevent. `build_preview` is a plain `&str`, so its
+        // braces were never processed by the enclosing `format!`.
+        // Catch ANY `{ident}` placeholder, not just `{id}` — a future fragment
+        // added as a plain `&str` would leak `{name}`/`{brief}` the same way.
+        // JSON examples in the contract are `{"key":...}`, so requiring a bare
+        // lower-snake identifier between the braces does not false-positive.
+        let leaked: Vec<&str> = lingxi
+            .match_indices('{')
+            .filter_map(|(start, _)| {
+                let rest = &lingxi[start + 1..];
+                let end = rest.find('}')?;
+                let inner = &rest[..end];
+                (!inner.is_empty()
+                    && inner
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b == b'_'))
+                .then_some(&lingxi[start..start + end + 2])
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "unsubstituted placeholder(s) {leaked:?} in the agent contract: {lingxi}"
+        );
+        assert!(
+            !lingxi.contains("{{") && !lingxi.contains("}}"),
+            "doubled braces leaked into the agent contract: {lingxi}"
+        );
+        assert!(
+            lingxi.contains(&format!("mcp__local_apps__build {{\"app_id\":\"{_app_id}\"}}")),
+            "the build example must carry this app's real id: {lingxi}"
+        );
+        // A failed build is the exact moment the agent goes off-script. The
+        // contract must name the recovery path AND forbid improvising an
+        // alternate build command — there is no second build path here.
+        assert!(
+            lingxi.contains("do NOT try a different build command"),
+            "{lingxi}"
+        );
+        assert!(
+            lingxi.contains("mcp__local_apps__install_dependencies"),
+            "dependency state is the most common build failure; the tool that \
+             reports it must be named: {lingxi}"
+        );
+        // Verification tools were documented only in the skill, so an agent
+        // working from the workspace had to rediscover them.
+        assert!(lingxi.contains("mcp__local_apps__query_data"), "{lingxi}");
+        assert!(lingxi.contains("mcp__local_apps__inspect_ui"), "{lingxi}");
         assert!(
             lingxi.contains("do not run a package manager in this local-app workspace"),
             "{lingxi}"

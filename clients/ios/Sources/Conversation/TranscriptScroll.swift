@@ -67,10 +67,8 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             // out of order during layout — plus the sign of a drag translation.
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 TranscriptScrollFollowState.isAtBottom(
-                    contentOffset: geometry.contentOffset.y,
                     contentSize: geometry.contentSize.height,
-                    containerSize: geometry.containerSize.height,
-                    bottomInset: geometry.contentInsets.bottom,
+                    visibleMaxY: geometry.visibleRect.maxY,
                     slack: TranscriptScrollFollowState.bottomSlack
                 )
             } action: { _, isAtBottom in
@@ -138,19 +136,23 @@ enum TranscriptScrollFollowState {
 
     /// Whether the reader is parked at the newest content.
     ///
-    /// Measured, not inferred. `contentOffset` may exceed the maximum while the
-    /// scroll view rubber-bands, and `contentSize` may be smaller than the
-    /// container when the transcript is short; both of those are "at the bottom".
+    /// Measured against `visibleRect`, NOT reconstructed from offset, container
+    /// size and insets. Device measurement (iPhone 11, iOS 18) showed
+    /// `containerSize` EXCLUDES the content insets while `visibleRect` includes
+    /// them, and that this surface's only inset is `contentInsets.top`, never
+    /// `.bottom` — so the reconstructed maximum was 92pt too high and this
+    /// predicate answered false even with the reader sitting at the bottom.
+    /// Asking `visibleRect` avoids the whole question.
+    ///
+    /// The gap goes negative while the scroll view rubber-bands past the end,
+    /// and is zero when the content is too short to scroll, so both cases fall
+    /// out of the comparison without a special case.
     static func isAtBottom(
-        contentOffset: CGFloat,
         contentSize: CGFloat,
-        containerSize: CGFloat,
-        bottomInset: CGFloat,
+        visibleMaxY: CGFloat,
         slack: CGFloat
     ) -> Bool {
-        let maximumOffset = contentSize - containerSize + bottomInset
-        guard maximumOffset > 0 else { return true }
-        return contentOffset >= maximumOffset - slack
+        contentSize - visibleMaxY <= slack
     }
 }
 

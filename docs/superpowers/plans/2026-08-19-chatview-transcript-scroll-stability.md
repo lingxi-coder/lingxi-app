@@ -54,21 +54,37 @@ order an estimation error on an off-screen trailing row does not move the reader
   `xcodebuild -scheme LingxiCode -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -only-testing:LingxiCodeTests test`.
   The unscoped `test` action also runs `LingxiCodeUITests`, which costs minutes
   per task and is not affected by any change in this plan.
-- **The branch tip is already red.** Measured at `383b0b8d4` in a clean worktree,
-  before any change in this plan. Treat exactly these as the known-red set; a
-  task's gate is "no failure outside this set", never "zero failures":
-  - `LingxiCodeTests.SessionResumeTests.testBootstrapRequestsTheCompleteSessionCatalog`
+- **The branch tip is already red, and the known-red set depends on which
+  bundles you run.** Measured at `383b0b8d4`/`79be41735` in a clean worktree.
+  A task's gate is "no failure outside the set for the command you ran", never
+  "zero failures". The run WILL print `** TEST FAILED **`; that is the baseline.
+
+  **With `-only-testing:LingxiCodeTests` (the per-task command) — 465 executed,
+  6 failures across 3 test cases:**
+  - `SessionResumeTests.testBootstrapRequestsTheCompleteSessionCatalog`
     (`Tests/SessionResumeTests.swift:1378`)
-  - `LingxiCodeTests.SessionResumeTests.testSessionResumedNeverRendersAToolResultAsAUserBubble`
+  - `SessionResumeTests.testSessionResumedNeverRendersAToolResultAsAUserBubble`
     (`Tests/SessionResumeTests.swift:1276`, `:1278`, `:1291`)
+  - `ConversationExecutionReducerTests.testPermissionPromptPresentsAboveCurrentModal`
+    (`Tests/ConversationExecutionReducerTests.swift:959`, `:960`)
+
+  **With the full scheme (unit + UI) — 4 unit failures, 2 UI failures:**
+  - the two `SessionResumeTests` above
   - `LingxiCodeUITests.testCancelledRunClosesEveryRunningRow`
   - `LingxiCodeUITests.testProviderManagementDoesNotExposeScheduledTasksInDrawer`
   - `LingxiCodeUITests.testVoiceModesShareInlinePanelAndConfigurationDeepLink`
 
-  Baseline unit-bundle numbers to compare against: **465 executed, 4 failures
-  across the 2 `SessionResumeTests` above**. None of them touch the transcript
-  scroller, the timeline projection, or the deployment target. Do not try to fix
-  them — they are outside this plan.
+  `testPermissionPromptPresentsAboveCurrentModal` appears in the first list and
+  not the second on purpose. It is **order-dependent, not flaky**: the test grabs
+  the foreground `UIWindowScene` and manipulates the key window
+  (`Tests/ConversationExecutionReducerTests.swift:913-953`). Running the UI bundle
+  alongside launches the app and leaves a foreground scene, so it passes; under
+  `-only-testing:LingxiCodeTests` there is none and it fails 3/3 deterministically.
+  Measured both ways at both deployment targets — the iOS 18.0 bump changes
+  nothing, the bundle composition is the whole variable.
+
+  None of these touch the transcript scroller, the timeline projection, or the
+  deployment target. Do not try to fix them — they are outside this plan.
 - Commit after each task.
 
 ---

@@ -21,7 +21,7 @@ IosEventListener.onEvent(_:)   ← Swift listener (EngineListener / CollectingLi
 
 ## 0. Prerequisites
 
-- macOS + Xcode 15+ (iOS 17 SDK or newer)
+- macOS + Xcode 16+ (iOS 18 SDK or newer)
 - `brew install xcodegen`
 - Rust toolchain with the iOS std targets (`aarch64-apple-ios`,
   `aarch64-apple-ios-sim`, `x86_64-apple-ios`). The build script installs any

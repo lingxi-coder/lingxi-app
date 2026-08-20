@@ -102,12 +102,18 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
         animated: Bool,
         requiresFollow: Bool
     ) {
+        // Decide BEFORE yielding. The geometry observer writes `followsLatest`
+        // from the very layout this scroll is waiting for: content growing by
+        // more than `bottomSlack` moves the offset out of the bottom band for
+        // one tick, so a guard read after the yield sees `false` and cancels
+        // the scroll that the new content asked for — permanently, since
+        // nothing re-arms it.
+        guard !requiresFollow || followsLatest else { return }
         // Wait for the streamed row's replacement layout to be committed. A
         // synchronous scroll can target the old bottom position, especially
         // when several text deltas arrive in one SwiftUI transaction.
         Task { @MainActor in
             await Task.yield()
-            guard !requiresFollow || followsLatest else { return }
             if animated {
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)

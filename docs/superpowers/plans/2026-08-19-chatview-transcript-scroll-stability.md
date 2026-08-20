@@ -1142,7 +1142,7 @@ Then install and launch with `xcrun devicectl device install app` and
 > symbol, rebuild it with `scripts/build-xcframework.sh` — `xcodebuild` will not
 > do it for you.
 
-- [ ] **Step 2: Walk the five scenarios and record the result**
+- [ ] **Step 2: Walk the six scenarios and record the result**
 
 For each, write PASS or FAIL with a one-line note directly into this plan file
 under a new `## Device QA 2026-08-19` heading:
@@ -1161,6 +1161,17 @@ under a new `## Device QA 2026-08-19` heading:
    transcript must not scroll. FAIL if the position moves.
 5. **Return to the bottom.** After scenario 3, scroll back down. Following must
    resume as soon as you reach the bottom, with no 30-second wait and no yank.
+6. **Verify the scroll-geometry convention.** Temporarily instrument the
+   `onScrollGeometryChange` transform in `TranscriptScroll.swift` to log
+   `contentOffset.y`, `contentSize.height`, `containerSize.height` and
+   `contentInsets.bottom`. Scroll the transcript fully to the bottom and read the
+   values with the keyboard DOWN, then again with it UP. Confirm
+   `contentOffset.y ≈ contentSize.height - containerSize.height +
+   contentInsets.bottom` in both states. If the relation only holds without the
+   inset term, `containerSize` is inset-adjusted and `isAtBottom` must drop
+   `+ bottomInset` — and `testBottomInsetRaisesTheReachableMaximumOffset` must be
+   re-derived with it. This is the one assumption the entire follow behaviour
+   rests on and no unit test can check it. Remove the instrumentation afterwards.
 
 - [ ] **Step 3: Commit the QA record**
 

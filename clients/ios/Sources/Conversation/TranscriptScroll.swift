@@ -42,7 +42,13 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                // NOT a LazyVStack. This stack has two children — the caller's
+                // content and the bottom anchor — so it provides no laziness of
+                // its own (`ConversationTimelineView` owns the real LazyVStack).
+                // What it did provide was a single child of unknown height for
+                // `.defaultScrollAnchor(.bottom)` to measure, which is how the
+                // transcript came up blank.
+                VStack(alignment: .leading, spacing: 0) {
                     content()
                     Color.clear
                         .frame(height: 1)

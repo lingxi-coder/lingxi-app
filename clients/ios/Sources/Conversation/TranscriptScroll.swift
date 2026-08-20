@@ -84,6 +84,10 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
                 scrollToLatest(using: proxy, animated: false, requiresFollow: true)
             }
             .onChange(of: follow) { _, _ in
+                // Unanimated on purpose. A streamed turn changes `follow` tens
+                // of times per second; a 200ms animation per change is always
+                // interrupted by the next one, and the pile-up is what reads as
+                // the transcript jittering.
                 scrollToLatest(using: proxy, animated: false, requiresFollow: true)
             }
             .onChange(of: focused) { _, isFocused in

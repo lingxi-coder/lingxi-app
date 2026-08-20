@@ -6,16 +6,14 @@ import SwiftUI
 /// Both surfaces show the same thing — an assistant talking, at length, while
 /// you watch — so they get the same scrolling behaviour rather than two
 /// implementations that drift. What lives here is exactly the part that is
-/// identical: the bottom anchor, the "stay pinned until the reader drags away
-/// from the bottom" rule with a delayed resume, and the scroll-on-focus nudge.
-/// What each caller keeps is its own content and its own idea of when new content
-/// arrived.
+/// identical: the bottom anchor, the "stay pinned while the reader is at the
+/// bottom" rule, and the scroll-on-focus nudge. What each caller keeps is its
+/// own content and its own idea of when new content arrived.
 ///
 /// `followsLatest` is a binding rather than internal state because the caller
-/// re-arms it when the visible session changes. The bottom anchor does not
-/// clear the flag on disappearance: a growing streaming row or a modal
-/// transition can temporarily push that marker off-screen before the follow
-/// scroll runs.
+/// re-arms it when the visible session changes. Its value is otherwise driven
+/// entirely by `onScrollGeometryChange`: it is true exactly while the scroll
+/// offset is within `TranscriptScrollFollowState.bottomSlack` of the bottom.
 struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     /// Changes to this value mean "new content arrived" and trigger a scroll —
     /// but only when `followsLatest` is true. Callers compose whatever set of
@@ -23,8 +21,8 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     let follow: Follow
 
     /// Whether the reader is currently parked at the bottom. Re-armable by the
-    /// caller, set back to true when the bottom anchor returns into view, or
-    /// after the detached-reader cooldown when new content arrives.
+    /// caller; otherwise kept in sync with the measured scroll offset by
+    /// `onScrollGeometryChange`.
     @Binding var followsLatest: Bool
 
     /// Composer focus. A keyboard coming up must reveal the newest content
@@ -34,8 +32,6 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
 
     /// Identifier for UI tests, applied to the scroll view.
     var accessibilityIdentifier: String?
-
-    @State private var followState = TranscriptScrollFollowState()
 
     @ViewBuilder var content: () -> Content
 
@@ -53,18 +49,6 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomAnchor)
-                        .onAppear {
-                            followsLatest = followState.bottomVisibilityChanged(
-                                true,
-                                followsLatest: followsLatest
-                            )
-                        }
-                        .onDisappear {
-                            followsLatest = followState.bottomVisibilityChanged(
-                                false,
-                                followsLatest: followsLatest
-                            )
-                        }
                 }
                 .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
@@ -77,27 +61,22 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             .defaultScrollAnchor(.bottom)
             .scrollIndicators(.hidden)
             .scrollDismissesKeyboard(.interactively)
+            // The reader's position is measured, not inferred. The previous
+            // implementation read it from a 1pt marker's onAppear/onDisappear
+            // inside a lazy stack — which fire on cell creation and recycling,
+            // out of order during layout — plus the sign of a drag translation.
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                TranscriptScrollFollowState.isAtBottom(
+                    contentOffset: geometry.contentOffset.y,
+                    contentSize: geometry.contentSize.height,
+                    containerSize: geometry.containerSize.height,
+                    bottomInset: geometry.contentInsets.bottom,
+                    slack: TranscriptScrollFollowState.bottomSlack
+                )
+            } action: { _, isAtBottom in
+                followsLatest = isAtBottom
+            }
             .modifier(OptionalAccessibilityIdentifier(identifier: accessibilityIdentifier))
-            // A bottom marker can disappear simply because a streamed row grew
-            // before the pending scroll has been applied. It is not evidence
-            // that the user scrolled away, so follow state is changed only by
-            // an upward user drag or by the marker returning into view.
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 8)
-                    .onChanged { value in
-                        followsLatest = followState.dragChanged(
-                            translationHeight: value.translation.height,
-                            followsLatest: followsLatest,
-                            now: Date()
-                        )
-                    }
-                    .onEnded { _ in
-                        followsLatest = followState.dragEnded(
-                            followsLatest: followsLatest,
-                            now: Date()
-                        )
-                    }
-            )
             .onAppear {
                 // A modal can temporarily recreate this surface. Restore the
                 // bottom only when the reader was already following the latest
@@ -105,20 +84,6 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
                 scrollToLatest(using: proxy, animated: false, requiresFollow: true)
             }
             .onChange(of: follow) { _, _ in
-                if !followsLatest {
-                    let resumed = followState.autoResumeIfTimedOut(
-                        followsLatest: followsLatest,
-                        now: Date(),
-                        after: TranscriptScrollFollowState.automaticFollowDelay
-                    )
-                    guard resumed else { return }
-                    followsLatest = true
-                }
-                // Unanimated on purpose. A streamed turn changes `follow` tens
-                // of times per second; a 200ms animation per change is always
-                // interrupted by the next one, and the pile-up is what reads as
-                // the transcript jittering. The focus scroll below is a
-                // discrete user action and stays animated.
                 scrollToLatest(using: proxy, animated: false, requiresFollow: true)
             }
             .onChange(of: focused) { _, isFocused in
@@ -155,70 +120,27 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     static var bottomAnchor: String { "bottom" }
 }
 
-struct TranscriptScrollFollowState {
-    /// A detached reader gets a grace period before live updates may resume
-    /// automatic following. The timeout is evaluated on the next content
-    /// update rather than by a timer, so a quiet transcript never jumps by
-    /// itself and modal presentation cannot fire a hidden scroll.
-    static let automaticFollowDelay: TimeInterval = 30
+enum TranscriptScrollFollowState {
+    /// How far above the true bottom still counts as "at the bottom". Absorbs
+    /// rounding and the one frame between a row growing and the follow scroll
+    /// landing, without swallowing a real upward drag.
+    static let bottomSlack: CGFloat = 24
 
-    private(set) var isBottomVisible = false
-    private var detachedAt: Date?
-
-    mutating func bottomVisibilityChanged(
-        _ isVisible: Bool,
-        followsLatest: Bool
+    /// Whether the reader is parked at the newest content.
+    ///
+    /// Measured, not inferred. `contentOffset` may exceed the maximum while the
+    /// scroll view rubber-bands, and `contentSize` may be smaller than the
+    /// container when the transcript is short; both of those are "at the bottom".
+    static func isAtBottom(
+        contentOffset: CGFloat,
+        contentSize: CGFloat,
+        containerSize: CGFloat,
+        bottomInset: CGFloat,
+        slack: CGFloat
     ) -> Bool {
-        isBottomVisible = isVisible
-        if isVisible {
-            detachedAt = nil
-        }
-        guard isVisible, !followsLatest else { return followsLatest }
-        return true
-    }
-
-    mutating func dragChanged(
-        translationHeight: CGFloat,
-        followsLatest: Bool,
-        now: Date = Date()
-    ) -> Bool {
-        guard translationHeight < 0, followsLatest else { return followsLatest }
-        // Keep the first transition timestamp, then refresh it when the drag
-        // ends so the cooldown starts after the user's last scroll gesture.
-        if detachedAt == nil {
-            detachedAt = now
-        }
-        return false
-    }
-
-    mutating func dragEnded(
-        followsLatest: Bool,
-        now: Date = Date()
-    ) -> Bool {
-        guard !followsLatest else {
-            detachedAt = nil
-            return followsLatest
-        }
-        guard isBottomVisible else {
-            detachedAt = now
-            return followsLatest
-        }
-        detachedAt = nil
-        return true
-    }
-
-    mutating func autoResumeIfTimedOut(
-        followsLatest: Bool,
-        now: Date,
-        after delay: TimeInterval
-    ) -> Bool {
-        guard !followsLatest,
-              let detachedAt,
-              now.timeIntervalSince(detachedAt) >= delay
-        else { return false }
-
-        self.detachedAt = nil
-        return true
+        let maximumOffset = contentSize - containerSize + bottomInset
+        guard maximumOffset > 0 else { return true }
+        return contentOffset >= maximumOffset - slack
     }
 }
 

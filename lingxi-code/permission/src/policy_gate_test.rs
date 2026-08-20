@@ -415,6 +415,42 @@ mod tests {
         );
     }
 
+    /// Plan mode must not be short-circuited by a convenience auto-allow.
+    ///
+    /// `AllowByDefault` skips the Plan backstop, so `LocalAppBuild` would run
+    /// a 30-minute build and `LocalAppRuntime {action:"open"}` would put an app
+    /// on screen while the user believes they are only planning. Neither is in
+    /// `PLAN_SAFE_TOOLS`, which is the existing statement of what may run.
+    #[tokio::test]
+    async fn plan_mode_still_gates_a_mutating_local_app_tool() {
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": {} }"#,
+            PermissionRuleSource::LocalSettings,
+        )
+        .unwrap();
+        let policy = Arc::new(PermissionPolicy::from_rules(PermissionMode::Plan, rules));
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "planning".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+
+        assert!(
+            matches!(
+                gate.check("LocalAppBuild", &serde_json::json!({"app_id": "app-a"}))
+                    .await,
+                PermissionDecision::Deny { .. }
+            ),
+            "a build must not run in plan mode"
+        );
+
+        // A genuinely read-only one is still frictionless while planning.
+        assert_eq!(
+            gate.check("LocalAppList", &serde_json::json!({})).await,
+            PermissionDecision::Allow,
+            "reading the app list is plan-safe"
+        );
+    }
+
     /// Without a translator the gate must be byte-identical to desktop.
     #[tokio::test]
     async fn no_translator_leaves_the_verdict_untouched() {

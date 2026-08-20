@@ -2853,6 +2853,15 @@ async fn build_mobile_inner_with_ask(
         .iter()
         .filter(|m| matches!(m.purpose, traits::MountPurpose::Workspace))
         .collect();
+    // THE workspace mount, chosen once. `model_cwd` below reuses this instead
+    // of running its own `.find()`: a bare `.find()` takes table order, so with
+    // two Workspace mounts the permission root and the model-visible cwd could
+    // bind to different ones and the prompt-per-write bug would return
+    // silently. Two derivations of one root is how the guest/host split forked.
+    let workspace_mount = match workspace_mounts.as_slice() {
+        [mount] => Some(*mount),
+        _ => None,
+    };
     let permission_cwd = match workspace_mounts.as_slice() {
         [mount] => {
             // BOTH sides must be canonicalized or the containment tests below
@@ -2880,19 +2889,26 @@ async fn build_mobile_inner_with_ask(
             let host_canon = std::fs::canonicalize(&mount.host_path)
                 .unwrap_or_else(|_| mount.host_path.clone());
             let cwd_canon = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
-            // Re-root ONLY for the disjoint (sibling) case — the `.global`
-            // scope the on-device diagnostic printed. `.project` and
-            // `.localApp` already anchor cwd AT the workspace, so this is a
-            // no-op there. If cwd is an ANCESTOR, rules already match through
-            // it and the wider root keeps more deny coverage; if cwd is a
-            // DESCENDANT, re-rooting would widen the rule root upward. Keep
-            // cwd in both cases.
-            if host_canon == cwd_canon
-                || host_canon.starts_with(&cwd_canon)
-                || cwd_canon.starts_with(&host_canon)
-            {
+            // Which root the rules resolve against.
+            //
+            // A WIDER root is not "more deny coverage": both local-app write
+            // guards are all-or-nothing on `is_local_app_workspace_root(
+            // &roots.cwd)`, and that is false for any directory that is not
+            // itself `.../apps/<id>/workspace`. Widening turns them OFF.
+            if cwd_canon == host_canon {
+                // Identical — `.project` / `.localApp`, where cwd already IS
+                // the workspace. No-op.
+                cwd.clone()
+            } else if cwd_canon.starts_with(&host_canon) {
+                // cwd is INSIDE the mount. Re-rooting would move the rule root
+                // UPWARD, widening every `./**` pattern. Keep the narrower cwd.
                 cwd.clone()
             } else {
+                // Either disjoint (the `.global` sibling case the on-device
+                // diagnostic printed) or cwd is an ANCESTOR of the mount. Both
+                // re-root onto the workspace: it is the directory the model
+                // actually writes into, and it is the only spelling under which
+                // the local-app guards engage at all.
                 mount.host_path.clone()
             }
         }
@@ -3242,10 +3258,8 @@ async fn build_mobile_inner_with_ask(
     // it and come back through translate_model_path onto the host twin. The
     // engine-internal cwd (`cwd` — transcripts, .lingxi, memory files) stays
     // host.
-    let model_cwd = mobile_linux_mounts
-        .iter()
-        .find(|m| matches!(m.purpose, traits::MountPurpose::Workspace))
-        .map(|m| std::path::PathBuf::from(&m.guest_path))
+    let model_cwd = workspace_mount
+        .map(|mount| std::path::PathBuf::from(&mount.guest_path))
         .unwrap_or_else(|| cwd.clone());
     // DIAGNOSTIC (permission coordinate audit): the model names files in
     // `model_cwd` (GUEST) while `PermissionPolicy`'s `FsRoots.cwd` was built

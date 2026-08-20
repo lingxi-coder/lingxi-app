@@ -212,6 +212,12 @@ impl Tool for LocalAppTool {
         30_000
     }
 
+    /// Same value the MCP adapter these replaced used — a large result is
+    /// persisted rather than inlined.
+    fn persistence_threshold(&self) -> Option<usize> {
+        Some(100_000)
+    }
+
     /// A long `LocalAppBuild` (30-minute budget) or `LocalAppInstallDeps` must
     /// be interruptible. The trait default is `Block`, under which the turn
     /// loop does NOT race the cancel token — ESC would leave the session
@@ -272,8 +278,23 @@ impl Tool for LocalAppTool {
         &self,
         input: Value,
         _ctx: ToolUseContext,
-        _progress_tx: ToolProgressSender,
+        progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        // A `LocalAppBuild` runs on a 30-minute budget. Without a `started`
+        // frame the row renders frozen for the whole of it — the MCP adapter
+        // these replaced emitted one, so dropping it was a visible regression.
+        // Best-effort `try_send`, like that adapter.
+        if let Some(tool_use_id) = _ctx.tool_use_id.clone() {
+            let _ = progress_tx.try_send(tool_api::progress::ToolProgress {
+                tool_use_id,
+                data: serde_json::json!({
+                    "type": "local_app_progress",
+                    "status": "started",
+                    "tool": self.name,
+                    "operation": self.operation,
+                }),
+            });
+        }
         // HOST-BIND `app_id` to the session's own app.
         //
         // These tools are AUTO-ALLOWED by the defaults table, and the static

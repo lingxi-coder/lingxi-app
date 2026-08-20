@@ -736,7 +736,7 @@ impl PolicyPermissionGate {
                         };
                     }
                 }
-                if read_only_default_auto_allows(name, reason) {
+                if read_only_default_auto_allows(name, reason, mode) {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
                     // auto-allow rather than ask-storm (phase-2 stand-in for the
                     // per-tool default). An explicit `ask` rule (tool-wide or
@@ -835,7 +835,7 @@ impl PolicyPermissionGate {
                 } else {
                     None
                 };
-                if read_only_default_auto_allows(name, reason) {
+                if read_only_default_auto_allows(name, reason, mode) {
                     self.record_auto_mode_non_deny(mode);
                     Ok(PermissionOutcome::Allow {
                         updated_input: None,
@@ -970,7 +970,7 @@ impl PolicyPermissionGate {
                     }
                     AutoModeClassifierResult::NoDecision => {}
                 }
-                if read_only_default_auto_allows(name, reason) {
+                if read_only_default_auto_allows(name, reason, mode) {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
                     // auto-allowed, no prompt. No rule matched, so no scope.
                     Ok(PermissionResolution::Allow { rule_source: None })
@@ -1278,7 +1278,29 @@ impl PolicyPermissionGate {
 /// (firing the `PermissionRequest` hook). A mode-fallback ask
 /// ([`PermissionDecisionReason::PermissionMode`]) keeps the frictionless
 /// read-only auto-allow so the common no-rule case never ask-storms.
-fn read_only_default_auto_allows(name: &str, reason: &PermissionDecisionReason) -> bool {
+fn read_only_default_auto_allows(
+    name: &str,
+    reason: &PermissionDecisionReason,
+    mode: PermissionMode,
+) -> bool {
+    // MOBILE DIVERGENCE, narrowly scoped to the local-app family.
+    //
+    // `AllowByDefault` short-circuits the Plan-mode backstop, so a mutating
+    // tool that is auto-allowed for convenience would RUN while the user
+    // believes they are only planning — `LocalAppBuild` starts a 30-minute
+    // build and `LocalAppRuntime {action:"open"}` puts an app on screen.
+    // `PLAN_SAFE_TOOLS` is the existing statement of what may run in Plan
+    // mode, and none of these are in it.
+    //
+    // Deliberately NOT applied to the oracle tools: several of them are
+    // `AllowByDefault` without being plan-safe, and changing that would be a
+    // parity change rather than a fix.
+    if mode == PermissionMode::Plan
+        && name.starts_with("LocalApp")
+        && !crate::mode_policy::is_plan_safe_tool(name)
+    {
+        return false;
+    }
     matches!(tool_default(name), PromptDefault::AllowByDefault)
         && !matches!(reason, PermissionDecisionReason::MatchedRule { .. })
 }

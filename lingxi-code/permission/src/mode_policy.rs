@@ -52,6 +52,16 @@ const PLAN_SAFE_TOOLS: &[&str] = &[
     "TaskList",
     "TaskStop",
     "TaskOutput",
+    // MOBILE DIVERGENCE: the READ-ONLY local-app host operations. Inspecting
+    // an app is exactly what planning does; the mutating siblings
+    // (`LocalAppBuild`, `LocalAppRuntime`, …) are deliberately absent, so the
+    // Plan backstop still stops them.
+    "LocalAppList",
+    "LocalAppGet",
+    "LocalAppLogs",
+    "LocalAppCheckpointList",
+    "LocalAppBackgroundList",
+    "LocalAppBackgroundStatus",
     // Plan mode / UI.
     "AskUserQuestion",
     "EnterPlanMode",

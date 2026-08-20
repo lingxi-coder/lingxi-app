@@ -37,11 +37,11 @@ struct SettingsPages: View {
 // MARK: - Main settings list
 struct MainSettingsPage: View {
     @Environment(AppState.self) private var app
+    @Environment(VoiceCapabilityModel.self) private var voiceCapability
     @Environment(LocalizationManager.self) private var localization
     @Environment(\.theme) private var t
     @Bindable var store: SettingsStore
     let host: SettingsHost
-    @State private var voiceCapability = VoiceCapabilityModel()
     @State private var providerRepository = ProviderRepository.shared
 
     var body: some View {
@@ -66,11 +66,10 @@ struct MainSettingsPage: View {
                             value: String(localized: "settings_providers_enabled_count \(store.fetchProviders.filter{$0.enabled}.count)"),
                             onTap: { host.push(.providerList(.init(.fetch))) })
                 SettingsRow(icon: .mic, iconColor: Color(srgb: 0.8018,0.4038,0.8909), label: String(localized: "settings_voice_tts"),
-                            sub: voiceCapability.configuredVoice?.name ?? String(localized: "settings_voice_default_ios"),
+                            sub: voiceCapability.voiceSummaryLabel,
                             value: voiceCapability.configurationReadiness.isReadyForFlow
                                 ? String(localized: "settings_status_available")
-                                : (voiceCapability.speechConfigurationConfirmed
-                                    && voiceCapability.ttsConfigurationConfirmed ? String(localized: "settings_status_needs_check") : String(localized: "settings_provider_unconfigured")),
+                                : String(localized: "settings_status_needs_check"),
                             isLast: true,
                             onTap: { host.push(.voice) })
             }

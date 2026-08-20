@@ -10,8 +10,13 @@ import com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.coroutines.coroutineContext
 
 /**
  * On-device text-to-speech via sherpa-onnx (offline pack). Wraps OfflineTts
@@ -24,6 +29,26 @@ class SherpaTts private constructor(
 ) {
     @Volatile private var track: AudioTrack? = null
     @Volatile private var stopped = false
+
+    suspend fun renderToPcm(
+        text: String,
+        sid: Int = 0,
+        speed: Float = 1.0f,
+    ): Pair<ByteArray, Int> = withContext(Dispatchers.IO) {
+        if (text.isBlank()) return@withContext ByteArray(0) to sampleRateHz
+        stopped = false
+        val pcm = ByteArrayOutputStream()
+        tts.generateWithCallback(text = text, sid = sid, speed = speed) { samples ->
+            if (stopped) {
+                0
+            } else {
+                coroutineContext.ensureActive()
+                pcm.write(samples.toPcm16Bytes())
+                1
+            }
+        }
+        pcm.toByteArray() to sampleRateHz
+    }
 
     /** Synthesize [text] and play it. [sid] selects the voice (0 = first). Blocks until done. */
     suspend fun speak(text: String, sid: Int = 0, speed: Float = 1.0f) = withContext(Dispatchers.IO) {
@@ -72,6 +97,16 @@ class SherpaTts private constructor(
     }
 
     fun close() { stop(); tts.release() }
+
+    private fun FloatArray.toPcm16Bytes(): ByteArray {
+        val bytes = ByteArray(size * 2)
+        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        for (sample in this) {
+            val clamped = sample.coerceIn(-1f, 1f)
+            buffer.putShort((clamped * Short.MAX_VALUE).toInt().toShort())
+        }
+        return bytes
+    }
 
     companion object {
         fun load(entry: OfflineModelEntry, modelDir: File): SherpaTts {

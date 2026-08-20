@@ -3,6 +3,7 @@ package com.lingxi.code.voice.audio
 import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import com.lingxi.code.bindings.SpeechFfiException
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -11,6 +12,7 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.Locale
 import java.util.UUID
 import kotlin.coroutines.resume
 
@@ -43,7 +45,7 @@ class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
         voice: String?,
         keyProvider: suspend () -> String?,
     ): Flow<ByteArray> = flow {
-        val (pcm, _) = renderToPcm(text, voice = voice)
+        val (pcm, _) = renderToPcm(text, voice = voice, strictVoice = voice != null)
         if (pcm.isNotEmpty()) emit(pcm)
     }
 
@@ -52,6 +54,8 @@ class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
         text: String,
         voice: String? = null,
         speed: Float = 1.0f,
+        language: String? = null,
+        strictVoice: Boolean = voice != null,
     ): Pair<ByteArray, Int> {
         if (text.isBlank()) return ByteArray(0) to capabilities.sampleRateHz
         val wavFile = File(context.cacheDir, "tts/sys-${UUID.randomUUID()}.wav").also {
@@ -60,10 +64,34 @@ class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
         val tts = awaitTtsInit()
         try {
             tts.setSpeechRate(speed.coerceIn(0.5f, 2.0f))
-            voice
+            val requestedVoice = voice
                 ?.takeUnless { it == "default" }
                 ?.let { voiceId -> tts.voices?.firstOrNull { it.name == voiceId } }
-                ?.let { tts.voice = it }
+            val languageCompatibleVoice = requestedVoice?.takeIf {
+                language == null || languageMatches(it.locale?.toLanguageTag(), language)
+            }
+            if (voice != null && voice != "default" && languageCompatibleVoice == null && strictVoice) {
+                throw SpeechFfiException.Unavailable()
+            }
+            val effectiveVoice = languageCompatibleVoice
+                ?: if (voice != null && voice != "default") {
+                    tts.voices
+                        ?.asSequence()
+                        ?.filter { languageMatches(it.locale?.toLanguageTag(), language) }
+                        ?.sortedWith(
+                            compareBy<android.speech.tts.Voice> { it.isNetworkConnectionRequired }
+                                .thenByDescending { it == tts.defaultVoice }
+                                .thenBy { it.name.lowercase(Locale.US) },
+                        )
+                        ?.firstOrNull()
+                } else {
+                    null
+                }
+            if (effectiveVoice != null) {
+                tts.voice = effectiveVoice
+            } else if (language != null && (voice == null || voice == "default")) {
+                tts.language = Locale.forLanguageTag(language)
+            }
             val utterance = "lingxi-${UUID.randomUUID()}"
             val status = synthesizeToFile(tts, text, utterance, wavFile)
             if (status != TextToSpeech.SUCCESS) return ByteArray(0) to capabilities.sampleRateHz
@@ -72,6 +100,11 @@ class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
             runCatching { tts.shutdown() }
             runCatching { wavFile.delete() }
         }
+    }
+
+    private fun languageMatches(candidate: String?, target: String?): Boolean {
+        if (candidate.isNullOrBlank() || target.isNullOrBlank()) return false
+        return candidate.substringBefore('-').equals(target.substringBefore('-'), ignoreCase = true)
     }
 
     private suspend fun awaitTtsInit(): TextToSpeech =

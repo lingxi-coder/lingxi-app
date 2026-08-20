@@ -60,6 +60,9 @@
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
 
     <!-- Android 11+ package visibility: SpeechRecognizer checks for an
          installed RecognitionService before opening a realtime session. This

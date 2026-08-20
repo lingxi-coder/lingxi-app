@@ -184,42 +184,14 @@ struct LanguagePage: View {
 
 // MARK: - Voice TTS
 struct VoicePage: View {
-    @Environment(AppState.self) private var app
+    @Environment(VoiceCapabilityModel.self) private var capability
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.theme) private var t
-    @Bindable var store: SettingsStore
-    @State private var capability = VoiceCapabilityModel()
-    @State private var saveMessage: String?
+    let store: SettingsStore
 
     var body: some View {
         VStack(spacing: 0) {
-            SettingsSection(
-                label: String(localized: "voice_section_config_status"),
-                footer: saveMessage ?? capability.configurationReadiness.message
-            ) {
-                SettingsRow(
-                    label: String(localized: "voice_speech_recognition"),
-                    value: capability.speechConfigurationConfirmed ? String(localized: "voice_status_saved") : String(localized: "voice_status_pending"),
-                    valueColor: capability.speechConfigurationConfirmed ? t.ok : t.text3,
-                    chevron: false
-                )
-                SettingsRow(
-                    label: String(localized: "voice_speech_playback"),
-                    value: capability.ttsConfigurationConfirmed ? String(localized: "voice_status_saved") : String(localized: "voice_status_pending"),
-                    valueColor: capability.ttsConfigurationConfirmed ? t.ok : t.text3,
-                    chevron: false
-                )
-                SettingsRow(label: String(localized: "voice_save_config"), chevron: false, isLast: true) {
-                    Button("voice_save_button") {
-                        saveVoiceConfiguration()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(t.accent)
-                    .accessibilityIdentifier("settings.voice.save")
-                }
-            }
-
             SettingsSection(label: String(localized: "voice_speech_recognition"),
                             footer: capability.effectiveRecognitionLabel) {
                 SettingsRow(label: String(localized: "voice_recognition_language"), chevron: false) {
@@ -267,29 +239,41 @@ struct VoicePage: View {
                 }
             }
 
-            SettingsSection(label: String(localized: "voice_section_permissions"),
-                            footer: String(localized: "voice_permissions_footer")) {
-                SettingsRow(
-                    label: String(localized: "voice_speech_recognition"),
-                    sub: capability.speechPermission.detail,
-                    value: capability.speechPermission.label,
-                    valueColor: capability.speechAuthorization == .authorized ? t.ok : t.text3,
-                    chevron: false
-                )
-                SettingsRow(
-                    label: String(localized: "voice_microphone"),
-                    sub: capability.microphonePermission.detail,
-                    value: capability.microphonePermission.label,
-                    chevron: false,
-                    isLast: true
+            if !capability.offlinePackStates.isEmpty {
+                SettingsSection(
+                    label: String(localized: "voice_offline_models"),
+                    footer: String(localized: "voice_offline_models_footer")
                 ) {
-                    Button(permissionActionLabel) {
-                        handlePermissionAction()
+                    ForEach(capability.offlinePackStates) { status in
+                        SettingsRow(
+                            label: status.model.displayName[Locale.current.language.languageCode?.identifier ?? "en"]
+                                ?? status.model.displayName["en"]
+                                ?? status.model.id,
+                            sub: status.model.license,
+                            value: offlineStateLabel(status.state),
+                            valueColor: status.state.isReady ? t.ok : t.text3,
+                            chevron: false
+                        )
+                    }
+                    SettingsRow(
+                        label: String(localized: "voice_offline_models_action"),
+                        chevron: false,
+                        isLast: true
+                    ) {
+                        Button(offlineDownloadActive
+                            ? String(localized: "common_cancel")
+                            : String(localized: "voice_offline_download")) {
+                            if offlineDownloadActive {
+                                capability.cancelOfflinePackDownload()
+                            } else {
+                                capability.downloadOfflinePack()
+                            }
+                        }
                     }
                 }
             }
 
-            SettingsSection(label: String(localized: "voice_section_system_tts"),
+            SettingsSection(label: String(localized: "voice_speech_playback"),
                             footer: String(localized: "voice_tts_footer")) {
                 SettingsRow(label: String(localized: "voice_voice_name"), chevron: false) {
                     Picker("voice_voice_name", selection: voiceBinding) {
@@ -300,6 +284,16 @@ struct VoicePage: View {
                     .labelsHidden()
                     .frame(maxWidth: 190)
                 }
+                SettingsRow(
+                    label: String(localized: "voice_current_selection"),
+                    value: capability.requestedVoiceLabel,
+                    chevron: false
+                )
+                SettingsRow(
+                    label: String(localized: "voice_active_mode"),
+                    value: capability.effectiveVoiceLabel,
+                    chevron: false
+                )
                 SettingsRow(
                     label: String(localized: "voice_speech_rate"),
                     value: capability.speed.formatted(.number.precision(.fractionLength(1))) + "x",
@@ -320,6 +314,43 @@ struct VoicePage: View {
                 }
             }
 
+            SettingsSection(label: String(localized: "voice_section_permissions"),
+                            footer: String(localized: "voice_permissions_footer")) {
+                SettingsRow(
+                    label: String(localized: "voice_speech_recognition"),
+                    sub: capability.mode == .onDevice
+                        ? String(localized: "voice_speech_permission_not_required_detail")
+                        : capability.speechPermission.detail,
+                    value: capability.mode == .onDevice
+                        ? String(localized: "voice_permission_not_required")
+                        : capability.speechPermission.label,
+                    valueColor: capability.mode == .onDevice || capability.speechAuthorization == .authorized
+                        ? t.ok : t.text3,
+                    chevron: false
+                )
+                SettingsRow(
+                    label: String(localized: "voice_microphone"),
+                    sub: capability.microphonePermission.detail,
+                    value: capability.microphonePermission.label,
+                    chevron: false,
+                    isLast: true
+                ) {
+                    Button(permissionActionLabel) {
+                        handlePermissionAction()
+                    }
+                }
+                SettingsRow(
+                    label: String(localized: "voice_speech_playback"),
+                    sub: capability.effectiveVoiceLabel,
+                    value: capability.voices.isEmpty
+                        ? String(localized: "settings_status_needs_check")
+                        : String(localized: "settings_status_available"),
+                    valueColor: capability.voices.isEmpty ? t.text3 : t.ok,
+                    chevron: false,
+                    isLast: true
+                )
+            }
+
             if let error = capability.errorMessage {
                 BlurbText(text: error)
             }
@@ -327,7 +358,6 @@ struct VoicePage: View {
         .task { capability.reloadFromDefaults() }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
-            saveMessage = nil
             capability.reloadFromDefaults()
         }
         .onDisappear {
@@ -339,9 +369,7 @@ struct VoicePage: View {
         Binding(
             get: { capability.language },
             set: { value in
-                saveMessage = nil
                 capability.setLanguage(value)
-                app.voiceLanguage = value
             }
         )
     }
@@ -350,9 +378,7 @@ struct VoicePage: View {
         Binding(
             get: { capability.mode },
             set: { value in
-                saveMessage = nil
                 capability.setMode(value)
-                app.voiceRecognitionMode = value.rawValue
             }
         )
     }
@@ -361,7 +387,6 @@ struct VoicePage: View {
         Binding(
             get: { capability.selectedVoice?.id ?? "" },
             set: { value in
-                saveMessage = nil
                 capability.setVoice(value)
             }
         )
@@ -376,15 +401,38 @@ struct VoicePage: View {
     }
 
     private var permissionActionLabel: String {
-        let speechDenied = capability.speechAuthorization == .denied
+        let speechDenied = capability.mode == .automatic && (capability.speechAuthorization == .denied
             || capability.speechAuthorization == .restricted
+        )
         let microphoneDenied = capability.microphonePermissionStatus == .denied
         return speechDenied || microphoneDenied ? String(localized: "voice_system_settings") : String(localized: "voice_check_permissions")
     }
 
+    private var offlineDownloadActive: Bool {
+        capability.offlinePackStates.contains { status in
+            switch status.state {
+            case .queued, .downloading, .verifying, .extracting: true
+            default: false
+            }
+        }
+    }
+
+    private func offlineStateLabel(_ state: VoiceModelState) -> String {
+        switch state {
+        case .notInstalled: String(localized: "voice_model_state_not_installed")
+        case .queued: String(localized: "voice_model_state_queued")
+        case .downloading: String(localized: "voice_model_state_downloading")
+        case .verifying: String(localized: "voice_model_state_verifying")
+        case .extracting: String(localized: "voice_model_state_installing")
+        case .ready: String(localized: "voice_model_state_ready")
+        case let .failed(message): "\(String(localized: "voice_model_state_failed")): \(message)"
+        }
+    }
+
     private func handlePermissionAction() {
-        let speechDenied = capability.speechAuthorization == .denied
+        let speechDenied = capability.mode == .automatic && (capability.speechAuthorization == .denied
             || capability.speechAuthorization == .restricted
+        )
         let microphoneDenied = capability.microphonePermissionStatus == .denied
         if speechDenied || microphoneDenied {
             guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else { return }
@@ -393,14 +441,6 @@ struct VoicePage: View {
             Task { await capability.requestPermissions() }
         }
     }
-
-    private func saveVoiceConfiguration() {
-        let readiness = capability.saveConfiguration()
-        app.voiceLanguage = capability.language
-        app.voiceRecognitionMode = capability.mode.rawValue
-        saveMessage = VoiceCapabilityModel.configurationSaveMessage(for: readiness)
-    }
-
 }
 
 // MARK: - shared helper

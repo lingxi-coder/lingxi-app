@@ -60,10 +60,18 @@ targets:
       - framework: Frameworks/LingxiCodeFFI.xcframework
         embed: false
         link: true
+      - framework: Frameworks/sherpa-onnx.xcframework
+        embed: false
+        link: true
+      - framework: Frameworks/onnxruntime.xcframework
+        embed: false
+        link: true
       # Native Rust dependencies reference the platform zlib/iconv supplied by
       # the iOS SDK; static XCFrameworks cannot encode these transitive links.
       - sdk: libz.tbd
       - sdk: libiconv.tbd
+      - sdk: libbz2.tbd
+      - sdk: libc++.tbd
       # Device-only iSH uses SQLite-backed fakefs, the host resolver, and
       # SystemConfiguration for live DNS updates. The iSH archives themselves
       # are generated from the pinned OpenMinis source by
@@ -77,6 +85,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/LingxiCode-Bridging-Header.h
         ENABLE_PREVIEWS: true
         GENERATE_INFOPLIST_FILE: false
         CODE_SIGN_ENTITLEMENTS: Widget.entitlements

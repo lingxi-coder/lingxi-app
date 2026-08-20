@@ -11,6 +11,7 @@ import SwiftUI
 
 struct SetupWizardView: View {
     @Environment(AppState.self) private var app
+    @Environment(VoiceCapabilityModel.self) private var voiceCapability
     /// Kept in the initializer for source compatibility with the existing root;
     /// model selection now belongs to the real Provider settings flow.
     @ObservedObject var convo: ConversationModel
@@ -28,9 +29,6 @@ struct SetupWizardView: View {
     // Editable copies, seeded from AppState on first appear.
     @State private var assistantName = String(localized: "app_name")
     @State private var userName = ""
-    @State private var recognitionMode: VoiceRecognitionMode = .onDevice
-    @State private var voiceLanguage = VoiceCapabilityModel.automaticLanguageIdentifier
-    @State private var voiceCapability = VoiceCapabilityModel()
 
     @FocusState private var fieldFocused: Bool
 
@@ -71,10 +69,7 @@ struct SetupWizardView: View {
             seeded = true
             assistantName = app.assistantName
             userName = app.userName
-            recognitionMode = VoiceRecognitionMode(rawValue: app.voiceRecognitionMode) ?? .onDevice
-            voiceLanguage = app.voiceLanguage
-            voiceCapability.setMode(recognitionMode)
-            voiceCapability.setLanguage(voiceLanguage)
+            voiceCapability.reloadFromDefaults()
         }
         .onChange(of: step) { oldStep, newStep in
             guard oldStep == 3, newStep != 3 else { return }
@@ -211,9 +206,9 @@ struct SetupWizardView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     completionRow(String(localized: "onboarding_done_row_assistant"), assistantName)
                     completionRow(String(localized: "onboarding_done_row_name"), userName)
-                    completionRow(String(localized: "onboarding_done_row_voice"), recognitionMode.title)
-                    completionRow(String(localized: "settings_language_title"), VoiceCapabilityModel.displayName(for: voiceLanguage))
-                    completionRow(String(localized: "onboarding_done_row_voiceover"), voiceCapability.selectedVoice?.name ?? String(localized: "onboarding_voice_later"))
+                    completionRow(String(localized: "onboarding_done_row_voice"), voiceCapability.mode.title)
+                    completionRow(String(localized: "settings_language_title"), voiceCapability.selectedLanguageLabel)
+                    completionRow(String(localized: "onboarding_done_row_voiceover"), voiceCapability.effectiveVoiceLabel)
                 }
                 .padding(16)
                 .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 15))
@@ -249,6 +244,38 @@ struct SetupWizardView: View {
                     voiceModeButton(mode)
                 }
 
+                if voiceCapability.mode == .onDevice,
+                   !voiceCapability.offlinePackStates.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("onboarding_voice_pack_title")
+                            .font(.caption.bold())
+                        Text("onboarding_voice_pack_subtitle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(voiceCapability.offlinePackStates) { status in
+                            HStack {
+                                Text(status.model.displayName["en"] ?? status.model.id)
+                                Spacer()
+                                Text(onboardingOfflineStateLabel(status.state))
+                                    .foregroundStyle(status.state.isReady ? .green : .secondary)
+                            }
+                            .font(.caption)
+                        }
+                        Button(onboardingOfflineDownloadActive
+                            ? String(localized: "common_cancel")
+                            : String(localized: "voice_offline_download")) {
+                            if onboardingOfflineDownloadActive {
+                                voiceCapability.cancelOfflinePackDownload()
+                            } else {
+                                voiceCapability.downloadOfflinePack()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding(14)
+                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
+                }
+
                 Text("onboarding_voice_voice_title")
                     .font(.caption.bold())
                     .foregroundStyle(Color(okl: 0.68, 0.04, 280))
@@ -282,7 +309,7 @@ struct SetupWizardView: View {
             Text(voiceCapability.effectiveRecognitionLabel)
                 .font(.footnote)
                 .foregroundStyle(
-                    recognitionMode == .onDevice && !voiceCapability.onDeviceAvailable
+                    voiceCapability.effectiveRecognitionStatus.fallbackReason != nil
                         ? Color.orange : Color(okl: 0.74, 0.10, 155)
                 )
                 .padding(.top, 18)
@@ -304,23 +331,42 @@ struct SetupWizardView: View {
         )
     }
 
+    private var onboardingOfflineDownloadActive: Bool {
+        voiceCapability.offlinePackStates.contains { status in
+            switch status.state {
+            case .queued, .downloading, .verifying, .extracting: true
+            default: false
+            }
+        }
+    }
+
+    private func onboardingOfflineStateLabel(_ state: VoiceModelState) -> String {
+        switch state {
+        case .notInstalled: String(localized: "voice_model_state_not_installed")
+        case .queued: String(localized: "voice_model_state_queued")
+        case .downloading: String(localized: "voice_model_state_downloading")
+        case .verifying: String(localized: "voice_model_state_verifying")
+        case .extracting: String(localized: "voice_model_state_installing")
+        case .ready: String(localized: "voice_model_state_ready")
+        case .failed: String(localized: "voice_model_state_failed")
+        }
+    }
+
     private func voiceLanguageButton(_ label: String, value: String) -> some View {
         Button(label) {
-            voiceLanguage = value
             voiceCapability.setLanguage(value)
         }
         .buttonStyle(.bordered)
-        .tint(voiceLanguage == value ? Color(okl: 0.70, 0.18, 285) : .gray)
+        .tint(voiceCapability.language == value ? Color(okl: 0.70, 0.18, 285) : .gray)
     }
 
     private func voiceModeButton(_ mode: VoiceRecognitionMode) -> some View {
         Button {
-            recognitionMode = mode
             voiceCapability.setMode(mode)
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: recognitionMode == mode ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(recognitionMode == mode ? Color(okl: 0.70, 0.18, 285) : .gray)
+                Image(systemName: voiceCapability.mode == mode ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(voiceCapability.mode == mode ? Color(okl: 0.70, 0.18, 285) : .gray)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(mode.title).font(.body.bold())
                     Text(mode.detail).font(.caption).foregroundStyle(.secondary)
@@ -329,7 +375,7 @@ struct SetupWizardView: View {
             }
             .padding(14)
             .background(
-                .white.opacity(recognitionMode == mode ? 0.10 : 0.04),
+                .white.opacity(voiceCapability.mode == mode ? 0.10 : 0.04),
                 in: RoundedRectangle(cornerRadius: 14)
             )
         }
@@ -406,11 +452,6 @@ struct SetupWizardView: View {
     private func finish() {
         app.assistantName = assistantName.trimmingCharacters(in: .whitespaces)
         app.userName = userName.trimmingCharacters(in: .whitespaces)
-        app.voiceRecognitionMode = recognitionMode.rawValue
-        app.voiceLanguage = voiceLanguage
-        voiceCapability.setMode(recognitionMode)
-        voiceCapability.setLanguage(voiceLanguage)
-        voiceCapability.saveConfiguration()
         app.setupDone = true
         onDone()
     }

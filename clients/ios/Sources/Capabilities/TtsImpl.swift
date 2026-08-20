@@ -19,21 +19,59 @@ import Foundation
         private let synthesizer = AVSpeechSynthesizer()
 
         func synthesize(text: String, voice: String?) async throws -> TtsAudioFfi {
-            let utterance = AVSpeechUtterance(string: text)
-            let defaults = UserDefaults.standard
-            let configuredVoice = defaults.string(forKey: "systemVoiceIdentifier")
-            let configuredLanguage = VoiceCapabilityModel.resolvedRecognitionLocaleIdentifier(
-                configuredLanguage: defaults.string(forKey: "voiceLanguage"),
-                currentLocale: .autoupdatingCurrent
+            let preferences = VoicePreferencesSnapshot.load()
+            if let voice {
+                let selection = VoicePreferencesSnapshot.normalizeVoiceSelection(voice)
+                if selection.hasPrefix("sherpa:") {
+                    guard let parsed = VoiceRuntimeResolver.parseSherpaVoice(selection),
+                          let model = GeneratedVoiceModelCatalog.byID(parsed.modelID),
+                          model.voices.contains(where: { $0.id == parsed.voiceID }),
+                          VoiceModelFiles.modelRoot(for: model) != nil
+                    else { throw SpeechFfiError.Unavailable }
+                }
+            }
+            let route = VoiceRuntimeResolver.speechRoute(
+                preferences: preferences,
+                voiceOverride: voice
             )
-            if let identifier = voice ?? configuredVoice,
-               let v = AVSpeechSynthesisVoice(identifier: identifier) {
+            if let voice {
+                let selection = VoicePreferencesSnapshot.normalizeVoiceSelection(voice)
+                if selection.hasPrefix("sherpa:") {
+                    guard case .sherpa = route else { throw SpeechFfiError.Unavailable }
+                }
+            }
+            if case let .sherpa(_, modelID, _, speakerID, modelDirectory) = route {
+                let rendered = try await SherpaSpeechRenderer.render(
+                    text: text,
+                    modelID: modelID,
+                    modelDirectory: modelDirectory,
+                    speakerID: speakerID,
+                    speed: preferences.rate
+                )
+                return TtsAudioFfi(pcm: rendered.pcm, sampleRateHz: rendered.sampleRate)
+            }
+
+            let utterance = AVSpeechUtterance(string: text)
+            guard case let .system(configuredLanguage, configuredVoice) = route else {
+                throw SpeechFfiError.Unavailable
+            }
+            let explicitSystemVoice = voice.map {
+                VoicePreferencesSnapshot.normalizeVoiceSelection($0).hasPrefix("system:")
+            } == true
+            if let identifier = configuredVoice,
+               identifier != "default",
+               let v = AVSpeechSynthesisVoice(identifier: identifier),
+               VoiceCapabilityModel.normalizedLocaleIdentifier(v.language)
+                .split(separator: "-").first.map(String.init)?.lowercased()
+                == VoiceCapabilityModel.normalizedLocaleIdentifier(configuredLanguage)
+                .split(separator: "-").first.map(String.init)?.lowercased() {
                 utterance.voice = v
+            } else if explicitSystemVoice {
+                throw SpeechFfiError.Unavailable
             } else if let v = AVSpeechSynthesisVoice(language: configuredLanguage) {
                 utterance.voice = v
             }
-            let speed = defaults.object(forKey: "voiceSpeed") == nil ? 1 : defaults.double(forKey: "voiceSpeed")
-            utterance.rate = VoiceCapabilityModel.utteranceRate(from: speed)
+            utterance.rate = VoiceCapabilityModel.utteranceRate(from: preferences.rate)
 
             return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<TtsAudioFfi, Error>) in
                 let collector = PcmCollector()

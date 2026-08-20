@@ -38,6 +38,7 @@ generate`, and again whenever the UniFFI surface
 ```sh
 cd clients/ios
 scripts/build-xcframework.sh
+scripts/install-sherpa-runtime.sh
 ```
 
 It builds a host cdylib + per-arch staticlibs, generates the Swift bindings
@@ -54,6 +55,11 @@ the xcframework. **No secrets are baked in** — the engine reads
 > build script deterministically injects `uniffiEnsureInitialized()` as
 > `buildIosEngine`'s first statement (a bindings fix only — no engine-semantics
 > change). This is what lets the listener receive events at all.
+
+The Sherpa installer is separate from the Rust/UniFFI build. It verifies the
+pinned runtime artifact recorded in `clients/voice/models.json` and stages the
+gitignored Sherpa and ONNX Runtime static XCFrameworks required by Local-only
+Voice.
 
 ## 2. Regenerate the Xcode project
 
@@ -191,5 +197,6 @@ in-process transport — including the real client — is wired.
 | `Sources/Bridge/EngineModule.swift` | UniFFI link smoke (force-links the static archive) |
 | `Tests/EngineRoundtripTests.swift` | the keyless simulator e2e (this document's §3) |
 | `scripts/build-xcframework.sh` | reproduces `Generated/` + `Frameworks/LingxiCodeFFI.xcframework` |
+| `scripts/install-sherpa-runtime.sh` | verifies and stages the pinned Sherpa + ONNX Runtime XCFrameworks |
 | `project.yml` | XcodeGen spec: app target, `LingxiCodeTests` unit-test target, and the test scheme |
 ```

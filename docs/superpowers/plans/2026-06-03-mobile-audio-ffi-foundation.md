@@ -1,5 +1,13 @@
 # Mobile audio end-to-end + device-capability FFI foundation
 
+> **Successor design:** The FFI foundation below remains valid, but the current
+> cross-platform Voice settings, capability, permission, and shared Sherpa
+> decisions are defined in
+> [`docs/plans/2026-08-19-mobile-voice-unification.md`](../../plans/2026-08-19-mobile-voice-unification.md).
+> New mobile Voice work must follow that document rather than treating the
+> Android system STT/TTS adapters in this historical plan as the final product
+> architecture.
+
 **Goal:** audio (system STT/TTS) truly end-to-end on Android: Compose UI → UniFFI →
 Rust engine tool → calls back into the Kotlin device impl → result to UI. Establish
 the reusable **device-capability-over-UniFFI** pattern (the foundation that's

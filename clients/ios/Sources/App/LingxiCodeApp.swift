@@ -4,6 +4,7 @@ import SwiftUI
 struct LingxiCodeApp: App {
     @UIApplicationDelegateAdaptor(AppNotificationDelegate.self) private var appDelegate
     @State private var app = AppState()
+    @State private var voice = VoiceCapabilityModel()
 
     init() {
         // M10 A2 / P2 link smoke: a reachable reference to the engine static
@@ -18,8 +19,9 @@ struct LingxiCodeApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            RootView(voiceCapability: voice)
                 .environment(app)
+                .environment(voice)
                 .environment(LocalizationManager.shared)
                 .environment(\.theme, app.palette)
                 .preferredColorScheme(app.colorScheme)

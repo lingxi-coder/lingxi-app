@@ -1,5 +1,6 @@
 package com.lingxi.code
 
+import android.content.pm.PackageManager
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,6 +19,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -39,6 +41,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import com.lingxi.code.conversation.AndroidConversationBackgroundExecution
 import com.lingxi.code.conversation.ChatScreen
+import com.lingxi.code.conversation.ConversationTurnOrigin
+import com.lingxi.code.conversation.ConversationTurnOutcome
 import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.ComputerUseSetupStatus
@@ -86,13 +90,10 @@ import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.theme.LingXiTheme
-import com.lingxi.code.voice.offline.SherpaVoice
 import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import androidx.core.content.ContextCompat
 import com.lingxi.code.share.rememberShare
 import com.lingxi.code.vision.rememberCameraCapture
 import com.lingxi.code.model.Role
@@ -110,6 +111,7 @@ import com.lingxi.code.voice.FlowModeOverlay
 import com.lingxi.code.voice.VoiceFlowOverlay
 import com.lingxi.code.voice.rememberOrbVoiceListen
 import com.lingxi.code.voice.rememberVoiceCapture
+import com.lingxi.code.voice.audio.VoiceSpeechPlayer
 import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.ui.graphics.asImageBitmap
@@ -157,9 +159,6 @@ fun RootScreen(
     // Only `@Preview`/tests that omit the argument would ever see it.
     assistantName: String = "灵犀",
     inputDialog: Boolean = true,
-    // The chosen offline voice-pack language ("zh"/"en"/""). When its sherpa pack
-    // is downloaded, the orb uses on-device STT/TTS instead of the system voice.
-    voiceLang: String = "",
     // Bumped from Settings → 重新连接引擎. The retained ChatViewModel replaces
     // its owned engine source so provider changes take effect without restart.
     reconnectToken: Int = 0,
@@ -172,6 +171,10 @@ fun RootScreen(
     onOpenLocalAppsHandled: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val voiceSpeechPlayer = remember(context) { VoiceSpeechPlayer(context) }
+    DisposableEffect(voiceSpeechPlayer) {
+        onDispose { voiceSpeechPlayer.stop() }
+    }
     val projectStore: ProjectStore = viewModel(
         key = "projects",
         factory = ProjectStore.factory(context),
@@ -431,16 +434,7 @@ fun RootScreen(
     // FlowMode orb voice driver: a one-shot tap-to-talk listener, plus the live
     // assistant reply text derived from the same conversation state ChatScreen
     // renders (the orb is just another view of the real session).
-    // The orb's listen path: prefer the OFFLINE sherpa STT when a language pack
-    // is downloaded AND mic permission is already granted; otherwise fall back to
-    // the system SpeechRecognizer (which also drives the permission request).
-    val orbSystemListen = rememberOrbVoiceListen()
-    val orbListen: (onResult: (String?) -> Unit) -> Unit = { cb ->
-        val canSherpa = voiceLang.isNotBlank() && SherpaVoice.sttReady(voiceLang) &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        if (canSherpa) scope.launch { cb(SherpaVoice.transcribe(voiceLang)) } else orbSystemListen(cb)
-    }
+    val orbListen = rememberOrbVoiceListen()
     val orbAssistantText = (state.streamingMessage ?: state.messages.lastOrNull())
         ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
 
@@ -450,6 +444,18 @@ fun RootScreen(
     val resolvedSettingsStore: SettingsStore =
         settingsStore ?: viewModel(factory = SettingsStore.factory(context))
     val settingsState by resolvedSettingsStore.state.collectAsState()
+    val currentAutoPlayReplies = rememberUpdatedState(settingsState.voice.autoPlayReplies)
+    val currentFlowActive = rememberUpdatedState(flowActive)
+    LaunchedEffect(chatViewModel, voiceSpeechPlayer) {
+        chatViewModel.turnCompletions.collect { completion ->
+            if (completion.origin != ConversationTurnOrigin.Ordinary) return@collect
+            if (completion.outcome != ConversationTurnOutcome.Completed) return@collect
+            if (!currentAutoPlayReplies.value || currentFlowActive.value) return@collect
+            val text = completion.finalAssistantText.trim()
+            if (text.isEmpty()) return@collect
+            runCatching { voiceSpeechPlayer.speak(text) }
+        }
+    }
     LaunchedEffect(chatViewModel, resolvedSettingsStore) {
         chatViewModel.engineSource
             .flatMapLatest { it.clientEvents }
@@ -1128,21 +1134,35 @@ fun RootScreen(
                 } else {
                     ChatScreen(
                         state = state,
-                        onSend = { text -> runConversationAction { chatViewModel.send(text) } },
+                        onSend = {
+                            text ->
+                            voiceSpeechPlayer.stop()
+                            runConversationAction {
+                                chatViewModel.send(
+                                    text,
+                                    origin = ConversationTurnOrigin.Ordinary,
+                                )
+                            }
+                        },
                         // "新对话": reset the local transcript immediately AND tell the
                         // engine to begin a new session (NewSession). For the mock the
                         // engine call is a no-op, so this still behaves like newChat.
-                        onNewChat = { runConversationAction(chatViewModel::startNewSession) },
+                        onNewChat = {
+                            voiceSpeechPlayer.stop()
+                            runConversationAction(chatViewModel::startNewSession)
+                        },
                         onSelectModel = chatViewModel::selectModel,
                         isDark = isDark,
                         onToggleTheme = onToggleTheme,
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                         // Ordinary mic and Flow Mode are separate controls.
                         onMicClick = {
+                            if (!voiceActive) voiceSpeechPlayer.stop()
                             voiceActive = !voiceActive
                             if (voiceActive) onVoiceHoldStart() else onVoiceHoldRelease()
                         },
                         onMicHoldStart = {
+                            voiceSpeechPlayer.stop()
                             voiceActive = true
                             onVoiceHoldStart()
                         },
@@ -1150,17 +1170,27 @@ fun RootScreen(
                             voiceActive = false
                             onVoiceHoldRelease()
                         },
-                        onFlowModeClick = { flowActive = !flowActive },
+                        onFlowModeClick = {
+                            flowActive = !flowActive
+                            if (flowActive) voiceSpeechPlayer.stop()
+                        },
                         flowModeActive = flowActive,
                         flowModePanel = {
                             FlowModeOverlay(
                                 visible = flowActive,
                                 assistantName = assistantName,
                                 inputDialog = inputDialog,
-                                voiceLang = voiceLang,
                                 streaming = state.streaming,
                                 assistantText = orbAssistantText,
-                                onSend = { text -> runConversationAction { chatViewModel.send(text) } },
+                                onSend = {
+                                    text ->
+                                    runConversationAction {
+                                        chatViewModel.send(
+                                            text,
+                                            origin = ConversationTurnOrigin.Flow,
+                                        )
+                                    }
+                                },
                                 onCancel = { chatViewModel.cancel() },
                                 onListen = orbListen,
                                 onClose = { flowActive = false },

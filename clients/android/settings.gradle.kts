@@ -22,7 +22,7 @@ dependencyResolutionManagement {
         mavenCentral()
         // Vendored sherpa-onnx AAR (offline voice runtime) — no Maven publication
         // exists for k2-fsa/sherpa-onnx; the .aar lives in app/libs/ (gitignored,
-        // fetched from GitHub Releases v1.13.2).
+        // fetched from the shared clients/voice/models.json manifest).
         flatDir { dirs("app/libs") }
     }
 }

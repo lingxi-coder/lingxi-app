@@ -37,19 +37,110 @@ final class VoiceCapabilityTests: XCTestCase {
         XCTAssertNil(defaults.string(forKey: "apiKey"))
     }
 
+    func testFreshPreferencesDefaultToAutomatic() {
+        let snapshot = VoicePreferencesSnapshot.load(defaults: defaults)
+
+        XCTAssertEqual(snapshot.recognitionMode, .automatic)
+        XCTAssertEqual(snapshot.language, VoicePreferencesSnapshot.automaticLanguage)
+        XCTAssertEqual(snapshot.voiceSelection, VoicePreferencesSnapshot.defaultVoiceSelection)
+    }
+
+    func testSharedPreferencesMigrateLegacyKeysIntoVersionedContract() {
+        defaults.set("on-device", forKey: "voiceRecognitionMode")
+        defaults.set("en-US", forKey: "voiceLanguage")
+        defaults.set("com.apple.ttsbundle.Samantha-compact", forKey: "systemVoiceIdentifier")
+        defaults.set(1.4, forKey: "voiceSpeed")
+        defaults.set(true, forKey: "voiceAutoPlay")
+
+        let snapshot = VoicePreferencesSnapshot.load(defaults: defaults)
+
+        XCTAssertEqual(snapshot.schemaVersion, 2)
+        XCTAssertEqual(snapshot.recognitionMode, .onDevice)
+        XCTAssertEqual(snapshot.language, "en-US")
+        XCTAssertEqual(snapshot.voiceSelection, "system:com.apple.ttsbundle.Samantha-compact")
+        XCTAssertEqual(snapshot.rate, 1.4, accuracy: 0.001)
+        XCTAssertTrue(snapshot.autoPlayReplies)
+        XCTAssertEqual(defaults.integer(forKey: "voice.schemaVersion"), 2)
+    }
+
+    func testLocalOnlyNeverFallsBackToSystemRecognizer() {
+        let preferences = VoicePreferencesSnapshot(
+            schemaVersion: 2,
+            recognitionMode: .onDevice,
+            language: "zh-CN",
+            voiceSelection: VoicePreferencesSnapshot.defaultVoiceSelection,
+            rate: 1,
+            autoPlayReplies: false
+        )
+
+        let unavailable = VoiceRuntimeResolver.recognitionRoute(
+            preferences: preferences,
+            systemRecognizerAvailable: true,
+            modelRoot: { _ in nil }
+        )
+        guard case .unavailable = unavailable else {
+            return XCTFail("local-only must block when the Sherpa model is missing")
+        }
+
+        let ready = VoiceRuntimeResolver.recognitionRoute(
+            preferences: preferences,
+            systemRecognizerAvailable: true,
+            modelRoot: { _ in URL(fileURLWithPath: "/verified-model") }
+        )
+        guard case let .sherpa(_, modelID, _) = ready else {
+            return XCTFail("local-only must select Sherpa even when the system recognizer is available")
+        }
+        XCTAssertEqual(modelID, "sherpa.zipformer-zh-14m-mobile")
+    }
+
+    func testAutomaticPrefersSystemThenUsesVerifiedSherpaFallback() {
+        let preferences = VoicePreferencesSnapshot(
+            schemaVersion: 2,
+            recognitionMode: .automatic,
+            language: "en-US",
+            voiceSelection: VoicePreferencesSnapshot.defaultVoiceSelection,
+            rate: 1,
+            autoPlayReplies: false
+        )
+
+        let system = VoiceRuntimeResolver.recognitionRoute(
+            preferences: preferences,
+            systemRecognizerAvailable: true,
+            modelRoot: { _ in URL(fileURLWithPath: "/verified-model") }
+        )
+        guard case .system = system else { return XCTFail("automatic must prefer the system recognizer") }
+
+        let fallback = VoiceRuntimeResolver.recognitionRoute(
+            preferences: preferences,
+            systemRecognizerAvailable: false,
+            modelRoot: { _ in URL(fileURLWithPath: "/verified-model") }
+        )
+        guard case let .sherpa(_, modelID, _) = fallback else {
+            return XCTFail("automatic must use a verified Sherpa fallback")
+        }
+        XCTAssertEqual(modelID, "sherpa.moonshine-tiny-en")
+    }
+
+    func testDeniedSpeechAuthorizationMakesSystemRecognizerUnavailableForRouting() {
+        XCTAssertFalse(VoiceRuntimeResolver.systemRecognitionAvailable(
+            serviceAvailable: true,
+            authorization: .denied
+        ))
+        XCTAssertFalse(VoiceRuntimeResolver.systemRecognitionAvailable(
+            serviceAvailable: true,
+            authorization: .restricted
+        ))
+        XCTAssertTrue(VoiceRuntimeResolver.systemRecognitionAvailable(
+            serviceAvailable: true,
+            authorization: .notDetermined
+        ))
+    }
+
     func testFirstRunConfigurationIsExplicitlyUnconfirmed() {
         let model = VoiceCapabilityModel(defaults: defaults)
 
-        XCTAssertFalse(model.speechConfigurationConfirmed)
-        XCTAssertFalse(model.ttsConfigurationConfirmed)
-        XCTAssertFalse(model.configurationReadiness.isReadyForDictation)
-        XCTAssertFalse(model.configurationReadiness.isReadyForFlow)
-        XCTAssertTrue(model.configurationReadiness.issues.contains {
-            $0.component == .speech && $0.kind == .unconfigured
-        })
-        XCTAssertTrue(model.configurationReadiness.issues.contains {
-            $0.component == .tts && $0.kind == .unconfigured
-        })
+        XCTAssertTrue(model.speechConfigurationConfirmed)
+        XCTAssertTrue(model.ttsConfigurationConfirmed)
     }
 
     func testReadinessDifferentiatesPermissionsAndUnavailableCapabilities() {
@@ -96,7 +187,7 @@ final class VoiceCapabilityTests: XCTestCase {
         XCTAssertTrue(readiness.issues.isEmpty)
     }
 
-    func testSavingConfigurationPersistsVersionsAndConcreteFallbackVoice() throws {
+    func testSavingConfigurationPreservesRequestedSystemDefault() throws {
         let model = VoiceCapabilityModel(defaults: defaults)
         guard let fallbackVoice = model.selectedVoice else {
             throw XCTSkip("This test host has no installed system speech voices")
@@ -108,9 +199,10 @@ final class VoiceCapabilityTests: XCTestCase {
         XCTAssertTrue(model.ttsConfigurationConfirmed)
         XCTAssertTrue(readiness.speechConfigured)
         XCTAssertTrue(readiness.ttsConfigured)
-        XCTAssertEqual(defaults.integer(forKey: "voiceSpeechConfigurationVersion"), 1)
-        XCTAssertEqual(defaults.integer(forKey: "voiceTTSConfigurationVersion"), 1)
-        XCTAssertEqual(defaults.string(forKey: "systemVoiceIdentifier"), fallbackVoice.id)
+        XCTAssertEqual(
+            defaults.string(forKey: VoicePreferencesSnapshot.Keys.voiceSelection),
+            VoicePreferencesSnapshot.defaultVoiceSelection
+        )
     }
 
     func testSaveStatusKeepsBlockingReadinessIssueVisible() {
@@ -154,21 +246,20 @@ final class VoiceCapabilityTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(player.stopCalls, 1)
     }
 
-    func testChangingConfirmedChoicesRequiresSavingAgain() throws {
+    func testChangingChoicesPersistsImmediately() throws {
         let model = VoiceCapabilityModel(defaults: defaults)
         guard model.selectedVoice != nil else {
             throw XCTSkip("This test host has no installed system speech voices")
         }
-        model.saveConfiguration()
 
+        model.setMode(.onDevice)
         model.setMode(.automatic)
-        XCTAssertFalse(model.speechConfigurationConfirmed)
-        XCTAssertTrue(model.ttsConfigurationConfirmed)
+        XCTAssertEqual(defaults.string(forKey: "voiceRecognitionMode"), VoiceRecognitionMode.automatic.rawValue)
 
         let alternativeVoice = model.voices.first { $0.id != model.voiceIdentifier }
         if let alternativeVoice {
             model.setVoice(alternativeVoice.id)
-            XCTAssertFalse(model.ttsConfigurationConfirmed)
+            XCTAssertEqual(defaults.string(forKey: "systemVoiceIdentifier"), alternativeVoice.id)
         }
     }
 
@@ -193,10 +284,8 @@ final class VoiceCapabilityTests: XCTestCase {
 
     func testFirstRunVoiceLanguageFollowsSystemUntilUserOverridesIt() {
         let capability = VoiceCapabilityModel(defaults: defaults)
-        let appState = AppState(defaults: defaults)
 
         XCTAssertEqual(capability.language, VoiceCapabilityModel.automaticLanguageIdentifier)
-        XCTAssertEqual(appState.voiceLanguage, VoiceCapabilityModel.automaticLanguageIdentifier)
         XCTAssertNil(defaults.string(forKey: "voiceLanguage"))
     }
 

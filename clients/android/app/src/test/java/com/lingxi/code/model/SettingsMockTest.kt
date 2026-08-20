@@ -113,7 +113,7 @@ class SettingsMockTest {
         assertEquals(9, Presets.llm.size)
         assertEquals(5, Presets.search.size)
         assertEquals(4, Presets.fetch.size)
-        assertEquals(3, Presets.voice.size)
+        assertEquals(1, Presets.voice.size)
     }
 
     @Test

@@ -25,12 +25,18 @@ it before the first `xcodegen generate`, and again whenever the UniFFI surface
 ```sh
 cd clients/ios
 scripts/build-xcframework.sh
+scripts/install-sherpa-runtime.sh
 ```
 
-It builds a host cdylib + per-arch staticlibs, generates the Swift bindings
+The first script builds a host cdylib + per-arch staticlibs, generates the Swift bindings
 (deduped into a single Swift module), and assembles the xcframework. No secrets
 are baked in — the engine reads `ANTHROPIC_API_KEY` from the runtime
 environment, never from the framework.
+
+The Sherpa installer downloads the pinned 1.13.2 iOS artifact, verifies its
+SHA-256, and stages the gitignored `sherpa-onnx.xcframework` and
+`onnxruntime.xcframework` used by Local-only Voice. Re-run it only when the
+shared `clients/voice/models.json` runtime version changes.
 
 The same command also builds the device-only Linux runtime from the pinned
 OpenMinis source: iSH ARM64 static archives plus an Alpine aarch64 fakefs
@@ -71,6 +77,7 @@ container.
 ```sh
 cd clients/ios
 scripts/build-xcframework.sh   # once — produces the gitignored Generated/ + Frameworks/
+scripts/install-sherpa-runtime.sh # once — verifies and stages Sherpa + ONNX Runtime
 xcodegen generate              # produces LingxiCode.xcodeproj from project.yml
 open LingxiCode.xcodeproj        # then ⌘R on an iPhone simulator
 ```
@@ -80,6 +87,7 @@ Or from the command line:
 ```sh
 cd clients/ios
 scripts/build-xcframework.sh
+scripts/install-sherpa-runtime.sh
 xcodegen generate
 xcodebuild -project LingxiCode.xcodeproj -scheme LingxiCode \
   -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 15 Pro' build
@@ -87,9 +95,9 @@ xcodebuild -project LingxiCode.xcodeproj -scheme LingxiCode \
 
 `LingxiCode.xcodeproj` is generated and git-ignored; regenerate after editing
 `project.yml` or adding/removing source files. The `Generated/` Swift bindings
-are added to the app target's sources and `Frameworks/LingxiCodeFFI.xcframework`
-is linked (not embedded — it wraps a static archive); both are referenced from
-`project.yml`.
+are added to the app target's sources. `Frameworks/LingxiCodeFFI.xcframework`
+and the Sherpa/ONNX Runtime static XCFrameworks are linked but not embedded;
+all are referenced from `project.yml`.
 
 ## Architecture
 
@@ -103,7 +111,7 @@ is linked (not embedded — it wraps a static archive); both are referenced from
 | `Sources/Bridge` | `EngineModule` — UniFFI linkage smoke (force-links the engine static archive) |
 | `Sources/Drawer` | `Drawer` (workspace pills, chats/projects/crons, knowledge/memory, account) |
 | `Sources/Settings` | Settings sheet host + every page (LLM/search/fetch providers, voice, skills, MCP, dream, appearance, language, etc.) |
-| `Sources/Voice` | `VoiceFlowView` (long-press immersive recording) |
+| `Sources/Voice` | Unified Voice preferences/capabilities, Flow, Sherpa STT/TTS bridge, model store, and playback |
 | `Sources/Theme/LocalizationManager.swift` | Persisted app-language override (follow-system default) + the `Bundle` swizzle that makes `String(localized:)`/`Text` re-resolve without a relaunch |
 
 ### Localization

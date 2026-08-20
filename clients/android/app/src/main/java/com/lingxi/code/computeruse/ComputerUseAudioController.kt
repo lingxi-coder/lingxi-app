@@ -7,12 +7,10 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import androidx.core.content.ContextCompat
+import com.lingxi.code.voice.AndroidVoiceRuntime
 import com.lingxi.code.voice.audio.AudioFocusController
 import com.lingxi.code.voice.audio.AudioFocusListener
-import com.lingxi.code.voice.audio.AudioInput
 import com.lingxi.code.voice.audio.SttResult
-import com.lingxi.code.voice.audio.SystemSpeechRecognizerStt
-import com.lingxi.code.voice.audio.SystemTextToSpeechTts
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -50,7 +48,10 @@ internal fun audioPlaybackTimeoutMs(frameCount: Int, sampleRate: Int): Long {
  * page. Only one audio operation is allowed at a time, and stop/session teardown
  * cancels the active coroutine and releases AudioTrack immediately.
  */
-internal class ComputerUseAudioController(context: Context) {
+internal class ComputerUseAudioController(
+    context: Context,
+    private val voiceRuntime: AndroidVoiceRuntime = AndroidVoiceRuntime(context),
+) {
     private val appContext = context.applicationContext
     private val operationMutex = Mutex()
     private val stateLock = Any()
@@ -66,13 +67,7 @@ internal class ComputerUseAudioController(context: Context) {
             requireMicrophonePermission()
             val startedAt = System.currentTimeMillis()
             withActiveJob(currentCoroutineContext()) {
-                when (val result = withTimeout(timeoutMs) {
-                    SystemSpeechRecognizerStt(appContext).transcribe(
-                        audio = AudioInput.Pcm16(ByteArray(0), 16_000),
-                        language = language,
-                        keyProvider = { null },
-                    )
-                }) {
+                when (val result = withTimeout(timeoutMs) { voiceRuntime.transcribe(language) }) {
                     is SttResult.Ok -> ComputerUseTranscript(
                         text = result.text,
                         language = result.language ?: language,
@@ -91,10 +86,10 @@ internal class ComputerUseAudioController(context: Context) {
     ): ComputerUseSpeechResult = operationMutex.withLock {
         val startedAt = System.currentTimeMillis()
         withActiveJob(currentCoroutineContext()) {
-            val (pcm, sampleRate) = SystemTextToSpeechTts(appContext).renderToPcm(
+            val (pcm, sampleRate) = voiceRuntime.renderSpeech(
                 text = text,
-                voice = voice,
-                speed = speed,
+                voiceOverride = voice,
+                speedOverride = speed,
             )
             check(pcm.isNotEmpty()) { "Android TTS did not produce audio" }
             playPcm(pcm, sampleRate)

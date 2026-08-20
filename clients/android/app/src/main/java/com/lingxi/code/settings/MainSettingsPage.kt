@@ -35,7 +35,6 @@ import com.lingxi.code.R
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.LXToggle
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
-import com.lingxi.code.model.Presets
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.theme.Accents
 import com.lingxi.code.theme.AppLanguage
@@ -93,14 +92,8 @@ fun MainSettingsPage(
             SettingsRow(
                 icon = LXIconName.Mic, iconColor = Color(red = 0.8018f, green = 0.4038f, blue = 0.8909f),
                 label = stringResource(R.string.settings_voice_audio),
-                sub = stringResource(
-                    R.string.settings_voice_dictation_fmt,
-                    Presets.voice.firstOrNull { it.id == state.voice.preset }
-                        ?.takeIf { it.id != "system" }
-                        ?.name
-                        ?: stringResource(R.string.settings_voice_system),
-                ),
-                value = voiceLanguageSummary(state.voice.inputLanguage),
+                sub = voiceBackendSummary(state.voice, state.voiceCapability),
+                value = voiceLanguageSummary(state.voiceCapability.effectiveLanguage.ifBlank { state.voice.language }),
                 isLast = true,
                 onTap = { navController.navigate(SettingsRoutes.VOICE) },
             )
@@ -232,6 +225,19 @@ private fun voiceLanguageSummary(language: String): String = when (language) {
     "en-US" -> stringResource(R.string.onboarding_voice_language_en)
     "ja-JP" -> stringResource(R.string.onboarding_voice_language_ja)
     else -> stringResource(R.string.settings_auto)
+}
+
+@Composable
+private fun voiceBackendSummary(
+    voice: com.lingxi.code.model.VoiceConfig,
+    capability: VoiceCapabilitySnapshot,
+): String {
+    val recognition = when (voice.recognitionMode) {
+        com.lingxi.code.model.VoiceConfig.MODE_LOCAL_ONLY -> stringResource(R.string.settings_voice_mode_local_only)
+        else -> stringResource(R.string.settings_voice_mode_automatic)
+    }
+    val playback = capability.effectiveVoice?.label ?: stringResource(R.string.settings_voice_system_default)
+    return "$recognition · $playback"
 }
 
 /**

@@ -1,3 +1,9 @@
+import groovy.json.JsonSlurper
+
+val voiceManifest = rootProject.file("../voice/models.json")
+val voiceRuntime = JsonSlurper().parse(voiceManifest) as Map<*, *>
+val sherpaRuntimeVersion = (voiceRuntime["runtime"] as Map<*, *>)["version"] as String
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -193,7 +199,7 @@ dependencies {
     // sherpa-onnx offline voice runtime (vendored AAR in app/libs/, via the
     // flatDir repo in settings.gradle.kts). Carries the com.k2fsa.sherpa.onnx
     // Kotlin API + the static-linked onnxruntime JNI .so for on-device STT/TTS.
-    implementation(group = "", name = "sherpa-onnx-static-link-onnxruntime-1.13.2", ext = "aar")
+    implementation(group = "", name = "sherpa-onnx-static-link-onnxruntime-$sherpaRuntimeVersion", ext = "aar")
 
     // Secure key store — the Anthropic API key + base URL are encrypted at rest
     // via EncryptedSharedPreferences (AES-256 GCM, key wrapped by the Android

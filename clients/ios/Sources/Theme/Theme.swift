@@ -47,13 +47,6 @@ final class AppState {
     /// Whether first-run setup is complete (prototype `lx_setup_done`).
     var setupDone: Bool { didSet { defaults.set(setupDone, forKey: "setupDone") } }
 
-    /// The onboarding choice: prefer recognizer-enforced on-device STT when the
-    /// current locale supports it, otherwise allow the system network fallback.
-    var voiceRecognitionMode: String {
-        didSet { defaults.set(voiceRecognitionMode, forKey: "voiceRecognitionMode") }
-    }
-    var voiceLanguage: String { didSet { defaults.set(voiceLanguage, forKey: "voiceLanguage") } }
-
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         themeRaw = defaults.string(forKey: "theme") ?? "dark"
@@ -78,9 +71,6 @@ final class AppState {
         #else
             setupDone = defaults.bool(forKey: "setupDone")
         #endif
-        voiceRecognitionMode = defaults.string(forKey: "voiceRecognitionMode") ?? "on-device"
-        voiceLanguage = defaults.string(forKey: "voiceLanguage")
-            ?? VoiceCapabilityModel.automaticLanguageIdentifier
     }
 
     var isDark: Bool { themeRaw == "dark" }

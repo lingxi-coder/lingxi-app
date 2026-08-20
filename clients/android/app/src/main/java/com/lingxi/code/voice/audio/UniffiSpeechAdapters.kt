@@ -53,7 +53,7 @@ class AndroidTtsAdapter(private val provider: TtsProvider) : AndroidTts {
         // to draining the Flow for any other TtsProvider impl.
         return when (provider) {
             is SystemTextToSpeechTts -> {
-                val (pcm, sampleRateHz) = provider.renderToPcm(text)
+                val (pcm, sampleRateHz) = provider.renderToPcm(text, voice = voice)
                 TtsAudioFfi(pcm = pcm, sampleRateHz = sampleRateHz.toUInt())
             }
             else -> {

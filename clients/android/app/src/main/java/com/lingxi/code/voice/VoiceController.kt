@@ -37,7 +37,6 @@ import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.voice.audio.AndroidSttAdapter
 import com.lingxi.code.voice.audio.AndroidTtsAdapter
 import com.lingxi.code.voice.audio.SystemSpeechRecognizerStt
-import com.lingxi.code.voice.audio.SystemTextToSpeechTts
 import com.lingxi.code.vision.AndroidCameraAdapter
 import com.lingxi.code.share.AndroidShareAdapter
 import com.lingxi.code.notify.AndroidNotificationAdapter
@@ -212,8 +211,9 @@ fun buildVoiceEngine(
     },
 ): MobileEngineHandle? {
     val appContext = context.applicationContext
-    val stt = AndroidSttAdapter(SystemSpeechRecognizerStt(appContext))
-    val tts = AndroidTtsAdapter(SystemTextToSpeechTts(appContext))
+    val voiceRuntime = AndroidVoiceRuntime(appContext)
+    val stt = AndroidSttAdapter(RuntimeSpeechRecognizerStt(voiceRuntime))
+    val tts = AndroidTtsAdapter(RuntimeTextToSpeechTts(voiceRuntime))
     // Device-vision: the camera adapter drives the process-global CameraController,
     // whose ActivityResult launchers are registered by MainActivity. The engine
     // bridges this onto `traits::CameraControl`, lighting up `tool-camera` on-device.
@@ -763,6 +763,7 @@ fun rememberVoiceCapture(
     onPartialTranscript: (String) -> Unit = {},
 ): Pair<() -> Unit, () -> Unit> {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val voiceRuntime = remember(context) { AndroidVoiceRuntime(context) }
     val currentOnPartial = rememberUpdatedState(onPartialTranscript)
     val currentOnTranscript = rememberUpdatedState(onTranscript)
 
@@ -781,6 +782,23 @@ fun rememberVoiceCapture(
                 ) == PackageManager.PERMISSION_GRANTED
             },
             onPartialTranscript = { currentOnPartial.value(it) },
+            openRealtimeSession = { language, callbacks ->
+                voiceRuntime.openRealtimeSession(language, callbacks)
+            },
+            transcribeOnce = { language ->
+                when (val result = voiceRuntime.transcribe(language)) {
+                    is com.lingxi.code.voice.audio.SttResult.Ok -> {
+                        val text = result.text.trim()
+                        if (text.isEmpty()) VoiceCaptureResult.Empty
+                        else VoiceCaptureResult.Transcript(text)
+                    }
+                    is com.lingxi.code.voice.audio.SttResult.Err -> when (result.code) {
+                        "permission_denied" -> VoiceCaptureResult.PermissionDenied
+                        "no_speech" -> VoiceCaptureResult.Empty
+                        else -> VoiceCaptureResult.Failed(result.message)
+                    }
+                }
+            },
             strings = voiceStrings(context),
         )
     }
@@ -815,6 +833,7 @@ fun rememberVoiceCapture(
 @Composable
 fun rememberOrbVoiceListen(): OrbVoiceListenController {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val voiceRuntime = remember(context) { AndroidVoiceRuntime(context) }
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { /* observed on the next listen via hasPermission() */ }
@@ -826,6 +845,23 @@ fun rememberOrbVoiceListen(): OrbVoiceListenController {
                 ContextCompat.checkSelfPermission(
                     context, Manifest.permission.RECORD_AUDIO,
                 ) == PackageManager.PERMISSION_GRANTED
+            },
+            openRealtimeSession = { language, callbacks ->
+                voiceRuntime.openRealtimeSession(language, callbacks)
+            },
+            transcribeOnce = { language ->
+                when (val result = voiceRuntime.transcribe(language)) {
+                    is com.lingxi.code.voice.audio.SttResult.Ok -> {
+                        val text = result.text.trim()
+                        if (text.isEmpty()) VoiceCaptureResult.Empty
+                        else VoiceCaptureResult.Transcript(text)
+                    }
+                    is com.lingxi.code.voice.audio.SttResult.Err -> when (result.code) {
+                        "permission_denied" -> VoiceCaptureResult.PermissionDenied
+                        "no_speech" -> VoiceCaptureResult.Empty
+                        else -> VoiceCaptureResult.Failed(result.message)
+                    }
+                }
             },
             strings = voiceStrings(context),
         )

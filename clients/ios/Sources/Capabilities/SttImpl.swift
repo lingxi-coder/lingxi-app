@@ -10,6 +10,11 @@ import Foundation
         import UIKit
     #endif
 
+    protocol VoiceRecognitionOperation: AnyObject {
+        func finishInput()
+        func cancel(with error: Error)
+    }
+
     /// Native STT over `SFSpeechRecognizer` + an `AVAudioEngine` mic tap.
     ///
     /// UniFFI calls `transcribe` as a one-shot operation. The composer additionally
@@ -19,7 +24,7 @@ import Foundation
     final class SttImpl: IosStt, @unchecked Sendable {
         private struct Attempt {
             let id: UUID
-            var operation: SpeechRecognitionOperation?
+            var operation: (any VoiceRecognitionOperation)?
             var finishRequested = false
             var cancellation: Error?
         }
@@ -57,18 +62,59 @@ import Foundation
 
             return try await withTaskCancellationHandler {
                 try Task.checkCancellation()
-                try await requestAuthorization()
-                try checkAttempt(attemptID)
-
-                let configuredLanguage = UserDefaults.standard.string(forKey: "voiceLanguage")
+                let preferences = VoicePreferencesSnapshot.load()
                 let resolvedIdentifier = VoiceCapabilityModel.resolvedRecognitionLocaleIdentifier(
-                    configuredLanguage: language ?? configuredLanguage,
+                    configuredLanguage: language ?? preferences.language,
                     currentLocale: .autoupdatingCurrent
                 )
                 let locale = Locale(identifier: resolvedIdentifier)
-                guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
-                    throw SpeechFfiError.Unavailable
+                let recognizer = SFSpeechRecognizer(locale: locale)
+                let route = VoiceRuntimeResolver.recognitionRoute(
+                    preferences: preferences,
+                    languageOverride: language,
+                    systemRecognizerAvailable: VoiceRuntimeResolver.systemRecognitionAvailable(
+                        serviceAvailable: recognizer?.isAvailable == true,
+                        authorization: SFSpeechRecognizer.authorizationStatus()
+                    )
+                )
+
+                switch route {
+                case let .sherpa(_, modelID, modelDirectory):
+                    try await requestMicrophoneAuthorization()
+                    try checkAttempt(attemptID)
+                    let audioLease: VoiceAudioSessionCoordinator.Lease
+                    do {
+                        audioLease = try await VoiceAudioSessionCoordinator.shared.acquire(.recognition)
+                    } catch {
+                        throw SpeechFfiError.Retriable(message: "audio session: \(error.localizedDescription)")
+                    }
+                    do {
+                        let operation = SherpaRecognitionOperation(
+                            modelID: modelID,
+                            modelDirectory: modelDirectory,
+                            automaticEndpointAfterSilence: automaticEndpointAfterSilence
+                        )
+                        switch attach(operation, to: attemptID) {
+                        case .proceed: break
+                        case .finish: operation.finishInput()
+                        case let .cancel(error): operation.cancel(with: error)
+                        }
+                        let transcript = try await operation.run()
+                        await VoiceAudioSessionCoordinator.shared.release(audioLease)
+                        return transcript
+                    } catch {
+                        await VoiceAudioSessionCoordinator.shared.release(audioLease)
+                        throw error
+                    }
+                case let .unavailable(message):
+                    throw SpeechFfiError.Other(message: message)
+                case .system:
+                    break
                 }
+
+                try await requestAuthorization()
+                try checkAttempt(attemptID)
+                guard let recognizer, recognizer.isAvailable else { throw SpeechFfiError.Unavailable }
 
                 let audioLease: VoiceAudioSessionCoordinator.Lease
                 do {
@@ -165,7 +211,7 @@ import Foundation
         }
 
         private func attach(
-            _ operation: SpeechRecognitionOperation,
+            _ operation: any VoiceRecognitionOperation,
             to id: UUID
         ) -> AttachDisposition {
             stateLock.lock()
@@ -204,12 +250,18 @@ import Foundation
             try Task.checkCancellation()
             guard micGranted else { throw SpeechFfiError.PermissionDenied }
         }
+
+        private func requestMicrophoneAuthorization() async throws {
+            let micGranted = await AVAudioApplication.requestRecordPermission()
+            try Task.checkCancellation()
+            guard micGranted else { throw SpeechFfiError.PermissionDenied }
+        }
     }
 
     /// Owns exactly one audio tap, Speech request and continuation. Every terminal
     /// path runs `endInputLocked`, cancels the recognition task and removes its
     /// interruption/background observers before resuming the caller.
-    private final class SpeechRecognitionOperation: @unchecked Sendable {
+    private final class SpeechRecognitionOperation: VoiceRecognitionOperation, @unchecked Sendable {
         private let lock = NSRecursiveLock()
         private let request: SFSpeechAudioBufferRecognitionRequest
         private let audioEngine = AVAudioEngine()

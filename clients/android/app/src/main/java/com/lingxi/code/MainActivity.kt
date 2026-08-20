@@ -320,7 +320,6 @@ class MainActivity : ComponentActivity() {
                         modelSetupRequired = settingsState.needsLlmSetup,
                         assistantName = prefs.assistantName,
                         inputDialog = prefs.inputDialog,
-                        voiceLang = prefs.voiceLang,
                         reconnectToken = engineReconnect,
                         settingsStore = settingsStore,
                         onConversationSourceChanged = { activeConversationSource = it },
@@ -377,11 +376,19 @@ class MainActivity : ComponentActivity() {
                         initialVoiceLang = prefs.voiceLang,
                         onFinish = { assistantName, userName, voiceprint, modelId, voiceLang ->
                             scope.launch {
+                                val migratedVoiceLanguage = when (voiceLang.lowercase()) {
+                                    "zh" -> "zh-CN"
+                                    "en" -> "en-US"
+                                    else -> settingsState.voice.language
+                                }
                                 store.setAssistantName(assistantName)
                                 store.setUserName(userName)
                                 store.setVoiceprint(voiceprint)
                                 store.setDefaultModel(modelId)
                                 store.setVoiceLang(voiceLang)
+                                settingsStore.setVoice(
+                                    settingsState.voice.copy(language = migratedVoiceLanguage),
+                                )
                                 store.setSetupDone(true)
                             }
                         },

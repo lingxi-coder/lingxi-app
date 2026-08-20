@@ -22,6 +22,7 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.AndroidComputerUseFfiException
 import com.lingxi.code.bindings.AndroidComputerUseHost
 import com.lingxi.code.bindings.AndroidScreenshotFfi
+import com.lingxi.code.model.VoiceConfig
 import com.lingxi.code.settings.VoiceSettingsRepository
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -458,15 +459,15 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
             .put("audio_speak_enabled", mutableConfiguration.value.speakEnabled)
             .putNullable(
                 "audio_input_language",
-                applicationContext?.let { VoiceSettingsRepository(it).load().inputLanguage },
+                applicationContext?.let { VoiceSettingsRepository(it).load().language },
             )
             .putNullable(
                 "audio_voice",
-                applicationContext?.let { VoiceSettingsRepository(it).load().voiceId },
+                applicationContext?.let { VoiceSettingsRepository(it).load().voiceSelection },
             )
             .put(
                 "audio_speed",
-                applicationContext?.let { VoiceSettingsRepository(it).load().speed } ?: 1.0f,
+                applicationContext?.let { VoiceSettingsRepository(it).load().rate } ?: 1.0f,
             )
             .toString()
     }
@@ -613,7 +614,7 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         val voiceConfig = VoiceSettingsRepository(context).load()
         val language = request.optString("language")
             .takeIf { it.isNotBlank() && it != "null" }
-            ?: voiceConfig.inputLanguage.takeUnless { it == "auto" }
+            ?: voiceConfig.language.takeUnless { it == VoiceConfig.LANGUAGE_AUTO }
         val timeoutMs = request.optLong(
             "timeout_ms",
             config.maxListenSeconds * 1_000L,
@@ -666,11 +667,11 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         val voiceConfig = VoiceSettingsRepository(context).load()
         val voice = request.optString("voice")
             .takeIf { it.isNotBlank() && it != "null" }
-            ?: voiceConfig.voiceId
+            ?: voiceConfig.voiceSelection
         val speed = if (request.has("speed") && !request.isNull("speed")) {
-            request.optDouble("speed", voiceConfig.speed.toDouble()).toFloat()
+            request.optDouble("speed", voiceConfig.rate.toDouble()).toFloat()
         } else {
-            voiceConfig.speed
+            voiceConfig.rate
         }.coerceIn(0.5f, 2.0f)
         return try {
             val result = requireNotNull(audioController) {

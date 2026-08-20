@@ -93,13 +93,50 @@ data class MCPServer(
 )
 
 data class VoiceConfig(
-    val inputProvider: String = "system",
-    val inputLanguage: String = "auto",
-    val preset: String = "system",
-    val voiceId: String = "default",
-    val speed: Float = 1.0f,
-    val autoPlay: Boolean = false,
-)
+    val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
+    val recognitionMode: String = MODE_AUTOMATIC,
+    val language: String = LANGUAGE_AUTO,
+    val voiceSelection: String = DEFAULT_VOICE_SELECTION,
+    val rate: Float = 1.0f,
+    val autoPlayReplies: Boolean = false,
+) {
+    // Legacy accessors kept so concurrent runtime callers continue to compile
+    // while the settings and voice runtime converge on the shared contract.
+    val inputProvider: String get() = "system"
+    val inputLanguage: String get() = language
+    val preset: String get() = if (voiceSelection.startsWith(SHERPA_VOICE_PREFIX)) "sherpa" else "system"
+    val voiceId: String
+        get() = when {
+            voiceSelection == DEFAULT_VOICE_SELECTION -> DEFAULT_VOICE_ID
+            voiceSelection.startsWith(SYSTEM_VOICE_PREFIX) -> voiceSelection.removePrefix(SYSTEM_VOICE_PREFIX)
+            else -> voiceSelection
+        }
+    val speed: Float get() = rate
+    val autoPlay: Boolean get() = autoPlayReplies
+    val voiceLang: String
+        get() = when (language.substringBefore('-').lowercase()) {
+            "zh" -> "zh"
+            "en" -> "en"
+            else -> ""
+        }
+
+    companion object {
+        const val CURRENT_SCHEMA_VERSION = 2
+        const val MODE_AUTOMATIC = "automatic"
+        const val MODE_LOCAL_ONLY = "localOnly"
+        const val LANGUAGE_AUTO = "auto"
+        const val DEFAULT_VOICE_ID = "default"
+        const val SYSTEM_VOICE_PREFIX = "system:"
+        const val SHERPA_VOICE_PREFIX = "sherpa:"
+        const val DEFAULT_VOICE_SELECTION = "${SYSTEM_VOICE_PREFIX}${DEFAULT_VOICE_ID}"
+
+        fun systemVoiceSelection(id: String): String =
+            "${SYSTEM_VOICE_PREFIX}${id.ifBlank { DEFAULT_VOICE_ID }}"
+
+        fun sherpaVoiceSelection(modelId: String, voiceId: String): String =
+            "${SHERPA_VOICE_PREFIX}$modelId:${voiceId}"
+    }
+}
 
 data class DreamConfig(
     val enabled: Boolean = true,
@@ -182,8 +219,6 @@ object Presets {
     )
 
     val voice: List<ProviderPreset> = listOf(
-        ProviderPreset("elevenlabs", "ElevenLabs", "高质量 · 多语种", Color(red = 0.8018f, green = 0.4038f, blue = 0.8909f), "https://api.elevenlabs.io/v1", "", emptyList()),
-        ProviderPreset("openai-tts", "OpenAI TTS", "低延迟", Color(red = 0.1326f, green = 0.7261f, blue = 0.5350f), "https://api.openai.com/v1", "", emptyList()),
         ProviderPreset("system", "系统语音", "设备本地 · 免费", Color(red = 0.5728f, green = 0.6177f, blue = 0.7466f), "", "", emptyList()),
     )
 }

@@ -2243,7 +2243,16 @@ final class MockConversationSource: ConversationSource {
                 return
             }
             let handle = try await ensureHandle()
-            try await handle.submit(command: command)
+            do {
+                try await handle.submit(command: command)
+            } catch {
+                let errorDescription = String(describing: error)
+                Self.turnLog.error(
+                    "submit command failed command=\(String(describing: command), privacy: .public) error=\(errorDescription, privacy: .public)"
+                )
+                print("[LingxiCode] submitCommand failed command=\(command) error=\(errorDescription)")
+                throw error
+            }
         }
 
         private func confirmBypassPermissionsForCurrentSession() async throws {
@@ -4179,6 +4188,10 @@ final class MockConversationSource: ConversationSource {
                 Self.turnLog.error(
                     "turn error turn=\(self.currentTurnId ?? 0, privacy: .public) kind=\(String(describing: kind), privacy: .public) accepted=\(accepted, privacy: .public) message=\(message, privacy: .private(mask: .hash))"
                 )
+                Self.turnLog.error(
+                    "turn error details kind=\(String(describing: kind), privacy: .public) message=\(message, privacy: .public)"
+                )
+                print("[LingxiCode] turn error kind=\(kind) accepted=\(accepted) message=\(message)")
                 guard accepted else { return }
                 if case let .resuming(taskID) = model.workflowResumeState {
                     model.workflowResumeState = .failed(taskID: taskID, message: message)

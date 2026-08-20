@@ -1,7 +1,15 @@
 import SwiftUI
+import OSLog
 
 // MARK: - ChatView — main conversation surface
 struct ChatView: View {
+    #if canImport(engine_mobileFFI)
+        private static let questionLog = Logger(
+            subsystem: "com.lingxi.code",
+            category: "ask-user-question"
+        )
+    #endif
+
     @Environment(AppState.self) private var app
     @Environment(\.theme) private var t
 
@@ -423,6 +431,11 @@ struct ChatView: View {
                 )
                 return true
             } catch {
+                let errorDescription = String(describing: error)
+                Self.questionLog.error(
+                    "answerAskUserQuestion failed requestId=\(requestId, privacy: .public) error=\(errorDescription, privacy: .public)"
+                )
+                print("[LingxiCode] answerAskUserQuestion failed requestId=\(requestId) error=\(errorDescription)")
                 return false
             }
         #else

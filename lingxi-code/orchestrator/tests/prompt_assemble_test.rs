@@ -226,7 +226,7 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
 
     assert!(out.contains(" - Users may configure 'hooks', shell commands that execute"));
     assert!(out.contains("\n  - /help: Get help with using LingXi"));
-    // Agent tool bullet in session guidance.
-    assert!(out.contains("Use the Agent tool with specialized agents"));
+    // Agent tool bullet in session guidance (2.1.232 default-ON fork text).
+    assert!(out.contains("Calling Agent with subagent_type: \"fork\" creates a fork"));
     assert!(out.contains("suggest they type `! <command>`"));
 }

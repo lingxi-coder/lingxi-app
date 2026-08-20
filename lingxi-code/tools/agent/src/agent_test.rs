@@ -818,14 +818,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     // #1 — OMITTING `subagent_type` (None) falls back to `general-purpose`
-    // (claude `subagent_type ?? GENERAL_PURPOSE_AGENT.agentType`,
-    // AgentTool.tsx:322) and dispatches; the request carries the resolved
-    // effective type.
+    // (2.1.232 `t ?? GENERAL_PURPOSE`), even when the fork feature is ON.
     #[tokio::test]
     async fn omitted_subagent_type_spawns_general_purpose() {
-        // Acquire the fork-gate lock + clear the var: with the gate ON an omitted
-        // subagent_type would take the FORK path, not general-purpose. Serialize
-        // against the gate-ON tests so this default-OFF assertion is stable.
+        // Acquire the fork-gate lock. Omitted type is general-purpose regardless
+        // of the 2.1.232 default-ON feature gate.
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1537,11 +1534,46 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
-    // Gate ON + omitted subagent_type + a parent assistant-with-tool_use in
-    // ctx.messages → fork path: request.subagent_type == "fork",
-    // fork_context_messages == [assistant_clone, user(tool_results + directive)].
+    // 2.1.232: omitted subagent_type is general-purpose even when the fork
+    // feature is ON. Only an explicit `subagent_type: "fork"` inherits context.
     #[tokio::test]
-    async fn fork_gate_on_omitted_takes_fork_path() {
+    async fn fork_gate_on_omitted_spawns_general_purpose() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
+
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let ctx = ctx_with_messages(
+            Arc::new(ToolRegistry::new()),
+            vec![parent_assistant_with_tool_use()],
+        );
+        let input = serde_json::json!({
+            "description": "do anything",
+            "prompt": "Do the subtask",
+            "run_in_background": false
+        });
+        tool.call(input, ctx, fresh_tx())
+            .await
+            .expect("omitted type still spawns");
+        let inv = spawner.invocations();
+        assert_eq!(inv.len(), 1);
+        assert_eq!(inv[0].request.subagent_type, "general-purpose");
+        assert!(inv[0].request.fork_context_messages.is_none());
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+    }
+
+    // 2.1.232: explicit `subagent_type: "fork"` + a parent assistant-with-tool_use
+    // in ctx.messages → fork path.
+    #[tokio::test]
+    async fn fork_gate_on_explicit_fork_takes_fork_path() {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1556,7 +1588,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         let tool = AgentTool::new(bctx);
         // is_non_interactive_session must be false (fresh_ctx_with_registry sets
-        // false) for the gate to fire.
+        // false) for the default gate; explicit env true also enables it.
         let ctx = ctx_with_messages(
             Arc::new(ToolRegistry::new()),
             vec![parent_assistant_with_tool_use()],
@@ -1564,6 +1596,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let input = serde_json::json!({
             "description": "fork it",
             "prompt": "Do the subtask",
+            "subagent_type": "fork",
             "run_in_background": false
         });
         tool.call(input, ctx, fresh_tx())
@@ -1639,6 +1672,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let input = serde_json::json!({
             "description": "fork it",
             "prompt": "Do the subtask",
+            "subagent_type": "fork",
             "run_in_background": false
         });
         tool.call(input, ctx, fresh_tx())
@@ -1685,7 +1719,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             is_visible_in_transcript_only: false,
         };
         let ctx = ctx_with_messages(Arc::new(ToolRegistry::new()), vec![boilerplate]);
-        let input = serde_json::json!({ "description": "fork again", "prompt": "nested" });
+        let input = serde_json::json!({
+            "description": "fork again",
+            "prompt": "nested",
+            "subagent_type": "fork"
+        });
         let err = tool
             .call(input, ctx, fresh_tx())
             .await
@@ -1803,6 +1841,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // 2.1.193 default externalizes them to the orchestrator reminder), so
         // force the inline path to exercise `formatAgentLine` rendering here.
         std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
             spawner.clone(),
@@ -1819,6 +1858,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             })
             .await;
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
         assert!(prompt.contains("Available agent types and the tools they have access to:"));
         // formatAgentLine: `- {type}: {whenToUse} (Tools: {tools})`.
         assert!(
@@ -1936,8 +1976,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        let full = AgentTool::build_prompt(&agents, &[], false);
-        let slim = AgentTool::build_prompt(&agents, &[], true);
+        let full = AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"));
+        let slim = AgentTool::build_prompt(&agents, &[], true, Some("claude-opus-5"));
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(full.contains("## When to use"));
         assert!(!slim.contains("## When to use"));
@@ -1957,13 +1997,15 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
         let agents = vec![traits::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        let prompt = AgentTool::build_prompt(&agents, &[], false);
+        let prompt = AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"));
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
         assert!(
             prompt.contains(
                 "call starts fresh.\n\
@@ -1989,10 +2031,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
 
         // Default (unknown plan): no pro-block, `## When to use` present.
         traits::subscription::set_current_subscription(None);
-        let p_default = AgentTool::build_prompt(&agents, &[], false);
+        let p_default = AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"));
         assert!(!p_default.contains("**Do not spawn agents unless the user asks.**"));
         assert!(p_default.contains("## When to use"));
 
@@ -2004,8 +2047,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 ..traits::subscription::SubscriptionSnapshot::default()
             },
         ));
-        let p_pro = AgentTool::build_prompt(&agents, &[], false);
+        let p_pro = AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"));
         traits::subscription::set_current_subscription(None);
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         assert!(
             p_pro.contains(
@@ -2023,7 +2067,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert!(p_pro.contains("conversation.\n\n**Do not spawn agents unless the user asks.**"));
         // The four bullets are NOT gated on the plan.
         assert!(p_pro.contains(
-            "- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing."
+            "- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` only when your very next action depends on the result and nothing else could usefully happen while it runs"
         ));
     }
 
@@ -2045,7 +2089,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 ..traits::subscription::SubscriptionSnapshot::default()
             },
         ));
-        let p = AgentTool::build_prompt(&agents, &[], false);
+        let p = AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"));
         traits::subscription::set_current_subscription(None);
         assert!(!p.contains("**Do not spawn agents unless the user asks.**"));
         assert!(p.contains("## When to use"));
@@ -2067,9 +2111,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             tools_description: "All tools".into(),
         }];
 
-        // Default (fork env OFF): non-fork subagent_type sentence, no addendum.
+        // Explicit disable: non-fork subagent_type sentence, no addendum.
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
+        let p_off = AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"));
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
-        let p_off = AgentTool::build_prompt(&agents, &[], false);
         assert!(
             p_off.contains("specify a subagent_type parameter to select which agent type to use")
         );
@@ -2079,7 +2124,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // Fork ON: env truthy + interactive (non_interactive=false) + non-coordinator.
         traits::session_flags::set_non_interactive_session(false);
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
-        let p_on = AgentTool::build_prompt(&agents, &[], false);
+        let p_on = AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"));
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         assert!(
@@ -2090,7 +2135,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         assert!(
             p_on.contains(
-                "A fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate."
+                "A fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate. Subagents run in the background"
             ),
             "fork addendum missing"
         );
@@ -2106,10 +2151,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
-    // The fork gate is OFF in a non-interactive session even with the env set
-    // (binary `isForkSubagentEnabled` ⇒ `!getIsNonInteractiveSession()`).
+    // Unset + headless: 2.1.232 `Krb`/`Nn()` disables fork. Explicit env true
+    // still enables it (the `"env"` arm runs before the headless check).
     #[test]
-    fn build_prompt_fork_gate_off_when_non_interactive() {
+    fn build_prompt_fork_gate_off_when_non_interactive_unless_env_set() {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -2119,15 +2164,22 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             tools_description: "All tools".into(),
         }];
         traits::session_flags::set_non_interactive_session(true);
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        let p_unset = AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"));
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
-        let p = AgentTool::build_prompt(&agents, &[], false);
+        let p_env = AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"));
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
         traits::session_flags::set_non_interactive_session(false);
         assert!(
-            !p.contains("forks yourself"),
-            "non-interactive disables fork text"
+            !p_unset.contains("forks yourself"),
+            "unset + headless disables fork text"
         );
-        assert!(p.contains("specify a subagent_type parameter to select which agent type to use"));
+        assert!(p_unset
+            .contains("specify a subagent_type parameter to select which agent type to use"));
+        assert!(
+            p_env.contains("forks yourself"),
+            "explicit env true enables fork text even when headless"
+        );
     }
 
     #[tokio::test]
@@ -2143,13 +2195,14 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let prior_global = traits::session_flags::is_non_interactive_session();
         let prior_env = std::env::var("LINGXI_FORK_SUBAGENT").ok();
         traits::session_flags::set_non_interactive_session(true);
-        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
+        // Unset env: interactive defaults ON, headless defaults OFF (2.1.232).
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         let interactive = traits::session_flags::scope_non_interactive_session(false, async {
-            AgentTool::build_prompt(&agents, &[], false)
+            AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"))
         });
         let headless = traits::session_flags::scope_non_interactive_session(true, async {
-            AgentTool::build_prompt(&agents, &[], false)
+            AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"))
         });
         let (interactive, headless) = tokio::join!(interactive, headless);
 
@@ -2175,7 +2228,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        let p = AgentTool::build_prompt(&agents, &["github".into(), "linear".into()], false);
+        let p = AgentTool::build_prompt(
+            &agents,
+            &["github".into(), "linear".into()],
+            false,
+            Some("claude-opus-5"),
+        );
         assert!(
             !p.contains("# MCP Servers"),
             "v2.1.193 has no per-tool MCP-servers note; was:\n{p}"
@@ -2192,15 +2250,17 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
 
         let agents = vec![traits::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        let p = AgentTool::build_prompt(&agents, &[], false);
+        let p = AgentTool::build_prompt(&agents, &[], false, Some("claude-opus-5"));
 
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         assert!(
             p.contains(

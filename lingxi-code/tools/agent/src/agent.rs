@@ -589,13 +589,14 @@ impl AgentTool {
     /// may be unwired ⇒ `None` ⇒ no block, matching the binary's unknown-plan
     /// default).
     ///
-    /// The `o` fork-subagent gate (`isForkSubagentEnabled`) IS modeled: when fork
-    /// is enabled (`is_fork_subagent_enabled(is_coordinator, is_non_interactive)`,
-    /// reading the process-global [`traits::session_flags::is_non_interactive_session`]),
-    /// the subagent_type sentence explains `"fork"`, a fork addendum follows
-    /// `## When to use`, and the SendMessage bullet gains the `(except
-    /// subagent_type: "fork", …)` qualifier. Inert unless `LINGXI_FORK_SUBAGENT`
-    /// is set (default OFF) ⇒ the non-fork text, byte-identical to the pre-F4 prompt.
+    /// The `o` fork-subagent gate (`isForkSubagentEnabled` / 2.1.232 `SPe`) IS
+    /// modeled: when fork is enabled (`is_fork_subagent_enabled(is_coordinator,
+    /// is_non_interactive)`, reading the process-global
+    /// [`traits::session_flags::is_non_interactive_session`]), the subagent_type
+    /// sentence explains `"fork"`, a fork addendum follows `## When to use`, and
+    /// the SendMessage bullet gains the `(except subagent_type: "fork", …)`
+    /// qualifier. Default ON for interactive non-coordinator sessions; set
+    /// `LINGXI_FORK_SUBAGENT=0` (or `CLAUDE_CODE_FORK_SUBAGENT=0`) to disable.
     ///
     /// Deferred vs binary (no behavioral surface here): the `m` embedded-grep hint
     /// swap, teammate (`yB`/`_m`) notes, and the remote-isolation (`V8t`) note. The
@@ -605,16 +606,8 @@ impl AgentTool {
         agents: &[traits::subagent_spawn::SubagentListingEntry],
         mcp_server_names: &[String],
         is_coordinator: bool,
+        model: Option<&str>,
     ) -> String {
-        // Binary `l=!DT()&&!aZ()` @234652470.
-        //   `DT()` @230660586 = `return Z.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
-        //     → the port's `LINGXI_DISABLE_BACKGROUND_TASKS`, read the same way
-        //     as the dispatch-site gate at the bottom of `call`.
-        //   `aZ()` @227950071 = `a6i.getStore()!==void 0`, an in-process-SDK
-        //     `AsyncLocalStorage` probe. LingXi has no in-process SDK host
-        //     (CLI/TUI/desktop are always out-of-process), so it is modeled as
-        //     a constant `false` — matching the binary's CLI/TUI default.
-        // ⇒ `l` is TRUE unless the kill-switch env is set.
         let async_agents_available = !traits::env::is_env_truthy(
             std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
                 .ok()
@@ -625,6 +618,7 @@ impl AgentTool {
             mcp_server_names,
             is_coordinator,
             async_agents_available,
+            model,
         )
     }
 
@@ -635,168 +629,13 @@ impl AgentTool {
         _mcp_server_names: &[String],
         is_coordinator: bool,
         async_agents_available: bool,
+        model: Option<&str>,
     ) -> String {
-        // Catalog placement (binary intro `p`): the 2.1.193 default externalizes
-        // the catalog to the orchestrator's `<system-reminder>` attachment, so the
-        // description carries only the static pointer line. A LEGACY inline body is
-        // retained behind an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
-        // opt-out (gate OFF) — not a 2.1.193 form, but a usable escape hatch.
-        let agent_list_section = if traits::subagent_spawn::should_inject_agent_list_in_messages() {
-            "Available agent types are listed in <system-reminder> messages in the conversation."
-                .to_string()
-        } else {
-            let agent_lines = agents
-                .iter()
-                .map(Self::format_agent_line)
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("Available agent types and the tools they have access to:\n{agent_lines}")
-        };
-
-        // Pro-plan gate `d` (binary `d=vi()==="pro"?<block>:""`): on the `pro`
-        // plan, discourage spawning. Read from the process-global subscription
-        // (the port's `vi()` analog); `None`/non-pro ⇒ empty (the common case,
-        // since subscription resolution may be unwired ⇒ gate inert, matching the
-        // binary's unknown-plan default). The block is injected right after the
-        // catalog pointer line, and (below) it SUPPRESSES the `## When to use`
-        // section — both per the binary's `${d}` / `${d?"":…}` placements.
-        let pro_block = if traits::subscription::is_pro_plan() {
-            // Binary `d=Pi()==="pro"?`\n\n**Do not spawn…`:""` — DOUBLE leading `\n`
-            // (injected as `…conversation.${d}\n\n${subagent}`; od -c verified on
-            // 2.1.195 @211615145).
-            "\n\n**Do not spawn agents unless the user asks.** Each spawn starts cold and re-derives context you already have — it's the expensive path on this plan. A task with \"multiple angles,\" \"thorough,\" or several parts is not a request to spawn; handle it inline with your own tools. Only use this tool when the user explicitly says to use a subagent, or names one of the available agent types."
-        } else {
-            ""
-        };
-
-        // Fork-subagent gate `o` (binary `o=isForkSubagentEnabled()`): when fork
-        // is enabled, the subagent_type sentence explains the `"fork"` type, the
-        // body gains a fork addendum, and the SendMessage bullet notes the fork
-        // exception. The gate is `is_fork_subagent_enabled(is_coordinator,
-        // is_non_interactive)` — env `LINGXI_FORK_SUBAGENT` AND !coordinator
-        // AND !non-interactive; the non-interactive flag is read from the
-        // process-global session flag (the port's `getIsNonInteractiveSession()`
-        // analog, set by `ConversationOrchestrator::new`). Default OFF ⇒ the
-        // non-fork text below, byte-identical to the pre-F4 prompt.
-        let is_fork = traits::fork_subagent::is_fork_subagent_enabled(
+        crate::prompt::build_agent_prompt(
+            agents,
             is_coordinator,
-            traits::session_flags::effective_non_interactive_session(),
-        );
-
-        // Subagent_type sentence — fork variant (binary `${o?…:…}`).
-        let subagent_sentence = if is_fork {
-            format!(
-                "When using the {AGENT_TOOL_NAME} tool, specify a subagent_type to select an agent: `\"fork\"` forks yourself (the fork inherits your full conversation context and always runs on your model — a `model` override is ignored); any other type — or omitting it — starts a fresh agent (general-purpose by default)."
-            )
-        } else {
-            format!(
-                "When using the {AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used."
-            )
-        };
-
-        // Intro `p` (binary JS source @211615462): the catalog line sits between
-        // the two intro sentences (with the `${d}` pro-block appended to it); the
-        // subagent_type sentence closes it.
-        // Binary `p`: `…available to it.\n\nAvailable agent types…conversation.${d}\n\n${subagent}`
-        // — DOUBLE `\n` separators around the catalog line + `${d}` pro-block
-        // (od -c verified on 2.1.195; an earlier pass misread the `strings` dump
-        // as single `\n`).
-        let intro = format!(
-            "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\n\
-{agent_list_section}{pro_block}\n\n\
-{subagent_sentence}"
-        );
-
-        // Coordinator mode gets the slim intro only (binary `if(t)return p`).
-        if is_coordinator {
-            return intro;
-        }
-
-        // Non-coordinator SHORT form (binary `if(c)` branch — the live 2.1.193
-        // default): `## When to use` + four terse bullets. NO `## When not to
-        // use`, NO `## Usage notes`, NO `<example>`s (those are the FULL form).
-        // Em-dashes are U+2014. The `run_in_background` bullet is the
-        // background-enabled 2.1.206 default (the binary's `T`). The
-        // `LINGXI_DISABLE_BACKGROUND_TASKS` suppression IS modeled — see the
-        // `async_agents_available` (`l`) gate on the tail bullets below. The
-        // teammate suppressions (binary `v = aZ()?…:o_()?…:""`) and the remote
-        // isolation bullet (`b = ian()?…:""`, gate `tengu_neapolitan`) are
-        // gated OFF by default and remain unmodeled.
-        //
-        // `## When to use` is SUPPRESSED on the pro plan (binary `${d?"":…}`):
-        // when the pro-block is present, the discouragement replaces the
-        // when-to-use guidance. The four bullets are NOT gated and always render.
-        let when_to_use = if pro_block.is_empty() {
-            // Binary `${d?"":`\n\n## When to use\n\nReach…`}` — DOUBLE `\n` before
-            // the heading AND before the paragraph (od -c verified on 2.1.195).
-            "\n\n## When to use\n\n\
-Reach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result."
-        } else {
-            ""
-        };
-        // Fork addendum (binary `${o?…:""}`), after `## When to use`, before the
-        // bullets.
-        let fork_addendum = if is_fork {
-            // Binary `${o?`\n\nA fork runs…`:""}` — DOUBLE leading `\n` (od -c
-            // verified on 2.1.195).
-            "\n\nA fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate."
-        } else {
-            ""
-        };
-        // SendMessage bullet — fork qualifier (binary `${o?' (except …)':""}`).
-        let send_message_bullet = if is_fork {
-            format!(
-                "- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh (except subagent_type: \"fork\", which inherits your context)."
-            )
-        } else {
-            format!(
-                "- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh."
-            )
-        };
-        // Binary: `…re-delegate.`:""}\n\n- The agent's final message…\n- Use…`
-        // — DOUBLE `\n` before the FIRST bullet, SINGLE `\n` between subsequent
-        // bullets (od -c verified on 2.1.195).
-        //
-        // The agent-definition bullet is an unconditional fixed literal between
-        // the SendMessage bullet and the isolation bullet (2.1.207 binary @
-        // ~222815108: `- Each agent type's model, reasoning effort, and tools come
-        // from its definition (\`.claude/agents/*.md\` frontmatter or SDK
-        // \`agents\`).`). Ported verbatim except the path is rebranded
-        // `.claude/agents/*.md` → `.lingxi/agents/*.md` per the accepted .lingxi
-        // naming divergence (cf. sandbox-runtime path_utils.rs `.lingxi/agents`).
-        //
-        // FIRST tail bullet — binary @234659244 is a TERNARY on `l`:
-        //   `- ${l?"The agent's final report is not shown to the user — relay
-        //         what matters.":"The agent's final message is returned to you
-        //         as the tool result; it is not shown to the user — relay what
-        //         matters."}`
-        // (the two "relay what matters" occurrences are @234659308 / @234659430).
-        // `l` is TRUE by default, so the port previously emitted the WRONG arm.
-        let final_report_bullet = if async_agents_available {
-            "- The agent's final report is not shown to the user — relay what matters."
-        } else {
-            "- The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters."
-        };
-        // BACKGROUND bullet — binary @234657319:
-        //   `let T = l && !o ? (n ? <SHORT> : <LONG>) : ""`
-        // where `n` is the fork FEATURE flag (`TSe()` @230723430, default
-        // "disabled") and `o = n && (allowFork ?? true)` is the port's
-        // `is_fork`. The port has no separate `n`, so the `n=true && o=false`
-        // SHORT arm ("Subagents run in the background; …", no
-        // `run_in_background: false` sentence) is UNMODELED — unreachable while
-        // `is_fork` implies the feature is on. `l=false` OR `is_fork` ⇒ the
-        // bullet is dropped entirely, not shortened.
-        let background_bullet = if async_agents_available && !is_fork {
-            "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
-        } else {
-            ""
-        };
-        format!(
-            "{intro}{when_to_use}{fork_addendum}\n\n\
-{final_report_bullet}\n\
-{send_message_bullet}\n\
-- Each agent type's model, reasoning effort, and tools come from its definition (`.lingxi/agents/*.md` frontmatter or SDK `agents`).\n\
-- `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged).{background_bullet}"
+            async_agents_available,
+            model,
         )
     }
 
@@ -1395,7 +1234,7 @@ impl Tool for AgentTool {
         "Launch a new agent".into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> String {
         // claude-code builds the Agent tool prompt dynamically (getPrompt,
         // AgentTool/prompt.ts:66-287): it injects the live agent catalog (one
         // `formatAgentLine` per resolved AgentDefinition) and the available MCP
@@ -1432,7 +1271,7 @@ impl Tool for AgentTool {
             .coordinator_mode
             .as_ref()
             .is_some_and(|m| m.is_enabled());
-        Self::build_prompt(&agents, &mcp_server_names, is_coordinator)
+        Self::build_prompt(&agents, &mcp_server_names, is_coordinator, opts.model.as_deref())
     }
 
     async fn call(
@@ -1518,25 +1357,28 @@ impl Tool for AgentTool {
             )
         })?;
 
-        // 3. Fork-subagent routing (codex #5, claude `AgentTool.tsx:318-335`):
-        //   effectiveType = subagent_type ?? (gate ? undefined : general-purpose)
-        //   isForkPath    = effectiveType === undefined
-        // In Rust: an OMITTED `subagent_type` is `None`; with the fork gate ON we
-        // take the fork path; with it OFF we fall back to `general-purpose`. An
-        // EXPLICIT type always wins (never forks), even when the gate is ON.
+        // 3. Fork-subagent routing (claude-code 2.1.232 `AgentTool.call`):
+        //   A = subagent_type is present AND normalizes to `"fork"`
+        //   I = `fUf` / `SPe()` (fork feature available)
+        //   L = A && I
+        // An OMITTED type is general-purpose (`t ?? GENERAL_PURPOSE`). Only an
+        // explicit `subagent_type: "fork"` inherits conversation + prompt cache.
         //
-        // The gate (`is_fork_subagent_enabled`) is mutually exclusive with
-        // coordinator mode + non-interactive sessions. `is_coordinator` is read
-        // LIVE from the `coordinator_mode` seam on `BuiltinToolContext` (`None` ⇒
-        // not coordinator), so a mid-session mode switch immediately disables
-        // forking. The non-interactive arm is honored via
-        // `ctx.options.is_non_interactive_session`.
+        // The gate (`is_fork_subagent_enabled`) is off in coordinator mode.
+        // `is_coordinator` is read LIVE from the `coordinator_mode` seam on
+        // `BuiltinToolContext` (`None` ⇒ not coordinator). Headless is honored
+        // via `ctx.options.is_non_interactive_session` unless the env override
+        // is explicitly true.
         let is_coordinator = self
             .ctx
             .coordinator_mode
             .as_ref()
             .is_some_and(|m| m.is_enabled());
-        let is_fork = parsed.subagent_type.is_none()
+        let wants_fork = parsed
+            .subagent_type
+            .as_deref()
+            .is_some_and(|t| normalize_agent_type(t) == "fork");
+        let is_fork = wants_fork
             && traits::fork_subagent::is_fork_subagent_enabled(
                 is_coordinator,
                 ctx.options.is_non_interactive_session,
@@ -1563,13 +1405,12 @@ impl Tool for AgentTool {
             ));
         }
 
-        // Resolve the EFFECTIVE subagent type (claude `effectiveType`,
-        // AgentTool.tsx:322 + :337-356):
-        //   - FORK PATH ⇒ the synthetic `fork` type.
-        //   - OMITTED (`None`, gate OFF) ⇒ `general-purpose` (claude `?? GENERAL_PURPOSE`).
-        //   - EXPLICIT (`Some(x)`) ⇒ validated against the agent listing; an
-        //     unknown explicit type is REJECTED with claude's "Agent type 'x'
-        //     not found. Available agents: …" error (AgentTool.tsx:353).
+        // Resolve the EFFECTIVE subagent type (2.1.232 `L ? Yne : t ?? general`):
+        //   - FORK PATH (explicit `"fork"` + gate) ⇒ the synthetic `fork` type.
+        //   - OMITTED (`None`) ⇒ `general-purpose`.
+        //   - EXPLICIT (`Some(x)` not fork, or fork with gate off) ⇒ catalog
+        //     lookup; unknown types are REJECTED with claude's
+        //     "Agent type 'x' not found. Available agents: …" error.
         // Denied-by-permission-rule (claude-code `getDenyRuleForAgent` →
         // `AgentTypeError`, AgentTool.tsx:349-351): a content-ful `Agent(<type>)`
         // deny rule rejects the resolved subagent type — checked BEFORE the
@@ -2388,16 +2229,15 @@ mod agent_test;
 mod f_description_l_gate_tests {
     use super::{AgentTool, AGENT_LIST_ENV_LOCK};
 
-    /// Run `body` with `LINGXI_FORK_SUBAGENT` cleared, under the shared lock,
-    /// restoring the prior value BEFORE the guard drops — a global mutated
-    /// under a lock has to be put back inside the critical section, or the lock
-    /// just serializes the corruption.
+    /// Pin the non-fork description (`LINGXI_FORK_SUBAGENT=0`). 2.1.232 defaults
+    /// the feature ON for interactive sessions; these tests lock the `l`-gate
+    /// tail bullets of the non-fork form.
     fn prompt_env<T>(body: impl FnOnce() -> T) -> T {
         let _guard = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var("LINGXI_FORK_SUBAGENT").ok();
-        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
         let out = body();
         match saved {
             Some(value) => std::env::set_var("LINGXI_FORK_SUBAGENT", value),
@@ -2423,7 +2263,7 @@ mod f_description_l_gate_tests {
     #[test]
     fn first_tail_bullet_uses_the_l_true_arm_by_default() {
         let p =
-            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true, Some("claude-opus-5")));
         assert!(
             p.contains(
                 "\n\n- The agent's final report is not shown to the user \u{2014} relay what matters.\n- Use "
@@ -2443,7 +2283,7 @@ mod f_description_l_gate_tests {
     #[test]
     fn first_tail_bullet_uses_the_l_false_arm_when_async_agents_unavailable() {
         let p =
-            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false));
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false, Some("claude-opus-5")));
         assert!(p.contains(
             "\n\n- The agent's final message is returned to you as the tool result; it is not shown to the user \u{2014} relay what matters.\n- Use "
         ));
@@ -2458,10 +2298,10 @@ mod f_description_l_gate_tests {
     #[test]
     fn background_bullet_carries_the_full_long_arm() {
         let p =
-            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true, Some("claude-opus-5")));
         assert!(
             p.ends_with(
-                "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing. Never fabricate or predict a pending agent's results \u{2014} the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
+                "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` only when your very next action depends on the result and nothing else could usefully happen while it runs \u{2014} otherwise background it so the user can interject. Never fabricate or predict a pending agent's results \u{2014} the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
             ),
             "background bullet must be the FULL long arm and must be last; got tail: {:?}",
             &p[p.len().saturating_sub(400)..]
@@ -2473,7 +2313,7 @@ mod f_description_l_gate_tests {
     #[test]
     fn background_bullet_absent_when_async_agents_unavailable() {
         let p =
-            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false));
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false, Some("claude-opus-5")));
         assert!(
             !p.contains("Subagents run in the background"),
             "l=false must drop the background bullet entirely"
@@ -2489,7 +2329,7 @@ mod f_description_l_gate_tests {
     #[test]
     fn tail_bullet_order_matches_the_binary() {
         let p =
-            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true, Some("claude-opus-5")));
         let i1 = p.find("- The agent's final report is not shown").unwrap();
         let i2 = p.find("- Use SendMessage").unwrap();
         let i3 = p.find("- Each agent type's model").unwrap();
@@ -2507,7 +2347,15 @@ mod f_description_l_gate_tests {
     fn coordinator_branch_has_no_tail_bullets_either_way() {
         for l in [true, false] {
             let p =
-                prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], true, l));
+                prompt_env(|| {
+                    AgentTool::build_prompt_with_async_agents(
+                        &agents(),
+                        &[],
+                        true,
+                        l,
+                        Some("claude-opus-5"),
+                    )
+                });
             assert!(!p.contains("relay what matters"));
             assert!(!p.contains("Subagents run in the background"));
         }

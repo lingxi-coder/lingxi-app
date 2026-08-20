@@ -5957,6 +5957,7 @@ mod persist_with_parent_tests {
     use session::jsonl::schema::JsonlMessage;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
+    use uuid::Uuid;
 
     /// Build an orchestrator wired with a `JsonlWriter` backed by `path`.
     fn orch_with_writer(
@@ -7093,6 +7094,20 @@ mod persist_with_parent_tests {
             "expected 3 single-block assistant lines (one per content block), got {}",
             asst_lines.len()
         );
+        assert!(
+            asst_lines[0].parent_uuid.is_none(),
+            "first block should start a fresh chain link"
+        );
+        assert_eq!(
+            asst_lines[1].parent_uuid.as_deref(),
+            Some(asst_lines[0].uuid.as_str()),
+            "second block should chain from first block uuid"
+        );
+        assert_eq!(
+            asst_lines[2].parent_uuid.as_deref(),
+            Some(asst_lines[1].uuid.as_str()),
+            "third block should chain from second block uuid"
+        );
         for (i, l) in asst_lines.iter().enumerate() {
             let blocks = l
                 .message
@@ -7199,6 +7214,168 @@ mod persist_with_parent_tests {
         assert_ne!(
             tr_lines[0].parent_uuid, tr_lines[1].parent_uuid,
             "the two tool_results must NOT share one parent (per-tool reparenting)"
+        );
+    }
+
+    #[tokio::test]
+    async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path_1 = dir.path().join("session1.jsonl");
+        let session_path_2 = dir.path().join("session2.jsonl");
+        let session_path_3 = dir.path().join("session3.jsonl");
+        let session_path_4 = dir.path().join("session4.jsonl");
+        let session_path_5 = dir.path().join("session5.jsonl");
+        let orch1 = orch_with_writer(dir.path(), session_path_1.clone());
+        let orch2 = orch_with_writer(dir.path(), session_path_2.clone());
+        let orch3 = orch_with_writer(dir.path(), session_path_3.clone());
+        let orch4 = orch_with_writer(dir.path(), session_path_4.clone());
+        let orch5 = orch_with_writer(dir.path(), session_path_5.clone());
+
+        let assistant_id = protocol::MessageId::from_uuid(
+            Uuid::from_u128(0x0a0b_0c0d_0e0f_1011_1213_1415_1617_1819),
+        );
+        let content = vec![
+            protocol::ContentBlock::Text {
+                text: "seeded block".into(),
+            },
+            protocol::ContentBlock::ToolUse {
+                id: protocol::ToolUseId::from("toolu_shared"),
+                name: "Echo".into(),
+                input: serde_json::json!({ "x": 1 }),
+                provider_id: None,
+            },
+            protocol::ContentBlock::ToolUse {
+                id: protocol::ToolUseId::from("toolu_followup"),
+                name: "Echo".into(),
+                input: serde_json::json!({ "x": 2 }),
+                provider_id: None,
+            },
+        ];
+        let msg_1 = ConversationMessage::Assistant {
+            id: assistant_id,
+            content: content.clone(),
+            stop_reason: Some("tool_use".into()),
+        };
+        let msg_2 = ConversationMessage::Assistant {
+            id: assistant_id,
+            content,
+            stop_reason: Some("tool_use".into()),
+        };
+
+        orch1
+            .persist_assistant_per_block(&msg_1, None, None)
+            .await;
+        orch2
+            .persist_assistant_per_block(&msg_2, None, None)
+            .await;
+        let msg_3 = ConversationMessage::Assistant {
+            id: assistant_id,
+            content: vec![
+                protocol::ContentBlock::Text {
+                    text: "different seed block".into(),
+                },
+                protocol::ContentBlock::ToolUse {
+                    id: protocol::ToolUseId::from("toolu_shared"),
+                    name: "Echo".into(),
+                    input: serde_json::json!({ "x": 1 }),
+                    provider_id: None,
+                },
+                protocol::ContentBlock::ToolUse {
+                    id: protocol::ToolUseId::from("toolu_followup"),
+                    name: "Echo".into(),
+                    input: serde_json::json!({ "x": 2 }),
+                    provider_id: None,
+                },
+            ],
+            stop_reason: Some("tool_use".into()),
+        };
+        orch3
+            .persist_assistant_per_block(&msg_3, None, None)
+            .await;
+        let mut input_tool_4 = serde_json::Map::new();
+        input_tool_4.insert(
+            "x".to_string(),
+            serde_json::json!({ "nested": { "b": 2, "a": 1 } }),
+        );
+        input_tool_4.insert("y".to_string(), serde_json::json!(1));
+        let mut input_tool_5 = serde_json::Map::new();
+        input_tool_5.insert("y".to_string(), serde_json::json!(1));
+        input_tool_5.insert(
+            "x".to_string(),
+            serde_json::json!({ "a": 1, "b": 2 }),
+        );
+        let msg_4 = ConversationMessage::Assistant {
+            id: assistant_id,
+            content: vec![protocol::ContentBlock::ToolUse {
+                id: protocol::ToolUseId::from("toolu_ordered"),
+                name: "Echo".into(),
+                input: serde_json::Value::Object(input_tool_4),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+        };
+        let msg_5 = ConversationMessage::Assistant {
+            id: assistant_id,
+            content: vec![protocol::ContentBlock::ToolUse {
+                id: protocol::ToolUseId::from("toolu_ordered"),
+                name: "Echo".into(),
+                input: serde_json::Value::Object(input_tool_5),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+        };
+        orch4
+            .persist_assistant_per_block(&msg_4, None, None)
+            .await;
+        orch5
+            .persist_assistant_per_block(&msg_5, None, None)
+            .await;
+
+        let first = read_jsonl(&session_path_1);
+        let second = read_jsonl(&session_path_2);
+        let third = read_jsonl(&session_path_3);
+        let fourth = read_jsonl(&session_path_4);
+        let fifth = read_jsonl(&session_path_5);
+        let uuids_1: Vec<String> = first
+            .into_iter()
+            .filter(|line| line.message_type == "assistant")
+            .map(|line| line.uuid)
+            .collect();
+        let uuids_2: Vec<String> = second
+            .into_iter()
+            .filter(|line| line.message_type == "assistant")
+            .map(|line| line.uuid)
+            .collect();
+        let uuids_3: Vec<String> = third
+            .into_iter()
+            .filter(|line| line.message_type == "assistant")
+            .map(|line| line.uuid)
+            .collect();
+        let uuids_4: Vec<String> = fourth
+            .into_iter()
+            .filter(|line| line.message_type == "assistant")
+            .map(|line| line.uuid)
+            .collect();
+        let uuids_5: Vec<String> = fifth
+            .into_iter()
+            .filter(|line| line.message_type == "assistant")
+            .map(|line| line.uuid)
+            .collect();
+
+        assert_eq!(
+            uuids_1,
+            uuids_2,
+            "same turn id / content / position should deterministically derive identical block uuids"
+        );
+        assert_ne!(
+            uuids_1,
+            uuids_3,
+            "content-sensitive signature should change when block payload changes"
+        );
+        assert_eq!(
+            uuids_4,
+            uuids_5,
+            "equivalent tool input json object order must not alter per-block signature"
         );
     }
 

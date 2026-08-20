@@ -125,9 +125,12 @@ pub fn assemble_system_prompt_with_style(
     // paths. Keep that signal explicit in the context rather than assuming
     // every caller is interactive.
     let has_agent = ctx.tool_names.iter().any(|t| t == "Agent");
-    let fork_mode = std::env::var("LINGXI_FORK_SUBAGENT")
-        .map(|v| !v.is_empty() && v != "0" && v != "false")
-        .unwrap_or(false);
+    // 2.1.232 `SPe()`: fork session-guidance is ON by default for interactive
+    // main-thread prompts. Coordinator sessions use a separate prompt builder.
+    let fork_mode = traits::fork_subagent::is_fork_subagent_enabled(
+        /* is_coordinator */ false,
+        /* is_non_interactive */ !ctx.is_interactive,
+    );
     s.push_str(&body_sections::format(
         output_style.is_some(),
         keep_coding,

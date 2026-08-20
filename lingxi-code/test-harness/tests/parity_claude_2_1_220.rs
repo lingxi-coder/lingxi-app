@@ -547,7 +547,7 @@ async fn live_orchestrator_prompt_uses_production_context() {
         "live model must drive the production environment block"
     );
     assert!(
-        prompt.contains("Use the Agent tool with specialized agents"),
+        prompt.contains("Calling Agent with subagent_type: \"fork\" creates a fork"),
         "live tool registry must drive the production session guidance"
     );
     let additional_context = orchestrator
@@ -561,9 +561,9 @@ async fn live_orchestrator_prompt_uses_production_context() {
 
     let normalized = normalize_live_prompt(&prompt, &cwd);
     let digest = format!("{:x}", Sha256::digest(normalized.as_bytes()));
-    assert_eq!(normalized.len(), 14_774, "live prompt length drifted");
+    assert_eq!(normalized.len(), 14_619, "live prompt length drifted");
     assert_eq!(
-        digest, "b2d353a6094baeff8485d60ddc1373c2c02620e7d4ad7b252bb805ce3563a9a9",
+        digest, "7168da6b81a307e543e1d3007d88f21505e5c4e24281a77a09499ee0a506dec4",
         "live normalized production prompt drifted"
     );
 }

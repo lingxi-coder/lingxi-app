@@ -17,6 +17,7 @@
     clippy::manual_let_else
 )]
 pub mod agent;
+pub mod prompt;
 pub use agent::AgentTool;
 
 pub mod classifier_handoff;

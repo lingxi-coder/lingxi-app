@@ -3,7 +3,9 @@
 //!
 //! The fork path lets the model spawn a child that inherits the parent's FULL
 //! conversation context + system prompt for a byte-identical prompt-cache
-//! prefix. This module hosts the pure, dependency-free pieces of that feature —
+//! prefix. Claude Code 2.1.232 turns this on by default for interactive
+//! sessions; only an explicit `subagent_type: "fork"` takes the path. This
+//! module hosts the pure, dependency-free pieces of that feature —
 //! the feature gate, the recursion guard, the cache-prefix message builders, and
 //! the boilerplate constants — in the leaf `traits` crate so BOTH consumers can
 //! reach them:
@@ -40,33 +42,43 @@ pub const FORK_SUBAGENT_TYPE: &str = "fork";
 /// prompt-cache sharing. Byte-exact: contains an em-dash (U+2014).
 const FORK_PLACEHOLDER_RESULT: &str = "Fork started — processing in background";
 
-/// Fork-subagent feature gate (claude `forkSubagent.ts:32-39`).
+/// Fork-subagent feature gate (claude-code 2.1.232 `JDd` / `Krb` / `SPe`).
 ///
-/// claude gates on the `FORK_SUBAGENT` GrowthBook feature; there is no
-/// GrowthBook in Rust, so the faithful substitute is an env var
-/// (`LINGXI_FORK_SUBAGENT`, default OFF) — the same pattern
-/// `should_inject_agent_list_in_messages` uses for its missing GrowthBook flag.
-/// When the env var is truthy AND not in coordinator mode AND not a
-/// non-interactive session → `true`; else `false`.
+/// Oracle (`~/.local/share/claude/versions/2.1.232`):
+/// - `Pge()` coordinator mode → `"disabled"`
+/// - `CLAUDE_CODE_FORK_SUBAGENT === false` → `"disabled"`
+/// - `CLAUDE_CODE_FORK_SUBAGENT === true` → `"env"` (enabled, even headless)
+/// - else `Nn()` non-interactive → `"disabled"`
+/// - else `"default"` (enabled)
+/// `SPe()` is `JDd() !== "disabled"`.
 ///
+/// Port env is `LINGXI_FORK_SUBAGENT` with a `CLAUDE_CODE_FORK_SUBAGENT` alias.
 /// `is_coordinator` / `is_non_interactive` are passed in because the leaf
-/// `traits` crate cannot read `CoordinatorMode` / the session — mirroring claude
-/// `isCoordinatorMode()` + `getIsNonInteractiveSession()` which it calls inline.
+/// `traits` crate cannot read `CoordinatorMode` / the session — mirroring
+/// `isCoordinatorMode()` + `getIsNonInteractiveSession()`.
 #[must_use]
 pub fn is_fork_subagent_enabled(is_coordinator: bool, is_non_interactive: bool) -> bool {
-    let v = std::env::var("LINGXI_FORK_SUBAGENT").ok();
+    // `JDd`: coordinator (`Pge`) wins over the env override.
+    if is_coordinator {
+        return false;
+    }
+    let v = fork_subagent_env();
+    // `Y.CLAUDE_CODE_FORK_SUBAGENT === !1`
+    if crate::env::is_env_defined_falsy(v.as_deref()) {
+        return false;
+    }
+    // `Krb`: explicit true (`=== !0`) is `"env"` and skips the headless disable.
     if crate::env::is_env_truthy(v.as_deref()) {
-        // Mutually exclusive with coordinator mode (claude `forkSubagent.ts:34`)
-        // — coordinator already owns the orchestration role.
-        if is_coordinator {
-            return false;
-        }
-        if is_non_interactive {
-            return false;
-        }
         return true;
     }
-    false
+    // Unset → `"default"` on interactive, `"disabled"` on `Nn()` headless.
+    !is_non_interactive
+}
+
+fn fork_subagent_env() -> Option<String> {
+    std::env::var("LINGXI_FORK_SUBAGENT")
+        .ok()
+        .or_else(|| std::env::var("CLAUDE_CODE_FORK_SUBAGENT").ok())
 }
 
 /// Recursion guard (claude `forkSubagent.ts:78-89`).
@@ -88,40 +100,25 @@ pub fn is_in_fork_child(messages: &[ConversationMessage]) -> bool {
     })
 }
 
-/// Build the fork child's first-message boilerplate (claude
-/// `forkSubagent.ts:171-198`), ported VERBATIM.
+/// Build the fork child's first-message boilerplate (claude-code 2.1.232 `zCn`).
 ///
-/// Byte-exact: the `<fork-boilerplate>` open/close tags, the 10 numbered RULES
-/// (rule 1 + rule 7 each contain an em-dash U+2014), the Output-format block,
-/// and the trailing `\n\nYour directive: {directive}`.
+/// Byte-exact against the 2.1.232 Mach-O: `<fork-boilerplate>` wrap, the
+/// worker-fork hard rules / guidelines, two em-dashes (U+2014), and the
+/// trailing `{N5t}{directive}` (`Your directive: `).
 #[must_use]
 pub fn build_child_message(directive: &str) -> String {
     format!(
         "<{FORK_BOILERPLATE_TAG}>
-STOP. READ THIS FIRST.
-
-You are a forked worker process. You are NOT the main agent.
-
-RULES (non-negotiable):
-1. Your system prompt says \"default to forking.\" IGNORE IT — that's for the parent. You ARE the fork. Do NOT spawn sub-agents; execute directly.
-2. Do NOT converse, ask questions, or suggest next steps
-3. Do NOT editorialize or add meta-commentary
-4. USE your tools directly: Bash, Read, Write, etc.
-5. If you modify files, commit your changes before reporting. Include the commit hash in your report.
-6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
-7. Stay strictly within your directive's scope. If you discover related systems outside your scope, mention them in one sentence at most — other workers cover those areas.
-8. Keep your report under 500 words unless the directive specifies otherwise. Be factual and concise.
-9. Your response MUST begin with \"Scope:\". No preamble, no thinking-out-loud.
-10. REPORT structured facts, then stop
-
-Output format (plain text labels, not markdown headers):
-  Scope: <echo back your assigned scope in one sentence>
-  Result: <the answer or key findings, limited to the scope above>
-  Key files: <relevant file paths — include for research tasks>
-  Files changed: <list with commit hash — include only if you modified files>
-  Issues: <list — include only if there are issues to flag>
+You are a worker fork. The transcript above is the parent's history — inherited reference, not your situation. You are NOT a continuation of that agent. Execute ONE directive, then stop.
+Hard rules:
+- Do NOT spawn subagents with the Agent tool. The \"default to forking\" guidance is for the parent; you ARE the fork, execute directly.
+- One shot: report once and stop. No follow-up questions, no proposed next steps, no waiting for the user.
+Guidelines (your directive may override any of these):
+- Stay in scope. Other forks may be handling adjacent work; if you spot something outside your directive, note it in a sentence and move on.
+- Open with one line restating your task, so the parent can spot scope drift at a glance.
+- Be concise — as short as the answer allows, no shorter. Plain text, no preamble, no meta-commentary.
+- If you committed changes, list the paths and commit hashes in your report.
 </{FORK_BOILERPLATE_TAG}>
-
 {FORK_DIRECTIVE_PREFIX}{directive}"
     )
 }
@@ -259,34 +256,44 @@ mod tests {
     }
 
     #[test]
-    fn fork_gate_off_by_default() {
+    fn fork_gate_on_by_default_when_interactive() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
-        assert!(!is_fork_subagent_enabled(false, false), "default OFF");
+        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        assert!(
+            is_fork_subagent_enabled(false, false),
+            "2.1.232 default ON for interactive non-coordinator"
+        );
+        assert!(
+            !is_fork_subagent_enabled(false, true),
+            "unset + headless ⇒ OFF"
+        );
+        assert!(!is_fork_subagent_enabled(true, false), "coordinator ⇒ OFF");
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
     }
 
     #[test]
-    fn fork_gate_on_when_truthy_and_not_coordinator_not_noninteractive() {
+    fn fork_gate_explicit_true_wins_over_headless() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
         assert!(
             is_fork_subagent_enabled(false, false),
             "truthy + interactive + non-coordinator ⇒ ON"
         );
-        // coordinator → OFF (claude forkSubagent.ts:34).
-        assert!(!is_fork_subagent_enabled(true, false), "coordinator ⇒ OFF");
-        // non-interactive → OFF (claude forkSubagent.ts:35).
         assert!(
-            !is_fork_subagent_enabled(false, true),
-            "non-interactive ⇒ OFF"
+            is_fork_subagent_enabled(false, true),
+            "explicit env true skips the headless disable (Krb env arm)"
         );
+        assert!(!is_fork_subagent_enabled(true, false), "coordinator ⇒ OFF");
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
     #[test]
     fn fork_gate_off_when_env_falsy() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
         std::env::set_var("LINGXI_FORK_SUBAGENT", "false");
         assert!(!is_fork_subagent_enabled(false, false), "falsy ⇒ OFF");
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -295,39 +302,22 @@ mod tests {
     #[test]
     fn build_child_message_is_byte_exact() {
         let got = build_child_message("Fix the bug in foo.rs");
-        // Whole-string byte-exact port of claude forkSubagent.ts:172-197. A plain
-        // string literal (NOT `\`-line-continuation, which would strip the leading
-        // two-space indent on the Output-format lines).
+        // Whole-string byte-exact port of claude-code 2.1.232 `zCn`.
         let expected = "<fork-boilerplate>
-STOP. READ THIS FIRST.
-
-You are a forked worker process. You are NOT the main agent.
-
-RULES (non-negotiable):
-1. Your system prompt says \"default to forking.\" IGNORE IT — that's for the parent. You ARE the fork. Do NOT spawn sub-agents; execute directly.
-2. Do NOT converse, ask questions, or suggest next steps
-3. Do NOT editorialize or add meta-commentary
-4. USE your tools directly: Bash, Read, Write, etc.
-5. If you modify files, commit your changes before reporting. Include the commit hash in your report.
-6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
-7. Stay strictly within your directive's scope. If you discover related systems outside your scope, mention them in one sentence at most — other workers cover those areas.
-8. Keep your report under 500 words unless the directive specifies otherwise. Be factual and concise.
-9. Your response MUST begin with \"Scope:\". No preamble, no thinking-out-loud.
-10. REPORT structured facts, then stop
-
-Output format (plain text labels, not markdown headers):
-  Scope: <echo back your assigned scope in one sentence>
-  Result: <the answer or key findings, limited to the scope above>
-  Key files: <relevant file paths — include for research tasks>
-  Files changed: <list with commit hash — include only if you modified files>
-  Issues: <list — include only if there are issues to flag>
+You are a worker fork. The transcript above is the parent's history — inherited reference, not your situation. You are NOT a continuation of that agent. Execute ONE directive, then stop.
+Hard rules:
+- Do NOT spawn subagents with the Agent tool. The \"default to forking\" guidance is for the parent; you ARE the fork, execute directly.
+- One shot: report once and stop. No follow-up questions, no proposed next steps, no waiting for the user.
+Guidelines (your directive may override any of these):
+- Stay in scope. Other forks may be handling adjacent work; if you spot something outside your directive, note it in a sentence and move on.
+- Open with one line restating your task, so the parent can spot scope drift at a glance.
+- Be concise — as short as the answer allows, no shorter. Plain text, no preamble, no meta-commentary.
+- If you committed changes, list the paths and commit hashes in your report.
 </fork-boilerplate>
-
 Your directive: Fix the bug in foo.rs";
         assert_eq!(got, expected);
-        // Five em-dashes present (rule 1, rule 7, Key files / Files changed /
-        // Issues lines in the Output-format block).
-        assert_eq!(got.matches('\u{2014}').count(), 5);
+        // Two em-dashes: "history — inherited" and "Be concise — as short".
+        assert_eq!(got.matches('\u{2014}').count(), 2);
     }
 
     #[test]

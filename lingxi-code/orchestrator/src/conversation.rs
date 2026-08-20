@@ -19,6 +19,7 @@ use hooks::registry::HookContext;
 use llm_client::{LlmError, LlmEvent, LlmResponse};
 use protocol::{ConversationMessage, HookId, MessageId, SessionId};
 use session::JsonlWriter;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 /// Re-export of the canonical image-source shape (FROZEN in `protocol`) so callers
@@ -1920,6 +1921,73 @@ impl ConversationOrchestrator {
     pub fn with_jsonl_writer(mut self, writer: Arc<JsonlWriter>) -> Self {
         self.jsonl_writer = Some(writer);
         self
+    }
+
+    /// Build a deterministic assistant-block `uuid` for write-side per-block
+    /// persistence.
+    ///
+    /// Streaming persists one JSONL line per content block (`content_block_stop`);
+    /// this helper derives the outer `uuid` from the turn `inner_id`, zero-based
+    /// block index, parent chain pointer, and a canonical per-block payload
+    /// signature. This keeps the per-block chain reproducible while preserving
+    /// a syntactically valid UUID v4-style outer shape.
+    fn assistant_block_derived_uuid(
+        turn_id: &str,
+        block_index: usize,
+        parent_uuid: Option<&str>,
+        block: &protocol::ContentBlock,
+    ) -> String {
+        let block_index = u64::try_from(block_index).unwrap_or(u64::MAX);
+        let parent_uuid = parent_uuid.unwrap_or("root");
+        let block_signature = Self::assistant_block_signature(block);
+        let mut hasher = Sha256::new();
+
+        hasher.update(b"lingxi-assistant-block-v1");
+        hasher.update(turn_id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(block_index.to_le_bytes());
+        hasher.update(b"|");
+        hasher.update(parent_uuid.as_bytes());
+        hasher.update(b"|");
+        hasher.update(block_signature.as_bytes());
+        let digest = hasher.finalize();
+
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        uuid::Uuid::from_bytes(bytes).to_string()
+    }
+
+    fn assistant_block_signature(block: &protocol::ContentBlock) -> String {
+        let mut payload = serde_json::to_value(block).unwrap_or(serde_json::Value::Null);
+        Self::sort_json_object_keys(&mut payload);
+        serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    fn sort_json_object_keys(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                let mut entries: Vec<(String, serde_json::Value)> =
+                    std::mem::take(object).into_iter().collect();
+                for (_, val) in entries.iter_mut() {
+                    Self::sort_json_object_keys(val);
+                }
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                for (key, val) in entries {
+                    object.insert(key, val);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    Self::sort_json_object_keys(value);
+                }
+            }
+            serde_json::Value::String(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Null => {}
+        }
     }
 
     /// Whether a [`JsonlWriter`] has been wired via [`Self::with_jsonl_writer`].
@@ -6237,19 +6305,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     ///
     /// claude-code builds an `AssistantMessage` at each `content_block_stop` from
     /// a SINGLE content block (`content: normalizeContentFromAPI([contentBlock])`)
-    /// with a FRESH top-level `uuid: randomUUID()` but the SAME inner
-    /// `message.id` shared across all blocks of the turn. So an assistant turn
-    /// `[text, tool_use A, tool_use B]` becomes THREE assistant JSONL lines: one
-    /// shared inner `message.id`, three distinct top-level `uuid`s, one block each.
+    /// with distinct top-level `uuid`s and the SAME inner `message.id` shared
+    /// across all blocks of the turn. So an assistant turn `[text, tool_use A,
+    /// tool_use B]` becomes THREE assistant JSONL lines: one shared inner
+    /// `message.id`, three distinct top-level `uuid`s, one block each.
     ///
     /// This is a WRITE-side (transcript) split ONLY — the caller keeps the single
     /// merged `ConversationMessage::Assistant` in `session.history` for
     /// request-building (the Anthropic request needs one assistant turn carrying
-    /// all blocks). We mint a fresh [`MessageId`] per block so each line gets a
-    /// distinct top-level `uuid` (via [`Self::to_jsonl_message`], whose `uuid`
-    /// derives from `msg.id().as_uuid()`), and inject the originating turn's id
-    /// (`msg.id().as_uuid()`) as the shared inner `message.id` so the loader's
-    /// sibling-grouping reconstructs the DAG.
+    /// all blocks). The write-side top-level `uuid` is now derived from the
+    /// turn id / block index / parent chain (instead of `MessageId::new()`), and
+    /// the originating turn's id (`msg.id().as_uuid()`) is injected as the shared
+    /// inner `message.id` so the loader's sibling-grouping reconstructs the DAG.
     ///
     /// Returns a `tool_use_id -> that block's line uuid` map so the caller can
     /// parent EACH `tool_result` to ITS specific `tool_use` line (TS
@@ -6302,15 +6369,22 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
 
-        for block in content {
-            // Build a synthetic SINGLE-block assistant message with a FRESH id so
-            // its top-level JSONL `uuid` is distinct per line.
+        for (block_index, block) in content.iter().enumerate() {
+            // Build a synthetic SINGLE-block assistant message. The outer
+            // JSONL `uuid` is derived from chain context below; the inner
+            // message id remains shared for sibling grouping.
             let single = ConversationMessage::Assistant {
                 id: MessageId::new(),
                 content: vec![block.clone()],
                 stop_reason: stop_reason.clone(),
             };
             let parent_uuid = self.last_jsonl_uuid.lock().await.clone();
+            let derived_uuid = Self::assistant_block_derived_uuid(
+                &inner_id,
+                block_index,
+                parent_uuid.as_deref(),
+                block,
+            );
             // Assistant lines never carry a promptId (it is a user-only field).
             let mut jmsg = self.to_jsonl_message_with_inner_id(
                 &single,
@@ -6325,6 +6399,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 request_id,
                 None,
             );
+            jmsg.uuid = derived_uuid;
             jmsg.extra.insert(
                 "modelProfile".to_string(),
                 model_profile

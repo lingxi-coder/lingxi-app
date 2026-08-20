@@ -288,13 +288,21 @@ struct ChatView: View {
         // The scroll container is shared with local-app generation
         // (`TranscriptScroll`); what stays here is this screen's content and
         // its own definition of "something new arrived".
-        TranscriptScroll(
+        let groups = visibleTimelineGroups
+        return TranscriptScroll(
             follow: FollowSignal(
-                itemCount: visibleTimelineItemCount,
-                lastMessageText: visibleRenderItems.reversed().compactMap { item in
+                itemCount: groups.reduce(0) { $0 + $1.rows.count },
+                // `last(where:)` scans from the end and stops at the first
+                // match. The previous `reversed().compactMap { ... }.first`
+                // allocated every message's text on every body evaluation —
+                // once per streamed token — to keep one of them.
+                lastMessageText: visibleRenderItems.last { item in
+                    if case .message = item { return true }
+                    return false
+                }.flatMap { item in
                     guard case let .message(message) = item else { return nil }
                     return message.text
-                }.first,
+                },
                 streaming: convo.streaming,
                 error: convo.error,
                 notice: convo.notice
@@ -306,7 +314,7 @@ struct ChatView: View {
             if convo.selectedAgentID == ConversationModel.mainAgentID {
                 if visibleRenderItems.isEmpty, !convo.streaming, convo.isNew { emptyState }
                 ConversationTimelineView(
-                    groups: visibleTimelineGroups,
+                    groups: groups,
                     messageDetails: visibleMessageDetails,
                     expandedToolCalls: convo.expandedToolCalls,
                     onToggleToolCall: toggleToolCall,
@@ -320,7 +328,7 @@ struct ChatView: View {
                 childAgentEmptyState
             } else if !visibleRenderItems.isEmpty {
                 ConversationTimelineView(
-                    groups: visibleTimelineGroups,
+                    groups: groups,
                     messageDetails: visibleMessageDetails,
                     expandedToolCalls: convo.expandedToolCalls,
                     onToggleToolCall: toggleToolCall,
@@ -355,10 +363,6 @@ struct ChatView: View {
 
     private var visibleTimelineGroups: [ConversationTimelineGroup] {
         convo.visibleTimelineGroups
-    }
-
-    private var visibleTimelineItemCount: Int {
-        visibleTimelineGroups.reduce(0) { $0 + $1.rows.count }
     }
 
     private var visibleExecutionGroups: [ExecutionStatusPanel.Group] {

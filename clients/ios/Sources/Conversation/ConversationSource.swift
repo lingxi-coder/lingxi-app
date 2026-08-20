@@ -311,7 +311,9 @@ final class ConversationModel: ObservableObject {
     /// The chat surface's ordered render list: plain messages plus per-turn
     /// execution traces / shell cards. `messages` remains the compatibility
     /// transcript used by voice/setup surfaces.
-    @Published var items: [ConversationRenderItem]
+    @Published var items: [ConversationRenderItem] {
+        didSet { timelineGroupsCache = nil }
+    }
 
     /// Session-scoped agent roster.  The first row is always the root agent;
     /// child rows arrive from `SessionAgentList`/`SessionAgentUpdated` or the
@@ -319,10 +321,14 @@ final class ConversationModel: ObservableObject {
     @Published private(set) var agentSummaries: [ConversationAgentSummary]
     /// The currently visible agent.  Selecting a child makes its transcript
     /// read-only; selecting `main` restores the ordinary composer transcript.
-    @Published var selectedAgentID: String
+    @Published var selectedAgentID: String {
+        didSet { timelineGroupsCache = nil }
+    }
     /// Child-agent transcript cache keyed by stable agent id.  Main-agent data
     /// intentionally remains in `messages/items` for backwards compatibility.
-    @Published private(set) var agentTranscripts: [String: ConversationAgentTranscript]
+    @Published private(set) var agentTranscripts: [String: ConversationAgentTranscript] {
+        didSet { timelineGroupsCache = nil }
+    }
     @Published var isAgentTranscriptLoading = false
     @Published var agentTranscriptError: String?
     /// Identifies the one transcript request allowed to mutate loading/error
@@ -354,9 +360,24 @@ final class ConversationModel: ObservableObject {
     /// Ordered activity projection for the currently selected session/agent.
     /// Run cards never enter this projection; reasoning, tools, notices and
     /// narrative rows retain their wire order and stable identities.
+    /// Memoised because `timelineGroups` walks every transcript item and
+    /// `ChatView.body` reads this more than once per evaluation, on every
+    /// streamed token. The three inputs are stored `@Published` properties, so
+    /// their `didSet` hooks are a single invalidation point covering every
+    /// mutation site.
     var visibleTimelineGroups: [ConversationTimelineGroup] {
-        ConversationRenderLayout.timelineGroups(selectedAgentItems)
+        if let timelineGroupsCache { return timelineGroupsCache }
+        let groups = ConversationRenderLayout.timelineGroups(selectedAgentItems)
+        timelineGroupsCache = groups
+        timelineGroupsRebuildCount += 1
+        return groups
     }
+
+    private var timelineGroupsCache: [ConversationTimelineGroup]?
+
+    /// Number of times the projection was actually rebuilt. Test-only signal;
+    /// production code must not branch on it.
+    private(set) var timelineGroupsRebuildCount: Int = 0
     var visibleTimelineRows: [ConversationTimelineRow] {
         ConversationRenderLayout.timelineRows(selectedAgentItems)
     }

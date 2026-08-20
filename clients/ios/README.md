@@ -8,7 +8,7 @@ mock data (later milestones).
 
 ## Requirements
 
-- macOS with Xcode 15+ (iOS 17.0 SDK or newer)
+- macOS with Xcode 16+ (iOS 18.0 SDK or newer)
 - [XcodeGen](https://github.com/yonyz/XcodeGen): `brew install xcodegen`
 - Rust toolchain with the iOS std targets (`aarch64-apple-ios`,
   `aarch64-apple-ios-sim`, `x86_64-apple-ios`) — the build script adds any

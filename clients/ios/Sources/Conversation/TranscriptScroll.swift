@@ -114,7 +114,12 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
                     guard resumed else { return }
                     followsLatest = true
                 }
-                scrollToLatest(using: proxy, animated: true, requiresFollow: true)
+                // Unanimated on purpose. A streamed turn changes `follow` tens
+                // of times per second; a 200ms animation per change is always
+                // interrupted by the next one, and the pile-up is what reads as
+                // the transcript jittering. The focus scroll below is a
+                // discrete user action and stays animated.
+                scrollToLatest(using: proxy, animated: false, requiresFollow: true)
             }
             .onChange(of: focused) { _, isFocused in
                 guard isFocused else { return }

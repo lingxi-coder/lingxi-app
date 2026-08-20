@@ -54,4 +54,25 @@ final class ConversationTimelineCacheTests: XCTestCase {
             "Switching the selected agent changes which items project, so it must invalidate"
         )
     }
+
+    func testUpdatingAgentTranscriptsInvalidatesTheProjection() {
+        let model = ConversationModel()
+        model.items = []
+        model.activeSessionId = "session-1"
+        _ = model.visibleTimelineGroups
+        let afterFirstRead = model.timelineGroupsRebuildCount
+
+        model.setAgentTranscript(
+            "child-agent",
+            transcript: ConversationAgentTranscript(),
+            sessionID: "session-1"
+        )
+        _ = model.visibleTimelineGroups
+
+        XCTAssertEqual(
+            model.timelineGroupsRebuildCount - afterFirstRead,
+            1,
+            "Updating a child agent's transcript changes what may project, so it must invalidate"
+        )
+    }
 }

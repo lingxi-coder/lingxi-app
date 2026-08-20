@@ -136,7 +136,7 @@ struct ConversationTimelineView: View {
 
         for row in group.rows {
             switch row {
-            case let .tool(runID, trace):
+            case let .tool(_, trace):
                 pendingTools.append(trace)
             case let .message(message):
                 flushTools()

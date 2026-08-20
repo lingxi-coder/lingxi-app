@@ -9,8 +9,6 @@
     <string name="local_apps_create_model_follow_current">跟隨目前對話</string>
     <string name="local_apps_create_model_label">Workflow 模型</string>
     <string name="local_apps_create_model_section">建置模型</string>
-    <string name="local_apps_error_workflow_model_unavailable">所選 Workflow 模型已無法使用，請重新選擇。</string>
-    <string name="local_apps_error_create_in_progress">已有一個本地應用正在建立中，請稍候。</string>
     <string name="local_apps_refresh">重新整理應用</string>
     <string name="local_apps_search">搜尋應用</string>
     <string name="local_apps_empty">還沒有本地應用</string>
@@ -595,6 +593,7 @@
     <string name="local_apps_restore_checkpoint_title">恢復程式碼檢查點？</string>
     <string name="local_apps_restore_code">恢復程式碼</string>
     <string name="local_apps_retry_generate">重試生成</string>
+    <string name="local_apps_runtime_failed_title">執行失敗</string>
     <string name="local_apps_runtime_mode">執行模式</string>
     <string name="local_apps_runtime_vite">Vite 本地服務</string>
     <string name="local_apps_runtime_running">執行中</string>
@@ -615,7 +614,7 @@
     <string name="local_apps_section_permissions">權限</string>
     <string name="local_apps_section_preview">預覽</string>
     <string name="local_apps_source">原始碼</string>
-    <string name="local_apps_source_detail">可檢視和編輯完整文字原始碼；符號連結、建置產物和工作區外路徑不會顯示。依賴清單由宿主依模板鎖定並管理，因此不受支援的套件修改或安裝會在驗證時失敗。</string>
+    <string name="local_apps_source_detail">可檢視和編輯完整文字原始碼；符號連結、建置產物和工作區外路徑不會顯示。修改固定依賴可以儲存，但建置驗證會拒絕不受支援的版本或安裝操作。</string>
     <string name="local_apps_source_empty">暫無可編輯原始碼</string>
     <string name="local_apps_source_error_title">原始碼錯誤</string>
     <string name="local_apps_source_loading">正在讀取原始碼…</string>
@@ -1180,7 +1179,8 @@
     <string name="local_apps_runtime_log_recovery">恢復：%1$s</string>
     <string name="local_apps_runtime_log_status">狀態：%1$s</string>
     <string name="local_apps_runtime_log_title">執行日誌</string>
-    <string name="local_apps_runtime_notice_staging">本地應用執行時仍在首次準備中。請等待準備完成後直接重試生成應用。</string>
+    <string name="local_apps_runtime_notice_staged_after_null">本地應用執行時已準備就緒，但本次啟動中曾有一次引擎建置沒能拿到它。引擎只在啟動時讀取一次執行時路徑：如果失敗原因是執行時不可用，請重啟 App 後重試；否則本次失敗與執行時無關。</string>
+    <string name="local_apps_runtime_notice_staging">本地應用執行時仍在首次準備中。引擎只在啟動時讀取一次執行時路徑，因此準備完成後需要重啟 App 才能生成應用。</string>
     <string name="local_apps_runtime_notice_unavailable">本地應用執行時準備失敗（安裝包中沒有執行時，或解壓失敗），本次啟動無法生成應用。</string>
     <string name="local_apps_section_permissions_logs">權限/日誌</string>
     <string name="local_apps_source_browser_notice">僅顯示 1 MiB 以內的文字原始碼；符號連結、建置產物和私有目錄已排除。依賴檔案可編輯，但不受支援的版本會在建置校驗時被拒絕。</string>
@@ -1369,7 +1369,7 @@
     <string name="settings_skill_seed_css_doctor_desc">診斷佈局問題並給出修復</string>
     <string name="settings_skill_seed_polish_name">英文潤色</string>
     <string name="settings_skill_seed_polish_desc">中→英寫作潤色，保留原意</string>
-    <string name="settings_skill_bundled_create_local_app_desc">編排本地應用的設計、腳手架、生成、建置和驗證</string>
+    <string name="settings_skill_bundled_create_local_app_desc">編排設計、依賴、生成、建置和驗證本地應用</string>
     <string name="settings_skill_bundled_frontend_design_desc">為目標平台和 form factor 設計原生前端方向</string>
     <string name="settings_skill_bundled_frontend_qa_desc">用 Browser 與原生 WebView 驗證介面和互動</string>
     <string name="settings_skill_bundled_accessibility_desc">檢查語意、鍵盤、觸控、對比度和動態字體</string>
@@ -1618,9 +1618,6 @@
     <string name="local_apps_create_brief_detail">AI 會據此生成一份問卷，幫助細化需求。</string>
     <string name="local_apps_create_brief_section">用一句話描述你想要的應用</string>
     <string name="local_apps_create_git_version_control">使用 Git 管理應用版本（推薦）</string>
-    <string name="local_apps_create_add_widget">建立後新增到主畫面 Widget</string>
-    <string name="local_apps_create_add_widget_detail">建立完成後會請求系統確認</string>
-    <string name="local_apps_widget_pin_unavailable">目前的啟動器不支援自動新增 Widget，請稍後手動新增。</string>
     <string name="local_apps_error_bridge_detached">應用檢視已關閉，這次請求不會有結果了。</string>
     <string name="local_apps_error_bridge_payload_invalid">請求內容無法序列化。</string>
     <string name="local_apps_error_brief_required">請用一句話描述這個應用。</string>
@@ -1690,4 +1687,9 @@
     <string name="slash_command_running">正在執行命令</string>
     <string name="slash_command_select_hint">填入命令；再次傳送以執行</string>
     <string name="slash_commands_title">Slash 命令</string>
+    <string name="local_apps_create_add_widget">建立後新增到主畫面 Widget</string>
+    <string name="local_apps_create_add_widget_detail">建立完成後會請求系統確認</string>
+    <string name="local_apps_error_create_in_progress">已有一個本地應用正在建立中，請稍候。</string>
+    <string name="local_apps_error_workflow_model_unavailable">所選 Workflow 模型已無法使用，請重新選擇。</string>
+    <string name="local_apps_widget_pin_unavailable">目前的啟動器不支援自動新增 Widget，請稍後手動新增。</string>
 </resources>

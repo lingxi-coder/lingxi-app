@@ -11,6 +11,35 @@ function readSnapshot() {
   return { bridge, bridgeReady: bridge !== null, device, adapter };
 }
 
+/// The native `deviceContext` is LIVE — the host defines `viewport`,
+/// `safeArea`, `colorScheme`, `reducedMotion` and `inputMode` as getters, so
+/// reading it again always returns current values. But `getDeviceContext`
+/// normalizes into a plain object, which snapshots those getters at call time.
+/// Without this comparison-and-resubscribe the provider would freeze the very
+/// first read: an iPad rotation, a Stage Manager / Split View resize, or a
+/// dark-mode toggle would never reach the app.
+function sameDevice(a, b) {
+  return (
+    a.os === b.os &&
+    a.formFactor === b.formFactor &&
+    a.colorScheme === b.colorScheme &&
+    a.reducedMotion === b.reducedMotion &&
+    a.inputMode === b.inputMode &&
+    a.viewport.width === b.viewport.width &&
+    a.viewport.height === b.viewport.height &&
+    a.safeArea.top === b.safeArea.top &&
+    a.safeArea.right === b.safeArea.right &&
+    a.safeArea.bottom === b.safeArea.bottom &&
+    a.safeArea.left === b.safeArea.left
+  );
+}
+
+const MEDIA_QUERIES = [
+  "(prefers-color-scheme: dark)",
+  "(prefers-reduced-motion: reduce)",
+  "(pointer: fine)",
+];
+
 export function LingXiBridgeProvider({ children }) {
   const [snapshot, setSnapshot] = useState(readSnapshot);
 
@@ -30,6 +59,42 @@ export function LingXiBridgeProvider({ children }) {
     };
     frame = window.requestAnimationFrame(refresh);
     return () => window.cancelAnimationFrame(frame);
+  }, [snapshot.bridgeReady]);
+
+  // Resubscribe once the bridge exists. Every source that can change a
+  // deviceContext getter is watched: window resize covers rotation and iPad
+  // multitasking, visualViewport covers the software keyboard and pinch-zoom
+  // insets, and the media queries cover appearance, motion and input-mode.
+  useEffect(() => {
+    if (!snapshot.bridgeReady) return undefined;
+
+    const resync = () => {
+      setSnapshot((current) => {
+        const next = readSnapshot();
+        return sameDevice(current.device, next.device) ? current : next;
+      });
+    };
+
+    window.addEventListener("resize", resync);
+    window.addEventListener("orientationchange", resync);
+    const viewport = window.visualViewport ?? null;
+    viewport?.addEventListener("resize", resync);
+
+    const lists = MEDIA_QUERIES.map((query) => window.matchMedia?.(query)).filter(
+      Boolean,
+    );
+    for (const list of lists) list.addEventListener("change", resync);
+
+    // The first paint may land before the host has applied safe-area insets,
+    // so take one catch-up read instead of trusting the mount-time snapshot.
+    resync();
+
+    return () => {
+      window.removeEventListener("resize", resync);
+      window.removeEventListener("orientationchange", resync);
+      viewport?.removeEventListener("resize", resync);
+      for (const list of lists) list.removeEventListener("change", resync);
+    };
   }, [snapshot.bridgeReady]);
 
   const value = useMemo(

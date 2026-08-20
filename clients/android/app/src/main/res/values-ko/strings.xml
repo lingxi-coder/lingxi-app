@@ -9,8 +9,6 @@
     <string name="local_apps_create_model_follow_current">현재 대화 따르기</string>
     <string name="local_apps_create_model_label">Workflow 모델</string>
     <string name="local_apps_create_model_section">빌드 모델</string>
-    <string name="local_apps_error_workflow_model_unavailable">선택한 Workflow 모델을 더 이상 사용할 수 없습니다. 다른 모델을 선택하세요.</string>
-    <string name="local_apps_error_create_in_progress">다른 로컬 앱을 생성 중입니다. 잠시 기다려 주세요.</string>
     <string name="local_apps_refresh">앱 새로고침</string>
     <string name="local_apps_search">앱 검색</string>
     <string name="local_apps_empty">아직 로컬 앱이 없습니다</string>
@@ -595,6 +593,7 @@
     <string name="local_apps_restore_checkpoint_title">코드 체크포인트를 복원하시겠습니까?</string>
     <string name="local_apps_restore_code">코드 복원</string>
     <string name="local_apps_retry_generate">다시 생성</string>
+    <string name="local_apps_runtime_failed_title">실행 실패</string>
     <string name="local_apps_runtime_mode">실행 모드</string>
     <string name="local_apps_runtime_vite">Vite 로컬 서비스</string>
     <string name="local_apps_runtime_running">실행 중</string>
@@ -615,7 +614,7 @@
     <string name="local_apps_section_permissions">권한</string>
     <string name="local_apps_section_preview">미리보기</string>
     <string name="local_apps_source">소스 코드</string>
-    <string name="local_apps_source_detail">전체 텍스트 소스 코드를 보고 편집할 수 있습니다. 심볼릭 링크, 빌드 결과물, 작업 공간 밖의 경로는 표시되지 않습니다. 의존성 매니페스트는 호스트가 템플릿 기준으로 잠가 관리하므로, 지원되지 않는 패키지 수정이나 설치는 검증에서 실패합니다.</string>
+    <string name="local_apps_source_detail">전체 텍스트 소스 코드를 보고 편집할 수 있습니다. 심볼릭 링크, 빌드 결과물, 작업 공간 밖의 경로는 표시되지 않습니다. 고정 의존성 수정 사항은 저장할 수 있지만, 빌드 검증에서 지원되지 않는 버전이나 설치 작업은 거부됩니다.</string>
     <string name="local_apps_source_empty">편집 가능한 소스 코드가 없습니다</string>
     <string name="local_apps_source_error_title">소스 코드 오류</string>
     <string name="local_apps_source_loading">소스 코드를 불러오는 중…</string>
@@ -1180,7 +1179,8 @@
     <string name="local_apps_runtime_log_recovery">복구: %1$s</string>
     <string name="local_apps_runtime_log_status">상태: %1$s</string>
     <string name="local_apps_runtime_log_title">실행 로그</string>
-    <string name="local_apps_runtime_notice_staging">로컬 앱 런타임이 아직 최초 준비 중입니다. 준비가 끝나면 앱 생성만 다시 시도해 주세요.</string>
+    <string name="local_apps_runtime_notice_staged_after_null">로컬 앱 런타임이 준비되었지만, 이번 시작 중 한 번의 엔진 빌드에서 이를 받지 못했습니다. 엔진은 시작할 때 한 번만 런타임 경로를 읽습니다. 실패 원인이 런타임을 사용할 수 없어서라면 앱을 재시작한 후 다시 시도해 주세요. 그렇지 않다면 이번 실패는 런타임과 관련이 없습니다.</string>
+    <string name="local_apps_runtime_notice_staging">로컬 앱 런타임이 아직 최초 준비 중입니다. 엔진은 시작할 때 한 번만 런타임 경로를 읽으므로, 준비가 끝나면 앱을 재시작해야 앱을 생성할 수 있습니다.</string>
     <string name="local_apps_runtime_notice_unavailable">로컬 앱 런타임 준비에 실패했습니다(설치 패키지에 런타임이 없거나 압축 해제에 실패). 이번 실행에서는 앱을 생성할 수 없습니다.</string>
     <string name="local_apps_section_permissions_logs">권한/로그</string>
     <string name="local_apps_source_browser_notice">1 MiB 이하의 텍스트 소스 코드만 표시됩니다. 심볼릭 링크, 빌드 결과물, 비공개 디렉터리는 제외됩니다. 의존성 파일은 편집할 수 있지만, 지원되지 않는 버전은 빌드 검증 시 거부됩니다.</string>
@@ -1369,7 +1369,7 @@
     <string name="settings_skill_seed_css_doctor_desc">레이아웃 문제를 진단하고 수정 방법 제시</string>
     <string name="settings_skill_seed_polish_name">영문 다듬기</string>
     <string name="settings_skill_seed_polish_desc">중국어 → 영어 글쓰기 다듬기, 원래 의미 유지</string>
-    <string name="settings_skill_bundled_create_local_app_desc">로컬 앱의 설계, 스캐폴드, 생성, 빌드, 검증을 통합 진행</string>
+    <string name="settings_skill_bundled_create_local_app_desc">로컬 앱의 설계, 의존성, 생성, 빌드, 검증을 통합 진행</string>
     <string name="settings_skill_bundled_frontend_design_desc">대상 플랫폼과 폼 팩터에 맞는 네이티브 프런트엔드 방향을 설계</string>
     <string name="settings_skill_bundled_frontend_qa_desc">Browser와 네이티브 WebView로 UI와 상호작용을 검증</string>
     <string name="settings_skill_bundled_accessibility_desc">시맨틱, 키보드 접근, 터치 대상, 대비, 동적 글꼴을 점검</string>
@@ -1618,9 +1618,6 @@
     <string name="local_apps_create_brief_detail">AI가 이를 바탕으로 세부 사항을 정리할 설문지를 작성합니다.</string>
     <string name="local_apps_create_brief_section">원하는 앱을 한 줄로 설명해 주세요</string>
     <string name="local_apps_create_git_version_control">Git으로 앱 버전 관리(권장)</string>
-    <string name="local_apps_create_add_widget">생성 후 홈 화면에 Widget 추가</string>
-    <string name="local_apps_create_add_widget_detail">생성 후 시스템 확인을 요청합니다</string>
-    <string name="local_apps_widget_pin_unavailable">현재 런처는 Widget 자동 추가를 지원하지 않습니다. 나중에 수동으로 추가하세요.</string>
     <string name="local_apps_error_bridge_detached">앱 화면이 닫혀 이 요청은 응답되지 않습니다.</string>
     <string name="local_apps_error_bridge_payload_invalid">요청 내용을 직렬화할 수 없습니다.</string>
     <string name="local_apps_error_brief_required">앱을 한 줄로 설명해 주세요.</string>
@@ -1690,4 +1687,9 @@
     <string name="slash_command_running">명령 실행 중</string>
     <string name="slash_command_select_hint">명령을 입력한 뒤 다시 보내 실행합니다</string>
     <string name="slash_commands_title">슬래시 명령</string>
+    <string name="local_apps_create_add_widget">생성 후 홈 화면에 Widget 추가</string>
+    <string name="local_apps_create_add_widget_detail">생성 후 시스템 확인을 요청합니다</string>
+    <string name="local_apps_error_create_in_progress">다른 로컬 앱을 생성 중입니다. 잠시 기다려 주세요.</string>
+    <string name="local_apps_error_workflow_model_unavailable">선택한 Workflow 모델을 더 이상 사용할 수 없습니다. 다른 모델을 선택하세요.</string>
+    <string name="local_apps_widget_pin_unavailable">현재 런처는 Widget 자동 추가를 지원하지 않습니다. 나중에 수동으로 추가하세요.</string>
 </resources>

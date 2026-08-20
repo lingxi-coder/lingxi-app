@@ -9,8 +9,6 @@
     <string name="local_apps_create_model_follow_current">Follow current conversation</string>
     <string name="local_apps_create_model_label">Workflow model</string>
     <string name="local_apps_create_model_section">Build model</string>
-    <string name="local_apps_error_workflow_model_unavailable">The selected workflow model is no longer available. Choose another model.</string>
-    <string name="local_apps_error_create_in_progress">Another local app is still being created. Please wait.</string>
     <string name="local_apps_refresh">Refresh Apps</string>
     <string name="local_apps_search">Search Apps</string>
     <string name="local_apps_empty">No local apps yet</string>
@@ -595,6 +593,7 @@
     <string name="local_apps_restore_checkpoint_title">Restore this code checkpoint?</string>
     <string name="local_apps_restore_code">Restore Code</string>
     <string name="local_apps_retry_generate">Retry Generation</string>
+    <string name="local_apps_runtime_failed_title">Runtime failed</string>
     <string name="local_apps_runtime_mode">Run Mode</string>
     <string name="local_apps_runtime_vite">Vite Local Server</string>
     <string name="local_apps_runtime_running">Running</string>
@@ -615,7 +614,7 @@
     <string name="local_apps_section_permissions">Permissions</string>
     <string name="local_apps_section_preview">Preview</string>
     <string name="local_apps_source">Source</string>
-    <string name="local_apps_source_detail">View and edit the full text source; symlinks, build artifacts, and paths outside the workspace aren\'t shown. Dependency manifests are host-managed and locked to the template, so unsupported package edits or installs will fail validation.</string>
+    <string name="local_apps_source_detail">View and edit the full text source; symlinks, build artifacts, and paths outside the workspace aren\'t shown. Changes to pinned dependencies can be saved, but build validation will reject unsupported versions or installs.</string>
     <string name="local_apps_source_empty">No editable source yet</string>
     <string name="local_apps_source_error_title">Source Error</string>
     <string name="local_apps_source_loading">Loading source…</string>
@@ -1008,12 +1007,6 @@
     <string name="chat_run_status_completed">Run complete</string>
     <string name="chat_run_status_failed">Run failed</string>
     <string name="chat_run_status_cancelled">Stopped</string>
-    <string name="chat_execution_status">Execution</string>
-    <string name="chat_execution_agents">Agents</string>
-    <string name="chat_execution_tasks">Workflows &amp; tasks</string>
-    <string name="chat_execution_plan">Plan</string>
-    <string name="chat_workflow_resume">Resume workflow</string>
-    <string name="chat_status_paused">Paused</string>
     <string name="chat_run_status_finished">Finished</string>
     <string name="chat_run_tools_windowed">%1$d earlier tool calls</string>
     <string name="chat_background_service_channel">Active conversation</string>
@@ -1186,7 +1179,8 @@
     <string name="local_apps_runtime_log_recovery">Recovery: %1$s</string>
     <string name="local_apps_runtime_log_status">Status: %1$s</string>
     <string name="local_apps_runtime_log_title">Runtime log</string>
-    <string name="local_apps_runtime_notice_staging">The local-app runtime is still being prepared for the first time. Wait for preparation to finish, then retry app generation directly.</string>
+    <string name="local_apps_runtime_notice_staged_after_null">The local-app runtime is ready, but during this launch one engine build failed to pick it up. The engine reads the runtime path only once at launch: if the failure was caused by the runtime being unavailable, restart the app and try again; otherwise this failure is unrelated to the runtime.</string>
+    <string name="local_apps_runtime_notice_staging">The local-app runtime is still being prepared for the first time. The engine reads the runtime path only once at launch, so you\'ll need to restart the app after preparation finishes before you can generate apps.</string>
     <string name="local_apps_runtime_notice_unavailable">The local-app runtime failed to prepare (the install package has no runtime, or extraction failed); apps can\'t be generated during this launch.</string>
     <string name="local_apps_section_permissions_logs">Permissions/Logs</string>
     <string name="local_apps_source_browser_notice">Only text source under 1 MiB is shown; symlinks, build artifacts, and private directories are excluded. Dependency files are editable, but unsupported versions are rejected during build verification.</string>
@@ -1375,7 +1369,7 @@
     <string name="settings_skill_seed_css_doctor_desc">Diagnoses layout issues and provides fixes</string>
     <string name="settings_skill_seed_polish_name">English Polishing</string>
     <string name="settings_skill_seed_polish_desc">Chinese-to-English writing polish that preserves the original meaning</string>
-    <string name="settings_skill_bundled_create_local_app_desc">Orchestrates the design, scaffold, generation, build, and verification of a local app</string>
+    <string name="settings_skill_bundled_create_local_app_desc">Orchestrates the design, dependencies, generation, build, and verification of a local app</string>
     <string name="settings_skill_bundled_frontend_design_desc">Designs a native frontend direction for the target platform and form factor</string>
     <string name="settings_skill_bundled_frontend_qa_desc">Validates UI and interactions with Browser and the native WebView</string>
     <string name="settings_skill_bundled_accessibility_desc">Checks semantics, keyboard access, touch targets, contrast, and dynamic type</string>
@@ -1624,9 +1618,6 @@
     <string name="local_apps_create_brief_detail">The model will turn this into a short questionnaire to nail down the details.</string>
     <string name="local_apps_create_brief_section">Describe the app you want in one line</string>
     <string name="local_apps_create_git_version_control">Use Git to manage app versions (recommended)</string>
-    <string name="local_apps_create_add_widget">Add a Widget to the Home screen</string>
-    <string name="local_apps_create_add_widget_detail">The launcher will ask for confirmation after creation</string>
-    <string name="local_apps_widget_pin_unavailable">This launcher cannot add Widgets automatically. Add it manually later.</string>
     <string name="local_apps_error_bridge_detached">The app view closed; this request will not be answered.</string>
     <string name="local_apps_error_bridge_payload_invalid">The request payload could not be serialized.</string>
     <string name="local_apps_error_brief_required">Please describe your app in one line.</string>
@@ -1696,4 +1687,15 @@
     <string name="slash_command_running">Running command</string>
     <string name="slash_command_select_hint">Insert the command, then send again to run it</string>
     <string name="slash_commands_title">Slash commands</string>
+    <string name="chat_execution_agents">Agents</string>
+    <string name="chat_execution_plan">Plan</string>
+    <string name="chat_execution_status">Execution</string>
+    <string name="chat_execution_tasks">Workflows &amp; tasks</string>
+    <string name="chat_status_paused">Paused</string>
+    <string name="chat_workflow_resume">Resume workflow</string>
+    <string name="local_apps_create_add_widget">Add a Widget to the Home screen</string>
+    <string name="local_apps_create_add_widget_detail">The launcher will ask for confirmation after creation</string>
+    <string name="local_apps_error_create_in_progress">Another local app is still being created. Please wait.</string>
+    <string name="local_apps_error_workflow_model_unavailable">The selected workflow model is no longer available. Choose another model.</string>
+    <string name="local_apps_widget_pin_unavailable">This launcher cannot add Widgets automatically. Add it manually later.</string>
 </resources>

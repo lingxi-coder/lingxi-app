@@ -9,8 +9,6 @@
     <string name="local_apps_create_model_follow_current">現在の会話に従う</string>
     <string name="local_apps_create_model_label">Workflow モデル</string>
     <string name="local_apps_create_model_section">ビルドモデル</string>
-    <string name="local_apps_error_workflow_model_unavailable">選択した Workflow モデルは利用できなくなりました。別のモデルを選択してください。</string>
-    <string name="local_apps_error_create_in_progress">別のローカルアプリを作成中です。しばらくお待ちください。</string>
     <string name="local_apps_refresh">アプリを更新</string>
     <string name="local_apps_search">アプリを検索</string>
     <string name="local_apps_empty">ローカルアプリはまだありません</string>
@@ -595,6 +593,7 @@
     <string name="local_apps_restore_checkpoint_title">コードのチェックポイントを復元しますか？</string>
     <string name="local_apps_restore_code">コードを復元</string>
     <string name="local_apps_retry_generate">生成を再試行</string>
+    <string name="local_apps_runtime_failed_title">実行に失敗しました</string>
     <string name="local_apps_runtime_mode">実行モード</string>
     <string name="local_apps_runtime_vite">Vite ローカルサービス</string>
     <string name="local_apps_runtime_running">実行中</string>
@@ -615,7 +614,7 @@
     <string name="local_apps_section_permissions">権限</string>
     <string name="local_apps_section_preview">プレビュー</string>
     <string name="local_apps_source">ソースコード</string>
-    <string name="local_apps_source_detail">完全なテキストソースコードの閲覧・編集ができます。シンボリックリンク、ビルド成果物、ワークスペース外のパスは表示されません。依存マニフェストはホストがテンプレートに合わせて固定管理するため、未対応のパッケージ編集やインストールは検証で失敗します。</string>
+    <string name="local_apps_source_detail">完全なテキストソースコードの閲覧・編集ができます。シンボリックリンク、ビルド成果物、ワークスペース外のパスは表示されません。固定された依存関係の変更は保存できますが、サポート対象外のバージョンやインストール操作はビルド検証で拒否されます。</string>
     <string name="local_apps_source_empty">編集可能なソースコードはまだありません</string>
     <string name="local_apps_source_error_title">ソースコードエラー</string>
     <string name="local_apps_source_loading">ソースコードを読み込み中…</string>
@@ -1180,7 +1179,8 @@
     <string name="local_apps_runtime_log_recovery">復旧：%1$s</string>
     <string name="local_apps_runtime_log_status">状態：%1$s</string>
     <string name="local_apps_runtime_log_title">実行ログ</string>
-    <string name="local_apps_runtime_notice_staging">ローカルアプリのランタイムは、まだ初回の準備中です。準備が完了したら、そのままアプリ生成を再試行してください。</string>
+    <string name="local_apps_runtime_notice_staged_after_null">ローカルアプリのランタイムは準備できていますが、今回の起動中に一度、エンジンのビルドがそれを取得できませんでした。エンジンは起動時に一度だけランタイムパスを読み込みます。失敗の原因がランタイムの利用不可によるものであれば、アプリを再起動してから再試行してください。それ以外の場合、今回の失敗はランタイムとは無関係です。</string>
+    <string name="local_apps_runtime_notice_staging">ローカルアプリのランタイムは、まだ初回の準備中です。エンジンは起動時に一度だけランタイムパスを読み込むため、準備が完了したらアプリを再起動しないとアプリを生成できません。</string>
     <string name="local_apps_runtime_notice_unavailable">ローカルアプリのランタイムの準備に失敗しました（インストールパッケージにランタイムが含まれていないか、展開に失敗しました）。今回の起動ではアプリを生成できません。</string>
     <string name="local_apps_section_permissions_logs">権限／ログ</string>
     <string name="local_apps_source_browser_notice">1 MiB 以内のテキストソースコードのみを表示します。シンボリックリンク、ビルド成果物、非公開ディレクトリは除外されています。依存関係ファイルは編集できますが、サポート対象外のバージョンはビルド検証時に拒否されます。</string>
@@ -1369,7 +1369,7 @@
     <string name="settings_skill_seed_css_doctor_desc">レイアウトの問題を診断し、修正方法を提示</string>
     <string name="settings_skill_seed_polish_name">英文校正</string>
     <string name="settings_skill_seed_polish_desc">中国語から英語への文章を、原意を保ったまま校正</string>
-    <string name="settings_skill_bundled_create_local_app_desc">ローカルアプリの設計、スキャフォールド、生成、ビルド、検証を一貫して進行</string>
+    <string name="settings_skill_bundled_create_local_app_desc">ローカルアプリの設計、依存関係、生成、ビルド、検証を一貫して進行</string>
     <string name="settings_skill_bundled_frontend_design_desc">対象プラットフォームとフォームファクターに合わせてネイティブフロントエンドの方向性を設計</string>
     <string name="settings_skill_bundled_frontend_qa_desc">Browser とネイティブ WebView で UI と操作を検証</string>
     <string name="settings_skill_bundled_accessibility_desc">セマンティクス、キーボード操作、タッチターゲット、コントラスト、動的文字サイズを確認</string>
@@ -1618,9 +1618,6 @@
     <string name="local_apps_create_brief_detail">AI がこれをもとに詳細を詰めるための質問票を作成します。</string>
     <string name="local_apps_create_brief_section">作りたいアプリを一行で説明してください</string>
     <string name="local_apps_create_git_version_control">Git でアプリのバージョンを管理する（推奨）</string>
-    <string name="local_apps_create_add_widget">作成後にホーム画面へ Widget を追加</string>
-    <string name="local_apps_create_add_widget_detail">作成完了後にシステム確認を表示します</string>
-    <string name="local_apps_widget_pin_unavailable">このランチャーは Widget の自動追加に対応していません。後で手動で追加してください。</string>
     <string name="local_apps_error_bridge_detached">アプリ画面が閉じたため、このリクエストは応答されません。</string>
     <string name="local_apps_error_bridge_payload_invalid">リクエスト内容をシリアライズできません。</string>
     <string name="local_apps_error_brief_required">アプリを一行で説明してください。</string>
@@ -1690,4 +1687,9 @@
     <string name="slash_command_running">コマンドを実行中</string>
     <string name="slash_command_select_hint">コマンドを入力し、もう一度送信して実行します</string>
     <string name="slash_commands_title">スラッシュコマンド</string>
+    <string name="local_apps_create_add_widget">作成後にホーム画面へ Widget を追加</string>
+    <string name="local_apps_create_add_widget_detail">作成完了後にシステム確認を表示します</string>
+    <string name="local_apps_error_create_in_progress">別のローカルアプリを作成中です。しばらくお待ちください。</string>
+    <string name="local_apps_error_workflow_model_unavailable">選択した Workflow モデルは利用できなくなりました。別のモデルを選択してください。</string>
+    <string name="local_apps_widget_pin_unavailable">このランチャーは Widget の自動追加に対応していません。後で手動で追加してください。</string>
 </resources>

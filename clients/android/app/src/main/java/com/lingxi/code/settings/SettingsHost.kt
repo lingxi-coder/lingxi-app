@@ -21,8 +21,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Alignment
@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -48,6 +49,7 @@ import com.lingxi.code.components.LXIconName
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
+import com.lingxi.code.voice.offline.VoiceModelDownloader
 
 /**
  * Settings surface host.
@@ -85,7 +87,20 @@ fun SettingsHost(
     val resolvedStore: SettingsStore =
         store ?: viewModel(factory = SettingsStore.factory(context))
     val t = LingXiTheme.palette
-    val state by resolvedStore.state.collectAsState()
+    val state by resolvedStore.state.collectAsStateWithLifecycle()
+    val modelStates by VoiceModelDownloader.states.collectAsStateWithLifecycle()
+    val probedVoiceCapability by produceState(
+        initialValue = state.voiceCapability,
+        key1 = context.applicationContext,
+        key2 = state.voice,
+        key3 = modelStates,
+    ) {
+        value = probeVoiceCapabilitySnapshot(
+            context = context.applicationContext,
+            preferences = state.voice,
+            modelStates = modelStates,
+        )
+    }
     val backEntry by navController.currentBackStackEntryAsState()
     val route = backEntry?.destination?.route
     val atRoot = route == null || route == SettingsRoutes.MAIN
@@ -96,6 +111,9 @@ fun SettingsHost(
                 launchSingleTop = true
             }
         }
+    }
+    LaunchedEffect(probedVoiceCapability) {
+        resolvedStore.setVoiceCapability(probedVoiceCapability)
     }
 
     // System back: pop one page, or close the whole surface at the root.
@@ -157,7 +175,11 @@ fun SettingsHost(
 
                 // 智能 — providers (A7) + voice TTS editor
                 page(SettingsRoutes.VOICE) {
-                    VoicePage(voice = state.voice, onChange = resolvedStore::setVoice)
+                    VoicePage(
+                        voice = state.voice,
+                        capability = state.voiceCapability,
+                        onChange = resolvedStore::setVoice,
+                    )
                 }
                 page(SettingsRoutes.PROVIDER_LIST) {
                     val kind = providerKindArg(it)
@@ -230,6 +252,7 @@ fun SettingsHost(
                 page(SettingsRoutes.COMPUTER_USE) {
                     ComputerUseSettingsPage(
                         voice = state.voice,
+                        capability = state.voiceCapability,
                         onOpenAudioSettings = {
                             navController.navigate(SettingsRoutes.VOICE)
                         },

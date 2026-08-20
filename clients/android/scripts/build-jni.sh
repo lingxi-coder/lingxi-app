@@ -50,6 +50,12 @@ SONAME="lib${LIB_STEM}.so"
 HOST_DYLIB="lib${LIB_STEM}.dylib"     # macOS host cdylib (bindgen introspection)
 
 UNIFFI_CONFIG="${CARGO_DIR}/apps/${CRATE}/uniffi.toml"
+VOICE_MANIFEST="${ANDROID_DIR}/../voice/models.json"
+
+[[ -f "${VOICE_MANIFEST}" ]] || {
+  echo "ERROR: shared voice manifest is missing: ${VOICE_MANIFEST}" >&2
+  exit 1
+}
 
 # Build into a gitignored staging directory, then atomically replace only this
 # script's three owned files after every ABI and binding step succeeds. A Rust
@@ -79,9 +85,18 @@ log() { printf '\033[1;34m[build-jni]\033[0m %s\n' "$*"; }
 # ---------------------------------------------------------------------------
 # 0. Preflight — tools, NDK, Rust targets
 # ---------------------------------------------------------------------------
-for tool in cargo rustc cargo-ndk; do
+for tool in cargo rustc cargo-ndk node shasum; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "ERROR: required tool not found: ${tool}" >&2; exit 1; }
 done
+
+IFS=$'\t' read -r SHERPA_AAR_VER SHERPA_AAR_NAME SHERPA_AAR_URL SHERPA_AAR_SHA256 < <(
+  node -e '
+    const fs = require("fs");
+    const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const artifact = manifest.runtime.android;
+    process.stdout.write([manifest.runtime.version, artifact.name, artifact.url, artifact.sha256].join("\t"));
+  ' "${VOICE_MANIFEST}"
+)
 
 # Resolve ANDROID_NDK_HOME: honor an existing env, else pick the newest NDK under
 # the SDK's ndk/ dir (highest version-sorted directory name).
@@ -113,19 +128,27 @@ fi
 
 # ---------------------------------------------------------------------------
 # 0b. Vendored sherpa-onnx AAR (offline voice runtime) — gitignored, fetched
-#     from GitHub Releases v1.13.2 into app/libs/ (consumed via the flatDir repo
-#     in settings.gradle.kts). ~38 MB; skipped if already present.
+#     from the shared voice manifest into app/libs/ (consumed via the flatDir
+#     repo in settings.gradle.kts). ~38 MB; skipped if already present after
+#     checksum verification.
 # ---------------------------------------------------------------------------
-SHERPA_AAR_VER="1.13.2"
-SHERPA_AAR="${ANDROID_DIR}/app/libs/sherpa-onnx-static-link-onnxruntime-${SHERPA_AAR_VER}.aar"
+SHERPA_AAR="${ANDROID_DIR}/app/libs/${SHERPA_AAR_NAME}"
 if [[ ! -f "${SHERPA_AAR}" ]]; then
   log "Downloading sherpa-onnx AAR v${SHERPA_AAR_VER} → ${SHERPA_AAR}"
   mkdir -p "$(dirname "${SHERPA_AAR}")"
-  curl -fsSL "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_AAR_VER}/sherpa-onnx-static-link-onnxruntime-${SHERPA_AAR_VER}.aar" -o "${SHERPA_AAR}" \
+  curl -fsSL "${SHERPA_AAR_URL}" -o "${SHERPA_AAR}" \
     || { echo "ERROR: failed to fetch sherpa-onnx AAR" >&2; exit 1; }
   log "  $(du -h "${SHERPA_AAR}" | awk '{print $1}')"
 else
   log "sherpa-onnx AAR present: ${SHERPA_AAR}"
+fi
+
+ACTUAL_SHERPA_AAR_SHA256="$(shasum -a 256 "${SHERPA_AAR}" | awk '{print $1}')"
+if [[ "${ACTUAL_SHERPA_AAR_SHA256}" != "${SHERPA_AAR_SHA256}" ]]; then
+  echo "ERROR: sherpa-onnx AAR checksum mismatch" >&2
+  echo "expected: ${SHERPA_AAR_SHA256}" >&2
+  echo "actual:   ${ACTUAL_SHERPA_AAR_SHA256}" >&2
+  exit 1
 fi
 
 # ---------------------------------------------------------------------------

@@ -44,17 +44,32 @@ enum VoiceBargeInError: LocalizedError {
 @MainActor
 final class VoiceBargeInRecognizer: VoiceBargeInRecognizing {
     func start(language: String?, prefersOnDevice: Bool) async throws -> any VoiceBargeInSession {
+        let preferences = VoicePreferencesSnapshot.load()
+        let identifier = VoiceCapabilityModel.resolvedRecognitionLocaleIdentifier(
+            configuredLanguage: language ?? preferences.language,
+            currentLocale: .autoupdatingCurrent
+        )
+        let recognizer = SFSpeechRecognizer(locale: Locale(identifier: identifier))
+        let route = VoiceRuntimeResolver.recognitionRoute(
+            preferences: preferences,
+            languageOverride: language,
+            systemRecognizerAvailable: VoiceRuntimeResolver.systemRecognitionAvailable(
+                serviceAvailable: recognizer?.isAvailable == true,
+                authorization: SFSpeechRecognizer.authorizationStatus()
+            )
+        )
+        if case .sherpa = route {
+            guard AVAudioApplication.shared.recordPermission == .granted else {
+                throw VoiceBargeInError.permissionDenied
+            }
+            return SherpaVoiceBargeInSession(language: language)
+        }
+        guard case .system = route, let recognizer, recognizer.isAvailable else {
+            throw VoiceBargeInError.unavailable
+        }
         guard SFSpeechRecognizer.authorizationStatus() == .authorized,
               AVAudioApplication.shared.recordPermission == .granted
         else { throw VoiceBargeInError.permissionDenied }
-
-        let identifier = VoiceCapabilityModel.resolvedRecognitionLocaleIdentifier(
-            configuredLanguage: language,
-            currentLocale: .autoupdatingCurrent
-        )
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: identifier)),
-              recognizer.isAvailable
-        else { throw VoiceBargeInError.unavailable }
 
         let lease = try await VoiceAudioSessionCoordinator.shared.acquire(.flowDuplex)
         do {
@@ -68,6 +83,52 @@ final class VoiceBargeInRecognizer: VoiceBargeInRecognizing {
             await VoiceAudioSessionCoordinator.shared.release(lease)
             throw error
         }
+    }
+}
+
+@MainActor
+private final class SherpaVoiceBargeInSession: VoiceBargeInSession {
+    let events: AsyncStream<VoiceBargeInEvent>
+    private let recognizer = SttImpl()
+    private var continuation: AsyncStream<VoiceBargeInEvent>.Continuation?
+    private var task: Task<Void, Never>?
+
+    init(language: String?) {
+        var captured: AsyncStream<VoiceBargeInEvent>.Continuation?
+        events = AsyncStream { captured = $0 }
+        continuation = captured
+        task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let transcript = try await recognizer.transcribe(
+                    language: language,
+                    automaticEndpointAfterSilence: .milliseconds(800)
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !Task.isCancelled else { return }
+                if transcript.isEmpty {
+                    continuation?.yield(.empty)
+                } else {
+                    continuation?.yield(.speechStarted)
+                    continuation?.yield(.transcript(transcript))
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                continuation?.yield(.failed(error.localizedDescription))
+            }
+            continuation?.finish()
+        }
+        continuation?.onTermination = { [weak self] _ in
+            Task { @MainActor [weak self] in await self?.stop() }
+        }
+    }
+
+    func stop() async {
+        recognizer.cancelRecognition()
+        task?.cancel()
+        task = nil
+        continuation?.finish()
+        continuation = nil
     }
 }
 

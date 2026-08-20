@@ -28,6 +28,9 @@ import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.net.URL
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.coroutineContext
@@ -246,6 +249,7 @@ object VoiceModelDownloader {
 
     /** Mark already-on-disk models Ready so re-entering the wizard reflects reality. */
     private fun reconcileFromDisk() {
+        restoreInterruptedInstallations()
         removeObsoletePartials()
         _states.value = OfflineModelCatalog.all.associate {
             it.id to if (isReady(it)) ModelState.Ready else (_states.value[it.id] ?: ModelState.NotInstalled)
@@ -258,6 +262,19 @@ object VoiceModelDownloader {
         File(ctx.cacheDir, "voice_dl").listFiles()
             ?.filter { it.isFile && it.name.endsWith(".tar.bz2") && it.name !in currentArchives }
             ?.forEach(File::delete)
+    }
+
+    private fun restoreInterruptedInstallations() {
+        OfflineModelCatalog.all.forEach { entry ->
+            val destination = modelDir(entry.id)
+            val backup = File(destination.parentFile, ".${entry.id}.previous")
+            val staging = File(destination.parentFile, ".${entry.id}.installing")
+            when {
+                destination.exists() -> backup.deleteRecursively()
+                backup.exists() -> runCatching { moveDirectory(backup, destination) }
+            }
+            staging.deleteRecursively()
+        }
     }
 
     /** Start (or resume) downloading every model in a language pack. */
@@ -435,13 +452,39 @@ object VoiceModelDownloader {
             staging.deleteRecursively()
             throw IOException(ctx?.getString(R.string.voice_download_extracted_files_missing) ?: "解压后文件缺失")
         }
-        if (destDir.exists() && !destDir.deleteRecursively()) {
+        val backup = File(destDir.parentFile, ".${entry.id}.previous")
+        backup.deleteRecursively()
+        var published = false
+        try {
+            if (destDir.exists()) moveDirectory(destDir, backup)
+            moveDirectory(staging, destDir)
+            published = true
+            backup.deleteRecursively()
+        } catch (error: Exception) {
+            if (published && destDir.exists()) destDir.deleteRecursively()
+            if (backup.exists()) runCatching { moveDirectory(backup, destDir) }
             staging.deleteRecursively()
-            throw IOException(ctx?.getString(R.string.voice_download_replace_failed) ?: "无法替换旧语音模型")
+            throw IOException(
+                ctx?.getString(R.string.voice_download_activate_failed) ?: "无法激活语音模型",
+                error,
+            )
         }
-        if (!staging.renameTo(destDir)) {
-            staging.deleteRecursively()
-            throw IOException(ctx?.getString(R.string.voice_download_activate_failed) ?: "无法激活语音模型")
+    }
+
+    private fun moveDirectory(source: File, destination: File) {
+        try {
+            Files.move(
+                source.toPath(),
+                destination.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(
+                source.toPath(),
+                destination.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
         }
     }
 

@@ -103,7 +103,7 @@ struct RootView: View {
     @State private var confirmedSession: String
     @State private var pendingSessionRestoreID: String?
     @State private var draft: String
-    @State private var voiceInteraction = VoiceInteractionController()
+    @State private var voiceInteraction: VoiceInteractionController
     @State private var conversationBackgroundExecution =
         ConversationBackgroundExecutionController.live()
     @State private var projectSwitching = false
@@ -111,7 +111,7 @@ struct RootView: View {
     private let appSandboxRoot: String
     private let scopedPreferences: ProjectScopedPreferences
 
-    init() {
+    init(voiceCapability: VoiceCapabilityModel) {
         let root = ConversationSourceFactory.appSandboxRoot()
         let rootURL = URL(fileURLWithPath: root, isDirectory: true)
         let projects = ProjectStore(appSandboxRoot: rootURL)
@@ -205,6 +205,14 @@ struct RootView: View {
             ? ""
             : preferences.draft(projectID: projectID)
         _draft = State(initialValue: initialDraft)
+        _voiceInteraction = State(
+            initialValue: VoiceInteractionController(
+                voiceCapture: VoiceCapture(),
+                capability: voiceCapability,
+                speechPlayer: SystemVoiceSpeechPlayer(),
+                bargeInRecognizer: VoiceBargeInRecognizer()
+            )
+        )
         appSandboxRoot = root
         scopedPreferences = preferences
     }

@@ -46,10 +46,12 @@ import com.lingxi.code.computeruse.ComputerUseSessionState
 import com.lingxi.code.computeruse.ComputerUseTier
 import com.lingxi.code.model.VoiceConfig
 import com.lingxi.code.theme.LingXiTheme
+import java.util.Locale
 
 @Composable
 fun ComputerUseSettingsPage(
     voice: VoiceConfig,
+    capability: VoiceCapabilitySnapshot,
     onOpenAudioSettings: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -284,7 +286,7 @@ fun ComputerUseSettingsPage(
             }
             SettingsRow(
                 label = stringResource(R.string.settings_cu_audio_settings),
-                sub = "${voiceLanguageLabel(voice.inputLanguage)} · ${voice.speed}x · ${voice.voiceId.ifBlank { "default" }}",
+                sub = "${voiceLanguageLabel(capability.effectiveLanguage.ifBlank { voice.language })} · ${String.format(Locale.US, "%.1fx", voice.rate)} · ${capability.effectiveVoice?.label ?: stringResource(R.string.settings_voice_system_default)}",
                 value = stringResource(R.string.common_open),
                 isLast = true,
                 onTap = onOpenAudioSettings,

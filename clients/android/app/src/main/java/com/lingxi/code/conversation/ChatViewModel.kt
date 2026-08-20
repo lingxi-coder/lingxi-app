@@ -29,8 +29,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -176,6 +178,24 @@ enum class ChatErrorKind {
 
 private const val ANDROID_COMPUTER_USE_TOOL = "android_use"
 
+enum class ConversationTurnOrigin {
+    Ordinary,
+    Flow,
+}
+
+enum class ConversationTurnOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+data class ConversationTurnCompletion(
+    val token: Long,
+    val origin: ConversationTurnOrigin,
+    val outcome: ConversationTurnOutcome,
+    val finalAssistantText: String,
+)
+
 /** Classify a raw engine error message into a [ChatErrorKind] for the banner. */
 internal fun classifyError(message: String): ChatErrorKind {
     val m = message.lowercase()
@@ -255,6 +275,10 @@ class ChatViewModel(
         },
     )
     val state: StateFlow<ChatState> = _state.asStateFlow()
+    private val _turnCompletions = MutableSharedFlow<ConversationTurnCompletion>(extraBufferCapacity = 8)
+    val turnCompletions = _turnCompletions.asSharedFlow()
+    private var currentTurnOrigin: ConversationTurnOrigin = ConversationTurnOrigin.Ordinary
+    private var lastTurnCompletionToken: Long = Long.MIN_VALUE
 
     /**
      * The engine's REAL resumable-session catalog, mirrored from the source's
@@ -1148,7 +1172,10 @@ class ChatViewModel(
      * guard is here (not only in the UI) so the contract holds regardless of who
      * calls `send`.
      */
-    fun send(text: String) {
+    fun send(
+        text: String,
+        origin: ConversationTurnOrigin = ConversationTurnOrigin.Ordinary,
+    ) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
         if (_state.value.streaming) return // ignore overlapping submit while streaming
@@ -1160,6 +1187,7 @@ class ChatViewModel(
         // capture this turn's token so its own events are accepted.
         turnToken++
         val token = turnToken
+        currentTurnOrigin = origin
         if (_sourceScope.value !is ConversationScope.LocalApp) {
             // The draft was just sent — clear the persisted copy. App scopes
             // keep their drafts in the per-scope store (RootScreen wires it),
@@ -1196,6 +1224,8 @@ class ChatViewModel(
      */
     fun cancel() {
         if (!_state.value.streaming) return
+        val cancelledToken = turnToken
+        val cancelledText = _state.value.streamingMessage?.text.orEmpty()
         // Supersede the turn: a late event arriving after the engine's Cancel
         // round-trip must not re-open streaming on the now-idle transcript.
         val job = abandonLocalTurn()
@@ -1213,6 +1243,7 @@ class ChatViewModel(
                 agentRunsByMessageId = settled.agentRunsByMessageId,
             )
         }
+        emitTurnCompletion(cancelledToken, ConversationTurnOutcome.Cancelled, cancelledText)
         val cancellation = viewModelScope.async {
             runCatching { cancelEngineTurn(job) }
         }
@@ -1486,6 +1517,11 @@ class ChatViewModel(
 
             is ReplyEvent.Error -> {
                 turnJob = null
+                emitTurnCompletion(
+                    token = token,
+                    outcome = ConversationTurnOutcome.Failed,
+                    finalAssistantText = _state.value.streamingMessage?.text.orEmpty(),
+                )
                 // Surface as the PERSISTENT, kind-aware banner — not the dim,
                 // overwritable statusLine. Clear the status line so a stale tool
                 // label doesn't linger beneath the error.
@@ -1512,6 +1548,14 @@ class ChatViewModel(
 
             is ReplyEvent.Completed -> {
                 turnJob = null
+                emitTurnCompletion(
+                    token = token,
+                    outcome = ConversationTurnOutcome.Completed,
+                    finalAssistantText = (
+                        _state.value.streamingMessage?.text
+                            ?: event.message.text
+                        ),
+                )
                 _state.update { s ->
                     val completed = s.streamingMessage
                         ?.let { live -> event.message.copy(id = live.id) }
@@ -1537,6 +1581,11 @@ class ChatViewModel(
 
             is ReplyEvent.End -> {
                 turnJob = null
+                emitTurnCompletion(
+                    token = token,
+                    outcome = ConversationTurnOutcome.Completed,
+                    finalAssistantText = _state.value.streamingMessage?.text.orEmpty(),
+                )
                 _state.update {
                     val run = it.agentRun ?: AgentRunState(turnId = token)
                     // The engine's mobile host never emits `MessageComplete`, so
@@ -1650,6 +1699,23 @@ class ChatViewModel(
         if (backgroundTurnActive == active) return
         backgroundTurnActive = active
         backgroundExecution.setTurnActive(active)
+    }
+
+    private fun emitTurnCompletion(
+        token: Long,
+        outcome: ConversationTurnOutcome,
+        finalAssistantText: String,
+    ) {
+        if (lastTurnCompletionToken == token) return
+        lastTurnCompletionToken = token
+        _turnCompletions.tryEmit(
+            ConversationTurnCompletion(
+                token = token,
+                origin = currentTurnOrigin,
+                outcome = outcome,
+                finalAssistantText = finalAssistantText,
+            ),
+        )
     }
 
     private companion object {

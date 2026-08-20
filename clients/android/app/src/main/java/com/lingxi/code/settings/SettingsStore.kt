@@ -38,6 +38,7 @@ data class SettingsUiState(
     val searchProviders: List<GenericProvider> = emptyList(),
     val fetchProviders: List<GenericProvider> = emptyList(),
     val voice: VoiceConfig = VoiceConfig(),
+    val voiceCapability: VoiceCapabilitySnapshot = VoiceCapabilitySnapshot(),
     val linuxRuntime: LinuxRuntimeUiState = LinuxRuntimeUiState(),
     val skills: List<Skill> = SettingsMock.bundledSkills(),
     val mcpServers: List<MCPServer> = SettingsMock.mcpServers(),
@@ -197,6 +198,9 @@ class SettingsStore(
         voiceRepo?.save(voice)
         _state.update { it.copy(voice = voice) }
     }
+
+    fun setVoiceCapability(snapshot: VoiceCapabilitySnapshot) =
+        _state.update { it.copy(voiceCapability = snapshot) }
     @Synchronized
     fun setLinuxRuntimeMode(mode: LinuxRuntimeMode) {
         val current = _state.value

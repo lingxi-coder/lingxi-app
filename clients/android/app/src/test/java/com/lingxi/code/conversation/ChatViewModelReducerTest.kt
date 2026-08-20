@@ -21,6 +21,8 @@ import com.lingxi.code.model.SessionRow
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +30,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -1335,6 +1338,28 @@ class ChatViewModelReducerTest {
         val message = Message(role = Role.Ai, text = "plain")
         vm.reduce(ReplyEvent.Completed(message))
         assertSame(message, vm.state.value.messages.single())
+    }
+
+    @Test
+    fun exactTurnCompletionCarriesOriginOutcomeAndFinalText() = runTest(dispatcher) {
+        val vm = newVm()
+        vm.send("hello", origin = ConversationTurnOrigin.Flow)
+        val completion = async(start = CoroutineStart.UNDISPATCHED) {
+            vm.turnCompletions.first()
+        }
+
+        vm.reduce(ReplyEvent.Delta("final answer"))
+        vm.reduce(ReplyEvent.Completed(Message(role = Role.Ai, text = "final answer")))
+
+        assertEquals(
+            ConversationTurnCompletion(
+                token = 1,
+                origin = ConversationTurnOrigin.Flow,
+                outcome = ConversationTurnOutcome.Completed,
+                finalAssistantText = "final answer",
+            ),
+            completion.await(),
+        )
     }
 
     // --- plan checklist ---------------------------------------------------

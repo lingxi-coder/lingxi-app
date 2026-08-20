@@ -121,7 +121,8 @@ private final class BufferedVoiceSpeechSession: VoiceSpeechStreamingSession {
 
 @MainActor
 final class SystemVoiceSpeechPlayer: VoiceSpeechPlaying {
-    private var activeStream: SystemVoiceSpeechStream?
+    private var activeStream: (any VoiceSpeechStreamingSession)?
+    private var activeStreamID: ObjectIdentifier?
 
     func speak(_ request: VoiceSpeechRequest) async throws -> VoiceSpeechPlaybackOutcome {
         let stream = try await openStream(
@@ -137,7 +138,10 @@ final class SystemVoiceSpeechPlayer: VoiceSpeechPlaying {
     }
 
     func stop() {
-        activeStream?.stopImmediately()
+        guard let activeStream else { return }
+        self.activeStream = nil
+        activeStreamID = nil
+        Task { await activeStream.stop() }
     }
 
     func openStream(
@@ -150,12 +154,35 @@ final class SystemVoiceSpeechPlayer: VoiceSpeechPlaying {
         let lease = managesAudioSession
             ? try await VoiceAudioSessionCoordinator.shared.acquire(.playback)
             : nil
+        if let selection = VoiceRuntimeResolver.parseSherpaVoice(configuration.voiceIdentifier),
+           let model = GeneratedVoiceModelCatalog.byID(selection.modelID),
+           let directory = VoiceModelFiles.modelRoot(for: model) {
+            let stream = SherpaVoiceSpeechStream(
+                configuration: configuration,
+                modelID: model.id,
+                modelDirectory: directory,
+                speakerID: Int32(model.voices.firstIndex(where: { $0.id == selection.voiceID }) ?? 0),
+                audioLease: lease
+            )
+            let streamID = ObjectIdentifier(stream)
+            stream.onTerminal = { [weak self] in
+                guard self?.activeStreamID == streamID else { return }
+                self?.activeStream = nil
+                self?.activeStreamID = nil
+            }
+            activeStream = stream
+            activeStreamID = streamID
+            return stream
+        }
         let stream = SystemVoiceSpeechStream(configuration: configuration, audioLease: lease)
-        stream.onTerminal = { [weak self, weak stream] in
-            guard let self, self.activeStream === stream else { return }
-            self.activeStream = nil
+        let streamID = ObjectIdentifier(stream)
+        stream.onTerminal = { [weak self] in
+            guard self?.activeStreamID == streamID else { return }
+            self?.activeStream = nil
+            self?.activeStreamID = nil
         }
         activeStream = stream
+        activeStreamID = streamID
         return stream
     }
 }
@@ -310,8 +337,17 @@ final class SystemVoiceSpeechStream: NSObject, VoiceSpeechStreamingSession, AVSp
         else { return }
         let text = queuedText.removeFirst()
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(identifier: configuration.voiceIdentifier)
-            ?? AVSpeechSynthesisVoice(language: configuration.languageIdentifier)
+        let systemVoiceIdentifier = configuration.voiceIdentifier.hasPrefix("system:")
+            ? String(configuration.voiceIdentifier.dropFirst("system:".count))
+            : configuration.voiceIdentifier
+        let requestedVoice = AVSpeechSynthesisVoice(identifier: systemVoiceIdentifier)
+        let requestedLanguage = requestedVoice?.language
+            .split(separator: "-").first.map(String.init)?.lowercased()
+        let effectiveLanguage = configuration.languageIdentifier
+            .split(separator: "-").first.map(String.init)?.lowercased()
+        utterance.voice = requestedVoice.flatMap {
+            requestedLanguage == effectiveLanguage ? $0 : nil
+        } ?? AVSpeechSynthesisVoice(language: configuration.languageIdentifier)
         utterance.rate = VoiceCapabilityModel.utteranceRate(from: configuration.speed)
         activeUtterance = utterance
         synthesizer.speak(utterance)
@@ -963,7 +999,8 @@ final class VoiceInteractionController {
 
     private var speechConfiguration: VoiceSpeechConfiguration {
         VoiceSpeechConfiguration(
-            voiceIdentifier: capability.voiceIdentifier,
+            voiceIdentifier: capability.selectedVoice?.id
+                ?? VoicePreferencesSnapshot.defaultVoiceSelection,
             languageIdentifier: capability.effectiveLanguageIdentifier,
             speed: capability.speed
         )
@@ -1327,7 +1364,8 @@ final class VoiceInteractionController {
         let operation = nextGeneration()
         let request = VoiceSpeechRequest(
             text: text,
-            voiceIdentifier: capability.voiceIdentifier,
+            voiceIdentifier: capability.selectedVoice?.id
+                ?? VoicePreferencesSnapshot.defaultVoiceSelection,
             languageIdentifier: capability.effectiveLanguageIdentifier,
             speed: capability.speed
         )

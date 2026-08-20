@@ -115,6 +115,7 @@ struct ChatView: View {
                          // pick, the source submits `SetModel(id)` with a real id.
                          availableModels: convo.availableModels,
                          activeModelId: convo.activeModelId,
+                         providerConfigured: convo.providerConfigured,
                          onSelectModel: { reference in
                              source.setModel(reference)
                              // Only an explicit pick counts. `applyActiveModel`

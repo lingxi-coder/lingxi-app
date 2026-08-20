@@ -7,6 +7,10 @@ final class LingxiCodeUITests: XCTestCase {
         super.setUp()
         continueAfterFailure = false
         app = XCUIApplication()
+        // Scheme test arguments reach the UI-test runner, not every
+        // XCUIApplication launch. Pin the app itself because many assertions
+        // intentionally verify the zh-Hans product copy.
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)"]
         app.launchEnvironment["LINGXI_UI_TESTING"] = "1"
         app.launch()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
@@ -66,6 +70,16 @@ final class LingxiCodeUITests: XCTestCase {
         dismissKeyboard.tap()
         XCTAssertFalse(app.keyboards.firstMatch.waitForExistence(timeout: 2))
         XCTAssertEqual(input.value as? String, "keyboard draft")
+    }
+
+    func testComposerShowsUnconfiguredWhenNoProviderExists() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_PROVIDER_UNCONFIGURED"] = "1"
+        app.launch()
+
+        let chip = app.buttons["composer.model"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertEqual(chip.label, "未配置", app.debugDescription)
     }
 
     func testComposerSendTransitionsToMatchingStopControl() {
@@ -342,37 +356,35 @@ final class LingxiCodeUITests: XCTestCase {
             NSPredicate(format: "label CONTAINS %@", "密钥仅本机加密")
         ).firstMatch
         XCTAssertTrue(providerBlurb.waitForExistence(timeout: 5), app.debugDescription)
-        let addProvider = app.buttons["provider.add"]
-        XCTAssertTrue(addProvider.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(waitUntilHittable(addProvider, timeout: 5), app.debugDescription)
-        addProvider.tap()
+        // Provider presets live on this page now. Selecting one opens its
+        // configuration sheet directly instead of requiring a separate + flow.
         XCTAssertTrue(app.staticTexts["Anthropic"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["OpenAI"].exists)
         XCTAssertTrue(app.staticTexts["Kimi"].exists)
 
-        let deepSeekPreset = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS %@", "DeepSeek")
-        ).firstMatch
+        let deepSeekPreset = app.buttons["provider.preset.deepseek"]
         XCTAssertTrue(deepSeekPreset.waitForExistence(timeout: 5), app.debugDescription)
+        let providerPage = app.scrollViews.firstMatch
+        XCTAssertTrue(scrollUntilHittable(deepSeekPreset, in: providerPage), app.debugDescription)
         deepSeekPreset.tap()
 
         let keyField = app.secureTextFields["provider.api-key"]
         let visibility = app.buttons["provider.api-key.visibility"]
         let clear = app.buttons["provider.api-key.clear"]
         XCTAssertTrue(keyField.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(visibility.exists)
-        XCTAssertTrue(clear.exists)
+        XCTAssertTrue(visibility.exists)
+        XCTAssertFalse(clear.exists)
 
         keyField.tap()
         keyField.typeText("sk-ui-draft")
         XCTAssertTrue(visibility.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertLessThanOrEqual(keyField.frame.maxX, visibility.frame.minX + 0.5)
-        XCTAssertLessThanOrEqual(visibility.frame.maxX, clear.frame.minX + 0.5)
+        XCTAssertFalse(clear.exists)
 
+        app.keyboards.buttons["return"].tap()
+        app.buttons["provider.cancel"].tap()
+        XCTAssertTrue(waitUntilGone(keyField, timeout: 5), app.debugDescription)
         app.buttons["完成"].tap()
-        let discardKeyChanges = app.buttons["放弃密钥修改"]
-        XCTAssertTrue(discardKeyChanges.waitForExistence(timeout: 5), app.debugDescription)
-        discardKeyChanges.tap()
         app.buttons["关闭设置"].tap()
         openDrawer()
         XCTAssertFalse(app.buttons["drawer.tab.crons"].exists)

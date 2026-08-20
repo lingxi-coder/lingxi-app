@@ -3,8 +3,8 @@ import XCTest
 
 @testable import LingxiCode
 
-/// The model picker's two pure pieces: the search predicate and the recents
-/// store. Both are deliberately free of SwiftUI so they can be tested directly.
+/// Pure model-picker and composer presentation policies that can be tested
+/// without driving the SwiftUI hierarchy.
 final class ModelPickerTests: XCTestCase {
     private let catalog = [
         "anthropic/claude-sonnet-5",
@@ -13,6 +13,41 @@ final class ModelPickerTests: XCTestCase {
         "deepseek/deepseek-v4-flash",
         "openrouter/openrouter/auto",
     ]
+
+    // MARK: composer presentation
+
+    func testComposerShowsUnconfiguredInsteadOfEngineDefaultWithoutAProvider() {
+        XCTAssertEqual(
+            Composer.modelChipLabel(
+                providerConfigured: false,
+                availableModels: catalog,
+                activeModelId: "anthropic/claude-sonnet-5"
+            ),
+            String(localized: "settings_provider_unconfigured")
+        )
+    }
+
+    func testComposerShowsActiveModelWhenAProviderIsConfigured() {
+        XCTAssertEqual(
+            Composer.modelChipLabel(
+                providerConfigured: true,
+                availableModels: catalog,
+                activeModelId: "anthropic/claude-sonnet-5"
+            ),
+            "Sonnet"
+        )
+    }
+
+    func testComposerKeepsLoadingStateWhileConfiguredCatalogIsPending() {
+        XCTAssertEqual(
+            Composer.modelChipLabel(
+                providerConfigured: true,
+                availableModels: [],
+                activeModelId: ""
+            ),
+            String(localized: "composer_loading_model")
+        )
+    }
 
     // MARK: filter
 

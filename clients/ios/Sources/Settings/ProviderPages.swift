@@ -8,7 +8,6 @@ struct ProviderListPage: View {
     @Environment(\.theme) private var t
     @State private var repository = ProviderRepository.shared
     @State private var editingDraft: ProviderEditorDraft?
-    @State private var showingPresetSheet = false
     @State private var showingRouting = false
     @State private var retryMaxAttemptsText = ""
     @State private var retryBackoffMsText = ""
@@ -23,12 +22,7 @@ struct ProviderListPage: View {
             llmContent
                 .sheet(item: $editingDraft) { draft in
                     ProviderEditorSheet(draft: draft) { editingDraft = nil }
-                }
-                .sheet(isPresented: $showingPresetSheet) {
-                    ProviderPresetSheet { presetID in
-                        showingPresetSheet = false
-                        editingDraft = repository.makeNewDraft(presetID: presetID)
-                    }
+                        .presentationDragIndicator(.visible)
                 }
                 .task {
                     retryMaxAttemptsText = String(repository.routingSettings.retryMaxAttempts)
@@ -54,16 +48,17 @@ struct ProviderListPage: View {
                     providerRow(state, isLast: index == repository.profiles.count - 1)
                 }
             }
-            Button { showingPresetSheet = true } label: {
-                HStack(spacing: 8) {
-                    LXIcon(name: .plus, size: 15, color: t.text2, stroke: 2)
-                    Text(String(localized: "provider_add_kind \(ProviderKind.llm.title)"))
-                        .font(.system(size: 13.5, weight: .medium)).foregroundColor(t.text2)
+            Text(String(localized: "settings_provider_picker_intro"))
+                .font(.system(size: 12))
+                .foregroundStyle(t.text3)
+                .lineSpacing(4)
+                .padding(.horizontal, 4)
+                .padding(.bottom, 10)
+            SettingsSection(label: String(localized: "settings_title_add_llm")) {
+                ForEach(Array(repository.catalogPresets.enumerated()), id: \.element.id) { index, preset in
+                    presetRow(preset, isLast: index == repository.catalogPresets.count - 1)
                 }
-                .frame(maxWidth: .infinity).padding(13)
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
             }
-            .buttonStyle(.plain).accessibilityIdentifier("provider.add").padding(.bottom, 14)
             routingSection
         }
         .onChange(of: repository.syncRevision) { _, _ in
@@ -121,6 +116,28 @@ struct ProviderListPage: View {
                 .frame(width: 28, height: 28).background(preset.color.mix(with: t.surface, amount: 0.18))
                 .clipShape(RoundedRectangle(cornerRadius: 7)).overlay(RoundedRectangle(cornerRadius: 7).stroke(preset.color.tint(0.28), lineWidth: 0.5))
         }
+    }
+
+    private func presetRow(_ preset: ProviderPreset, isLast: Bool) -> some View {
+        SettingsRow(
+            label: preset.name,
+            sub: preset.sub,
+            chevron: true,
+            isLast: isLast,
+            onTap: { editingDraft = repository.makeNewDraft(presetID: preset.id) }
+        ) {
+            Text(String(preset.name.prefix(1)))
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(preset.color)
+                .frame(width: 28, height: 28)
+                .background(preset.color.mix(with: t.surface, amount: 0.18))
+                .clipShape(.rect(cornerRadius: 7))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(preset.color.tint(0.28), lineWidth: 0.5)
+                }
+        }
+        .accessibilityIdentifier("provider.preset.\(preset.id)")
     }
 
     private var routingSection: some View {
@@ -203,43 +220,6 @@ struct ProviderListPage: View {
     }
 }
 
-// MARK: - Add provider sheet
-
-private struct ProviderPresetSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.theme) private var t
-    @State private var repository = ProviderRepository.shared
-    let onSelect: (String) -> Void
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(String(localized: "settings_provider_picker_intro")).font(.system(size: 12)).foregroundColor(t.text3).lineSpacing(4)
-                    SettingsSection {
-                        ForEach(Array(repository.catalogPresets.enumerated()), id: \.element.id) { index, preset in
-                            Button { onSelect(preset.id) } label: {
-                                HStack(spacing: 10) {
-                                    Text(String(preset.name.prefix(1))).font(.system(size: 14, weight: .bold)).foregroundColor(preset.color).frame(width: 30, height: 30).background(preset.color.tint(0.16)).clipShape(RoundedRectangle(cornerRadius: 8))
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(preset.name).font(.system(size: 14, weight: .semibold)).foregroundColor(t.text)
-                                        Text(preset.sub).font(.system(size: 11.5)).foregroundColor(t.text4)
-                                    }
-                                    Spacer(); LXIcon(name: .plus, size: 15, color: t.text4, stroke: 2)
-                                }.padding(.horizontal, 14).padding(.vertical, 11)
-                            }.buttonStyle(.plain)
-                            if index < repository.catalogPresets.count - 1 { Rectangle().fill(t.border).frame(height: 0.5) }
-                        }
-                    }
-                }.padding(16)
-            }
-            .navigationTitle(String(localized: "settings_title_add_llm")).navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button(String(localized: "settings_done")) { dismiss() } } }
-            .task { await repository.refreshCatalog() }
-        }
-    }
-}
-
 // MARK: - Draft editor sheet
 
 private struct ProviderEditorSheet: View {
@@ -292,13 +272,14 @@ private struct ProviderEditorSheet: View {
 
     private var bottomActions: some View {
         HStack(spacing: 9) {
-            Button(String(localized: "settings_cancel")) { dismiss() }
+            Button(String(localized: "common_cancel")) { dismiss() }
                 .font(.system(size: 13.5, weight: .medium))
                 .foregroundColor(t.text2)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 11)
                 .background(t.windowBg)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
+                .accessibilityIdentifier("provider.cancel")
             if !draft.isNew {
                 Button {
                     removing = true
@@ -326,13 +307,14 @@ private struct ProviderEditorSheet: View {
                 .background(t.windowBg)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             }
-            Button(String(localized: "settings_save_and_apply")) { save() }
+            Button(String(localized: "settings_provider_save_and_apply")) { save() }
                 .font(.system(size: 13.5, weight: .semibold))
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 11)
                 .background(saving || removing || draft.operationInFlight || draft.connectionState == .testing ? t.text4 : t.accent)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
+                .accessibilityIdentifier("provider.save")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -385,7 +367,10 @@ private struct ProviderEditorSheet: View {
                             }
                         }
                             .font(.system(size: 13.5, design: .monospaced)).textInputAutocapitalization(.never).autocorrectionDisabled().padding(.vertical, 11).padding(.leading, 12)
-                        Button(showKey ? String(localized: "settings_provider_hide_key") : String(localized: "settings_provider_show_key")) { showKey.toggle() }.font(.system(size: 11, weight: .medium)).foregroundColor(t.text3).padding(.horizontal, 10)
+                            .accessibilityIdentifier("provider.api-key")
+                        Button(showKey ? String(localized: "settings_provider_hide_key") : String(localized: "settings_provider_show_key")) { showKey.toggle() }
+                            .font(.system(size: 11, weight: .medium)).foregroundColor(t.text3).padding(.horizontal, 10)
+                            .accessibilityIdentifier("provider.api-key.visibility")
                     }.background(t.surface).clipShape(RoundedRectangle(cornerRadius: 10)).overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
                 }
                 if draft.hasStoredAPIKey || draft.clearCredentialOnApply {
@@ -397,7 +382,9 @@ private struct ProviderEditorSheet: View {
                         } else {
                             editingStoredCredential = false
                         }
-                    }.font(.system(size: 11.5, weight: .medium)).foregroundColor(draft.clearCredentialOnApply ? t.text3 : t.danger)
+                    }
+                    .font(.system(size: 11.5, weight: .medium)).foregroundColor(draft.clearCredentialOnApply ? t.text3 : t.danger)
+                    .accessibilityIdentifier("provider.api-key.clear")
                 }
             } else {
                 FieldHint(String(localized: "settings_provider_oauth_only"))

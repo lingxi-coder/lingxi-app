@@ -18,6 +18,7 @@ struct Composer: View {
     // `model` remains in the view API for compatibility with its existing owner.
     var availableModels: [String] = []
     var activeModelId: String = ""
+    var providerConfigured: Bool
     var onSelectModel: (String) -> Void = { _ in }
     var reasoningSelection: String = "automatic"
     var reasoningOptions: [String] = []
@@ -90,6 +91,7 @@ struct Composer: View {
         model: Binding<ModelOption>,
         availableModels: [String] = [],
         activeModelId: String = "",
+        providerConfigured: Bool,
         onSelectModel: @escaping (String) -> Void = { _ in },
         reasoningSelection: String = "automatic",
         reasoningOptions: [String] = [],
@@ -130,6 +132,7 @@ struct Composer: View {
         self._model = model
         self.availableModels = availableModels
         self.activeModelId = activeModelId
+        self.providerConfigured = providerConfigured
         self.onSelectModel = onSelectModel
         self.reasoningSelection = reasoningSelection
         self.reasoningOptions = reasoningOptions
@@ -439,14 +442,33 @@ struct Composer: View {
         voiceInteractionMode == .dictation && voiceCapturePhase == .listening
     }
 
-    /// The chip's short label from authoritative engine state.
+    /// The chip's short label from provider configuration plus authoritative
+    /// engine state. A keyless engine can still advertise its built-in model.
     private var chipLabel: String {
-        availableModels.isEmpty ? String(localized: "composer_loading_model") : ModelDisplay.shortName(for: activeModelId)
+        Self.modelChipLabel(
+            providerConfigured: providerConfigured,
+            availableModels: availableModels,
+            activeModelId: activeModelId
+        )
+    }
+
+    static func modelChipLabel(
+        providerConfigured: Bool,
+        availableModels: [String],
+        activeModelId: String
+    ) -> String {
+        guard providerConfigured else {
+            return String(localized: "settings_provider_unconfigured")
+        }
+        return availableModels.isEmpty
+            ? String(localized: "composer_loading_model")
+            : ModelDisplay.shortName(for: activeModelId)
     }
 
     /// The chip's dot color: derived from the active engine id when driving.
     private var chipColor: Color {
-        availableModels.isEmpty ? t.text4 : ModelDisplay.color(for: activeModelId)
+        if !providerConfigured { return t.danger }
+        return availableModels.isEmpty ? t.text4 : ModelDisplay.color(for: activeModelId)
     }
 
     private var modelChip: some View {

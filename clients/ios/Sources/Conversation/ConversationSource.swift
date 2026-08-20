@@ -393,6 +393,10 @@ final class ConversationModel: ObservableObject {
     @Published var availableModels: [String] = []
     /// The active model id the engine reports (`ModelList.current` / `ModelChanged.model`).
     @Published var activeModelId: String = ""
+    /// Whether the current source was launched with at least one enabled LLM
+    /// provider. The engine may still publish its built-in default model while
+    /// keyless, so model availability alone cannot represent configuration.
+    @Published var providerConfigured = false
     /// The effective permission mode reported by the engine after applying
     /// model/provider/killswitch safety gates. This may differ from the
     /// persisted user preference (for example, `auto` can downgrade to
@@ -1014,11 +1018,14 @@ enum ConversationSourceFactory {
     static func make(options: LaunchOptions = .init()) -> any ConversationSource {
         #if DEBUG
             if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" {
-                return MockConversationSource.uiTestFixture(
+                let source = MockConversationSource.uiTestFixture(
                     cancelledRun: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_CANCELLED_RUN"] == "1",
                     multiAgent: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_MULTI_AGENT"] == "1",
                     holdTurn: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_HOLD_TURN"] == "1"
                 )
+                source.model.providerConfigured =
+                    ProcessInfo.processInfo.environment["LINGXI_UI_TEST_PROVIDER_UNCONFIGURED"] != "1"
+                return source
             }
         #endif
         #if canImport(engine_mobileFFI)
@@ -1039,10 +1046,14 @@ enum ConversationSourceFactory {
                     providerProfilesJson: options.providerProfilesJson,
                     providerRoutingJson: options.providerRoutingJson,
                     mobileLinux: options.mobileLinux)
-                return EngineConversationSource(config: config)
+                let source = EngineConversationSource(config: config)
+                source.model.providerConfigured = options.providerConfigured
+                return source
             }
         #endif
-        return MockConversationSource()
+        let source = MockConversationSource()
+        source.model.providerConfigured = options.providerConfigured
+        return source
     }
 
     /// The app's writable container root the engine roots its filesystem +
@@ -1077,6 +1088,9 @@ enum ConversationSourceFactory {
 final class MockConversationSource: ConversationSource {
     let model = ConversationModel(messages: MockData.messagesDefault)
     private var cannedReplyDelay: TimeInterval = 1.1
+    #if canImport(engine_mobileFFI)
+        private var mockProviderCatalog: [ProviderCatalogEntry] = []
+    #endif
 
     /// Bumped on cancel / new-chat so an in-flight canned reply timer no-ops when
     /// it fires (the mock's analog of the engine's cancel token).
@@ -1206,6 +1220,21 @@ final class MockConversationSource: ConversationSource {
             }
             source.model.availableModels = uiTestModelCatalog
             source.model.activeModelId = uiTestModelCatalog[0]
+            #if canImport(engine_mobileFFI)
+                source.mockProviderCatalog = Presets.llm
+                    .filter { $0.id != "custom" }
+                    .map { preset in
+                        ProviderCatalogEntry(
+                            id: preset.id,
+                            displayName: preset.name,
+                            baseURL: preset.defaultUrl,
+                            protocolName: "OpenAiChat",
+                            authName: preset.id == "openai-chatgpt" ? "ChatGptOAuth" : "ApiKey",
+                            credentialEnv: nil,
+                            models: preset.models
+                        )
+                    }
+            #endif
             source.model.slashCommands = [
                 ConversationSlashCommand(
                     name: "help",
@@ -1247,6 +1276,12 @@ final class MockConversationSource: ConversationSource {
             "gemini/gemini-3.5-flash",
             "zai/glm-5.1",
         ]
+    #endif
+
+    #if canImport(engine_mobileFFI)
+        func providerCatalog() async throws -> [ProviderCatalogEntry] {
+            mockProviderCatalog
+        }
     #endif
 
     func startNewConversation() {

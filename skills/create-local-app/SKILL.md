@@ -13,9 +13,10 @@ delegate specialist work to `$frontend-design`, `$accessibility`,
 
 When `LINGXI.md` identifies a local app and its ID, the library has already
 created that app record and its app-scoped init session. Treat that ID as
-authoritative. Do not call `mcp__local_apps__list` or `mcp__local_apps__get` to
-rediscover or confirm the current app, and do not call `create` again. Use
-`list` only from a global conversation when no app ID is already known.
+authoritative. Do not call `LocalAppList` or `LocalAppGet` to
+rediscover or confirm the current app, and do not call `LocalAppCreate` again.
+Use `LocalAppList` only from a global conversation when no app ID is already
+known.
 
 Inside an app's own workspace, read `LINGXI.md` and sharpen its brief. In a
 global chat, gather the product, screens, data, capabilities, and visual intent
@@ -70,10 +71,10 @@ Create a new app with:
 {"brief":"<confirmed one-line brief>","name":"<display name>"}
 ```
 
-using `mcp__local_apps__create`. Declare collections, domains, capabilities,
-and the confirmed `device_context` with `mcp__local_apps__update_manifest`
+using `LocalAppCreate`. Declare collections, domains, capabilities,
+and the confirmed `device_context` with `LocalAppManifest`
 before generated source relies on them. Inside an existing app, do not call
-`create` again.
+`LocalAppCreate` again.
 
 Every collection requires `id`, `name`, and `fields`; every field requires
 `id`, `label`, and `kind`. Collection and field IDs use lower snake_case and
@@ -96,7 +97,7 @@ Capabilities are a closed enum. Use only `data_mutation`, `ui_control`,
 `background_schedule`; there is no `data` capability.
 `background_schedule` is required when the app registers a system background
 flow. `data_mutation` authorizes
-the conversation agent to call `mcp__local_apps__mutate_data`. Do not declare
+the conversation agent to call `LocalAppMutateData`. Do not declare
 it solely because the page writes its own collection through
 `window.lingxi.v2.data.mutate`; that foreground page path is already scoped to
 its app.
@@ -120,7 +121,7 @@ const scores = page.records.map((record) => record.document.score);
 await deleteRecord("high_scores", "best", page.records[0].revision);
 ```
 
-For direct MCP mutations, each operation must be exactly
+For direct `LocalAppMutateData` calls, each operation must be exactly
 `{"kind":"upsert","recordId":"...","document":{...},"expectedRevision":1}`
 or `{"kind":"delete","recordId":"...","expectedRevision":1}`; omit
 `expectedRevision` when optimistic concurrency is not needed. Never use
@@ -223,7 +224,7 @@ staging paths, or copy generated output back into editable source.
    fields from `records[].document` and do not swallow rejected native writes.
    Stay within the shipped dependency set; if an idea would require package or
    root-infra changes, redesign it as a source-only implementation.
-3. **Build** — call `mcp__local_apps__build`; the host runs the production
+3. **Build** — call `LocalAppBuild`; the host runs the production
    `vite build --outDir dist --emptyOutDir` equivalent offline from the
    workspace-backed writable mount with the fixed runtime and the app's
    materialized dependency snapshot. The output is staged under private
@@ -236,7 +237,7 @@ staging paths, or copy generated output back into editable source.
    available for the selected breadth, then use native WebView inspect/act/log
    tools for bridge, data, system back, and device context. For every declared
    collection written by a core UI path, perform the real UI write and then
-   call `mcp__local_apps__query_data`; the returned `records[].document` must
+   call `LocalAppQueryData`; the returned `records[].document` must
    contain the value. A local-only value or swallowed bridge failure is not
    persistence.
 
@@ -267,10 +268,10 @@ checkpoint-specific command surface.
 
 ## Existing app operations
 
-Use `mcp__local_apps__build`, `mcp__local_apps__manage_runtime`,
-`mcp__local_apps__read_logs`, structured `mcp__local_apps__inspect_ui` /
-`mcp__local_apps__act_on_ui`, `mcp__local_apps__query_data` /
-`mcp__local_apps__mutate_data`, `mcp__local_apps__restore_checkpoint`, and
+Use `LocalAppBuild`, `LocalAppRuntime`,
+`LocalAppLogs`, structured `LocalAppInspectUi` /
+`LocalAppActOnUi`, `LocalAppQueryData` /
+`LocalAppMutateData`, `LocalAppCheckpointRestore`, and
 app-event tools as needed. Restore
 checkpoints only after the user's explicit choice; a restore
 must not trigger package-manager repair from this workflow.

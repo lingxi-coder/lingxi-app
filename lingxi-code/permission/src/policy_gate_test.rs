@@ -103,10 +103,13 @@ mod tests {
     struct FakeGuestTranslator;
 
     impl crate::ModelPathTranslator for FakeGuestTranslator {
-        fn to_host(&self, model_path: &str, _write: bool) -> Option<String> {
-            model_path
-                .strip_prefix("/workspace/ws")
-                .map(|rest| format!("/proj{rest}"))
+        fn translate(&self, model_path: &str, _write: bool) -> crate::ModelPathOutcome {
+            match model_path.strip_prefix("/workspace/ws") {
+                // A fenced guest region: reachable by the model, not by the host.
+                Some(rest) if rest.starts_with("/fenced") => crate::ModelPathOutcome::Fenced,
+                Some(rest) => crate::ModelPathOutcome::Host(format!("/proj{rest}")),
+                None => crate::ModelPathOutcome::NotGuest,
+            }
         }
     }
 
@@ -339,6 +342,76 @@ mod tests {
             verdict,
             PermissionDecision::Allow,
             "a read-denied path must never be silently writable"
+        );
+    }
+
+    /// A per-app ALLOW rule must actually grant.
+    ///
+    /// The whole justification for moving these off `mcp__local_apps__*` was
+    /// that a builtin can be content-matched, so a user can grant one app
+    /// without granting every app on the device. `tool_content_key` only knew
+    /// WebFetch/Agent/Task, so `LocalAppBuild(app-a)` silently matched nothing
+    /// and the only working grant was the tool-wide one — exactly the
+    /// limitation the move was supposed to remove.
+    #[tokio::test]
+    async fn a_per_app_allow_rule_grants_only_that_app() {
+        let policy = local_settings_policy(
+            r#"{ "permissions": { "allow": ["LocalAppMutateData(app-a)"] } }"#,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "prompted".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+
+        assert_eq!(
+            gate.check("LocalAppMutateData", &serde_json::json!({"app_id": "app-a"}))
+                .await,
+            PermissionDecision::Allow,
+            "the named app must be granted"
+        );
+        assert_eq!(inner.calls(), 0, "a matching allow rule must not prompt");
+
+        // A sibling app is NOT covered by that grant. `LocalAppMutateData` is
+        // DenyByDefault, so this genuinely exercises the rule — on an
+        // AllowByDefault tool the default would allow the sibling regardless
+        // and the assertion would prove nothing.
+        assert!(
+            matches!(
+                gate.check("LocalAppMutateData", &serde_json::json!({"app_id": "app-b"}))
+                    .await,
+                PermissionDecision::Deny { .. }
+            ),
+            "a per-app grant must not cover a sibling app"
+        );
+    }
+
+    /// A FENCED guest region must withhold the exclusion list, not assert an
+    /// empty one.
+    ///
+    /// `to_host` collapses "not a guest path" and "must not be touched" into
+    /// one `None`. Falling back to the untranslated base for the second case
+    /// produces zero excludes, which the caller cannot tell apart from "this
+    /// policy has no read-deny rules" — so Grep/Glob would walk straight
+    /// through a denied directory.
+    #[tokio::test]
+    async fn a_fenced_guest_region_withholds_the_exclusion_list() {
+        use traits::permission_gate::PermissionGate as _;
+
+        let policy = local_settings_policy(r#"{ "permissions": { "deny": ["Read(/secrets/**)"] } }"#);
+        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow))
+            .with_path_translator(Arc::new(FakeGuestTranslator));
+
+        // A translatable base still yields the rebased excludes.
+        assert!(!gate
+            .read_deny_exclude_globs(std::path::Path::new("/workspace/ws"))
+            .unwrap_or_default()
+            .is_empty());
+
+        // A fenced one yields NO list at all — not an empty list.
+        assert_eq!(
+            gate.read_deny_exclude_globs(std::path::Path::new("/workspace/ws/fenced")),
+            None,
+            "a fenced region must withhold the list rather than claim no denies"
         );
     }
 

@@ -381,7 +381,7 @@ pub(crate) fn remove_app_session_file(
 }
 
 pub(crate) fn create_next_step_guidance() -> String {
-    "Run local-app-build: the workspace already contains the repository-verified Vite + Tailwind + shadcn/ui foundation. Edit app screens, app/globals.css, src/, components/, public/, and non-host-managed lib/style files. A host-owned `pnpm install` prepares workspace-local dependencies in the background; check `install_dependencies` or `get` if you need its status. Do not recreate the app scaffold or run a package-manager scaffold command. Then call build and preview via manage_runtime.".into()
+    "Run local-app-build: the workspace already contains the repository-verified Vite + Tailwind + shadcn/ui foundation. Edit app screens, app/globals.css, src/, components/, public/, and non-host-managed lib/style files. A host-owned `pnpm install` prepares workspace-local dependencies in the background; check `LocalAppInstallDeps` or `LocalAppGet` if you need its status. Do not recreate the app scaffold or run a package-manager scaffold command. Then call LocalAppBuild and preview via LocalAppRuntime.".into()
 }
 
 struct LocalAppsRuntimeConfiguration {
@@ -2929,7 +2929,7 @@ impl LocalAppsHostBroker {
         // copied through verbatim and the agent would read a malformed example
         // of the one call it is required to make.
         let build_preview = format!(
-            "- `mcp__local_apps__build {{\"app_id\":\"{id}\"}}` — offline `vite build` \
+            "- `LocalAppBuild {{\"app_id\":\"{id}\"}}` — offline `vite build` \
              (30-minute budget). The host waits for the app-local dependency state, mounts \
              the workspace as the sole writable `LocalAppBuild` root, runs the workspace's own \
              `node_modules/vite`, writes into private build-state, and serves only the promoted \
@@ -2940,43 +2940,43 @@ impl LocalAppsHostBroker {
             "# Local App: {name} ({id})\n\n\
              Brief: {brief}\n\n\
              ## Workspace contract\n\
-             - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `mcp__local_apps__list` or `mcp__local_apps__get` to rediscover or confirm it, and do not call `mcp__local_apps__create` again.\n\
+             - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `LocalAppList` or `LocalAppGet` to rediscover or confirm it, and do not call `LocalAppCreate` again.\n\
              - Edit ONLY app-owned files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
              {setup_path}\
              - The page reaches host data/network/device ONLY through `window.lingxi.v2` \
              (see `lib/lingxi-bridge.js`).\n\
              - Declare data collections / network domains / capabilities through \
-             `mcp__local_apps__update_manifest` BEFORE the page relies on them; runtime \
+             `LocalAppManifest` BEFORE the page relies on them; runtime \
              authorization still prompts the user. Every collection is `{{id,name,fields}}`; every field is `{{id,label,kind,required?,enumOptions?}}`; IDs use lower snake_case. Never declare host-owned `recordId`, `revision`, `createdAtMs`, or `updatedAtMs` as fields. Repair and retry any rejected manifest before building.\n\
              - If a material requirement is unresolved, call `AskUserQuestion` so the native client presents its sheet. Never leave unresolved questions in ordinary assistant text; when the brief and device context are sufficient, infer and continue.\n\n\
              ## Build & preview\n\
              {build_preview}\
-             - `mcp__local_apps__manage_runtime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
+             - `LocalAppRuntime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
              — serve the built output and return the preview url.\n\
-             - `mcp__local_apps__read_logs {{\"app_id\":\"{id}\",\"log\":\"build\"}}` — build log.\n\
-             - `mcp__local_apps__install_dependencies {{\"app_id\":\"{id}\",\"wait\":true}}` \
+             - `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"build\"}}` — build log.\n\
+             - `LocalAppInstallDeps {{\"app_id\":\"{id}\",\"wait\":true}}` \
              — dependency state; `lastError` names why an install failed.\n\n\
              ### When a build fails\n\
-             `mcp__local_apps__build` is the ONLY build path in this workspace, so \
+             `LocalAppBuild` is the ONLY build path in this workspace, so \
              do NOT try a different build command, package manager, or scaffold tool — \
              there is nothing else to fall back to and improvising cannot succeed. Instead:\n\
-             1. Read the failure: `mcp__local_apps__read_logs {{\"app_id\":\"{id}\",\"log\":\"build\"}}`.\n\
+             1. Read the failure: `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"build\"}}`.\n\
              2. A `not yet available` build means dependencies are not ready. Call \
-             `mcp__local_apps__install_dependencies {{\"app_id\":\"{id}\",\"wait\":true}}` and read \
+             `LocalAppInstallDeps {{\"app_id\":\"{id}\",\"wait\":true}}` and read \
              its `lastError`.\n\
              3. If the cause is your source, fix it and build again.\n\
              4. If the cause is the HOST — a missing toolchain, a failed dependency install, \
              an unavailable runtime — report it to the user and stop. Those cannot be worked \
              around from inside this workspace, and retrying will not clear them.\n\n\
              ## Verify\n\
-             - `mcp__local_apps__inspect_ui` / `mcp__local_apps__act_on_ui` — read and drive \
+             - `LocalAppInspectUi` / `LocalAppActOnUi` — read and drive \
              the running preview.\n\
-             - `mcp__local_apps__query_data {{\"app_id\":\"{id}\",\"collection\":\"<collection_id>\"}}` \
+             - `LocalAppQueryData {{\"app_id\":\"{id}\",\"collection\":\"<collection_id>\"}}` \
              — after a UI write, confirm the value reached native storage: it must appear in \
              `records[].document`. A value that exists only in page state is NOT persistence.\n\
-             - `mcp__local_apps__read_logs {{\"app_id\":\"{id}\",\"log\":\"runtime\"}}` — runtime log.\n\
+             - `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"runtime\"}}` — runtime log.\n\
              - After the user confirms a working state, record it with \
-             `mcp__local_apps__create_checkpoint`.\n",
+             `LocalAppCheckpointCreate`.\n",
             name = record.name,
             id = record.id,
             brief = record.brief,
@@ -5354,7 +5354,7 @@ mod tests {
             "doubled braces leaked into the agent contract: {lingxi}"
         );
         assert!(
-            lingxi.contains(&format!("mcp__local_apps__build {{\"app_id\":\"{_app_id}\"}}")),
+            lingxi.contains(&format!("LocalAppBuild {{\"app_id\":\"{_app_id}\"}}")),
             "the build example must carry this app's real id: {lingxi}"
         );
         // A failed build is the exact moment the agent goes off-script. The
@@ -5365,14 +5365,14 @@ mod tests {
             "{lingxi}"
         );
         assert!(
-            lingxi.contains("mcp__local_apps__install_dependencies"),
+            lingxi.contains("LocalAppInstallDeps"),
             "dependency state is the most common build failure; the tool that \
              reports it must be named: {lingxi}"
         );
         // Verification tools were documented only in the skill, so an agent
         // working from the workspace had to rediscover them.
-        assert!(lingxi.contains("mcp__local_apps__query_data"), "{lingxi}");
-        assert!(lingxi.contains("mcp__local_apps__inspect_ui"), "{lingxi}");
+        assert!(lingxi.contains("LocalAppQueryData"), "{lingxi}");
+        assert!(lingxi.contains("LocalAppInspectUi"), "{lingxi}");
         assert!(
             lingxi.contains("do not run a package manager in this local-app workspace"),
             "{lingxi}"

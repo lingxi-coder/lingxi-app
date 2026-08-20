@@ -134,7 +134,6 @@ pub use sed_validation::{
 pub use shadow::{detect_unreachable_rules, is_shared_setting_source, ShadowType, UnreachableRule};
 pub use update::PermissionUpdate;
 pub use workspace_lease::{
-    WorkspaceLeaseInfo, WorkspacePermissionLease, WorkspacePermissionLeaseRegistry,
-};
+    WorkspaceLeaseInfo, WorkspacePermissionLease, WorkspacePermissionLeaseRegistry, local_app_id_for_root,};
 
-pub use model_path::{FileSystemPathTranslator, ModelPathTranslator};
+pub use model_path::{FileSystemPathTranslator, ModelPathOutcome, ModelPathTranslator};

@@ -222,6 +222,60 @@ final class LingxiCodeUITests: XCTestCase {
         add(screenshot)
     }
 
+    /// A subagent's dispatch prompt is the first USER bubble of its child
+    /// transcript and runs to thousands of characters. The user branch of
+    /// `MessageBubble` had no fold at all — only the assistant branch did — so
+    /// opening a child agent buried the transcript under a wall of text.
+    func testLongSubagentPromptIsFoldedInTheChildTranscript() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_MULTI_AGENT"] = "1"
+        app.launch()
+
+        let childRow = app.buttons["conversation.agent-row.ui-child"]
+        XCTAssertTrue(childRow.waitForExistence(timeout: 5), app.debugDescription)
+        childRow.tap()
+
+        let toggle = app.buttons["conversation.message.user.toggle"]
+        XCTAssertTrue(
+            toggle.waitForExistence(timeout: 8),
+            "a long subagent prompt must offer a fold affordance: \(app.debugDescription)"
+        )
+
+        // The suite runs with `-testLanguage zh-Hans`, so the collapsed label
+        // is 展开. Asserting the CONCRETE initial label proves the bubble
+        // starts folded — a label that merely "flips" would still pass with
+        // the fold inert.
+        XCTAssertEqual(
+            toggle.label,
+            "展开",
+            "the bubble must START collapsed: \(app.debugDescription)"
+        )
+
+        // The real assertion: expanding must make the bubble TALLER. Without
+        // it, deleting the `.lineLimit` modifier entirely leaves this test
+        // green — the toggle would still render and its label would still
+        // flip, testing nothing about the fold.
+        // `otherElements[...]`, NOT `descendants(matching: .any)[...]`: the
+        // latter walks the entire accessibility tree and stalls the runner
+        // long enough for the test to be killed.
+        let bubble = app.otherElements["conversation.message.user"]
+        XCTAssertTrue(bubble.waitForExistence(timeout: 5), app.debugDescription)
+        let collapsedHeight = bubble.frame.height
+
+        toggle.tap()
+        XCTAssertEqual(toggle.label, "收起", app.debugDescription)
+        XCTAssertGreaterThan(
+            bubble.frame.height,
+            collapsedHeight,
+            "expanding must reveal more of the prompt: \(app.debugDescription)"
+        )
+
+        // …and collapsing returns it.
+        toggle.tap()
+        XCTAssertEqual(toggle.label, "展开", app.debugDescription)
+        XCTAssertEqual(bubble.frame.height, collapsedHeight, accuracy: 1.0)
+    }
+
     func testMultiAgentDockSwitchesTranscriptAndRestoresMain() {
         app.terminate()
         app.launchEnvironment["LINGXI_UI_TEST_MULTI_AGENT"] = "1"

@@ -14,6 +14,15 @@ struct ConversationTimelineView: View {
     let onShareMessage: (String) -> Void
 
     @State private var expandedReasoningIDs: Set<String> = []
+    /// Folded user bubbles, keyed by the engine-supplied row id.
+    ///
+    /// Owned by the LIST, not the row: `MessageBubble` lives in a `LazyVStack`,
+    /// which releases off-screen rows and takes their `@State` with them — a
+    /// prompt the user expanded would silently re-collapse after scrolling
+    /// past it. Android keeps the same fold in `rememberSaveable(message.id)`,
+    /// so row-local state would also make the two platforms disagree about how
+    /// long the user's action lasts.
+    @State private var expandedUserMessageIDs: Set<String> = []
     @State private var expandedBatchIDs: Set<String> = []
 
     var body: some View {
@@ -47,7 +56,9 @@ struct ConversationTimelineView: View {
                         )
                     )
                 },
-                onShare: onShareMessage
+                onShare: onShareMessage,
+                isUserExpanded: expandedUserMessageIDs.contains(rowID),
+                onToggleUserExpanded: { toggleUserMessage(rowID) }
             )
             .id(rowID)
         case let .commandOutput(rowID, output):
@@ -141,6 +152,14 @@ struct ConversationTimelineView: View {
         }
         flushTools()
         return result
+    }
+
+    private func toggleUserMessage(_ id: String) {
+        if expandedUserMessageIDs.contains(id) {
+            expandedUserMessageIDs.remove(id)
+        } else {
+            expandedUserMessageIDs.insert(id)
+        }
     }
 
     private func toggleReasoning(_ id: String) {

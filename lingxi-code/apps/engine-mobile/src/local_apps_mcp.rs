@@ -738,7 +738,7 @@ impl LocalAppsMcpTransport {
         });
         let mut list = Self::tool(
             "list",
-            "List local apps only from a global conversation when no app id is known. Never use from an app-scoped workspace to rediscover or confirm the current app; its LINGXI.md id is authoritative. Read-only; this is a discovery tool, not a prerequisite for get or runtime actions. The page is bounded by `limit` (default 50, max 100); when `has_more` is true, narrow with `query`.",
+            "List local apps only from a global conversation when no app id is known. Never use from an app-scoped workspace to rediscover or confirm the current app; its LINGXI.md id is authoritative. Read-only; this is a discovery tool, not a prerequisite for LocalAppGet or runtime actions. The page is bounded by `limit` (default 50, max 100); when `has_more` is true, narrow with `query`.",
             json!({"type":"object","properties":{"query":{"type":"string","maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":100}}}),
         );
         // App-scoped sessions already receive their authoritative id through
@@ -767,7 +767,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "build",
-                "Build the app workspace with the offline toolchain (30-minute budget). On success the app is marked ready; start or restart the runtime afterwards to serve the new build. On failure the error summary names what to fix; build logs are under read_logs.",
+                "Build the app workspace with the offline toolchain (30-minute budget). On success the app is marked ready; start or restart the runtime afterwards to serve the new build. On failure the error summary names what to fix; build logs are under LocalAppLogs.",
                 json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
@@ -785,7 +785,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "update_manifest",
-                "Declare the app's data collections, allowed network domains, exact capabilities and confirmed native device context in its manifest. Every collection is `{id,name,fields}` and every field is `{id,label,kind,required?,enumOptions?}`. Collection and field ids use lower snake_case. `recordId`, `revision`, `createdAtMs`, and `updatedAtMs` are host-owned record metadata; never declare them as fields. `data_mutation` authorizes conversation-agent calls to mutate_data; a page writing its own collection through window.lingxi.v2.data does not declare it solely for that. Destructive schema migrations against existing data require the user's approval.",
+                "Declare the app's data collections, allowed network domains, exact capabilities and confirmed native device context in its manifest. Every collection is `{id,name,fields}` and every field is `{id,label,kind,required?,enumOptions?}`. Collection and field ids use lower snake_case. `recordId`, `revision`, `createdAtMs`, and `updatedAtMs` are host-owned record metadata; never declare them as fields. `data_mutation` authorizes conversation-agent calls to LocalAppMutateData; a page writing its own collection through window.lingxi.v2.data does not declare it solely for that. Destructive schema migrations against existing data require the user's approval.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "collections":{
@@ -1081,6 +1081,30 @@ impl LocalAppsMcpTransport {
         } else {
             None
         }
+    }
+
+    /// The STATIC host-operation catalog (descriptions + input schemas).
+    ///
+    /// Exposed so `local_apps_tools` can build the builtin tools from the same
+    /// source of truth the provider uses — a hand-copied second catalog would
+    /// let a builtin and the provider disagree about an argument.
+    #[must_use]
+    pub fn host_tool_catalog() -> Vec<McpToolDto> {
+        Self::tool_catalog()
+    }
+
+    /// Dispatch ONE host operation by its provider-side name (`build`,
+    /// `read_logs`, …).
+    ///
+    /// This is the same dispatch the MCP path used, reached without a
+    /// connection handshake: the builtin tools are first-party and in-process,
+    /// so there is no connection to validate.
+    pub async fn call_host_operation(
+        &self,
+        operation: &str,
+        input: Value,
+    ) -> Result<McpToolResultDto, McpError> {
+        self.call(operation, input).await
     }
 
     async fn call(&self, tool: &str, input: Value) -> Result<McpToolResultDto, McpError> {
@@ -1518,11 +1542,12 @@ impl McpTransport for LocalAppsMcpTransport {
 
     async fn list_tools(&self, conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
         self.ensure_connection(conn)?;
-        let mut tools = if self.scope.is_app_scoped() {
-            Vec::new()
-        } else {
-            Self::tool_catalog()
-        };
+        // The static host operations are BUILTIN tools (`LocalApp*`) now, so the
+        // MCP surface advertises only the DYNAMIC per-app namespaces. Serving
+        // them here too would leave one operation reachable under two names
+        // with different permission semantics — the `mcp__` spelling matches no
+        // defaults-table row and cannot be scoped to a single app.
+        let mut tools: Vec<McpToolDto> = Vec::new();
         // The conversation-scoped transport is connected while the mobile
         // engine is still being assembled, before the profile-owned service
         // can be attached. Its catalog is intentionally static (dynamic app
@@ -1572,6 +1597,13 @@ impl McpTransport for LocalAppsMcpTransport {
         input: Value,
     ) -> Result<McpToolResultDto, McpError> {
         self.ensure_connection(conn)?;
+        // MCP serves DYNAMIC per-app tools only. A static host operation
+        // arriving here is the retired `mcp__local_apps__<op>` spelling;
+        // refuse it rather than run it with the weaker semantics. The builtin
+        // tools reach the same dispatch through `call_host_operation`.
+        if Self::parse_dynamic_tool(tool).is_none() {
+            return Err(McpError::ToolNotFound(tool.into()));
+        }
         self.call(tool, input).await
     }
 
@@ -1821,10 +1853,58 @@ mod tests {
             .list_tools(&connection)
             .await
             .expect("static bootstrap catalog");
-        assert_eq!(
-            tools.len(),
-            LocalAppsMcpTransport::tool_catalog().len(),
-            "conversation bootstrap must expose the static catalog without a service"
+        // The invariant this test protects is that listing SUCCEEDS before the
+        // profile service is attached — engine bootstrap must not depend on
+        // that later attachment. It used to also assert the static catalog was
+        // returned; those operations are BUILTIN tools now (`LocalApp*`), so
+        // the MCP surface correctly advertises nothing until apps exist.
+        assert!(
+            tools.is_empty(),
+            "static host operations moved to builtins; MCP advertises only \
+             dynamic per-app namespaces, and none exist yet: {tools:?}"
+        );
+    }
+
+    /// The static host operations moved to BUILTIN tools (`LocalApp*`). The
+    /// MCP surface must stop advertising and stop serving them, or the same
+    /// operation is reachable under two names with DIFFERENT permission
+    /// semantics: the builtin honours the defaults table, while the
+    /// `mcp__local_apps__*` spelling still falls through to `DenyByDefault`
+    /// and cannot be scoped to one app by any allow rule. Two doors to one
+    /// room, one of them the door this refactor exists to remove.
+    #[tokio::test]
+    async fn the_mcp_surface_no_longer_serves_the_static_host_operations() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let transport = LocalAppsMcpTransport::new(root.path().to_path_buf());
+        let connection = transport
+            .connect(&McpTransportSpec::InProcess {
+                registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
+            })
+            .await
+            .expect("connect");
+
+        let advertised = transport.list_tools(&connection).await.expect("list tools");
+        let names: Vec<&str> = advertised.iter().map(|t| t.tool_name.as_str()).collect();
+        assert!(
+            !names.contains(&"build"),
+            "the MCP surface must not advertise a static host operation: {names:?}"
+        );
+
+        // …and calling one by its MCP spelling must be refused outright.
+        let refused = transport
+            .call_tool(&connection, "build", serde_json::json!({"app_id": "abcd1234"}))
+            .await;
+        assert!(
+            matches!(refused, Err(McpError::ToolNotFound(_))),
+            "the MCP surface must refuse a static host operation, got {refused:?}"
+        );
+
+        // The BUILTIN entry point still reaches it — that is the supported path.
+        assert!(
+            LocalAppsMcpTransport::host_tool_catalog()
+                .iter()
+                .any(|t| t.tool_name == "build"),
+            "builtins still take their schema from the host catalog"
         );
     }
 

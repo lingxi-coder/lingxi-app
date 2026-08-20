@@ -3682,6 +3682,14 @@ async fn build_mobile_inner_with_ask(
             workflow_launcher.clone() as Arc<dyn tool_workflow::WorkflowLauncher>,
         ))));
     }
+    // First-party local-app host operations as ORDINARY builtins. Registered
+    // here, while `tools` is still `&mut` — `register_builtin` cannot run once
+    // the registry is `Arc`-wrapped below. The DYNAMIC per-app tools stay on
+    // the MCP transport (their namespace binds `app_id` host-side, and they
+    // must be added at runtime, which only `register_mcp_tools(&self, …)` does).
+    for tool in crate::local_apps_tools::local_app_builtin_tools(&local_apps_mcp, &cwd) {
+        tools.register_builtin(tool);
+    }
     let live_mcp_tool_ctx = tool_ctx.clone();
     let app_agent_mcp_tool_context = live_mcp_tool_ctx.clone();
     for (connection_id, mcp_tools) in

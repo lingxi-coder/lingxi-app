@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -72,24 +73,72 @@ fun MessageBubble(
 ) {
     val t = LingXiTheme.palette
     if (message.role == Role.User) {
-        Row(
+        // A subagent's dispatch prompt arrives as the first USER bubble of its
+        // child transcript and runs to thousands of characters. Same policy and
+        // the same two strings as the assistant branch below.
+        val isCollapsible = remember(message.text) {
+            AssistantMessageCollapsePolicy.shouldCollapse(message.text)
+        }
+        var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
+        Column(
             modifier = modifier.padding(bottom = 22.dp),
-            horizontalArrangement = Arrangement.End,
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Spacer(Modifier.weight(1f))
-            val shape = BubbleShape(topRightSharp = true)
-            Text(
-                text = message.text,
-                color = t.text,
-                fontSize = 15.5f.sp,
-                lineHeight = (15.5f * 1.5f).sp,
-                modifier = Modifier
-                    .widthIn(max = 300.dp)
-                    .clip(shape)
-                    .background(t.surface)
-                    .border(0.5.dp, t.border, shape)
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-            )
+            Row(horizontalArrangement = Arrangement.End) {
+                Spacer(Modifier.weight(1f))
+                val shape = BubbleShape(topRightSharp = true)
+                Text(
+                    text = message.text,
+                    color = t.text,
+                    fontSize = 15.5f.sp,
+                    lineHeight = (15.5f * 1.5f).sp,
+                    // `maxLines`, not the assistant branch's `heightIn`: this
+                    // bubble is one Text clipped to a BubbleShape, so a height
+                    // clip would square off the rounded bottom corners.
+                    // `maxLines` also gives a trailing ellipsis for free.
+                    maxLines = if (isCollapsible && !expanded) {
+                        AssistantMessageCollapsePolicy.COLLAPSED_LINE_LIMIT
+                    } else {
+                        Int.MAX_VALUE
+                    },
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .widthIn(max = 300.dp)
+                        .clip(shape)
+                        .background(t.surface)
+                        .border(0.5.dp, t.border, shape)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            }
+            if (isCollapsible) {
+                val toggleLabel = stringResource(
+                    if (expanded) R.string.chat_run_collapse else R.string.chat_run_expand,
+                )
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { expanded = !expanded }
+                        .testTag("conversation.message.user.toggle")
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    LXIcon(
+                        name = LXIconName.Chevron,
+                        size = 11.dp,
+                        color = t.accent,
+                        stroke = 2f,
+                        contentDescription = null,
+                    )
+                    Text(
+                        text = toggleLabel,
+                        color = t.accent,
+                        fontSize = 11.5f.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
         }
     } else {
         val isCollapsible = remember(message.text) {

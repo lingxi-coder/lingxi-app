@@ -259,6 +259,15 @@ fn fixed_vite_build_args(build_memory_mb: u32, executable: String, out_dir: Stri
         "--outDir".into(),
         out_dir,
         "--emptyOutDir".into(),
+        // PIN the config instead of letting Vite self-resolve. Vite searches
+        // `DEFAULT_CONFIG_FILES` in order and `vite.config.js` sorts FIRST,
+        // ahead of the `vite.config.mjs` the host writes. A Vite config is
+        // executed Node code, and `Edit` creates files on a nonexistent path,
+        // so an unpinned build let the workspace's own `Edit(./**)` grant
+        // reach arbitrary build-time code execution. Relative: the command
+        // runs with `cwd` set to the project root.
+        "--config".into(),
+        "vite.config.mjs".into(),
     ]
 }
 
@@ -1832,6 +1841,11 @@ mod tests {
                 "--outDir",
                 ".lingxi-build-state/build-output/dist",
                 "--emptyOutDir",
+                // PINNED, not self-resolved: Vite searches `DEFAULT_CONFIG_FILES`
+                // and `vite.config.js` sorts ahead of the `.mjs` the host writes,
+                // so an unpinned build would execute a shadow config as Node code.
+                "--config",
+                "vite.config.mjs",
             ]
         );
     }

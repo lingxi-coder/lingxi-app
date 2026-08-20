@@ -51,6 +51,12 @@ mod skill_loader;
 #[cfg(feature = "uniffi")]
 mod workflow_support;
 
+// First-party local-app host operations as ORDINARY builtin tools (they used
+// to be reachable only as `mcp__local_apps__*`, which gave them third-party
+// MCP permission semantics they were never meant to have).
+#[cfg(feature = "uniffi")]
+pub mod local_apps_tools;
+
 // LOCAL-APPS (phase 1): the domain ⇄ protocol bridge for the engine-owned
 // `local_apps::AppService` — the observer that lowers domain events onto the
 // client event sink plus the DTO lowering/raising helpers the `submit` command

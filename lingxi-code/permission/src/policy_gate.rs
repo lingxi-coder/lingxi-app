@@ -1310,12 +1310,22 @@ impl PermissionGate for PolicyPermissionGate {
         // walk proceeds with ZERO exclusions straight through a Read-denied
         // directory. Translate to the host twin first, exactly as the authorize
         // path does. (Unrooted patterns are cwd-independent and unaffected.)
-        let translated = self.path_translator.as_ref().and_then(|t| {
-            t.to_host(&cwd.to_string_lossy(), false)
-                .map(std::path::PathBuf::from)
-        });
-        let base = translated.as_deref().unwrap_or(cwd);
-        Some(crate::read_deny_exclude_globs(&self.live_policy(), base))
+        //
+        // FAIL CLOSED on a fenced region. `to_host` collapses "not a guest
+        // path" and "must not be touched" into one `None`, and falling back to
+        // the untranslated base for the second case yields ZERO exclusions —
+        // indistinguishable from "this policy has no read-deny rules", so the
+        // walk proceeds straight through a denied directory. Returning `None`
+        // withholds the exclusion list instead of asserting an empty one.
+        let base = match self.path_translator.as_ref() {
+            None => cwd.to_path_buf(),
+            Some(translator) => match translator.translate(&cwd.to_string_lossy(), false) {
+                crate::ModelPathOutcome::Host(host) => std::path::PathBuf::from(host),
+                crate::ModelPathOutcome::NotGuest => cwd.to_path_buf(),
+                crate::ModelPathOutcome::Fenced => return None,
+            },
+        };
+        Some(crate::read_deny_exclude_globs(&self.live_policy(), &base))
     }
 
     fn check_noninteractive_with_allow_rules(

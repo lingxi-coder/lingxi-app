@@ -13,31 +13,74 @@ struct MessageBubble: View, Equatable {
     /// Tapping the assistant bubble's share affordance surfaces the native share
     /// sheet for this reply's text (mirrors Android `MessageBubble onShare`).
     var onShare: (String) -> Void = { _ in }
+    /// Fold state for a long USER bubble, owned by `ConversationTimelineView`.
+    /// Row-local `@State` would be discarded when the `LazyVStack` releases an
+    /// off-screen row, silently re-collapsing a prompt the user expanded.
+    var isUserExpanded: Bool = false
+    var onToggleUserExpanded: () -> Void = {}
 
     static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
         lhs.message == rhs.message &&
             lhs.detail == rhs.detail &&
             lhs.expandedToolBlocks == rhs.expandedToolBlocks &&
+            // Without this the fold toggle would change no observed property
+            // and SwiftUI would skip the re-render entirely.
+            lhs.isUserExpanded == rhs.isUserExpanded &&
             lhs.dimmed == rhs.dimmed
     }
 
     var body: some View {
         if message.role == .user {
-            HStack(alignment: .top, spacing: 0) {
-                Spacer(minLength: 0)
-                Text(message.text)
-                    // Dynamic Type: scale the body relative to .body so the
-                    // transcript honors the user's text-size setting while
-                    // keeping the design's 15.5pt baseline.
-                    .font(.scaledSystem(15.5, relativeTo: .body))
-                    .lineSpacing(15.5 * 0.5)
-                    .foregroundColor(t.text)
-                    .padding(.horizontal, 16).padding(.vertical, 12)
-                    .background(t.surface)
-                    .clipShape(BubbleShape(topRightSharp: true))
-                    .overlay(BubbleShape(topRightSharp: true).stroke(t.border, lineWidth: 0.5))
-                    .frame(maxWidth: 320, alignment: .trailing)
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .trailing, spacing: 4) {
+                HStack(alignment: .top, spacing: 0) {
+                    Spacer(minLength: 0)
+                    Text(message.text)
+                        // Dynamic Type: scale the body relative to .body so the
+                        // transcript honors the user's text-size setting while
+                        // keeping the design's 15.5pt baseline.
+                        .font(.scaledSystem(15.5, relativeTo: .body))
+                        .lineSpacing(15.5 * 0.5)
+                        // `lineLimit`, not the assistant branch's
+                        // `frame(maxHeight:)`: this bubble is one `Text` inside
+                        // a `BubbleShape`, so a height clip would square off the
+                        // rounded bottom corners. `lineLimit` also gives a
+                        // trailing ellipsis for free.
+                        .lineLimit(userIsCollapsed
+                            ? AssistantMessageCollapsePolicy.collapsedLineLimit
+                            : nil)
+                        .foregroundColor(t.text)
+                        .padding(.horizontal, 16).padding(.vertical, 12)
+                        .background(t.surface)
+                        .clipShape(BubbleShape(topRightSharp: true))
+                        .overlay(BubbleShape(topRightSharp: true).stroke(t.border, lineWidth: 0.5))
+                        .frame(maxWidth: 320, alignment: .trailing)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // A subagent's prompt arrives as the first USER bubble of its
+                // child transcript, and those run to thousands of characters —
+                // the whole transcript became a wall of text. Same affordance,
+                // same policy, and the same two strings as the assistant side.
+                if userIsCollapsible {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            onToggleUserExpanded()
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            LXIcon(name: .chevron, size: 11, color: t.accent, stroke: 2)
+                                .rotationEffect(.degrees(isUserExpanded ? 180 : 0))
+                            Text(isUserExpanded
+                                ? String(localized: "chat_run_collapse")
+                                : String(localized: "chat_run_expand"))
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundColor(t.accent)
+                        }
+                        .frame(minHeight: 28)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("conversation.message.user.toggle")
+                }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(.bottom, 22)
@@ -115,6 +158,14 @@ struct MessageBubble: View, Equatable {
         }
     }
 
+    private var userIsCollapsible: Bool {
+        AssistantMessageCollapsePolicy.shouldCollapse(message.text)
+    }
+
+    private var userIsCollapsed: Bool {
+        userIsCollapsible && !isUserExpanded
+    }
+
     private var assistantIsCollapsible: Bool {
         AssistantMessageCollapsePolicy.shouldCollapse(message.text)
     }
@@ -131,6 +182,11 @@ struct MessageBubble: View, Equatable {
 enum AssistantMessageCollapsePolicy {
     private static let characterLimit = 640
     private static let lineLimit = 20
+
+    /// Lines revealed when a USER bubble is collapsed. 15 lines at 15.5pt with
+    /// 0.5 line spacing is ~349pt, which lands next to the assistant branch's
+    /// 360pt reveal so both sides fold to about the same height.
+    static let collapsedLineLimit = 15
 
     static func shouldCollapse(_ text: String) -> Bool {
         text.count >= characterLimit || text.lazy.filter { $0 == "\n" }.prefix(lineLimit).count >= lineLimit

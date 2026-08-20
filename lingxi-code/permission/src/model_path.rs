@@ -26,26 +26,55 @@ use std::sync::Arc;
 /// `permission` about I/O. [`traits::FileSystem::translate_model_path`] is a
 /// sync trait method, so this is callable from the sync gate.
 pub trait ModelPathTranslator: Send + Sync {
-    /// `None` when the path has no host twin, or must not be touched.
-    fn to_host(&self, model_path: &str, write: bool) -> Option<String>;
+    /// Resolve a model-supplied path against the guest/host mount table.
+    fn translate(&self, model_path: &str, write: bool) -> ModelPathOutcome;
+
+    /// The host twin, or `None` for anything else. Convenience for callers
+    /// that treat "not a guest path" and "fenced" alike.
+    fn to_host(&self, model_path: &str, write: bool) -> Option<String> {
+        match self.translate(model_path, write) {
+            ModelPathOutcome::Host(host) => Some(host),
+            _ => None,
+        }
+    }
+}
+
+/// Why a translation did or did not produce a host path.
+///
+/// The two non-success cases are NOT interchangeable, and collapsing them is a
+/// fail-open on the enumeration path: `NotGuest` means the caller already holds
+/// a host path and may proceed, while `Fenced` means the guest region must not
+/// be reached from the host at all — treating that as "no host twin, carry on"
+/// silently produces zero read-deny exclusions, which is indistinguishable from
+/// "this policy has no deny rules".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelPathOutcome {
+    /// The path is in guest space and this is its host twin.
+    Host(String),
+    /// The path is not in guest space; the caller's own path is already host.
+    NotGuest,
+    /// Inside the model-visible space, but must not be touched from the host.
+    Fenced,
 }
 
 /// Production adapter over the session's [`traits::FileSystem`].
 pub struct FileSystemPathTranslator(pub Arc<dyn traits::FileSystem>);
 
 impl ModelPathTranslator for FileSystemPathTranslator {
-    fn to_host(&self, model_path: &str, write: bool) -> Option<String> {
+    fn translate(&self, model_path: &str, write: bool) -> ModelPathOutcome {
         // `Err(..)` means the path is inside the model-visible space but must
         // not be touched from the host (iSH fakefs regions, or a read-only
-        // mount for `write == true`). Map it to `None`, NEVER to a rewrite and
-        // NEVER to a verdict: the raw guest path then flows to the policy
-        // exactly as it does today (relativizes to `../…`, matches no allow
-        // rule, prompts), and the tool refuses it a moment later with the
-        // filesystem's own message. Turning a translation refusal into an
-        // allow would authorize a path the host must not reach.
+        // mount for `write == true`). It is reported as `Fenced`, never as a
+        // rewrite and never as a verdict: on the authorize path the raw guest
+        // path then flows to the policy exactly as it does today (relativizes
+        // to `../…`, matches no allow rule, prompts) and the tool refuses it a
+        // moment later with the filesystem's own message. Turning a
+        // translation refusal into an allow would authorize a path the host
+        // must not reach.
         match self.0.translate_model_path(model_path, write) {
-            Ok(Some(host)) => Some(host),
-            Ok(None) | Err(_) => None,
+            Ok(Some(host)) => ModelPathOutcome::Host(host),
+            Ok(None) => ModelPathOutcome::NotGuest,
+            Err(_) => ModelPathOutcome::Fenced,
         }
     }
 }

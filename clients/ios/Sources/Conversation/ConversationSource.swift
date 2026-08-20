@@ -1196,6 +1196,20 @@ final class MockConversationSource: ConversationSource {
             source.model.isNew = false
             source.model.activeSessionId = "ui-session"
             if multiAgent {
+                // The prompt a subagent is DISPATCHED with arrives as the first
+                // user bubble of its child transcript, and real ones run to
+                // thousands of characters. Seed one past
+                // `AssistantMessageCollapsePolicy`'s 640-character threshold so
+                // the fold affordance is actually reachable — the fixture used
+                // to hold only the `.ai` reply, so no test could cross the line
+                // the fold guards.
+                let childPrompt = Message(
+                    role: .user,
+                    text: String(
+                        repeating: "Inspect the workspace and report every mismatch you find. ",
+                        count: 16
+                    )
+                )
                 let childMessage = Message(role: .ai, text: "Child agent completed the requested check.")
                 source.model.replaceAgentSummaries([
                     .main,
@@ -1211,8 +1225,8 @@ final class MockConversationSource: ConversationSource {
                 source.model.setAgentTranscript(
                     "ui-child",
                     transcript: ConversationAgentTranscript(
-                        messages: [childMessage],
-                        items: [.message(childMessage)],
+                        messages: [childPrompt, childMessage],
+                        items: [.message(childPrompt), .message(childMessage)],
                         loaded: true
                     ),
                     sessionID: "ui-session"

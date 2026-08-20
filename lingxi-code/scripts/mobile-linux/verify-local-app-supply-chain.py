@@ -817,18 +817,18 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     if not text.startswith("---\nname: create-local-app\ndescription: "):
         fail("create-local-app skill frontmatter is invalid")
     required_tokens = {
-        "mcp__local_apps__create",
-        "mcp__local_apps__update_manifest",
-        "mcp__local_apps__build",
-        "mcp__local_apps__manage_runtime",
-        "mcp__local_apps__read_logs",
-        "mcp__local_apps__inspect_ui",
-        "mcp__local_apps__act_on_ui",
-        "mcp__local_apps__query_data",
-        "mcp__local_apps__mutate_data",
-        "mcp__local_apps__restore_checkpoint",
+        "LocalAppCreate",
+        "LocalAppManifest",
+        "LocalAppBuild",
+        "LocalAppRuntime",
+        "LocalAppLogs",
+        "LocalAppInspectUi",
+        "LocalAppActOnUi",
+        "LocalAppQueryData",
+        "LocalAppMutateData",
+        "LocalAppCheckpointRestore",
         "window.lingxi.v2",
-        "Do not call `mcp__local_apps__list` or `mcp__local_apps__get`",
+        "Do not call `LocalAppList` or `LocalAppGet`",
         "call `AskUserQuestion`",
         "Never ask unresolved questions in ordinary assistant text",
         "Every collection requires `id`, `name`, and `fields`",
@@ -872,7 +872,7 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     except OSError as exc:
         fail(f"missing local-app-build workflow: {exc}")
     workflow_tokens = {
-        "mcp__local_apps__build",
+        "LocalAppBuild",
         "--outDir dist --emptyOutDir",
         "build/store/dist/",
         "strategy?: 'fast'|'balanced'|'thorough'",

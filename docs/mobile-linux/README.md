@@ -32,6 +32,26 @@ Full local-app release builds pass `--local-app-runtime --apk-dir <closure>`;
 that path validates the exact Node/Git closure before doing the expensive iSH
 build and verifies the resulting rootfs package database before staging.
 
+A `Full*` **device** build also packages a resolved dependency tree, so the
+first `create_local_app` on a device does not resolve the template's ~169
+packages over the network inside the emulated guest. The Xcode phase fails
+closed when it is absent, so produce it first:
+
+```text
+lingxi-code/scripts/mobile-linux/build-local-app-node-modules.sh --arch aarch64
+clients/ios/scripts/stage-local-app-runtime.sh --variant full \
+  --node-modules clients/ios/build/local-app-node-modules/aarch64/node_modules
+```
+
+The tree must be resolved **inside the rootfs**, which is what the first script
+does: Vite runs under musl on the guest's Node, so the `*-linux-<arch>-musl`
+native bindings are the ones that must be present. A host `pnpm install`
+resolves the darwin bindings and is rejected during staging.
+
+The engine adopts the staged tree by matching `runtime-manifest.json`'s
+`pnpm_lock_sha256` against the app's own lockfile; an app whose lockfile has
+drifted declines the seed and performs a real install instead.
+
 The runtime is in-process Linux userspace emulation, not a Linux kernel or a
 security boundary. Isolation remains the iOS app sandbox plus explicit fakefs
 bind mounts. Release artifacts must include iSH's GPLv3 text, `LICENSE.IOS`,

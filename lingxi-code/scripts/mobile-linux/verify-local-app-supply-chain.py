@@ -165,6 +165,53 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
+def load_yaml_mapping(path: pathlib.Path) -> dict:
+    """Parse the flat two-level settings mapping pnpm-workspace.yaml uses.
+
+    PyYAML is not a dependency of this gate and adding one to a supply-chain
+    verifier to read seven settings is a poor trade. The grammar accepted here
+    is exactly what the template file uses: `key: value` at column 0, and
+    `key:` followed by two-space-indented `name: value` pairs. Anything else
+    fails loudly rather than being skipped, so a file that grows a construct
+    this cannot represent cannot pass by being misread.
+    """
+    mapping: dict = {}
+    current: dict | None = None
+    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if raw.startswith("  "):
+            if current is None:
+                fail(f"{path}:{number}: indented entry outside a mapping")
+            nested = raw[2:]
+            # A third level would be flattened into the second if it were
+            # accepted here, which is exactly the silent misreading this parser
+            # must not do: the caller would compare a mapping that never
+            # existed in the file.
+            if nested.startswith(" "):
+                fail(f"{path}:{number}: unsupported nesting depth")
+            key, separator, value = nested.partition(":")
+            if not separator or not key.strip() or not value.strip():
+                fail(f"{path}:{number}: unsupported nested syntax")
+            current[key.strip()] = value.strip()
+            continue
+        # Any other leading whitespace -- a single space, or a tab, which YAML
+        # forbids for indentation -- would otherwise be stripped and read as a
+        # TOP-LEVEL key, turning a nested entry into a sibling of its parent.
+        if raw[:1].isspace():
+            fail(f"{path}:{number}: unsupported indentation")
+        key, separator, value = raw.partition(":")
+        if not separator:
+            fail(f"{path}:{number}: unsupported syntax")
+        if value.strip():
+            mapping[key.strip()] = value.strip()
+            current = None
+        else:
+            current = {}
+            mapping[key.strip()] = current
+    return mapping
+
+
 def load_json(path: pathlib.Path) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -360,8 +407,20 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
     EXPECTED_NODE = expected_node(pins)
     if package_json.get("engines") != {"node": EXPECTED_NODE}:
         fail("template package.json must pin Node exactly")
-    if package_json.get("overrides") != EXPECTED_OVERRIDES:
-        fail("template package.json must pin the deduplicated native CSS override")
+    # pnpm 11 stopped reading settings from package.json -- it warns
+    # "The \"pnpm\" field in package.json is no longer read by pnpm" and
+    # silently ignores an npm-style top-level "overrides" too. Checking the
+    # package.json field is therefore a check on dead config: the template
+    # carried `overrides: {lightningcss: 1.33.0}` there, the lockfile recorded
+    # no overrides block at all, and the tree resolved TWO lightningcss copies
+    # with 1.32.0 winning the hoisted root -- unsatisfying vite's own ^1.33.0.
+    # Assert it where pnpm actually applies it, and require the lockfile to
+    # show the override was applied rather than merely declared.
+    workspace_settings = load_yaml_mapping(template / "pnpm-workspace.yaml")
+    if workspace_settings.get("overrides") != EXPECTED_OVERRIDES:
+        fail("pnpm-workspace.yaml must pin the deduplicated native CSS override")
+    if "overrides" in package_json:
+        fail("template package.json must not carry overrides: pnpm 11 ignores them")
     if package_json.get("dependencies") != EXPECTED_DEPENDENCIES:
         fail("template package.json dependencies must match the fixed runtime")
     if package_json.get("scripts") != EXPECTED_SCRIPTS:
@@ -373,6 +432,10 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
         fail("pnpm-lock.yaml is missing importers/packages/snapshots")
     if "package-lock.json" in lock_text or "next@" in lock_text:
         fail("pnpm-lock.yaml contains retired npm/Next package metadata")
+    for name, version in EXPECTED_OVERRIDES.items():
+        if not re.search(rf"^overrides:\n(?:  .*\n)*  {re.escape(name)}:\s*{re.escape(version)}\s*$",
+                         lock_text, re.MULTILINE):
+            fail(f"pnpm-lock.yaml does not record the applied override {name}@{version}")
     for name, version in EXPECTED_DEPENDENCIES.items():
         pattern = rf"(?ms)^\s+['\"]?{re.escape(name)}['\"]?:\s*\n\s+specifier:\s*{re.escape(version)}\b"
         if not re.search(pattern, lock_text):
@@ -806,6 +869,27 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
     }
     if any(token not in ios_build_text for token in required_ish_build_tokens):
         fail("iOS build script does not apply and restore the pinned iSH policy patch")
+
+    # The bundled dependency seed only reaches the engine if the launch config
+    # actually carries its path. `LocalAppsRuntimeDistribution.runtimeRoot` was
+    # computed and then discarded -- BOTH call sites passed
+    # `localAppsRuntimeRoot: nil`, so `configured_runtime_root()` reported the
+    # seed as unconfigured and every device installed dependencies over the
+    # network with a complete tree sitting in its own bundle. A Rust test
+    # cannot see Swift, so assert the Swift spelling here.
+    for relative in (
+        "clients/ios/Sources/Conversation/ConversationSource.swift",
+        "clients/ios/Sources/Cron/CronFFIBridge.swift",
+    ):
+        source_path = repo / relative
+        try:
+            source_text = source_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            fail(f"missing iOS engine launch source: {exc}")
+        if "localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot" not in source_text:
+            fail(f"{relative} must pass the bundled local-app runtime root to the engine")
+        if "localAppsRuntimeRoot: nil" in source_text:
+            fail(f"{relative} still discards the bundled local-app runtime root")
 
 
 def validate_create_skill(repo: pathlib.Path) -> None:

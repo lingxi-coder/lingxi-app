@@ -10,9 +10,6 @@
     "dev": "vite",
     "preview": "vite preview"
   },
-  "overrides": {
-    "lightningcss": "1.33.0"
-  },
   "dependencies": {
     "@hookform/resolvers": "5.9.0",
     "@radix-ui/react-accordion": "1.2.20",

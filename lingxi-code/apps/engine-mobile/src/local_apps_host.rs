@@ -50,8 +50,10 @@ const RUNTIME_SEED_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEPENDENCY_INSTALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEPENDENCY_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PNPM_TOOLCHAIN_KEY: &str = "pnpm@11.22.0/node@24.18.1";
-const DEPENDENCY_SNAPSHOT_VERSION: u8 = 1;
+const DEPENDENCY_SNAPSHOT_VERSION: u8 = 2;
 const DEPENDENCY_SNAPSHOT_READY_FILE: &str = ".lingxi-dependency-ready";
+/// Emitted by `stage-local-app-runtime.py` beside the staged `node_modules`.
+const BUNDLED_SEED_MANIFEST_FILE: &str = "runtime-manifest.json";
 const WORKSPACE_DEPENDENCY_ATTESTATION_FILE: &str = ".lingxi-build-state/dependency-attestation";
 /// Consecutive `accept()` failures that retire the static server.  A burst of
 /// ECONNABORTED/EMFILE must not, so the cap is deliberately generous
@@ -1002,6 +1004,76 @@ impl LocalAppsHostBroker {
             .map_err(|error| format!("materialize dependency snapshot: {error}"))
     }
 
+    /// Adopt the read-only dependency tree staged into the app bundle as this
+    /// device's snapshot for `lock_digest`.
+    ///
+    /// `stage-local-app-runtime.py` records `pnpm_lock_sha256` in
+    /// `runtime-manifest.json` after validating the tree against the pinned
+    /// template lockfile, so the seed carries its own identity and the match is
+    /// exact rather than assumed. An app whose lockfile has drifted from the
+    /// bundled one gets `false` and falls through to a real install -- the seed
+    /// is an accelerator, never an override.
+    ///
+    /// Publication goes through `publish_dependency_snapshot` rather than
+    /// writing an attestation here, so the tree digest and the marker are
+    /// produced by the same code that validates every other snapshot.
+    fn adopt_bundled_dependency_seed(
+        runtime_root: &Path,
+        lock_digest: &str,
+        snapshot_root: &Path,
+    ) -> Result<bool, String> {
+        let manifest_path = runtime_root.join(BUNDLED_SEED_MANIFEST_FILE);
+        let manifest = match std::fs::read(&manifest_path) {
+            Ok(bytes) => bytes,
+            // A build that ships no seed is the ordinary Store configuration,
+            // not a fault: fall through to a real install.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "read bundled dependency seed manifest {}: {error}",
+                    manifest_path.display()
+                ))
+            }
+        };
+        let manifest: Value = serde_json::from_slice(&manifest).map_err(|error| {
+            format!(
+                "parse bundled dependency seed manifest {}: {error}",
+                manifest_path.display()
+            )
+        })?;
+        let seed_digest = manifest
+            .get("pnpm_lock_sha256")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "bundled dependency seed manifest is missing pnpm_lock_sha256: {}",
+                    manifest_path.display()
+                )
+            })?;
+        if seed_digest != lock_digest {
+            return Ok(false);
+        }
+        let seed_node_modules = runtime_root.join("node_modules");
+        match std::fs::symlink_metadata(&seed_node_modules) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "bundled dependency seed is not a directory: {}",
+                    seed_node_modules.display()
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "inspect bundled dependency seed {}: {error}",
+                    seed_node_modules.display()
+                ))
+            }
+        }
+        Self::publish_dependency_snapshot(&seed_node_modules, snapshot_root, lock_digest)?;
+        Ok(true)
+    }
+
     fn promote_dependency_tree(workspace: &Path, staging: &Path) -> Result<(), String> {
         let staged_node_modules = staging.join("node_modules");
         let marker = staged_node_modules.join("vite/bin/vite.js");
@@ -1251,18 +1323,42 @@ impl LocalAppsHostBroker {
                 return;
             }
         };
-        let snapshot_ready = match Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest)
-        {
-            Ok(ready) => ready,
-            Err(error) => {
-                let _ = Self::remove_owned_path(&dependency_staging);
-                let _ = service
-                    .fail_dependency_install(&app_id, error.clone())
-                    .await;
-                tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot validation failed");
-                return;
+        let mut snapshot_ready =
+            match Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest) {
+                Ok(ready) => ready,
+                Err(error) => {
+                    let _ = Self::remove_owned_path(&dependency_staging);
+                    let _ = service
+                        .fail_dependency_install(&app_id, error.clone())
+                        .await;
+                    tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot validation failed");
+                    return;
+                }
+            };
+        if !snapshot_ready {
+            // First install on this device: the app bundle already carries a
+            // tree resolved from the pinned template lockfile, so adopt it
+            // instead of resolving the same 169 packages over the network
+            // inside the Linux guest.
+            //
+            // A seed that cannot be adopted is never fatal. Store builds ship
+            // none at all, an app whose lockfile has drifted legitimately needs
+            // a real install, and a damaged bundle should degrade to the slow
+            // path rather than make app creation impossible -- so failures are
+            // recorded and fall through.
+            if let Ok(runtime_root) = self.configured_runtime_root() {
+                match Self::adopt_bundled_dependency_seed(
+                    &runtime_root,
+                    &lock_digest,
+                    &snapshot_root,
+                ) {
+                    Ok(adopted) => snapshot_ready = adopted,
+                    Err(error) => {
+                        tracing::warn!(app_id = %app_id, error = %error, "bundled dependency seed could not be adopted");
+                    }
+                }
             }
-        };
+        }
         if snapshot_ready {
             if let Err(error) =
                 Self::materialize_dependency_snapshot(&snapshot_root, &dependency_staging)
@@ -4482,17 +4578,35 @@ fn validate_dependency_tree(root: &Path) -> Result<(), String> {
     if metadata.is_file() {
         return Ok(());
     }
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| format!("resolve dependency tree {}: {error}", root.display()))?;
+    validate_dependency_entry(root, &canonical_root)
+}
+
+fn validate_dependency_entry(path: &Path, canonical_root: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect dependency tree {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        // A contained shim is legal; anything reaching outside the tree is not.
+        // Traversal never descends THROUGH the link, so a link to a directory
+        // inside the tree cannot make this recursion unbounded.
+        dependency_symlink_target(path, canonical_root)?;
+        return Ok(());
+    }
+    if metadata.is_file() {
+        return Ok(());
+    }
     if !metadata.is_dir() {
         return Err(format!(
             "dependency tree entry is not regular: {}",
-            root.display()
+            path.display()
         ));
     }
-    for entry in std::fs::read_dir(root)
-        .map_err(|error| format!("read dependency tree {}: {error}", root.display()))?
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| format!("read dependency tree {}: {error}", path.display()))?
     {
         let entry = entry.map_err(|error| format!("read dependency tree entry: {error}"))?;
-        validate_dependency_tree(&entry.path())?;
+        validate_dependency_entry(&entry.path(), canonical_root)?;
     }
     Ok(())
 }
@@ -4527,10 +4641,27 @@ fn dependency_tree_digest(root: &Path) -> Result<String, String> {
     digest.update((files.len() as u64).to_le_bytes());
     for (relative, path) in files {
         let relative = relative.as_bytes();
-        let bytes = std::fs::read(&path)
-            .map_err(|error| format!("read dependency tree file {}: {error}", path.display()))?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            format!("inspect dependency tree file {}: {error}", path.display())
+        })?;
+        // A shim is digested by its TARGET, tagged so it can never collide with
+        // a regular file whose contents happen to be that same path text --
+        // otherwise swapping `.bin/vite` between a link and a file would leave
+        // the attestation unchanged.
+        let (kind, bytes) = if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(&path).map_err(|error| {
+                format!("read dependency tree symlink {}: {error}", path.display())
+            })?;
+            (1u8, target.as_os_str().as_encoded_bytes().to_vec())
+        } else {
+            let bytes = std::fs::read(&path).map_err(|error| {
+                format!("read dependency tree file {}: {error}", path.display())
+            })?;
+            (0u8, bytes)
+        };
         digest.update((relative.len() as u64).to_le_bytes());
         digest.update(relative);
+        digest.update([kind]);
         digest.update((bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     }
@@ -4545,10 +4676,8 @@ fn collect_dependency_files(
     let metadata = std::fs::symlink_metadata(root)
         .map_err(|error| format!("inspect dependency tree {}: {error}", root.display()))?;
     if metadata.file_type().is_symlink() {
-        return Err(format!(
-            "dependency tree contains a symlink: {}",
-            root.display()
-        ));
+        files.push((relative.to_string_lossy().into_owned(), root.to_path_buf()));
+        return Ok(());
     }
     if metadata.is_file() {
         files.push((relative.to_string_lossy().into_owned(), root.to_path_buf()));
@@ -4577,10 +4706,12 @@ fn collect_dependency_files(
 fn make_dependency_files_read_only(root: &Path) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(root)?;
     if metadata.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("dependency tree contains a symlink: {}", root.display()),
-        ));
+        // Leave the link alone: `set_permissions` FOLLOWS it, so chmod-ing here
+        // would re-apply to the target that the walk already visits on its own,
+        // and there is no portable `lchmod`. The link node carries no content
+        // to protect -- its target is inside the tree and is made read-only in
+        // its own right.
+        return Ok(());
     }
     if metadata.is_file() {
         #[cfg(unix)]
@@ -4598,9 +4729,40 @@ fn make_dependency_files_read_only(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Resolve a symlink and require that it lands inside `canonical_root`.
+///
+/// The invariant a dependency tree actually needs is that no link reaches
+/// outside the tree -- the same rule `stage-local-app-runtime.py`'s
+/// `validate_symlinks` already enforces for the staged runtime. Forbidding
+/// links outright is stricter than the threat and rejects `node_modules/.bin`,
+/// which `pnpm install` writes as relative shims for every package carrying a
+/// `bin` field.
+///
+/// Resolution is strict: a shim whose target does not exist is rejected rather
+/// than copied forward as a dangling entry that fails later at `vite` spawn
+/// time with an unrelated message.
+fn dependency_symlink_target(path: &Path, canonical_root: &Path) -> Result<PathBuf, String> {
+    let resolved = std::fs::canonicalize(path).map_err(|error| {
+        format!(
+            "dependency tree symlink does not resolve: {}: {error}",
+            path.display()
+        )
+    })?;
+    if !resolved.starts_with(canonical_root) {
+        return Err(format!(
+            "dependency tree symlink escapes the tree: {} -> {}",
+            path.display(),
+            resolved.display()
+        ));
+    }
+    Ok(resolved)
+}
+
 fn clone_or_copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink() {
+        // The ROOT being a link is still refused: it would make the whole tree
+        // an alias for somewhere else, which is the escape this guards.
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
@@ -4621,32 +4783,61 @@ fn clone_or_copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
             format!("dependency source is not regular: {}", source.display()),
         ));
     }
+    let canonical_source = std::fs::canonicalize(source)?;
     if try_clone_tree(source, destination).is_ok() {
         return Ok(());
     }
     let _ = std::fs::remove_dir_all(destination);
     std::fs::create_dir_all(destination)?;
-    copy_dependency_tree(source, destination)
+    copy_dependency_tree(source, destination, &canonical_source)
 }
 
-fn copy_dependency_tree(source: &Path, destination: &Path) -> io::Result<()> {
+#[cfg(unix)]
+fn recreate_dependency_symlink(target: &Path, destination: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, destination)
+}
+
+#[cfg(not(unix))]
+fn recreate_dependency_symlink(_target: &Path, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "dependency tree symlinks are unsupported on this platform",
+    ))
+}
+
+fn copy_dependency_tree(
+    source: &Path,
+    destination: &Path,
+    canonical_source_root: &Path,
+) -> io::Result<()> {
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let metadata = std::fs::symlink_metadata(&source_path)?;
         if metadata.file_type().is_symlink() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "dependency source symlink is forbidden: {}",
-                    source_path.display()
-                ),
-            ));
+            // Containment is checked against the ORIGINAL root, not the
+            // directory being walked, so `.bin/vite -> ../vite/bin/vite.js`
+            // stays legal while `../../../etc/passwd` does not.
+            dependency_symlink_target(&source_path, canonical_source_root)
+                .map_err(io::Error::other)?;
+            let target = std::fs::read_link(&source_path)?;
+            if target.is_absolute() {
+                // An absolute target resolves inside the tree only for as long
+                // as the tree stays at this path; copying it into the snapshot
+                // would silently re-point at the source app's workspace.
+                return Err(io::Error::other(format!(
+                    "dependency tree symlink must be relative: {} -> {}",
+                    source_path.display(),
+                    target.display()
+                )));
+            }
+            recreate_dependency_symlink(&target, &destination_path)?;
+            continue;
         }
         if metadata.is_dir() {
             std::fs::create_dir_all(&destination_path)?;
-            copy_dependency_tree(&source_path, &destination_path)?;
+            copy_dependency_tree(&source_path, &destination_path, canonical_source_root)?;
         } else if metadata.is_file() {
             std::fs::copy(&source_path, &destination_path)?;
         } else {
@@ -5640,6 +5831,216 @@ mod tests {
             .expect("symlink");
         let error = validate_dependency_tree(&source).expect_err("symlink must be rejected");
         assert!(error.contains("symlink"), "{error}");
+    }
+
+    /// The shape `pnpm install` ACTUALLY produces for this template: every
+    /// package with a `bin` field gets a relative shim under `node_modules/.bin`
+    /// that points back inside the tree. Measured against the pinned template
+    /// lockfile with the engine's exact flags, that is `.bin/{jiti,nanoid,
+    /// rolldown,vite}` -- four internal relative symlinks, with `nodeLinker:
+    /// hoisted` keeping `.pnpm/` itself symlink-free.
+    ///
+    /// `dependency_snapshot_rejects_symlink_entries` above only ever builds a
+    /// symlink that ESCAPES the tree, so it pins the real security invariant
+    /// while never crossing the line this fixture crosses. Rejecting internal
+    /// shims too means `publish_dependency_snapshot` fails on every install
+    /// that pnpm completes successfully, so the snapshot cache can never be
+    /// populated and every app re-runs a full install.
+    #[cfg(unix)]
+    #[test]
+    fn dependency_snapshot_accepts_internal_bin_shims() {
+        let root = TempDir::new().expect("tempdir");
+        let source = root.path().join("install/node_modules");
+        fs::create_dir_all(source.join("vite/bin")).expect("source tree");
+        fs::write(source.join("vite/bin/vite.js"), b"vite").expect("vite marker");
+        fs::create_dir_all(source.join(".bin")).expect("bin dir");
+        std::os::unix::fs::symlink("../vite/bin/vite.js", source.join(".bin/vite"))
+            .expect("bin shim");
+
+        let snapshot = root.path().join("cache/snapshot");
+        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+            .expect("a pnpm tree with internal bin shims must publish");
+        assert!(
+            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("validate snapshot")
+        );
+
+        let staging = root.path().join("staging");
+        fs::create_dir_all(&staging).expect("staging");
+        LocalAppsHostBroker::materialize_dependency_snapshot(&snapshot, &staging)
+            .expect("materialize snapshot");
+        // The shim must survive as a shim: Node resolves `.bin/vite` through the
+        // link, so materializing it as a dangling entry would break the build
+        // just as surely as dropping it.
+        let shim = staging.join("node_modules/.bin/vite");
+        let shim_metadata = fs::symlink_metadata(&shim).expect("materialized bin shim");
+        assert!(
+            shim_metadata.file_type().is_symlink(),
+            "bin shim must stay a symlink"
+        );
+        assert_eq!(
+            fs::read(&shim).expect("shim resolves to its target"),
+            b"vite"
+        );
+    }
+
+    /// Loosening "no symlinks" to "no escaping symlink" only holds if the
+    /// containment check is enforced where the bytes actually move. Validation
+    /// runs on the staged COPY, so a copy layer that faithfully reproduced an
+    /// escaping link would already have read through it.
+    #[cfg(unix)]
+    #[test]
+    fn dependency_snapshot_still_refuses_escaping_shims() {
+        let root = TempDir::new().expect("tempdir");
+        let source = root.path().join("install/node_modules");
+        fs::create_dir_all(source.join("vite/bin")).expect("source tree");
+        fs::write(source.join("vite/bin/vite.js"), b"vite").expect("vite marker");
+        fs::write(root.path().join("secret"), b"secret").expect("outside file");
+        fs::create_dir_all(source.join(".bin")).expect("bin dir");
+        std::os::unix::fs::symlink("../../../secret", source.join(".bin/exfil"))
+            .expect("escaping shim");
+
+        let snapshot = root.path().join("cache/snapshot");
+        let error =
+            LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+                .expect_err("an escaping shim must not publish");
+        assert!(error.contains("escapes the tree"), "{error}");
+        assert!(
+            !snapshot.join("node_modules/.bin/exfil").exists(),
+            "a refused publish must leave no snapshot behind"
+        );
+    }
+
+    /// An absolute target can point inside the tree at publish time and still be
+    /// wrong: the snapshot is consumed from a different directory than it was
+    /// built in, so the link would silently re-point at the app that created it.
+    #[cfg(unix)]
+    #[test]
+    fn dependency_snapshot_refuses_absolute_shims_that_currently_resolve_inside() {
+        let root = TempDir::new().expect("tempdir");
+        let source = root.path().join("install/node_modules");
+        fs::create_dir_all(source.join("vite/bin")).expect("source tree");
+        fs::write(source.join("vite/bin/vite.js"), b"vite").expect("vite marker");
+        fs::create_dir_all(source.join(".bin")).expect("bin dir");
+        std::os::unix::fs::symlink(source.join("vite/bin/vite.js"), source.join(".bin/vite"))
+            .expect("absolute shim");
+
+        let snapshot = root.path().join("cache/snapshot");
+        let error =
+            LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
+                .expect_err("an absolute shim must not publish");
+        assert!(error.contains("must be relative"), "{error}");
+    }
+
+    /// The attestation has to see the difference between a shim and a regular
+    /// file holding that same path as text, or swapping one for the other would
+    /// leave `dependency_snapshot_is_ready` satisfied.
+    #[cfg(unix)]
+    #[test]
+    fn dependency_tree_digest_separates_a_shim_from_its_target_text() {
+        let root = TempDir::new().expect("tempdir");
+        let linked = root.path().join("linked/node_modules");
+        fs::create_dir_all(linked.join("vite/bin")).expect("linked tree");
+        fs::write(linked.join("vite/bin/vite.js"), b"vite").expect("vite marker");
+        std::os::unix::fs::symlink("../vite/bin/vite.js", linked.join("shim")).expect("shim");
+
+        let plain = root.path().join("plain/node_modules");
+        fs::create_dir_all(plain.join("vite/bin")).expect("plain tree");
+        fs::write(plain.join("vite/bin/vite.js"), b"vite").expect("vite marker");
+        fs::write(plain.join("shim"), b"../vite/bin/vite.js").expect("plain shim");
+
+        assert_ne!(
+            dependency_tree_digest(&linked).expect("linked digest"),
+            dependency_tree_digest(&plain).expect("plain digest"),
+        );
+    }
+
+    /// Build a staged seed shaped the way `stage-local-app-runtime.py` emits
+    /// one: a `node_modules` tree with a real `vite/bin/vite.js`, the `.bin`
+    /// shims pnpm writes, and a `runtime-manifest.json` naming the lockfile the
+    /// tree was resolved from.
+    #[cfg(unix)]
+    fn create_bundled_seed(root: &Path, manifest_lock_digest: &str) -> PathBuf {
+        let seed = root.join("bundle/local-app-runtime");
+        let node_modules = seed.join("node_modules");
+        fs::create_dir_all(node_modules.join("vite/bin")).expect("seed tree");
+        fs::write(node_modules.join("vite/bin/vite.js"), b"#!/usr/bin/env node\n")
+            .expect("seed vite");
+        fs::create_dir_all(node_modules.join(".bin")).expect("seed bin dir");
+        std::os::unix::fs::symlink("../vite/bin/vite.js", node_modules.join(".bin/vite"))
+            .expect("seed shim");
+        fs::write(
+            seed.join("runtime-manifest.json"),
+            format!(
+                "{{\"schema_version\":1,\"pnpm_lock_sha256\":\"{manifest_lock_digest}\",\"read_only\":true}}\n"
+            ),
+        )
+        .expect("seed manifest");
+        seed
+    }
+
+    /// The whole point of shipping the seed: a device that has never installed
+    /// anything gets a ready snapshot without a package manager, a Linux guest,
+    /// or a network round trip.
+    #[cfg(unix)]
+    #[test]
+    fn bundled_seed_becomes_the_snapshot_for_its_own_lockfile() {
+        let root = TempDir::new().expect("tempdir");
+        let seed = create_bundled_seed(root.path(), "lock-digest");
+        let snapshot = root.path().join("cache/snapshot");
+
+        let adopted =
+            LocalAppsHostBroker::adopt_bundled_dependency_seed(&seed, "lock-digest", &snapshot)
+                .expect("adopt bundled seed");
+
+        assert!(adopted, "a matching seed must be adopted");
+        assert!(
+            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
+                .expect("validate adopted snapshot"),
+            "the adopted snapshot must satisfy the same readiness check a real install produces"
+        );
+        assert!(fs::symlink_metadata(snapshot.join("node_modules/.bin/vite"))
+            .expect("adopted bin shim")
+            .file_type()
+            .is_symlink());
+    }
+
+    /// Editing `package.json` re-resolves the lockfile, and the bundled tree no
+    /// longer describes those dependencies. Adopting it anyway would install
+    /// the wrong packages under an attestation claiming they were right.
+    #[cfg(unix)]
+    #[test]
+    fn bundled_seed_is_declined_when_the_app_lockfile_has_drifted() {
+        let root = TempDir::new().expect("tempdir");
+        let seed = create_bundled_seed(root.path(), "bundled-digest");
+        let snapshot = root.path().join("cache/snapshot");
+
+        let adopted = LocalAppsHostBroker::adopt_bundled_dependency_seed(
+            &seed,
+            "the-apps-own-digest",
+            &snapshot,
+        )
+        .expect("evaluate bundled seed");
+
+        assert!(!adopted, "a seed for a different lockfile must be declined");
+        assert!(
+            !snapshot.exists(),
+            "declining must not leave a partial snapshot behind"
+        );
+    }
+
+    /// Store builds ship no seed at all, so absence is an ordinary outcome and
+    /// must not fail the install that would otherwise proceed over the network.
+    #[test]
+    fn bundled_seed_absence_is_not_an_error() {
+        let root = TempDir::new().expect("tempdir");
+        let adopted = LocalAppsHostBroker::adopt_bundled_dependency_seed(
+            &root.path().join("no-such-bundle"),
+            "lock-digest",
+            &root.path().join("cache/snapshot"),
+        )
+        .expect("absent seed must not be an error");
+        assert!(!adopted);
     }
 
     #[test]

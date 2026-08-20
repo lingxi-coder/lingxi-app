@@ -5,3 +5,5 @@ verifyStoreIntegrity: true
 strictStorePkgContentCheck: true
 ignoreScripts: true
 preferFrozenLockfile: true
+overrides:
+  lightningcss: 1.33.0

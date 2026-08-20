@@ -183,7 +183,7 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: appSandboxRoot)
             },
             localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
-            localAppsRuntimeRoot: nil,
+            localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot,
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
             hostEnvironment: await MainActor.run {
                 makeIosHostEnvironment(launchMode: .scheduledHeadless)

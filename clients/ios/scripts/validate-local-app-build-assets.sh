@@ -8,11 +8,10 @@ PLATFORM=""
 STAGED=""
 ROOTFS_MANIFEST=""
 # Judge the ROOTFS ALONE, skipping the staged local-app runtime requirement.
-# The Xcode staging phase is the only caller that runs during a real build, and
-# nothing there populates a staged node_modules tree -- commit 1a4385f09
-# deliberately removed the phase that did, recording a directive against
-# reintroducing a bundled dependency seed. Demanding it there would fail every
-# Full/Release iphoneos build, so the build wires in this scoped mode.
+# The Xcode phase no longer uses this: it installs the staged dependency seed
+# and then validates it, because `build-local-app-node-modules.sh` now supplies
+# the tree that 1a4385f09 left unproduced. The mode stays for callers that
+# genuinely package no seed -- android/store paths and the supply-chain tests.
 ROOTFS_ONLY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in

@@ -159,12 +159,46 @@ targets:
           # REQUIRED=1 for ANY *Release, so calling it unconditionally would
           # fail every StoreRelease device build on a rootfs it is not supposed
           # to have.
+          # Ship the resolved dependency tree so the FIRST create_local_app on a
+          # device does not resolve 169 packages over the network inside the
+          # emulated guest. The engine matches the seed's
+          # runtime-manifest.json `pnpm_lock_sha256` against the app's own
+          # lockfile and, on a match, publishes it straight into the dependency
+          # snapshot cache -- no pnpm, no guest, no network.
+          #
+          # This is the producer stage `validate-local-app-build-assets.sh` has
+          # always named in its failure text ("Set LINGXI_LOCAL_APP_NODE_MODULES
+          # and rebuild"), and which nothing in the repository supplied: the
+          # phase was removed by 1a4385f09 with a directive not to reintroduce a
+          # bundled seed "without revisiting bundle-size and build-cache
+          # invariants". Revisited: the tree is 125 MB expanded / ~27 MB
+          # compressed, replaces a 141 MB pnpm store that cannot be seeded at
+          # all (pnpm 11 keeps a SQLite index and fails read-only with
+          # ERR_SQLITE_ERROR), and is content-addressed by the lockfile digest
+          # so a drifted app lockfile declines it instead of installing the
+          # wrong packages.
+          #
+          # Scoped to Full* for the same reason as the rootfs above: Store
+          # builds ship no Node toolchain, so a dependency tree there would be
+          # dead weight in the bundle.
           case "${CONFIGURATION}" in
             Full*)
+              STAGED_RUNTIME="${SRCROOT}/build/local-app-runtime/full"
+              if [ ! -f "${STAGED_RUNTIME}/node_modules/vite/bin/vite.js" ]; then
+                echo "error: the staged local-app dependency seed is missing: ${STAGED_RUNTIME}"
+                echo "       Run, from the repository root:"
+                echo "         lingxi-code/scripts/mobile-linux/build-local-app-node-modules.sh --arch aarch64"
+                echo "         clients/ios/scripts/stage-local-app-runtime.sh --variant full \\"
+                echo "           --node-modules clients/ios/build/local-app-node-modules/aarch64/node_modules"
+                exit 1
+              fi
+              "${SRCROOT}/scripts/install-staged-local-app-runtime.sh" \
+                --staged "${STAGED_RUNTIME}" \
+                --destination "${DESTINATION}/local-app-runtime" || exit 1
               "${SRCROOT}/scripts/validate-local-app-build-assets.sh" \
                 --configuration "${CONFIGURATION}" \
                 --platform "${PLATFORM_NAME}" \
-                --rootfs-only \
+                --staged "${DESTINATION}/local-app-runtime" \
                 --rootfs-manifest "${DESTINATION}/linux-runtime-manifest.json" || exit 1
               ;;
           esac

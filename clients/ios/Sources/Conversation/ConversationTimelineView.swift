@@ -25,7 +25,7 @@ struct ConversationTimelineView: View {
     }
 
     private var timelineSegments: [Segment] {
-        groups.flatMap(segments(in:))
+        groups.flatMap(Self.segments(in:))
     }
 
     @ViewBuilder
@@ -84,6 +84,18 @@ struct ConversationTimelineView: View {
         }
     }
 
+    /// The `ForEach` id a tool group projects to, whatever its tool count.
+    static func toolSegmentID(groupID: String) -> String {
+        "timeline-tools:\(groupID)"
+    }
+
+    /// The row ids a group projects to. `Segment` is private, so this is the
+    /// testable projection of it; it calls the same `segments(in:)` the view
+    /// renders from, so the two cannot drift.
+    static func segmentIDs(in group: ConversationTimelineGroup) -> [String] {
+        segments(in: group).map(\.id)
+    }
+
     private enum Segment: Identifiable {
         case message(id: String, message: Message)
         case commandOutput(id: String, output: ConversationCommandOutput)
@@ -101,17 +113,23 @@ struct ConversationTimelineView: View {
         }
     }
 
-    private func segments(in group: ConversationTimelineGroup) -> [Segment] {
+    private static func segments(in group: ConversationTimelineGroup) -> [Segment] {
         var result: [Segment] = []
-        var pendingTools: [(String, ConversationToolTrace)] = []
+        var pendingTools: [ConversationToolTrace] = []
 
         func flushTools() {
             guard !pendingTools.isEmpty else { return }
+            // ONE id for both shapes. A live group grows from one tool to two
+            // mid-turn; if the single-tool id and the batch id differ, that
+            // growth reads to SwiftUI as "remove a row, insert a different
+            // row" and the subtree is rebuilt under the reader. The group id
+            // is keyed on the group's FIRST tool, so it is stable as more
+            // tools are appended.
+            let id = Self.toolSegmentID(groupID: group.id)
             if pendingTools.count >= 2 {
-                let id = "timeline-batch:\(group.id)"
-                result.append(.toolBatch(id: id, tools: pendingTools.map(\.1)))
+                result.append(.toolBatch(id: id, tools: pendingTools))
             } else if let one = pendingTools.first {
-                result.append(.tool(id: one.0, trace: one.1))
+                result.append(.tool(id: id, trace: one))
             }
             pendingTools.removeAll(keepingCapacity: true)
         }
@@ -119,7 +137,7 @@ struct ConversationTimelineView: View {
         for row in group.rows {
             switch row {
             case let .tool(runID, trace):
-                pendingTools.append(("tool:\(runID ?? "none"):\(trace.id)", trace))
+                pendingTools.append(trace)
             case let .message(message):
                 flushTools()
                 result.append(.message(id: "message:\(message.id.uuidString)", message: message))

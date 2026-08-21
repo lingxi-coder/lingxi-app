@@ -1270,21 +1270,12 @@ fn current_contract_index() -> ContractIndex {
     put("AppManifestDto.capabilities", "Vec<AppCapabilityKindDto>");
     put("AppManifestDto.device_context", "Option<DeviceContextDto>");
 
+    // Only the stable target pair: viewport, safe area, color scheme,
+    // reduced motion and input mode were removed because they are live values
+    // the page reads from `window.lingxi.v2.deviceContext`, and the host that
+    // writes this record has none of them.
     put("DeviceContextDto.os", "String");
     put("DeviceContextDto.form_factor", "String");
-    put("DeviceContextDto.viewport", "DeviceViewportDto");
-    put("DeviceContextDto.safe_area", "DeviceInsetsDto");
-    put("DeviceContextDto.color_scheme", "String");
-    put("DeviceContextDto.reduced_motion", "bool");
-    put("DeviceContextDto.input_mode", "String");
-
-    put("DeviceViewportDto.width", "u32");
-    put("DeviceViewportDto.height", "u32");
-
-    put("DeviceInsetsDto.top", "u32");
-    put("DeviceInsetsDto.right", "u32");
-    put("DeviceInsetsDto.bottom", "u32");
-    put("DeviceInsetsDto.left", "u32");
 
     put("AppRuntimeDetailsDto.state", "AppRuntimeStateDto");
     put("AppRuntimeDetailsDto.mode", "Option<AppRuntimeModeDto>");
@@ -1764,7 +1755,7 @@ fn contract_index_covers_every_dto() {
         AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto, AppEventDto, AppManifestDto,
         AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeRecoveryStateDto,
         AppRuntimeStateDto, AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
-        AppUiTargetDto, AppWorkflowStateDto, DeviceContextDto, DeviceInsetsDto, DeviceViewportDto,
+        AppUiTargetDto, AppWorkflowStateDto, DeviceContextDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
     use client_protocol::permission::{
@@ -2119,24 +2110,9 @@ fn contract_index_covers_every_dto() {
         fields: Vec::new(),
         enabled_by_default: false,
     };
-    let device_viewport = DeviceViewportDto {
-        width: 0,
-        height: 0,
-    };
-    let device_insets = DeviceInsetsDto {
-        top: 0,
-        right: 0,
-        bottom: 0,
-        left: 0,
-    };
     let device_context = DeviceContextDto {
         os: String::new(),
         form_factor: String::new(),
-        viewport: device_viewport,
-        safe_area: device_insets,
-        color_scheme: String::new(),
-        reduced_motion: false,
-        input_mode: String::new(),
     };
     let _app_manifest = AppManifestDto {
         schema_version: 0,

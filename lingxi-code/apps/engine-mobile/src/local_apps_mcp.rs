@@ -36,6 +36,10 @@ pub trait LocalAppsMcpHost: Send + Sync {
     async fn mutate_data(&self, input: Value) -> Result<Value, String>;
     async fn inspect_ui(&self, input: Value) -> Result<Value, String>;
     async fn act_on_ui(&self, input: Value) -> Result<Value, String>;
+    /// Capture a still image of the app's own view. Returns the MCP
+    /// `{"type":"image", …}` content shape so the model SEES the frame; a
+    /// base64 string in a text block would be unreadable to it.
+    async fn capture_ui(&self, input: Value) -> Result<Value, String>;
     async fn restore_checkpoint(&self, input: Value) -> Result<Value, String>;
     /// Build the app workspace with the offline toolchain (v3 agent-driven
     /// flow): replaces the build source, runs the fixed Vite/Next build under
@@ -569,6 +573,29 @@ impl LocalAppsMcpTransport {
         }
     }
 
+    /// Result carrying a captured frame.
+    ///
+    /// The frame rides as an MCP `image` content block, NOT as base64 inside
+    /// the text block `Self::result` would build: `tools/mcp`'s
+    /// `transform_result` turns `{"type":"image","data":…,"mimeType":…}` into
+    /// an Anthropic `{type:"image",source:{type:"base64",…}}` block the model
+    /// can actually see, and runs it through the shared image budget on the
+    /// way. A base64 string in a text block is just characters to the model.
+    ///
+    /// `structured_content` rides ALONGSIDE it — the same transform keeps
+    /// non-text blocks and appends the structured JSON as text — so the
+    /// viewport metadata survives without costing the image. That metadata is
+    /// not decoration: the same app looks different on an iPad in landscape
+    /// and an iPhone in portrait, and the frame alone does not say which.
+    fn image_result(data: &str, mime_type: &str, metadata: Value) -> McpToolResultDto {
+        McpToolResultDto {
+            content: json!([{ "type": "image", "data": data, "mimeType": mime_type }]),
+            is_error: false,
+            structured_content: Some(metadata),
+            ..Default::default()
+        }
+    }
+
     fn query_result(mut value: Value) -> McpToolResultDto {
         if let Some(object) = value.as_object_mut() {
             object
@@ -785,7 +812,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "update_manifest",
-                "Declare the app's data collections, allowed network domains, exact capabilities and confirmed native device context in its manifest. Every collection is `{id,name,fields}` and every field is `{id,label,kind,required?,enumOptions?}`. Collection and field ids use lower snake_case. `recordId`, `revision`, `createdAtMs`, and `updatedAtMs` are host-owned record metadata; never declare them as fields. `data_mutation` authorizes conversation-agent calls to LocalAppMutateData; a page writing its own collection through window.lingxi.v2.data does not declare it solely for that. Destructive schema migrations against existing data require the user's approval.",
+                "Declare the app's data collections, allowed network domains and exact capabilities in its manifest. The native device context is host-derived and recorded automatically; never declare it. Every collection is `{id,name,fields}` and every field is `{id,label,kind,required?,enumOptions?}`. Collection and field ids use lower snake_case. `recordId`, `revision`, `createdAtMs`, and `updatedAtMs` are host-owned record metadata; never declare them as fields. `data_mutation` authorizes conversation-agent calls to LocalAppMutateData; a page writing its own collection through window.lingxi.v2.data does not declare it solely for that. Destructive schema migrations against existing data require the user's approval.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "collections":{
@@ -794,16 +821,7 @@ impl LocalAppsMcpTransport {
                         "items":manifest_collection
                     },
                     "allowed_domains":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":200}},
-                    "capabilities":{"type":"array","maxItems":local_apps::AppCapability::ALL.len(),"uniqueItems":true,"items":{"enum":app_capabilities}},
-                    "device_context":{"type":"object","properties":{
-                        "os":{"enum":["ios","android","desktop","unknown"]},
-                        "formFactor":{"enum":["iphone","ipad","phone","tablet","desktop","unknown"]},
-                        "viewport":{"type":"object","properties":{"width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1}},"required":["width","height"],"additionalProperties":false},
-                        "safeArea":{"type":"object","properties":{"top":{"type":"integer","minimum":0},"right":{"type":"integer","minimum":0},"bottom":{"type":"integer","minimum":0},"left":{"type":"integer","minimum":0}},"required":["top","right","bottom","left"],"additionalProperties":false},
-                        "colorScheme":{"enum":["light","dark","unknown"]},
-                        "reducedMotion":{"type":"boolean"},
-                        "inputMode":{"enum":["touch","pointer","hybrid","unknown"]}
-                    },"required":["os","formFactor","viewport","safeArea","colorScheme","reducedMotion","inputMode"],"additionalProperties":false}
+                    "capabilities":{"type":"array","maxItems":local_apps::AppCapability::ALL.len(),"uniqueItems":true,"items":{"enum":app_capabilities}}
                 },"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
@@ -864,12 +882,12 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "act_on_ui",
-                "Perform one structured UI action. Allowed actions are click, fill, select, toggle, scroll, navigate, back and reload; arbitrary JavaScript is rejected.",
+                "Perform one structured UI action. Allowed actions are click, fill, select, toggle, scroll, navigate, back, reload, pointer and key; arbitrary JavaScript is rejected. Use pointer/key for a canvas or WebGL surface: it has no elements for click/fill to resolve, and listens for pointer and keyboard events instead. pointer takes value \"x,y\" (viewport CSS pixels) or \"x,y,phase\" where phase is tap, down, move or up — hold with down, release with up. key takes value \"<key>\" or \"<key>,phase\" where key is a DOM key name such as ArrowLeft, and phase is press, down or up.",
                 json!({
                     "type":"object",
                     "properties":{
                         "app_id":app_id.clone(),
-                        "action":{"enum":["click","fill","select","toggle","scroll","navigate","back","reload"]},
+                        "action":{"enum":["click","fill","select","toggle","scroll","navigate","back","reload","pointer","key"]},
                         "target":{
                             "oneOf":[
                                 {"type":"string","maxLength":500},
@@ -889,6 +907,11 @@ impl LocalAppsMcpTransport {
                     "required":["app_id","action"],
                     "additionalProperties":false
                 }),
+            ),
+            Self::tool(
+                "capture_ui",
+                "Capture a still image of a running local app's own view and return it as an image. Use this when the DOM snapshot cannot describe what the app is showing — a canvas or WebGL surface renders no inspectable elements, so inspect_ui returns an empty list whether the app is drawing correctly, drawing nothing, or crashed.",
+                json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "read_logs",
@@ -1419,6 +1442,36 @@ impl LocalAppsMcpTransport {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
+            "capture_ui" => match self.host()?.capture_ui(input).await {
+                Ok(mut value) => {
+                    // The host hands back `{image:{data,mime_type}, …}`. Split
+                    // the frame out of the JSON so it can ride as a real image
+                    // block; whatever else the host attached stays structured.
+                    let image = value
+                        .as_object_mut()
+                        .and_then(|object| object.remove("image"));
+                    match image {
+                        Some(image) => {
+                            let data = image.get("data").and_then(Value::as_str).unwrap_or("");
+                            let mime = image
+                                .get("mime_type")
+                                .and_then(Value::as_str)
+                                .unwrap_or("image/jpeg");
+                            if data.is_empty() {
+                                Self::tool_error(
+                                    "capture_ui returned an empty frame; the app view may not be on screen",
+                                )
+                            } else {
+                                Self::image_result(data, mime, value)
+                            }
+                        }
+                        None => Self::tool_error(
+                            "capture_ui returned no frame; the app view may not be on screen",
+                        ),
+                    }
+                }
+                Err(message) => Self::tool_error(message),
+            },
             "act_on_ui" => match self.host()?.act_on_ui(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
@@ -1908,6 +1961,44 @@ mod tests {
         );
     }
 
+    /// The canvas-driving vocabulary must be reachable AND described.
+    ///
+    /// `pointer`/`key` are useless if the model cannot discover how to pass
+    /// coordinates: they are fieldless wire variants whose payload rides the
+    /// shared `value` field, so unlike `fill` or `select` the schema alone does
+    /// not reveal the shape. If the description stops explaining it, the tool
+    /// silently becomes undrivable for exactly the apps it was added for.
+    #[test]
+    fn act_on_ui_advertises_the_canvas_actions_and_how_to_address_them() {
+        let tools = LocalAppsMcpTransport::tool_catalog();
+        let act = tools
+            .iter()
+            .find(|tool| tool.tool_name == "act_on_ui")
+            .expect("act_on_ui in the fixed catalog");
+
+        let actions = act.input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        for action in ["pointer", "key"] {
+            assert!(actions.contains(&action), "{action} missing from {actions:?}");
+        }
+
+        let description = &act.description;
+        assert!(
+            description.contains("\"x,y\""),
+            "the description must give the pointer value shape: {description}"
+        );
+        for phase in ["tap", "down", "move", "up", "press"] {
+            assert!(
+                description.contains(phase),
+                "phase {phase} is accepted by the host but undocumented: {description}"
+            );
+        }
+    }
+
     #[test]
     fn catalog_is_fixed_and_exposes_no_arbitrary_execution_surface() {
         let tools = LocalAppsMcpTransport::tool_catalog();
@@ -1927,6 +2018,7 @@ mod tests {
                 "mutate_data",
                 "inspect_ui",
                 "act_on_ui",
+                "capture_ui",
                 "read_logs",
                 "read_app_events",
                 "background_schedule",
@@ -2353,6 +2445,30 @@ mod tests {
         );
     }
 
+    /// The device context is a host fact, not a model input. Re-exposing it
+    /// here is what produced `{os:"ios", formFactor:"phone"}` on every
+    /// iPhone: the agent can only see the mobile runtime reminder, whose
+    /// `Device class: phone` is not an iOS form factor, so the pair it wrote
+    /// was exactly the one `DeviceContext::validate` rejects.
+    #[test]
+    fn update_manifest_never_asks_the_agent_for_the_device_context() {
+        let tools = LocalAppsMcpTransport::tool_catalog();
+        let update = tools
+            .iter()
+            .find(|tool| tool.tool_name == "update_manifest")
+            .expect("update_manifest is declared");
+        assert!(
+            update.input_schema["properties"]
+                .get("device_context")
+                .is_none(),
+            "the host derives the device context: {}",
+            update.input_schema["properties"]
+        );
+        // `additionalProperties:false` is what turns a re-introduction by an
+        // older client into a rejected call rather than a silent override.
+        assert_eq!(update.input_schema["additionalProperties"], false);
+    }
+
     #[test]
     fn update_manifest_catalog_accepts_authoritative_manifest_boundaries() {
         let tools = LocalAppsMcpTransport::tool_catalog();
@@ -2564,6 +2680,136 @@ mod tests {
     /// A minimal [`LocalAppsMcpHost`] double that only records
     /// `scaffold_app` calls — every other method is unreachable from
     /// the `create` tool and panics if ever called.
+    /// A host that hands back a frame, so the dispatch layer's image handling
+    /// can be exercised without a device.
+    struct FrameHost {
+        frame: Option<Value>,
+    }
+
+    #[async_trait]
+    impl LocalAppsMcpHost for FrameHost {
+        fn create_next_step(&self) -> String {
+            unreachable!("not exercised by these tests")
+        }
+        async fn capture_ui(&self, _input: Value) -> Result<Value, String> {
+            Ok(match &self.frame {
+                Some(image) => json!({
+                    "ok": true,
+                    "image": image,
+                    "viewport": {"width": 834, "height": 1194},
+                    "device_pixel_ratio": 2.0,
+                }),
+                None => json!({"ok": true}),
+            })
+        }
+        async fn manage_runtime(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn query_data(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn mutate_data(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn inspect_ui(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn act_on_ui(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn restore_checkpoint(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn build_app(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn install_dependencies(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn update_manifest(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn read_app_events(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn scaffold_app(&self, _record: local_apps::AppRecord) -> Result<(), String> {
+            unreachable!("not exercised by these tests")
+        }
+    }
+
+    /// The captured frame must reach the model as an IMAGE block.
+    ///
+    /// This is the whole reason `capture_ui` exists as its own dispatch arm
+    /// rather than riding `Self::result`: `tools/mcp`'s `transform_result` turns
+    /// an MCP `image` content block into an Anthropic image block the model can
+    /// see, and leaves a text block as text. Base64 inside a text block is just
+    /// characters — the agent would "have" the screenshot and be unable to look
+    /// at it, which is exactly the failure this tool is meant to fix.
+    #[tokio::test]
+    async fn capture_ui_returns_the_frame_as_an_image_block_not_text() {
+        const DATA: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        assert!(transport
+            .attach_host(Arc::new(FrameHost {
+                frame: Some(json!({"data": DATA, "mime_type": "image/jpeg"})),
+            }))
+            .is_ok());
+
+        let result = transport
+            .call("capture_ui", json!({"app_id": "abcd1234"}))
+            .await
+            .expect("capture_ui");
+
+        assert!(!result.is_error, "a captured frame is not an error");
+        let blocks = result.content.as_array().expect("content array");
+        assert_eq!(blocks.len(), 1, "one image block: {blocks:?}");
+        assert_eq!(blocks[0]["type"], "image");
+        assert_eq!(blocks[0]["data"], DATA);
+        assert_eq!(
+            blocks[0]["mimeType"], "image/jpeg",
+            "the transform gates on `mimeType` (camelCase, MCP spelling); a \
+             snake_case key would silently fall through to a text block"
+        );
+
+        // The viewport rides alongside rather than inside the image: the same
+        // app is a different layout on an iPad in landscape and an iPhone in
+        // portrait, and the pixels do not say which one this is.
+        let structured = result.structured_content.expect("structured metadata");
+        assert_eq!(structured["viewport"]["width"], 834);
+        assert_eq!(structured["device_pixel_ratio"], 2.0);
+        assert!(
+            structured.get("image").is_none(),
+            "the frame must be MOVED out of the structured JSON, not copied — \
+             leaving it would send the base64 twice and pay for it twice"
+        );
+    }
+
+    /// A host that produced no frame is an ERROR, not an empty success.
+    ///
+    /// The view being offscreen is the common case (the preview is not
+    /// mounted), and an `ok` result with no image reads to the agent as "the
+    /// app renders nothing" — the exact wrong conclusion for a canvas app.
+    #[tokio::test]
+    async fn capture_ui_without_a_frame_is_an_error() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        assert!(transport
+            .attach_host(Arc::new(FrameHost { frame: None }))
+            .is_ok());
+
+        let result = transport
+            .call("capture_ui", json!({"app_id": "abcd1234"}))
+            .await
+            .expect("capture_ui");
+        assert!(result.is_error, "a missing frame must surface as an error");
+        assert!(
+            result.content.to_string().contains("may not be on screen"),
+            "the message must name the likely cause: {:?}",
+            result.content
+        );
+    }
+
     struct RecordingScaffoldHost {
         calls: StdMutex<Vec<String>>,
         failure: Option<&'static str>,
@@ -2588,6 +2834,9 @@ mod tests {
             unreachable!("not exercised by these tests")
         }
         async fn act_on_ui(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn capture_ui(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
         async fn restore_checkpoint(&self, _input: Value) -> Result<Value, String> {

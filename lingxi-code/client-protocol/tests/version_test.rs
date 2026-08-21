@@ -32,14 +32,15 @@ fn version_is_semver() {
     }
 }
 
-/// The removal of the local-app designer/generation pipeline (the
-/// design/questionnaire/plan/generation command, event, and DTO families;
-/// `AppWorkflowStateDto` collapsed to `draft`/`ready`) pins the contract at
-/// `5.0.0` (a further MAJOR bump past the `git_enabled` `4.0.0` — see
+/// Shrinking `DeviceContextDto` to the stable `os`/`form_factor` target pair
+/// — the host writes it from its own device facts, and the removed
+/// viewport/safe-area/color-scheme/reduced-motion/input-mode fields are live
+/// values the page reads at runtime — pins the contract at `6.0.0` (a further
+/// MAJOR bump past the designer-removal `5.0.0` — see
 /// `client_protocol::version::CLIENT_PROTOCOL_VERSION`'s doc comment). A
 /// change here is a deliberate, reviewed bump — this test makes an accidental
 /// edit visible.
 #[test]
-fn version_is_five_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "5.0.0");
+fn version_is_six_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "6.0.0");
 }

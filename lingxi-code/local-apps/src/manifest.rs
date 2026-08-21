@@ -121,11 +121,20 @@ pub struct DataCollectionSchema {
     pub fields: Vec<DataFieldSchema>,
 }
 
-/// Native host context used to choose a platform-specific generated shell.
+/// Native host target a generated app was confirmed for.
 ///
-/// This is deliberately a small, version-tolerant contract: the host owns
-/// the values and the generated app treats an absent context as unknown. It
-/// is not inferred from the browser user agent.
+/// Host-owned by construction: the engine derives it from the native
+/// client's reported host facts. It is never authored by the model and
+/// never inferred from the browser user agent — the model can only see the
+/// mobile runtime reminder, whose `Device class: phone` vocabulary does not
+/// name an iOS form factor, so asking it to declare this pair produced a
+/// value the validator below had to reject.
+///
+/// It records only the STABLE target pair. Viewport, safe area, color
+/// scheme, reduced motion, and input mode are live values the generated page
+/// reads from `window.lingxi.v2.deviceContext` at runtime; a snapshot of them
+/// taken when the target was confirmed could only go stale. An absent context
+/// means "unknown", which every consumer already tolerates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceContext {
@@ -133,55 +142,37 @@ pub struct DeviceContext {
     pub os: String,
     /// `iphone`, `ipad`, `phone`, `tablet`, `desktop`, or `unknown`.
     pub form_factor: String,
-    pub viewport: DeviceViewport,
-    pub safe_area: DeviceInsets,
-    /// `light`, `dark`, or `unknown`.
-    pub color_scheme: String,
-    pub reduced_motion: bool,
-    /// `touch`, `pointer`, `hybrid`, or `unknown`.
-    pub input_mode: String,
-}
-
-/// CSS-pixel/point viewport dimensions supplied by the native host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceViewport {
-    pub width: u32,
-    pub height: u32,
-}
-
-/// Safe-area insets supplied by the native host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceInsets {
-    pub top: u32,
-    pub right: u32,
-    pub bottom: u32,
-    pub left: u32,
 }
 
 impl DeviceContext {
+    /// Derive the confirmed native target from the native client's host facts.
+    ///
+    /// `None` when the client could not classify the device: every pair that
+    /// names a real platform would be a guess, and an absent context already
+    /// carries exactly that meaning.
+    #[must_use]
+    pub fn from_host_environment(environment: &traits::MobileHostEnvironment) -> Option<Self> {
+        let (os, form_factor) = match (environment.host_os, environment.device_class) {
+            (traits::MobileHostOs::Ios, traits::MobileDeviceClass::Phone) => ("ios", "iphone"),
+            (traits::MobileHostOs::Ios, traits::MobileDeviceClass::Tablet) => ("ios", "ipad"),
+            (traits::MobileHostOs::Android, traits::MobileDeviceClass::Phone) => {
+                ("android", "phone")
+            }
+            (traits::MobileHostOs::Android, traits::MobileDeviceClass::Tablet) => {
+                ("android", "tablet")
+            }
+            (_, traits::MobileDeviceClass::Unknown) => return None,
+        };
+        Some(Self {
+            os: os.into(),
+            form_factor: form_factor.into(),
+        })
+    }
+
+    /// Guard the persisted pair. Nothing the model writes reaches this any
+    /// more, so it now guards deserialized on-disk state: a manifest written
+    /// by an older build, or hand-edited, must still name a real platform.
     fn validate(&self) -> Result<(), AppError> {
-        let valid_os = matches!(self.os.as_str(), "ios" | "android" | "desktop" | "unknown");
-        let valid_form_factor = matches!(
-            self.form_factor.as_str(),
-            "iphone" | "ipad" | "phone" | "tablet" | "desktop" | "unknown"
-        );
-        let valid_color_scheme = matches!(self.color_scheme.as_str(), "light" | "dark" | "unknown");
-        let valid_input_mode = matches!(
-            self.input_mode.as_str(),
-            "touch" | "pointer" | "hybrid" | "unknown"
-        );
-        if !valid_os || !valid_form_factor || !valid_color_scheme || !valid_input_mode {
-            return Err(AppError::InvalidRequest(
-                "manifest deviceContext contains an unsupported platform value".into(),
-            ));
-        }
-        if self.viewport.width == 0 || self.viewport.height == 0 {
-            return Err(AppError::InvalidRequest(
-                "manifest deviceContext viewport must be non-zero".into(),
-            ));
-        }
         let valid_pair = matches!(
             (self.os.as_str(), self.form_factor.as_str()),
             ("ios", "iphone")
@@ -807,23 +798,99 @@ mod tests {
         manifest.device_context = Some(DeviceContext {
             os: "ios".into(),
             form_factor: "iphone".into(),
-            viewport: DeviceViewport {
-                width: 393,
-                height: 852,
-            },
-            safe_area: DeviceInsets {
-                top: 59,
-                right: 0,
-                bottom: 34,
-                left: 0,
-            },
-            color_scheme: "light".into(),
-            reduced_motion: false,
-            input_mode: "touch".into(),
         });
         manifest.validate().unwrap();
-        manifest.device_context.as_mut().unwrap().form_factor = "tablet".into();
+        // The exact pair the model used to produce, reading `Host OS: iOS`
+        // and `Device class: phone` off the mobile runtime reminder.
+        manifest.device_context.as_mut().unwrap().form_factor = "phone".into();
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn the_host_device_class_derives_the_platform_form_factor() {
+        let derive = |host_os, device_class| {
+            DeviceContext::from_host_environment(&traits::MobileHostEnvironment::new(
+                host_os,
+                Some("19.0".into()),
+                device_class,
+                traits::MobileExecutionTarget::PhysicalDevice,
+                traits::MobileLaunchMode::Interactive,
+            ))
+            .map(|context| (context.os, context.form_factor))
+        };
+        // `Device class: phone` is the ONLY class an iPhone reports, and it
+        // must not reach the manifest verbatim.
+        assert_eq!(
+            derive(traits::MobileHostOs::Ios, traits::MobileDeviceClass::Phone),
+            Some(("ios".into(), "iphone".into()))
+        );
+        assert_eq!(
+            derive(traits::MobileHostOs::Ios, traits::MobileDeviceClass::Tablet),
+            Some(("ios".into(), "ipad".into()))
+        );
+        assert_eq!(
+            derive(
+                traits::MobileHostOs::Android,
+                traits::MobileDeviceClass::Phone
+            ),
+            Some(("android".into(), "phone".into()))
+        );
+        assert_eq!(
+            derive(
+                traits::MobileHostOs::Android,
+                traits::MobileDeviceClass::Tablet
+            ),
+            Some(("android".into(), "tablet".into()))
+        );
+        assert_eq!(
+            derive(
+                traits::MobileHostOs::Ios,
+                traits::MobileDeviceClass::Unknown
+            ),
+            None
+        );
+        // Every pair the derivation can produce must survive validation.
+        for (host_os, device_class) in [
+            (traits::MobileHostOs::Ios, traits::MobileDeviceClass::Phone),
+            (traits::MobileHostOs::Ios, traits::MobileDeviceClass::Tablet),
+            (
+                traits::MobileHostOs::Android,
+                traits::MobileDeviceClass::Phone,
+            ),
+            (
+                traits::MobileHostOs::Android,
+                traits::MobileDeviceClass::Tablet,
+            ),
+        ] {
+            let mut manifest = manifest();
+            manifest.device_context =
+                DeviceContext::from_host_environment(&traits::MobileHostEnvironment::new(
+                    host_os,
+                    None,
+                    device_class,
+                    traits::MobileExecutionTarget::PhysicalDevice,
+                    traits::MobileLaunchMode::Interactive,
+                ));
+            manifest.validate().expect("a derived pair always validates");
+        }
+    }
+
+    /// A manifest written before the dynamic fields were dropped still loads:
+    /// the removed keys are ignored, and the target pair survives.
+    #[test]
+    fn a_legacy_device_context_drops_its_runtime_snapshot_fields() {
+        let legacy = serde_json::json!({
+            "os": "ios",
+            "formFactor": "ipad",
+            "viewport": {"width": 1024, "height": 1366},
+            "safeArea": {"top": 24, "right": 0, "bottom": 20, "left": 0},
+            "colorScheme": "dark",
+            "reducedMotion": true,
+            "inputMode": "touch",
+        });
+        let context: DeviceContext = serde_json::from_value(legacy).expect("legacy manifest loads");
+        assert_eq!(context.os, "ios");
+        assert_eq!(context.form_factor, "ipad");
     }
 
     #[test]

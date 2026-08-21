@@ -308,36 +308,17 @@ pub struct AppManifestDto {
     pub device_context: Option<DeviceContextDto>,
 }
 
-/// Native host context captured for platform-aware generated UI.
+/// Native host target the app was generated for.
+///
+/// Host-derived, not model-authored, and deliberately just the stable pair:
+/// viewport, safe area, color scheme, reduced motion and input mode are live
+/// values the page reads from `window.lingxi.v2.deviceContext`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceContextDto {
     pub os: String,
     pub form_factor: String,
-    pub viewport: DeviceViewportDto,
-    pub safe_area: DeviceInsetsDto,
-    pub color_scheme: String,
-    pub reduced_motion: bool,
-    pub input_mode: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceViewportDto {
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceInsetsDto {
-    pub top: u32,
-    pub right: u32,
-    pub bottom: u32,
-    pub left: u32,
 }
 
 /// Runtime snapshot included in an app detail response.
@@ -698,6 +679,53 @@ pub enum AppUiActionKindDto {
     Navigate,
     Back,
     Reload,
+    /// Capture a still image of the app's own `WebView` and return it as a
+    /// base64 image. Read-only like [`Self::Inspect`], but strictly more
+    /// revealing: `Inspect` redacts `password`/`hidden` input values and a
+    /// pixel capture cannot, so the client prompts for it instead of
+    /// auto-approving.
+    ///
+    /// `CaptureView`, deliberately not `Screenshot`. Two reasons, and the
+    /// second is the load-bearing one:
+    ///
+    /// - It keeps one name across all three layers — builtin
+    ///   `LocalAppCaptureUi`, provider operation `capture_ui`, wire
+    ///   `capture_view` — instead of the wire layer alone jumping vocabulary.
+    /// - "Screenshot" is the device-level word (`computer` / `android_use` /
+    ///   `ios_use` all spell it `screenshot`). Those tools cannot appear in the
+    ///   mobile tool set, so there is no identifier collision — but the label
+    ///   derived from this variant is interpolated into the user's
+    ///   authorization sheet, and a prompt saying "screen" for one app's view
+    ///   next to a device-level prompt saying "screen" for the whole device is
+    ///   an authorization the user cannot correctly reason about.
+    ///
+    /// Appended LAST — uniffi assigns FFI discriminants by declaration order,
+    /// so inserting mid-enum renumbers every later variant for clients that
+    /// were built against the old ordering. Kept FIELDLESS for the same
+    /// reason a data-carrying variant is avoided elsewhere: uniffi renders a
+    /// mixed enum as a Kotlin `sealed class`, which would rename every
+    /// existing constant (`CLICK` → `Click`).
+    CaptureView,
+    /// Dispatch a pointer event at viewport coordinates.
+    ///
+    /// Distinct from [`Self::Click`], which resolves an ELEMENT and calls
+    /// `.click()` on it — a synthetic `MouseEvent` at `(0, 0)`. A canvas app
+    /// has no element to resolve and listens for `pointerdown`/`pointermove`/
+    /// `pointerup` with real coordinates, so `Click` can neither address nor
+    /// reach it.
+    ///
+    /// Fieldless: the coordinates ride in `AppUiRequestDto::value` as
+    /// `"x,y"` or `"x,y,phase"`, the same comma-packed convention
+    /// [`Self::Scroll`] already uses. A data-carrying variant would make uniffi
+    /// render this enum as a Kotlin `sealed class` and rename every existing
+    /// constant (`CLICK` → `Click`) — an Android-only break.
+    Pointer,
+    /// Dispatch a keyboard event.
+    ///
+    /// `AppUiRequestDto::value` carries `"key"` or `"key,phase"`. There is no
+    /// existing key action at all, so a keyboard-driven app cannot be driven
+    /// even in principle today.
+    Key,
 }
 
 /// A structured target resolved by the `WebView` host.

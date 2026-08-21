@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '5.0.0';
+export const CLIENT_PROTOCOL_VERSION = '6.0.0';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // commands.rs
@@ -830,18 +830,18 @@ export interface AppManifestDto {
   allowed_domains: string[];
   /** Capabilities the confirmed plan declared; empty for pre-capability manifests. */
   capabilities: AppCapabilityKindDto[];
-  /** Native host context used by platform-aware generated shells. */
+  /** Native target the app was generated for; host-derived, absent when unknown. */
   device_context?: DeviceContextDto;
 }
 
+/**
+ * The stable native target pair only. Viewport, safe area, color scheme,
+ * reduced motion and input mode are live values the generated page reads from
+ * `window.lingxi.v2.deviceContext`, so they are deliberately not persisted here.
+ */
 export interface DeviceContextDto {
   os: 'ios' | 'android' | 'desktop' | 'unknown' | string;
   formFactor: 'iphone' | 'ipad' | 'phone' | 'tablet' | 'desktop' | 'unknown' | string;
-  viewport: { width: number; height: number };
-  safeArea: { top: number; right: number; bottom: number; left: number };
-  colorScheme: 'light' | 'dark' | 'unknown' | string;
-  reducedMotion: boolean;
-  inputMode: 'touch' | 'pointer' | 'hybrid' | 'unknown' | string;
 }
 
 /** Runtime snapshot inside an app detail response (local_apps.rs `AppRuntimeDetailsDto`). */
@@ -1067,7 +1067,10 @@ export type AppUiActionKindDto =
   | 'scroll'
   | 'navigate'
   | 'back'
-  | 'reload';
+  | 'reload'
+  | 'capture_view'
+  | 'pointer'
+  | 'key';
 
 /** A structured target resolved by the `WebView` host (local_apps.rs `AppUiTargetDto`). */
 export interface AppUiTargetDto {

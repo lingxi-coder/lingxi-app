@@ -58,7 +58,7 @@ pub use events::{
 };
 pub use manifest::{
     load_manifest, save_manifest, AppLayout, AppManifest, DataCollectionSchema, DataFieldKind,
-    DataFieldSchema, DeviceContext, DeviceInsets, DeviceViewport, WORKSPACE_SETTINGS_LOCAL_FILE,
+    DataFieldSchema, DeviceContext, WORKSPACE_SETTINGS_LOCAL_FILE,
 };
 pub use permissions::{
     load_permissions, save_permissions, save_workspace_permission_settings, AppCapability,

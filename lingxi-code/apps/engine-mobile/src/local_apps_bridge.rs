@@ -33,7 +33,6 @@ use client_protocol::local_apps::{
     AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto,
     AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
     AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppWorkflowStateDto, DeviceContextDto,
-    DeviceInsetsDto, DeviceViewportDto,
 };
 use local_apps::{
     load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppError, AppErrorCode,
@@ -414,19 +413,6 @@ pub(crate) fn lower_manifest(manifest: AppManifest) -> AppManifestDto {
         device_context: manifest.device_context.map(|context| DeviceContextDto {
             os: context.os,
             form_factor: context.form_factor,
-            viewport: DeviceViewportDto {
-                width: context.viewport.width,
-                height: context.viewport.height,
-            },
-            safe_area: DeviceInsetsDto {
-                top: context.safe_area.top,
-                right: context.safe_area.right,
-                bottom: context.safe_area.bottom,
-                left: context.safe_area.left,
-            },
-            color_scheme: context.color_scheme,
-            reduced_motion: context.reduced_motion,
-            input_mode: context.input_mode,
         }),
     }
 }

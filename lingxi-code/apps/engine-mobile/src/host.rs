@@ -9135,6 +9135,18 @@ pub fn build_mobile_engine_inner(
     {
         tracing::warn!("local-apps Agent executor was already attached");
     }
+    // The same host facts that render the mobile runtime reminder. A local
+    // app's device context is derived from these, never declared by the
+    // agent — the reminder's `Device class: phone` is not an iOS form factor,
+    // so an agent reading it could only produce a rejected pair.
+    if let Some(host_environment) = firer_cfg.host_environment.clone() {
+        if local_apps_host
+            .attach_host_environment(host_environment)
+            .is_err()
+        {
+            tracing::warn!("local-apps host environment was already attached");
+        }
+    }
     match &local_apps {
         Ok(service) => {
             if inner

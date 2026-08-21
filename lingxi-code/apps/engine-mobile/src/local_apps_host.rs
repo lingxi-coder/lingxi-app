@@ -427,6 +427,14 @@ pub(crate) struct LocalAppsHostBroker {
     /// replacement alone cannot prevent concurrent creates/updates from
     /// overwriting a stale catalog snapshot.
     agent_session_writes: Mutex<()>,
+    /// Stable native host facts, attached by the mobile composition root from
+    /// the same `MobileConfig` that renders the mobile runtime reminder.
+    ///
+    /// This is the ONLY source of an app's device context. The agent cannot
+    /// supply one: the reminder is all it sees, and the reminder's device
+    /// vocabulary (`phone`/`tablet`) does not name an iOS form factor.
+    /// Unattached — desktop embedders and host tests — means no context.
+    host_environment: OnceLock<traits::MobileHostEnvironment>,
     /// Host-owned app Agent execution seam, attached by the mobile composition
     /// root after the app service and MCP host are ready.
     agent_executor: OnceLock<Arc<dyn LocalAppsAgentExecutor>>,
@@ -538,6 +546,7 @@ impl LocalAppsHostBroker {
             llm_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             mailbox_writes: Mutex::new(()),
             agent_session_writes: Mutex::new(()),
+            host_environment: OnceLock::new(),
             agent_executor: OnceLock::new(),
             agent_turns: Arc::new(Mutex::new(HashMap::new())),
             pending_profile_proposals: Mutex::new(HashMap::new()),
@@ -608,6 +617,26 @@ impl LocalAppsHostBroker {
         llm: Arc<crate::local_apps_profile::SharedLlm>,
     ) -> Result<(), Arc<crate::local_apps_profile::SharedLlm>> {
         self.llm.set(llm)
+    }
+
+    /// Bind the native host facts. Set once, at the same composition-root
+    /// call site as [`Self::attach_agent_executor`].
+    pub(crate) fn attach_host_environment(
+        &self,
+        environment: traits::MobileHostEnvironment,
+    ) -> Result<(), traits::MobileHostEnvironment> {
+        self.host_environment.set(environment)
+    }
+
+    /// The confirmed native target for apps generated on this host.
+    ///
+    /// `None` when no host facts are attached or the client could not classify
+    /// the device — an absent context already means unknown, so neither case
+    /// invents a platform.
+    fn host_device_context(&self) -> Option<local_apps::DeviceContext> {
+        self.host_environment
+            .get()
+            .and_then(local_apps::DeviceContext::from_host_environment)
     }
 
     pub(crate) fn attach_agent_executor(
@@ -3067,6 +3096,10 @@ impl LocalAppsHostBroker {
              ## Verify\n\
              - `LocalAppInspectUi` / `LocalAppActOnUi` — read and drive \
              the running preview.\n\
+             - `LocalAppCaptureUi {{\"app_id\":\"{id}\"}}` — a still image of the preview. \
+             Use it when the DOM cannot describe what the app is showing: a canvas or WebGL \
+             surface has no inspectable elements, so `LocalAppInspectUi` returns an empty \
+             list whether the app is drawing correctly, drawing nothing, or has crashed.\n\
              - `LocalAppQueryData {{\"app_id\":\"{id}\",\"collection\":\"<collection_id>\"}}` \
              — after a UI write, confirm the value reached native storage: it must appear in \
              `records[].document`. A value that exists only in page state is NOT persistence.\n\
@@ -3087,7 +3120,18 @@ impl LocalAppsHostBroker {
         })
         .await
         .map_err(|error| format!("join workspace scaffold worker: {error}"))?
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        // Stamp the native target the app is being generated for. Done here,
+        // on the manifest `create_app_with_initializer` already wrote, so an
+        // app carries its target from creation whether or not the agent ever
+        // calls `LocalAppManifest`.
+        if let Some(device_context) = self.host_device_context() {
+            let layout = self.layout(&record.id)?;
+            let mut manifest = local_apps::load_manifest(&layout).map_err(|e| e.to_string())?;
+            manifest.device_context = Some(device_context);
+            local_apps::save_manifest(&layout, &manifest).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -3375,10 +3419,12 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             manifest.capabilities = serde_json::from_value(capabilities.clone())
                 .map_err(|e| format!("invalid capabilities: {e}"))?;
         }
-        if let Some(device_context) = input.get("device_context") {
-            manifest.device_context = serde_json::from_value(device_context.clone())
-                .map_err(|e| format!("invalid device_context: {e}"))?;
-        }
+        // The device context is host-derived, never taken from `input`: the
+        // agent only ever sees the mobile runtime reminder, and that
+        // reminder's `Device class: phone` is not an iOS form factor. Every
+        // save re-stamps it so the record tracks the host the app is
+        // actually being generated on.
+        manifest.device_context = self.host_device_context();
         manifest.validate().map_err(|e| e.to_string())?;
         // Schema changes against live data go through the SAME preview +
         // destructive-approval gate the pipeline used — an agent declaring a
@@ -3417,6 +3463,24 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
 
     async fn mutate_data(&self, input: Value) -> Result<Value, String> {
         self.mutate_data_value(input, true).await
+    }
+
+    async fn capture_ui(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        self.service()?
+            .record(&app_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        // No `target`: a capture is of the whole view, and a selector would
+        // imply an element crop the native side does not do.
+        self.request_ui(AppUiRequestDto {
+            request_id: self.request_id("app-ui"),
+            app_id,
+            action: AppUiActionKindDto::CaptureView,
+            target: None,
+            value: None,
+        })
+        .await
     }
 
     async fn inspect_ui(&self, input: Value) -> Result<Value, String> {
@@ -3464,6 +3528,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             "navigate" => AppUiActionKindDto::Navigate,
             "back" => AppUiActionKindDto::Back,
             "reload" => AppUiActionKindDto::Reload,
+            "pointer" => AppUiActionKindDto::Pointer,
+            "key" => AppUiActionKindDto::Key,
             _ => return Err("unsupported structured UI action".into()),
         };
         let target = normalize_ui_target(input.get("target"))?;
@@ -5508,6 +5574,35 @@ mod tests {
         (record.id, lingxi)
     }
 
+    /// Creation, not just `LocalAppManifest`, records the target: an app the
+    /// agent never declares a manifest for still knows what it was built on.
+    #[tokio::test]
+    async fn scaffold_records_the_host_device_context() {
+        let (root, service, broker) = create_broker(false, None).await;
+        assert!(broker
+            .attach_host_environment(host_environment(
+                traits::MobileHostOs::Ios,
+                traits::MobileDeviceClass::Tablet,
+            ))
+            .is_ok());
+        let record = service
+            .create_app(Some("Scaffolded"), "a test app", None)
+            .await
+            .expect("create app");
+        broker
+            .scaffold_app_value(&record)
+            .await
+            .expect("scaffold app");
+
+        let layout = AppLayout::new(root.path().to_path_buf(), record.id).expect("layout");
+        let recorded = load_manifest(&layout)
+            .expect("manifest")
+            .device_context
+            .expect("creation records the native target");
+        assert_eq!(recorded.os, "ios");
+        assert_eq!(recorded.form_factor, "ipad");
+    }
+
     #[tokio::test]
     async fn scaffold_writes_capability_neutral_lingxi_when_toolchain_is_available() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
@@ -7044,6 +7139,155 @@ mod tests {
         let mut manifest = load_manifest(&layout).expect("fixture manifest");
         manifest.capabilities.push(capability);
         local_apps::save_manifest(&layout, &manifest).expect("declare capability");
+    }
+
+    /// Build the host facts a native client reports for one device.
+    fn host_environment(
+        host_os: traits::MobileHostOs,
+        device_class: traits::MobileDeviceClass,
+    ) -> traits::MobileHostEnvironment {
+        traits::MobileHostEnvironment::new(
+            host_os,
+            Some("19.0".into()),
+            device_class,
+            traits::MobileExecutionTarget::PhysicalDevice,
+            traits::MobileLaunchMode::Interactive,
+        )
+    }
+
+    /// The reported iPhone failure: the agent was asked to declare the native
+    /// device context, but the only device facts it can see are the runtime
+    /// reminder's `Host OS: iOS` plus `Device class: phone` — and
+    /// `(ios, phone)` is exactly the pair the manifest validator rejects. The
+    /// host owns these facts, so it stamps them itself and the agent never
+    /// supplies them.
+    #[tokio::test]
+    async fn the_host_stamps_the_iphone_device_context_the_agent_cannot_name() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        assert!(broker
+            .attach_host_environment(host_environment(
+                traits::MobileHostOs::Ios,
+                traits::MobileDeviceClass::Phone,
+            ))
+            .is_ok());
+        let app_id = create_app_fixture(&root, &service, "Device").await;
+
+        let result = broker
+            .update_manifest(json!({"app_id": app_id}))
+            .await
+            .expect("the host derives the device context without the agent");
+        assert_eq!(result["device_context"]["os"], "ios");
+        assert_eq!(result["device_context"]["formFactor"], "iphone");
+
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id).expect("layout");
+        let recorded = load_manifest(&layout)
+            .expect("manifest")
+            .device_context
+            .expect("the host records the confirmed native target");
+        assert_eq!(recorded.os, "ios");
+        assert_eq!(recorded.form_factor, "iphone");
+    }
+
+    /// The same derivation on the other platform, where the reminder's
+    /// vocabulary happens to match the manifest's.
+    #[tokio::test]
+    async fn the_host_stamps_the_android_tablet_device_context() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        assert!(broker
+            .attach_host_environment(host_environment(
+                traits::MobileHostOs::Android,
+                traits::MobileDeviceClass::Tablet,
+            ))
+            .is_ok());
+        let app_id = create_app_fixture(&root, &service, "Tablet").await;
+
+        let result = broker
+            .update_manifest(json!({"app_id": app_id}))
+            .await
+            .expect("the host derives the device context without the agent");
+        assert_eq!(result["device_context"]["os"], "android");
+        assert_eq!(result["device_context"]["formFactor"], "tablet");
+    }
+
+    /// An unclassified host records NO context rather than a guessed one:
+    /// `DeviceContext` is documented as absent-means-unknown, and every
+    /// os/form-factor pair naming a real platform would be a fabrication.
+    #[tokio::test]
+    async fn an_unclassified_host_records_no_device_context() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        assert!(broker
+            .attach_host_environment(host_environment(
+                traits::MobileHostOs::Ios,
+                traits::MobileDeviceClass::Unknown,
+            ))
+            .is_ok());
+        let app_id = create_app_fixture(&root, &service, "Unclassified").await;
+
+        let result = broker
+            .update_manifest(json!({"app_id": app_id}))
+            .await
+            .expect("an unclassified host still updates the manifest");
+        assert!(result["device_context"].is_null(), "{result}");
+    }
+
+    /// A model-authored `device_context` is no longer part of the contract:
+    /// the tool schema rejects the key outright rather than letting a guessed
+    /// pair reach the validator.
+    #[tokio::test]
+    async fn an_agent_supplied_device_context_never_overrides_the_host() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        assert!(broker
+            .attach_host_environment(host_environment(
+                traits::MobileHostOs::Ios,
+                traits::MobileDeviceClass::Tablet,
+            ))
+            .is_ok());
+        let app_id = create_app_fixture(&root, &service, "Ignored").await;
+
+        let result = broker
+            .update_manifest(json!({
+                "app_id": app_id,
+                "device_context": {"os": "ios", "formFactor": "phone"},
+            }))
+            .await
+            .expect("a stray key never fails the call");
+        assert_eq!(result["device_context"]["formFactor"], "ipad");
     }
 
     #[tokio::test]

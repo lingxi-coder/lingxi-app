@@ -29,4 +29,10 @@
 /// command, event, and DTO families are gone and `AppWorkflowStateDto`
 /// collapsed to `draft` / `ready`. Removals are BREAKING structural changes
 /// under the F1-09 guard, so this is a real major bump.
-pub const CLIENT_PROTOCOL_VERSION: &str = "5.0.0";
+/// Bumped to 6.0.0 when `DeviceContextDto` shrank to the stable
+/// `os`/`form_factor` target pair. The viewport, safe-area, color-scheme,
+/// reduced-motion and input-mode fields were removed: they are live values
+/// the generated page reads from `window.lingxi.v2.deviceContext`, and the
+/// record is now written by the host from its own device facts rather than
+/// declared by the agent. Removals are BREAKING under the F1-09 guard.
+pub const CLIENT_PROTOCOL_VERSION: &str = "6.0.0";

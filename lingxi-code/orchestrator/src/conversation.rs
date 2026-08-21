@@ -5236,24 +5236,34 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     );
                     serde_json::Value::Object(m)
                 } else {
-                    // SYNTHETIC assistant line (no real response model/usage).
-                    // LingXi's only synthetic assistant persist is the terminal
-                    // API-error line (conversation.rs ~4399). claude-code builds
-                    // these via baseCreateAssistantMessage (`QBl`) →
-                    // createAssistantAPIErrorMessage (`tc`), which persists the
-                    // synthetic BetaMessage envelope (v2.1.185 binary @205978440):
-                    //   {id, container:null, model:"<synthetic>", role:"assistant",
-                    //    stop_details:null, stop_reason:"stop_sequence",
-                    //    stop_sequence:"", type:"message", content, context_management:null}
-                    // `usage` is OMITTED — `tc` calls `QBl` with no `usage` arg,
-                    // so `usage:undefined` drops the key under JSON.stringify.
-                    // `stop_reason` is hardcoded `"stop_sequence"`; the real
-                    // terminal reason lives in the OUTER apiError/error fields,
-                    // which claude-code does NOT write into the persisted inner
-                    // message (and which LingXi doesn't track). `model` is the
-                    // `<synthetic>` sentinel (`WR`). The prior shape was a bare
-                    // `{role,content}` — under-specified vs the binary.
+                    // SYNTHETIC assistant line. LingXi's only synthetic assistant
+                    // persist is the terminal API-error line (conversation.rs
+                    // ~4399). claude-code 2.1.238 builds it in `Mqm`
+                    // (cc-238 @296633254), whose `message` literal is:
+                    //   {diagnostics:null, id, container:null, model:yD,
+                    //    role:"assistant", stop_details:null,
+                    //    stop_reason:"stop_sequence", stop_sequence:"",
+                    //    type:"message", usage:l, content, context_management:null}
+                    //
+                    // SC-05 — the previous note here was read off a **2.1.185**
+                    // binary and was wrong for the current oracle on two counts:
+                    //   * `diagnostics:null` exists and is the FIRST key.
+                    //   * `usage` is NOT omitted. `Mqm`'s `usage` parameter has a
+                    //     DEFAULT — a fully zeroed usage object — so the key is
+                    //     always serialized; it never reaches `JSON.stringify` as
+                    //     `undefined`. The old "usage is dropped" claim came from
+                    //     `tc` passing no argument, which selects that default
+                    //     rather than omitting the field.
+                    // Key ORDER is load-bearing: these envelopes are compared
+                    // byte-for-byte against recorded JSONL.
+                    //
+                    // `stop_reason` stays hardcoded `"stop_sequence"` (the refusal
+                    // path overrides it); the real terminal reason lives in the
+                    // OUTER apiError/error fields, which claude-code does not
+                    // write into the persisted inner message. `model` is the
+                    // `<synthetic>` sentinel (`WR`/`yD`).
                     let mut m = serde_json::Map::new();
+                    m.insert("diagnostics".to_string(), serde_json::Value::Null);
                     m.insert(
                         "id".to_string(),
                         serde_json::Value::String(
@@ -5290,6 +5300,31 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     m.insert(
                         "type".to_string(),
                         serde_json::Value::String("message".to_string()),
+                    );
+                    // SC-05: `Mqm`'s default `usage` literal, key order included.
+                    // `output_tokens_details` leads and is null — the same field
+                    // 2.1.238 grew a `thinking_tokens` member on (see SC-01).
+                    m.insert(
+                        "usage".to_string(),
+                        serde_json::json!({
+                            "output_tokens_details": serde_json::Value::Null,
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "server_tool_use": {
+                                "web_search_requests": 0,
+                                "web_fetch_requests": 0
+                            },
+                            "service_tier": serde_json::Value::Null,
+                            "cache_creation": {
+                                "ephemeral_1h_input_tokens": 0,
+                                "ephemeral_5m_input_tokens": 0
+                            },
+                            "inference_geo": serde_json::Value::Null,
+                            "iterations": serde_json::Value::Null,
+                            "speed": serde_json::Value::Null
+                        }),
                     );
                     m.insert("content".to_string(), serde_json::json!(content));
                     m.insert("context_management".to_string(), serde_json::Value::Null);

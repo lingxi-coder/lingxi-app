@@ -1388,3 +1388,35 @@ identifiers derive from one constant.
 excludes exactly that file. It exists only as an untracked file in a developer's checkout, so **a fresh
 clone or worktree cannot compile `local-apps`**. Fix by committing the file, removing the ignore line,
 or generating it in a build script.
+
+## Round 2 — 2026-08-21 (commit `ceae53506`)
+
+| id | outcome |
+|---|---|
+| `REM-06` | **Closed.** Reminder defaults ON, matching the oracle. Confirmed from a LIVE 2.1.238 session emitting `<total_tokens>14999028 tokens left</total_tokens>` against the 15,000,000 budget — not inferred from the GrowthBook fallback. Divergence test now asserts `PORT_DEFAULT_MODE == ORACLE_DEFAULT_MODE`. |
+| `PERM-02` | **Partial, deliberately.** Rows 1 and 3 byte-exact vs `@302829842`. Row 2 left alone: upstream it is composed from the permission result's `suggestions`, and the port has that field with no engine source (`hook_payload.rs:639`, `executor.rs:2184` pass `None`). Writing a label there would be inventing text — the ST-01 mistake. |
+| `SLASH-06` | **Closed.** `bug` is its own command with alias `share` (`@248164336`); the port had `bug` as an alias of `feedback` and `share` as a standalone "compiled stub". `name:"share"` has ZERO hits in 2.1.220 and 2.1.238 — the stub classification came from the stale de-minified source. |
+
+### A note on where wrong models come from
+
+Two of this round's three findings trace to the same root cause as `ST-01`: a
+claim taken from the **de-minified source tree** rather than the shipped binary.
+`share`-as-a-stub-command survived in two classification tables, a fixture, and
+four counter locks. When a port fact cites `claude-code/src/...`, treat it as a
+hypothesis and re-check it against the binary.
+
+### Verification note — a false pass that nearly shipped
+
+One full-suite run exited 101 having executed **zero** tests: the disk filled up
+(`No space left on device`) during compilation. The failure-name parser in use at
+the time reported "0 failing tests", which read as success. It was not.
+
+The worktree's `target/` had reached **55 GB**, 31 GB of it `debug/incremental`.
+Two consequences worth carrying forward:
+
+* An isolated worktree cannot share the main checkout's build cache, so it costs
+  a second full target tree. Budget for it, and `cargo clean` the worktree when
+  the branch merges.
+* **Never read a non-zero exit with zero parsed failures as a pass.** Cross-check
+  the exit code against how many test binaries actually reported, and against the
+  compiler's own `error:` lines.

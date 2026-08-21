@@ -6564,11 +6564,14 @@ mod persist_with_parent_tests {
         assert_eq!(inner["stop_sequence"], serde_json::Value::Null);
         assert_eq!(inner["usage"], usage);
 
-        // Synthetic path (no model/usage) → the synthetic BetaMessage envelope
-        // (baseCreateAssistantMessage `QBl` → createAssistantAPIErrorMessage `tc`,
-        // binary @205978440): model "<synthetic>", `usage` OMITTED, `stop_reason`
-        // hardcoded "stop_sequence" (NOT the message's own "end_turn"), with
-        // container/stop_details/context_management = null.
+        // Synthetic path (no model/usage) → the synthetic BetaMessage envelope.
+        // SC-05: re-derived from claude-code 2.1.238 `Mqm` (cc-238 @296633254).
+        // This assertion previously pinned a 2.1.185 reading that was wrong on
+        // two counts — it demanded `diagnostics` be ABSENT and `usage` be
+        // OMITTED. Both are present upstream: `diagnostics:null` is the first
+        // key, and `Mqm`'s `usage` parameter DEFAULTS to a zeroed usage object,
+        // so the key is always serialized. `stop_reason` stays hardcoded
+        // "stop_sequence" (NOT the message's own "end_turn").
         let plain = orch.to_jsonl_message_with_inner_id(
             &msg,
             "sess",
@@ -6592,6 +6595,7 @@ mod persist_with_parent_tests {
         assert_eq!(
             pkeys,
             vec![
+                "diagnostics",
                 "id",
                 "container",
                 "model",
@@ -6600,6 +6604,7 @@ mod persist_with_parent_tests {
                 "stop_reason",
                 "stop_sequence",
                 "type",
+                "usage",
                 "content",
                 "context_management"
             ],
@@ -6615,10 +6620,39 @@ mod persist_with_parent_tests {
         assert_eq!(pinner["stop_sequence"], serde_json::json!(""));
         assert_eq!(pinner["type"], serde_json::json!("message"));
         assert_eq!(pinner["context_management"], serde_json::Value::Null);
-        // `usage` is omitted (tc calls QBl without a usage arg).
-        assert!(
-            !pinner.contains_key("usage"),
-            "synthetic envelope must omit usage"
+        // `usage` is PRESENT and is `Mqm`'s zeroed default, key order included.
+        assert_eq!(pinner["diagnostics"], serde_json::Value::Null);
+        let pusage = pinner["usage"].as_object().expect("synthetic usage object");
+        assert_eq!(
+            pusage.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "output_tokens_details",
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+                "server_tool_use",
+                "service_tier",
+                "cache_creation",
+                "inference_geo",
+                "iterations",
+                "speed"
+            ],
+            "Mqm default usage key order"
+        );
+        assert_eq!(pusage["output_tokens_details"], serde_json::Value::Null);
+        assert_eq!(pusage["input_tokens"], serde_json::json!(0));
+        assert_eq!(pusage["output_tokens"], serde_json::json!(0));
+        assert_eq!(
+            pusage["server_tool_use"],
+            serde_json::json!({"web_search_requests": 0, "web_fetch_requests": 0})
+        );
+        assert_eq!(
+            pusage["cache_creation"],
+            serde_json::json!({
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+            })
         );
         assert_eq!(pinner["content"][0]["type"], serde_json::json!("text"));
         assert_eq!(pinner["content"][0]["text"], serde_json::json!("hi"));

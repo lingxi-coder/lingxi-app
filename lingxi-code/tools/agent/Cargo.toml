@@ -21,6 +21,8 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 once_cell = "1"
 thiserror.workspace = true
+# `[web-fetch agent] isolation:… ignored` notice (claude 2.1.238 @292890415 `T(...)`).
+tracing = { workspace = true }
 
 [features]
 # Exposes agent_test_support (M4-05 subagent/mailbox/task/budget mocks) for

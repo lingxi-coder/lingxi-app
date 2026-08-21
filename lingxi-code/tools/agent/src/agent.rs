@@ -223,6 +223,43 @@ fn render_available_agents(types: &[String]) -> String {
     }
 }
 
+/// claude 2.1.238 `KH="web-fetch"` (@287971650) — the built-in web-fetch
+/// agent's type label. Spelled locally so `tool-agent` need not depend on the
+/// `agent` engine crate (cycle); kept in sync with
+/// `agent::builtins::WEB_FETCH_AGENT_TYPE`.
+const WEB_FETCH_AGENT_TYPE: &str = "web-fetch";
+
+/// claude 2.1.238 `hdr(e)` (@290291941):
+///
+/// ```js
+/// function hdr(e){return`Agent type '${e}' is unavailable because every tool it may use is denied by the current permission settings.`}
+/// ```
+///
+/// Thrown from the spawn path alongside `de("subagent_launch",
+/// "subagent_type_tools_denied")` (@292890415) when `mdr(agent, ctx)` says every
+/// tool the agent may use is denied. 0 hits in 2.1.220 — new in 2.1.238.
+fn agent_type_tools_denied_error(agent_type: &str) -> String {
+    format!(
+        "Agent type '{agent_type}' is unavailable because every tool it may use is denied by the current permission settings."
+    )
+}
+
+/// claude `Agi()` (@287975693) `"coordinator"` arm, applied where coordinator
+/// mode is actually live: `vyt()` never pushes `Hlr` in coordinator mode, so the
+/// built-in `web-fetch` agent must not appear in the catalog `AgentTool`
+/// advertises (or resolves against) for a coordinator session. The roster
+/// function `agent::builtins::builtin_agent_definitions` cannot read coordinator
+/// mode (it is a per-session `CoordinatorModeHandle`, not a process global), so
+/// the arm is enforced here.
+fn drop_coordinator_hidden_builtins(
+    agents: &mut Vec<traits::subagent_spawn::SubagentListingEntry>,
+    is_coordinator: bool,
+) {
+    if is_coordinator {
+        agents.retain(|a| a.agent_type != WEB_FETCH_AGENT_TYPE);
+    }
+}
+
 /// Decode a forwarded-subagent-message progress line (`--forward-subagent-text`,
 /// 2.1.212). Returns the inner subagent message `Value` when `line` is a JSON
 /// object carrying [`traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`]
@@ -1773,6 +1810,16 @@ impl Tool for AgentTool {
                 agents.retain(|a| !denied.iter().any(|d| d == &a.agent_type));
             }
         }
+        // 2.1.238 `NJa` (@290291941) via `$Gr`/`vki`: a BUILT-IN agent whose every
+        // permitted tool is denied by the current permission settings is not an
+        // available agent, so it must not be advertised either. Empty (the
+        // default seam / no deny rules) ⇒ nothing removed.
+        if let Some(s) = &self.ctx.subagent_spawner {
+            let tools_denied = s.tools_denied_agent_types().await;
+            if !tools_denied.is_empty() {
+                agents.retain(|a| !tools_denied.iter().any(|d| d == &a.agent_type));
+            }
+        }
         let mcp_server_names: Vec<String> = match &self.ctx.mcp_registry {
             Some(reg) => reg
                 .snapshot()
@@ -1790,6 +1837,9 @@ impl Tool for AgentTool {
             .coordinator_mode
             .as_ref()
             .is_some_and(|m| m.is_enabled());
+        // claude `Agi()==="coordinator"` — `vyt()` never registers the built-in
+        // web-fetch agent for a coordinator session.
+        drop_coordinator_hidden_builtins(&mut agents, is_coordinator);
         Self::build_prompt(
             &agents,
             &mcp_server_names,
@@ -1940,6 +1990,17 @@ impl Tool for AgentTool {
         // not-found lookup (binary `o5e` precedes the catalog match) and applied
         // to the `general-purpose` default too (deny `Agent(general-purpose)`
         // blocks an omitted type). Byte-exact message + raw `SettingSource`.
+        //
+        // 2.1.238 `NJa`/`mdr` (@290291941): a BUILT-IN agent whose every permitted
+        // tool is denied by the current permission settings is filtered out of
+        // `$Gr`'s available set, and asking for it by name raises `hdr`'s
+        // "every tool it may use is denied" error. Resolved ONCE here and used
+        // as a second unavailability reason everywhere `agent_deny_content_types`
+        // is (the `Available agents:` tails, the ambiguity `(unavailable)`
+        // markers, and the pre-resolution rejection below). Empty by default
+        // (the trait's default seam, or no deny rules wired) ⇒ no behaviour
+        // change.
+        let tools_denied: Vec<String> = spawner.tools_denied_agent_types().await;
         let effective_type: String = if is_fork {
             traits::fork_subagent::FORK_SUBAGENT_TYPE.to_string()
         } else {
@@ -1961,6 +2022,26 @@ impl Tool for AgentTool {
                     )));
                 }
             }
+            // claude @292890415, in the `Gt.length===1 && !kt.has(...)` arm:
+            // `if(Br) throw …denied by permission rule…;
+            //  if(mdr(yr,y)) throw new ISt(hdr(wr))` — the tools-denied error is
+            // raised only AFTER the `Agent(<type>)` deny rule was ruled out, so
+            // it sits directly below that check. Hoisted ahead of the catalog
+            // lookup for the same reason the deny check is: the requested type
+            // is not in the available set, so the lookup could only mislabel it
+            // "not found".
+            if tools_denied.iter().any(|t| t == candidate) {
+                Self::emit_failed(
+                    &bus,
+                    &invocation_id,
+                    "agent_type_tools_denied",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(agent_type_tools_denied_error(
+                    candidate,
+                )));
+            }
             match parsed.subagent_type.as_deref() {
                 None => {
                     // 2.1.238 @292889305 (NEW — 2.1.220 @234673007 went straight
@@ -1977,12 +2058,15 @@ impl Tool for AgentTool {
                     // is unreachable here: the port only reaches this arm when
                     // `is_fork` is false, and `is_fork` is exactly
                     // "fork enabled AND subagent_type omitted".
-                    let listing = spawner.agent_listing().await;
+                    let mut listing = spawner.agent_listing().await;
+                    drop_coordinator_hidden_builtins(&mut listing, is_coordinator);
                     if !general_purpose_is_available(&listing) {
-                        let denied = match &self.ctx.permission_gate {
+                        let mut denied = match &self.ctx.permission_gate {
                             Some(gate) => gate.agent_deny_content_types().await,
                             None => Vec::new(),
                         };
+                        // `Xt = $Gr(k,A,y)` is deny-filtered AND `NJa`-filtered.
+                        denied.extend(tools_denied.iter().cloned());
                         let available = listing
                             .iter()
                             .filter(|a| !denied.iter().any(|d| d == &a.agent_type))
@@ -2003,17 +2087,26 @@ impl Tool for AgentTool {
                     GENERAL_PURPOSE_AGENT_TYPE.to_string()
                 }
                 Some(explicit) => {
-                    let listing = spawner.agent_listing().await;
+                    let mut listing = spawner.agent_listing().await;
+                    drop_coordinator_hidden_builtins(&mut listing, is_coordinator);
                     if listing.iter().any(|a| a.agent_type == explicit) {
                         explicit.to_string()
                     } else {
                         // The `Available agents:` set is the deny-filtered listing
                         // (claude-code `Pxe`), so a denied type never appears as a
                         // suggestion.
-                        let denied = match &self.ctx.permission_gate {
+                        let type_denied: Vec<String> = match &self.ctx.permission_gate {
                             Some(gate) => gate.agent_deny_content_types().await,
                             None => Vec::new(),
                         };
+                        // claude `kt` (the available-type set) is `$Gr`'s output:
+                        // deny-filtered AND `NJa`-filtered, so a tools-denied type
+                        // is "(unavailable)" in an ambiguity message and absent
+                        // from every `Available agents:` tail. `type_denied` stays
+                        // separate because claude checks the `Agent(<x>)` deny rule
+                        // BEFORE `mdr` — a type that is both must report the rule.
+                        let mut denied = type_denied.clone();
+                        denied.extend(tools_denied.iter().cloned());
                         let is_denied = |t: &str| denied.iter().any(|d| d.as_str() == t);
                         let available = || {
                             listing
@@ -2081,6 +2174,27 @@ impl Tool for AgentTool {
                         }
                         if matches.len() == 1 && !is_denied(&matches[0]) {
                             matches.into_iter().next().unwrap()
+                        } else if matches.len() == 1
+                            && !type_denied.iter().any(|d| d == &matches[0])
+                            && tools_denied.iter().any(|d| d == &matches[0])
+                        {
+                            // claude @292890415, `Gt.length===1 && !kt.has(...)`:
+                            // `if(Br) throw …denied by permission rule…;
+                            //  if(mdr(yr,y)) throw new ISt(hdr(wr))` — the
+                            // normalized match resolved to a real agent that is
+                            // unavailable ONLY because every tool it may use is
+                            // denied, so it reports that, not "not found".
+                            let matched = matches[0].clone();
+                            Self::emit_failed(
+                                &bus,
+                                &invocation_id,
+                                "agent_type_tools_denied",
+                                started.elapsed().as_millis() as u64,
+                            )
+                            .await;
+                            return Err(ToolError::InvalidInput(
+                                agent_type_tools_denied_error(&matched),
+                            ));
                         } else {
                             Self::emit_failed(
                                 &bus,
@@ -2343,6 +2457,29 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 .isolation
                 .clone()
                 .or_else(|| selected.isolation.clone())
+        };
+        // claude 2.1.238 @292890415, immediately after `z = s ?? G.isolation`:
+        //
+        // ```js
+        // if(z&&J9(G)){ T(`[web-fetch agent] isolation:'${z}' ignored; the built-in
+        //   web-fetch agent always runs as a local agent`); z=void 0 }
+        // ```
+        //
+        // `J9(e)` (@287972xxx) = `e.source==="built-in" && e.agentType===KH`, so
+        // BOTH halves are required — a user agent that happens to be named
+        // `web-fetch` keeps its isolation. `selected.is_built_in` is claude's
+        // `source === 'built-in'`. New in 2.1.238 (`oracle.sh count
+        // 'web-fetch agent'` = 0 in 2.1.220, 5 in 2.1.238).
+        let effective_isolation = match effective_isolation {
+            Some(iso)
+                if selected.is_built_in && effective_type == WEB_FETCH_AGENT_TYPE =>
+            {
+                tracing::info!(
+                    "[web-fetch agent] isolation:'{iso}' ignored; the built-in web-fetch agent always runs as a local agent"
+                );
+                None
+            }
+            other => other,
         };
         let mut agent_worktree: Option<traits::worktree::WorktreeHandle> = None;
         let mut resolved_cwd: Option<String> = if is_fork { None } else { parsed.cwd.clone() };

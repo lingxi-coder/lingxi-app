@@ -54,9 +54,10 @@ pub use context::SubagentContext;
 pub use definition::*;
 pub use display::AgentDisplay;
 pub use handle::{
-    agent_listing_entries, tools_description, with_transcript_subdir_override,
-    workflow_transcript_subdir_override, DefaultModelSelection, PoolSubagentSpawner,
-    ProviderFirstPartyResolver, StreamingSubagentSpawner,
+    agent_listing_entries, tools_denied_agent_types, tools_description,
+    with_transcript_subdir_override, workflow_transcript_subdir_override,
+    DefaultModelSelection, PoolSubagentSpawner, ProviderFirstPartyResolver,
+    StreamingSubagentSpawner,
 };
 // `agent_listing_delta` shared surface: the ONE `formatAgentLine` and the
 // `shouldInjectAgentListInMessages` gate live in the leaf `traits` crate (so

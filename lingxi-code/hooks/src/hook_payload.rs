@@ -1336,6 +1336,23 @@ pub fn parse_response(
                     resp.updated_mcp_tool_output = Some(out.clone());
                 }
             }
+            // SH-01 — `hookSpecificOutput.classifierContext` (NEW in 2.1.238,
+            // oracle @ 296466460): `classifierContext:H().describe("Host-asserted
+            // context shown to the auto-mode permission classifier alongside this
+            // tool call's result. …").optional()`. Scoped to the `PostToolUse`
+            // arm of the `hookSpecificOutput` union exactly like
+            // `updatedToolOutput` above — a hook returning it on any other event
+            // has it ignored.
+            //
+            // The consumption site guards on TRUTHINESS (`if(z.classifierContext)`,
+            // @ 296974134), so an empty string contributes nothing; we mirror
+            // that here rather than storing a `Some("")` the fold would have to
+            // re-filter.
+            if let Some(ctx) = hs.get("classifierContext").and_then(Value::as_str) {
+                if !ctx.is_empty() {
+                    resp.classifier_context = Some(ctx.to_string());
+                }
+            }
         }
         // `hookSpecificOutput.additionalContext` (claude-code
         // `result.additionalContext`, `utils/hooks.ts:622`). Kept DISTINCT from

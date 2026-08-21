@@ -77,10 +77,12 @@ pub mod logging;
 pub mod mode;
 pub mod output;
 pub mod output_adapter;
+pub mod permission_prompt_notify;
 pub(crate) mod process_wrapper;
 pub mod queued_commands;
 pub mod repl;
 pub mod repl_loop;
+pub mod resume_truncation;
 pub mod run;
 pub mod session_cost;
 pub mod sigint;
@@ -599,13 +601,24 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 
     // (CLI-15) `--append-subagent-system-prompt` carries the oracle's implication
     // `wby(e,t=process.env){if(e)t.CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT="1"}`
-    // (@306637528) — the flag turns its own gate on. The SPLICE half (the
-    // subagent prompt assembler appending the text as the last section) lives in
-    // `tools/agent` and is NOT ported yet, so today this only sets the gate; the
-    // flag reaches no model bytes until that assembler consumes it. Nothing here
-    // claims otherwise.
-    if parsed.append_subagent_system_prompt.is_some() {
+    // (@306637528) — the flag turns its own gate on.
+    //
+    // The SPLICE half is now wired too: the value rides
+    // `LINGXI_APPEND_SUBAGENT_SYSTEM_PROMPT` and
+    // `agent::handle::append_subagent_system_prompt_suffix` folds it onto every
+    // subagent's rendered system prompt as the final section, gated on the env
+    // flag above (oracle @292360822:
+    // `Zt=!C&&!d?.isolatedContext&&Un(process.env.CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT)
+    //     &&r.options.appendSubagentSystemPrompt?Rm([...Xt,r.options.appendSubagentSystemPrompt]):Xt`).
+    //
+    // The env pair is the transport because the subagent spawner is reached
+    // through `engine-desktop`'s runtime build, which carries no per-spawn CLI
+    // options channel; it is also what gives the oracle's "propagated to nested
+    // subagents" for free — a nested spawn is a child of the same process and
+    // reads the same variables. Both are set BEFORE any runtime is constructed.
+    if let Some(text) = parsed.append_subagent_system_prompt.as_deref() {
         std::env::set_var("LINGXI_ENABLE_APPEND_SUBAGENT_PROMPT", "1");
+        std::env::set_var("LINGXI_APPEND_SUBAGENT_SYSTEM_PROMPT", text);
     }
 
     // (CLI-01, cc2.1.238) `--autocompact <auto|tokens>` projects onto
@@ -872,25 +885,14 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return exit_codes::ARGV_ERROR;
     }
 
-    // The truncating resume itself is NOT ported: the oracle threads
-    // `resumeSessionAt`/`resumeDropsTurn` into the headless transcript load,
-    // which stops the chain at the named entry and REFUSES when the discarded
-    // range holds anything not attributable to the declared turn (absorbed
-    // queued messages, task notifications, a compaction summary, a non-furniture
-    // attachment). lingxi-cli has no read-side chain truncation and no such
-    // range classifier — `session::rewind` rewrites a transcript, which is a
-    // different operation. Silently ignoring the pair would be the worst
-    // outcome: the caller asks for a truncated history, gets the FULL one, and
-    // the turn then appends to it — so say so and stop, the same way `--chrome`
-    // and `--remote-control` refuse rather than accept an inert flag.
-    // Print-mode-only, because "Ignored outside print mode" is the oracle's
-    // documented behaviour for both flags and must stay a true no-op there.
-    if parsed.print && parsed.resume_session_at.is_some() {
-        eprintln!(
-            "lingxi-cli: --resume-session-at is not available: lingxi-cli has no truncating resume, and resuming the FULL session instead would silently contradict the flag."
-        );
-        return exit_codes::NOT_IMPLEMENTED;
-    }
+    // (CLI-13) The truncating resume itself lives in
+    // `crate::resume_truncation::apply_truncating_resume`, applied by
+    // `run::resume_resolved_session` immediately after the transcript load —
+    // the oracle's own position (@307370121). It stops the chain at the named
+    // entry and, when `--resume-drops-turn` is supplied, REFUSES when the
+    // discarded range holds anything not attributable to the declared turn
+    // (the `AEy` classifier, @306799802). This module used to refuse the flag
+    // outright; that refusal is gone now that the behaviour exists.
 
     // P3 cross-flag validation for --input-format=stream-json and
     // --replay-user-messages (§4.1 SPEC-inferred.md, exact error strings).
@@ -1030,14 +1032,26 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
                     },
                 ),
             );
+            // SH-02: keep a typed handle so the `permission_prompt` notifier
+            // can be attached once the orchestrator exists (the gate itself has
+            // to be built FIRST — it is injected into the runtime config).
+            let gate_handle = gate.clone();
             cfg.injected_permission_gate = Some(gate as Arc<dyn permission::gate::PermissionGate>);
-            match init::build_runtime_from_config(cfg, adapter).await {
+            let rt = match init::build_runtime_from_config(cfg, adapter).await {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("lingxi-cli: {e}");
                     return exit_codes::RUNTIME_ERROR;
                 }
-            }
+            };
+            // SH-02 — this is what makes `Cou` reachable: without it the gate's
+            // `OnceLock` stays empty and every armed guard is inert.
+            gate_handle.set_prompt_notifier(Arc::new(
+                permission_prompt_notify::OrchestratorPermissionPromptNotifier::new(
+                    rt.orchestrator.clone(),
+                ),
+            ));
+            rt
         } else {
             match init::build_runtime(&parsed, adapter, permission_mode).await {
                 Ok(r) => r,

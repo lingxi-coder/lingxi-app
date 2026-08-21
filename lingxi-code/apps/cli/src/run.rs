@@ -2996,6 +2996,31 @@ async fn resume_resolved_session(
     // scrollback (render side).
     let messages = loaded.unwrap_or_default();
 
+    // (CLI-13, cc 2.1.238) The truncating resume. The oracle runs this block
+    // IMMEDIATELY after the transcript load and before anything consumes
+    // `u.messages` (@307370121), so it sits here — ahead of the prompt/TUI
+    // split below, which is where the history is first seeded.
+    //
+    // Both flags are print-mode-only ("Ignored outside print mode" in their own
+    // help text), and `validate_truncating_resume_args` has already enforced
+    // `--resume-session-at requires --resume` and `--resume-drops-turn requires
+    // --resume-session-at`.
+    let messages = if argv.print {
+        match crate::resume_truncation::apply_truncating_resume(
+            messages,
+            argv.resume_session_at.as_deref(),
+            argv.resume_drops_turn.as_deref(),
+        ) {
+            Ok(m) => m,
+            Err(message) => {
+                sink.error("runtime", &message).await;
+                return exit_codes::RUNTIME_ERROR;
+            }
+        }
+    } else {
+        messages
+    };
+
     // A follow-up prompt keeps the one-shot path (matches the fresh
     // `Mode::Print` arm): print the resume line then run the turn. The prompt
     // continues the *resumed* conversation only when the orchestrator carries

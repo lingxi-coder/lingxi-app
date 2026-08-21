@@ -505,6 +505,7 @@ mod command_arm_tests {
                 args: vec!["--check".into()],
                 env: HashMap::new(),
                 cwd: None,
+                shell: None,
             },
             source: HookSource::User,
             blocking: true,
@@ -2166,6 +2167,7 @@ mod async_path_tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                shell: None,
             },
             source: HookSource::User,
             blocking,
@@ -3371,6 +3373,87 @@ mod once_and_status_message_tests {
         );
     }
 
+    /// SH-01: a `PostToolUse` hook's `classifierContext` is capped at 2000
+    /// UTF-16 units, counted into the shared budget, tagged with the hook's
+    /// `pairedRewrite`, and folded onto the aggregate's OWN channel — never onto
+    /// `additional_contexts` (model-facing) or `system_messages`.
+    #[tokio::test]
+    async fn post_hook_classifier_context_reaches_aggregate_capped() {
+        struct ContextBuiltin;
+        #[async_trait]
+        impl BuiltinHookHandler for ContextBuiltin {
+            fn id(&self) -> &str {
+                "ctx"
+            }
+            async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+                HookResult {
+                    outcome: HookOutcome::Success,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: None,
+                    response: Some(HookResponse {
+                        // 2500 units — 500 over the `Pfr` cap.
+                        classifier_context: Some("x".repeat(2500)),
+                        // Pairs with a direct output rewrite ⇒ `pairedRewrite:"direct"`.
+                        updated_tool_output: Some(Some(serde_json::json!({ "x": 1 }))),
+                        ..Default::default()
+                    }),
+                }
+            }
+        }
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "ctx".into(),
+            events: vec![HookEventType::PostToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "ctx".into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+        };
+        let (exec, _reg) = executor_with(hook, Arc::new(ContextBuiltin));
+        let post = HookEvent::PostToolUse {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({}),
+            tool_output: serde_json::json!({ "content": "original" }),
+            tool_use_id: ToolUseId::new(),
+            duration_ms: None,
+        };
+        let agg = exec.execute(post, HookContext::default()).await;
+        assert_eq!(agg.classifier_contexts.len(), 1);
+        assert_eq!(
+            agg.classifier_contexts[0].value.chars().count(),
+            2000,
+            "capped at Pfr = 2000 UTF-16 code units",
+        );
+        assert!(
+            !agg.classifier_contexts[0].host_principal,
+            "no port hook type is a host principal",
+        );
+        assert_eq!(
+            agg.classifier_context_chars, 2000,
+            "the shared budget counts POST-cap length",
+        );
+        assert_eq!(
+            agg.paired_rewrite,
+            Some(crate::response::PairedRewrite::Direct),
+            "the same hook set updatedToolOutput ⇒ \"direct\"",
+        );
+        assert!(
+            agg.additional_contexts.is_empty(),
+            "classifierContext must NOT leak onto the model-facing channel",
+        );
+        assert!(agg.system_messages.is_empty());
+    }
+
     /// #38: A `PostToolUse` Builtin hook returning `updated_tool_output` (the
     /// all-tools field) has it folded into the aggregate by `merge`. The outer
     /// `Some` is preserved (`!== void 0` semantics).
@@ -4185,5 +4268,134 @@ mod prompt_dispatch_tests {
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
         assert!(r.stderr.contains("mcp_tool executor not wired"));
+    }
+}
+
+/// SH-06 — the `shell: "powershell"` spawn branch (oracle 2.1.238 @ 296948400).
+#[cfg(test)]
+mod sh06_shell_selector_tests {
+    use super::*;
+
+    /// `Bfa() = ["-NoProfile","-NonInteractive"]` plus `["-ExecutionPolicy",
+    /// "Bypass"]` unless the respect-policy env var is set.
+    #[test]
+    fn powershell_base_args_match_bfa() {
+        // The env var is unset in the test process, so the Bypass pair is on.
+        assert_eq!(
+            powershell_base_args(),
+            vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+            ],
+        );
+    }
+
+    /// `o9T` rewrites the three `${VAR}` host tokens into PowerShell's
+    /// `${env:VAR}` form, and touches nothing else.
+    #[test]
+    fn powershell_env_token_rewrite_matches_o9t() {
+        assert_eq!(
+            powershell_env_token_rewrite("cd ${LINGXI_PROJECT_DIR}; ls"),
+            "cd ${env:LINGXI_PROJECT_DIR}; ls",
+        );
+        assert_eq!(
+            powershell_env_token_rewrite("${LINGXI_PLUGIN_ROOT}/${LINGXI_PLUGIN_DATA}"),
+            "${env:LINGXI_PLUGIN_ROOT}/${env:LINGXI_PLUGIN_DATA}",
+        );
+        // Already-scoped and unrelated text pass through untouched.
+        assert_eq!(
+            powershell_env_token_rewrite("${env:LINGXI_PROJECT_DIR} $HOME"),
+            "${env:LINGXI_PROJECT_DIR} $HOME",
+        );
+    }
+
+    /// The `/\$CLAUDE_PROJECT_DIR\b/` warn probe: a BARE `$VAR` reference trips
+    /// it, `$VARSOMETHING` does not (the `\b`), and the `${…}` form does not —
+    /// that one is rewritten rather than warned about.
+    #[test]
+    fn bare_project_dir_probe_respects_the_word_boundary() {
+        assert!(references_bare_project_dir_var("echo $LINGXI_PROJECT_DIR"));
+        assert!(references_bare_project_dir_var("$LINGXI_PROJECT_DIR/x"));
+        assert!(!references_bare_project_dir_var("$LINGXI_PROJECT_DIRECTORY"));
+        assert!(!references_bare_project_dir_var("$LINGXI_PROJECT_DIR_2"));
+        assert!(!references_bare_project_dir_var("echo hello"));
+        // `${…}` is not a bare reference — `powershell_env_token_rewrite` fixes it.
+        assert!(!references_bare_project_dir_var("${LINGXI_PROJECT_DIR}"));
+    }
+
+    /// The byte-locked resolution-failure message.
+    #[test]
+    fn powershell_missing_error_is_byte_faithful() {
+        assert_eq!(
+            powershell_missing_error("build.ps1"),
+            "Hook \"build.ps1\" has shell: 'powershell' but no PowerShell executable \
+             (pwsh or powershell) was found on PATH. Install PowerShell, or remove \
+             \"shell\": \"powershell\" to use bash."
+        );
+    }
+
+    /// `Otr() = Sh() ? "bash" : "powershell"`; `Sh()` is unconditionally true
+    /// off Windows.
+    #[test]
+    #[cfg(not(windows))]
+    fn default_shell_is_bash_on_posix() {
+        assert_eq!(default_hook_shell(), crate::definition::HookShell::Bash);
+    }
+}
+
+/// SH-01 — `wo(e, t)` / `Pfr` (oracle 2.1.238 @ 281366731 / 292378095).
+#[cfg(test)]
+mod sh01_classifier_context_tests {
+    use crate::response::{truncate_utf16, CLASSIFIER_CONTEXT_CAP_UTF16, PairedRewrite};
+
+    /// `Pfr = 2000`.
+    #[test]
+    fn cap_matches_the_oracle_constant() {
+        assert_eq!(CLASSIFIER_CONTEXT_CAP_UTF16, 2000);
+    }
+
+    /// `if(e.length<=t)return e` — under the cap, the value is returned as-is.
+    #[test]
+    fn under_cap_is_identity() {
+        assert_eq!(truncate_utf16("hello", 2000), "hello");
+        assert_eq!(truncate_utf16("hello", 5), "hello");
+    }
+
+    /// `if(t<=0)return""`.
+    #[test]
+    fn zero_cap_is_empty() {
+        assert_eq!(truncate_utf16("hello", 0), "");
+    }
+
+    /// The cap counts UTF-16 CODE UNITS, not chars and not bytes. `é` is one
+    /// unit but two bytes, so a byte-counting cap would cut at 3 chars here.
+    #[test]
+    fn cap_counts_utf16_code_units_not_bytes() {
+        assert_eq!(truncate_utf16("ééééé", 3), "ééé");
+    }
+
+    /// An astral char is TWO UTF-16 units, so cutting mid-pair must drop the
+    /// leading high surrogate rather than emit a lone one
+    /// (`n>=55296&&n<=56319 ? r.slice(0,-1) : r`).
+    #[test]
+    fn a_cut_never_splits_a_surrogate_pair() {
+        // "a" + U+1F600 (2 units) = 3 units total.
+        let s = "a\u{1F600}";
+        assert_eq!(s.encode_utf16().count(), 3);
+        // cap 2 lands on the high surrogate → it is dropped.
+        assert_eq!(truncate_utf16(s, 2), "a");
+        // cap 3 keeps the whole pair.
+        assert_eq!(truncate_utf16(s, 3), s);
+    }
+
+    /// The four wire spellings upstream yields for `pairedRewrite`.
+    #[test]
+    fn paired_rewrite_wire_spellings() {
+        assert_eq!(PairedRewrite::Direct.as_str(), "direct");
+        assert_eq!(PairedRewrite::LegacyMcp.as_str(), "legacy_mcp");
+        assert_eq!(PairedRewrite::Suppressed.as_str(), "suppressed");
+        assert_eq!(PairedRewrite::None.as_str(), "none");
     }
 }

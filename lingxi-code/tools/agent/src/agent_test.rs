@@ -2300,6 +2300,135 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert!(spawner.invocations().is_empty());
     }
 
+    // 2.1.238 @290291941 / @292890415 (0 hits in 2.1.220): a BUILT-IN agent whose
+    // every permitted tool is denied is dropped from `$Gr`'s available set and
+    // asking for it raises `hdr`'s message with
+    // `de("subagent_launch","subagent_type_tools_denied")`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // brief; serializes the fork-gate env var
+    async fn call_rejects_an_agent_type_whose_every_tool_is_denied() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        let spawner = arc_mock_spawner();
+        spawner.set_tools_denied_agent_types(vec!["statusline-setup".to_string()]);
+        spawner.set_agent_listing(vec![
+            traits::subagent_spawn::SubagentListingEntry {
+                agent_type: "general-purpose".into(),
+                when_to_use: "anything".into(),
+                tools_description: "All tools".into(),
+            },
+            traits::subagent_spawn::SubagentListingEntry {
+                agent_type: "statusline-setup".into(),
+                when_to_use: "status line".into(),
+                tools_description: "Read, Edit".into(),
+            },
+        ]);
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let input = serde_json::json!({
+            "description": "desc here",
+            "prompt": "do a thing",
+            "subagent_type": "statusline-setup"
+        });
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let err = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => assert_eq!(
+                msg,
+                "Agent type 'statusline-setup' is unavailable because every tool it may use is denied by the current permission settings."
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert!(spawner.invocations().is_empty());
+    }
+
+    // The same set also disappears from the `Available agents:` tail (claude
+    // `Xt = $Gr(k,A,y).map(agentType)`), so the model is never told to retry with
+    // an agent it cannot have.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // brief; serializes the fork-gate env var
+    async fn tools_denied_types_are_absent_from_the_available_agents_tail() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        let spawner = arc_mock_spawner();
+        spawner.set_tools_denied_agent_types(vec!["statusline-setup".to_string()]);
+        spawner.set_agent_listing(vec![
+            traits::subagent_spawn::SubagentListingEntry {
+                agent_type: "general-purpose".into(),
+                when_to_use: "anything".into(),
+                tools_description: "All tools".into(),
+            },
+            traits::subagent_spawn::SubagentListingEntry {
+                agent_type: "statusline-setup".into(),
+                when_to_use: "status line".into(),
+                tools_description: "Read, Edit".into(),
+            },
+        ]);
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let input = serde_json::json!({
+            "description": "desc here",
+            "prompt": "do a thing",
+            "subagent_type": "nope-not-here"
+        });
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let err = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => assert_eq!(
+                msg,
+                "Agent type 'nope-not-here' not found. Available agents: general-purpose"
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    // An UNSET seam (the trait default / a host that never wired deny rules)
+    // must leave the previous behaviour byte-identical.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // brief; serializes the fork-gate env var
+    async fn empty_tools_denied_set_changes_nothing() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let input = serde_json::json!({
+            "description": "desc here",
+            "prompt": "do a thing",
+            "subagent_type": "my-custom-project-agent"
+        });
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let err = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => assert_eq!(
+                msg,
+                "Agent type 'my-custom-project-agent' not found. Available agents: general-purpose, Explore, Plan"
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
     // build_prompt's coordinator branch returns the slim intro only (no
     // `## When to use` / bullets), matching binary `if(t)return p`. The
     // non-coordinator SHORT form carries `## When to use`.

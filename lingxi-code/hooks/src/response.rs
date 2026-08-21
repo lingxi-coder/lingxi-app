@@ -10,6 +10,103 @@ use protocol::HookId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// SH-01 — `Pfr = 2000` (oracle 2.1.238 @ 292378095): the per-hook cap, in
+/// UTF-16 code units, applied to `hookSpecificOutput.classifierContext`.
+///
+/// The schema's describe string calls it "a budget shared across all hooks that
+/// contribute to one call"; the aggregation loop itself (@ 296974134) applies
+/// `wo(z.classifierContext, Pfr)` per hook and ACCUMULATES the post-cap lengths
+/// into `classifierContextChars`, which is the counter that tracks the shared
+/// budget. Both halves are ported: the per-hook cap here, the running total on
+/// [`AggregateHookResult::classifier_context_chars`].
+pub const CLASSIFIER_CONTEXT_CAP_UTF16: usize = 2000;
+
+/// SH-01 — `wo(e, t)` (oracle 2.1.238 @ 281366731):
+///
+/// ```js
+/// function wo(e,t){ if(t<=0)return"";
+///   if(e.length<=t)return e;
+///   let r=e.slice(0,t), n=r.charCodeAt(t-1);
+///   return cTu(n>=55296&&n<=56319 ? r.slice(0,-1) : r) }
+/// ```
+///
+/// `e.length` is UTF-16 code units, not chars and not bytes — a cap counted in
+/// Rust `char`s or bytes would disagree with the oracle for any non-BMP or
+/// non-ASCII content. The high-surrogate check (`0xD800..=0xDBFF`) drops a
+/// trailing lone surrogate so the cut never splits an astral character. `cTu`
+/// is a V8 sliced-string detach, semantically the identity.
+#[must_use]
+pub fn truncate_utf16(value: &str, cap: usize) -> String {
+    if cap == 0 {
+        return String::new();
+    }
+    let units: Vec<u16> = value.encode_utf16().collect();
+    if units.len() <= cap {
+        return value.to_string();
+    }
+    let mut kept = &units[..cap];
+    if kept.last().is_some_and(|u| (0xD800..=0xDBFF).contains(u)) {
+        kept = &kept[..kept.len() - 1];
+    }
+    String::from_utf16_lossy(kept)
+}
+
+/// SH-01 — one host-asserted context line a `PostToolUse` hook attached to a
+/// completed tool call's result (oracle 2.1.238 @ 296974134,
+/// `classifierContexts:[{value:U,hostPrincipal:…}]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassifierHostContext {
+    /// The post-cap text (see [`CLASSIFIER_CONTEXT_CAP_UTF16`]).
+    pub value: String,
+    /// `hostPrincipal` — upstream computes it as
+    /// `z.hook.type==="callback" && pluginId===undefined && pluginRoot===undefined
+    ///  && skillRoot===undefined`, i.e. TRUE only for an in-process host callback
+    /// that belongs to no plugin and no skill. The port has no `callback` hook
+    /// type at all (`loader.rs` builds `command`/`http`/`agent`/`prompt`/
+    /// `mcp_tool` only), so every context the port can produce today is
+    /// `false` — which is what the binary would also compute for those types.
+    pub host_principal: bool,
+}
+
+/// SH-01 — `pairedRewrite` (oracle 2.1.238 @ 296974134): which output-rewrite,
+/// if any, the SAME hook performed in the same result as its
+/// `classifierContext`.
+///
+/// ```js
+/// pairedRewrite: z.updatedToolOutput!==void 0 ? "direct"
+///              : z.updatedMCPToolOutput!==void 0 ? "legacy_mcp"
+///              : z.legacyMcpRewriteSuppressed ? "suppressed" : "none"
+/// ```
+/// The classifier needs it to know whether the context describes the output the
+/// model will actually see or the one the hook replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairedRewrite {
+    /// The same hook set `updatedToolOutput`.
+    Direct,
+    /// The same hook set the legacy `updatedMCPToolOutput`.
+    LegacyMcp,
+    /// The legacy MCP rewrite was suppressed. The port has no
+    /// `legacyMcpRewriteSuppressed` signal, so this variant is never produced
+    /// today — it exists so the wire vocabulary is complete.
+    Suppressed,
+    /// The hook rewrote nothing.
+    None,
+}
+
+impl PairedRewrite {
+    /// The wire spelling upstream yields.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::LegacyMcp => "legacy_mcp",
+            Self::Suppressed => "suppressed",
+            Self::None => "none",
+        }
+    }
+}
+
 /// Structured response a hook may return to influence the in-flight action.
 ///
 /// All fields are optional. A hook may simply observe (returning the default
@@ -101,6 +198,24 @@ pub struct HookResponse {
     /// hook, or a hook that omits the field) leaves the result untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_tool_output: Option<Option<Value>>,
+    /// SH-01 — `hookSpecificOutput.classifierContext` a `PostToolUse` hook
+    /// returned (NEW in 2.1.238; the literal counts 0 in 2.1.220). Oracle
+    /// @ 296466460:
+    ///
+    /// > "Host-asserted context shown to the auto-mode permission classifier
+    /// > alongside this tool call's result. … Capped at 2000 UTF-16 code units,
+    /// > a budget shared across all hooks that contribute to one call …
+    /// > Honored on synchronous hook responses only …"
+    ///
+    /// Stored RAW here; the cap is applied at fold time (the aggregation loop is
+    /// where upstream calls `wo(z.classifierContext, Pfr)`), so the cap and its
+    /// running character budget stay in one place.
+    ///
+    /// "Honored on synchronous hook responses only" — a hook that backgrounds
+    /// itself (`{"async":true}`) contributes no synchronous response, so its
+    /// value never reaches the fold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_context: Option<String>,
     /// Elicitation answer a hook provided via
     /// `hookSpecificOutput.{action,content}` (claude-code
     /// `parseElicitationHookOutput`, `utils/hooks.ts:4434-4446` /
@@ -374,6 +489,25 @@ pub struct AggregateHookResult {
     /// result (BIN off 202169384). Additive default `None` → byte-identical when
     /// no hook mutates the output.
     pub updated_tool_output: Option<Option<Value>>,
+    /// SH-01 — every `classifierContext` a folded `PostToolUse` hook supplied,
+    /// in execution order, already capped to
+    /// [`CLASSIFIER_CONTEXT_CAP_UTF16`] (oracle 2.1.238 @ 296974134 yields one
+    /// `classifierContexts:[{value,hostPrincipal}]` per contributing hook).
+    ///
+    /// These are host-asserted context lines shown to the auto-mode permission
+    /// classifier alongside the tool call's result — they are NOT model-facing
+    /// and must never be merged into [`Self::additional_contexts`].
+    pub classifier_contexts: Vec<ClassifierHostContext>,
+    /// SH-01 — `M.classifierContextChars` (oracle @ 296974134): the running sum
+    /// of POST-cap UTF-16 lengths across every contributing hook. This is the
+    /// "budget shared across all hooks that contribute to one call" the schema
+    /// describes, and the value upstream also reports per plugin through `G`.
+    pub classifier_context_chars: usize,
+    /// SH-01 — `pairedRewrite` of the LAST hook that supplied a
+    /// `classifierContext` (upstream yields one per contributing hook; the port
+    /// keeps the most recent, matching every other last-wins channel here).
+    /// `None` when no hook supplied a context.
+    pub paired_rewrite: Option<PairedRewrite>,
     /// `true` when ANY folded `PermissionDenied` hook returned
     /// `hookSpecificOutput.retry: true` (claude-code `toolExecution.ts:1090`,
     /// `if (result.retry) hookSaysRetry = true`). The turn loop reads this — only

@@ -15,6 +15,7 @@ pub mod env_block;
 pub mod env_meta;
 pub mod file_tree;
 pub mod git_status;
+pub mod goal_checkin;
 pub mod locked_templates;
 pub mod memory_block;
 pub mod memory_section;
@@ -28,6 +29,7 @@ pub mod skill_listing;
 pub mod subagent_env;
 pub mod task_notification;
 pub mod todo_reminder;
+pub mod tool_search_reminder;
 pub mod tools_block;
 pub mod total_tokens;
 

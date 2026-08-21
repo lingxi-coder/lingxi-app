@@ -303,6 +303,11 @@ pub struct StreamJsonInitParams {
     pub model: String,
     pub permission_mode: String,
     pub slash_commands: Vec<String>,
+    /// SLASH-15 (2.1.238): the subset of [`Self::slash_commands`] carrying the
+    /// oracle's `terminalOriented:!0` flag, so a thin/remote client knows to
+    /// route those four locally. Emitted immediately after `slash_commands` and
+    /// only when non-empty — see [`build_init_frame`].
+    pub terminal_slash_commands: Vec<String>,
     pub api_key_source: String,
     pub claude_code_version: String,
     pub output_style: String,
@@ -339,6 +344,40 @@ pub const STREAM_JSON_CAPABILITIES: [&str; 3] = [
     "interrupt_cancel_queued_v1",
     "msg_lifecycle_v1",
 ];
+
+/// SH-07 — build the `system/hook_progress` frame body (oracle 2.1.238
+/// @ 296463298, `EjT`).
+///
+/// Key ORDER is the wire contract: `type, subtype, hook_id, hook_name,
+/// hook_event, stdout, stderr, output`, then the `uuid` / `session_id` the
+/// shared emitter (`u0`) appends — the same tail `hook_started` and
+/// `hook_response` carry. Split out as a pure function so the shape is
+/// assertable without a live outbound drain.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn build_hook_progress_frame(
+    hook_id: &str,
+    hook_name: &str,
+    hook_event: &str,
+    stdout: &str,
+    stderr: &str,
+    output: &str,
+    uuid: &str,
+    session_id: &str,
+) -> serde_json::Value {
+    json!({
+        "type": "system",
+        "subtype": "hook_progress",
+        "hook_id": hook_id,
+        "hook_name": hook_name,
+        "hook_event": hook_event,
+        "stdout": stdout,
+        "stderr": stderr,
+        "output": output,
+        "uuid": uuid,
+        "session_id": session_id
+    })
+}
 
 /// Shared outbound queue: sender half for the single-writer drain task.
 ///
@@ -1463,6 +1502,63 @@ impl OutputStream for StreamJsonStream {
         self.enqueue(&frame);
     }
 
+    /// SH-07 — `Q9i(hookEvent)`: SessionStart/Setup always stream; everything
+    /// else needs `--include-hook-events`. json-mode streams nothing.
+    ///
+    /// This is the same gate `emit_hook_started` / `emit_hook_response` /
+    /// `emit_hook_progress_frame` apply to their own frames, exposed as a query
+    /// so the hook executor can skip arming the progress poll entirely — which
+    /// is exactly what upstream's `if(!Q9i(e.hookEvent))return()=>{}` head does.
+    fn hook_events_streamed(&self, hook_event: &str) -> bool {
+        if self.suppress_frames {
+            return false;
+        }
+        matches!(hook_event, "SessionStart" | "Setup")
+            || self.include_hook_events.load(Ordering::Relaxed)
+    }
+
+    /// SH-07 — emit a `system/hook_progress` NDJSON frame for
+    /// `--include-hook-events`.
+    ///
+    /// Oracle 2.1.238 @ 296463298 (`EjT`) — the frame body, in key order:
+    /// `{type, subtype, hook_id, hook_name, hook_event, stdout, stderr, output}`;
+    /// `uuid` + `session_id` are appended by the shared emitter (`u0`), exactly
+    /// as for `hook_started` / `hook_response`.
+    ///
+    /// Same gate (`Q9i`) as its two siblings: SessionStart/Setup always stream,
+    /// every other event needs `--include-hook-events`.
+    async fn emit_hook_progress_frame(
+        &self,
+        hook_id: &str,
+        hook_name: &str,
+        hook_event: &str,
+        stdout: &str,
+        stderr: &str,
+        output: &str,
+    ) {
+        if self.suppress_frames {
+            return;
+        }
+        // Gate pGn: SessionStart + Setup always stream; others need the flag.
+        let always_stream = matches!(hook_event, "SessionStart" | "Setup");
+        if !always_stream && !self.include_hook_events.load(Ordering::Relaxed) {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let frame = build_hook_progress_frame(
+            hook_id,
+            hook_name,
+            hook_event,
+            stdout,
+            stderr,
+            output,
+            &uuid,
+            &session_id,
+        );
+        self.enqueue(&frame);
+    }
+
     /// Emit a `system/hook_response` NDJSON frame for `--include-hook-events`.
     ///
     /// Same gate as `emit_hook_started`: SessionStart/Setup always stream.
@@ -1538,6 +1634,23 @@ fn build_init_frame(session_id: &str, uuid: &str, p: &StreamJsonInitParams) -> V
     o.insert("model".into(), json!(p.model));
     o.insert("permissionMode".into(), json!(p.permission_mode));
     o.insert("slash_commands".into(), json!(p.slash_commands));
+    // SLASH-15 (2.1.238): `terminal_slash_commands` is spread in directly AFTER
+    // `slash_commands` and ONLY when the list is non-empty — the init emitter
+    // `Fin` (@298685916):
+    //
+    // ```js
+    // let n=e.commands.filter((i)=>i.userInvocable!==!1&&i.terminalOriented===!0).map((i)=>i.name);
+    // …slash_commands:…, ...n.length>0&&{terminal_slash_commands:n}, apiKeySource:…
+    // ```
+    //
+    // The key does not exist in 2.1.220 at all, so an empty list must OMIT it
+    // rather than emit `[]`.
+    if !p.terminal_slash_commands.is_empty() {
+        o.insert(
+            "terminal_slash_commands".into(),
+            json!(p.terminal_slash_commands),
+        );
+    }
     o.insert("apiKeySource".into(), json!(p.api_key_source));
     o.insert("claude_code_version".into(), json!(p.claude_code_version));
     o.insert("output_style".into(), json!(p.output_style));
@@ -1643,6 +1756,19 @@ pub fn build_init_params(
     // apiKeySource: check ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN presence.
     let api_key_source = detect_api_key_source();
 
+    // SLASH-15: derive the `terminalOriented:!0` subset from the SAME advertised
+    // list the frame emits, mirroring the oracle's single-source filter over
+    // `e.commands` (`userInvocable!==!1 && terminalOriented===!0`) — the port's
+    // `slash_commands` argument is already the user-invocable list, and
+    // `command_api::builtin_support::names::TERMINAL_ORIENTED_COMMANDS` is the
+    // registry-side table this consumes. Order follows the advertised list, as
+    // upstream's `.filter().map()` does.
+    let terminal_slash_commands: Vec<String> = slash_commands
+        .iter()
+        .filter(|name| command_api::builtin_support::names::is_terminal_oriented(name.as_str()))
+        .cloned()
+        .collect();
+
     StreamJsonInitParams {
         cwd,
         session_id: session_id.to_string(),
@@ -1652,6 +1778,7 @@ pub fn build_init_params(
         model: model.to_string(),
         permission_mode: permission_mode.to_string(),
         slash_commands,
+        terminal_slash_commands,
         api_key_source,
         claude_code_version: traits::CLAUDE_CODE_VERSION.to_string(),
         output_style: output_style.to_string(),
@@ -2760,6 +2887,92 @@ mod tests {
         assert_eq!(frame["uuid"], "uuid-1234");
     }
 
+    /// SLASH-15 (2.1.238 `Fin` @298685916): `terminal_slash_commands` carries
+    /// the `terminalOriented:!0` subset of the advertised commands, is spread in
+    /// directly AFTER `slash_commands`, and is ABSENT when the subset is empty
+    /// (the key does not exist in 2.1.220 at all).
+    #[test]
+    fn init_frame_emits_terminal_slash_commands_after_slash_commands() {
+        // Advertised list deliberately interleaves flagged and unflagged names.
+        let params = build_init_params(
+            "sess-terminal",
+            vec![],
+            vec![],
+            "claude-opus-4-8",
+            "default",
+            vec![
+                "color".to_string(),
+                "context".to_string(),
+                "exit".to_string(),
+                "reload-plugins".to_string(),
+                "statusline".to_string(),
+                "usage".to_string(),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            "default",
+            None,
+            "off",
+            None,
+        );
+        assert_eq!(
+            params.terminal_slash_commands,
+            vec![
+                "color".to_string(),
+                "exit".to_string(),
+                "reload-plugins".to_string(),
+                "statusline".to_string()
+            ],
+            "only the TERMINAL_ORIENTED_COMMANDS members, in advertised order"
+        );
+
+        let frame = build_init_frame("sess-terminal", "u", &params);
+        let obj = frame.as_object().unwrap();
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        let slash = keys.iter().position(|k| *k == "slash_commands").unwrap();
+        let terminal = keys
+            .iter()
+            .position(|k| *k == "terminal_slash_commands")
+            .expect("present when the subset is non-empty");
+        assert_eq!(
+            terminal,
+            slash + 1,
+            "must sit immediately after slash_commands, got {keys:?}"
+        );
+        assert_eq!(
+            keys.get(terminal + 1),
+            Some(&"apiKeySource"),
+            "…and immediately before apiKeySource, got {keys:?}"
+        );
+
+        // Empty subset ⇒ the key is OMITTED, not emitted as [].
+        let none = build_init_params(
+            "sess-terminal-none",
+            vec![],
+            vec![],
+            "claude-opus-4-8",
+            "default",
+            vec!["context".to_string(), "usage".to_string()],
+            vec![],
+            vec![],
+            vec![],
+            "default",
+            None,
+            "off",
+            None,
+        );
+        assert!(none.terminal_slash_commands.is_empty());
+        let frame = build_init_frame("sess-terminal-none", "u", &none);
+        assert!(
+            !frame
+                .as_object()
+                .unwrap()
+                .contains_key("terminal_slash_commands"),
+            "an empty subset must emit NO terminal_slash_commands key"
+        );
+    }
+
     /// 2.1.220 live capture: `capabilities` advertises the three protocol
     /// contracts verbatim, between `plugins` and (when present)
     /// `mcp_server_errors`; a reason-less run omits
@@ -2880,6 +3093,101 @@ mod tests {
             )
             .await;
         // No panic = pass.
+    }
+
+    /// SH-07 — the `hook_progress` frame body is byte-faithful to `EjT`: eight
+    /// content keys in oracle order, then the shared `uuid` / `session_id` tail.
+    /// Before SH-07 the port emitted `hook_started` and `hook_response` but had
+    /// no `hook_progress` emitter at all, so a long-running hook streamed
+    /// nothing between its two lifecycle frames.
+    #[test]
+    fn hook_progress_frame_is_byte_faithful() {
+        let frame = build_hook_progress_frame(
+            "hook:abc",
+            "my-formatter",
+            "PostToolUse",
+            "half done\n",
+            "warn\n",
+            "half done\nwarn\n",
+            "11111111-2222-3333-4444-555555555555",
+            "sess-1",
+        );
+        let obj = frame.as_object().unwrap();
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "type",
+                "subtype",
+                "hook_id",
+                "hook_name",
+                "hook_event",
+                "stdout",
+                "stderr",
+                "output",
+                "uuid",
+                "session_id",
+            ],
+        );
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "hook_progress");
+        assert_eq!(frame["hook_id"], "hook:abc");
+        assert_eq!(frame["hook_name"], "my-formatter");
+        assert_eq!(frame["hook_event"], "PostToolUse");
+        // `output` is the ARRIVAL-ordered interleaving of both pipes, which is
+        // the value the poll's change detection compares — not stdout alone.
+        assert_eq!(frame["output"], "half done\nwarn\n");
+        assert_eq!(frame["session_id"], "sess-1");
+    }
+
+    /// The `hook_progress` emitter shares the `hook_started` / `hook_response`
+    /// gate (`Q9i`): flag off + a non-SessionStart event ⇒ nothing; SessionStart
+    /// and Setup always stream; flag on ⇒ everything streams.
+    #[tokio::test]
+    async fn hook_progress_follows_the_shared_gate() {
+        let stream = Arc::new(StreamJsonStream::new(make_params("sess-progress")));
+        // Flag OFF, ordinary event: suppressed.
+        stream
+            .emit_hook_progress_frame("h:1", "fmt", "PostToolUse", "a", "", "a")
+            .await;
+        // Flag OFF, SessionStart: always streams.
+        stream
+            .emit_hook_progress_frame("h:2", "boot", "SessionStart", "a", "", "a")
+            .await;
+        // Flag ON: everything streams.
+        stream.set_flags(false, true);
+        stream
+            .emit_hook_progress_frame("h:3", "fmt", "PostToolUse", "a", "", "a")
+            .await;
+        // json-mode suppresses regardless of the flag.
+        let json_mode = Arc::new(StreamJsonStream::new_json_mode(make_params("sess-json")));
+        json_mode.set_flags(false, true);
+        json_mode
+            .emit_hook_progress_frame("h:4", "fmt", "SessionStart", "a", "", "a")
+            .await;
+        // No panic = pass (same harness convention as the sibling gate tests).
+    }
+
+    /// SH-07 — the `Q9i` query the hook executor uses to decide whether to arm
+    /// the progress poll at all. Getting this wrong in the permissive direction
+    /// would make every TUI hook run spawn a 1 s poll task for frames nobody
+    /// emits.
+    #[test]
+    fn hook_events_streamed_matches_q9i() {
+        let stream = StreamJsonStream::new(make_params("sess-q9i"));
+        // Flag OFF: only the always-on events.
+        assert!(stream.hook_events_streamed("SessionStart"));
+        assert!(stream.hook_events_streamed("Setup"));
+        assert!(!stream.hook_events_streamed("PreToolUse"));
+        assert!(!stream.hook_events_streamed("PostToolUse"));
+        // Flag ON: everything.
+        stream.set_flags(false, true);
+        assert!(stream.hook_events_streamed("PostToolUse"));
+        // json-mode streams nothing, flag or not.
+        let json_mode = StreamJsonStream::new_json_mode(make_params("sess-q9i-json"));
+        json_mode.set_flags(false, true);
+        assert!(!json_mode.hook_events_streamed("SessionStart"));
+        assert!(!json_mode.hook_events_streamed("PostToolUse"));
     }
 
     /// Verify `emit_hook_response` is suppressed in json-mode.

@@ -39,15 +39,26 @@
 //!   [`select_in_context_paths`] is that filter, minus the host lookups the
 //!   caller owns.
 //!
-//! **STATUS — renderer only, deliberately unwired.** The BODY is the byte-locked
-//! half and is pinned by the tests below. The producer is not wired: nothing in
-//! this port maintains a `pendingMemoryUpdates` queue — the background memory
-//! consolidator (`tasks/src/handlers/dream.rs`) writes the memory directory
-//! without announcing what it changed, so there is no queue to drain. Wiring it
-//! needs (a) a `MemoryUpdateProvider` handle on `ConversationOrchestrator` in
-//! the `task_notifications` mould, (b) the dream handler enqueueing
-//! `{source, summary, paths}` on completion, and (c) a composition-root edge —
-//! all outside this module.
+//! **STATUS — PORTED AND WIRED.** The producer is
+//! `ConversationOrchestrator::memory_update_reminder_messages`, called from the
+//! streaming turn driver's per-turn reminder fan-out in `conversation.rs`
+//! directly after the `<task-notification>` drain. The queue
+//! (`ConversationOrchestrator::pending_memory_updates`, this module's
+//! [`PendingMemoryUpdate`]) is filled by that same drain: the port's background
+//! consolidator is a FORKED SUBAGENT whose completion only surfaces as a
+//! terminal `dream` task notification, so that is where the oracle's
+//! `setAppState({pendingMemoryUpdates:[…]})` enqueue lands here.
+//!
+//! Two reconstructions, because the port's dream task carries less than the
+//! oracle's queue entry:
+//!
+//! * `summary` — the oracle's consolidator supplies it directly. Here it is the
+//!   dream agent's own final text (`TaskNotification::result`), which is exactly
+//!   what `dream.rs`'s prompt asks for ("Return a brief summary of what you
+//!   consolidated, updated, or pruned"), falling back to the task description.
+//!   No copy is invented.
+//! * `paths` — recomputed by listing the user memdir for files whose mtime is
+//!   newer than the previous scan, instead of being reported by the writer.
 
 /// `F5T` @296741219 — the only `source` the oracle's label table defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +83,20 @@ impl MemoryUpdateSource {
 /// (`tool-api/src/defer.rs`, where it is private); duplicated rather than
 /// re-exported so this module owns its own oracle citation.
 pub const AMBIENT_CONTEXT_TRAILER: &str = "This is ambient context \u{2014} do not narrate it to the user unless they ask or it is directly relevant to their request.";
+
+/// A QUEUED memory update, before the caller has resolved which of the changed
+/// paths are still in the model's context.
+///
+/// The oracle queues `{source, summary, paths}` at write time and computes
+/// `inContextPaths` at drain time (`jzm`'s `i` predicate). This is that queue
+/// entry; [`MemoryUpdate`] is what the drain turns it into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMemoryUpdate {
+    /// `e.source`.
+    pub source: MemoryUpdateSource,
+    /// `e.summary`.
+    pub summary: String,
+}
 
 /// One drained `pendingMemoryUpdates` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]

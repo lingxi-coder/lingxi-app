@@ -190,56 +190,16 @@ pub enum AutoCompactWindowSource {
     /// `"unknown-model"` (NEW in 2.1.238) — auto-compact will hold the session
     /// inside the window it *assumes* for a model this build does not recognize.
     ///
-    /// # Divergence: the startup NOTICE is deliberately not rendered (SC-06)
+    /// Paired with a one-shot user-facing notice, [`unknown_model_window_notice`]
+    /// (`Pk0` @306646044) — see there for the copy and where it is emitted.
     ///
-    /// Upstream pairs this source with a one-shot startup warning, `Pk0`
-    /// (cc-238.js @306646044), emitted from the REPL launcher
-    /// (@306693668: `let Oo=Fby(zs,W,lc) … cz(Zl)`):
-    ///
-    /// ```text
-    /// "${model}" is not a model this version of Claude Code recognizes, so
-    /// auto-compact will keep this session within ${oc(window)} tokens (the
-    /// context window it assumes). ${hints}map it in the modelOverrides setting
-    /// or update Claude Code; CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1
-    /// restores the previous wait-for-the-API behavior.
-    /// ```
-    ///
-    /// where `hints` is `"To make it recognized, "`, or
-    /// `` `If the model accepts ${window<1e6?"more":"less"}, ${[…].join(", or ")}; to make it recognized, ` ``
-    /// over `"append [1m] to the model name for 1M"` (unless
-    /// `CLAUDE_CODE_DISABLE_1M_CONTEXT`) and
-    /// `"set CLAUDE_CODE_MAX_CONTEXT_TOKENS to its real window"` (when
-    /// `BCd(model)`, i.e. the model is not `claude-*`).
-    ///
-    /// The `source` half of `N8` ports cleanly and is live above. The notice
-    /// does not, for three reasons that are each sufficient:
-    ///
-    /// 1. **It would fire on almost every LingXi startup, wrongly.**
-    ///    [`model_window_is_assumed`] consults
-    ///    `llm_client::model::model_limits`, a process-global registry
-    ///    populated at CATALOG-ASSEMBLY time. The oracle emits its notice from
-    ///    the launcher, before that assembly, so at the emit point every
-    ///    non-Claude model looks unrecognized — including the ones the catalog
-    ///    is about to describe exactly. Upstream has no such window: `ICd` reads
-    ///    a table compiled into the binary.
-    /// 2. **Two of its three remedies do not exist here.** LingXi has no
-    ///    window-overrides setting (`modelOverrides` in
-    ///    `llm-client/src/model/allowlist.rs` is an unrelated Anthropic-id →
-    ///    provider-id map for the allowlist gate), and
-    ///    `LINGXI_MAX_CONTEXT_TOKENS` is honored only under `USER_TYPE=ant`
-    ///    (`llm_client::model::context_window`, a pre-existing documented
-    ///    divergence). Rendering the copy would tell users to do two things
-    ///    that cannot be done.
-    /// 3. **An unrecognized model is the normal case here, not an anomaly.**
-    ///    Multi-provider support is a user-confirmed LingXi divergence; a
-    ///    warning shown for every third-party model is noise, not parity.
-    ///
-    /// Nothing in the enforcement half is lost by this: the port does not clamp
-    /// on `unknown-model` either (the arm returns the bare model window, same
-    /// as [`Self::Auto`]), so there is no surprising behavior for the notice to
-    /// explain. If LingXi ever gains a real window-overrides setting and moves
-    /// registry assembly ahead of the launcher, port `Pk0` verbatim from the
-    /// offset above.
+    /// The *enforcement* half of the oracle's branch is deliberately absent:
+    /// this arm returns the bare model window, same as [`Self::Auto`], so
+    /// nothing is clamped. That is a LingXi divergence with a reason —
+    /// multi-provider support means an unrecognized model is the NORMAL case
+    /// here, and clamping every third-party model to an assumed window would
+    /// truncate sessions the provider was happy to serve. The notice says only
+    /// what is true of this port: the window is an assumption.
     UnknownModel,
     /// `"auto"` — no override applied.
     Auto,
@@ -371,6 +331,171 @@ pub fn resolve_auto_compact_window(
         configured: model_window,
         source,
     }
+}
+
+/// `Gpe()` — `CLAUDE_CODE_DISABLE_1M_CONTEXT`.
+///
+/// Read here rather than borrowed from `llm_client::model::context_window`
+/// because that crate's `is_1m_context_disabled` is private; the spelling is
+/// the un-rebranded one the port already honours there, so the two agree.
+fn is_1m_context_disabled() -> bool {
+    env_truthy("CLAUDE_CODE_DISABLE_1M_CONTEXT")
+}
+
+/// `oc(e)` (@283762505) — `vf(e).replace(".0","")`, where `vf` is
+/// `Intl.NumberFormat("en-US", compact-for-≥1000).format(e).toLowerCase()`.
+/// `200000` -> `200k`, `1000000` -> `1m`, `1500000` -> `1.5m`.
+///
+/// Twin of `commands::core::autocompact`'s private `format_tokens_compact`;
+/// duplicated rather than shared because that one is a crate-private helper of
+/// a slash-command handler and `compaction` must not depend on `commands`.
+fn format_window_tokens(n: u64) -> String {
+    fn trim(v: f64) -> String {
+        let s = format!("{v:.1}");
+        s.strip_suffix(".0").map_or(s.clone(), str::to_string)
+    }
+    #[allow(clippy::cast_precision_loss)]
+    if n >= 1_000_000 {
+        format!("{}m", trim(n as f64 / 1_000_000.0))
+    } else if n >= 1_000 {
+        format!("{}k", trim(n as f64 / 1_000.0))
+    } else {
+        n.to_string()
+    }
+}
+
+/// SC-06 — the one-shot notice for an [`AutoCompactWindowSource::UnknownModel`]
+/// window. `Pk0` (cc-238.js @306646044), wrapped by `Fby` (@306646018):
+///
+/// ```js
+/// function Pk0(e,t,r){ let{source:n,window:o}=N8(e,t,r);
+///   if(n!=="unknown-model") return null;
+///   let i=BCd(e), s=V.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+///   if(i&&s!==void 0&&s>0) return null;
+///   let a=o<1e6, l=[];
+///   if(!Gpe()&&a) l.push("append [1m] to the model name for 1M");
+///   if(i) l.push("set CLAUDE_CODE_MAX_CONTEXT_TOKENS to its real window");
+///   let c=l.length>0?`If the model accepts ${a?"more":"less"}, ${l.join(", or ")}; to make it recognized, `
+///                   :"To make it recognized, ";
+///   return `"${e}" is not a model this version of Claude Code recognizes, so auto-compact will keep this session within ${oc(o)} tokens (the context window it assumes). ${c}map it in the modelOverrides setting or update Claude Code; CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 restores the previous wait-for-the-API behavior.` }
+/// ```
+///
+/// `Fby` exists only to catch a throw and log `"unknown-model notice failed"`;
+/// nothing here can throw, so the wrapper collapses into this function.
+///
+/// # Rebrands, and the one clause that is dropped
+///
+/// * `Claude Code` -> [`branding::PRODUCT_NAME`];
+///   `CLAUDE_CODE_MAX_CONTEXT_TOKENS` -> `LINGXI_MAX_CONTEXT_TOKENS`;
+///   `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT` ->
+///   [`DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV`].
+/// * **`map it in the modelOverrides setting or ` is DROPPED.** LingXi has no
+///   window-overrides setting — `modelOverrides` in
+///   `llm-client/src/model/allowlist.rs` is an unrelated Anthropic-id ->
+///   provider-id map for the allowlist gate. Rendering the clause would tell
+///   the user to do something that cannot be done, which is worse than a
+///   shorter notice. Everything else is byte-for-byte.
+/// * `LINGXI_MAX_CONTEXT_TOKENS` is itself honoured only under `USER_TYPE=ant`
+///   (`llm_client::model::context_window`, a pre-existing documented
+///   divergence), so that remedy can be inert. The probe below still reads the
+///   RAW var, like the oracle: if the user has already set it, repeating the
+///   advice is noise regardless of whether the gate lets it through.
+///
+/// `betas` / `settings_window` / `auto_compact_enabled` are threaded straight
+/// into [`resolve_auto_compact_window`] so the notice can never disagree with
+/// the window it describes.
+#[must_use]
+pub fn unknown_model_window_notice(
+    model: &str,
+    betas: &[String],
+    settings_window: Option<u64>,
+    auto_compact_enabled: bool,
+) -> Option<String> {
+    let resolved = resolve_auto_compact_window(model, betas, settings_window, auto_compact_enabled);
+    if resolved.source != AutoCompactWindowSource::UnknownModel {
+        return None;
+    }
+    // `BCd(e)` — "this is not a `claude-*` model", i.e. the one case where a
+    // real context window can be stated by hand.
+    let is_non_claude = !llm_client::model::context_window::is_claude_family(model);
+    let max_context_tokens_set = std::env::var("LINGXI_MAX_CONTEXT_TOKENS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .is_some_and(|n| n > 0);
+    if is_non_claude && max_context_tokens_set {
+        return None;
+    }
+
+    let accepts_more = resolved.window < 1_000_000;
+    let mut remedies: Vec<&str> = Vec::new();
+    if !is_1m_context_disabled() && accepts_more {
+        remedies.push("append [1m] to the model name for 1M");
+    }
+    if is_non_claude {
+        remedies.push("set LINGXI_MAX_CONTEXT_TOKENS to its real window");
+    }
+    let lead = if remedies.is_empty() {
+        "To make it recognized, ".to_string()
+    } else {
+        format!(
+            "If the model accepts {}, {}; to make it recognized, ",
+            if accepts_more { "more" } else { "less" },
+            remedies.join(", or ")
+        )
+    };
+
+    let product = branding::PRODUCT_NAME;
+    Some(format!(
+        "\"{model}\" is not a model this version of {product} recognizes, so \
+         auto-compact will keep this session within {} tokens (the context \
+         window it assumes). {lead}update {product}; \
+         {DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV}=1 restores the previous \
+         wait-for-the-API behavior.",
+        format_window_tokens(resolved.window)
+    ))
+}
+
+/// One-shot guard for [`unknown_model_window_notice`].
+///
+/// The oracle emits its notice exactly once, from the REPL launcher
+/// (@306693668), before the first turn. The port cannot emit it there: LingXi's
+/// model registry (`llm_client::model::model_limits`) is populated at
+/// CATALOG-ASSEMBLY time, which happens AFTER the launcher — so at the oracle's
+/// emit point every non-Claude model still looks unrecognized, including the
+/// ones the catalog is about to describe exactly. Upstream has no such window;
+/// `ICd` reads a table compiled into the binary.
+///
+/// So the port latches it instead and emits on the first window resolution of
+/// the session, which is the first turn — same information, same once, and by
+/// then the registry answers correctly.
+static UNKNOWN_MODEL_NOTICE_SHOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// [`unknown_model_window_notice`], but only the FIRST time it would fire in
+/// this process. Returns `None` on every later call.
+#[must_use]
+pub fn unknown_model_window_notice_once(
+    model: &str,
+    betas: &[String],
+    settings_window: Option<u64>,
+    auto_compact_enabled: bool,
+) -> Option<String> {
+    if UNKNOWN_MODEL_NOTICE_SHOWN.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let notice = unknown_model_window_notice(model, betas, settings_window, auto_compact_enabled)?;
+    // Latched only when a notice was actually produced, so a session that
+    // starts on a recognized model and later switches still gets one.
+    if UNKNOWN_MODEL_NOTICE_SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    Some(notice)
+}
+
+/// Test-only reset for [`UNKNOWN_MODEL_NOTICE_SHOWN`].
+#[cfg(test)]
+fn reset_unknown_model_notice_latch() {
+    UNKNOWN_MODEL_NOTICE_SHOWN.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Returns the context window size minus the max output tokens reserved for the
@@ -672,6 +797,100 @@ mod tests {
                     - max_output_tokens_for_model(UNKNOWN).min(MAX_OUTPUT_TOKENS_FOR_SUMMARY)
             );
         });
+    }
+
+    /// SC-06 — the unknown-model notice (`Pk0`). Every branch of the remedy
+    /// list, and the two early returns.
+    #[test]
+    fn sc06_unknown_model_notice_copy() {
+        with_clean_env(|| {
+            reset_unknown_model_notice_latch();
+            const UNKNOWN: &str = "mysteryprovider/mystery-9-turbo";
+
+            // Non-Claude, under 1M, nothing disabled ⇒ BOTH remedies.
+            let notice = unknown_model_window_notice(UNKNOWN, &[], None, true)
+                .expect("an unrecognized model must produce a notice");
+            assert_eq!(
+                notice,
+                format!(
+                    "\"{UNKNOWN}\" is not a model this version of {} recognizes, \
+                     so auto-compact will keep this session within 200k tokens \
+                     (the context window it assumes). If the model accepts more, \
+                     append [1m] to the model name for 1M, or set \
+                     LINGXI_MAX_CONTEXT_TOKENS to its real window; to make it \
+                     recognized, update {}; \
+                     LINGXI_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 restores \
+                     the previous wait-for-the-API behavior.",
+                    branding::PRODUCT_NAME,
+                    branding::PRODUCT_NAME
+                )
+            );
+
+            // `Gpe()` drops the `[1m]` remedy, leaving one item — and therefore
+            // NO `, or ` separator.
+            std::env::set_var("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
+            let one = unknown_model_window_notice(UNKNOWN, &[], None, true).expect("notice");
+            assert!(
+                one.contains(
+                    "If the model accepts more, set LINGXI_MAX_CONTEXT_TOKENS to its real window; \
+                     to make it recognized, "
+                ),
+                "{one}"
+            );
+            assert!(!one.contains("append [1m]"));
+            std::env::remove_var("CLAUDE_CODE_DISABLE_1M_CONTEXT");
+
+            // A model the build DOES recognize never gets a notice.
+            assert_eq!(unknown_model_window_notice(MODEL, &[], None, true), None);
+            // Neither does an unknown one once the enforcement kill switch is on
+            // (the source falls back to `auto`).
+            std::env::set_var(DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV, "1");
+            assert_eq!(unknown_model_window_notice(UNKNOWN, &[], None, true), None);
+            std::env::remove_var(DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV);
+
+            // `if(i && s !== void 0 && s > 0) return null` — the user already
+            // stated the real window, so the advice would be noise.
+            std::env::set_var("LINGXI_MAX_CONTEXT_TOKENS", "300000");
+            assert_eq!(unknown_model_window_notice(UNKNOWN, &[], None, true), None);
+            std::env::set_var("LINGXI_MAX_CONTEXT_TOKENS", "0");
+            assert!(
+                unknown_model_window_notice(UNKNOWN, &[], None, true).is_some(),
+                "a non-positive value is not a stated window"
+            );
+            std::env::remove_var("LINGXI_MAX_CONTEXT_TOKENS");
+        });
+    }
+
+    /// The notice fires ONCE per process — the latch that stands in for the
+    /// oracle's launcher-time emit.
+    #[test]
+    fn sc06_unknown_model_notice_is_one_shot() {
+        with_clean_env(|| {
+            reset_unknown_model_notice_latch();
+            const UNKNOWN: &str = "mysteryprovider/mystery-9-turbo";
+            // A recognized model must NOT burn the latch.
+            assert_eq!(
+                unknown_model_window_notice_once(MODEL, &[], None, true),
+                None
+            );
+            assert!(unknown_model_window_notice_once(UNKNOWN, &[], None, true).is_some());
+            assert_eq!(
+                unknown_model_window_notice_once(UNKNOWN, &[], None, true),
+                None,
+                "the second call is silent"
+            );
+            reset_unknown_model_notice_latch();
+        });
+    }
+
+    /// `oc(e)` — the compact token formatter the notice renders the window with.
+    #[test]
+    fn sc06_window_token_formatting() {
+        assert_eq!(format_window_tokens(200_000), "200k");
+        assert_eq!(format_window_tokens(1_000_000), "1m");
+        assert_eq!(format_window_tokens(1_500_000), "1.5m");
+        assert_eq!(format_window_tokens(999), "999");
+        assert_eq!(format_window_tokens(128_000), "128k");
     }
 
     /// `N8`'s env → settings precedence, and the byte-exact `source` spellings

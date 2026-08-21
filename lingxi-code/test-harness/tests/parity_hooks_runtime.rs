@@ -351,6 +351,7 @@ async fn command_arm_deferred_stub_returns_error() {
             args: vec![],
             env: HashMap::new(),
             cwd: None,
+            shell: None,
         },
         source: HookSource::User,
         blocking: true,

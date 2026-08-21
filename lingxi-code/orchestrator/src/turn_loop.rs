@@ -606,6 +606,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             PtlCallOutcome::Response(resp) => resp,
             PtlCallOutcome::PromptTooLong => {
                 let assistant_id = surface_prompt_too_long(orch).await;
+                // SLASH-04: `w4v` maps `prompt_too_long` to `context_limit`.
+                clear_goal_after_unrecoverable_error(orch, GoalClearReason::ContextLimit).await;
                 return Ok((
                     TurnStepOutcome::Ended {
                         final_message_id: assistant_id,
@@ -623,6 +625,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 // the reactive-exhausted `prompt_too_long` so SDK/stream-json
                 // consumers categorize the two preempt origins distinctly.
                 let assistant_id = surface_prompt_too_long(orch).await;
+                // SLASH-04: `w4v` maps `blocking_limit` to `context_limit`.
+                clear_goal_after_unrecoverable_error(orch, GoalClearReason::ContextLimit).await;
                 return Ok((
                     TurnStepOutcome::Ended {
                         final_message_id: assistant_id,
@@ -640,6 +644,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 // (`bin/claude.exe` offset ~208016504; terminal-reason enum lists
                 // `rapid_refill_breaker`, never `invalid_request`).
                 let assistant_id = surface_rapid_refill_thrashing(orch).await;
+                // SLASH-04: `w4v` maps `rapid_refill_breaker` to `context_limit`.
+                clear_goal_after_unrecoverable_error(orch, GoalClearReason::ContextLimit).await;
                 return Ok((
                     TurnStepOutcome::Ended {
                         final_message_id: assistant_id,
@@ -657,7 +663,17 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         // else gracefully as an `isApiErrorMessage` assistant message + end the
         // turn with `reason:"model_error"` (no Stop/StopFailure hooks — the catch
         // path runs neither). 0 output tokens.
-        Err(e) if is_carveout_propagated(&e) => return Err(e),
+        Err(e) if is_carveout_propagated(&e) => {
+            // SC-02: the `rate_limited` half of the rate-limit resume
+            // checkpoint. This is the port's twin of the oracle's REPL trigger
+            // (@306528240: the `vut` rate-limit callback fires
+            // `performRateLimitCheckpoint({todos, trigger:"rate_limited"})`
+            // fire-and-forget) — the point at which a rate-limited response
+            // ends the turn is where the user's in-progress files are worth
+            // snapshotting.
+            maybe_checkpoint_on_rate_limit(orch, &e).await;
+            return Err(e);
+        }
         Err(e) => {
             // Classify the TYPED error into the api-error envelope (`Flp`/`KNn`)
             // BEFORE consuming it for the verbatim error text. The rendered
@@ -674,7 +690,22 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 }
                 _ => e.to_string(),
             };
+            let error_kind = env.error;
             let assistant_id = surface_model_error(orch, &content, env).await;
+            // SLASH-04: this arm is the oracle's `api_error` reason (see the
+            // NAMING NOTE on `GoalClearBucket`), so it is classified by
+            // errorKind, not by the port's `model_error` spelling.
+            // `mal(Wr)`'s `apiErrorIsTransient` field has no port analogue; the
+            // `overloaded`/`server_error` half of the predicate is subsumed by
+            // those categories' own no-clear arms.
+            clear_goal_after_unrecoverable_error(
+                orch,
+                GoalClearReason::ApiError {
+                    error_kind,
+                    is_transient: false,
+                },
+            )
+            .await;
             return Ok((
                 TurnStepOutcome::Ended {
                     final_message_id: assistant_id,
@@ -1205,6 +1236,28 @@ pub(crate) async fn call_api_with_ptl_recovery(
     let active_betas = orch.api.active_betas();
     let warning = compaction::calculate_token_warning_state(estimate, model, &active_betas, true);
 
+    // SC-06: the one-shot unknown-model auto-compact notice (`Pk0`
+    // @306646044). Upstream emits it from the REPL launcher (@306693668) as
+    // `cz(<notice>)` when interactive, or `T("[autocompact] <notice>",
+    // {level:"warn"})` when the output is json/stream-json or the session kind
+    // is `bg`. The port emits it HERE, on the first window resolution of the
+    // session, because LingXi's model registry is populated at catalog-assembly
+    // time — i.e. AFTER the launcher — so at the oracle's emit point every
+    // third-party model still looks unrecognized. `_once` latches it, so this
+    // costs one relaxed atomic load per turn afterwards.
+    //
+    // Landed on the warn log, which is the oracle's own non-interactive branch
+    // verbatim; the port has no `cz`-equivalent console-notice channel for the
+    // interactive branch.
+    if let Some(notice) = compaction::thresholds::unknown_model_window_notice_once(
+        model,
+        &active_betas,
+        None,
+        compaction::thresholds::is_auto_compact_enabled(true),
+    ) {
+        tracing::warn!("[autocompact] {notice}");
+    }
+
     // Push the live context-pressure banner to the UI — the orchestrator-side
     // twin of claude-code's `<TokenWarning>` render
     // (`PromptInput/Notifications.tsx:321`), which recomputes
@@ -1646,6 +1699,262 @@ async fn reissue_after_model_fallback(
 /// @228721216 and its reactive twin @228749977). With no recorded failure the
 /// bare [`PROMPT_TOO_LONG_ERROR_MESSAGE`] is surfaced exactly as before. The
 /// detail is CONSUMED here (one-shot), so a later turn can never inherit it.
+/// SLASH-04 (NEW in claude-code 2.1.238) — the `/goal` auto-teardown on a turn
+/// that died for a reason the user cannot retry past. Oracle `Cqf`
+/// (@292182815, statsig `tengu_quartz_pipit`, **default `true`**):
+///
+/// ```js
+/// function*Cqf(e,t,r,n){try{
+///   if(!it("tengu_quartz_pipit",!0)||!e||t.agentId||t.abortController.signal.aborted||PH(r)!=="main")return;
+///   let o=w4v(n);if(o===null)return;let{label:i,errorCode:s}=v4v[o];
+///   t.sessionHooksRegistry.remove(zt(),"Stop",{type:"prompt",prompt:e.condition}),
+///   cFe(e,o==="context_limit"?"context_limit":"api_error"),de("goal_met",s),
+///   yield{type:"active_goal",value:void 0},yield bOi(!0,e.condition),
+///   yield jBt(`Goal cleared after an unrecoverable error (${i}): "${Yl(e.condition,T4v,!0)}". Run /goal again to continue.`,"warning")
+/// }catch(o){Ce(o)}}
+/// ```
+///
+/// The bucket map is `w4v` (@292182951), read verbatim:
+///
+/// ```js
+/// switch(e.reason){
+///   case"image_error":case"model_error":case"malformed_tool_use_exhausted":
+///   case"aborted_streaming":case"aborted_tools":case"stop_hook_prevented":
+///   case"hook_stopped":case"tool_deferred":case"max_turns":
+///   case"background_requested":case"completed":return null;
+///   case"blocking_limit":case"prompt_too_long":case"rapid_refill_breaker":return"context_limit";
+///   case"api_error":if(e.isTransient)return null;
+///     switch(e.errorKind){
+///       case"overloaded":case"server_error":case"max_output_tokens":case"rate_limit":
+///       case"invalid_request":case"unknown":case void 0:return null;
+///       case"authentication_failed":case"oauth_org_not_allowed":
+///         return V.CLAUDE_CODE_REMOTE||j2()||BYt()!==null?null:"auth";
+///       case"account_on_hold":return"auth";
+///       case"billing_error":return"billing";
+///       case"model_not_found":return"model_unavailable"}}
+/// ```
+///
+/// NAMING NOTE — the oracle's `api_error` reason is spelled `model_error` in
+/// this port. Upstream, the graceful api-error catch produces an
+/// `isApiErrorMessage` assistant message and the loop then returns
+/// `{reason:"api_error",errorKind:Wr.error,isTransient:mal(Wr)}` (@292258007);
+/// the oracle's OWN `model_error` reason is the unrelated `model_blocked`
+/// / queryLoop-invariant arm (@292249827). LingXi's `Err(e)` arm below is the
+/// FORMER, so it is classified with [`GoalClearReason::ApiError`] carrying
+/// `classify_api_error`'s category as `errorKind` — not with the oracle's
+/// no-clear `model_error` case. Getting this backwards would make the whole
+/// api-error family silently non-clearing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoalClearBucket {
+    /// `auth` — "authentication failed" / `cleared_auth`.
+    Auth,
+    /// `billing` — "credit balance too low" / `cleared_billing`.
+    Billing,
+    /// `context_limit` — "context limit reached" / `cleared_context_limit`.
+    ContextLimit,
+    /// `model_unavailable` — "model unavailable" / `cleared_model_unavailable`.
+    ModelUnavailable,
+}
+
+impl GoalClearBucket {
+    /// `v4v[o].label` (@292183854) — interpolated into the warning's parens.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Auth => "authentication failed",
+            Self::Billing => "credit balance too low",
+            Self::ContextLimit => "context limit reached",
+            Self::ModelUnavailable => "model unavailable",
+        }
+    }
+
+    /// `v4v[o].errorCode` — the `de("goal_met", s)` telemetry property.
+    pub(crate) fn error_code(self) -> &'static str {
+        match self {
+            Self::Auth => "cleared_auth",
+            Self::Billing => "cleared_billing",
+            Self::ContextLimit => "cleared_context_limit",
+            Self::ModelUnavailable => "cleared_model_unavailable",
+        }
+    }
+}
+
+/// The terminal-reason shape `w4v` switches on, narrowed to the reasons this
+/// port's turn loop can actually produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoalClearReason<'a> {
+    /// `blocking_limit` / `prompt_too_long` / `rapid_refill_breaker`.
+    ContextLimit,
+    /// The oracle's `api_error` (this port's `model_error` stop_reason), with
+    /// `classify_api_error`'s category as `errorKind` and `mal(Wr)`'s verdict.
+    ApiError {
+        /// `e.errorKind` — `None` maps to the `case void 0` no-clear arm.
+        error_kind: Option<&'a str>,
+        /// `e.isTransient` = `mal(Wr)` (@296630038):
+        /// `e.apiErrorIsTransient===!0||e.error==="overloaded"||e.error==="server_error"`.
+        is_transient: bool,
+    },
+}
+
+/// `w4v(n)` — reason (+ errorKind) to bucket, or `None` for "do not clear".
+pub(crate) fn goal_clear_bucket(reason: GoalClearReason<'_>) -> Option<GoalClearBucket> {
+    match reason {
+        GoalClearReason::ContextLimit => Some(GoalClearBucket::ContextLimit),
+        GoalClearReason::ApiError { is_transient, .. } if is_transient => None,
+        GoalClearReason::ApiError { error_kind, .. } => match error_kind {
+            // `authentication_failed | oauth_org_not_allowed` clear UNLESS the
+            // session is remote. LingXi has no remote surface (an accepted
+            // divergence), so only the env half of `CLAUDE_CODE_REMOTE ||
+            // j2() || BYt()!==null` is observable — and it is what an operator
+            // can actually set.
+            Some("authentication_failed" | "oauth_org_not_allowed") => {
+                if std::env::var("CLAUDE_CODE_REMOTE").is_ok_and(|v| !v.is_empty()) {
+                    None
+                } else {
+                    Some(GoalClearBucket::Auth)
+                }
+            }
+            Some("account_on_hold") => Some(GoalClearBucket::Auth),
+            Some("billing_error") => Some(GoalClearBucket::Billing),
+            Some("model_not_found") => Some(GoalClearBucket::ModelUnavailable),
+            // `overloaded | server_error | max_output_tokens | rate_limit |
+            // invalid_request | unknown | void 0` and anything unrecognised.
+            _ => None,
+        },
+    }
+}
+
+/// `T4v` — the condition-truncation width inside the warning's quotes.
+pub(crate) const GOAL_CLEAR_CONDITION_WIDTH: usize = 80;
+
+/// The statsig gate, DEFAULT TRUE (`it("tengu_quartz_pipit",!0)`), so this path
+/// is live in a default install.
+const GOAL_CLEAR_FLAG: &str = "tengu_quartz_pipit";
+
+/// Oracle `is(e,t)` (@283759767) — grapheme-wise truncate to DISPLAY WIDTH `t`,
+/// appending U+2026 which itself occupies one column of the budget:
+///
+/// ```js
+/// function is(e,t){if(ar(e)<=t)return e;if(t<=1)return"\u2026";
+///   let r=0,n="";for(let{segment:o}of H_().segment(e)){let i=ar(o);if(r+i>t-1)break;n+=o,r+=i}
+///   return n+"\u2026"}
+/// ```
+fn truncate_to_display_width_with_ellipsis(s: &str, max_width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    use unicode_width::UnicodeWidthStr as _;
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut used = 0usize;
+    let mut out = String::new();
+    for g in s.graphemes(true) {
+        let w = g.width();
+        if used + w > max_width - 1 {
+            break;
+        }
+        out.push_str(g);
+        used += w;
+    }
+    out.push('\u{2026}');
+    out
+}
+
+/// Oracle `Yl(e,t,r)` (@283760333) with `r = true`, the form `Cqf` calls:
+///
+/// ```js
+/// function Yl(e,t,r=!1){let n=e;
+///   if(r){let o=e.indexOf("\n");
+///     if(o!==-1){if(n=e.substring(0,o),ar(n)+1>t)return is(`${n}\u2026`,t);return `${n}\u2026`}}
+///   if(ar(n)<=t)return n;return is(n,t)}
+/// ```
+///
+/// The multi-line branch is NOT a width truncation: a condition containing a
+/// newline is cut to its FIRST LINE and gains an ellipsis even when it is short,
+/// and only then is width-clamped. A naive "truncate to 80 chars" would emit
+/// different bytes for every multi-line goal.
+fn truncate_goal_condition(condition: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthStr as _;
+    if let Some(nl) = condition.find('\n') {
+        let first = &condition[..nl];
+        let with_ellipsis = format!("{first}\u{2026}");
+        return if first.width() + 1 > max_width {
+            truncate_to_display_width_with_ellipsis(&with_ellipsis, max_width)
+        } else {
+            with_ellipsis
+        };
+    }
+    if condition.width() <= max_width {
+        return condition.to_string();
+    }
+    truncate_to_display_width_with_ellipsis(condition, max_width)
+}
+
+/// `` `Goal cleared after an unrecoverable error (${i}): "${Yl(e.condition,T4v,!0)}". Run /goal again to continue.` ``
+pub(crate) fn goal_cleared_after_error_message(label: &str, condition: &str) -> String {
+    let truncated = truncate_goal_condition(condition, GOAL_CLEAR_CONDITION_WIDTH);
+    format!(
+        "Goal cleared after an unrecoverable error ({label}): \"{truncated}\". \
+         Run /goal again to continue."
+    )
+}
+
+/// Run the `Cqf` teardown for a turn that just ended with `reason`.
+///
+/// Preconditions, in the oracle's order:
+/// * `it("tengu_quartz_pipit",!0)` — default true;
+/// * `!e` — a goal must be active;
+/// * `t.agentId` / `PH(r)!=="main"` — main agent only. Structurally satisfied
+///   here: subagents never run through `ConversationOrchestrator` (they use
+///   `agent::runner`), so every orchestrator reaching this function IS the main
+///   agent. Recorded rather than re-checked because there is no `agentId` to
+///   read.
+/// * `t.abortController.signal.aborted` — an aborted turn ends as
+///   `TurnOutcome::Cancelled` on a different path and never reaches the four
+///   call sites below.
+///
+/// Effects: remove the session-scoped `Stop` prompt hook + clear the active
+/// goal (both in `clear_active_goal_state_and_hook`), fire the `goal_met`
+/// telemetry with the bucket's errorCode, and surface the warning as a SYSTEM
+/// notice — `jBt(text,"warning")`, not an assistant message, so it never enters
+/// the model-facing history.
+pub(crate) async fn clear_goal_after_unrecoverable_error(
+    orch: &ConversationOrchestrator,
+    reason: GoalClearReason<'_>,
+) {
+    if !telemetry::flag_bool(GOAL_CLEAR_FLAG, true) {
+        return;
+    }
+    // `!e` — cheap read first, so the common no-goal turn does no extra work.
+    // Bound explicitly so the session guard is released before the awaits below.
+    let has_goal = {
+        let s = orch.session.lock().await;
+        s.active_goal.is_some()
+    };
+    if !has_goal {
+        return;
+    }
+    let Some(bucket) = goal_clear_bucket(reason) else {
+        return;
+    };
+    // `t.sessionHooksRegistry.remove(...)` + `cFe(e, …)` + `yield {type:"active_goal",value:void 0}`
+    // are one operation in this port: the state clear and the Stop-hook removal
+    // are inseparable here.
+    //
+    // DIVERGENCE (recorded): the oracle stamps the goal-status attachment with
+    // `context_limit` / `api_error`; `traits::GoalStatusKind` has only
+    // `Set|Cleared|Achieved`, and widening it would change a serialized
+    // transcript enum, so the teardown records `Cleared`.
+    let Some(goal) = orch.clear_active_goal_state_and_hook().await else {
+        return;
+    };
+    // `de("goal_met", s)` — the failure-flavoured twin of the success event.
+    telemetry::emit_command_failed("goal_met", bucket.error_code());
+    let text = goal_cleared_after_error_message(bucket.label(), &goal.condition);
+    orch.output.emit_system_notice(&text, false).await;
+}
+
 pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> MessageId {
     let compact_failure = orch
         .compaction_tracking
@@ -1958,6 +2267,72 @@ pub(crate) fn is_carveout_propagated(e: &OrchestratorError) -> bool {
                 LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
             )
     )
+}
+
+/// SC-02 — fire the rate-limit resume checkpoint on a rate-limited turn end.
+///
+/// Mirrors the oracle's call shape exactly: fire-and-forget, errors swallowed
+/// (`…then(({performRateLimitCheckpoint:Yr})=>Yr({todos,trigger:"rate_limited"}))
+/// .catch(()=>{})`). The checkpoint runs several `git` subprocesses, so it goes
+/// on a detached OS thread rather than blocking the turn's teardown.
+///
+/// `session::perform_rate_limit_checkpoint` latches its result process-wide
+/// (`getLastCheckpointResult`), so re-firing on every subsequent rate-limited
+/// turn is free; the early `last_checkpoint_result()` read here just avoids
+/// spawning a thread to discover that.
+///
+/// # Still missing: the `near_limit` twin
+///
+/// Upstream has a SECOND trigger (@292220726) inside the query loop's
+/// usage-limit grace/wrap-up block — `usage_limit_near_wrapup`, which fires
+/// with `trigger:"near_limit"` BEFORE the limit is hit. That block has no port
+/// analogue (the port has no `usage_limit_near_wrapup` / grace-wrapup arm at
+/// all), so `CheckpointTrigger::NearLimit` currently has no caller. Adding one
+/// belongs with that wrap-up feature, in `conversation.rs`.
+async fn maybe_checkpoint_on_rate_limit(
+    orch: &ConversationOrchestrator,
+    error: &OrchestratorError,
+) {
+    if !matches!(
+        error,
+        OrchestratorError::ApiCall(LlmError::RateLimited { .. })
+            | OrchestratorError::Streaming(LlmError::RateLimited { .. })
+    ) {
+        return;
+    }
+    if session::last_checkpoint_result().is_some() {
+        return;
+    }
+    let (session_id, todos) = {
+        let s = orch.session.lock().await;
+        (s.session_id.as_uuid().to_string(), s.todos.clone())
+    };
+    let cwd = orch.session_cwd.cwd();
+    let gates = session::CheckpointGates {
+        // `Dn()` — print mode / SDK / scheduled-headless never gets a
+        // checkpoint, because nothing would ever tell the user it happened.
+        non_interactive: !orch.prompt_is_interactive(),
+        // `Ca()` — no remote-workspace concept in the port.
+        remote_workspace: false,
+        // `Vs("allow_local_checkpoint_commit")` defaults to ALLOWED upstream —
+        // i.e. Claude Code writes a WIP commit into the user's repository on
+        // the first rate limit of a session. The port has no managed-policy
+        // feature registry to express that check, and "should LingXi commit
+        // into a user's repo uninvited?" is a product call, not an engineering
+        // one. So the mechanism is complete and wired, and this one boolean
+        // reads an explicit opt-in until that call is made. Flipping it to
+        // `true` matches upstream exactly.
+        policy_allows: session::local_checkpoint_commit_allowed(),
+    };
+    std::thread::spawn(move || {
+        session::perform_rate_limit_checkpoint(&session::CheckpointRequest {
+            session_id: &session_id,
+            trigger: session::CheckpointTrigger::RateLimited,
+            todos: &todos,
+            cwd: &cwd,
+            gates,
+        });
+    });
 }
 
 /// Surface a `model_error` turn-end (port of `query.ts:955-997`'s top-level
@@ -2429,6 +2804,53 @@ pub(crate) fn tool_denial_kind(
     "permission-rule"
 }
 
+/// BASH-10 — the `(decision_reason_type, decision_reason)` pair a TOOL-originated
+/// permission result contributes to the stdio `can_use_tool` request.
+///
+/// Mirrors claude-code's two serializers, which the permission crate already
+/// implements for its OWN producers but keeps `pub(crate)`:
+/// * the `.type` discriminant (`decisionReason?.type`), and
+/// * `ZXn(decisionReason)` (2.1.238 BIN off **292948902**), which returns
+///   `undefined` for `rule`/`mode`/`subcommandResults`/`permissionPromptTool`
+///   and `e.reason` for `classifier`/`hook`/`asyncAgent`/`sandboxOverride`/
+///   `workingDir`/`safetyCheck`/`other`.
+///
+/// `SandboxOverride` is the one that matters here: the oracle sends
+/// `decision_reason_type:"sandboxOverride"` with
+/// `decision_reason:"dangerouslyDisableSandbox"`. LingXi models that reason as an
+/// ENUM, so the string is rendered from the variant.
+fn tool_ask_reason_context(
+    reason: &permission::PermissionDecisionReason,
+) -> (Option<String>, Option<String>) {
+    use permission::result::SandboxOverrideReason;
+    use permission::PermissionDecisionReason as R;
+    match reason {
+        R::MatchedRule { .. } => (Some("rule".into()), None),
+        R::PermissionMode { .. } => (Some("mode".into()), None),
+        R::SubcommandResults { .. } => (Some("subcommandResults".into()), None),
+        R::PermissionPromptTool { .. } => (Some("permissionPromptTool".into()), None),
+        R::ClassifierApproved { .. } => (Some("classifier".into()), None),
+        R::ClassifierRejected { reason, .. } => (Some("classifier".into()), Some(reason.clone())),
+        R::HookOverride { reason, .. } => (Some("hook".into()), reason.clone()),
+        R::AsyncAgent { reason } => (Some("asyncAgent".into()), Some(reason.clone())),
+        R::WorkingDirectory { reason } => (Some("workingDir".into()), Some(reason.clone())),
+        R::SafetyCheck { reason, .. } => (Some("safetyCheck".into()), Some(reason.clone())),
+        R::SandboxOverride { reason } => (
+            Some("sandboxOverride".into()),
+            Some(
+                match reason {
+                    SandboxOverrideReason::DangerouslyDisableSandbox => "dangerouslyDisableSandbox",
+                    SandboxOverrideReason::ExcludedCommand => "excludedCommand",
+                }
+                .into(),
+            ),
+        ),
+        R::Other { reason } => (Some("other".into()), Some(reason.clone())),
+        // LingXi-internal reasons carry no claude-code `.type`.
+        R::DenialLimitExceeded | R::AutoModeFallback | R::BypassPermissions => (None, None),
+    }
+}
+
 pub(crate) fn rule_decision_otel_source(rule_source: Option<&str>, allow: bool) -> &'static str {
     match rule_source {
         Some("session") => {
@@ -2799,6 +3221,31 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             results.push(result_block);
             continue;
         };
+
+        // BASH-18 `coerceInput` seam (claude-code 2.1.238 BIN off **294282716**,
+        // the top of `checkPermissionsAndCallTool`):
+        //
+        // ```js
+        // let h=r,g=null;
+        // if(e.coerceInput){ if(g=e.coerceInput(r), g!==null) h=g.input }
+        // let y=e.inputSchema.safeParse(h);
+        // ```
+        //
+        // A tool-supplied normalization of the model's raw arguments that runs
+        // BEFORE schema validation and, when it fires, REPLACES the input for
+        // everything downstream — the schema gate, `validate_input`, the
+        // PreToolUse hooks (which read `effective_input`, seeded from `input`
+        // below) and `call` — exactly as the oracle threads `y.data` onward.
+        // `None` (the oracle's `null`) leaves the raw input untouched, which is
+        // every tool but `Bash` today, so this is a strict no-op there.
+        //
+        // NOT emitted: the oracle's `tengu_tool_input_coerced` analytics event.
+        // It is a pure telemetry dimension (`shapeClass` / `outcome`) with no
+        // model-visible bytes, and registering a new tengu name would move the
+        // parity telemetry-registry count. `CoercedInput::shape_class` carries
+        // the value for a future wiring.
+        let coerced_input = tool_handle.coerce_input(input);
+        let input: &serde_json::Value = coerced_input.as_ref().map_or(input, |c| &c.input);
 
         // JSON-schema input gate (claude-code `toolExecution.ts:615`
         // `inputSchema.safeParse`): runs on the RAW `input` (pre-hook), AFTER the
@@ -3531,6 +3978,92 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             } else {
                 resolution
             };
+            // BASH-10 — the TOOL's own `Tool::check_permissions` refinement
+            // (claude-code `a6e`'s `l = await e.checkPermissions(input, ctx)`,
+            // 2.1.238 BIN off **290296046**).
+            //
+            // In claude-code the tool hook runs INSIDE the policy evaluation and
+            // its `ask` survives the later allow-rule / bypassPermissions arms
+            // when the reason is one of the protected kinds
+            // (`…||l.decisionReason?.type==="sandboxOverride"||…`). LingXi's
+            // policy is a separate crate that cannot call back into a `Tool`, so
+            // the composition happens here — and the GUARD the oracle spells out
+            // inside `BashTool.checkPermissions`
+            // (`r.behavior!=="deny" && r.behavior!=="ask" && !XXn(r.decisionReason)`)
+            // is applied on this side, because it is a property of the BASE
+            // decision that only the gate knows:
+            //
+            //   * `behavior !== "deny" / "ask"`  ⇒ resolution is `Allow`
+            //   * `!XXn(decisionReason)`         ⇒ the allow did NOT come from a
+            //     permission RULE ⇒ `rule_source` is `None`
+            //
+            // Every tool whose `check_permissions` returns `Allow` (all of them
+            // but `Bash` on the sandbox-override path) leaves the resolution
+            // untouched, so this is a strict no-op for them.
+            //
+            // DOCUMENTED NARROWING: `XXn` distinguishes a `rule` decisionReason
+            // produced by the BASH-COMMAND rule evaluation (`M8n`), whereas
+            // `rule_source` here is `Some` for any matched rule — including a
+            // TOOL-WIDE `Bash` allow rule, which in `a6e` would NOT suppress the
+            // sandboxOverride ask (that arm returns before `Bni`'s allow-rule
+            // check). The port therefore skips the escalation in the tool-wide
+            // allow-rule case; the common content-rule case (`Bash(cmd:*)`)
+            // matches the oracle exactly.
+            //
+            // BYPASS CARVE-OUT (load-bearing): under `bypassPermissions` the
+            // oracle's protected-reason arm is `!p && (…||"sandboxOverride"||…)`
+            // — the `!p` conjunct means the sandboxOverride ask does NOT survive
+            // bypass; only `f` (a `safetyCheck` in the dangerous-removal prefix
+            // set) does, and no tool hook produces one. Wiring the hook without
+            // this guard would make bypassPermissions start prompting, which is
+            // the exact class of regression the 2.1.211 bypass audit found.
+            let bypass_mode = orch
+                .permission_mode()
+                .is_some_and(|m| m == "bypassPermissions");
+            let mut tool_ask_reason: Option<permission::PermissionDecisionReason> = None;
+            let resolution = if matches!(
+                &resolution,
+                PermissionResolution::Allow { rule_source } if rule_source.is_none()
+            ) {
+                match tool_handle.check_permissions(&effective_input, &ctx).await {
+                    // `if(l?.behavior==="deny") return l` runs BEFORE `a6e`'s
+                    // bypass arm, so a tool DENY binds even under bypass; only
+                    // the ASK is carved out below.
+                    permission::PermissionResult::Ask { .. } if bypass_mode => resolution,
+                    permission::PermissionResult::Ask { reason, .. } => {
+                        let (rt, rtext) = tool_ask_reason_context(&reason);
+                        tool_ask_reason = Some(reason);
+                        PermissionResolution::AskWithContext {
+                            decision_reason_type: rt,
+                            decision_reason: rtext,
+                        }
+                    }
+                    // A tool `Deny` also binds in `a6e`
+                    // (`if(l?.behavior==="deny") return l`). No builtin returns
+                    // one from this arm today.
+                    permission::PermissionResult::Deny {
+                        reason,
+                        explanation,
+                        ..
+                    } => {
+                        let (rt, rtext) = tool_ask_reason_context(&reason);
+                        PermissionResolution::Deny {
+                            reason: explanation.unwrap_or_else(|| {
+                                format!("Permission to use {name} has been denied.")
+                            }),
+                            source: PermissionDecisionSource::Unspecified,
+                            rule_source: None,
+                            decision_reason_type: rt,
+                            decision_reason: rtext,
+                            behavior_ask: false,
+                            content_blocks: Vec::new(),
+                        }
+                    }
+                    permission::PermissionResult::Allow { .. } => resolution,
+                }
+            } else {
+                resolution
+            };
             let ask_reason_context = match &resolution {
                 PermissionResolution::AskWithContext {
                     decision_reason_type,
@@ -3717,11 +4250,25 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                 decision_reason: ask_reason_context.1.clone(),
                                 ..Default::default()
                             };
-                            match orch
-                                .perms
-                                .check_with_context(name, &effective_input, &ctx)
-                                .await
-                            {
+                            // BASH-10: an ask that the TOOL raised must NOT be
+                            // re-derived from the rule/mode layer — `PolicyPermissionGate`
+                            // would recompute the very allow the tool escalated
+                            // and silently defeat it. `ask_via_transport` hands
+                            // the call straight to the prompt transport (the
+                            // same `self.inner.check_with_context` the gate's own
+                            // Ask arm reaches after it has decided to prompt).
+                            // Unreachable unless a tool returned `Ask` above, so
+                            // every policy-originated ask keeps the old call.
+                            let outcome = if tool_ask_reason.is_some() {
+                                orch.perms
+                                    .ask_via_transport(name, &effective_input, &ctx)
+                                    .await
+                            } else {
+                                orch.perms
+                                    .check_with_context(name, &effective_input, &ctx)
+                                    .await
+                            };
+                            match outcome {
                                 traits::permission_gate::PermissionOutcome::Allow {
                                     updated_input,
                                     // `permission_updates` (the host's
@@ -7139,5 +7686,308 @@ mod tool_result_persistence_wiring_tests {
         let orch = orch_with(Arc::new(SizedTool), None);
         let content = dispatch_content(&orch, &use_of("Sized", 0)).await;
         assert_eq!(content, "(Sized completed with no output)");
+    }
+}
+
+// ===========================================================================
+// BASH-10 / BASH-18 — the two trait seams this file now WIRES.
+//
+// Both hooks existed on `Tool` (or, for `coerce_input`, did not exist at all)
+// with ZERO production call sites, which is why the findings that needed them
+// were previously refused. These tests pin the CALL SITES, not the hooks: each
+// one runs a real `dispatch_tool_uses_tracked` and would still pass if the
+// hook were only DEFINED — so every case is paired with its A/B twin (the same
+// dispatch with the hook returning the neutral value), which fails if the
+// dispatcher stops consulting it.
+//
+// Kept in its own module rather than in the concurrently-edited
+// turn_loop_test.rs, per the convention the modules above already follow.
+// ===========================================================================
+#[cfg(test)]
+mod tool_hook_wiring_tests {
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, StaticMemoryProvider,
+    };
+    use crate::turn_loop::dispatch_tool_uses_tracked;
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use protocol::{ContentBlock, ToolUseId};
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        CoercedInput, DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError,
+        ToolStaticContext, ValidationError,
+    };
+    use traits::permission_gate::{PermissionDecision, PermissionGate, PermissionResolution};
+
+    /// A gate that RESOLVES to a plain allow (the `rule_source` under test) but
+    /// whose prompt transport always denies — so "the ask reached the prompt" is
+    /// observable as a deny in the tool_result.
+    struct PromptSpyGate {
+        rule_source: Option<String>,
+    }
+
+    #[async_trait]
+    impl PermissionGate for PromptSpyGate {
+        async fn check(&self, _t: &str, _i: &Value) -> PermissionDecision {
+            // Stands in for the interactive prompt. Reaching this proves the
+            // tool's ask was routed to the transport instead of being
+            // re-authorized (and re-allowed) from the rule layer.
+            PermissionDecision::Deny {
+                reason: "prompted-and-declined".into(),
+            }
+        }
+        async fn resolve_detailed(&self, _t: &str, _i: &Value) -> PermissionResolution {
+            PermissionResolution::Allow {
+                rule_source: self.rule_source.clone(),
+            }
+        }
+    }
+
+    /// A tool with a STRICT schema (so an un-coerced alias key is rejected), an
+    /// optional `coerce_input` twin of Bash's `timeout_ms` rule, and an optional
+    /// `check_permissions` ask. Records the input `call` actually received.
+    struct SeamTool {
+        coerce: bool,
+        ask: bool,
+        seen: Arc<Mutex<Vec<Value>>>,
+    }
+
+    #[async_trait]
+    impl Tool for SeamTool {
+        fn name(&self) -> &str {
+            "Seam"
+        }
+        fn input_schema(&self) -> &Value {
+            static SCHEMA: once_cell::sync::Lazy<Value> = once_cell::sync::Lazy::new(|| {
+                json!({
+                    "type": "object",
+                    "properties": { "timeout": { "type": "number" } },
+                    "additionalProperties": false
+                })
+            });
+            &SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _: &Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &Value) -> bool {
+            true
+        }
+        fn coerce_input(&self, input: &Value) -> Option<CoercedInput> {
+            if !self.coerce {
+                return None;
+            }
+            let obj = input.as_object()?;
+            if !obj.contains_key("timeout_ms") || obj.contains_key("timeout") {
+                return None;
+            }
+            let mut out = serde_json::Map::new();
+            for (k, v) in obj {
+                if k != "timeout_ms" {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
+            out.insert("timeout".into(), obj["timeout_ms"].clone());
+            Some(CoercedInput {
+                input: Value::Object(out),
+                shape_class: "timeout_ms".into(),
+            })
+        }
+        async fn validate_input(
+            &self,
+            _: &Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _: &Value,
+            _: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            if self.ask {
+                return permission::PermissionResult::Ask {
+                    reason: permission::PermissionDecisionReason::SandboxOverride {
+                        reason:
+                            permission::result::SandboxOverrideReason::DangerouslyDisableSandbox,
+                    },
+                    prompt: permission::result::PermissionPrompt {
+                        title: "Seam".into(),
+                        message: "Run outside of the sandbox".into(),
+                        options: Vec::new(),
+                    },
+                    pending_classifier_check: None,
+                    metadata: permission::result::PermissionMetadata::default(),
+                };
+            }
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+            "seam".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            input: Value,
+            _: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            self.seen.lock().unwrap().push(input);
+            Ok(ToolCallResult::from_data(json!({ "content": "ran" })))
+        }
+    }
+
+    /// Dispatch `{"timeout_ms": 5000}` at one `SeamTool` configuration and return
+    /// `(model text of the tool_result, inputs `call` saw)`.
+    async fn dispatch(tool: SeamTool, rule_source: Option<&str>) -> (String, Vec<Value>) {
+        let seen = tool.seen.clone();
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(tool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(PromptSpyGate {
+                rule_source: rule_source.map(str::to_string),
+            }),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let uses = vec![(
+            ToolUseId::new(),
+            "Seam".to_string(),
+            json!({ "timeout_ms": 5000 }),
+            None,
+        )];
+        let (blocks, ..) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch must succeed");
+        let text = match &blocks[0] {
+            ContentBlock::ToolResult { content, .. } => content.clone(),
+            other => panic!("expected a tool_result, got {other:?}"),
+        };
+        let inputs = seen.lock().unwrap().clone();
+        (text, inputs)
+    }
+
+    /// BASH-18 CALL SITE: `coerce_input` runs BEFORE the JSON-schema gate, and
+    /// the rewritten input is what `call` receives.
+    #[tokio::test]
+    async fn coerce_input_is_applied_before_schema_validation() {
+        let (text, inputs) = dispatch(
+            SeamTool {
+                coerce: true,
+                ask: false,
+                seen: Arc::new(Mutex::new(Vec::new())),
+            },
+            None,
+        )
+        .await;
+        assert!(
+            !text.contains("InputValidationError"),
+            "the coerced input must clear the strict schema, got: {text}"
+        );
+        assert_eq!(inputs.len(), 1, "the tool must have run");
+        assert_eq!(inputs[0], json!({ "timeout": 5000 }));
+    }
+
+    /// A/B TWIN — the same dispatch with `coerce_input` returning `None` is
+    /// REJECTED by the strict schema. Without this the test above would pass
+    /// even if the dispatcher never called the hook (the schema gate would have
+    /// to be lenient, and it is not).
+    #[tokio::test]
+    async fn without_the_hook_the_alias_key_fails_the_schema() {
+        let (text, inputs) = dispatch(
+            SeamTool {
+                coerce: false,
+                ask: false,
+                seen: Arc::new(Mutex::new(Vec::new())),
+            },
+            None,
+        )
+        .await;
+        assert!(
+            text.contains("InputValidationError"),
+            "an un-coerced alias key must fail the strict schema, got: {text}"
+        );
+        assert!(inputs.is_empty(), "the tool must not have run");
+    }
+
+    /// BASH-10 CALL SITE: a tool `check_permissions` ASK escalates a NON-RULE
+    /// allow all the way to the prompt transport.
+    #[tokio::test]
+    async fn tool_check_permissions_ask_escalates_a_non_rule_allow() {
+        let (text, inputs) = dispatch(
+            SeamTool {
+                coerce: true,
+                ask: true,
+                seen: Arc::new(Mutex::new(Vec::new())),
+            },
+            None,
+        )
+        .await;
+        assert!(
+            text.contains("prompted-and-declined"),
+            "the tool's ask must reach the prompt transport, got: {text}"
+        );
+        assert!(inputs.is_empty(), "a declined prompt must not run the tool");
+    }
+
+    /// A/B TWIN 1 — the same gate + input with the tool returning `Allow` runs
+    /// the tool. Proves the deny above came from the HOOK, not from the gate.
+    #[tokio::test]
+    async fn tool_check_permissions_allow_leaves_the_resolution_alone() {
+        let (text, inputs) = dispatch(
+            SeamTool {
+                coerce: true,
+                ask: false,
+                seen: Arc::new(Mutex::new(Vec::new())),
+            },
+            None,
+        )
+        .await;
+        assert!(!text.contains("prompted-and-declined"), "got: {text}");
+        assert_eq!(inputs.len(), 1, "an allowing hook must not block the tool");
+    }
+
+    /// A/B TWIN 2 — `!XXn(r.decisionReason)`: when the base allow came from a
+    /// permission RULE the oracle does NOT let the tool escalate, so the tool
+    /// still runs even though its hook asks.
+    #[tokio::test]
+    async fn a_rule_allow_suppresses_the_tool_ask() {
+        let (text, inputs) = dispatch(
+            SeamTool {
+                coerce: true,
+                ask: true,
+                seen: Arc::new(Mutex::new(Vec::new())),
+            },
+            Some("userSettings"),
+        )
+        .await;
+        assert!(!text.contains("prompted-and-declined"), "got: {text}");
+        assert_eq!(inputs.len(), 1, "a rule allow must bind over the tool ask");
     }
 }

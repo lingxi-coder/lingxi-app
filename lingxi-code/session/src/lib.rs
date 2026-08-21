@@ -29,11 +29,16 @@ pub use agent_color::{agent_color_entry, last_agent_color, save_agent_color};
 pub use branch::{create_branch, BranchError, BranchResult};
 pub use file_history::{FileHistory, FileHistoryBackup, SnapshotRecord};
 pub use metadata::SessionMetadata;
-// Rate-limit resume checkpoint (SC-02): the `RESUME.md` document half. The git
-// executor and its trigger are a documented follow-up — see the module docs.
+// Rate-limit resume checkpoint (SC-02): the `RESUME.md` document, the git
+// executor (`q4v`) and the once-per-session latch (`z4v`). The `rate_limited`
+// trigger lives in `orchestrator::turn_loop`; see the module docs for the
+// `near_limit` twin that still needs a caller.
 pub use rate_limit_checkpoint::{
-    checkpoint_ref, render_resume_md, sanitize_todo_line, CheckpointResult, CheckpointSkipReason,
-    CheckpointTrigger, ResumeDoc, CHECKPOINT_REF_PREFIX, MAX_CHECKPOINT_FILE_COUNT,
+    checkpoint_ref, clear_last_checkpoint_result, last_checkpoint_result,
+    local_checkpoint_commit_allowed, perform_rate_limit_checkpoint, render_resume_md,
+    sanitize_todo_line, CheckpointGates,
+    CheckpointRequest, CheckpointResult, CheckpointSkipReason, CheckpointTrigger, ResumeDoc,
+    ALLOW_LOCAL_CHECKPOINT_COMMIT_ENV, CHECKPOINT_REF_PREFIX, MAX_CHECKPOINT_FILE_COUNT,
     MAX_CHECKPOINT_TOTAL_BYTES, RESUME_MD_REPO_PATH,
 };
 pub use resumer::{ResumeError, ResumedRollout, ResumedSession, SessionResumer};
@@ -47,6 +52,13 @@ pub use jsonl::reader::SessionMetadata as JsonlSessionMetadata;
 pub use jsonl::{
     project_dir_name, session_path, validate_uuid, JsonlMessage, JsonlReader, JsonlWriter,
     LITE_READ_BUF_SIZE,
+};
+// SC-08 — transcript-file compaction (`performCompactTranscript`). The trigger
+// lives on `JsonlWriter::maybe_compact_transcript`; these are the surface an
+// embedder needs to inspect or drive one directly.
+pub use jsonl::{
+    perform_compact_transcript, CompactFailure, CompactOutcome, CompactStats,
+    COMPACT_BACKSTOP_BYTES, MIN_COMPACT_FILE_BYTES, TRANSCRIPT_LOCAL_GC_ENV,
 };
 
 // Rollout RECORD capability (codex `rollout` crate recorder semantics merged

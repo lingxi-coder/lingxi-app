@@ -76,6 +76,22 @@ impl ToolInvoker for RegistryToolInvoker {
             .find_by_name(name)
             .ok_or_else(|| ToolInvokerError::NotFound(name.to_string()))?;
 
+        // BASH-18 `coerceInput` (claude-code 2.1.238 BIN off **294282716**): the
+        // tool's own pre-validation normalization of the model's raw arguments.
+        // The oracle applies it once, at the TOP of `checkPermissionsAndCallTool`,
+        // and the rewritten value is what the permission check and `call` both
+        // see — so the subagent dispatch surface must coerce here too, BEFORE the
+        // gate below, or a subagent's `Bash{timeout_ms}` would silently lose its
+        // timeout where the main loop honours it. `None` for every tool but
+        // `Bash` ⇒ strict no-op.
+        //
+        // (This surface still has no JSON-schema gate and no `validate_input`
+        // call — a pre-existing, separately-tracked divergence from the main
+        // loop; the coercion is correct with or without them.)
+        if let Some(coerced) = tool.coerce_input(&input) {
+            input = coerced.input;
+        }
+
         // Permission gate (enforcement 3b). The subagent/teammate dispatch
         // surface now consults the same gate as the main loop — previously it
         // dispatched any registered tool unconditionally (the bypass). A `Deny`

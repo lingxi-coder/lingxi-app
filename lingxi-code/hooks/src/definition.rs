@@ -113,6 +113,45 @@ impl HookDefinition {
     }
 }
 
+/// claude-code's command-hook `shell` selector (`schemas/hooks.ts`;
+/// oracle 2.1.238 @ 282293705).
+///
+/// ```js
+/// shell:Mr(w$u).optional().describe("Shell interpreter. 'bash' uses your $SHELL
+///   (bash/zsh/sh); 'powershell' uses pwsh. Defaults to bash (powershell on
+///   Windows without Git Bash).")
+/// ```
+/// with `w$u=["bash","powershell"]` (oracle @ 282293098). Identical in 2.1.220 —
+/// this is an old port gap, not 238 drift.
+///
+/// The selector is only consulted for the SHELL form of a command hook (no
+/// `args`); the exec form (`args` present) spawns the executable directly and is
+/// never wrapped (oracle spawn head @ 296948400: `if(I) spawn(I[0],I[1],…)` is
+/// taken FIRST, ahead of both shell branches).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookShell {
+    /// `'bash' uses your $SHELL (bash/zsh/sh)`. On POSIX this is Node's
+    /// `shell: true`, i.e. `/bin/sh -c <command>`.
+    Bash,
+    /// `'powershell' uses pwsh`. Spawns the resolved PowerShell executable with
+    /// `[-NoProfile, -NonInteractive, (-ExecutionPolicy Bypass), -Command, <cmd>]`.
+    Powershell,
+}
+
+impl HookShell {
+    /// Parse the wire spelling. `None` for any value outside `w$u`, which is
+    /// how zod's `Mr(w$u)` rejects the entry.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "bash" => Some(Self::Bash),
+            "powershell" => Some(Self::Powershell),
+            _ => None,
+        }
+    }
+}
+
 /// How the engine actually invokes a hook body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HookExecutor {
@@ -127,6 +166,14 @@ pub enum HookExecutor {
         env: HashMap<String, String>,
         /// Working directory for the child; `None` inherits the engine's cwd.
         cwd: Option<PathBuf>,
+        /// claude-code `shell` (`w$u=["bash","powershell"]`, oracle 2.1.238 @
+        /// 282293705). `None` = the field was omitted, which upstream resolves
+        /// at spawn time as `e.shell ?? Otr()` where
+        /// `Otr()=Sh()?"bash":"powershell"` and `Sh()` is "not Windows, or Git
+        /// Bash was found" — see [`crate::executor::default_hook_shell`].
+        /// Ignored entirely for the exec form (`args` non-empty).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<HookShell>,
     },
     /// POST the event payload to an HTTP endpoint and parse the JSON body
     /// as the [`crate::HookResponse`]. Subject to the [`crate::SsrfGuard`].

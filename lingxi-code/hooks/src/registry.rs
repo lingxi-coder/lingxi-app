@@ -1394,6 +1394,7 @@ mod match_event_matcher_tests {
                 args: vec![],
                 env: std::collections::HashMap::new(),
                 cwd: None,
+                shell: None,
             },
             source: HookSource::User,
             blocking: true,

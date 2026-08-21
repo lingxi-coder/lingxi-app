@@ -47,9 +47,11 @@ pub use attachment::{
     HookAttachmentSink,
 };
 pub use cwd_changed_firer::{CwdChangedFire, CwdChangedFirer, OptionalCwdChangedFirer};
-pub use definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
+pub use definition::{HookCondition, HookDefinition, HookExecutor, HookShell, HookSource};
 pub use events::{HookEvent, HookEventType, HookProgressEvent};
 pub use executor::{
+    default_hook_shell, powershell_base_args, powershell_env_token_rewrite,
+    powershell_missing_error, references_bare_project_dir_var, resolve_powershell_executable,
     BuiltinHookHandler, HookExecutorImpl, HOOK_AGENT_TIMEOUT_MS, HOOK_COMMAND_TIMEOUT_MS,
     HOOK_HTTP_TIMEOUT_MS,
 };
@@ -67,8 +69,9 @@ pub use prompt_executor::{
 };
 pub use registry::{HookContext, HookRegistry};
 pub use response::{
-    AggregateHookResult, ElicitationHookResponse, HookDecision, HookOutcome, HookResponse,
-    HookResult,
+    truncate_utf16, AggregateHookResult, ClassifierHostContext, ElicitationHookResponse,
+    HookDecision, HookOutcome, HookResponse, HookResult, PairedRewrite,
+    CLASSIFIER_CONTEXT_CAP_UTF16,
 };
 pub use ssrf_guard::{DnsResolver, IpRange, SsrfError, SsrfGuard};
 pub use task_completed_firer::{OptionalTaskCompletedFirer, TaskCompletedFire, TaskCompletedFirer};

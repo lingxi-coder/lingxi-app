@@ -565,11 +565,15 @@ pub const STATICALLY_DISABLED_COMMANDS: &[&str] = &["version"];
 /// …writeSdkMessages([LSs({…,commands:_o(Ho.mcp.commands),…,loadedSkills:Ct.filter((Ri)=>Ri.terminalOriented!==!0),…})])
 /// ```
 ///
-/// NOTE 1: the emission half is NOT wired yet — the CLI's `system`/`init`
-/// builder (`apps/cli/src/run.rs` -> `build_init_params`) still omits the key,
-/// and the bridge announcer does no filtering. This table is the registry-side
-/// source of truth that wiring will read; it is deliberately left unconsumed
-/// rather than half-wired from this crate, which owns no emitter.
+/// NOTE 1 (CLOSED 2026-08-21): the emission half is wired. `apps/cli`'s
+/// `build_init_params` (`apps/cli/src/stream_json.rs`) derives
+/// `terminal_slash_commands` by running the advertised `slash_commands` list
+/// through [`is_terminal_oriented`], and `build_init_frame` spreads it into the
+/// `system`/`init` frame immediately after `slash_commands` and only when
+/// non-empty, matching `Fin` (@298685916). The mirror-image consumer — the
+/// bridge/SDK announcer's `_o()` SUBTRACTION (@307252579) — belongs to
+/// `apps/bridge-server`, whose announcer still does no filtering; that is the
+/// one remaining unconsumed use of this table.
 ///
 /// NOTE 2 (open, for the skills owner): upstream also flags the BUNDLED SKILL
 /// `doctor` — `wd({name:"doctor",aliases:["checkup"],…,terminalOriented:!0,…})`

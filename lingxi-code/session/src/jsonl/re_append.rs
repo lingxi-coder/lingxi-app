@@ -54,34 +54,22 @@ use std::path::Path;
 /// 237851998, tail of `drainQueuesOnce`, with `skip_dedup = true`).
 pub const METADATA_REAPPEND_BACKSTOP_BYTES: usize = LITE_READ_BUF_SIZE / 2;
 
-// ── GAP (SC-08): the reclamation half of this backstop is not ported ────────
+// ── SC-08: the reclamation half now exists ──────────────────────────────────
 //
 // This module is the GROWTH side: every backstop firing appends a fresh copy of
 // the whole metadata set, so a long session accumulates superseded sidecar
-// records without bound. Upstream pairs it with `performCompactTranscript`
-// (cc-238.js @296788068) — present in 2.1.220 too, so this is a pre-existing
-// gap, not 2.1.238 drift — which rewrites `<sid>.jsonl` through
-// `<sid>.jsonl.compact.tmp.<8 hex>`, dropping records superseded under the
-// `always` / `last-wins` persistence tables (`s9m` / `aqT`), then re-appends
-// the metadata set with `skip_dedup = true`.
+// records. Upstream pairs it with `performCompactTranscript` (cc-238.js
+// @296788068), which rewrites `<sid>.jsonl` through
+// `<sid>.jsonl.compact.tmp.<8 hex>`, dropping the records the compaction policy
+// table `aqT` marks superseded, then re-appends the metadata set with
+// `skip_dedup = true`.
 //
-// Constants (@296896686, @296899269): `I6m = 5_242_880` (skip below 5 MiB),
-// `Uyr = 20_971_520` (the backstop this arms on every compact boundary —
-// @296794903: `this.backstopThresholdBytes = Uyr, this.requestCompact(...)`),
-// `P6m = 8 * Uyr` (160 MiB ceiling), `O6m = 0.1` (a rewrite reclaiming under
-// 10 % doubles the backstop instead). Telemetry `tengu_transcript_compact
-// {bytesBefore,bytesAfter}` / `tengu_transcript_compact_failed{reason:
-// snapshot_mid_line|source_changed|rename_fallback|io}`; warn copy
-// `Transcript compact failed (…): …`.
-//
-// DEFERRED, deliberately, rather than half-ported: the oracle's safety
-// envelope is the whole feature — a stat-inode + three 4 KiB sample-window
-// re-verification before AND after the rewrite, a mid-line tail check on the
-// last window, a re-read of the bytes that arrived during the rewrite (trimmed
-// back to the last `\n`), an fsync, and an unlink of the temp file on every
-// failure path. Ported without all of that it silently truncates transcripts,
-// and it cannot be validated by reading. The growth side stays correct without
-// it; the cost of the gap is disk, not data.
+// That half is ported in [`crate::jsonl::transcript_compact`] and driven from
+// [`crate::jsonl::writer::JsonlWriter::maybe_compact_transcript`], which the
+// ordinary append path calls — armed both by the 20 MiB byte backstop and by
+// the moment a `compact_boundary` line is persisted. It is gated on
+// `LINGXI_TRANSCRIPT_LOCAL_GC`, mirroring upstream's `localGcEnabled`, which is
+// also off in a default install.
 
 /// `normalizeLastPrompt` truncation width, in UTF-16 code units
 /// (oracle: `t.length>200?ma(t,200)…`).

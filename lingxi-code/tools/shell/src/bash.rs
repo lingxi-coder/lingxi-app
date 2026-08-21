@@ -24,6 +24,7 @@ use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
+use permission::result::{PermissionPrompt, SandboxOverrideReason};
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -1739,6 +1740,67 @@ impl BashTool {
         self.shell_cwd = cell;
         self
     }
+
+    /// The oracle's `BY(input)` for THIS tool's live context — "will this call
+    /// actually be sandbox-wrapped?".
+    ///
+    /// Shares the exact inputs [`Tool::call`] feeds
+    /// [`sandbox::decision::should_use_sandbox`], so the permission decision and
+    /// the execution decision cannot drift: `ctx.sandbox_available`, the
+    /// `/sandbox`-aware [`BuiltinToolContext::effective_sandbox_runtime`], and
+    /// the session cwd.
+    ///
+    /// `override_flag` is the `dangerouslyDisableSandbox` value to evaluate,
+    /// letting BASH-10 run the oracle's two probes
+    /// (`BY(e)` and `BY({...e, dangerouslyDisableSandbox:!1})`) over one config
+    /// snapshot each.
+    fn sandbox_wraps(&self, input: &Value, override_flag: bool) -> bool {
+        let Some(command) = input.get("command").and_then(Value::as_str) else {
+            // `if(!e.command) return !1`.
+            return false;
+        };
+        let runtime = self.ctx.effective_sandbox_runtime();
+        matches!(
+            sandbox::decision::should_use_sandbox(
+                command,
+                self.ctx.sandbox_available,
+                override_flag,
+                runtime.are_unsandboxed_commands_allowed(),
+                &runtime,
+                self.ctx.cwd(),
+            ),
+            sandbox::decision::SandboxDecision::Sandbox { .. }
+        )
+    }
+
+    /// `BY(e)` — honours the input's own `dangerouslyDisableSandbox`.
+    fn will_sandbox(&self, input: &Value) -> bool {
+        self.sandbox_wraps(
+            input,
+            input
+                .get("dangerouslyDisableSandbox")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
+    }
+
+    /// `BY({...e, dangerouslyDisableSandbox:!1})` — the counterfactual probe.
+    fn will_sandbox_ignoring_override(&self, input: &Value) -> bool {
+        self.sandbox_wraps(input, false)
+    }
+}
+
+/// Byte-locked `message` of the oracle's sandbox-override ask
+/// (2.1.238 BIN off **114873408**, 4 hits; identical in 2.1.220).
+pub const SANDBOX_OVERRIDE_ASK_MESSAGE: &str = "Run outside of the sandbox";
+
+/// `V.CLAUDE_CODE_BASH_SANDBOX_SHOW_INDICATOR` (LingXi:
+/// `LINGXI_BASH_SANDBOX_SHOW_INDICATOR`) evaluated with the oracle's PLAIN JS
+/// truthiness — the `userFacingName` arm reads it as `V.X && BY(e)`, not through
+/// `isEnvTruthy`, so every non-empty value (including `"0"` and `"false"`)
+/// enables the `SandboxedBash` indicator. Unset in a stock install ⇒ inert.
+fn bash_sandbox_show_indicator() -> bool {
+    std::env::var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR").is_ok_and(|v| !v.is_empty())
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -1867,7 +1929,119 @@ impl Tool for BashTool {
         true
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    /// BASH-19 — port of the oracle's Bash `userFacingName(input)`
+    /// (2.1.238 BIN off **294576071**):
+    ///
+    /// ```js
+    /// userFacingName(e){if(!e)return"Bash";
+    ///  if(e.command){let t=Ffr(e.command);if(t)return f0i({file_path:t.filePath,old_string:"x"})}
+    ///  return V.CLAUDE_CODE_BASH_SANDBOX_SHOW_INDICATOR&&BY(e)?"SandboxedBash":"Bash"}
+    /// ```
+    ///
+    /// Two of the three arms are ported here:
+    /// * a MISSING / non-object input renders the bare tool name (`"Bash"`),
+    /// * an input that WILL be sandbox-wrapped renders `"SandboxedBash"` when
+    ///   the indicator env var is set.
+    ///
+    /// The middle arm — `Ffr` (`detectSimulatedSedEdit`) relabelling a
+    /// single-command `sed -i 's/…/…/' FILE` as the Edit tool's
+    /// `"Update"`/`"Updated plan"` — is NOT ported: it exists to name the
+    /// `_simulatedSedEdit` permission surface (BIN off 292490136 builds a
+    /// `title:"Edit file"` / `kind:"file-edit-diff"` prompt from `Ffr`'s
+    /// `{filePath, pattern, replacement, flags}`), and that prompt shape has no
+    /// LingXi counterpart. Emitting the label without the diff surface would
+    /// name a real shell execution as a file edit — strictly worse than the
+    /// truthful `"Bash"`.
+    ///
+    /// ENV NOTE: the oracle reads `V.CLAUDE_CODE_BASH_SANDBOX_SHOW_INDICATOR`
+    /// with plain JS truthiness (`V.X && BY(e)`), NOT its `isEnvTruthy`
+    /// allowlist — so any non-empty value enables it, `"0"` and `"false"`
+    /// included. Reproduced exactly here (a `traits::env::is_env_truthy` call
+    /// would be the wrong predicate). Under LingXi branding the name is
+    /// `LINGXI_BASH_SANDBOX_SHOW_INDICATOR`.
+    ///
+    /// CALL SITE: [`Self::check_permissions`] below titles the sandbox-override
+    /// prompt with it (the same role the oracle's prompt renderer gives
+    /// `userFacingName`), so it is reachable from the turn loop's permission
+    /// gate.
+    fn user_facing_name_for_input(&self, input: &Value) -> Option<String> {
+        // `if(!e) return "Bash"` — JS falsy input (undefined/null). A non-object
+        // is likewise nothing this tool can reason about.
+        if !input.is_object() {
+            return Some(TOOL_NAME.to_string());
+        }
+        if bash_sandbox_show_indicator() && self.will_sandbox(input) {
+            return Some("SandboxedBash".to_string());
+        }
+        Some(TOOL_NAME.to_string())
+    }
+
+    /// BASH-10 — port of the oracle's Bash `checkPermissions` sandbox-override
+    /// arm (2.1.238 BIN off **294577064**; the copy `Run outside of the sandbox`
+    /// sits at BIN off **114873408**):
+    ///
+    /// ```js
+    /// async checkPermissions(e,t){let r=await M8n(e,t);
+    ///  if(e.dangerouslyDisableSandbox&&r.behavior!=="deny"&&r.behavior!=="ask"
+    ///     &&!XXn(r.decisionReason)&&!BY(e)&&BY({...e,dangerouslyDisableSandbox:!1}))
+    ///    return{behavior:"ask",decisionReason:{type:"sandboxOverride",reason:"dangerouslyDisableSandbox"},
+    ///           message:"Run outside of the sandbox"};
+    ///  return r}
+    /// ```
+    ///
+    /// The predicate is SPLIT across the two layers that own its inputs, and the
+    /// two halves compose into exactly the oracle's conjunction:
+    ///
+    /// * `r.behavior!=="deny" && r.behavior!=="ask" && !XXn(r.decisionReason)` —
+    ///   a property of the BASE decision, which in LingXi is produced by the
+    ///   central gate, not by the tool. The turn loop applies it: it consults
+    ///   this hook only when its own resolution is a NON-RULE `Allow`
+    ///   (`PermissionResolution::Allow { rule_source: None }`).
+    /// * `e.dangerouslyDisableSandbox && !BY(e) && BY({...e, dangerouslyDisableSandbox:false})`
+    ///   — "the flag, and only the flag, is what takes this command out of the
+    ///   sandbox". That needs the live sandbox runtime config, which the tool
+    ///   owns; it is evaluated below.
+    ///
+    /// Every other arm returns the pre-existing allow-all stub, so a Bash call
+    /// without `dangerouslyDisableSandbox` (or with sandboxing off) is
+    /// byte-identical to before.
+    ///
+    /// INERT BY DEFAULT: `sandbox_available` is false and
+    /// `SandboxRuntimeConfig::enabled` defaults off in a stock install, so
+    /// `will_sandbox` is false for both probes and this never fires. It becomes
+    /// live the moment sandboxing is enabled AND unsandboxed commands are
+    /// allowed — which is precisely the configuration the oracle guards.
+    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        let dangerously_disable_sandbox = input
+            .get("dangerouslyDisableSandbox")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        // `!BY(e) && BY({...e, dangerouslyDisableSandbox:!1})`: with the flag the
+        // command escapes the sandbox, without it the command would have been
+        // wrapped. Both probes read ONE snapshot of the runtime config so a
+        // concurrent `/sandbox` toggle cannot split the comparison.
+        if dangerously_disable_sandbox
+            && !self.will_sandbox(input)
+            && self.will_sandbox_ignoring_override(input)
+        {
+            return PermissionResult::Ask {
+                reason: PermissionDecisionReason::SandboxOverride {
+                    reason: SandboxOverrideReason::DangerouslyDisableSandbox,
+                },
+                prompt: PermissionPrompt {
+                    // The oracle's prompt renderer titles the request with the
+                    // tool's `userFacingName` — BASH-19's hook, called here.
+                    title: self
+                        .user_facing_name_for_input(input)
+                        .unwrap_or_else(|| TOOL_NAME.to_string()),
+                    // Byte-locked `message:"Run outside of the sandbox"`.
+                    message: SANDBOX_OVERRIDE_ASK_MESSAGE.to_string(),
+                    options: Vec::new(),
+                },
+                pending_classifier_check: None,
+                metadata: PermissionMetadata::default(),
+            };
+        }
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-02 default)".into(),
@@ -1876,6 +2050,73 @@ impl Tool for BashTool {
             update_destination: None,
             metadata: PermissionMetadata::default(),
         }
+    }
+
+    /// BASH-18 — port of the oracle's Bash `coerceInput` (`Vmm`, 2.1.238 BIN off
+    /// **294485010**; identical in 2.1.220):
+    ///
+    /// ```js
+    /// function Vmm(e){if(!ni(e))return null;let t={...e},r=[];
+    ///  if("timeout_ms"in t&&!("timeout"in t)){let n=t.timeout_ms;
+    ///   if(typeof n==="number"||typeof n==="string"&&/^\d+$/.test(n))t.timeout=n,r.push("timeout_ms");
+    ///   delete t.timeout_ms}
+    ///  return r.length?{input:t,shapeClass:r.join(",")}:null}
+    /// ```
+    ///
+    /// Faithful details that are easy to get wrong:
+    /// * the rewrite is SKIPPED entirely when `timeout` is already present — the
+    ///   stray `timeout_ms` then survives into `safeParse` and (with the schema's
+    ///   `additionalProperties:false`) legitimately fails validation;
+    /// * a non-coercible `timeout_ms` (a float-shaped string, `true`, an object)
+    ///   deletes the key on the COPY but pushes nothing, so `r.length === 0` and
+    ///   the whole copy is DISCARDED (`null`) — the raw input, `timeout_ms` and
+    ///   all, is what reaches the schema. Returning the pruned copy here would be
+    ///   a silent divergence that turns a validation error into a success.
+    /// * the value is moved ACROSS AS-IS — a numeric STRING stays a string, which
+    ///   the Bash `timeout` schema then rejects/accepts exactly as the oracle's
+    ///   `VF(E.number())` coercion does.
+    ///
+    /// CALL SITE: `orchestrator::turn_loop::dispatch_tool_uses_tracked`, between
+    /// the unknown-tool arm and `validate_tool_input_schema` — the same slot the
+    /// oracle occupies in `checkPermissionsAndCallTool` (BIN off 294282716).
+    fn coerce_input(&self, input: &Value) -> Option<tool_api::tool_trait::CoercedInput> {
+        // `ni(e)` — plain-object guard.
+        let obj = input.as_object()?;
+        if !obj.contains_key("timeout_ms") {
+            return None;
+        }
+        if obj.contains_key("timeout") {
+            // The oracle never enters the branch, so `timeout_ms` is NOT deleted
+            // and no coercion is reported.
+            return None;
+        }
+        let raw = obj.get("timeout_ms").expect("checked above");
+        let coercible = match raw {
+            Value::Number(_) => true,
+            Value::String(s) => !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()),
+            _ => false,
+        };
+        if !coercible {
+            // `r.length === 0` ⇒ the oracle returns `null` and throws its pruned
+            // copy away.
+            return None;
+        }
+        // Rebuild in the oracle's key ORDER: `{...e}` keeps the original order,
+        // `t.timeout = n` APPENDS `timeout` at the end, `delete t.timeout_ms`
+        // drops that key in place. `serde_json` is built with `preserve_order`,
+        // so a `remove` + `insert` on a clone would be at the mercy of the map's
+        // removal strategy — rebuild explicitly instead.
+        let mut coerced = serde_json::Map::with_capacity(obj.len());
+        for (k, v) in obj {
+            if k != "timeout_ms" {
+                coerced.insert(k.clone(), v.clone());
+            }
+        }
+        coerced.insert("timeout".to_string(), raw.clone());
+        Some(tool_api::tool_trait::CoercedInput {
+            input: Value::Object(coerced),
+            shape_class: "timeout_ms".to_string(),
+        })
     }
 
     async fn description(&self, input: &Value, _opts: &DescriptionOptions) -> String {
@@ -3641,10 +3882,10 @@ mod tests {
         );
     }
 
-    /// Serializes every test that mutates the process-global
-    /// `tengu_amber_sentinel` gate env (the sleep-block opt-in). A tokio mutex
-    /// keeps the guard `Send` across the `.await` in these async tests.
-    static SLEEP_GATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // The sleep-gate tests used to have their own `SLEEP_GATE_LOCK`. They now
+    // share `crate::prompt::background_env_lock()` with every other test in the
+    // crate that touches these process-global gates — see that lock's doc for
+    // why three separate locks over one global was no exclusion at all.
 
     fn bash_tool_noop() -> BashTool {
         BashTool::new(shell_test_ctx(ProcessOutput {
@@ -3657,7 +3898,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_blocks_standalone_sleep_when_gate_on() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         // Gate ON + duration >= 25 (G2n) → blocked with the byte-exact message.
         std::env::set_var("tengu_amber_sentinel", "1");
@@ -3674,7 +3915,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_blocks_sleep_with_followup_when_gate_on() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         std::env::set_var("tengu_amber_sentinel", "1");
         let result = tool
@@ -3692,7 +3933,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_sleep_block_is_off_by_default() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         // No gate env set (default) → even a long sleep is allowed (1:1 with
         // stock claude-code, whose `sq()` defaults false).
@@ -3704,7 +3945,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_allows_sub_threshold_and_float_even_when_gate_on() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         std::env::set_var("tengu_amber_sentinel", "1");
         // < 25 (incl. fractional, and non-sleep commands) are never blocked.
@@ -3730,7 +3971,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_allows_sleep_when_backgrounded_even_with_gate_on() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         std::env::set_var("tengu_amber_sentinel", "1");
         let result = tool
@@ -3749,7 +3990,7 @@ mod tests {
     /// stops blocking rather than dead-ending the model.
     #[tokio::test]
     async fn validate_input_does_not_block_sleep_when_background_tasks_are_disabled() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         std::env::set_var("tengu_amber_sentinel", "1");
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
@@ -3924,23 +4165,17 @@ mod tests {
         assert_eq!(res.data["noOutputExpected"], false);
     }
 
-    /// Serializes every test that reads or mutates the process-global
-    /// `LINGXI_DISABLE_BACKGROUND_TASKS` gate. `input_schema()` now selects
-    /// between the full schema and the `run_in_background`-omitted one on that
-    /// env var (claude-code `egm`/`WA()`), so an unguarded parallel test that
-    /// sets it would flip the schema out from under the order assertions.
-    static BACKGROUND_TASKS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Poison-tolerant guard (payload is `()`).
-    fn background_tasks_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        BACKGROUND_TASKS_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    // `BACKGROUND_TASKS_ENV_LOCK` lived here. `input_schema()` selects between
+    // the full schema and the `run_in_background`-omitted one on
+    // `LINGXI_DISABLE_BACKGROUND_TASKS` (claude-code `egm`/`WA()`), and the
+    // Bash PROMPT reads the same var for its detached-run bullet — so schema
+    // tests and prompt tests must serialize against each other, not merely
+    // within their own file. They all take
+    // `crate::prompt::background_env_lock()` now.
 
     #[test]
     fn input_schema_uses_timeout_not_timeout_ms() {
-        let _g = background_tasks_env_lock();
+        let _g = crate::prompt::background_env_lock();
         // claude-code `BashTool.tsx:229` names the param `timeout` (ms).
         let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
             stdout: String::new(),
@@ -3968,7 +4203,7 @@ mod tests {
     /// insertion order is what the model actually sees in the tool definition.
     #[test]
     fn input_schema_property_order_matches_oracle() {
-        let _g = background_tasks_env_lock();
+        let _g = crate::prompt::background_env_lock();
         let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -4001,12 +4236,12 @@ mod tests {
     /// offer the model something nothing explains.
     #[test]
     fn input_schema_omits_run_in_background_when_background_tasks_are_disabled() {
-        let _g = background_tasks_env_lock();
-        // `LINGXI_DISABLE_BACKGROUND_TASKS` is now read by the sleep-block gate
-        // too (BASH-17), so hold that family's lock for the env window as well.
-        // Lock ORDER is fixed here (background → sleep) and nothing takes them
-        // the other way round, so this cannot deadlock.
-        let _s = SLEEP_GATE_LOCK.blocking_lock();
+        // ONE acquisition. This used to take two different locks — the schema
+        // one and the sleep-gate one — because `LINGXI_DISABLE_BACKGROUND_TASKS`
+        // is read by both families (BASH-17). Now that they are a single
+        // crate-wide lock, taking it twice here would SELF-DEADLOCK:
+        // `std::sync::Mutex` is not reentrant.
+        let _g = crate::prompt::background_env_lock();
         let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -4724,6 +4959,191 @@ mod tests {
         );
     }
 
+    // ===== BASH-18 `coerceInput` (oracle `Vmm`, 2.1.238 BIN off 294485010) =====
+
+    #[test]
+    fn coerce_input_moves_numeric_timeout_ms_into_timeout() {
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        let c = tool
+            .coerce_input(&json!({"command": "echo hi", "timeout_ms": 5000}))
+            .expect("timeout_ms is coercible");
+        assert_eq!(c.shape_class, "timeout_ms");
+        assert_eq!(c.input["timeout"], json!(5000));
+        assert!(
+            c.input.get("timeout_ms").is_none(),
+            "the alias key must be dropped"
+        );
+        // `{...e}` order, then `timeout` appended last (`t.timeout = n`).
+        let keys: Vec<&str> = c
+            .input
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, vec!["command", "timeout"]);
+    }
+
+    #[test]
+    fn coerce_input_accepts_a_digits_only_string_verbatim() {
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        let c = tool
+            .coerce_input(&json!({"command": "echo hi", "timeout_ms": "5000"}))
+            .expect("digit string is coercible");
+        // `t.timeout = n` moves the value ACROSS AS-IS — it stays a STRING.
+        assert_eq!(c.input["timeout"], json!("5000"));
+    }
+
+    #[test]
+    fn coerce_input_is_none_when_timeout_already_present() {
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        // The oracle never enters the branch, so `timeout_ms` SURVIVES into
+        // `safeParse` (and legitimately fails `additionalProperties:false`).
+        assert!(tool
+            .coerce_input(&json!({"command": "x", "timeout": 1, "timeout_ms": 2}))
+            .is_none());
+    }
+
+    #[test]
+    fn coerce_input_discards_the_copy_when_the_value_is_not_coercible() {
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        // `r.length === 0` ⇒ `null`: the pruned copy is thrown away, so the RAW
+        // input (with the stray key) is what the schema sees.
+        for bad in [json!("5s"), json!("5.5"), json!(true), json!({})] {
+            assert!(
+                tool.coerce_input(&json!({"command": "x", "timeout_ms": bad}))
+                    .is_none(),
+                "non-coercible timeout_ms must not produce a rewrite: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn coerce_input_is_none_without_the_alias_key() {
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        assert!(tool
+            .coerce_input(&json!({"command": "x", "timeout": 1}))
+            .is_none());
+        // `ni(e)` plain-object guard.
+        assert!(tool.coerce_input(&json!("not an object")).is_none());
+    }
+
+    // ===== BASH-10 sandbox-override ask (oracle BIN off 294577064) ==========
+
+    fn sandboxing_on_ctx() -> BuiltinToolContext {
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.sandbox_available = true;
+        ctx.sandbox_runtime.excluded_commands = vec![];
+        ctx.sandbox_runtime.allow_unsandboxed_commands = true;
+        ctx
+    }
+
+    #[tokio::test]
+    async fn check_permissions_asks_when_only_the_flag_escapes_the_sandbox() {
+        let tool = BashTool::new(sandboxing_on_ctx());
+        let result = tool
+            .check_permissions(
+                &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+                &use_ctx(),
+            )
+            .await;
+        match result {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(
+                        reason,
+                        PermissionDecisionReason::SandboxOverride {
+                            reason: SandboxOverrideReason::DangerouslyDisableSandbox
+                        }
+                    ),
+                    "decisionReason must be {{type:'sandboxOverride',reason:'dangerouslyDisableSandbox'}}"
+                );
+                // Byte-locked oracle copy.
+                assert_eq!(prompt.message, "Run outside of the sandbox");
+                // BASH-19's hook is what titles the prompt.
+                assert_eq!(prompt.title, "Bash");
+            }
+            other => panic!("expected an Ask, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_permissions_allows_without_the_flag() {
+        let tool = BashTool::new(sandboxing_on_ctx());
+        assert!(matches!(
+            tool.check_permissions(&json!({"command": "echo hi"}), &use_ctx())
+                .await,
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_permissions_allows_when_the_flag_changes_nothing() {
+        // Sandboxing unavailable ⇒ `BY(e)` is false with AND without the flag,
+        // so `BY({...e,dangerouslyDisableSandbox:!1})` fails and no ask is raised.
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        assert!(matches!(
+            tool.check_permissions(
+                &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+                &use_ctx()
+            )
+            .await,
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_permissions_allows_when_the_policy_forbids_unsandboxed_commands() {
+        // `areUnsandboxedCommandsAllowed()` false ⇒ the flag is ignored, the
+        // command is still wrapped, so `!BY(e)` fails.
+        let mut ctx = sandboxing_on_ctx();
+        ctx.sandbox_runtime.allow_unsandboxed_commands = false;
+        let tool = BashTool::new(ctx);
+        assert!(matches!(
+            tool.check_permissions(
+                &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+                &use_ctx()
+            )
+            .await,
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ===== BASH-19 `userFacingName` (oracle BIN off 294576071) =============
+
+    #[test]
+    fn user_facing_name_is_bash_without_the_indicator_env() {
+        let tool = BashTool::new(sandboxing_on_ctx());
+        // `if(!e) return "Bash"`.
+        assert_eq!(
+            tool.user_facing_name_for_input(&Value::Null).as_deref(),
+            Some("Bash")
+        );
+        // Indicator unset ⇒ "Bash" even for a command that WILL be wrapped.
+        std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR");
+        assert_eq!(
+            tool.user_facing_name_for_input(&json!({"command": "echo hi"}))
+                .as_deref(),
+            Some("Bash")
+        );
+    }
+
+    #[test]
+    fn user_facing_name_is_sandboxed_bash_with_the_indicator_env() {
+        let tool = BashTool::new(sandboxing_on_ctx());
+        // JS truthiness, NOT `isEnvTruthy`: `"0"` is a non-empty string and so
+        // ENABLES the indicator.
+        std::env::set_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR", "0");
+        let sandboxed = tool.user_facing_name_for_input(&json!({"command": "echo hi"}));
+        // A `dangerouslyDisableSandbox` call is NOT wrapped ⇒ plain "Bash".
+        let unwrapped = tool.user_facing_name_for_input(
+            &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+        );
+        std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR");
+        assert_eq!(sandboxed.as_deref(), Some("SandboxedBash"));
+        assert_eq!(unwrapped.as_deref(), Some("Bash"));
+    }
+
     /// A `SandboxRunner` that records every `wrap`/`cleanup_after_command` call
     /// and returns a sentinel-prefixed wrapped command, so a test can prove the
     /// Bash tool routes through `ctx.sandbox_runner` (not the sync free fn) with
@@ -5045,6 +5465,18 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_current_gen_model_returns_short_variant() {
+        // The SHORT prompt's `run_in_background` bullet is gated on
+        // `background_usage_note()`, which reads the process-global
+        // `LINGXI_DISABLE_BACKGROUND_TASKS`. A sibling test SETS that var, so
+        // without a shared guard this test intermittently rendered a prompt
+        // with the bullet missing — it failed roughly once per full-workspace
+        // run and passed every time in isolation.
+        //
+        // The underlying defect was THREE locks over one global — two in this
+        // file and one in `prompt.rs` — which is no mutual exclusion at all.
+        // They are a single crate-wide lock now, so a `prompt.rs` test setting
+        // the var can no longer race a `bash.rs` prompt assertion.
+        let _g = crate::prompt::background_env_lock();
         // `model: Some("claude-opus-4-8")` ⇒ `Dh` true ⇒ SHORT prompt — exactly
         // what claude-code serves opus-4-8. Default test sandbox is disabled, so
         // the sandbox section is absent and the git section is the CONCISE one.

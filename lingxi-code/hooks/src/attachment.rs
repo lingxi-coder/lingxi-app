@@ -873,6 +873,7 @@ mod tests {
             args: vec!["-a".into(), "b".into()],
             env: HashMap::new(),
             cwd: None,
+            shell: None,
         });
         assert_eq!(attachment_command(&cmd), "./x.sh -a b");
 
@@ -899,6 +900,7 @@ mod tests {
             args: vec![],
             env: HashMap::new(),
             cwd: None,
+            shell: None,
         });
         with_status.status_message = Some("Formatting".into());
         assert_eq!(

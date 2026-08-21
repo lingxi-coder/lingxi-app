@@ -160,8 +160,8 @@ pub use orchestrator::{
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;
 pub use process::{
-    ForegroundOutcome, HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner,
-    ProcessStreamSink,
+    ForegroundOutcome, HookOutputObserver, HookRunOutcome, ProcessError, ProcessHandle,
+    ProcessOutput, ProcessRunner, ProcessStreamSink,
 };
 pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,

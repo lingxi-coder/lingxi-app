@@ -375,6 +375,45 @@ const ACT_DONT_REDERIVE_SECTION: &str = "When you have enough information to act
 /// The Fable-only identity paragraph in the pinned 2.1.220 prompt.
 const FABLE_IDENTITY_SECTION: &str = "This iteration of Claude is Claude Fable 5, the first model in Anthropic's new Claude 5 family and part of a new Mythos-class model tier that sits above Claude Opus in capability. Claude Fable 5 and Claude Mythos 5 share the same underlying model. Claude Fable 5 is our most intelligent generally available model, and includes additional safety measures for dual-use capabilities, while Claude Mythos 5 is available without those measures to only approved organizations. Fable 5 is the most advanced generally available Claude model. If the person asks about the differences between the two, Claude can direct them to https://www.anthropic.com/news/claude-fable-5-mythos-5 for more information.";
 
+/// SP-10 — `k9T` @**297083649** (also in 2.1.220 as `lMy` @237498803, so this is
+/// a long-standing port gap, not 2.1.238 drift): the `tool_param_json` slot.
+///
+/// One paragraph, registered between `fable_identity` and `session_guidance`
+/// (@297072456):
+///
+/// ```js
+/// aB("tool_param_json",()=>z4d()||($Xe(i)||Vpe(t))&&it("tengu_silent_harbor",!1)?k9T:null)
+/// ```
+const TOOL_PARAM_JSON_SECTION: &str = "Object and array parameter values must be a single JSON value \u{2014} never write parameter-tag markup inside a JSON value.";
+
+/// The `tool_param_json` gate.
+///
+/// * `z4d()` = `g1n().toolParamStrictness` = the GrowthBook `juniper_shoal.
+///   bracken_spool` flag — absent in a stock install, so **false**. Port
+///   stand-in: `LINGXI_TOOL_PARAM_STRICTNESS`.
+/// * `($Xe(i)||Vpe(t))&&it("tengu_silent_harbor",!1)` — a model-family
+///   predicate AND a second GrowthBook flag whose literal default is **false**,
+///   so this whole arm is off in a stock install regardless of the model.
+///   `Vpe` is the same predicate the `fable_identity` slot uses
+///   (`tBr(i)||Vpe(t)?C9T:null`), which the port models as the
+///   [`traits::model_capabilities::ModelCapability::Fable5Mitigations`]
+///   capability; the flag stand-in is `LINGXI_SILENT_HARBOR`.
+///
+/// Both arms are therefore OFF by default and this section is INERT — the
+/// system prompt is byte-identical to before. It exists so that flipping either
+/// gate matches upstream.
+fn tool_param_json_enabled(model: &str) -> bool {
+    let env = |key: &str| traits::env::is_env_truthy(std::env::var(key).ok().as_deref());
+    if env("LINGXI_TOOL_PARAM_STRICTNESS") {
+        return true;
+    }
+    env("LINGXI_SILENT_HARBOR")
+        && traits::model_capabilities::has_capability(
+            model,
+            traits::model_capabilities::ModelCapability::Fable5Mitigations,
+        )
+}
+
 /// Autonomous-session mitigation appended after context management for Fable
 /// and Mythos in the pinned 2.1.220 build.
 const FABLE_MYTHOS_MITIGATIONS: &str = "You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work. For reversible actions that follow from the original request, proceed without asking. Stop only for destructive actions or genuine scope changes the user must decide. Offering follow-ups after the task is done is fine; asking permission before doing the work is not.\n\nException: when the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment. Report your findings and stop. Don't apply a fix until they ask for one.\n\nBefore ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.\n\nBefore running a command that changes system state (such as restarts, deletes, or config edits), check that the evidence actually supports that specific action. A signal that pattern-matches to a known failure may have a different cause.";
@@ -606,6 +645,12 @@ pub fn format(
     ) {
         sections.push(FABLE_IDENTITY_SECTION.to_string());
     }
+    // SP-10 `tool_param_json` — slot order @297072456 puts it directly between
+    // `fable_identity` and `session_guidance`. Inert by default; see
+    // [`tool_param_json_enabled`].
+    if tool_param_json_enabled(model) {
+        sections.push(TOOL_PARAM_JSON_SECTION.to_string());
+    }
     // NOTE: `task_continuity` (`sMy`) is deliberately NOT ported. Its gate is
     // `function tBc(e){return!1}` — hard-disabled in 2.1.220, so the oracle
     // never emits it. Porting the text would ADD a section the oracle does not
@@ -751,6 +796,52 @@ mod tests {
             let p = format(false, true, &[], true, false, false, m, false);
             assert!(!p.contains("# Harness"), "{m} must take the long arm");
         }
+    }
+
+    /// SP-10: `tool_param_json` is INERT by default (both upstream gates are
+    /// GrowthBook flags that are unset in a stock install), and lands between
+    /// `fable_identity` and `# Session-specific guidance` when enabled.
+    #[test]
+    fn tool_param_json_is_inert_by_default_and_slots_after_fable_identity() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        const BODY: &str = "Object and array parameter values must be a single JSON value";
+
+        let default = format(false, true, &[], true, false, false, "claude-fable-5", false);
+        assert!(
+            !default.contains(BODY),
+            "both gates default OFF ⇒ the paragraph must not ship"
+        );
+
+        std::env::set_var("LINGXI_TOOL_PARAM_STRICTNESS", "1");
+        let on = format(false, true, &[], true, false, false, "claude-fable-5", false);
+        std::env::remove_var("LINGXI_TOOL_PARAM_STRICTNESS");
+        assert_eq!(
+            on.matches(BODY).count(),
+            1,
+            "`toolParamStrictness` alone enables the slot"
+        );
+        assert!(
+            on.contains(&format!(
+                "{FABLE_IDENTITY_SECTION}\n\n{TOOL_PARAM_JSON_SECTION}"
+            )),
+            "slot order @297072456: directly after `fable_identity`"
+        );
+    }
+
+    /// The second arm needs BOTH the model predicate and `tengu_silent_harbor`;
+    /// neither alone is enough.
+    #[test]
+    fn the_silent_harbor_arm_needs_the_flag_and_the_model() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!tool_param_json_enabled("claude-fable-5"), "flag unset");
+        std::env::set_var("LINGXI_SILENT_HARBOR", "1");
+        let fable = tool_param_json_enabled("claude-fable-5");
+        let opus47 = tool_param_json_enabled("claude-opus-4-7");
+        std::env::remove_var("LINGXI_SILENT_HARBOR");
+        assert!(fable, "a Fable-mitigations model takes the arm");
+        assert!(!opus47, "a non-Fable model does not");
     }
 
     /// `action_caution` is the lean arm's replacement for

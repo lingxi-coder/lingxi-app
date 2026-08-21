@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# SC-06: the product noun in the unknown-model auto-compact notice
+# (`branding::PRODUCT_NAME`).
+branding.workspace = true
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }

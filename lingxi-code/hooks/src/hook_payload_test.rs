@@ -2029,6 +2029,51 @@ mod tests {
         assert!(absent.watch_paths.is_none(), "absent key → None");
     }
 
+    // ---- SH-01 hookSpecificOutput.classifierContext (NEW in 2.1.238) ------
+
+    /// A `PostToolUse` hook's `classifierContext` is parsed onto its own
+    /// channel — NOT onto `additional_context` (model-facing) and NOT onto
+    /// `system_message` (transcript-facing). It is classifier-facing.
+    #[test]
+    fn parse_response_reads_post_tool_use_classifier_context() {
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","classifierContext":"the user approved this in the desktop app"}}"#,
+            "PostToolUse",
+        )
+        .unwrap();
+        assert_eq!(
+            r.classifier_context.as_deref(),
+            Some("the user approved this in the desktop app")
+        );
+        assert!(r.additional_context.is_none());
+        assert!(r.system_message.is_none());
+    }
+
+    /// The consumption site guards on truthiness (`if(z.classifierContext)`),
+    /// so an empty string contributes nothing.
+    #[test]
+    fn parse_response_ignores_an_empty_classifier_context() {
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","classifierContext":""}}"#,
+            "PostToolUse",
+        )
+        .unwrap();
+        assert!(r.classifier_context.is_none());
+    }
+
+    /// The field lives in the `PostToolUse` arm of the `hookSpecificOutput`
+    /// union — a `PreToolUse` hook returning it has it ignored, exactly like
+    /// `updatedToolOutput`.
+    #[test]
+    fn parse_response_ignores_classifier_context_outside_post_tool_use() {
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","classifierContext":"nope"}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert!(r.classifier_context.is_none());
+    }
+
     #[test]
     fn parse_response_non_array_watch_paths_is_ignored() {
         // A non-array value has no `Vec<String>` representation → ignored (None).

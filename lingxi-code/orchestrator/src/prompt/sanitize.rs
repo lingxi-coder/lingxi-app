@@ -49,15 +49,31 @@ fn escape_control_chars(s: &str) -> String {
     out
 }
 
-/// `pze(e)` @285128585 — full HTML-entity escape (`&`, `<`, `>`) plus
-/// [`escape_control_chars`]. Used on values the oracle treats as fully
-/// untrusted text: the output-style name and the read-truncation banner.
+/// `Ma(e)` @283751324 — the BARE HTML-entity escape (`&`, `<`, `>`), with NO
+/// control-character pass:
+///
+/// ```js
+/// function Ma(e){return e.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")}
+/// ```
+///
+/// Distinct from [`escape_reminder_text`] (`pze`), which is `ktp(Ma(e))`. The
+/// difference is observable: `Ma` leaves a newline alone, `pze` turns it into
+/// `&#10;`. The goal check-in interstitial uses `Ma` (its goal condition and
+/// task lines may legitimately span characters `ktp` would mangle).
 ///
 /// `&` is replaced FIRST, exactly like the JS chain, so an input `&lt;` becomes
 /// `&amp;lt;` rather than being double-decoded.
 #[must_use]
+pub fn escape_reminder_html(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// `pze(e)` @285128585 — full HTML-entity escape (`&`, `<`, `>`) plus
+/// [`escape_control_chars`]. Used on values the oracle treats as fully
+/// untrusted text: the output-style name and the read-truncation banner.
+#[must_use]
 pub fn escape_reminder_text(s: &str) -> String {
-    escape_control_chars(&s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"))
+    escape_control_chars(&escape_reminder_html(s))
 }
 
 /// `Kae(e)` @285128585 — the FILENAME/path escape: `<`/`>` only (`uLt`) plus
@@ -131,6 +147,14 @@ mod tests {
         assert_eq!(escape_reminder_text("a & <b> \u{2028}"), "a &amp; &lt;b&gt; &#8232;");
         // `&` first ⇒ an already-escaped entity is escaped again, like JS.
         assert_eq!(escape_reminder_text("&lt;"), "&amp;lt;");
+    }
+
+    /// `Ma` escapes the three entities and NOTHING else — the point of it
+    /// being separate from `pze`.
+    #[test]
+    fn bare_html_escape_leaves_control_characters_alone() {
+        assert_eq!(escape_reminder_html("a & <b>\n"), "a &amp; &lt;b&gt;\n");
+        assert_eq!(escape_reminder_text("a & <b>\n"), "a &amp; &lt;b&gt;&#10;");
     }
 
     #[test]

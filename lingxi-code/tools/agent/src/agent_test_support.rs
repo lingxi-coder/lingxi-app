@@ -62,6 +62,9 @@ pub struct MockSubagentSpawner {
     /// `subagent_type is required` tests, which need a catalog WITHOUT
     /// `general-purpose`.
     listing_override: Mutex<Option<Vec<SubagentListingEntry>>>,
+    /// Scripted `tools_denied_agent_types` (claude 2.1.238 `NJa`/`mdr`,
+    /// @290291941). Default empty ⇒ nothing withheld.
+    tools_denied: Mutex<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -99,12 +102,18 @@ impl MockSubagentSpawner {
             async_unwired: Mutex::new(false),
             concurrent_subagents: AtomicUsize::new(0),
             listing_override: Mutex::new(None),
+            tools_denied: Mutex::new(Vec::new()),
         }
     }
 
     /// Replace the catalog returned by `agent_listing`.
     pub fn set_agent_listing(&self, entries: Vec<SubagentListingEntry>) {
         *self.listing_override.lock().unwrap() = Some(entries);
+    }
+
+    /// Script the agent types whose every tool is denied (claude `NJa`).
+    pub fn set_tools_denied_agent_types(&self, types: Vec<String>) {
+        *self.tools_denied.lock().unwrap() = types;
     }
 
     /// Set the active-subagent count returned at the pre-spawn boundary.
@@ -315,6 +324,11 @@ impl SubagentSpawner for MockSubagentSpawner {
     /// production spawner surfaces (built-ins). `Plan` is included so the
     /// budget-gate test (which spawns `Plan`) clears the type validation that now
     /// precedes the budget gate.
+    /// claude 2.1.238 `NJa` (@290291941) — scripted, default empty.
+    async fn tools_denied_agent_types(&self) -> Vec<String> {
+        self.tools_denied.lock().unwrap().clone()
+    }
+
     async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
         if let Some(entries) = self.listing_override.lock().unwrap().clone() {
             return entries;

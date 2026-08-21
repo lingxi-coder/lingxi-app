@@ -236,6 +236,16 @@ struct HookEntry {
     /// (the executor already supports it; the loader previously dropped it).
     #[serde(default)]
     args: Option<Vec<String>>,
+    /// `command` hook `shell` selector (oracle 2.1.238 @ 282293705,
+    /// `shell:Mr(w$u).optional()` with `w$u=["bash","powershell"]`):
+    /// "Shell interpreter. 'bash' uses your $SHELL (bash/zsh/sh); 'powershell'
+    /// uses pwsh. Defaults to bash (powershell on Windows without Git Bash)."
+    ///
+    /// Kept as a raw `String` so an out-of-enum value can be rejected the way
+    /// zod's `Mr(w$u)` rejects it — the whole entry is dropped — rather than
+    /// silently defaulting. Carried onto [`HookExecutor::Command`]'s `shell`.
+    #[serde(default)]
+    shell: Option<String>,
     /// `http` hook endpoint URL (`schemas/hooks.ts:99`). Always sent via POST.
     #[serde(default)]
     url: Option<String>,
@@ -453,11 +463,29 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
     match entry.kind.as_deref() {
         Some("command") => {
             let command = entry.command.clone()?;
+            // `shell:Mr(w$u).optional()` — an omitted field is `None` (resolved
+            // at spawn time by `default_hook_shell`); a PRESENT value outside
+            // `["bash","powershell"]` fails the zod enum, which rejects the
+            // whole hook entry, so we return `None` and the caller skips it.
+            let shell = match entry.shell.as_deref() {
+                None => None,
+                Some(raw) => match crate::definition::HookShell::from_wire(raw) {
+                    Some(parsed) => Some(parsed),
+                    None => {
+                        tracing::warn!(
+                            "Hook {command:?} has an unrecognized shell: {raw:?}; \
+                             valid values are \"bash\" and \"powershell\". Hook ignored."
+                        );
+                        return None;
+                    }
+                },
+            };
             let executor = HookExecutor::Command {
                 command: command.clone(),
                 args: entry.args.clone().unwrap_or_default(),
                 env: HashMap::new(),
                 cwd: None,
+                shell,
             };
             Some((command, executor))
         }
@@ -1180,6 +1208,52 @@ mod tests {
         assert!(matches!(hooks[1].executor, HookExecutor::Http { .. }));
         assert!(matches!(hooks[2].executor, HookExecutor::Agent { .. }));
         assert!(matches!(hooks[3].executor, HookExecutor::Prompt { .. }));
+    }
+
+    // ---- SH-06: the `shell` selector ---------------------------------------
+
+    /// `shell:"bash"` / `shell:"powershell"` reach `HookExecutor::Command`.
+    /// Before SH-06 the loader had no `shell` field at all, so BOTH of these
+    /// parsed to an executor that could only ever run `/bin/sh -c`.
+    #[test]
+    fn shell_selector_reaches_the_command_executor() {
+        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "command", "command": "a.sh", "shell": "bash" },
+            { "type": "command", "command": "b.ps1", "shell": "powershell" },
+            { "type": "command", "command": "c.sh" }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert_eq!(hooks.len(), 3);
+        let shells: Vec<Option<crate::definition::HookShell>> = hooks
+            .iter()
+            .map(|h| match &h.executor {
+                HookExecutor::Command { shell, .. } => *shell,
+                other => panic!("expected Command, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shells,
+            vec![
+                Some(crate::definition::HookShell::Bash),
+                Some(crate::definition::HookShell::Powershell),
+                // Omitted stays `None` so the spawn path can apply `Otr()`.
+                None,
+            ],
+        );
+    }
+
+    /// `shell:Mr(w$u)` is a zod ENUM: a value outside `["bash","powershell"]`
+    /// fails the schema, which drops the whole entry. Defaulting instead would
+    /// silently run a typo'd `"shell": "pwsh"` hook through `/bin/sh`.
+    #[test]
+    fn an_out_of_enum_shell_value_drops_the_hook() {
+        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "command", "command": "a.sh", "shell": "pwsh" },
+            { "type": "command", "command": "b.sh" }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert_eq!(hooks.len(), 1, "only the valid entry survives");
+        assert_eq!(hooks[0].name, "b.sh");
     }
 
     // ---- #41: managed-policy hook gate (vBr / h$) --------------------------

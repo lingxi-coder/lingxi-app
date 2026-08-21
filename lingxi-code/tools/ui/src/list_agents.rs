@@ -7,6 +7,19 @@
 //! KNOWN GAP (structural, not copy): the oracle's `formatForModel` (`roT`)
 //! renders the in-process `local_agent` tasks FIRST and the peer sessions
 //! second; `format_listing` below still renders only the peer sessions.
+//!
+//! KNOWN GAP (structural): the oracle's peer row is
+//! `V2i(name, [formerNames, kind, p.status, tmux, started …])` (@294228478) —
+//! `status` is the peer's live `busy`/`idle`/`waiting` state, computed by
+//! `KHg` (@302105762: `{status: e.isLoading||e.delegatedActive?"busy":"idle"}`)
+//! and published into the session registry. `traits::live_sessions::
+//! LiveSessionRecord` has no `status` field and nothing publishes one, so
+//! `format_listing` cannot render it. `SendMessage`'s 2.1.238 cross-session
+//! paragraph points the model at that column ("its `ListAgents` row says
+//! whether it is busy or idle right now"), so the copy is ahead of the data
+//! until a turn-boundary status publisher exists — that publisher (a
+//! `status` field on `LiveSessionRecord` plus a writer on the turn
+//! start/end edges) is the seam this gap needs.
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;

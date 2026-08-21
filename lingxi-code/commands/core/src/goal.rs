@@ -55,15 +55,22 @@
 //!   the binary fragment is incomplete, [`GoalHandler::status`]'s suffix format
 //!   is a best-effort placeholder, clearly marked, not a confirmed port.
 //!
-//! ## NOT PORTED — SLASH-04: auto-clear on an unrecoverable turn error
+//! ## PORTED — SLASH-04: auto-clear on an unrecoverable turn error
 //!
 //! claude-code 2.1.238 added `Cqf` (@292182815, statsig `tengu_quartz_pipit`
 //! **default `true`**), which tears the goal down when a turn dies for a
 //! reason the user cannot retry past. It is absent from 2.1.220, so this is
-//! genuine 2.1.238 drift, and it is unported: the trigger is the CONVERSATION
-//! turn-error path (`orchestrator`), not this command, and there is no
-//! turn-end `reason` taxonomy in the port to key it off yet. Recorded here so
-//! the byte-level spec is not lost:
+//! genuine 2.1.238 drift.
+//!
+//! It does NOT live in this file: the trigger is the conversation turn-error
+//! path, so the port lives with the turn loop that owns the terminal reasons —
+//! `orchestrator::turn_loop::clear_goal_after_unrecoverable_error`, called from
+//! all four terminal arms of `execute_one_turn_with_recovery_tracked`
+//! (`PromptTooLong`, `BlockingLimit`, `RapidRefillBreaker` → `context_limit`,
+//! and the graceful api-error `Err(e)` arm → the errorKind switch). The
+//! teardown reuses this command's own clear path
+//! (`clear_active_goal_state_and_hook`), so the Stop hook is removed exactly as
+//! `/goal clear` removes it. The byte-level spec, kept here for reference:
 //!
 //! ```text
 //! if(!it("tengu_quartz_pipit",!0)||!e||t.agentId||t.abortController.signal.aborted||PH(r)!=="main")return;

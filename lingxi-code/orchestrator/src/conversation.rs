@@ -1394,6 +1394,37 @@ pub struct ConversationOrchestrator {
     /// and spliced back into the walk by
     /// [`crate::prompt::silent_turn::scan_silent_stretch`].
     pub(crate) silent_turn_reminder_marks: std::sync::Mutex<Vec<usize>>,
+    /// REM-14 `pendingMemoryUpdates` — the oracle's app-state queue
+    /// (`jzm(e)` @296554545: `let t=e.getAppState().pendingMemoryUpdates;
+    /// if(t.length===0)return[]; e.setAppState(…clear…)`), drained
+    /// consume-once by [`Self::memory_update_reminder_messages`].
+    ///
+    /// Filled by [`Self::task_notification_reminder_message`] when it drains a
+    /// TERMINAL `dream` (background memory consolidation) task — the port's
+    /// dream handler is a forked subagent whose completion only surfaces through
+    /// the task registry, so that drain is the one place the signal exists.
+    /// Capped at [`Self::MAX_PENDING_MEMORY_UPDATES`], oldest dropped: the
+    /// BATCHED turn driver (`turn_loop.rs`) calls the notification drain but not
+    /// the memory-update drain, so on that driver the queue must not grow.
+    pub(crate) pending_memory_updates: std::sync::Mutex<Vec<crate::prompt::memory_update::PendingMemoryUpdate>>,
+    /// REM-09 goal check-in deferral bookkeeping (`deferredSince` /
+    /// `checkinCount` / `lastDeferralPassAt` on the oracle's `activeGoal`).
+    /// Session-scoped and deliberately NOT on
+    /// `engine::session::ActiveGoalState` — the oracle strips exactly these
+    /// fields before persisting the goal, so keeping them here leaves the
+    /// compaction/JSONL goal shape untouched. See
+    /// [`crate::prompt::goal_checkin::GoalDeferralState`].
+    pub(crate) goal_checkin: std::sync::Mutex<crate::prompt::goal_checkin::GoalDeferralState>,
+    /// REM-10: `history.len()` captured at each `tool_search_usage_reminder`
+    /// emission. The oracle finds the previous reminder as an ATTACHMENT row in
+    /// the message list (`R3T` @296552671); LingXi's per-turn reminders never
+    /// enter `session.history`, so the emission points are recorded here — the
+    /// same technique [`Self::silent_turn_reminder_marks`] uses.
+    pub(crate) tool_search_reminder_marks: std::sync::Mutex<Vec<usize>>,
+    /// Floor-truncated wall clock (ms) of the last memory-directory scan — the
+    /// lower bound for "which memdir files did the consolidation rewrite".
+    /// Seeded at construction so the first dream only reports files it touched.
+    pub(crate) last_memory_scan_ms: std::sync::atomic::AtomicI64,
     /// Shared output-token pool backing a workflow script's `budget.spent()`.
     /// Every successful main-loop API response adds its output tokens here (in
     /// [`Self::record_response_input_tokens`]); a launched `LocalWorkflowHandler`
@@ -1948,6 +1979,14 @@ impl ConversationOrchestrator {
                 crate::prompt::total_tokens::TotalTokensLedger::default(),
             ),
             silent_turn_reminder_marks: std::sync::Mutex::new(Vec::new()),
+            pending_memory_updates: std::sync::Mutex::new(Vec::new()),
+            goal_checkin: std::sync::Mutex::new(
+                crate::prompt::goal_checkin::GoalDeferralState::default(),
+            ),
+            tool_search_reminder_marks: std::sync::Mutex::new(Vec::new()),
+            last_memory_scan_ms: std::sync::atomic::AtomicI64::new(
+                tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now()),
+            ),
             output_token_pool: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_start_output_baseline: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_safe_slot: None,
@@ -7299,6 +7338,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // orchestrator's main-loop Stop firing always runs inside a tool-use
         // context, so populate the snapshot here (and ONLY here / SubagentStop).
         self.populate_stop_hook_snapshot(&mut ctx).await;
+        // REM-09 (goal check-in): the oracle decides deferral BEFORE the Stop
+        // hooks run — `if(U.length>0){…i.sessionHooksRegistry.remove(zt(),"Stop",y)…}`
+        // @292174788 removes the goal's Stop hook for this turn so the goal is
+        // NOT evaluated while background work is in flight, and emits the
+        // interstitial once the deferral has run past the check-in interval.
+        // The port cannot un-register the hook mid-dispatch, so it suppresses
+        // the goal DISPOSITION instead — the observable effect is identical
+        // (no `GoalContinue`, no `iterations` bump, no `goal_status` record).
+        let goal_deferred = self
+            .goal_checkin_pass(ctx.background_tasks.as_deref().unwrap_or(&[]))
+            .await;
         let agg = self
             .hooks
             .execute(
@@ -7308,7 +7358,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 ctx,
             )
             .await;
-        let goal_disposition = self.goal_stop_hook_disposition(goal_hook_id, &agg).await;
+        let goal_disposition = if goal_deferred {
+            None
+        } else {
+            self.goal_stop_hook_disposition(goal_hook_id, &agg).await
+        };
         let disposition = if agg.prevent_continuation {
             // FIX C: carry the hook's `stopReason` (parsed into `agg.reason`,
             // `hook_payload.rs:1113`) so `handle_stop_at_end` can persist the
@@ -7351,6 +7405,92 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             blocked = matches!(agg.decision, Some(hooks::response::HookDecision::Block)),
         );
         disposition
+    }
+
+    /// REM-09 — the goal-deferral pass at end of turn, and the goal check-in
+    /// interstitial it emits.
+    ///
+    /// Returns `true` when the goal's Stop-hook evaluation must be SKIPPED this
+    /// turn because background work is still running (oracle @292174788:
+    /// `if(U.length>0){…sessionHooksRegistry.remove(zt(),"Stop",y)…}`).
+    ///
+    /// * DEFERRING SET — `_qf(taskRegistry.all())` @292181184, applied to the
+    ///   `background_tasks` snapshot the Stop payload already carries (which is
+    ///   itself `Lic(taskRegistry.all())`, i.e. the same registry, already
+    ///   filtered to `running`/`pending` and already type-labelled). Kept: the
+    ///   labels in [`crate::prompt::goal_checkin::DEFERRING_TASK_LABELS`], minus
+    ///   the `main-session` subagent the oracle excludes by name.
+    /// * NOTHING DEFERRING — the `else if(L.deferredSince!==void 0){…}` arm:
+    ///   drop the deferral bookkeeping and evaluate the goal normally.
+    /// * CHECK-IN — [`crate::prompt::goal_checkin::GoalDeferralState::advance`]
+    ///   (`wzf`/`Tzf`); the body is appended as a plain `isMeta` user message
+    ///   (`kn({content:Z,isMeta:!0})`), NOT `<system-reminder>`-wrapped — the
+    ///   interstitial is not part of the attachment family.
+    ///
+    /// LIVE by default: the upstream gate `tengu_saffron_wren` defaults TRUE and
+    /// the port has no GrowthBook, so only `CLAUDE_CODE_GOAL_CHECKIN_MINUTES=0`
+    /// turns it off. It is still a strict no-op in any session with no active
+    /// goal, which is the overwhelmingly common case.
+    async fn goal_checkin_pass(&self, background_tasks: &[hooks::HookBackgroundTask]) -> bool {
+        let Some(condition) = ({
+            let session = self.session.lock().await;
+            session.active_goal.as_ref().map(|g| g.condition.clone())
+        }) else {
+            self.goal_checkin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+            return false;
+        };
+
+        let deferring: Vec<crate::prompt::goal_checkin::DeferringTask> = background_tasks
+            .iter()
+            .filter(|t| {
+                crate::prompt::goal_checkin::DEFERRING_TASK_LABELS.contains(&t.r#type.as_str())
+                    && t.agent_type.as_deref() != Some("main-session")
+            })
+            .map(|t| crate::prompt::goal_checkin::DeferringTask {
+                id: t.id.clone(),
+                label: t.r#type.clone(),
+                // `s.type==="local_bash"&&!isMonitor?s.command:s.description`.
+                detail: t
+                    .command
+                    .clone()
+                    .filter(|c| !c.is_empty())
+                    .unwrap_or_else(|| t.description.clone()),
+            })
+            .collect();
+
+        if deferring.is_empty() {
+            self.goal_checkin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+            return false;
+        }
+
+        let now_ms = tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
+        let checkin = {
+            let mut state = self
+                .goal_checkin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.advance(
+                &condition,
+                &deferring,
+                now_ms,
+                crate::prompt::goal_checkin::checkin_interval_ms(),
+            )
+        };
+        if let Some(body) = checkin {
+            let msg = ConversationMessage::user_meta(MessageId::new(), body);
+            {
+                let mut session = self.session.lock().await;
+                session.history.push(msg.clone());
+            }
+            self.persist_message_to_jsonl(&msg).await;
+        }
+        true
     }
 
     async fn goal_stop_hook_disposition(
@@ -8849,6 +8989,20 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 turn_reminders.push(reminder);
             }
 
+            // REM-05 `changed_files` / `edited_text_file` (streaming twin):
+            // one meta reminder per file whose on-disk mtime moved since the
+            // model last saw it. Producer `Izm` @296537358; the oracle's
+            // attachment fan-out (@296520120) places `changed_files`
+            // immediately after `agent_listing_delta` and immediately before
+            // `nested_memory` — but the port's `nested_memory` reminder is
+            // injected above, so this sits directly after `agent_listing_delta`
+            // to keep the relative order with everything downstream. LIVE (no
+            // gate); empty in the common case because nothing fires unless a
+            // tracked file changed outside this session's own writes. Appended
+            // to THIS turn's OUTGOING snapshot only (never `session.history` /
+            // JSONL). See [`Self::changed_files_reminder_messages`].
+            turn_reminders.extend(self.changed_files_reminder_messages().await);
+
             // Finding #73 (streaming twin): per-turn, transient `todo_reminder`
             // (V1) / `task_reminder` (V2) reminder. Same gates as the batched
             // twin (killswitch / tool-present / Brief-absent / non-empty history
@@ -8861,7 +9015,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // Appended to THIS turn's OUTGOING snapshot only (never
             // `session.history` / JSONL). `None` keeps the locked streaming
             // fixtures byte-identical. See [`Self::todo_reminder_message`].
-            if let Some(reminder) = self.todo_reminder_message().await {
+            let todo_reminder = self.todo_reminder_message().await;
+            let todo_reminder_fired = todo_reminder.is_some();
+            if let Some(reminder) = todo_reminder {
+                turn_reminders.push(reminder);
+            }
+
+            // REM-10 `tool_search_usage_reminder` (streaming twin): the periodic
+            // nudge to load deferred tool schemas. Producer `Uzm` @296553134,
+            // whose renderer sits immediately after `task_reminder` in the
+            // oracle's `xBi` switch — hence this position, right after the
+            // todo/task reminder whose presence it is gated against
+            // (`task_reminder_same_turn`). INERT by default: the upstream gate
+            // is a GrowthBook payload that is unset in a stock install, so
+            // `config()` is `None` and this is a strict no-op unless
+            // `LINGXI_TOOL_SEARCH_REMINDER` is set. Appended to THIS turn's
+            // OUTGOING snapshot only. See
+            // [`Self::tool_search_usage_reminder_message`].
+            if let Some(reminder) = self
+                .tool_search_usage_reminder_message(todo_reminder_fired)
+                .await
+            {
                 turn_reminders.push(reminder);
             }
 
@@ -8883,6 +9057,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             if let Some(reminder) = self.task_notification_reminder_message().await {
                 turn_reminders.push(reminder);
             }
+
+            // REM-14 `memory_update` (streaming twin): one meta reminder per
+            // background memory consolidation that finished, telling the model
+            // which memory files moved on disk and which of its loaded copies
+            // are now stale. Producer `jzm` @296554545; the queue is filled by
+            // the `dream` notifications the drain above just consumed, so this
+            // MUST follow it. Appended to THIS turn's OUTGOING snapshot only
+            // (never `session.history` / JSONL). Empty unless a `dream` task
+            // completed. See [`Self::memory_update_reminder_messages`].
+            turn_reminders.extend(self.memory_update_reminder_messages().await);
 
             // P0.1 (streaming twin): per-turn, transient `relevant_memories`
             // SURFACING reminders — the memory-selector/prefetch result rendered
@@ -11928,11 +12112,166 @@ As you answer the user's questions, you can use the following context:\n\
     /// cannot close the envelope early). Appended ONLY to the
     /// per-turn OUTGOING snapshot, never `session.history` / JSONL, so it never
     /// accumulates. No delta set is needed — draining the registry IS the dedup.
+    ///
+    /// REM-14 side effect: a terminal `dream` task in the drained batch is the
+    /// port's only signal that the BACKGROUND MEMORY CONSOLIDATOR finished, so
+    /// this is where the oracle's `setAppState({pendingMemoryUpdates:[…]})`
+    /// enqueue lands. The queue is drained separately by
+    /// [`Self::memory_update_reminder_messages`].
     pub(crate) async fn task_notification_reminder_message(&self) -> Option<ConversationMessage> {
         let provider = self.task_notifications.as_ref()?;
         let notifications = provider.take_pending_task_notifications().await;
+        self.enqueue_memory_updates_from(&notifications);
         let content = crate::prompt::task_notification::render_reminder(&notifications)?;
         Some(ConversationMessage::user_meta(MessageId::new(), content))
+    }
+
+    /// Cap on [`Self::pending_memory_updates`]. The BATCHED turn driver calls
+    /// the notification drain (which enqueues) but not
+    /// [`Self::memory_update_reminder_messages`] (which drains), so the queue
+    /// must be bounded; oldest entries are dropped.
+    pub(crate) const MAX_PENDING_MEMORY_UPDATES: usize = 8;
+
+    /// REM-14 enqueue half: turn every terminal `dream` notification into a
+    /// [`crate::prompt::memory_update::PendingMemoryUpdate`].
+    ///
+    /// `summary` is the dream agent's own final text (`result`) — the very
+    /// thing `tasks/src/handlers/dream.rs`'s prompt asks it to return ("Return a
+    /// brief summary of what you consolidated, updated, or pruned") — falling
+    /// back to the task description when the agent returned nothing. A `failed`
+    /// / `killed` dream is skipped: nothing was consolidated.
+    fn enqueue_memory_updates_from(&self, notifications: &[traits::task_registry::TaskNotification]) {
+        let fresh: Vec<crate::prompt::memory_update::PendingMemoryUpdate> = notifications
+            .iter()
+            .filter(|n| n.task_type == "dream" && n.status == "completed")
+            .map(|n| crate::prompt::memory_update::PendingMemoryUpdate {
+                source: crate::prompt::memory_update::MemoryUpdateSource::Dream,
+                summary: n
+                    .result
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(n.description.as_str())
+                    .to_string(),
+            })
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let mut queue = self
+            .pending_memory_updates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.extend(fresh);
+        let overflow = queue.len().saturating_sub(Self::MAX_PENDING_MEMORY_UPDATES);
+        if overflow > 0 {
+            queue.drain(..overflow);
+        }
+    }
+
+    /// REM-14 — the per-turn `memory_update` reminders: one meta message per
+    /// queued background memory consolidation.
+    ///
+    /// 1:1 with the oracle producer `jzm(e)` @**296554545**:
+    ///
+    /// ```js
+    /// function jzm(e){let t=e.getAppState().pendingMemoryUpdates;if(t.length===0)return[];
+    ///   e.setAppState(…clear…);
+    ///   let n=…memory index path…, o=XAa(e.session),
+    ///       i=(s)=>s===n||o.has(s)||e.readFileState.has(s)||e.loadedNestedMemoryPaths?.[s]===!0;
+    ///   return t.map((s)=>({type:"memory_update",source:s.source,summary:s.summary,
+    ///                       paths:s.paths,inContextPaths:s.paths.filter(i)}))}
+    /// ```
+    ///
+    /// * DRAIN — consume-once, exactly like the oracle's clear-on-read.
+    /// * `paths` — the oracle's writer reports them; the port recomputes them by
+    ///   listing the user memdir (the same directory the `# Memory` section
+    ///   points the model at, `memory_prefetch.user_memdir()`) for entries whose
+    ///   mtime is newer than the previous scan. `None` when no memdir is wired —
+    ///   which is also when the memory feature itself is off, so nothing can have
+    ///   been consolidated.
+    /// * `inContextPaths` — [`crate::prompt::memory_update::select_in_context_paths`]
+    ///   over `readFileState.has(s)`, the one arm of the oracle's `i` predicate
+    ///   the port has (there is no separate memory-index file or session-memory
+    ///   set here).
+    /// * RENDER — [`crate::prompt::memory_update::render_memory_update`], wrapped
+    ///   per update, matching `Zy([kn({content:o.join("\n"),isMeta:!0})])`.
+    ///
+    /// Silent in a stock session: nothing queues unless a `dream` task completes.
+    pub(crate) async fn memory_update_reminder_messages(&self) -> Vec<ConversationMessage> {
+        let pending: Vec<crate::prompt::memory_update::PendingMemoryUpdate> = {
+            let mut queue = self
+                .pending_memory_updates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *queue)
+        };
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        let Some(memdir) = self
+            .memory_prefetch
+            .as_ref()
+            .and_then(|p| p.user_memdir())
+            .map(std::path::Path::to_path_buf)
+        else {
+            return Vec::new();
+        };
+
+        // Which memdir files moved since the last scan.
+        let since = self
+            .last_memory_scan_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let now_ms = tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
+        self.last_memory_scan_ms
+            .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+        let mut paths: Vec<String> = Vec::new();
+        if let Ok(mut entries) = tokio::fs::read_dir(&memdir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                let Ok(meta) = entry.metadata().await else {
+                    continue;
+                };
+                if !meta.is_file() {
+                    continue;
+                }
+                let Ok(modified) = meta.modified() else {
+                    continue;
+                };
+                if tool_api::read_file_state::mtime_ms_floor(modified) > since {
+                    paths.push(path.to_string_lossy().into_owned());
+                }
+            }
+        }
+        paths.sort();
+
+        let in_context = {
+            let guard = self
+                .read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::prompt::memory_update::select_in_context_paths(&paths, |p| {
+                guard.contains(std::path::Path::new(p))
+            })
+        };
+
+        pending
+            .into_iter()
+            .map(|queued| {
+                let body = crate::prompt::memory_update::render_memory_update(
+                    &crate::prompt::memory_update::MemoryUpdate {
+                        source: queued.source,
+                        summary: queued.summary,
+                        paths: paths.clone(),
+                        in_context_paths: in_context.clone(),
+                    },
+                );
+                ConversationMessage::user_meta(
+                    MessageId::new(),
+                    format!("<system-reminder>\n{body}\n</system-reminder>"),
+                )
+            })
+            .collect()
     }
 
     /// Finding #73: the per-turn `todo_reminder` (V1) / `task_reminder` (V2)
@@ -12373,13 +12712,40 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// appended ONLY to the per-turn OUTGOING snapshot (never `session.history` /
     /// JSONL), so it is recomputed each turn and never accumulates.
     ///
-    /// DOCUMENTED DEFERRAL vs TS: the `removedTypes` branch (an agent type that
-    /// DISAPPEARS, messages.ts:4202-4206) and the subscription-conditioned
-    /// "launch multiple agents concurrently" note (`showConcurrencyNote`,
-    /// messages.ts:4207-4211) are omitted. The Rust catalog is wired once at boot
-    /// and does not shrink mid-session (no live `/reload-plugins` removal path),
-    /// and the concurrency note is subscription-gated (no subscription signal
-    /// here) and secondary; the inline path keeps its own existing note.
+    /// AGT-15 — the two branches that used to be documented as deferrals are
+    /// now implemented, 1:1 with the oracle renderer @296704484:
+    ///
+    /// ```js
+    /// if(n.length>0&&o.length>0){let a=e.isInitial?"Available agent types for the Agent tool:":"New agent types are now available for the Agent tool:";s.push(`${a}\n${n.join("\n")}`)}
+    /// if(i.length>0)s.push(`The following agent types are no longer available:\n${i.map((a)=>`- ${a}`).join("\n")}`),s.push($io);
+    /// if(n.length>0&&o.length>0&&e.isInitial&&e.showConcurrencyNote)s.push("When you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently.");
+    /// if(s.length===0)return[];
+    /// return Zy([kn({content:s.join("\n\n"),isMeta:!0})])
+    /// ```
+    ///
+    /// * REMOVAL: `removedTypes` = announced-minus-current, sorted (the oracle's
+    ///   `c.sort()`, a plain lexicographic sort, NOT the `localeCompare` used for
+    ///   the added list). Its section is followed by the shared ambient-context
+    ///   trailer `$io` (@296730196) as a SEPARATE section, so the two are joined
+    ///   by a blank line. Removed types are dropped from
+    ///   [`Self::sent_agent_names`] — the oracle's `s.delete(p)` replay — so a
+    ///   type that comes back is re-announced.
+    ///   The Rust catalog CAN shrink mid-session: `agent_catalog` is a
+    ///   `RwLock` the plugin/MCP reload path rewrites, which is exactly the
+    ///   `removedTypes` case.
+    /// * CONCURRENCY NOTE: gated on `isInitial && showConcurrencyNote` with
+    ///   `showConcurrencyNote = Cc()!=="pro" && DZ()==="default"` (producer
+    ///   @296530704) — i.e. NOT a Pro subscription and the subagent steer left at
+    ///   `default`. Both signals exist in the port:
+    ///   [`traits::subscription::is_pro_plan`] and
+    ///   [`traits::live_sessions::subagent_steer_is_default`].
+    ///
+    /// NOT inert: `LINGXI_AGENT_LIST_IN_MESSAGES` defaults **ON** since 2.1.193
+    /// (`traits::subagent_spawn::should_inject_agent_list_in_messages` returns
+    /// `true` when unset), so a stock session that has the Agent tool now sends
+    /// the concurrency note on its FIRST agent listing — which is exactly what
+    /// 2.1.238 does for a non-Pro plan on the default steer. The removal branch
+    /// stays silent until a catalog actually shrinks.
     pub(crate) async fn agent_listing_reminder_message(&self) -> Option<ConversationMessage> {
         // GATE: off by default (no GrowthBook in Rust) ⇒ no reminder, inline
         // catalog stays byte-identical.
@@ -12409,11 +12775,31 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         }
         let entries = agent::agent_listing_entries(&defs);
 
-        // DELTA: keep only types not yet announced, then record them as sent.
+        // DELTA: keep only types not yet announced, then record them as sent;
+        // and (AGT-15) compute the REMOVED set — announced types that are no
+        // longer in the listing — dropping them from the announced set so a
+        // type that returns is re-announced (oracle `s.delete(p)`).
         // `is_initial` is captured BEFORE inserting (TS `announced.size === 0`).
-        let (is_initial, new_entries): (bool, Vec<traits::subagent_spawn::SubagentListingEntry>) = {
+        let (is_initial, new_entries, removed_types): (
+            bool,
+            Vec<traits::subagent_spawn::SubagentListingEntry>,
+            Vec<String>,
+        ) = {
             let mut sent = self.sent_agent_names.lock().await;
             let is_initial = sent.is_empty();
+            let current: std::collections::HashSet<String> =
+                entries.iter().map(|e| e.agent_type.clone()).collect();
+            let mut removed: Vec<String> = sent
+                .iter()
+                .filter(|t| !current.contains(t.as_str()))
+                .cloned()
+                .collect();
+            // Oracle `c.sort()` — plain lexicographic (UTF-16 code-unit) order,
+            // deliberately NOT the `localeCompare` used on the added list.
+            removed.sort();
+            for t in &removed {
+                sent.remove(t);
+            }
             let delta: Vec<_> = entries
                 .into_iter()
                 .filter(|e| !sent.contains(&e.agent_type))
@@ -12421,26 +12807,335 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             for e in &delta {
                 sent.insert(e.agent_type.clone());
             }
-            (is_initial, delta)
+            (is_initial, delta, removed)
         };
-        if new_entries.is_empty() {
+        if new_entries.is_empty() && removed_types.is_empty() {
             return None;
         }
 
-        // RENDER: header (is_initial-conditional) + one formatAgentLine per new
-        // type, wrapped in a single `<system-reminder>` (messages.ts:4194-4214).
-        let header = if is_initial {
-            "Available agent types for the Agent tool:"
-        } else {
-            "New agent types are now available for the Agent tool:"
-        };
-        let lines = new_entries
-            .iter()
-            .map(agent::format_agent_line)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let content = format!("<system-reminder>\n{header}\n{lines}\n</system-reminder>");
+        // RENDER: the oracle builds an array of SECTIONS and joins them with a
+        // BLANK LINE (`s.join("\n\n")`), then wraps the whole thing in one
+        // `<system-reminder>` (@296704484).
+        let mut sections: Vec<String> = Vec::new();
+
+        // 1. ADDED: header (is_initial-conditional) + one formatAgentLine per
+        //    new type.
+        if !new_entries.is_empty() {
+            let header = if is_initial {
+                "Available agent types for the Agent tool:"
+            } else {
+                "New agent types are now available for the Agent tool:"
+            };
+            let lines = new_entries
+                .iter()
+                .map(agent::format_agent_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(format!("{header}\n{lines}"));
+        }
+
+        // 2. REMOVED + the shared ambient-context trailer `$io` (@296730196),
+        //    pushed as its OWN section so a blank line separates them.
+        if !removed_types.is_empty() {
+            let lines = removed_types
+                .iter()
+                .map(|t| format!("- {t}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(format!(
+                "The following agent types are no longer available:\n{lines}"
+            ));
+            sections.push(crate::prompt::memory_update::AMBIENT_CONTEXT_TRAILER.to_string());
+        }
+
+        // 3. CONCURRENCY NOTE: initial listing only, and only when the plan is
+        //    not Pro and the subagent steer is `default`
+        //    (`showConcurrencyNote:Cc()!=="pro"&&DZ()==="default"`, @296530704).
+        if !new_entries.is_empty()
+            && is_initial
+            && !traits::subscription::is_pro_plan()
+            && traits::live_sessions::subagent_steer_is_default()
+        {
+            sections.push(
+                "When you launch multiple agents for independent work, send them in a single \
+message with multiple tool uses so they run concurrently."
+                    .to_string(),
+            );
+        }
+
+        if sections.is_empty() {
+            return None;
+        }
+        let body = sections.join("\n\n");
+        let content = format!("<system-reminder>\n{body}\n</system-reminder>");
         Some(ConversationMessage::user_meta(MessageId::new(), content))
+    }
+
+    /// REM-10 — the periodic `tool_search_usage_reminder`, or `None` (the
+    /// default) when its gate is off.
+    ///
+    /// 1:1 with the oracle producer `Uzm` @**296553134**; see
+    /// [`crate::prompt::tool_search_reminder`] for the oracle listing and for why
+    /// this ships INERT (the upstream GrowthBook payload `juniper_shoal.
+    /// marsh_lantern` is unset in a stock install, so `Lda()` is `null` and
+    /// `Uzm` returns `[]` on its first line).
+    ///
+    /// Gate order, matching `Uzm`:
+    /// 1. `Lda()` — [`crate::prompt::tool_search_reminder::config`]; `None` ⇒ off.
+    /// 2. `if(!e||e.length===0)` — empty history ⇒ nothing.
+    /// 3. `R3T` — BOTH counters must have reached `everyNTurns`.
+    /// 4. `if(mBr()!=="tst")` — tool search must be in the plain enabled mode;
+    ///    `tst-auto` ([`tool_api::defer::ToolSearchMode::Auto`]) is excluded.
+    /// 5. `if(!bjt(t.options.tools))` — the ToolSearch tool must be present.
+    /// 6. `l.length===0` — there must be at least one UNDISCOVERED deferred tool.
+    /// 7. `if(c)return s("task_reminder_same_turn")` — never in the same turn as
+    ///    a todo/task reminder.
+    ///
+    /// # Divergence (reason)
+    /// `Uzm` also gates on `e1e(model)` / `!QLe(Fo(model))` — a per-model
+    /// capability table and a Vertex exclusion. The port has neither table, and
+    /// inventing one would gate on a guess; the remaining six gates are ported
+    /// exactly.
+    ///
+    /// MUTATES the emission marks, so it must be called at most ONCE per
+    /// outgoing model step, like every other member of this family.
+    pub(crate) async fn tool_search_usage_reminder_message(
+        &self,
+        todo_reminder_fired_this_turn: bool,
+    ) -> Option<ConversationMessage> {
+        // (1) gate.
+        let config = crate::prompt::tool_search_reminder::config()?;
+        // (4) mode. `Enabled` is the oracle's `"tst"`; `Auto` is `"tst-auto"`.
+        if self.tools.deferral().mode() != tool_api::defer::ToolSearchMode::Enabled {
+            return None;
+        }
+        // (5) the ToolSearch tool must be available this turn.
+        let tool_search = self.tools.find_by_name("ToolSearch")?;
+        let tool_search_name = tool_search.name().to_string();
+
+        // (2)+(3) history + both turn counters.
+        let history = { self.session.lock().await.history.clone() };
+        if history.is_empty() {
+            return None;
+        }
+        let marks = self
+            .tool_search_reminder_marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let (since_tool_search, since_reminder) =
+            crate::prompt::tool_search_reminder::count_turns(&history, &marks, &tool_search_name);
+        if since_tool_search < config.every_n_turns || since_reminder < config.every_n_turns {
+            return None;
+        }
+        // (7) never alongside a todo/task reminder.
+        if todo_reminder_fired_this_turn {
+            return None;
+        }
+        // (6) the undiscovered set — the searchable view minus what this session
+        // has already loaded, sorted (oracle `.sort()`).
+        let loaded: std::collections::HashSet<String> = self
+            .tools
+            .deferral()
+            .loaded_tool_names()
+            .into_iter()
+            .collect();
+        let mut undiscovered: Vec<String> = self
+            .tools
+            .tool_search_view()
+            .entries()
+            .into_iter()
+            .map(|entry| entry.name)
+            .filter(|name| !loaded.contains(name))
+            .collect();
+        undiscovered.sort();
+        undiscovered.dedup();
+        if undiscovered.is_empty() {
+            return None;
+        }
+        let count = undiscovered.len();
+        undiscovered.truncate(config.max_names);
+        let body = crate::prompt::tool_search_reminder::render_reminder(
+            &undiscovered,
+            count,
+            &tool_search_name,
+        )?;
+        self.tool_search_reminder_marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(history.len());
+        Some(ConversationMessage::user_meta(
+            MessageId::new(),
+            format!("<system-reminder>\n{body}\n</system-reminder>"),
+        ))
+    }
+
+    /// REM-05 — the per-turn `edited_text_file` (changed-files) reminders: one
+    /// meta user message per file that changed ON DISK since the model last saw
+    /// it.
+    ///
+    /// 1:1 with the oracle producer `Izm(ctx)` @**296537358**:
+    ///
+    /// ```js
+    /// async function Izm(e){let t=OWr(e.readFileState);if(t.length===0)return[];
+    ///  let r=gn(e),o=(await Promise.all(t.map(async(s)=>{
+    ///    let a=e.readFileState.get(s);if(!a)return null;
+    ///    if(a.offset!==void 0||a.limit!==void 0)return null;
+    ///    let l=Zi(s);if(qhe(l,r))return null;
+    ///    try{ if(await f4e(l)<=a.timestamp)return null;
+    ///         …let p=await mC.call({file_path:l},e);
+    ///         if(p.data.type==="text"){ if(p.data.file.truncatedByTokenCap===!0)return null;
+    ///           if(vNe(a,p.data.file.content))return null;
+    ///           let f=SEf(a.content,p.data.file.content); if(f==="")return null;
+    ///           return{type:"edited_text_file",filename:l,snippet:f}} …}
+    ///    catch(c){if(ur(c))e.readFileState.delete(s);return null}})))
+    ///   .filter((s)=>s!=null), i=0;
+    ///  for(let s of o){…if(i>=m3T)s.snippet="";else i+=s.snippet.length}
+    ///  return o}
+    /// ```
+    ///
+    /// Step for step:
+    ///
+    /// 1. **Scan** every MODEL-VISIBLE read-state entry, in the LRU's MRU→LRU
+    ///    order, through
+    ///    [`tool_api::read_file_state::ReadFileStateLru::peek`] so the scan does
+    ///    not rewrite recency (the oracle iterates the Map, which does not
+    ///    either).
+    ///
+    ///    # Divergence (reason)
+    ///    `OWr(e.readFileState)` yields EVERY key. LingXi additionally carries
+    ///    HOST-SEEDED snapshots in the same registry, explicitly flagged
+    ///    `in_model_context: false` ("the host marks this content as not present
+    ///    in the model context", `seed_read_state_from_host`). Telling the model
+    ///    a file "changed on disk since you last read it" when it never read it
+    ///    would be a lie, so the scan uses `model_context_keys()`. In claude-code
+    ///    every `readFileState` entry IS model context, so the two sets coincide
+    ///    there.
+    /// 2. **Skip partial reads** — `a.offset!==void 0||a.limit!==void 0`.
+    ///    Also skip `seeded_from_context` / `is_partial_view` entries: their
+    ///    recorded content is deliberately NOT the on-disk bytes (frontmatter
+    ///    stripping, token-cap truncation), so diffing them against disk would
+    ///    emit a bogus reminder every turn. That is this port's stand-in for the
+    ///    oracle's `truncatedByTokenCap===!0` early return.
+    /// 3. **mtime gate** — `if(await f4e(l)<=a.timestamp)return null`. A missing
+    ///    file DROPS the entry (`if(ur(c))e.readFileState.delete(s)`).
+    /// 4. **Re-read + content compare** — `vNe(a,content)`: identical bytes ⇒ no
+    ///    reminder (but the entry's timestamp is refreshed so the mtime gate
+    ///    stops firing).
+    /// 5. **Diff** — [`crate::prompt::changed_files::render_snippet`] (`SEf`,
+    ///    `structuredPatch` at context 8, 8192-char cap); an empty diff ⇒ no
+    ///    reminder.
+    /// 6. **Budget** — [`crate::prompt::changed_files::apply_snippet_budget`]
+    ///    (`m3T = 16384`, cumulative across the turn's files; entries past the
+    ///    threshold render the "diff is omitted here" arm).
+    /// 7. **Render** — [`crate::prompt::changed_files::render_changed_file`],
+    ///    each wrapped in its own `<system-reminder>` and marked meta, matching
+    ///    `Zy([kn({content:…,isMeta:!0})])` per attachment.
+    ///
+    /// The re-read REWRITES the read-state entry (content + mtime), which is
+    /// what the oracle's nested `Read` tool call does as a side effect — it is
+    /// what stops the reminder from repeating every turn for the same edit.
+    ///
+    /// This is LIVE: there is no gate. It is silent in the common case because
+    /// nothing fires unless a tracked file's mtime actually moved outside the
+    /// session's own Read/Write path.
+    pub(crate) async fn changed_files_reminder_messages(&self) -> Vec<ConversationMessage> {
+        // (1) Snapshot the registry without touching recency.
+        let candidates: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)> = {
+            let guard = self
+                .read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard
+                .model_context_keys()
+                .into_iter()
+                .filter_map(|p| guard.peek(&p).map(|e| (p, e)))
+                .collect()
+        };
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        let read_tool_name = self
+            .tools
+            .find_by_name("Read")
+            .map_or_else(|| "Read".to_string(), |t| t.name().to_string());
+
+        let mut changed: Vec<crate::prompt::changed_files::ChangedFile> = Vec::new();
+        for (path, entry) in candidates {
+            // (2) partial / not-disk-faithful entries never participate.
+            if entry.offset.is_some()
+                || entry.limit.is_some()
+                || entry.seeded_from_context
+                || entry.is_partial_view
+            {
+                continue;
+            }
+            // (3) mtime gate; a vanished file drops its entry.
+            let mtime_ms = match tokio::fs::metadata(&path).await.and_then(|m| m.modified()) {
+                Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
+                Err(err) => {
+                    if err.kind() == std::io::ErrorKind::NotFound {
+                        if let Ok(mut guard) = self.read_state_map.lock() {
+                            let _ = guard.remove(&path);
+                        }
+                    }
+                    continue;
+                }
+            };
+            if mtime_ms <= entry.mtime_ms {
+                continue;
+            }
+            // (4) re-read. A non-UTF-8 / unreadable file is skipped entirely —
+            // the oracle's `mC.call` would have returned an image/pdf/notebook
+            // payload, none of which produce an `edited_text_file`.
+            let Ok(fresh) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            // Refresh the entry either way, so the mtime gate does not re-fire
+            // on the next turn for the same on-disk state (the side effect the
+            // oracle gets from re-reading through the Read tool).
+            let unchanged = fresh == entry.content;
+            tool_api::read_file_state::set_with_model_context(
+                &self.read_state_map,
+                path.clone(),
+                tool_api::read_file_state::ReadFileEntry {
+                    content: fresh.clone(),
+                    mtime_ms,
+                    ..entry.clone()
+                },
+                true,
+            );
+            if unchanged {
+                continue;
+            }
+            // (5) diff.
+            let snippet = crate::prompt::changed_files::render_snippet(&entry.content, &fresh, false);
+            if snippet.is_empty() {
+                continue;
+            }
+            changed.push(crate::prompt::changed_files::ChangedFile {
+                filename: path.to_string_lossy().into_owned(),
+                snippet,
+            });
+        }
+        if changed.is_empty() {
+            return Vec::new();
+        }
+        // (6) cross-file snippet budget, then (7) render one wrapped meta
+        // message per changed file.
+        crate::prompt::changed_files::apply_snippet_budget(&mut changed);
+        changed
+            .iter()
+            .map(|file| {
+                let body =
+                    crate::prompt::changed_files::render_changed_file(file, &read_tool_name);
+                ConversationMessage::user_meta(
+                    MessageId::new(),
+                    format!("<system-reminder>\n{body}\n</system-reminder>"),
+                )
+            })
+            .collect()
     }
 
     /// §F: the per-turn, transient `conditional_rules` reminder — path-gated
@@ -12614,9 +13309,11 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// a tool already read, so the gate would be a no-op here. Not invented.
     ///
     /// `pub` (unlike its `pub(crate)` siblings) only so `test-harness` can drive
-    /// it against a real `FileReadTool`: `orchestrator` does not depend on
-    /// `tool-file`, so the end-to-end seed-then-dedup proof cannot live here.
-    /// Both turn drivers are still the only production callers.
+    /// it against a real `FileReadTool`: the end-to-end seed-then-dedup proof
+    /// needs the real tool's registration + permission plumbing, which does not
+    /// exist in this crate's unit tests. (`orchestrator` now carries a `tool-file`
+    /// dependency for REM-05's `structuredPatch`, but only the diff function —
+    /// not the tool.) Both turn drivers are still the only production callers.
     pub async fn nested_memory_reminder_message(&self) -> Option<ConversationMessage> {
         // Same env kill-switch the eager loader honors (`Rop`'s
         // `CLAUDE_CODE_DISABLE_CLAUDE_MDS` guard). ANY non-empty value disables.

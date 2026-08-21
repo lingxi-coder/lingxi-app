@@ -976,14 +976,38 @@ pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, _model: Option<&str
     lines.join("\n")
 }
 
+/// One lock for every test in this crate that reads or writes the
+/// process-global env vars the Bash prompt gates on
+/// (`LINGXI_DISABLE_BACKGROUND_TASKS` in particular).
+///
+/// This exists because the crate previously had THREE separate locks guarding
+/// that one global — `prompt::tests::ENV_LOCK`, `bash::tests::SLEEP_GATE_LOCK`
+/// and `bash::tests::BACKGROUND_TASKS_ENV_LOCK`. Three locks over one global is
+/// no mutual exclusion at all: a `prompt.rs` test setting the var could flip the
+/// `run_in_background` bullet out from under a `bash.rs` prompt assertion, which
+/// failed roughly once per full-workspace run and passed every time in
+/// isolation. Take THIS lock, not a new one.
+///
+/// It is a `std` mutex on purpose: the guard is held across `.await` in the
+/// `#[tokio::test]` cases, which is sound because those run on a current-thread
+/// runtime whose future is not required to be `Send`.
+#[cfg(test)]
+pub(crate) static BACKGROUND_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Poison-tolerant guard for [`BACKGROUND_ENV_LOCK`] (payload is `()`, so a
+/// panicking test never invalidates the lock for the rest of the run).
+#[cfg(test)]
+pub(crate) fn background_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    BACKGROUND_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Env vars are process-global; serialize the env-gating tests so they don't
-    // race the default-config golden test.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::background_env_lock as env_lock;
 
     fn disabled_sandbox() -> SandboxRuntimeConfig {
         SandboxRuntimeConfig::default()
@@ -991,7 +1015,7 @@ mod tests {
 
     #[test]
     fn prompt_contains_locked_anchors() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let p = simple_prompt(&disabled_sandbox());
 
@@ -1046,7 +1070,7 @@ mod tests {
     /// `LINGXI_ENABLE_TASKS` is defined-falsy); `gi="Agent"` always.
     #[test]
     fn git_prompt_interpolates_task_and_agent_tool_names() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
 
         // Default (V2 tasks enabled) → "TaskCreate or Agent".
         std::env::remove_var("LINGXI_ENABLE_TASKS");
@@ -1080,7 +1104,7 @@ mod tests {
 
     #[test]
     fn timeout_sentence_substitutes_locked_constants() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let p = simple_prompt(&disabled_sandbox());
         // 120000ms / 600000ms substituted from BASH_DEFAULT_TIMEOUT_MS /
@@ -1097,7 +1121,7 @@ mod tests {
 
     #[test]
     fn tool_preference_bullets_steer_to_builtin_tools() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let p = simple_prompt(&disabled_sandbox());
         assert!(p.contains(" - File search: Use Glob (NOT find or ls)"));
         assert!(p.contains(" - Content search: Use Grep (NOT grep or rg)"));
@@ -1108,7 +1132,7 @@ mod tests {
 
     #[test]
     fn background_note_absent_when_env_disabled() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
         let p = simple_prompt(&disabled_sandbox());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -1122,7 +1146,7 @@ mod tests {
     fn git_section_absent_when_disabled_via_env() {
         // R-MINOR: LINGXI_DISABLE_GIT_INSTRUCTIONS (truthy) omits the git/PR
         // section (claude-code `aOt()`); default-unset keeps it.
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_GIT_INSTRUCTIONS");
         assert!(
             simple_prompt(&disabled_sandbox()).contains("# Committing changes with git"),
@@ -1139,7 +1163,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_absent_when_disabled() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let p = simple_prompt(&disabled_sandbox());
         assert!(
             !p.contains("## Command sandbox"),
@@ -1180,7 +1204,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_present_when_enabled() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let cfg = SandboxRuntimeConfig {
             enabled: true,
             // Default is now `true` (allow unsandboxed) — set `false` explicitly so
@@ -1223,7 +1247,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_unsandboxed_allowed_branch() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let cfg = SandboxRuntimeConfig {
             enabled: true,
             allow_unsandboxed_commands: true,
@@ -1242,7 +1266,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_emits_allow_within_deny_when_allow_read_set() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         // allow_read non-empty ⇒ read object carries denyOnly THEN allowWithinDeny.
         let cfg = SandboxRuntimeConfig {
             enabled: true,
@@ -1301,7 +1325,7 @@ mod tests {
     /// `Phr(l(t.allowOnly))`).
     #[test]
     fn sandbox_section_truncates_every_oversized_list() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let paths = |prefix: &str| -> Vec<String> {
             (0..60).map(|i| format!("{prefix}{i}")).collect()
         };
@@ -1336,7 +1360,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_emits_denied_hosts_in_order() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         // allowedHosts THEN deniedHosts THEN allowUnixSockets.
         let cfg = SandboxRuntimeConfig {
             enabled: true,
@@ -1372,7 +1396,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_normalizes_lingxi_temp_dir_to_tmpdir_literal() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         // Pin the temp-dir base via LINGXI_TMPDIR so lingxi_temp_dir() is
         // deterministic across hosts/users.
         let tmp_base = tempfile::tempdir().unwrap();
@@ -1409,7 +1433,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_policy_disabled_branch_when_bool_false() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         // false ⇒ the policy-disabled override branch.
         let disabled = SandboxRuntimeConfig {
             enabled: true,

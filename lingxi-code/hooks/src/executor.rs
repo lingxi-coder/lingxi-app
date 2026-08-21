@@ -196,7 +196,9 @@ pub trait BuiltinHookHandler: Send + Sync {
 pub struct HookExecutorImpl {
     registry: Arc<RwLock<HookRegistry>>,
     http: Arc<dyn HttpTransport>,
-    #[allow(dead_code)] // Command arm uses ProcessRunner not RuntimeSpawner.
+    /// Background spawner. The Command arm's child runs on the `ProcessRunner`;
+    /// this drives the `hook_progress` poll task (SH-07) and is snapshotted onto
+    /// every [`Dispatcher`].
     runtime: Arc<dyn RuntimeSpawner>,
     builtin_handlers: HashMap<String, Arc<dyn BuiltinHookHandler>>,
     ssrf_guard: SsrfGuard,
@@ -466,6 +468,7 @@ impl HookExecutorImpl {
             async_registry: self.async_registry.clone(),
             attachment_sink: self.attachment_sink.clone(),
             hook_observer: self.hook_observer.clone(),
+            runtime: self.runtime.clone(),
         }
     }
 
@@ -665,7 +668,7 @@ impl HookExecutorImpl {
                     let run_ms = run_started.elapsed().as_millis() as u64;
                     self.publish_run_attachment(&mut agg, hook, &attachment_id, &timed_out, run_ms)
                         .await;
-                    Self::merge(&mut agg, hook, timed_out);
+                    Self::merge(&mut agg, hook, timed_out, &hook_event);
                     break;
                 };
                 // Emit hook_response AFTER dispatch (for --include-hook-events).
@@ -713,7 +716,7 @@ impl HookExecutorImpl {
                 // ONE transcript attachment per hook run — same as `execute`.
                 self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
                     .await;
-                Self::merge(&mut agg, hook, result);
+                Self::merge(&mut agg, hook, result, &hook_event);
                 // #45(b): no early break on first `Block`. SessionEnd's decision is
                 // a shutdown-path verdict that is never consumed for blocking, and
                 // claude's `cH` runner runs every matched hook regardless; running
@@ -839,7 +842,7 @@ impl HookExecutorImpl {
                 // for every run — 26 048 records in real 2.1.220 transcripts).
                 self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
                     .await;
-                Self::merge(&mut agg, hook, result);
+                Self::merge(&mut agg, hook, result, &hook_event);
                 // #45(b): NO early break on the first `Block`. claude-code's `cH`
                 // runner dispatches every matched hook (BIN off 205755512) and
                 // folds `blocked = some(t.blocked)` afterwards, so later hooks'
@@ -855,6 +858,7 @@ impl HookExecutorImpl {
                 }
             }
         }
+        publish_classifier_host_contexts(&agg, &attachment_id);
         agg
     }
 
@@ -923,7 +927,7 @@ impl HookExecutorImpl {
                 // ONE transcript attachment per hook run — same as `execute`.
                 self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
                     .await;
-                Self::merge(&mut agg, hook, result);
+                Self::merge(&mut agg, hook, result, &hook_event);
                 // #45(b): no early break on first `Block` — see `execute`. All
                 // matched hooks dispatch; `merge` keeps `Block` sticky.
             } else {
@@ -999,7 +1003,7 @@ impl HookExecutorImpl {
                 // ONE transcript attachment per hook run — same as `execute`.
                 self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
                     .await;
-                Self::merge(&mut agg, hook, result);
+                Self::merge(&mut agg, hook, result, &hook_event);
                 // #45(b): no early break on first `Block` — see `execute`. All
                 // matched hooks dispatch; `merge` keeps `Block` sticky.
             } else {
@@ -1208,9 +1212,97 @@ struct Dispatcher {
     /// Live progress sink retained for runtime-marker hooks whose real command
     /// completion happens after the originating dispatch has returned.
     hook_observer: Option<Arc<dyn OutputStream>>,
+    /// SH-07: background spawner for the `hook_progress` poll task. The hooks
+    /// crate must not touch tokio directly (D17), so the 1 s cadence runs on the
+    /// injected [`RuntimeSpawner`] exactly like the async-hook registry's work.
+    runtime: Arc<dyn RuntimeSpawner>,
 }
 
 impl Dispatcher {
+    /// SH-07 — start claude-code's `hook_progress` poll for one command hook.
+    ///
+    /// Oracle 2.1.238 @ 296463298:
+    /// ```js
+    /// function tWi(e){ if(!Q9i(e.hookEvent))return()=>{};
+    ///   let t="",r=setInterval(()=>{ e.getOutput().then(({stdout:n,stderr:o,output:i})=>{
+    ///     if(i===t)return; t=i, EjT({…,stdout:n,stderr:o,output:i}) }) },
+    ///   e.intervalMs??1000); return r.unref(),()=>clearInterval(r) }
+    /// ```
+    /// i.e. a 1 s interval that emits a frame ONLY when the accumulated
+    /// `output` changed — so a hook that finishes inside the first second emits
+    /// nothing, and a silent long-running hook emits nothing either.
+    ///
+    /// Upstream's `if(!Q9i(e.hookEvent))return()=>{}` head skips the poll
+    /// entirely when hook events are not being streamed; the port asks the sink
+    /// the same question through [`OutputStream::hook_events_streamed`], so a
+    /// host that is not streaming hook frames pays for neither the poll task nor
+    /// the chunked pipe reads.
+    ///
+    /// Returns `None` when no poll was started; the caller then passes `None` as
+    /// the runner's observer and the child is drained with the cheap bulk read.
+    async fn begin_hook_progress_frames(
+        &self,
+        hook: &HookDefinition,
+        hook_event: &str,
+    ) -> Option<HookProgressFrames> {
+        let observer = self.hook_observer.as_ref()?.clone();
+        // `if(!Q9i(e.hookEvent))return()=>{}` — no poll, no live pipe reads, when
+        // the sink is not streaming hook frames for this event. Every
+        // non-stream-json host answers `false` by default, so the desktop/TUI
+        // path pays nothing.
+        if !observer.hook_events_streamed(hook_event) {
+            return None;
+        }
+        let buf = Arc::new(std::sync::Mutex::new(HookLiveOutput::default()));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let poll_buf = buf.clone();
+        let poll_stop = stop.clone();
+        let hook_id = hook.id.to_string();
+        let hook_name = hook.name.clone();
+        let event = hook_event.to_string();
+        let sleeper = self.runtime.clone();
+        let task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> =
+            Box::pin(async move {
+                // `let t=""` — the last emitted aggregate.
+                let mut last: Option<String> = None;
+                loop {
+                    sleeper
+                        .sleep(Duration::from_millis(HOOK_PROGRESS_INTERVAL_MS))
+                        .await;
+                    if poll_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    let (stdout, stderr, output) = {
+                        let live = poll_buf.lock().unwrap_or_else(|e| e.into_inner());
+                        live.snapshot()
+                    };
+                    // `if(i===t)return` — no frame unless the aggregate moved.
+                    if last.as_deref() == Some(output.as_str()) {
+                        continue;
+                    }
+                    last = Some(output.clone());
+                    observer
+                        .emit_hook_progress_frame(
+                            &hook_id, &hook_name, &event, &stdout, &stderr, &output,
+                        )
+                        .await;
+                }
+            });
+        let handle = self.runtime.spawn("hook_progress", task).await.ok();
+        Some(HookProgressFrames { buf, stop, handle })
+    }
+
+    /// SH-07 — the `()=>clearInterval(r)` disposer returned by `tWi`.
+    async fn finish_hook_progress_frames(&self, frames: Option<HookProgressFrames>) {
+        let Some(frames) = frames else { return };
+        frames
+            .stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = &frames.handle {
+            let _ = self.runtime.cancel(handle).await;
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "arm dispatch fan-out — splitting hurts readability"
@@ -1276,6 +1368,7 @@ impl Dispatcher {
                 args,
                 env,
                 cwd,
+                shell,
             } => {
                 // Both the runner and the sandbox must be wired: the runner
                 // only accepts a `SandboxedCommand`, which only the sandbox can
@@ -1382,7 +1475,36 @@ impl Dispatcher {
                 // need plugin scope (not on `HookExecutor::Command`) and are a
                 // documented residual — a string carrying only those tokens passes
                 // through unchanged, matching claude when no plugin scope is bound.
-                let command = substitute_project_dir(command, &project_dir_str);
+                // SH-06 — `shell` selector (oracle 2.1.238 @ 296948400 spawn
+                // head): `v = e.shell ?? Otr()`, `w = v === "powershell"`,
+                // `C = e.args !== void 0`. The exec form (`C`) never consults
+                // the selector.
+                let is_exec_form = !args.is_empty();
+                let effective_shell = shell.unwrap_or_else(default_hook_shell);
+                let want_powershell =
+                    !is_exec_form && effective_shell == crate::definition::HookShell::Powershell;
+                // `if(!C&&w){R=o9T(R); if(/\$CLAUDE_PROJECT_DIR\b/.test(R)) warn}`
+                // — the PowerShell env-var rewrite runs on the RAW command,
+                // BEFORE any `${…}` interpolation, so `${LINGXI_PROJECT_DIR}`
+                // becomes `${env:LINGXI_PROJECT_DIR}` and is deliberately NOT
+                // substituted literally afterwards (PowerShell reads it from the
+                // child env, exactly as upstream intends).
+                // `e.command` verbatim — the spelling upstream quotes in both
+                // shell-resolution errors (`Hook "<cmd>" has shell: …`).
+                let original_command = command.clone();
+                let mut base_command = command.clone();
+                if want_powershell {
+                    if references_bare_project_dir_var(&base_command) {
+                        tracing::warn!(
+                            "PowerShell hook command references $LINGXI_PROJECT_DIR, which \
+                             PowerShell reads as an undefined variable ($null). Use \
+                             $env:LINGXI_PROJECT_DIR or ${{LINGXI_PROJECT_DIR}} instead. \
+                             Command: {base_command}"
+                        );
+                    }
+                    base_command = powershell_env_token_rewrite(&base_command);
+                }
+                let command = substitute_project_dir(&base_command, &project_dir_str);
                 let args: Vec<String> = args
                     .iter()
                     .map(|a| substitute_project_dir(a, &project_dir_str))
@@ -1412,10 +1534,37 @@ impl Dispatcher {
                 // RESIDUAL (Windows): upstream resolves Git Bash and THROWS when
                 // it is absent. The port has no Git-Bash discovery, so Windows
                 // keeps the bare-exec behaviour until that lands.
-                let (command, args) = if args.is_empty() && !cfg!(windows) {
-                    ("/bin/sh".to_string(), vec!["-c".to_string(), command])
-                } else {
+                //
+                // SH-06 — the THREE upstream spawn branches, in upstream order:
+                //   1. `if(I) spawn(I[0], I[1], …)`          — exec form, no shell
+                //   2. `else if(v==="powershell") spawn(bfe(), THn(M), …)`
+                //   3. `else spawn(M, [], {shell: He})`      — bash / `/bin/sh -c`
+                let (command, args) = if is_exec_form {
                     (command, args)
+                } else if want_powershell {
+                    // `let Pe=await bfe(); if(!Pe) throw Error(…)`.
+                    let Some(exe) = resolve_powershell_executable() else {
+                        return map_command_output(
+                            hook,
+                            Err(ProcessError::Io(powershell_missing_error(&original_command))),
+                            expected_event,
+                        )
+                        .0;
+                    };
+                    // `THn(e) = [...Bfa(), "-Command", e]`.
+                    let mut ps_args = powershell_base_args();
+                    ps_args.push("-Command".to_string());
+                    ps_args.push(command);
+                    (exe, ps_args)
+                } else if cfg!(windows) {
+                    // `let Pe=S?$_e():null; if(S&&!Pe) throw Error(…)` — Windows
+                    // bash needs Git Bash. The port has no Git-Bash discovery, so
+                    // this keeps the pre-existing bare-exec fallback rather than
+                    // synthesizing a refusal upstream would not have raised on a
+                    // machine where Git Bash IS installed.
+                    (command, args)
+                } else {
+                    ("/bin/sh".to_string(), vec!["-c".to_string(), command])
                 };
                 // claude-code writes `jsonStringify(hookInput) + '\n'` to the
                 // child's stdin then closes it (`hooks.ts:1006`/`1210`). The
@@ -1433,6 +1582,19 @@ impl Dispatcher {
                 // `shouldSkipHookDueToTrust`), so an audited bypass is the
                 // parity-honest construction here.
                 let sandboxed = sandbox.bypass_with_audit(pcmd, "hook_command");
+                // SH-07: start the `hook_progress` poll (claude-code `tWi`)
+                // BEFORE the child is spawned, exactly where upstream attaches
+                // its `stdout`/`stderr` `data` listeners, and hand the runner a
+                // live observer so the accumulator actually fills.
+                let progress_frames = self
+                    .begin_hook_progress_frames(hook, &format!("{:?}", event.event_type()))
+                    .await;
+                let live_observer: Option<Arc<dyn traits::HookOutputObserver>> =
+                    progress_frames.as_ref().map(|frames| {
+                        Arc::new(HookLiveOutputObserver {
+                            buf: frames.buf.clone(),
+                        }) as Arc<dyn traits::HookOutputObserver>
+                    });
                 // Runtime `{"async":true}` first-line detection (claude-code
                 // `hooks.ts:1117-1166`): a hook whose first stdout line is that
                 // marker is backgrounded and contributes no synchronous decision.
@@ -1445,7 +1607,11 @@ impl Dispatcher {
                 });
                 let run_started = std::time::Instant::now();
                 let (result, timed_out) = match process
-                    .run_hook_with_async_detection(&sandboxed, default_async_timeout)
+                    .run_hook_with_async_detection_observed(
+                        &sandboxed,
+                        default_async_timeout,
+                        live_observer,
+                    )
                     .await
                 {
                     Ok(traits::HookRunOutcome::Backgrounded {
@@ -1531,6 +1697,8 @@ impl Dispatcher {
                     }
                     Err(e) => map_command_output(hook, Err(e), expected_event),
                 };
+                // `()=>clearInterval(r)` — stop the poll once the child is done.
+                self.finish_hook_progress_frames(progress_frames).await;
                 if timed_out {
                     emit_command_timeout(hook, effective_timeout);
                 }
@@ -1670,7 +1838,15 @@ impl HookExecutorImpl {
         }
     }
 
-    fn merge(agg: &mut AggregateHookResult, hook: &HookDefinition, r: HookResult) {
+    /// `hook_event` is the `Debug` event name (`f` in the oracle's aggregation
+    /// loop) — needed by the SH-01 `classifierContext` log line, which upstream
+    /// formats as ``Hook ${f} (${dJ(z.hook)}) provided classifierContext …``.
+    fn merge(
+        agg: &mut AggregateHookResult,
+        hook: &HookDefinition,
+        r: HookResult,
+        hook_event: &str,
+    ) {
         if let Some(resp) = &r.response {
             // #45(b): claude-code's `cH` runner dispatches EVERY matched hook
             // (`c.map(async …)` + await-all, BIN off 205755512 — no break) then
@@ -1755,6 +1931,47 @@ impl HookExecutorImpl {
             if let Some(out) = &resp.updated_tool_output {
                 agg.updated_tool_output = Some(out.clone());
             }
+            // SH-01 `classifierContext` (oracle 2.1.238 @ 296974134):
+            //
+            //   if(z.classifierContext){ let U=wo(z.classifierContext,Pfr);
+            //     T(`Hook ${f} (${dJ(z.hook)}) provided classifierContext (${U.length} chars after cap)`),
+            //     M.classifierContextChars+=U.length, G(z.hook,"classifierContextChars",U.length),
+            //     yield{pairedRewrite: …, classifierContexts:[{value:U,hostPrincipal:…}]} }
+            //
+            // The cap runs HERE (not at parse) so the per-hook truncation and
+            // the shared character budget stay together, exactly as upstream.
+            if let Some(raw) = &resp.classifier_context {
+                let capped = crate::response::truncate_utf16(
+                    raw,
+                    crate::response::CLASSIFIER_CONTEXT_CAP_UTF16,
+                );
+                // `U.length` is UTF-16 code units, like the cap itself.
+                let chars = capped.encode_utf16().count();
+                tracing::debug!(
+                    "Hook {} ({}) provided classifierContext ({chars} chars after cap)",
+                    hook_event,
+                    attachment::attachment_command(hook),
+                );
+                agg.classifier_context_chars += chars;
+                // `pairedRewrite` describes THIS hook's own rewrite, so it is
+                // computed from `resp`, never from the aggregate.
+                agg.paired_rewrite = Some(if resp.updated_tool_output.is_some() {
+                    crate::response::PairedRewrite::Direct
+                } else if resp.updated_mcp_tool_output.is_some() {
+                    crate::response::PairedRewrite::LegacyMcp
+                } else {
+                    crate::response::PairedRewrite::None
+                });
+                agg.classifier_contexts
+                    .push(crate::response::ClassifierHostContext {
+                        value: capped,
+                        // `hostPrincipal` is true only for an in-process
+                        // `callback` hook owned by neither a plugin nor a skill;
+                        // the port has no `callback` executor, so it is false for
+                        // every hook type the loader can build.
+                        host_principal: false,
+                    });
+            }
             // PermissionDenied `retry`: OR-fold so a single hook saying
             // `retry: true` flips the aggregate, mirroring TS's
             // `if (result.retry) hookSaysRetry = true` (`toolExecution.ts:1090`).
@@ -1806,6 +2023,224 @@ impl HookExecutorImpl {
         }
         agg.all_results.push((hook.id, r));
     }
+}
+
+/// SH-01 — hand every folded `classifierContext` to the auto-mode permission
+/// classifier's host-context store.
+///
+/// This is the wire that makes the whole `classifierContext` path reachable:
+/// the hooks layer parses + caps the value, and THIS call is what puts it where
+/// `permission::policy_gate`'s auto-mode arm reads it back
+/// (`classify_tool_call_with_host_context`). Records published from a live hook
+/// dispatch are `live = true` — they were attached during this session — which
+/// is the only provenance that upstream lets carry user intent at all.
+///
+/// A no-op (not even a lock acquisition) when no hook supplied a context, which
+/// is every dispatch in a default install.
+fn publish_classifier_host_contexts(
+    agg: &AggregateHookResult,
+    identity: &HookAttachmentIdentity,
+) {
+    if agg.classifier_contexts.is_empty() {
+        return;
+    }
+    permission::host_context::store().publish(
+        &identity.tool_use_id,
+        agg.classifier_contexts
+            .iter()
+            .map(|c| (c.value.clone(), c.host_principal)),
+        true,
+    );
+}
+
+/// SH-07 — `tWi`'s `e.intervalMs ?? 1000` poll cadence for `hook_progress`
+/// frames (oracle 2.1.238 @ 296463298). No call site supplies `intervalMs`, so
+/// 1 s is the only value the binary ever uses.
+pub const HOOK_PROGRESS_INTERVAL_MS: u64 = 1000;
+
+/// SH-07 — live accumulator for one hook child's output, the port's stand-in for
+/// upstream's `te` / `ee` / `re` closure locals (oracle @ 296950289):
+/// `ne=(Pe)=>{ee+=Pe,re+=Pe}` on stderr and `X=(Pe)=>{te+=Pe,re+=Pe}` on stdout.
+///
+/// [`Self::output`] is therefore the ARRIVAL-ORDERED interleaving of both pipes,
+/// not `stdout + stderr` — which matters because it is the value the poll's
+/// change detection compares.
+#[derive(Default)]
+struct HookLiveOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    output: Vec<u8>,
+}
+
+impl HookLiveOutput {
+    /// Decode the three buffers once, over whole buffers — a per-chunk decode
+    /// would corrupt a multi-byte sequence split across a read boundary.
+    fn snapshot(&self) -> (String, String, String) {
+        (
+            String::from_utf8_lossy(&self.stdout).into_owned(),
+            String::from_utf8_lossy(&self.stderr).into_owned(),
+            String::from_utf8_lossy(&self.output).into_owned(),
+        )
+    }
+}
+
+/// SH-07 — the [`traits::HookOutputObserver`] the runner pushes chunks into.
+struct HookLiveOutputObserver {
+    buf: Arc<std::sync::Mutex<HookLiveOutput>>,
+}
+
+#[async_trait]
+impl traits::HookOutputObserver for HookLiveOutputObserver {
+    async fn on_chunk(&self, stdout_delta: &[u8], stderr_delta: &[u8]) {
+        let mut live = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        if !stdout_delta.is_empty() {
+            live.stdout.extend_from_slice(stdout_delta);
+            live.output.extend_from_slice(stdout_delta);
+        }
+        if !stderr_delta.is_empty() {
+            live.stderr.extend_from_slice(stderr_delta);
+            live.output.extend_from_slice(stderr_delta);
+        }
+    }
+}
+
+/// SH-07 — the handle `tWi` returns: the shared accumulator plus everything
+/// needed to run `clearInterval` on it.
+struct HookProgressFrames {
+    buf: Arc<std::sync::Mutex<HookLiveOutput>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<traits::BackgroundTaskHandle>,
+}
+
+/// SH-06 — `Otr()` (oracle 2.1.238 @ 284437507):
+/// `function Otr(){return Sh()?"bash":"powershell"}` where
+/// `function Sh(){if(Wt()!=="windows")return!0;return $_e()!==null}` — i.e. the
+/// implicit default is `bash` everywhere except Windows-without-Git-Bash, where
+/// it is `powershell`.
+///
+/// The port has no Git-Bash discovery of its own inside the hooks crate, so on
+/// Windows it reports `Powershell` (upstream's no-Git-Bash arm). That is the
+/// SAFE side of the fork: the bash arm on Windows would immediately throw
+/// upstream's `requires bash but Git Bash was not found` error, whereas the
+/// PowerShell arm resolves a real interpreter. Non-Windows is unconditional
+/// `Bash`, byte-identical to `Otr()`.
+#[must_use]
+pub fn default_hook_shell() -> crate::definition::HookShell {
+    if cfg!(windows) {
+        crate::definition::HookShell::Powershell
+    } else {
+        crate::definition::HookShell::Bash
+    }
+}
+
+/// SH-06 — `Bfa()` (oracle 2.1.238 @ 284461074):
+/// `let e=["-NoProfile","-NonInteractive"]; if(!V.CLAUDE_CODE_POWERSHELL_RESPECT_EXECUTION_POLICY)
+///  e.push("-ExecutionPolicy","Bypass"); return e`.
+///
+/// The env guard is raw JS truthiness on the env value (any non-empty string
+/// suppresses the `-ExecutionPolicy Bypass` pair), NOT the strict
+/// `isEnvTruthy` predicate — mirrored here with a non-empty check.
+///
+/// Both spellings are read, `LINGXI_` first then the upstream `CLAUDE_CODE_`
+/// name — the same two-spelling convention `tools::shell::bash`'s
+/// `LINGXI_GIT_BASH_PATH` / `CLAUDE_CODE_GIT_BASH_PATH` override uses.
+#[must_use]
+pub fn powershell_base_args() -> Vec<String> {
+    let mut args = vec!["-NoProfile".to_string(), "-NonInteractive".to_string()];
+    let respect_policy = [
+        "LINGXI_POWERSHELL_RESPECT_EXECUTION_POLICY",
+        "CLAUDE_CODE_POWERSHELL_RESPECT_EXECUTION_POLICY",
+    ]
+    .iter()
+    .any(|var| std::env::var(var).is_ok_and(|v| !v.is_empty()));
+    if !respect_policy {
+        args.push("-ExecutionPolicy".to_string());
+        args.push("Bypass".to_string());
+    }
+    args
+}
+
+/// SH-06 — `bfe()`/`aBb()` (oracle 2.1.238 @ 284436932 / 284435843), POSIX arm:
+/// `await yT("pwsh")` first, then `await yT("powershell")`, else `null`. The
+/// Linux `/snap/` workaround and the Windows `ProgramFiles`/`LOCALAPPDATA`/
+/// `USERPROFILE` probes are Windows/snap-only residuals the port does not
+/// carry; the PATH scan is the branch every POSIX host takes.
+#[must_use]
+pub fn resolve_powershell_executable() -> Option<String> {
+    let path_env = std::env::var_os("PATH")?;
+    for name in ["pwsh", "powershell"] {
+        for dir in std::env::split_paths(&path_env) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+            #[cfg(windows)]
+            {
+                let exe = dir.join(format!("{name}.exe"));
+                if exe.is_file() {
+                    return Some(exe.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// SH-06 — the byte-locked `shell: "powershell"` resolution failure (oracle
+/// 2.1.238 @ 296948400). Upstream `throw`s this; the port maps it through
+/// [`map_command_output`]'s I/O arm so the hook reports a non-blocking error the
+/// same way a spawn failure does.
+#[must_use]
+pub fn powershell_missing_error(command: &str) -> String {
+    format!(
+        "Hook \"{command}\" has shell: 'powershell' but no PowerShell executable \
+         (pwsh or powershell) was found on PATH. Install PowerShell, or remove \
+         \"shell\": \"powershell\" to use bash."
+    )
+}
+
+/// SH-06 — `o9T` (oracle 2.1.238 @ 296991060):
+/// ```js
+/// for(let t of ["CLAUDE_PROJECT_DIR","CLAUDE_PLUGIN_ROOT","CLAUDE_PLUGIN_DATA"])
+///   e=e.replaceAll("${"+t+"}",()=>"${env:"+t+"}");
+/// ```
+/// PowerShell has no `${VAR}` env syntax, so the three host tokens are rewritten
+/// to `${env:VAR}` before the command reaches `-Command`.
+#[must_use]
+pub fn powershell_env_token_rewrite(command: &str) -> String {
+    let mut out = command.to_string();
+    for name in [
+        "LINGXI_PROJECT_DIR",
+        "LINGXI_PLUGIN_ROOT",
+        "LINGXI_PLUGIN_DATA",
+    ] {
+        out = out.replace(&format!("${{{name}}}"), &format!("${{env:{name}}}"));
+    }
+    out
+}
+
+/// SH-06 — the `/\$CLAUDE_PROJECT_DIR\b/` probe upstream warns on before
+/// spawning a shell-form PowerShell hook: a BARE `$LINGXI_PROJECT_DIR` (no
+/// `env:` scope, not the `${…}` form that [`powershell_env_token_rewrite`]
+/// already fixed) reads as `$null` inside PowerShell.
+#[must_use]
+pub fn references_bare_project_dir_var(command: &str) -> bool {
+    const VAR: &str = "$LINGXI_PROJECT_DIR";
+    let bytes = command.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = command[from..].find(VAR) {
+        let at = from + rel;
+        let after = at + VAR.len();
+        // `\b`: the match must not be followed by another word character.
+        let boundary = bytes
+            .get(after)
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || *c == b'_'));
+        if boundary {
+            return true;
+        }
+        from = after;
+    }
+    false
 }
 
 /// #43: substitute every literal `${LINGXI_PROJECT_DIR}` token in `s` with
@@ -3232,6 +3667,7 @@ mod attachment_wiring_tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                shell: None,
             },
             source: HookSource::User,
             blocking: true,

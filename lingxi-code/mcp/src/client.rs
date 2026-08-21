@@ -11,7 +11,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use traits::{
     McpPromptDto, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransportKind, ServerCapabilitiesDto,
@@ -231,6 +231,18 @@ pub struct McpClient {
     connection: Arc<jsonrpc::Connection>,
     /// Server capabilities snapshot from the `initialize` response.
     server_capabilities: RwLock<Option<ServerCapabilitiesDto>>,
+    /// The RAW `capabilities` object from the `initialize` response, kept
+    /// alongside the decoded [`ServerCapabilitiesDto`].
+    ///
+    /// TR-03: [`decode_server_capabilities`] collapses the wire object down to
+    /// four presence booleans plus `experimental`, which throws away
+    /// `capabilities.extensions` — and `extensions` is exactly what 2.1.238's
+    /// `serverDeclaresDirectoryRead` (`FSf`, cc-238.js) reads:
+    /// `caps?.extensions?.["io.modelcontextprotocol/skills"]?.directoryRead === true`.
+    /// Caching the raw value here (rather than widening the shared DTO, which
+    /// has 13 struct-literal construction sites across nine crates) keeps the
+    /// extension surface addressable without touching any of them.
+    raw_server_capabilities: RwLock<Option<serde_json::Value>>,
     /// Server-provided instructions string from the `initialize` response,
     /// truncated to [`MAX_MCP_DESCRIPTION_LENGTH`] chars on receipt
     /// (matches claude-code `client.ts:1163-1166`).
@@ -348,6 +360,7 @@ impl McpClient {
             cwd,
             connection,
             server_capabilities: RwLock::new(None),
+            raw_server_capabilities: RwLock::new(None),
             server_instructions: RwLock::new(None),
             config_timeout_ms: None,
             config_always_load: false,
@@ -433,6 +446,9 @@ impl McpClient {
 
         let caps = decode_server_capabilities(&resp.capabilities);
         *self.server_capabilities.write().await = Some(caps.clone());
+        // TR-03: keep the undecoded object too — `capabilities.extensions` has
+        // no DTO field and the MCP-skills directory-read predicate needs it.
+        *self.raw_server_capabilities.write().await = Some(resp.capabilities.clone());
 
         // Truncate server instructions matching claude-code behavior
         // (client.ts:1163-1166: if > MAX_MCP_DESCRIPTION_LENGTH, slice
@@ -940,6 +956,93 @@ impl McpClient {
         ))
     }
 
+    /// The RAW `capabilities` object captured during `initialize`, or `None`
+    /// if `initialize` has not completed. See [`Self::raw_server_capabilities`]
+    /// — the decoded [`ServerCapabilitiesDto`] drops `extensions`, which the
+    /// MCP-skills directory-read predicate needs.
+    pub async fn server_capabilities_raw(&self) -> Option<serde_json::Value> {
+        self.raw_server_capabilities.read().await.clone()
+    }
+
+    /// Paginated `resources/directory/read` — the port of 2.1.238's
+    /// `readMcpDirectory` (`Cpv`, oracle @289723766):
+    ///
+    /// ```js
+    /// async function Cpv(e,t){
+    ///   if(!FSf(e.capabilities))throw Error("readMcpDirectory called on a server without directoryRead capability");
+    ///   let r=[],n,o=0;
+    ///   do{ let i;
+    ///       try{ i=await ug(e.client).request({method:"resources/directory/read",params:{uri:t,...n&&{cursor:n}}},F5e,{timeout:uC()}) }
+    ///       catch(s){ if(o===0||!(s instanceof Jy&&s.code===Qp.InvalidParams))throw s;
+    ///                 return It(e.name,`resources/directory/read ${t}: page ${o+1} returned InvalidParams on cursor; returning ${r.length} entries from prior pages`),r }
+    ///       r.push(...i.resources),n=i.nextCursor,o++
+    ///   }while(n&&o<NSf);
+    ///   if(n)It(e.name,`resources/directory/read ${t}: stopped at ${NSf} pages with more pending`);
+    ///   return r}
+    /// var NSf=20;
+    /// ```
+    ///
+    /// Three details are load-bearing and preserved verbatim:
+    /// * `cursor` is OMITTED from `params` on the first page (`...n&&{cursor:n}`),
+    ///   not sent as `null`.
+    /// * An `InvalidParams` (-32602) failure is tolerated ONLY after page 1 —
+    ///   it means the server rejected the cursor, and the pages already
+    ///   collected are returned instead of erroring. Any other code, or an
+    ///   InvalidParams on the FIRST page, propagates.
+    /// * The page loop is hard-capped at [`MAX_MCP_DIRECTORY_PAGES`]; a cursor
+    ///   still pending at the cap is logged and the partial listing returned.
+    ///
+    /// The capability precondition is the CALLER's (`ReadMcpResourceDirTool`
+    /// checks `serverDeclaresDirectoryRead` and returns the model-facing
+    /// "does not support directory listing." message before reaching here), so
+    /// this method does not re-derive it.
+    pub async fn read_mcp_directory(
+        &self,
+        uri: &str,
+    ) -> Result<Vec<McpDirectoryEntry>, McpClientError> {
+        let mut out: Vec<McpDirectoryEntry> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut page: usize = 0;
+        loop {
+            let mut params = serde_json::json!({ "uri": uri });
+            if let Some(c) = cursor.as_deref() {
+                params["cursor"] = serde_json::Value::String(c.to_string());
+            }
+            let resp: DirectoryReadResponse =
+                match self.connection.call("resources/directory/read", params).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if page > 0 && is_invalid_params(&e) {
+                            tracing::warn!(
+                                target: "lingxi_mcp::client",
+                                server = %self.server_name,
+                                "resources/directory/read {uri}: page {} returned InvalidParams on cursor; returning {} entries from prior pages",
+                                page + 1,
+                                out.len(),
+                            );
+                            return Ok(out);
+                        }
+                        return Err(McpClientError::Rpc(e.to_string()));
+                    }
+                };
+            out.extend(resp.resources);
+            cursor = resp.next_cursor;
+            page += 1;
+            if cursor.is_none() || page >= MAX_MCP_DIRECTORY_PAGES {
+                break;
+            }
+        }
+        if cursor.is_some() {
+            tracing::warn!(
+                target: "lingxi_mcp::client",
+                server = %self.server_name,
+                "resources/directory/read {uri}: stopped at {} pages with more pending",
+                MAX_MCP_DIRECTORY_PAGES,
+            );
+        }
+        Ok(out)
+    }
+
     /// Liveness probe — JSON-RPC `ping` with no params; success on any
     /// non-error response. The health checker uses this to detect dead
     /// servers without forcing a full `tools/list` roundtrip.
@@ -1019,6 +1122,54 @@ struct RawResource {
     #[serde(rename = "mimeType", default)]
     mime_type: Option<String>,
 }
+
+/// TR-03 `NSf` (oracle @289724681) — the hard page cap on a paginated
+/// `resources/directory/read`. A cursor still pending at this page count is
+/// logged and the partial listing returned.
+pub const MAX_MCP_DIRECTORY_PAGES: usize = 20;
+
+/// One direct child of a directory resource, as returned by
+/// `resources/directory/read` (oracle schema `F5e = H5e.extend({resources:$d(CQe)})`,
+/// @287151819 — the paginated-result base plus a resource array).
+///
+/// Subdirectories are distinguished by `mime_type == "inode/directory"`
+/// (oracle `JBn`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpDirectoryEntry {
+    /// Child resource URI — the value to pass back as `uri` to descend.
+    pub uri: String,
+    /// Child resource name.
+    #[serde(default)]
+    pub name: String,
+    /// Child MIME type; absent when the server omits it (the oracle maps
+    /// `c.mimeType!==void 0 ? qG(c.mimeType) : void 0`, i.e. an omitted type
+    /// stays omitted rather than becoming `""`).
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+/// Wire-level shape of one `resources/directory/read` page.
+#[derive(Debug, Deserialize)]
+struct DirectoryReadResponse {
+    #[serde(default)]
+    resources: Vec<McpDirectoryEntry>,
+    /// Opaque continuation token; `None`/absent ends the pagination loop.
+    #[serde(rename = "nextCursor", default)]
+    next_cursor: Option<String>,
+}
+
+/// `s instanceof Jy && s.code === Qp.InvalidParams` — the oracle's tolerated
+/// mid-pagination failure. JSON-RPC `InvalidParams` is -32602.
+fn is_invalid_params(e: &jsonrpc::ConnectionError) -> bool {
+    matches!(
+        e,
+        jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(r))
+            if r.code == JSONRPC_INVALID_PARAMS
+    )
+}
+
+/// JSON-RPC reserved error code for `InvalidParams` (`Qp.InvalidParams`).
+const JSONRPC_INVALID_PARAMS: i32 = -32602;
 
 /// Wire-level shape of a `resources/read` response body.
 #[derive(Debug, Deserialize)]

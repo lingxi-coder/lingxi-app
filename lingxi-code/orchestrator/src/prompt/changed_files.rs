@@ -28,32 +28,32 @@
 //!   line-number prefixer; `Xcr()` (@288773154, GrowthBook `tengu_tab_read_sep`)
 //!   defaults to **false**, so the separator is a TAB unless the caller opts in.
 //!
-//! **STATUS — partial port.** Everything model-visible that this module can own
-//! is here and pinned by tests: the byte-exact 238 copy, the two snippet arms,
-//! the 16384-char cross-file budget, the line-number prefixer and the 8192-char
-//! snippet truncation. The PRODUCER is not wired. Three things it needs, none
-//! of which this module can supply:
+//! **STATUS — PORTED AND WIRED.** The renderer half (byte-exact 238 copy, the
+//! two snippet arms, the 16384-char cross-file budget, the line-number
+//! prefixer, the 8192-char snippet truncation) plus [`render_snippet`] — the
+//! `SEf` diff at context 8 — live here; the PRODUCER is
+//! `ConversationOrchestrator::changed_files_reminder_message`, called from the
+//! streaming turn driver's per-turn reminder fan-out in `conversation.rs`
+//! (positioned after `agent_listing_delta` and before `nested_memory`, the
+//! oracle's fan-out order @296520120).
 //!
-//! 1. **A context-8 `structuredPatch`.** `tool_file::structured_patch` hardcodes
-//!    jsdiff's default context of 4 (`PATCH_CONTEXT`), so it needs an additive
-//!    `build_structured_patch_with_context(before, after, 8)`, plus a `tool-file`
-//!    dependency edge from this crate (no cycle — `tool-file` depends only on
-//!    the shared lower tier).
-//! 2. **Injection in BOTH turn twins.** Every other per-turn reminder is
-//!    appended in `conversation.rs` (streaming) *and* `turn_loop.rs` (batched);
-//!    `reminder_twin_wiring_test` exists to catch a one-sided wiring. The
-//!    oracle's fan-out order (@296520120) puts `changed_files` immediately
-//!    after `agent_listing_delta` and immediately before `nested_memory`, which
-//!    is the anchor to use in both twins.
-//! 3. **A read-state migration for the test suite — the real blocker.** `Izm`
-//!    fires for every `readFileState` entry whose on-disk mtime is newer than
-//!    the recorded `timestamp`, and it re-reads *through the Read tool*, which
-//!    refreshes the entry so the reminder does not repeat. Orchestrator tests
-//!    seed the registry by hand with `mtime_ms: 0` against paths that exist on
-//!    disk (e.g. `conversation_test.rs` `push_touched` / `push_host_seed`), so
-//!    a faithful producer would fire on those seeds and inject an extra message
-//!    into a large number of asserted snapshots. Wiring the producer therefore
-//!    means auditing and re-seeding every such fixture in the same change.
+//! Two deliberate deviations from `Izm`, both non-model-visible:
+//!
+//! * The re-read is a plain filesystem read that REWRITES the `read_file_state`
+//!   entry (content + mtime) rather than a nested `Read` tool invocation. The
+//!   oracle's re-read exists to refresh the entry so the reminder does not
+//!   repeat; doing it directly has the same effect without re-entering the tool
+//!   layer (and without emitting a second `readFileState` telemetry event).
+//! * `qhe` (the permission-context path filter) has no orchestrator-side
+//!   analogue; the producer instead skips anything that is not a readable UTF-8
+//!   file, which is the only way a denied path can reach here.
+//!
+//! Entries recorded from a PARTIAL read (`offset`/`limit` set) are skipped, like
+//! the oracle. So are `seeded_from_context` / `is_partial_view` entries: the
+//! recorded content for those deliberately differs from disk (frontmatter
+//! stripping, token-cap truncation), so a byte compare would fire every turn
+//! forever. That is the port's stand-in for the oracle's
+//! `truncatedByTokenCap === true` early return plus its `vNe` content compare.
 
 /// `m3T = 16384` @296537358 — the per-turn snippet budget shared by every
 /// changed file.
@@ -213,6 +213,54 @@ pub fn truncate_snippet(snippet: &str) -> String {
     format!("{head}\n\n... [{truncated_lines} lines truncated] ...")
 }
 
+/// `SEf(old, new)` @289903016 — the snippet the reminder shows.
+///
+/// ```js
+/// function SEf(e,t){let r=F2t("file.txt","file.txt",e,t,void 0,void 0,{context:8,timeout:JEi});
+///  if(!r)return"";
+///  let n=Xcr(),o=r.hunks.map((d)=>({startLine:d.oldStart,content:d.lines.filter((p)=>!p.startsWith("-")&&!p.startsWith("\\")).map((p)=>p.slice(1)).join("\n"),tabAwareSeparator:n})).map(rUo).join("\n...\n");
+///  if(o.length<=oKa)return o; … }
+/// ```
+///
+/// Each hunk keeps only its context (` `) and ADDED (`+`) lines — removals and
+/// the `\ No newline at end of file` marker are dropped — strips the one-char
+/// prefix, numbers the result from the hunk's `oldStart`, and joins hunks with
+/// `"\n...\n"`. The whole snippet is then truncated at 8192 UTF-16 units by
+/// [`truncate_snippet`].
+///
+/// Returns `""` when the diff is empty, which the producer treats as "no
+/// reminder for this file" (`if(f==="")return null`).
+#[must_use]
+pub fn render_snippet(before: &str, after: &str, tab_aware_separator: bool) -> String {
+    // `DIFF_CONTEXT_LINES` (this module) and
+    // `tool_file::structured_patch::CHANGED_FILE_PATCH_CONTEXT` are the same
+    // `{context:8}`; the differ takes the `i64` spelling.
+    let hunks = tool_file::structured_patch::build_structured_patch_with_context(
+        before,
+        after,
+        tool_file::structured_patch::CHANGED_FILE_PATCH_CONTEXT,
+    );
+    if hunks.is_empty() {
+        return String::new();
+    }
+    let rendered = hunks
+        .iter()
+        .map(|hunk| {
+            let content = hunk
+                .lines
+                .iter()
+                .filter(|l| !l.starts_with('-') && !l.starts_with('\\'))
+                .map(|l| l.chars().skip(1).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let start = u64::try_from(hunk.old_start).unwrap_or(1);
+            number_lines(&content, start, tab_aware_separator)
+        })
+        .collect::<Vec<_>>()
+        .join(HUNK_SEPARATOR);
+    truncate_snippet(&rendered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +353,57 @@ mod tests {
         assert_eq!(number_lines("\tindented", 1, true), "1:\tindented");
         assert_eq!(number_lines("\tindented", 1, false), "1\t\tindented");
         assert_eq!(number_lines("plain", 1, true), "1\tplain");
+    }
+
+    /// `SEf` keeps context + ADDED lines, drops removals, and numbers the
+    /// result from the hunk's `oldStart`.
+    #[test]
+    fn snippet_keeps_context_and_additions_numbered_from_old_start() {
+        let snippet = render_snippet("a\nb\nc\n", "a\nB\nc\n", false);
+        // The removal line (`-b`) is dropped; the addition (`+B`) survives.
+        assert_eq!(snippet, "1\ta\n2\tB\n3\tc");
+    }
+
+    /// Context **8** (`SEf`'s `{context:8}`), not jsdiff's default 4: a 10-line
+    /// unchanged gap between two edits stays inside ONE hunk at context 8
+    /// (`gap <= 2*context`), where context 4 splits it in two.
+    #[test]
+    fn the_diff_runs_at_context_8_not_the_jsdiff_default_4() {
+        let before: Vec<String> = (0..40).map(|i| format!("line{i}")).collect();
+        let mut after = before.clone();
+        after[10] = "CHANGED10".into();
+        after[21] = "CHANGED21".into();
+        let b = before.join("\n");
+        let a = after.join("\n");
+
+        assert_eq!(
+            tool_file::structured_patch::build_structured_patch_with_context(
+                &b,
+                &a,
+                tool_file::structured_patch::CHANGED_FILE_PATCH_CONTEXT,
+            )
+            .len(),
+            1,
+            "context 8 must merge a 10-line gap into one hunk"
+        );
+        assert_eq!(
+            tool_file::structured_patch::build_structured_patch(&b, &a).len(),
+            2,
+            "guard: at jsdiff's default context of 4 the same input splits, so \
+             the assertion above really is testing the context-8 path"
+        );
+
+        let snippet = render_snippet(&b, &a, false);
+        assert!(
+            !snippet.contains(HUNK_SEPARATOR),
+            "one hunk ⇒ no hunk separator; got: {snippet}"
+        );
+        assert!(snippet.contains("CHANGED10") && snippet.contains("CHANGED21"));
+    }
+
+    #[test]
+    fn an_identical_pair_yields_an_empty_snippet() {
+        assert_eq!(render_snippet("a\nb\n", "a\nb\n", false), "");
     }
 
     #[test]

@@ -53,6 +53,10 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 additional_context: None,
                 // PermissionDenied retry (cb796fad): None — not a retry responder.
                 retry: None,
+                // SH-01 classifierContext: None — a PreToolUse Block mock never
+                // supplies auto-mode classifier host context (the field is
+                // PostToolUse-only).
+                classifier_context: None,
                 // #38 all-tools updatedToolOutput: None — Block mock replaces no
                 // tool output.
                 updated_tool_output: None,

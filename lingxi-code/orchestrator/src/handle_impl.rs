@@ -1939,6 +1939,7 @@ mod tests {
                     args: Vec::new(),
                     env: HashMap::new(),
                     cwd: None,
+                    shell: None,
                 },
                 source: hooks::HookSource::User,
                 blocking: true,

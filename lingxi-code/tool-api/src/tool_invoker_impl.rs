@@ -17,70 +17,81 @@ use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerEr
 /// layer the fold understands (claude `freezeCommandDenies` → the
 /// `case"disallowed_tools"` arm of `gn(toolUseContext)`).
 ///
-/// Returns an EMPTY vec when `frozen` is empty or nothing survives validation,
-/// which leaves [`traits::permission_gate::PermissionCheckContext::permission_layers`]
+/// Returns an EMPTY vec when `frozen` is empty or nothing survives, which
+/// leaves [`traits::permission_gate::PermissionCheckContext::permission_layers`]
 /// empty and the fold byte-identical to a spawn that froze nothing.
 ///
-/// ## Why entries are dropped rather than rejected
+/// ## Entries are CANONICALIZED, not round-trip-tested
 ///
-/// [`permission::PermissionRuleValue::from_rule_string`] is INFALLIBLE — a
-/// malformed rule silently degrades to a bare tool name rather than erroring.
-/// So "unparseable" cannot mean a parse failure here; it means the string does
-/// not round-trip, or it is not a `Bash` command rule at all. Either way the
-/// scoping record is corrupt or foreign, and the frozen entry cannot be honoured
-/// as written.
+/// The gate re-parses whatever this emits — `PolicyPermissionGate::
+/// extend_command_rules` feeds every layer string back through
+/// [`permission::PermissionRuleValue::from_rule_string`]. So emitting a string
+/// the parser reads differently than intended is the one failure that matters,
+/// and it fails OPEN: a padded `" Bash(rm:*) "` parses to a BARE rule for a tool
+/// literally named `" Bash(rm:*) "`, which matches nothing, so the deny silently
+/// evaporates.
 ///
-/// A corrupt entry is SKIPPED and logged rather than failing the resume: the
-/// alternative — refusing to resume — turns a damaged sidecar into an
-/// unrecoverable agent, and the surviving entries still tighten the policy.
-/// The log is what makes the silent degradation visible.
+/// Rejecting anything that does not round-trip byte-for-byte fails open in the
+/// other direction: `from_rule_string` deliberately normalizes (`Bash(*)` and
+/// `Bash()` collapse to the tool-wide form, content parens are re-escaped,
+/// legacy tool names are rewritten), so a round-trip test discards legitimate —
+/// and in the `Bash(*)` case, maximally strict — rules as "corrupt". Upstream
+/// `jLa` validates nothing at all; it spreads the strings straight into
+/// `alwaysDenyRules.command`.
+///
+/// Emitting `parsed.to_rule_string()` gets both: every rule the parser
+/// understood survives, in exactly the spelling the gate will re-parse.
+///
+/// Non-`Bash` rules are SKIPPED and logged rather than failing the resume:
+/// refusing to resume would turn a damaged sidecar into an unrecoverable agent,
+/// and the surviving entries still tighten the policy.
+///
+/// KNOWN DIVERGENCE — do not "fix" one half of this alone. Claude reads
+/// `alwaysDenyRules.command`, which is keyed by rule SOURCE, not by tool: the
+/// `command` bucket legitimately holds `Read(...)` / `WebFetch(...)` / `Edit(...)`
+/// rules (claude unions a skill's frontmatter `disallowed-tools` straight into
+/// it). This port instead freezes only tool-`Bash` rules, in BOTH halves — the
+/// producer (`tools/skill/src/skill.rs::frozen_command_denies`) and the filter
+/// below. Correcting the producer to read `PermissionRuleSource::Command`
+/// WITHOUT also dropping this filter would make every non-`Bash` rule it newly
+/// captures get silently discarded here and logged as a corrupt record.
 #[must_use]
 fn frozen_command_deny_layers(frozen: &[String]) -> Vec<Value> {
-    if frozen.is_empty() {
-        return Vec::new();
-    }
     let kept: Vec<String> = frozen
         .iter()
-        .filter(|raw| {
+        .filter_map(|raw| {
             let rule = raw.trim();
             if rule.is_empty() {
                 tracing::warn!(
+                    target: "permission",
                     "frozen_command_denies: dropping an empty rule from the scoping record"
                 );
-                return false;
+                return None;
             }
+            // `from_rule_string` is INFALLIBLE — a mangled string degrades to a
+            // bare tool name rather than erroring — so the tool-name check is
+            // also what catches malformed input: `"Bash(unbalanced"` has no
+            // closing paren, so it parses as a tool NAMED `"Bash(unbalanced"`.
             let parsed = permission::PermissionRuleValue::from_rule_string(rule);
-            // `from_rule_string` never fails, so a mangled string arrives here as
-            // a bare tool name. A failed round-trip is the only signal that the
-            // input was not a well-formed rule.
-            if parsed.to_rule_string() != rule {
-                tracing::warn!(
-                    "frozen_command_denies: dropping {rule:?} — it does not round-trip as a \
-                     permission rule (scoping record corrupt or written by another version)"
-                );
-                return false;
-            }
-            // The snapshot is taken from the `Bash` deny bucket only, so anything
-            // else means the record was written by a different producer.
             if parsed.tool_name != "Bash" {
                 tracing::warn!(
+                    target: "permission",
                     "frozen_command_denies: dropping {rule:?} — expected a Bash command rule, \
-                     got tool {:?}",
+                     got tool {:?} (scoping record corrupt or written by another producer)",
                     parsed.tool_name
                 );
-                return false;
+                return None;
             }
-            true
+            Some(parsed.to_rule_string())
         })
-        .cloned()
         .collect();
     if kept.is_empty() {
         return Vec::new();
     }
-    vec![serde_json::json!({
-        "kind": "disallowed_tools",
-        "disallowedTools": kept,
-    })]
+    // Built through the layer type that OWNS this wire spelling, so the
+    // `disallowed_tools` / `disallowedTools` keys cannot drift from the
+    // `PermissionLayer::from_wire` that reads them back.
+    vec![permission::PermissionLayer::DisallowedTools(kept).to_wire()]
 }
 
 /// Wraps an `Arc<ToolRegistry>` as a `dyn ToolInvoker`.
@@ -1256,14 +1267,15 @@ mod tests {
     #[test]
     fn frozen_command_deny_layers_drops_entries_it_cannot_honour() {
         // `from_rule_string` is INFALLIBLE — a mangled rule degrades to a bare
-        // tool name instead of erroring — so a failed ROUND-TRIP is the only
-        // signal that the scoping record is corrupt. Corrupt entries are skipped
-        // and logged rather than failing the resume, and the good ones survive.
+        // tool name instead of erroring — so a rule that is not a `Bash` command
+        // rule after parsing is the signal that the record is corrupt or
+        // foreign. Those entries are skipped and logged rather than failing the
+        // resume, and the good ones survive.
         let layers = frozen_command_deny_layers(&[
             "Bash(rm:*)".to_string(),
-            "   ".to_string(),                 // empty after trim
-            "Bash(unbalanced".to_string(),     // no closing paren → bare name
-            "Read(/etc/passwd)".to_string(),   // not a command rule
+            "   ".to_string(),               // empty after trim
+            "Bash(unbalanced".to_string(),   // no closing paren → parses as that tool NAME
+            "Read(/etc/passwd)".to_string(), // not a command rule
             "Bash(git push:*)".to_string(),
         ]);
         assert_eq!(
@@ -1273,6 +1285,51 @@ mod tests {
                 "disallowedTools": ["Bash(rm:*)", "Bash(git push:*)"],
             })],
             "only well-formed Bash command rules survive"
+        );
+    }
+
+    #[test]
+    fn frozen_command_deny_layers_emits_the_canonical_spelling() {
+        // The string this emits is re-parsed by `extend_command_rules`, so it
+        // must be the spelling the parser round-trips — NOT the raw record text.
+        //
+        // Two ways the raw text betrays the deny, both fail-OPEN:
+        //   * padding — `from_rule_string(" Bash(rm:*) ")` sees a trailing space
+        //     after the `)`, so it degrades to a BARE rule for a tool literally
+        //     named `" Bash(rm:*) "`, which matches nothing;
+        //   * `Bash(*)` / `Bash()` — the parser collapses both to the tool-wide
+        //     form, so a byte-for-byte round-trip test would discard the single
+        //     strictest rule the record can carry.
+        let layers = frozen_command_deny_layers(&[
+            " Bash(rm:*) ".to_string(),
+            "Bash(*)".to_string(),
+            "\tBash(git push:*)\n".to_string(),
+        ]);
+        assert_eq!(
+            layers,
+            vec![json!({
+                "kind": "disallowed_tools",
+                "disallowedTools": ["Bash(rm:*)", "Bash", "Bash(git push:*)"],
+            })],
+            "every rule the parser understood survives, in canonical spelling"
+        );
+    }
+
+    #[test]
+    fn frozen_command_deny_layers_are_the_layer_type_the_fold_reads_back() {
+        // Guard against the wire spelling drifting from `PermissionLayer`: the
+        // producer and the fold must agree, and asserting a hand-written literal
+        // on both sides cannot catch a rename. Parse + fold the emitted value
+        // through the REAL consumer instead.
+        let layers = frozen_command_deny_layers(&["Bash(rm:*)".to_string()]);
+        let folded = permission::fold_permission_layers(
+            &permission::parse_permission_layers(&layers),
+            permission::LayerFoldInputs::default(),
+        );
+        assert_eq!(
+            folded.deny_command_rules,
+            vec!["Bash(rm:*)".to_string()],
+            "the emitted layer must reach the fold's command-deny bucket"
         );
     }
 

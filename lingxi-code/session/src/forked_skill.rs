@@ -468,10 +468,16 @@ pub fn check_fork_capable(
 /// was parked could REMOVE a deny that was in force at launch. In this port the
 /// two cannot drift within a process: frozen, live, and boot are the same set.
 ///
-/// The record still has to be written, because it outlives the process. When a
-/// cross-session fork resume lands (today's resume is `send_message` to a
-/// parked IN-PROCESS agent), it will read this record against a freshly-loaded
-/// policy that genuinely can differ — and this is the transform it needs.
+/// SUPERSEDED as the resume transform: the replay now runs through the general
+/// permission-LAYER fold instead. `tool_api::tool_invoker_impl::
+/// frozen_command_deny_layers` turns the frozen set into a `disallowed_tools`
+/// layer, and `PolicyPermissionGate::extend_command_rules` APPENDS it to the
+/// live command-deny bucket — which is the same "frozen first, live unioned in,
+/// the set only ever grows" result, expressed once in the fold rather than twice.
+/// This function is kept as the standalone statement of that ordering (and for
+/// the skill's own `disallowed` list, which the layer path does not carry); do
+/// not wire it at the resume boundary without first removing the layer path, or
+/// the union will be applied twice.
 ///
 /// Order is `frozen`, then `live`, then the skill's own `disallowed` —
 /// deduplicated, first occurrence winning. Putting the FROZEN rules first is

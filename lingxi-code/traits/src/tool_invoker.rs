@@ -113,11 +113,17 @@ pub struct SubagentInvocationContext {
     /// base policy — so a frozen deny WINS over a live rule that would now allow
     /// the same command.
     ///
-    /// The port's own exposure is narrower than upstream's: `PolicyPermissionGate`
-    /// holds a boot-snapshot policy, so within ONE process the frozen set and the
-    /// live set cannot drift. The scoping record outlives the process, though, and
-    /// a cross-session resume reads it against a freshly loaded policy — which is
-    /// exactly the window this closes.
+    /// The port is exposed in BOTH directions, so this is not a cross-session-only
+    /// concern: `PolicyPermissionGate::apply_permission_update` mutates the gate's
+    /// `live_state` deny rules in-process (`addRules` / `replaceRules` /
+    /// `removeRules`), so a host permission update can remove an in-force deny
+    /// while a fork is parked in the SAME process. The scoping record additionally
+    /// outlives the process, and a cross-session resume reads it against a freshly
+    /// loaded policy.
+    ///
+    /// Note the converse gap, which this field does not close: the snapshot is
+    /// taken from the BOOT policy (`PermissionPolicy::deny_rules`), not from the
+    /// gate's `live_state`, so a deny ADDED at runtime is never frozen.
     ///
     /// Empty ⇒ no layer is added and the fold is byte-identical to before.
     pub frozen_command_denies: Vec<String>,

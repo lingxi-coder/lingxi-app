@@ -70,14 +70,38 @@ pub const MAX_GLOB_MATCHES: usize = 100;
 /// Model-facing string when no files matched (`GlobTool.ts:178-183`, byte-exact).
 const NO_FILES_FOUND: &str = "No files found";
 
+/// `lhe.maxResultSizeChars` = `1e5` (binary 2.1.238 @289926092). Glob's own cap,
+/// deliberately NOT the shared `MAX_TOOL_OUTPUT_LENGTH`.
+const GLOB_MAX_RESULT_SIZE_CHARS: usize = 100_000;
+
 /// Model-facing description / prompt — VERBATIM from `GlobTool/prompt.ts:3-7`
 /// (`DESCRIPTION`). TS `GlobTool` exposes only `description`; `prompt()` returns
 /// the same `DESCRIPTION` (`GlobTool.ts:143-145`), so both methods return this.
-const GLOB_DESCRIPTION: &str = r#"- Fast file pattern matching tool that works with any codebase size
+///
+/// Oracle 2.1.238 `znp` (@285270818) — the four unconditional bullets. The
+/// delegate-to-Agent bullet lives in [`GLOB_DESCRIPTION_AGENT_BULLET`] because
+/// upstream gates it (ST-03).
+const GLOB_DESCRIPTION_BASE: &str = r#"- Fast file pattern matching tool that works with any codebase size
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
 - Returns matching file paths sorted by modification time
-- Use this tool when you need to find files by name patterns
-- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead (if available)"#;
+- Use this tool when you need to find files by name patterns"#;
+
+/// ST-03: the fifth bullet is NOT unconditional. Oracle 2.1.238:
+/// `BJb = `${znp}\n- When you are doing an open ended search … (if available)``
+/// and `ISa(e){if(qk(e))return SHORT; return DZ()==="default"?BJb:znp}` — so
+/// under a NON-default subagent steer (`DZ()!=="default"`, port
+/// `traits::live_sessions::subagent_steer_is_default()`) the whole bullet is
+/// dropped, not shortened. Grep gates its own Agent bullet the same way.
+const GLOB_DESCRIPTION_AGENT_BULLET: &str = "\n- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead (if available)";
+
+/// `ISa(e)`'s long arm: `DZ()==="default" ? BJb : znp`.
+fn glob_description(steer_is_default: bool) -> String {
+    if steer_is_default {
+        format!("{GLOB_DESCRIPTION_BASE}{GLOB_DESCRIPTION_AGENT_BULLET}")
+    } else {
+        GLOB_DESCRIPTION_BASE.to_string()
+    }
+}
 
 /// The SHORT Glob prompt — byte-locked VERBATIM to claude-code `Jhi(e)`'s
 /// `Dh(e)===true` branch (binary offset 195605886), served to current-gen
@@ -188,8 +212,13 @@ impl Tool for GlobTool {
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
     }
+    /// ST-10: Glob carries its OWN cap, not the shared default. Oracle 2.1.238
+    /// `lhe = es({name:Bm, searchHint:"find files by name pattern or wildcard",
+    /// maxResultSizeChars:1e5, …})` at binary @289926092 — 100_000, where the
+    /// port was returning the generic 30_000. Grep's cap is different again
+    /// (20_000, see `grep.rs`), so the two tools must not share a constant.
     fn max_result_size_chars(&self) -> usize {
-        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        GLOB_MAX_RESULT_SIZE_CHARS
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         true
@@ -205,11 +234,22 @@ impl Tool for GlobTool {
     /// validator accepts a file and words its ENOENT error "Path does not
     /// exist" (see [`crate::dir_validate`]). The cwd (`er()`) is the tool's
     /// live workspace.
+    ///
+    /// ST-06: the oracle runs `h0i(Bm,[["pattern",e],["path",t]])` FIRST — a
+    /// NUL in either field short-circuits with its own message before any
+    /// `stat` — so the null-byte guard leads here too.
     async fn validate_input(
         &self,
         input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
+        crate::dir_validate::validate_no_null_bytes(
+            TOOL_NAME,
+            &[
+                ("pattern", input.get("pattern").and_then(Value::as_str)),
+                ("path", input.get("path").and_then(Value::as_str)),
+            ],
+        )?;
         if let Some(path) = input.get("path").and_then(Value::as_str) {
             crate::dir_validate::validate_glob_directory(path, &self.cwd_now())?;
         }
@@ -227,19 +267,22 @@ impl Tool for GlobTool {
         }
     }
 
+    /// Oracle `async description(){return ISa(void 0)}` — `qk(undefined)` is
+    /// false, so this is the LONG arm, itself gated on the subagent steer
+    /// (ST-03).
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        GLOB_DESCRIPTION.to_string()
+        glob_description(traits::live_sessions::subagent_steer_is_default())
     }
 
     async fn prompt(&self, opts: &PromptOptions) -> String {
         // Model-gated, mirroring claude-code `prompt({model:e}){return Jhi(e)}`
-        // where `Jhi(e){if(Dh(e))return SHORT; return KBr}` (binary offset
-        // 195605879). `description()` stays the static LONG `KBr`. Predicate
-        // shared with TodoWrite via `tool_api`.
+        // where `Jhi(e){if(Dh(e))return SHORT; return DZ()==="default"?BJb:znp}`
+        // (2.1.238 `ISa`, @285270043). Predicate shared with TodoWrite via
+        // `tool_api`.
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
             GLOB_PROMPT_SHORT.to_string()
         } else {
-            GLOB_DESCRIPTION.to_string()
+            glob_description(traits::live_sessions::subagent_steer_is_default())
         }
     }
 
@@ -315,17 +358,28 @@ impl Tool for GlobTool {
                 "invalid glob pattern {pattern:?}: {e}"
             )));
         }
-        // Read(deny) exclusions (`glob.ts` `lLa()`: `for(_ of l) d.push("--glob",
-        // `!${_}`)`). Each active `Read`-`deny` rule (resolved at boot by
-        // `permission::read_deny_exclude_globs`) is read from the live policy
-        // gate on every call and added as a negated override so a
-        // denied/sensitive path is never listed. The reference prefixes a
-        // bare `!` to every entry — `F4e` already prepends a leading `/` to the
-        // rooted entries (and unrooted entries pass through relative), so we
-        // mirror that with `!{p}` verbatim. A `!`-prefixed `OverrideBuilder`
-        // pattern is an ignore.
+        // Read(deny) exclusions. Each active `Read`-`deny` rule (resolved at
+        // boot by `permission::read_deny_exclude_globs`) is read from the live
+        // policy gate on every call and added as a negated override so a
+        // denied/sensitive path is never listed. A `!`-prefixed
+        // `OverrideBuilder` pattern is an ignore.
+        //
+        // ST-15: the oracle's Glob builder `PEf` (@289923175) prefixes
+        // exactly like Grep's `Nhv` does, NOT with a bare `!`:
+        // ``for(let w of d) m.push("--glob", w.startsWith("/")?`!${w}`:`!**/${w}`)``
+        // — a rooted (`/`-anchored) entry keeps its anchor, a relative entry is
+        // matched at ANY depth. The port previously emitted `!{p}` for both,
+        // which under gitignore semantics only ignores a MULTI-SEGMENT relative
+        // pattern at the search root (`config/secret.txt` would still be listed
+        // under `sub/config/secret.txt`). Grep already did the split
+        // (`grep.rs`); Glob now matches it.
         for p in self.ctx.effective_read_deny_exclude_globs(&canon_base) {
-            let _ = ob.add(&format!("!{p}"));
+            let neg = if p.starts_with('/') {
+                format!("!{p}")
+            } else {
+                format!("!**/{p}")
+            };
+            let _ = ob.add(&neg);
         }
         let overrides = match ob.build() {
             Ok(o) => o,
@@ -522,7 +576,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
-        // description() is the static LONG list (KBr), never gated.
+        // description() = ISa(void 0) ⇒ the LONG arm. Tests run with the
+        // subagent steer unlatched ⇒ DZ()==="default" ⇒ BJb (with the bullet).
         let d = tool
             .description(
                 &json!({}),
@@ -531,8 +586,8 @@ mod tests {
                 },
             )
             .await;
-        assert_eq!(d, GLOB_DESCRIPTION);
-        // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG (== KBr).
+        assert_eq!(d, glob_description(true));
+        // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
         let long = tool
             .prompt(&PromptOptions {
                 include_examples: false,
@@ -540,7 +595,7 @@ mod tests {
                 model_profile: None,
             })
             .await;
-        assert_eq!(long, GLOB_DESCRIPTION);
+        assert_eq!(long, glob_description(true));
         // prompt(model:claude-opus-4-8) ⇒ Dh=true ⇒ SHORT (byte-anchor).
         let short = tool
             .prompt(&PromptOptions {
@@ -554,6 +609,60 @@ mod tests {
             short,
             "Fast file pattern matching. Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\". Returns matching file paths sorted by modification time."
         );
+    }
+
+    /// ST-03: `ISa(e)`'s long arm is `DZ()==="default"?BJb:znp` — a non-default
+    /// subagent steer DROPS the whole delegate-to-Agent bullet (it is not
+    /// reworded), leaving the four `znp` bullets and no trailing newline.
+    #[test]
+    fn agent_bullet_is_gated_on_the_subagent_steer() {
+        let with_bullet = glob_description(true);
+        let without = glob_description(false);
+        assert_eq!(with_bullet, format!("{without}{GLOB_DESCRIPTION_AGENT_BULLET}"));
+        assert!(with_bullet.ends_with(
+            "- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead (if available)"
+        ));
+        assert!(!without.contains("Agent"));
+        assert!(without.ends_with("- Use this tool when you need to find files by name patterns"));
+    }
+
+    /// ST-06: `h0i(Bm,[["pattern",e],["path",t]])` runs BEFORE the directory
+    /// stat, reports only the FIRST offending field, and renders the literal
+    /// `(\0)`.
+    #[tokio::test]
+    async fn null_bytes_are_rejected_before_the_directory_check() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        let err = tool
+            .validate_input(&json!({ "pattern": "a\0b" }), &fresh_ctx())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.0,
+            "Glob pattern cannot contain null bytes (\\0). Remove the null byte and try again."
+        );
+        // `path` is checked second — and wins over the (nonexistent) directory
+        // error that would otherwise fire.
+        let err = tool
+            .validate_input(&json!({ "pattern": "*.rs", "path": "no_such\0dir" }), &fresh_ctx())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.0,
+            "Glob path cannot contain null bytes (\\0). Remove the null byte and try again."
+        );
+        // `pattern` is found first when both are poisoned (JS `find`).
+        let err = tool
+            .validate_input(&json!({ "pattern": "a\0", "path": "b\0" }), &fresh_ctx())
+            .await
+            .unwrap_err();
+        assert!(err.0.starts_with("Glob pattern "), "got: {}", err.0);
+        // Clean input still passes.
+        assert!(tool
+            .validate_input(&json!({ "pattern": "*.rs" }), &fresh_ctx())
+            .await
+            .is_ok());
     }
 
     /// The glob env toggles (`CLAUDE_CODE_GLOB_*`) are process-global; cargo runs
@@ -699,6 +808,41 @@ mod tests {
                 "non-denied file stays visible: {matches:?}"
             );
         }
+    }
+
+    /// ST-15: an UNROOTED multi-segment deny entry is prefixed `!**/{p}` (oracle
+    /// `PEf`: ``w.startsWith("/")?`!${w}`:`!**/${w}` ``), so it prunes at ANY
+    /// depth. With the old bare `!{p}` the nested copy stayed visible.
+    #[tokio::test]
+    async fn unrooted_read_deny_exclude_glob_prunes_at_any_depth() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        let nested = tmp.path().join("sub").join("secrets");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("key.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("visible.rs"), "x").unwrap();
+
+        let (mut ctx, _sink) = make_ctx(&tmp);
+        ctx.read_deny_exclude_globs = vec!["secrets/**".to_string()];
+        let tool = GlobTool::new(ctx);
+        let matches: Vec<String> = tool
+            .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap()
+            .data["filenames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().replace('\\', "/"))
+            .collect();
+        assert!(
+            !matches.iter().any(|m| m.ends_with("sub/secrets/key.rs")),
+            "unrooted deny must prune at any depth: {matches:?}"
+        );
+        assert!(
+            matches.iter().any(|m| m.ends_with("visible.rs")),
+            "non-denied file stays visible: {matches:?}"
+        );
     }
 
     /// The headline recursion fix: a BARE `*.rs` must match files at ANY depth

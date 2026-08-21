@@ -82,19 +82,45 @@ const VCS_DIRECTORIES_TO_EXCLUDE: [&str; 6] = [".git", ".svn", ".hg", ".bzr", ".
 /// `--max-columns 500` equivalent (`GrepTool.ts:338`).
 const MAX_COLUMNS: usize = 500;
 
+/// `Uve.maxResultSizeChars` = `20000` (binary 2.1.238 @289933813). Grep's own
+/// cap — five times smaller than Glob's, and not the shared default.
+const GREP_MAX_RESULT_SIZE_CHARS: usize = 20_000;
+
 /// Model-facing description / prompt (`prompt.ts:6-18`, byte-faithful with
 /// `GREP_TOOL_NAME='Grep'`, `AGENT_TOOL_NAME='Agent'`, `BASH_TOOL_NAME='Bash'`).
-const GREP_DESCRIPTION: &str = r#"A powerful search tool built on ripgrep
+/// Everything down to the "Output modes:" bullet — the gated Agent bullet and
+/// the tail live in [`GREP_DESCRIPTION_AGENT_BULLET`] / [`GREP_DESCRIPTION_TAIL`]
+/// (ST-03).
+const GREP_DESCRIPTION_HEAD: &str = r#"A powerful search tool built on ripgrep
 
   Usage:
   - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` through a registered shell tool. The Grep tool has been optimized for correct permissions and access.
   - Supports full regex syntax (e.g., "log.*Error", "function\s+\w+")
   - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
   - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
-  - Use Agent tool (if available) for open-ended searches requiring multiple rounds
-  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\{\}` to find `interface{}` in Go code)
+"#;
+
+/// ST-03: the oracle wraps this ONE line in `${DZ()==="default"?…:""}` (2.1.238
+/// `Wka`, source text @286224735) — under a non-default subagent steer the whole
+/// line, newline included, disappears from the middle of the bullet list. Port
+/// gate: `traits::live_sessions::subagent_steer_is_default()`.
+const GREP_DESCRIPTION_AGENT_BULLET: &str =
+    "  - Use Agent tool (if available) for open-ended searches requiring multiple rounds\n";
+
+/// The bullets that follow the gated Agent line.
+const GREP_DESCRIPTION_TAIL: &str = r#"  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\{\}` to find `interface{}` in Go code)
   - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \{[\s\S]*?field`, use `multiline: true`
 "#;
+
+/// `Wka(e)`'s long arm, with the Agent bullet gated exactly as upstream.
+fn grep_description(steer_is_default: bool) -> String {
+    let bullet = if steer_is_default {
+        GREP_DESCRIPTION_AGENT_BULLET
+    } else {
+        ""
+    };
+    format!("{GREP_DESCRIPTION_HEAD}{bullet}{GREP_DESCRIPTION_TAIL}")
+}
 
 /// The SHORT Grep prompt — byte-locked VERBATIM to claude-code `Ajr(e)`'s
 /// `Dh(e)===true` branch (binary offset 197076712), served to current-gen
@@ -295,17 +321,121 @@ fn split_glob_patterns(glob: &str) -> Vec<String> {
     out
 }
 
-/// Decode an emitted line: lossy-UTF8, strip one trailing CRLF, truncate to
-/// `MAX_COLUMNS` (`--max-columns 500` approximation).
+/// Decode an emitted line: lossy-UTF8, strip one trailing CRLF. The
+/// `--max-columns` rule is applied later, at emit time — see
+/// [`apply_max_columns`] (ST-13).
 fn decode_line(bytes: &[u8]) -> String {
     let cow = String::from_utf8_lossy(bytes);
     let s = cow.as_ref();
     let s = s.strip_suffix('\n').unwrap_or(s);
     let s = s.strip_suffix('\r').unwrap_or(s);
-    if s.chars().count() > MAX_COLUMNS {
-        s.chars().take(MAX_COLUMNS).collect()
+    s.to_string()
+}
+
+/// ST-13 — the real `--max-columns 500` behaviour. The oracle pushes
+/// `"--max-columns","500"` (`Nhv`, @289928728) and ripgrep 14.1.1 does NOT
+/// truncate an over-long line: it REPLACES the text with a marker, a different
+/// one for matching vs. context lines. Verified against the ripgrep the oracle
+/// ships (`ARGV0=rg ~/.local/bin/claude -n --max-columns 500 …`):
+///
+/// ```text
+/// 1:short MATCH here
+/// 2:[Omitted long matching line]
+/// 1-[Omitted long context line]
+/// ```
+///
+/// The port used to slice the line to its first 500 CHARS, which both invented
+/// text ripgrep never prints and (for multi-byte input) applied the wrong
+/// threshold — rg measures BYTES, including the line terminator, so a 500-byte
+/// line with its newline is 501 and is omitted while a 499-byte one is kept.
+/// Under `-o` the rule applies to each emitted MATCH, not to its source line
+/// (`rg -n -o --max-columns 500 MATCH` on a 1200-byte line whose match is at
+/// column 900 prints `1:MATCH`), which is why callers pass the emitted text.
+fn apply_max_columns(text: String, is_context: bool) -> String {
+    if text.len() < MAX_COLUMNS {
+        return text;
+    }
+    if is_context {
+        "[Omitted long context line]".to_string()
     } else {
-        s.to_string()
+        "[Omitted long matching line]".to_string()
+    }
+}
+
+/// ST-07 — 1:1 port of the `head_limit`/`offset` guard in the oracle's Grep
+/// `validateInput` (2.1.238 @289934948; 2.1.220 byte-identical):
+///
+/// ```js
+/// for(let[a,l]of[["head_limit",o],["offset",i]])
+///   if(l!==void 0&&(!Number.isInteger(l)||l<0))
+///     return{result:!1,message:`${a} must be a whole number of 0 or more, got ${l}.${a==="head_limit"?" Pass 0 for unlimited.":""}`,errorCode:2};
+/// ```
+///
+/// `!==void 0` is "key present" — an explicit `null`, a fraction and a negative
+/// all fail. The value is first run through the schema's `ece` preprocess
+/// (`$Wr`: trim, `/^[-+]?\d+(\.\d+)?$/` → `Number`), so `"3"` is a valid 3
+/// while `"3.5"` is a rejected 3.5 and `"abc"` stays a string. The rendered
+/// value follows JS `${l}` (`1.5` → `1.5`, `null` → `null`, a string → itself).
+fn validate_whole_number(name: &str, value: Option<&Value>) -> Result<(), ValidationError> {
+    let Some(value) = value else { return Ok(()) };
+    // `$Wr` — the `ece(...)` preprocess: a numeric string becomes a number.
+    let coerced: Option<f64> = match value {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => {
+            let t = s.trim();
+            let numeric = {
+                let body = t
+                    .strip_prefix('-')
+                    .or_else(|| t.strip_prefix('+'))
+                    .unwrap_or(t);
+                let (int_part, frac_part) = match body.split_once('.') {
+                    Some((i, f)) => (i, Some(f)),
+                    None => (body, None),
+                };
+                !int_part.is_empty()
+                    && int_part.bytes().all(|b| b.is_ascii_digit())
+                    && frac_part.is_none_or(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
+            };
+            if numeric {
+                t.parse::<f64>().ok().filter(|f| f.is_finite())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    if coerced.is_some_and(|f| f.fract() == 0.0 && f >= 0.0) {
+        return Ok(());
+    }
+    // JS `${l}` rendering of the ORIGINAL (post-preprocess) value.
+    let rendered = match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::String(s) => match coerced {
+            // The preprocess replaced the string with a number, so `${l}`
+            // prints the number.
+            Some(f) => render_js_number(f),
+            None => s.clone(),
+        },
+        Value::Number(n) => n.as_f64().map_or_else(|| n.to_string(), render_js_number),
+        other => other.to_string(),
+    };
+    let hint = if name == "head_limit" {
+        " Pass 0 for unlimited."
+    } else {
+        ""
+    };
+    Err(ValidationError(format!(
+        "{name} must be a whole number of 0 or more, got {rendered}.{hint}"
+    )))
+}
+
+/// JS `${n}` for a finite number: integers print without a `.0` tail.
+fn render_js_number(f: f64) -> String {
+    if f.fract() == 0.0 && f.abs() < 1e21 {
+        format!("{f:.0}")
+    } else {
+        format!("{f}")
     }
 }
 
@@ -351,8 +481,11 @@ fn value_as_bool(v: &Value) -> Option<bool> {
 /// `GREP_RECORDS_CAP` as a pure memory valve, but the search keeps running so the
 /// count stays accurate.
 struct GrepSink {
-    /// `(line_number, text)` records in encounter order (content mode only).
-    records: Vec<(Option<u64>, String)>,
+    /// `(line_number, text, is_context)` records in encounter order (content
+    /// mode only). `is_context` separates `rg`'s context lines from its
+    /// matching lines: only matching lines are subject to `-o`, and the two
+    /// carry different `--max-columns` markers (ST-13/ST-14).
+    records: Vec<(Option<u64>, String, bool)>,
     /// True count of *matched* (not context) lines seen — never capped.
     match_count: usize,
     /// Set when the records valve (`GREP_RECORDS_CAP`) stopped *recording*
@@ -382,7 +515,7 @@ impl Sink for GrepSink {
         // appending to `records`.
         if self.record_lines && self.records.len() < GREP_RECORDS_CAP {
             self.records
-                .push((mat.line_number(), decode_line(mat.bytes())));
+                .push((mat.line_number(), decode_line(mat.bytes()), false));
             if self.records.len() >= GREP_RECORDS_CAP {
                 self.overflow = true;
             }
@@ -394,7 +527,7 @@ impl Sink for GrepSink {
         // Context lines also respect the records valve (they share the buffer).
         if self.record_lines && self.records.len() < GREP_RECORDS_CAP {
             self.records
-                .push((ctx.line_number(), decode_line(ctx.bytes())));
+                .push((ctx.line_number(), decode_line(ctx.bytes()), true));
         }
         Ok(true)
     }
@@ -441,6 +574,20 @@ impl GrepTool {
     }
 }
 
+/// ST-08: property INSERTION order is the wire order (`serde_json` is built
+/// with `preserve_order`), and it must be the oracle's `Dhv` order:
+/// `pattern, path, glob, output_mode, -B, -A, -C, context, -n, -i, -o, type,
+/// head_limit, offset, multiline` (2.1.238 @289931400+). The port previously
+/// hoisted `type` to 4th and emitted `-A` before `-B`.
+///
+/// Also ST-08: NO `default` keys. Every optional field upstream is
+/// `ece(Xe().optional())` / `xq(Bt().optional())` — a `z.preprocess` around a
+/// bare `.optional()` with no `.default()`, which zod-to-json-schema renders
+/// WITHOUT a `default`. (Contrast Edit's `replace_all: xq(Bt().default(!1)
+/// .optional())`, which does carry one — and which `edit.rs` correctly emits.)
+/// The six the port used to inject (`output_mode`, `-n`, `-i`, `-o`, `offset`,
+/// `multiline`) were model-visible bytes the oracle never sends; the runtime
+/// defaults themselves are unaffected — they live in `call()`.
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
@@ -450,23 +597,22 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "pattern":     { "type": "string", "description": "The regular expression pattern to search for in file contents" },
             "path":        { "type": "string", "description": "File or directory to search in (rg PATH). Defaults to current working directory." },
             "glob":        { "type": "string", "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg --glob" },
-            "type":        { "type": "string", "description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than include for standard file types." },
             "output_mode": {
                 "type": "string",
                 "enum": ["content", "files_with_matches", "count"],
-                "default": "files_with_matches",
                 "description": "Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\"."
             },
-            "-A":          { "type": "number", "description": "Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise." },
             "-B":          { "type": "number", "description": "Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise." },
+            "-A":          { "type": "number", "description": "Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise." },
             "-C":          { "type": "number", "description": "Alias for context." },
             "context":     { "type": "number", "description": "Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise." },
-            "-n":          { "type": "boolean", "default": true, "description": "Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise. Defaults to true." },
-            "-i":          { "type": "boolean", "default": false, "description": "Case insensitive search (rg -i)" },
-            "-o":          { "type": "boolean", "default": false, "description": "Print only the matched (non-empty) parts of each matching line, one match per output line (rg -o / --only-matching). Requires output_mode: \"content\", ignored otherwise. Defaults to false." },
+            "-n":          { "type": "boolean", "description": "Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise. Defaults to true." },
+            "-i":          { "type": "boolean", "description": "Case insensitive search (rg -i)" },
+            "-o":          { "type": "boolean", "description": "Print only the matched (non-empty) parts of each matching line, one match per output line (rg -o / --only-matching). Requires output_mode: \"content\", ignored otherwise. Defaults to false." },
+            "type":        { "type": "string", "description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than include for standard file types." },
             "head_limit":  { "type": "number", "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). Defaults to 250 when unspecified. Pass 0 for unlimited (use sparingly — large result sets waste context)." },
-            "offset":      { "type": "number", "default": 0, "description": "Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0." },
-            "multiline":   { "type": "boolean", "default": false, "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false." }
+            "offset":      { "type": "number", "description": "Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0." },
+            "multiline":   { "type": "boolean", "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false." }
         }
     })
 });
@@ -487,8 +633,13 @@ impl Tool for GrepTool {
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
     }
+    /// ST-10: Grep carries its OWN cap. Oracle 2.1.238 `Uve = es({name:Am,
+    /// searchHint:"search file contents with regex (ripgrep)",
+    /// maxResultSizeChars:20000, …})` at binary @289933813 — the port was
+    /// returning the generic 30_000, so Grep results were truncated 1.5x later
+    /// than upstream. Glob's cap is 100_000 (see `glob.rs`); they differ.
     fn max_result_size_chars(&self) -> usize {
-        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        GREP_MAX_RESULT_SIZE_CHARS
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         true
@@ -503,11 +654,28 @@ impl Tool for GrepTool {
     /// only rejection is ENOENT, worded `Path does not exist: …` rather than
     /// Glob's `Directory does not exist: …` (see [`crate::dir_validate`]).
     /// The cwd (`er()`) is the tool's live workspace.
+    ///
+    /// The oracle runs three guards, in this order:
+    /// 1. ST-06 `h0i(Am,[["pattern",e],["path",t],["glob",r],["type",n]])` — a
+    ///    NUL in any of the FOUR string fields (Glob only checks two);
+    /// 2. ST-07 the `head_limit`/`offset` whole-number loop;
+    /// 3. the ENOENT `stat` on `path`.
     async fn validate_input(
         &self,
         input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
+        crate::dir_validate::validate_no_null_bytes(
+            TOOL_NAME,
+            &[
+                ("pattern", input.get("pattern").and_then(Value::as_str)),
+                ("path", input.get("path").and_then(Value::as_str)),
+                ("glob", input.get("glob").and_then(Value::as_str)),
+                ("type", input.get("type").and_then(Value::as_str)),
+            ],
+        )?;
+        validate_whole_number("head_limit", input.get("head_limit"))?;
+        validate_whole_number("offset", input.get("offset"))?;
         if let Some(path) = input.get("path").and_then(Value::as_str) {
             crate::dir_validate::validate_grep_path(path, &self.cwd_now())?;
         }
@@ -525,20 +693,23 @@ impl Tool for GrepTool {
         }
     }
 
+    /// Oracle `async description(){return Wka(void 0)}` — `qk(undefined)` is
+    /// false, so this is the LONG arm, whose Agent bullet is itself gated on the
+    /// subagent steer (ST-03).
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        GREP_DESCRIPTION.to_string()
+        grep_description(traits::live_sessions::subagent_steer_is_default())
     }
 
     async fn prompt(&self, opts: &PromptOptions) -> String {
-        // Model-gated, mirroring claude-code `prompt({model:e}){return Ajr(e)}`
-        // where `Ajr(e){if(Dh(e))return SHORT; return LONG}` (binary offset
-        // 197076712). `description(){return Ajr(void 0)}` is hard-pinned to the
-        // LONG (`Dh(undefined)`=false). Predicate shared with TodoWrite via
+        // Model-gated, mirroring claude-code `prompt({model:e}){return Wka(e)}`
+        // where `Wka(e){if(qk(e))return SHORT; return LONG}` (2.1.238 source text
+        // @286224735). `description(){return Wka(void 0)}` is hard-pinned to the
+        // LONG (`qk(undefined)`=false). Predicate shared with TodoWrite via
         // `tool_api`.
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
             GREP_PROMPT_SHORT.to_string()
         } else {
-            GREP_DESCRIPTION.to_string()
+            grep_description(traits::live_sessions::subagent_steer_is_default())
         }
     }
 
@@ -785,11 +956,21 @@ impl Tool for GrepTool {
 
             if content_mode {
                 let rel = to_relative_path(path, &cwd_for_rel);
-                for (lnum, text) in &sink.records {
-                    if only_matching {
+                for (lnum, text, is_context) in &sink.records {
+                    // ST-14: `-o` applies to MATCHING lines only. The oracle
+                    // pushes `-o` and the `-C/-B/-A` block independently
+                    // (`if(d&&o==="content")_.push("-o")` … `if(o==="content"){…}`,
+                    // @289928728), and ripgrep prints context lines in full
+                    // under `-o` — verified:
+                    //   `rg -n -o -C 1 'MATCH[0-9]?'` → `2-bbb`, `3:MATCH`,
+                    //   `3:MATCH2`, `4-ccc`.
+                    if only_matching && !*is_context {
                         // rg -o: one matched substring per output line (a line
                         // with multiple matches yields multiple output lines).
+                        // ST-13: `--max-columns` measures the EMITTED match here,
+                        // not its source line.
                         for m in only_matching_spans(&matcher, text) {
+                            let m = apply_max_columns(m, false);
                             let line = match (show_line_numbers, lnum) {
                                 (true, Some(n)) => format!("{rel}:{n}:{m}"),
                                 _ => format!("{rel}:{m}"),
@@ -797,6 +978,7 @@ impl Tool for GrepTool {
                             content_lines.push(line);
                         }
                     } else {
+                        let text = apply_max_columns(text.clone(), *is_context);
                         let line = match (show_line_numbers, lnum) {
                             (true, Some(n)) => format!("{rel}:{n}:{text}"),
                             _ => format!("{rel}:{text}"),
@@ -881,8 +1063,18 @@ impl Tool for GrepTool {
             let (limited, applied_limit) = apply_head_limit(count_lines, head_limit, offset);
             let total = total_matches;
             let limit_info = format_limit_info(applied_limit, offset);
+            // ST-09: `g = n || (m>0 ? "No entries at this offset" : "No matches
+            // found")` (oracle `mapToolResultToToolResultBlockParam`, count
+            // branch @289935600) — `m` is `numMatches`, the TOTAL across every
+            // file BEFORE pagination. So a page past the end says "No entries at
+            // this offset", not "No matches found". The summary line is appended
+            // either way (`g+y`).
             let raw_content = if limited.is_empty() {
-                "No matches found".to_string()
+                if total_matches > 0 {
+                    "No entries at this offset".to_string()
+                } else {
+                    "No matches found".to_string()
+                }
             } else {
                 limited.join("\n")
             };
@@ -936,6 +1128,8 @@ impl Tool for GrepTool {
                 }
             });
             let sorted: Vec<PathBuf> = files_matched.into_iter().map(|(p, _)| p).collect();
+            // ST-09: `totalFiles: A.length` — the match count BEFORE pagination.
+            let total_files = sorted.len();
             let (limited, applied_limit) = apply_head_limit(sorted, head_limit, offset);
             let relpaths: Vec<String> = limited
                 .iter()
@@ -943,8 +1137,18 @@ impl Tool for GrepTool {
                 .collect();
             let num_files = relpaths.len();
             let limit_info = format_limit_info(applied_limit, offset);
+            // ST-09: the oracle's files branch is
+            // `if(t===0) content = c&&(s??0)>0 ? `No entries at this offset.
+            // [Showing results with pagination = ${d}]` : "No files found"`
+            // (t=numFiles, c=appliedOffset, s=totalFiles, d=bKa(limit,offset)).
+            // Note the pagination note is INLINE after a period here, unlike
+            // content mode's `\n\n[Showing …]`.
             let model = if num_files == 0 {
-                "No files found".to_string()
+                if applied_offset.is_some() && total_files > 0 {
+                    format!("No entries at this offset. [Showing results with pagination = {limit_info}]")
+                } else {
+                    "No files found".to_string()
+                }
             } else {
                 let suffix = if limit_info.is_empty() {
                     String::new()
@@ -957,11 +1161,15 @@ impl Tool for GrepTool {
                     relpaths.join("\n")
                 )
             };
-            // binary: {mode, filenames, numFiles, appliedLimit?, appliedOffset?} —
-            // NO content (the filenames ARE the result); model text → channel.
+            // binary: {mode, filenames, numFiles, totalFiles, appliedLimit?,
+            // appliedOffset?} — NO content (the filenames ARE the result); model
+            // text → channel. `totalFiles` is declared in the oracle's
+            // outputSchema (`Hhv`) and drives the "No entries at this offset"
+            // page above (ST-09).
             data.insert("mode".to_string(), json!("files_with_matches"));
             data.insert("filenames".to_string(), json!(relpaths));
             data.insert("numFiles".to_string(), json!(num_files));
+            data.insert("totalFiles".to_string(), json!(total_files));
             if let Some(l) = applied_limit {
                 data.insert("appliedLimit".to_string(), json!(l));
             }
@@ -1078,7 +1286,7 @@ mod tests {
                 },
             )
             .await;
-        assert_eq!(d, GREP_DESCRIPTION);
+        assert_eq!(d, grep_description(true));
         // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
         let long = tool
             .prompt(&PromptOptions {
@@ -1087,7 +1295,7 @@ mod tests {
                 model_profile: None,
             })
             .await;
-        assert_eq!(long, GREP_DESCRIPTION);
+        assert_eq!(long, grep_description(true));
         // prompt(model:claude-opus-4-8) ⇒ Dh=true ⇒ SHORT (byte-anchor).
         let short = tool
             .prompt(&PromptOptions {
@@ -1636,8 +1844,17 @@ mod tests {
             .await
             .unwrap();
         let c = content_str(&result);
-        assert!(c.contains(&"a".repeat(500)), "should keep 500 a's");
-        assert!(!c.contains(&"a".repeat(501)), "should truncate at 500");
+        // ST-13: ripgrep's `--max-columns 500` does NOT truncate the line — it
+        // REPLACES it with an omission marker. This test used to assert the
+        // port's invented "slice to the first 500 chars" behaviour, i.e. it was
+        // pinning text ripgrep never prints.
+        // Content mode prefixes the filename, so the whole rendered line is
+        // `a.txt:` + the marker — the marker REPLACES the line's text.
+        assert_eq!(c, "a.txt:[Omitted long matching line]", "got:\n{c}");
+        assert!(
+            !c.contains("aaaa"),
+            "the line content must not survive at all; got:\n{c}"
+        );
     }
 
     #[tokio::test]

@@ -381,10 +381,45 @@ pub const BUILTIN: &[SlashCommand] = &[
         advertised: true,
         run: ChatWidget::cmd_clear,
     },
+    // SLASH-11 (cc2.1.238): the oracle ships TWO independent `local-jsx`
+    // objects with no cross-alias —
+    //   @296226382 {type:"local-jsx",name:"tui",
+    //     description:"Set the terminal UI renderer (default | fullscreen)",
+    //     argumentHint:"[default|fullscreen]"}
+    //   @296317867 {type:"local-jsx",name:"focus",
+    //     description:"Toggle focus view: just your prompt, summary, and
+    //     response",immediate:!0,requires:{ink:!0}}
+    // `command-api`'s table already carries both names with those exact
+    // strings; this row now matches its `/tui` half (description + hint +
+    // an argument tail that dispatches instead of falling through to the
+    // model as a prompt). Upstream `/focus` is NOT an alias of `/tui` —
+    // it has its own palette row, its own description and its own help line —
+    // so `/focus` gets its own advertised row below instead of hiding inside
+    // `/tui`'s alias list, and the two surfaces finally agree.
+    //
+    // RESIDUAL GAP (deliberate, deferred): both rows still dispatch to
+    // [`ChatWidget::cmd_tui`], whose only outcome is
+    // `ChatOutcome::ToggleFullscreen` — a pure toggle owned by `App`. So
+    // `/tui default|fullscreen` toggles rather than sets (observable only when
+    // the requested mode is already active), and `/focus` toggles the
+    // fullscreen renderer that upstream's focus view is built on rather than
+    // the focus view itself (LingXi's ratatui backend has no focus renderer).
+    // Both halves need `chat_widget`/`app` changes — a set-mode outcome and a
+    // focus view — which is why only the advertised metadata moved here.
     SlashCommand {
         name: "/tui",
-        aliases: &["/focus"],
-        description: "Toggle full-screen mode",
+        aliases: &[],
+        description: "Set the terminal UI renderer (default | fullscreen)",
+        dynamic_description: None,
+        hint: "[default|fullscreen]",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_tui,
+    },
+    SlashCommand {
+        name: "/focus",
+        aliases: &[],
+        description: "Toggle focus view: just your prompt, summary, and response",
         dynamic_description: None,
         hint: "",
         args: ArgSpec::None,

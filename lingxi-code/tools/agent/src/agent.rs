@@ -515,7 +515,10 @@ fn render_completed_model_content(
 /// in `lingxi-coordinator` post-M5).
 pub struct AgentTool {
     ctx: BuiltinToolContext,
-    background_available: bool,
+    /// Whether the ADVERTISED input schema keeps `run_in_background` (binary
+    /// `nul` @292883815 — see [`AgentTool::new`]). Schema-only: the async
+    /// DISPATCH gate is `!WA()` alone and is evaluated inline in `call`.
+    advertise_run_in_background: bool,
 }
 
 /// Normalize a subagent `description` the way the binary does — `replace(/\s+/g,
@@ -593,16 +596,47 @@ impl AgentTool {
     }
 
     /// Construct.
+    ///
+    /// Resolves the advertised-schema gate, binary `nul` @292883815:
+    ///
+    /// ```js
+    /// nul=we(()=>{let e=e9v().omit({cwd:!0});return WA()||z1e()?e.omit({run_in_background:!0}):e})
+    /// ```
+    ///
+    /// * `WA()` @286250643 = `wZe().backgroundTasksDisabled||CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
+    ///   — the host-scoped half is settable only by an in-process SDK host, which
+    ///   LingXi does not have, so the port reads the env kill-switch
+    ///   (`LINGXI_DISABLE_BACKGROUND_TASKS`) alone, exactly as every other
+    ///   `WA()`/`DT()` site here does.
+    /// * `z1e()` @286314232 = `Obp()!=="disabled"` — the RAW fork-subagent
+    ///   FEATURE flag. It is NOT `is_fork_subagent_enabled`: the coordinator /
+    ///   non-interactive conditioning lives in `CGf`'s `forkAvailable` argument
+    ///   (`i = o && r`), not in `z1e()` itself, and this schema builder has no
+    ///   session context at all. The port's stand-in for the missing GrowthBook
+    ///   flag is `LINGXI_FORK_SUBAGENT` (see
+    ///   [`traits::fork_subagent::is_fork_subagent_enabled`]), read raw here.
+    ///
+    /// The pre-2.1.238 port gated on `traits::subscription::is_pro_plan()`
+    /// instead of the fork flag. That was wrong in both directions: on a Pro plan
+    /// it hid `run_in_background` and forced synchronous dispatch, and with fork
+    /// enabled it kept advertising a field the binary omits. All four
+    /// `Cc()==="pro"` sites in 2.1.238 (284189548, 285093692, 292442005,
+    /// 302317223) are the plan predicate, the model-picker suffix, the
+    /// Agent-prompt discouragement block, and a statusline hint — none gates
+    /// background agents.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        let background_available = !traits::env::is_env_truthy(
+        let background_tasks_disabled = traits::env::is_env_truthy(
             std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
                 .ok()
                 .as_deref(),
-        ) && !traits::subscription::is_pro_plan();
+        );
+        let fork_feature_enabled =
+            traits::env::is_env_truthy(std::env::var("LINGXI_FORK_SUBAGENT").ok().as_deref());
+        let advertise_run_in_background = !background_tasks_disabled && !fork_feature_enabled;
         Self {
             ctx,
-            background_available,
+            advertise_run_in_background,
         }
     }
 
@@ -1661,7 +1695,7 @@ impl Tool for AgentTool {
     fn input_schema(&self) -> &Value {
         // claude advertises `yJp().omit({cwd:!0})` — the model-facing schema
         // never exposes `cwd` (set internally by isolation / explicit override).
-        if self.background_available {
+        if self.advertise_run_in_background {
             &AGENT_INPUT_SCHEMA_MODEL
         } else {
             &AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND
@@ -2262,9 +2296,16 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 .ok()
                 .as_deref(),
         );
+        // Binary @292889340: `let Q=sv(),Y=z1e()&&!w,J=WA(); … let U=q||(o===!0||
+        // G.background===!0||Q&&!w||Y||!w&&o!==!1)&&!J`. The ONLY negative gate on
+        // the local-async group is `!J` = `!WA()` — the background-tasks
+        // kill-switch. The fork flag `z1e()` appears as a POSITIVE term (`Y`,
+        // fork forces background) and the plan predicate `Cc()` does not appear at
+        // all, so neither may suppress async dispatch here. (Before 2.1.238 the
+        // port ANDed in `is_pro_plan()`, which forced every Pro-plan subagent to
+        // run synchronously; the binary never does that.)
         let run_in_background = (parsed.run_in_background.unwrap_or(true) || selected.background)
-            && !background_tasks_disabled
-            && self.background_available;
+            && !background_tasks_disabled;
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,

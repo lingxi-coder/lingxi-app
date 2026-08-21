@@ -12,11 +12,11 @@
 //! Where `<description>` is `core_description(name)` — the real per-command
 //! one-liner for every visible builtin with a claude-code analogue (cp-01),
 //! falling back to the literal `"(unimplemented in v0.6.0)"` only for the few
-//! LingXi-specific / internal commands without one. The 27 hidden/disabled
+//! LingXi-specific / internal commands without one. The 28 hidden/disabled
 //! commands ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
-//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 79
-//! visible commands = 80 lines.
+//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 80
+//! visible commands = 81 lines.
 
 use crate::builtin_support::names::{
     core_description, is_command_env_disabled, is_palette_hidden, BUILTIN_COMMAND_NAMES,
@@ -88,10 +88,13 @@ mod tests {
         // 1 header + 80 visible commands = 81 lines (each terminated by '\n').
         // The hidden/disabled commands (is_palette_hidden) are filtered out,
         // matching claude-code's `!isHidden && !$te` help/palette filter.
-        // (107 builtins − 27 hidden = 80 visible, with no DISABLE_* env set.)
+        // (108 builtins − 28 hidden = 80 visible, with no DISABLE_* env set.)
         // Was 79 visible until SLASH-06: `share` left the hidden-stub table and
-        // `bug` joined the visible set, so one command moved from hidden to
-        // visible and the builtin total is unchanged.
+        // `bug` joined the visible set (still 107 builtins, still 79 visible
+        // net); then 80 visible while `/version` was still advertised, until
+        // SLASH-14 filtered it out — both of its oracle objects carry
+        // `isEnabled:()=>!1`, so claude-code never lists it either. SLASH-13
+        // then added the ungated `powerup` object: 108 builtins, 80 visible.
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
         // `DISABLE_*_COMMAND` mutation can't transiently drop a counted command.
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
@@ -106,13 +109,15 @@ mod tests {
     #[test]
     fn hidden_and_disabled_commands_are_omitted() {
         use crate::builtin_support::names::{
-            CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS, USAGE_CREDITS_BNR_GATED,
+            CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS, STATICALLY_DISABLED_COMMANDS,
+            USAGE_CREDITS_BNR_GATED,
         };
         let s = render_help_screen();
         for name in HIDDEN_PALETTE_COMMANDS
             .iter()
             .copied()
             .chain(USAGE_CREDITS_BNR_GATED.iter().copied())
+            .chain(STATICALLY_DISABLED_COMMANDS.iter().copied())
             .chain(CORRECT_BY_DESIGN_STUBS.iter().map(|(n, _)| *n))
         {
             let needle = format!("  /{name} ");
@@ -180,7 +185,7 @@ mod tests {
         let s = render_help_screen();
         for name in BUILTIN_COMMAND_NAMES {
             // Hidden/disabled commands are filtered out (see is_palette_hidden);
-            // only the 68 visible commands appear.
+            // only the 80 visible commands appear.
             if is_palette_hidden(name) {
                 continue;
             }

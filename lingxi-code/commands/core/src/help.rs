@@ -69,11 +69,16 @@ mod tests {
                 // Hidden/disabled commands are filtered out of /help.
                 assert!(!s.contains("  /heapdump "));
                 assert!(!s.contains("  /ant-trace "));
-                // 81 newlines total (1 header + 80 visible commands). Was 80
-                // until SLASH-06 gave `bug` its own visible row and dropped
-                // `share`, which is that command's alias rather than a command.
+                // 81 newlines total (1 header + 80 visible commands).
+                // SLASH-06 gave `bug` its own visible row and dropped `share`
+                // (that command's alias, not a command); SLASH-14 then removed
+                // `/version`, whose two oracle objects @2.1.238 296268759 both
+                // carry `isEnabled:()=>!1`; SLASH-13 added the ungated
+                // `/powerup` object (2.1.238 @296124285).
                 assert_eq!(s.matches('\n').count(), 81);
                 assert!(s.contains("  /bug "));
+                assert!(s.contains("  /powerup "));
+                assert!(!s.contains("  /version "));
             }
             other => panic!("expected Done, got {other:?}"),
         }

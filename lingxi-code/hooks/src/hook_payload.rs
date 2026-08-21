@@ -214,6 +214,13 @@ pub struct PreToolUsePayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// `prompt_id` — UUID correlating a user prompt with all subsequent
+    /// events until the next prompt. Oracle `createBaseHookInput`
+    /// (2.1.238 minified `c_`, BIN off 296935693) emits it between `cwd`
+    /// and `permission_mode`: `prompt_id:Vut()??void 0`. Absent until the
+    /// first user input of the process lifetime, so `None` omits the key.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -237,6 +244,9 @@ pub struct PostToolUsePayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -268,6 +278,9 @@ pub struct StopPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -304,6 +317,9 @@ pub struct SubagentStopPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     pub stop_hook_active: bool,
@@ -331,6 +347,9 @@ pub struct TaskCompletedPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -362,6 +381,9 @@ pub struct TaskCreatedPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -397,6 +419,9 @@ pub struct TeammateIdlePayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -421,6 +446,9 @@ pub struct UserPromptSubmitPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -450,6 +478,9 @@ pub struct SessionStartPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -479,6 +510,9 @@ pub struct StopFailurePayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -509,6 +543,9 @@ pub struct PostToolUseFailurePayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -541,6 +578,9 @@ pub struct SessionEndPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -566,6 +606,9 @@ pub struct PreCompactPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -592,6 +635,9 @@ pub struct PostCompactPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -616,6 +662,9 @@ pub struct NotificationPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -644,6 +693,9 @@ pub struct PermissionRequestPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -672,6 +724,9 @@ pub struct PermissionDeniedPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -698,6 +753,9 @@ pub struct SetupPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -722,6 +780,9 @@ pub struct SubagentStartPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     pub agent_id: String,
@@ -739,6 +800,9 @@ pub struct CwdChangedPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -763,6 +827,9 @@ pub struct DirectoryAddedPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -789,6 +856,9 @@ pub struct FileChangedPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -811,6 +881,9 @@ pub struct WorktreeRemovePayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -835,6 +908,9 @@ pub struct ConfigChangePayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -862,6 +938,9 @@ pub struct InstructionsLoadedPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -895,6 +974,9 @@ pub struct ElicitationPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -932,6 +1014,9 @@ pub struct ElicitationResultPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -972,6 +1057,9 @@ pub struct WorktreeCreatePayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -995,6 +1083,9 @@ pub struct PostToolBatchPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1018,6 +1109,9 @@ pub struct UserPromptExpansionPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1047,6 +1141,9 @@ pub struct MessageDisplayPayload {
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
+    /// See [`PreToolUsePayload::prompt_id`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]

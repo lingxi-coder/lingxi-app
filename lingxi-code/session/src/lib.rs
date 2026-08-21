@@ -14,6 +14,7 @@ pub mod forked_skill;
 pub mod jsonl;
 pub mod metadata;
 pub mod prompt_history;
+pub mod rate_limit_checkpoint;
 pub mod resumer;
 pub mod rewind;
 pub mod rollout;
@@ -28,6 +29,13 @@ pub use agent_color::{agent_color_entry, last_agent_color, save_agent_color};
 pub use branch::{create_branch, BranchError, BranchResult};
 pub use file_history::{FileHistory, FileHistoryBackup, SnapshotRecord};
 pub use metadata::SessionMetadata;
+// Rate-limit resume checkpoint (SC-02): the `RESUME.md` document half. The git
+// executor and its trigger are a documented follow-up — see the module docs.
+pub use rate_limit_checkpoint::{
+    checkpoint_ref, render_resume_md, sanitize_todo_line, CheckpointResult, CheckpointSkipReason,
+    CheckpointTrigger, ResumeDoc, CHECKPOINT_REF_PREFIX, MAX_CHECKPOINT_FILE_COUNT,
+    MAX_CHECKPOINT_TOTAL_BYTES, RESUME_MD_REPO_PATH,
+};
 pub use resumer::{ResumeError, ResumedRollout, ResumedSession, SessionResumer};
 pub use rewind::rewind_conversation;
 pub use storage::{LoadedSession, SessionStorage};

@@ -117,10 +117,33 @@ In code: default to writing no comments. Never write multi-paragraph docstrings 
 /// Keep this on the shared capability/profile registry. Raw substring matching
 /// here previously let a model named `vendor-compat-claude-sonnet-5` inherit
 /// Claude-only prompt bytes despite resolving to `FullHarness`.
+/// `v9T` @297082655 — the `turn_updates` variant of the `communication` slot,
+/// new in 2.1.238 (`CC_VER=2.1.220 oracle.sh count` → 0).
+///
+/// `T9T(e)` opens with
+/// `if(JJr("turn_updates",V.CLAUDE_CODE_TURN_UPDATES,Fo(e)))return v9T;`, so
+/// when it fires it REPLACES the whole communication section — heading and all
+/// — with this bare paragraph, for every model. `JJr(key, env, model)` prefers
+/// the env value and otherwise falls back to the model capability `key`;
+/// `turn_updates` occurs only twice in the whole binary (the V8 string table and
+/// this call site), so NO model declares it and the env var is the only way in.
+pub(crate) const TURN_UPDATES_SECTION: &str = "Before you start, say in a line what you're about to do; brief updates while you work help the user follow along. Close with a short recap that stands on its own \u{2014} what you found, what you did, and what's next \u{2014} so a reader who only sees the last message has the full picture.";
+
+/// `CLAUDE_CODE_TURN_UPDATES` — the env half of `JJr("turn_updates", …)`. Kept
+/// under the oracle's spelling, like every other `CLAUDE_CODE_*` knob the port
+/// honours (`CLAUDE_CODE_SILENT_TURN_REMINDER`, `CLAUDE_CODE_TOTAL_TOKENS_REMINDER`).
+fn turn_updates_enabled() -> bool {
+    traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_TURN_UPDATES").ok().as_deref())
+}
+
 #[must_use]
 fn anti_verbosity_section(model: &str) -> String {
     use traits::model_capabilities::{prompt_profile_for, PromptProfile};
 
+    // `T9T`'s FIRST branch, ahead of every model check.
+    if turn_updates_enabled() {
+        return TURN_UPDATES_SECTION.to_string();
+    }
     match prompt_profile_for(model) {
         PromptProfile::ClaudeLean if is_communicating_model(model) => {
             communicating_with_the_user_section(true)

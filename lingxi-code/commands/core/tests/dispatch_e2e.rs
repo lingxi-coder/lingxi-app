@@ -1,4 +1,4 @@
-//! End-to-end integration test: build a `CommandRegistry`, register all 107,
+//! End-to-end integration test: build a `CommandRegistry`, register all 108,
 //! wire a dispatcher, and exercise the full surface from the public API.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`

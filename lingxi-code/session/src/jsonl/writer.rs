@@ -7,7 +7,7 @@
 use crate::jsonl::re_append::{
     plan_re_append, read_tail, SessionMetadataState, METADATA_REAPPEND_BACKSTOP_BYTES,
 };
-use crate::jsonl::schema::JsonlMessage;
+use crate::jsonl::schema::{session_kind, JsonlMessage, SESSION_KIND_KEY};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -24,6 +24,32 @@ pub enum WriterError {
     /// `serde_json::to_string` failed (e.g. malformed `Value`).
     #[error("serialize failure: {0}")]
     Serialize(#[from] serde_json::Error),
+}
+
+/// SC-07 — stamp `sessionKind` on a chain entry that does not carry one.
+///
+/// The oracle sets it inside the persistence layer, on every entry
+/// `insertMessageChain` writes (@296794533: `…, sessionKind:a3e(), userType,
+/// …`), not at the message factories — which is why this lives here and not in
+/// the callers that build [`JsonlMessage`]. `a3e()` is process-global
+/// ([`session_kind`]), so one env read per line is the whole derivation.
+///
+/// Returns `None` — "nothing to change, serialize the caller's value" — in the
+/// overwhelmingly common case: no session kind set, or the entry already
+/// carries one (a resumed foreign line round-tripping through `extra`, which
+/// must keep the value the ORIGINAL writer stamped rather than adopt this
+/// process's). Only a genuine `bg` / `daemon` / `daemon-worker` process pays
+/// the clone.
+fn stamp_session_kind(msg: &JsonlMessage) -> Option<JsonlMessage> {
+    let kind = session_kind()?;
+    if msg.extra.contains_key(SESSION_KIND_KEY) {
+        return None;
+    }
+    let mut stamped = msg.clone();
+    stamped
+        .extra
+        .insert(SESSION_KIND_KEY.to_string(), serde_json::Value::String(kind));
+    Some(stamped)
 }
 
 /// Append-only writer for one session's `<uuid>.jsonl`.
@@ -115,7 +141,8 @@ impl JsonlWriter {
     pub async fn append(&self, msg: &JsonlMessage) -> Result<(), WriterError> {
         {
             let _g = self.lock.lock().await;
-            let line = serde_json::to_string(msg)?;
+            let stamped = stamp_session_kind(msg);
+            let line = serde_json::to_string(stamped.as_ref().unwrap_or(msg))?;
             let mut payload = String::with_capacity(line.len() + 1);
             payload.push_str(&line);
             payload.push('\n');

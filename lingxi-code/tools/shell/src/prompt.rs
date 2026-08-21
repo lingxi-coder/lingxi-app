@@ -32,11 +32,12 @@
 //!   `"Edit"`, `"Write"`, `"Bash"`) matching the claude-code wire names, rather
 //!   than imported constants from other crates (avoids a cross-crate dep).
 //! - **Co-Authored-By attribution.** claude-code injects a dynamic
-//!   `getAttributionTexts()` commit/PR attribution. This crate has no
-//!   attribution source, so the optional attribution clauses are omitted (the
-//!   commit step reads "Create the commit with a message." and the example
-//!   HEREDOCs carry no trailing attribution) — matching the TS shape when
-//!   `commitAttribution`/`prAttribution` are empty.
+//!   `getAttributionTexts()` commit/PR attribution into FIVE slots across the
+//!   two git sections. Its DEFAULT (no settings) is NON-empty, so
+//!   [`attribution_texts`] reproduces the default pair and the five slots keep
+//!   the oracle's conditional shape. Only the settings half
+//!   (`includeCoAuthoredBy: false` / a custom `attribution` object) is
+//!   unmodelled here — see [`attribution_texts`] for the residual.
 //!
 //! ## BASH.4 note (cwd persistence)
 //!
@@ -133,6 +134,26 @@ fn background_usage_note() -> Option<String> {
     )
 }
 
+/// Port of claude-code 2.1.238 `JQd()` — the gate on the CONCISE prompt's
+/// "Commands are cheap to run…" bullet:
+///
+/// ```js
+/// function Q$r(e,t,r){return e||sti(r)||VC()?.[t]===!0||it(t,!1)}
+/// function JQd(){return Q$r(V.CLAUDE_CODE_GORSE_PLOVER,DKb,void 0)}
+/// ```
+///
+/// Four sources OR'd together; three of them (the cohort helper, the flag
+/// override map, and the statsig gate `it(DKb,false)`) are host-runtime signals
+/// with no seam in this crate and all default FALSE, so only the env half is
+/// modelled — the same shape as [`background_tasks_disabled`].
+///
+/// NOTE the truthiness rule: `Q$r`'s first term is a BARE `e`, i.e. plain JS
+/// string truthiness (any non-empty value enables it), NOT the strict
+/// `isEnvTruthy` allowlist [`is_env_truthy`] implements.
+fn cheap_commands_bullet_enabled() -> bool {
+    std::env::var("LINGXI_GORSE_PLOVER").is_ok_and(|v| !v.is_empty())
+}
+
 /// Port of `shouldIncludeGitInstructions` (`aOt()`, `utils/gitSettings.ts`).
 ///
 /// R-MINOR: claude-code omits the git/PR section when
@@ -142,6 +163,54 @@ fn background_usage_note() -> Option<String> {
 /// toggle defaults to "on", so the env check is the only observable gate here).
 fn should_include_git_instructions() -> bool {
     !is_env_truthy("LINGXI_DISABLE_GIT_INSTRUCTIONS")
+}
+
+// ===== Commit / PR attribution ==============================================
+
+/// Commit trailer — the port's spelling of claude-code 2.1.238 `rcT`'s
+/// `Co-Authored-By: ${modelDisplayName} <noreply@anthropic.com>`.
+///
+/// The oracle resolves the display name as
+/// `FP(model) ? firstPartyName : Hhm(model) ? name(model) : "Claude"` — i.e.
+/// plain `"Claude"` for anything it cannot recognise as a first-party model.
+/// This crate is handle-free (no model catalog, and the VERBOSE builder gets no
+/// model at all), so it takes that fallback arm — the SAME literal the port's
+/// equally handle-free `/commit` handler already ships
+/// (`commands/core/src/commit.rs`).
+const COMMIT_ATTRIBUTION: &str = "Co-Authored-By: Claude <noreply@anthropic.com>";
+
+/// PR footer — claude-code 2.1.238 `Ohm()`:
+/// `` `🤖 Generated with [Claude Code](${CLAUDE_CODE_URL})` `` (the
+/// `tengu_pr_footer_surface_suffix` gate that appends `" via <surface>"` is
+/// default-false, so the bare footer is the shipped text).
+///
+/// Re-branded exactly as the port already re-brands it in
+/// `commands/core/src/commit_push_pr.rs` (product name swapped, URL kept).
+const PR_ATTRIBUTION: &str = "🤖 Generated with [LingXi](https://claude.com/claude-code)";
+
+/// Port of claude-code 2.1.238 `hvt()` → `rcT()` — the `{commit, pr}` pair the
+/// Bash git sections interpolate:
+///
+/// ```js
+/// function rcT(){…let n=`Co-Authored-By: ${t} <noreply@anthropic.com>`,r=Ohm(),o=Vo(),i=o.attribution;
+///  if(i!==void 0&&V8s(i))return{commit:i.commit??n,pr:i.pr??r};
+///  if(o.includeCoAuthoredBy===!1)return …{commit:"",pr:""};
+///  return{commit:n,pr:r}}
+/// ```
+///
+/// The DEFAULT (no settings) arm is `{commit: n, pr: r}` — NON-empty — which is
+/// what this returns.
+///
+/// RESIDUAL: the two settings-driven arms (`attribution.commit` /
+/// `attribution.pr` overrides, and `includeCoAuthoredBy: false` ⇒ both empty)
+/// have no settings reader in this crate, the same way
+/// [`should_include_git_instructions`] models only the env half of `aOt()`.
+/// Every consumer below keeps the oracle's `${x ? … : …}` conditional shape, so
+/// wiring a settings source later is a one-line change here and nothing else.
+/// `hvt()`'s outer session-URL decoration (`ecT(e, url, …)`, gated on
+/// `I_l()` — remote/teleport sessions only) is EXCLUDED surface.
+fn attribution_texts() -> (String, String) {
+    (COMMIT_ATTRIBUTION.to_string(), PR_ATTRIBUTION.to_string())
 }
 
 // ===== Sandbox section ======================================================
@@ -204,7 +273,12 @@ fn truncate_for_prompt(items: Vec<String>) -> Vec<String> {
 /// (tmpdir is already per-user) or `claude-{uid}` elsewhere. The result is
 /// `join(resolvedBase, name) + sep` (trailing separator included).
 fn lingxi_temp_dir() -> String {
-    let base: std::path::PathBuf = std::env::var_os("LINGXI_TMPDIR")
+    resolved_temp_dir(temp_dir_base())
+}
+
+/// The temp-dir BASE — `LINGXI_TMPDIR || (windows ? tmpdir() : "/tmp")`.
+fn temp_dir_base() -> std::path::PathBuf {
+    std::env::var_os("LINGXI_TMPDIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             if cfg!(target_os = "windows") {
@@ -212,21 +286,63 @@ fn lingxi_temp_dir() -> String {
             } else {
                 std::path::PathBuf::from("/tmp")
             }
-        });
-    // Resolve symlinks; fall back to the unresolved base on failure.
-    let resolved_base = std::fs::canonicalize(&base).unwrap_or(base);
+        })
+}
 
-    let name = if cfg!(target_os = "windows") {
+/// The per-user temp-dir NAME (TS `getClaudeTempDirName`).
+fn temp_dir_name() -> String {
+    if cfg!(target_os = "windows") {
         "claude".to_string()
     } else {
         format!("claude-{}", current_uid())
-    };
+    }
+}
 
-    let joined = resolved_base.join(name);
+/// `realpath(base) + name + sep` — the shared tail of `_8()` / `s2r()`.
+fn resolved_temp_dir(base: std::path::PathBuf) -> String {
+    // Resolve symlinks; fall back to the unresolved base on failure.
+    let resolved_base = std::fs::canonicalize(&base).unwrap_or(base);
+    let joined = resolved_base.join(temp_dir_name());
     let mut s = joined.to_string_lossy().into_owned();
     // Append the trailing platform separator (TS `+ sep`).
     s.push(std::path::MAIN_SEPARATOR);
     s
+}
+
+/// Byte-length ceiling above which claude-code refuses to host child-process
+/// sockets under the configured temp dir and falls back to `/tmp` — oracle
+/// 2.1.238 `O2b = 44` (cc-238.js @284355803, the `sun_path` headroom).
+const CHILD_PROCESS_TMPDIR_MAX_BYTES: usize = 44;
+
+/// Port of claude-code 2.1.238 `s2r()` — the CHILD-PROCESS temp dir, the SECOND
+/// member of the `$TMPDIR` normalization set (`new Set([_8(), s2r()])`).
+///
+/// ```js
+/// function n2r(){…let t=qzd(e);if(Buffer.byteLength(t)<=O2b)return t;
+///   let o=join("/tmp",`claude-${process.getuid?.()??0}`),i=o;
+///   try{mkdirSync(o,{recursive:!0,mode:448}),MDt(o)}catch{i=t}return i}
+/// function s2r(){…let t=n2r();…try{n=realpathSync(t)}catch{}return n+sep}
+/// ```
+///
+/// So this is the SAME path as [`lingxi_temp_dir`] whenever the configured temp
+/// dir fits in [`CHILD_PROCESS_TMPDIR_MAX_BYTES`] bytes (the default `/tmp` case
+/// always does), and `/tmp/claude-{uid}` only when a long `LINGXI_TMPDIR` pushes
+/// it over. Both then feed the same `Set`, so the two collapse to ONE `$TMPDIR`
+/// entry once the substitution runs — which is why the dedup must come AFTER the
+/// substitution (see [`normalize_allow_only_with`]).
+///
+/// RESIDUAL: the oracle CREATES the fallback directory (`mkdirSync` + an
+/// ownership check) and falls back to the configured dir when that fails.
+/// Building a prompt must not have filesystem side effects, so this resolves the
+/// path without creating it.
+fn child_process_temp_dir() -> String {
+    let base = temp_dir_base();
+    // `Buffer.byteLength(t)` over the UNRESOLVED `join(base, name)`.
+    let unresolved_len = base.join(temp_dir_name()).to_string_lossy().len();
+    if unresolved_len <= CHILD_PROCESS_TMPDIR_MAX_BYTES {
+        return lingxi_temp_dir();
+    }
+    resolved_temp_dir(std::path::PathBuf::from("/tmp"))
 }
 
 /// The real (not effective) UID, mirroring TS `process.getuid?.() ?? 0`. On
@@ -244,17 +360,79 @@ fn current_uid() -> u32 {
     0
 }
 
-/// Port of the TS `normalizeAllowOnly` (`prompt.ts:189`): dedup then map the
-/// per-UID Claude temp dir literal to `"$TMPDIR"` so the prompt is identical
-/// across users (avoids busting the cross-user global prompt cache; the sandbox
-/// already sets `$TMPDIR` at runtime). Applied ONLY to `write.allowOnly` — never
-/// to deny/read lists.
+/// Port of claude-code 2.1.238 `Ojr()`:
+/// `Wt()==="windows" || Bze()!=="relaxed"` — TRUE when the sandbox exports
+/// `$TMPDIR`, which is what selects BOTH the temp-file bullet wording and the
+/// substitute-vs-filter arm of [`normalize_allow_only_with`].
+///
+/// `Bze()` resolves the 2.1.238 `filesystemPolicy` setting
+/// (`strict` | `relaxed` | `relaxedIfForced`, default `strict`, forced `strict`
+/// on Windows), so the shipped default is TRUE.
+///
+/// RESIDUAL: this crate has no settings reader (same shape as
+/// [`should_include_git_instructions`]'s unmodelled settings half), and unlike
+/// `aOt()` the oracle exposes NO env override for `filesystemPolicy` — so
+/// inventing one here would invent surface the oracle does not have. The
+/// function therefore returns the shipped default and is the SINGLE place a
+/// settings source has to be wired; both arms of both consumers are implemented
+/// and unit-tested through [`normalize_allow_only_with`] / [`temp_file_bullet`].
+fn sandbox_exports_tmpdir() -> bool {
+    // `Wt()==="windows"` short-circuits to true; `Bze()` defaults to "strict".
+    true
+}
+
+/// Port of claude-code 2.1.238 `Khm`'s `l` (the `write.allowOnly` normalizer):
+///
+/// ```js
+/// let s=new Set([_8(),s2r()]),a=Ojr(),
+///     l=(m)=>to(a?m.map((h)=>s.has(h)?"$TMPDIR":h):m.filter((h)=>!s.has(h)));
+/// ```
+///
+/// Two things the port previously got wrong (BASH-12):
+/// 1. the set has TWO members — the claude temp dir AND the child-process temp
+///    dir ([`child_process_temp_dir`]) — not one;
+/// 2. `to()` (dedup) runs AFTER the map, so two DISTINCT temp dirs collapse to a
+///    single `"$TMPDIR"` entry. Dedup-then-map left the second one verbatim.
+///
+/// Applied ONLY to `write.allowOnly` — never to the deny/read lists, which take
+/// the plain `gXr()` dedup.
+fn normalize_allow_only_with(paths: &[String], exports_tmpdir: bool) -> Vec<String> {
+    let temp_dirs = [lingxi_temp_dir(), child_process_temp_dir()];
+    let is_temp_dir = |p: &String| temp_dirs.iter().any(|t| t == p);
+    let mapped: Vec<String> = if exports_tmpdir {
+        paths
+            .iter()
+            .map(|p| {
+                if is_temp_dir(p) {
+                    "$TMPDIR".to_string()
+                } else {
+                    p.clone()
+                }
+            })
+            .collect()
+    } else {
+        // `relaxed`: the sandbox does not export `$TMPDIR`, so the temp dirs are
+        // DROPPED from the rendered list rather than collapsed into a literal.
+        paths.iter().filter(|p| !is_temp_dir(p)).cloned().collect()
+    };
+    dedup(&mapped)
+}
+
+/// [`normalize_allow_only_with`] under the live [`sandbox_exports_tmpdir`].
 fn normalize_allow_only(paths: &[String]) -> Vec<String> {
-    let tmp = lingxi_temp_dir();
-    dedup(paths)
-        .into_iter()
-        .map(|p| if p == tmp { "$TMPDIR".to_string() } else { p })
-        .collect()
+    normalize_allow_only_with(paths, sandbox_exports_tmpdir())
+}
+
+/// The sandbox section's temp-file bullet — claude-code 2.1.238 `Khm`'s
+/// `Ojr()?"…$TMPDIR…":"…mktemp -d…"` ternary (both arms are plain string
+/// literals in the oracle, NOT interpolation slots). The `relaxed` arm is NEW in
+/// 2.1.238 (0 hits in 2.1.220). Em dash is U+2014.
+fn temp_file_bullet(exports_tmpdir: bool) -> &'static str {
+    if exports_tmpdir {
+        "For temporary files, always use the `$TMPDIR` environment variable. TMPDIR is automatically set to the correct sandbox-writable directory in sandbox mode. Do NOT use `/tmp` directly - use `$TMPDIR` instead."
+    } else {
+        "For temporary files, create a scratch directory with `mktemp -d` and reference it by absolute path. Do NOT assume `$TMPDIR` is set \u{2014} the sandbox does not export it in this configuration."
+    }
 }
 
 /// Port of `getSimpleSandboxSection` (`prompt.ts:172`), driven by the Rust
@@ -372,7 +550,9 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     };
 
     let mut items = sandbox_override_items;
-    items.push(Bullet::Item("For temporary files, always use the `$TMPDIR` environment variable. TMPDIR is automatically set to the correct sandbox-writable directory in sandbox mode. Do NOT use `/tmp` directly - use `$TMPDIR` instead.".into()));
+    items.push(Bullet::Item(
+        temp_file_bullet(sandbox_exports_tmpdir()).into(),
+    ));
 
     let mut lines: Vec<String> = vec![
         String::new(),
@@ -399,11 +579,31 @@ fn commit_and_pr_instructions() -> String {
         return String::new();
     }
 
-    // No attribution source in this crate → commitAttribution / prAttribution
-    // are empty, matching the TS shape with empty attribution (commit step says
-    // "Create the commit with a message." and example HEREDOCs carry no
-    // trailing attribution).
-    //
+    // Attribution (`{commit:o, pr:i}=hvt()`) feeds THREE slots in this section,
+    // each keeping the oracle's conditional shape (`fcT`, cc-238.js @231042884):
+    //   step 3   `- Create the commit with a message${o?` ending with:\n   ${o}`:"."}`
+    //   HEREDOC  `   Commit message here.${o?`\n\n   ${o}`:""}`
+    //   PR body  `${Ajt()}${i?`\n\n${i}`:""}`
+    // Note the THREE-space indent on both commit slots — the oracle indents them
+    // to match the surrounding numbered-step / HEREDOC body, and the PR footer is
+    // NOT indented.
+    let (commit_attribution, pr_attribution) = attribution_texts();
+    let commit_step_suffix = if commit_attribution.is_empty() {
+        ".".to_string()
+    } else {
+        format!(" ending with:\n   {commit_attribution}")
+    };
+    let commit_heredoc_suffix = if commit_attribution.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n   {commit_attribution}")
+    };
+    let pr_body_suffix = if pr_attribution.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{pr_attribution}")
+    };
+
     // `r=tH()?$F:_U`: the task-management tool name is `TaskCreate` when V2
     // task tools are enabled (default) and `TodoWrite` when
     // `LINGXI_ENABLE_TASKS` is a defined-falsy value — the same `tH()`/`TE()`
@@ -441,7 +641,7 @@ Git Safety Protocol:
   - Ensure it accurately reflects the changes and their purpose
 3. Run the following commands in parallel:
    - Add relevant untracked files to the staging area.
-   - Create the commit with a message.
+   - Create the commit with a message{COMMIT_STEP_SUFFIX}
    - Run git status after the commit completes to verify success.
    Note: git status depends on the commit completing, so run it sequentially after the commit.
 4. If the commit fails due to pre-commit hook: fix the issue and create a NEW commit
@@ -456,7 +656,7 @@ Important notes:
 - In order to ensure good formatting, ALWAYS pass the commit message via a HEREDOC, a la this example:
 <example>
 git commit -m \"$(cat <<'EOF'
-   Commit message here.
+   Commit message here.{COMMIT_HEREDOC_SUFFIX}
    EOF
    )\"
 </example>
@@ -484,7 +684,7 @@ gh pr create --title \"the pr title\" --body \"$(cat <<'EOF'
 <1-3 bullet points>
 
 ## Test plan
-[Bulleted markdown checklist of TODOs for testing the pull request...]
+[Bulleted markdown checklist of TODOs for testing the pull request...]{PR_BODY_SUFFIX}
 EOF
 )\"
 </example>
@@ -496,6 +696,9 @@ Important:
 # Other common operations
 - View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments"
         .replace("{TASK_TOOL}", task_tool)
+        .replace("{COMMIT_STEP_SUFFIX}", &commit_step_suffix)
+        .replace("{COMMIT_HEREDOC_SUFFIX}", &commit_heredoc_suffix)
+        .replace("{PR_BODY_SUFFIX}", &pr_body_suffix)
 }
 
 // ===== Public entry point ===================================================
@@ -624,25 +827,42 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
 /// - `_Xa()`/`nqn(e)` BOTH return `""` in the binary (`a`/`c` empty), and `l`
 ///   is hard-`null`, so the trailing `${c}`/`${a}`/`${l}` interpolations vanish
 ///   and the "only after the pre-ship checks below" clause never appears;
-/// - `qdt()` is the commit/PR ATTRIBUTION (`Co-Authored-By: <model> …` +
-///   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`). This
-///   crate has NO attribution source — resolved the SAME way as the VERBOSE
-///   [`commit_and_pr_instructions`] (empty `commitAttribution`/`prAttribution`),
-///   so the `- End git commit messages with:` / `- End PR bodies with:` bullets
-///   are OMITTED (matching the binary's `includeCoAuthoredBy===false` shape,
-///   i.e. `qdt()` ⇒ `{commit:"",pr:""}` ⇒ `i==""`).
+/// - `qdt()` (2.1.238 `hvt()`) is the commit/PR ATTRIBUTION. Its DEFAULT is
+///   NON-empty, so the two `- End …` bullets ARE emitted — see
+///   [`attribution_texts`]. They form the oracle's `i`/`a` block:
+///   `[commit?`- End git commit messages with:\n${commit}`:null,
+///     pr?`- End PR bodies with:\n${pr}`:null].filter(Boolean).join("\n")`,
+///   appended to the `- Commit or push only when the user asks…` bullet as
+///   `${a?`\n${a}`:""}`. The attribution VALUE is NOT indented — it sits at
+///   column 0 on its own line under each bullet.
 fn concise_git_section() -> String {
     if !should_include_git_instructions() {
         return String::new();
     }
-    // No attribution source (see [`commit_and_pr_instructions`]) ⇒ commit/pr
-    // attribution empty ⇒ the `- End …` bullets are omitted. `c`/`a`/`l` are
-    // all empty, so the section is exactly these three fixed bullets.
-    "# Git\n\
+    // `c`/`a`/`l` (pre-ship gate, `bash_lean` extras) are all empty in the
+    // shipped build, so the section is the three fixed bullets plus the
+    // attribution block.
+    let mut section = "# Git\n\
      - Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n\
      - Use the `gh` CLI for GitHub operations (PRs, issues, API).\n\
      - Commit or push only when the user asks. If on the default branch, branch first."
-        .to_string()
+        .to_string();
+
+    let (commit_attribution, pr_attribution) = attribution_texts();
+    let mut attribution_lines: Vec<String> = Vec::new();
+    if !commit_attribution.is_empty() {
+        attribution_lines.push(format!(
+            "- End git commit messages with:\n{commit_attribution}"
+        ));
+    }
+    if !pr_attribution.is_empty() {
+        attribution_lines.push(format!("- End PR bodies with:\n{pr_attribution}"));
+    }
+    if !attribution_lines.is_empty() {
+        section.push('\n');
+        section.push_str(&attribution_lines.join("\n"));
+    }
+    section
 }
 
 /// Port of `getSimplePrompt`'s CONCISE branch `qUp(e)` (binary @202741xxx) —
@@ -722,6 +942,12 @@ pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, _model: Option<&str
     // (`KFc(t)` / `CLAUDE_CODE_MARL_CORMORANT`) was deleted between the builds,
     // so every lean-prompt model gets the bullet, not just opus-5.
     lines.push("- Command output is displayed to you, not reliably to the user.".into());
+    // `c` — the gated "cheap to run" bullet, between the output-visibility
+    // bullet and the timeout bullet (`…,"- Command output …",...c,`- \`timeout\`
+    // …`,…`). `JQd()` is default-false, so this is inert in the stock config.
+    if cheap_commands_bullet_enabled() {
+        lines.push("- Commands are cheap to run and their errors are informative: run the straightforward command rather than perfecting it mentally first, and adjust from what it prints.".into());
+    }
     lines.push(format!(
         "- `timeout` is in milliseconds: default {}, max {}.",
         bash_default_timeout_ms(),

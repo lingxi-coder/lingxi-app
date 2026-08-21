@@ -3,7 +3,7 @@
 //! roots call. Built on the `command-api` runtime.
 //!
 //! After [`register_all_builtin_commands`] runs, the registry holds the locked
-//! 107-name surface; [`register_core_batch_1`] .. [`register_core_batch_8`]
+//! 108-name surface; [`register_core_batch_1`] .. [`register_core_batch_8`]
 //! then overwrite the implemented entries with their real handle/auth-bound
 //! handlers (batch 8 = `autocompact`/`fork`/`goal`/`recap`/`reload-skills`/
 //! `skill-doctor`/`stop`). See spec §19.

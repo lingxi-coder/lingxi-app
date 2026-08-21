@@ -30,6 +30,25 @@ fn parse_positive_budget_usd(value: &str) -> Result<f64, String> {
     Ok(amount)
 }
 
+/// clap value-parser for `--task-budget <tokens>`, 1:1 with the oracle's
+/// argParser (@307403649):
+///
+/// ```js
+/// (l)=>{let c=Nte(l);if(isNaN(c)||c<=0||!Number.isInteger(c))
+///        throw new j3t("--task-budget must be a positive integer");return c}
+/// ```
+///
+/// The rejection copy is byte-exact from that `j3t` throw.
+fn parse_task_budget(value: &str) -> Result<u64, String> {
+    const INVALID: &str = "--task-budget must be a positive integer";
+    let parsed: f64 = value.trim().parse().map_err(|_| INVALID.to_string())?;
+    if !parsed.is_finite() || parsed <= 0.0 || parsed.fract() != 0.0 {
+        return Err(INVALID.to_string());
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(parsed as u64)
+}
+
 /// Resolved `--autocompact <auto|tokens>` value.
 ///
 /// 1:1 with the return of claude-code 2.1.238's `DUn` (cc-238.js @222905882):
@@ -880,6 +899,212 @@ pub struct Argv {
     // the flag simply exposes the tool.
     #[arg(long = "brief")]
     pub brief: bool,
+
+    // ─────────────────────────────────────────────────────────────────────
+    // (CLI-12/13/15/16/17 + SC-09, cc 2.1.238) The remaining root-option
+    // surface. Every spec + description below was read out of the 2.1.238
+    // binary's root registration block; each carries `.hideHelp()` there, so
+    // each is `hide = true` here and none of them changes `--help`.
+    //
+    // Where LingXi owns the machinery the flag is WIRED (noted per field).
+    // Where it does not, the flag is PARSED and inert exactly as commander
+    // parses it — the port must not hard-error on an argv the oracle accepts,
+    // and must not fabricate the behaviour either. The load-bearing ones
+    // (`--rewind-files`, the truncating-resume pair) carry their oracle
+    // validation gates in `run_cli` and take the not-implemented path rather
+    // than reporting a success they did not perform.
+    // ─────────────────────────────────────────────────────────────────────
+    /// (deprecated) Enable debug mode (to stderr)
+    //
+    // Oracle @307399127: `new bp("-d2e, --debug-to-stderr", …).argParser(Boolean)
+    // .hideHelp().implies({debug:!0})`. The `-d2e` short form is a MULTI-char
+    // "short" that clap cannot express (`Arg::short` takes one `char`), so only
+    // the long form is registered; the `.implies({debug:!0})` half IS ported —
+    // `debug_enabled()` treats this flag as `--debug`.
+    #[arg(long = "debug-to-stderr", hide = true)]
+    pub debug_to_stderr: bool,
+
+    /// Run Setup hooks with init trigger, then continue
+    //
+    // PARSED, inert: the port has `HookEventType::Setup` in the hooks crate but
+    // no firer outside it — nothing in `apps/cli` runs a Setup trigger, so the
+    // flag cannot be wired from here without inventing the event.
+    #[arg(long = "init", hide = true)]
+    pub init: bool,
+
+    /// Run Setup and SessionStart:startup hooks, then exit
+    #[arg(long = "init-only", hide = true)]
+    pub init_only: bool,
+
+    /// Run Setup hooks with maintenance trigger, then continue
+    #[arg(long = "maintenance", hide = true)]
+    pub maintenance: bool,
+
+    /// Emit transcript_mirror frames on stdout (SDK-internal; set by
+    /// ProcessTransport when sessionStore is configured)
+    #[arg(long = "session-mirror", hide = true)]
+    pub session_mirror: bool,
+
+    /// API-side task budget in tokens (output_config.task_budget)
+    //
+    // Server-side `output_config` field on the Anthropic request body; LingXi
+    // is multi-provider and does not emit `output_config`. Parsed, inert.
+    #[arg(long = "task-budget", value_name = "tokens", hide = true, value_parser = parse_task_budget)]
+    pub task_budget: Option<u64>,
+
+    /// Enable auth status messages in SDK mode
+    #[arg(long = "enable-auth-status", hide = true)]
+    pub enable_auth_status: bool,
+
+    /// Workload tag for billing-header attribution (cc_workload).
+    /// Process-scoped; set by SDK daemon callers that spawn subprocesses for
+    /// cron work. (only works with --print)
+    //
+    // `cc_workload` is an Anthropic billing header. Parsed, inert.
+    #[arg(long = "workload", value_name = "tag", hide = true)]
+    pub workload: Option<String>,
+
+    /// Policy-tier settings JSON from a spawning parent process (SDK use only)
+    #[arg(long = "managed-settings", value_name = "json", hide = true)]
+    pub managed_settings: Option<String>,
+
+    /// Like --plugin-dir but the engine will not read this plugin's .mcp.json
+    /// (caller owns its MCP connections)
+    //
+    // Oracle @307411913 — the ROOT copy (the `agents` subcommand's shorter
+    // twin is already ported at `commands/agents.rs`). `argParser((l,c)=>[...c,l])`
+    // + `.default([])` ⇒ repeatable, so `ArgAction::Append` like `--plugin-dir`.
+    #[arg(long = "plugin-dir-no-mcp", value_name = "path", hide = true, action = clap::ArgAction::Append)]
+    pub plugin_dir_no_mcp: Option<Vec<String>>,
+
+    /// Enable the server-side advisor tool with the specified model (alias or
+    /// full ID).
+    //
+    // The advisor is a SERVER-side Anthropic tool; LingXi has no such tool.
+    #[arg(long = "advisor", value_name = "model", hide = true)]
+    pub advisor: Option<String>,
+
+    /// MCP servers whose channel notifications (inbound push) should register
+    /// this session. Space-separated server names.
+    #[arg(long = "channels", value_name = "servers", num_args = 1.., hide = true)]
+    pub channels: Option<Vec<String>>,
+
+    /// Load channel servers not on the approved allowlist. For local channel
+    /// development only. Shows a confirmation dialog at startup.
+    #[arg(
+        long = "dangerously-load-development-channels",
+        value_name = "servers",
+        num_args = 1..,
+        hide = true
+    )]
+    pub dangerously_load_development_channels: Option<Vec<String>>,
+
+    /// Use remote WebSocket endpoint for SDK I/O streaming (only with -p and
+    /// stream-json format)
+    #[arg(long = "sdk-url", value_name = "url", hide = true)]
+    pub sdk_url: Option<String>,
+
+    /// Pre-fill the prompt input with text without submitting it
+    #[arg(long = "prefill", value_name = "text", hide = true)]
+    pub prefill: Option<String>,
+
+    /// Base64url-encoded --prefill value (deep-link shell-safe launch paths)
+    //
+    // Oracle argParser: `Buffer.from(l,"base64url").toString("utf8")` — Node's
+    // decoder never throws, so the raw string is kept here and decoded lazily
+    // by [`Argv::resolve_prefill`] with the same lenient semantics.
+    #[arg(long = "prefill-b64", value_name = "b64", hide = true)]
+    pub prefill_b64: Option<String>,
+
+    /// Signal that this session was launched from a deep link
+    #[arg(long = "deep-link-origin", hide = true)]
+    pub deep_link_origin: bool,
+
+    /// Repo slug the deep link ?repo= parameter resolved to the current cwd
+    #[arg(long = "deep-link-repo", value_name = "slug", hide = true)]
+    pub deep_link_repo: Option<String>,
+
+    /// FETCH_HEAD mtime in epoch ms, precomputed by the deep link trampoline
+    //
+    // Oracle argParser: `let c=Number(l); return Number.isFinite(c)?c:void 0` —
+    // a non-numeric value is DROPPED, not rejected. A typed `Option<f64>` here
+    // would make clap hard-error, so the raw token is kept and
+    // [`Argv::deep_link_last_fetch_ms`] applies the oracle's finite check.
+    #[arg(long = "deep-link-last-fetch", value_name = "ms", hide = true)]
+    pub deep_link_last_fetch: Option<String>,
+
+    /// Base64url-encoded working directory (deep-link shell-safe launch paths)
+    #[arg(long = "deep-link-cwd-b64", value_name = "b64", hide = true)]
+    pub deep_link_cwd_b64: Option<String>,
+
+    /// When resuming, immediately query if the loaded transcript ends in a
+    /// user-role message (set by /background mid-turn so the fork continues the
+    /// in-flight turn).
+    #[arg(long = "reply-on-resume", hide = true)]
+    pub reply_on_resume: bool,
+
+    /// (deprecated) Opt in to auto mode
+    #[arg(long = "enable-auto-mode", hide = true)]
+    pub enable_auto_mode: bool,
+
+    /// Append a system prompt to every Task-tool subagent's system prompt,
+    /// propagated to nested subagents (only works with --print). Implies
+    /// CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT=1.
+    //
+    // (CLI-15) Oracle @307405786. The flag is an IMPLIES-style env setter:
+    // `wby(e,t=process.env){if(e)t.CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT="1"}`
+    // (@306637528), and the subagent prompt assembler splices it as the last
+    // section: `!C && !d?.isolatedContext && isEnvTruthy(env.CLAUDE_CODE_ENABLE_
+    // APPEND_SUBAGENT_PROMPT) && options.appendSubagentSystemPrompt ?
+    // join([...sections, appendSubagentSystemPrompt]) : sections` (@292360822).
+    // `run_cli` performs the env implication half; the splice itself lives in
+    // the subagent prompt assembler (`tools/agent`), which this seam only feeds.
+    #[arg(
+        long = "append-subagent-system-prompt",
+        value_name = "prompt",
+        hide = true
+    )]
+    pub append_subagent_system_prompt: Option<String>,
+
+    /// Cross-session messaging server path: a Unix domain socket on Mac/Linux,
+    /// a \\.\pipe\ name on Windows (defaults to an auto-generated path)
+    //
+    // (CLI-12) Oracle @307414302 — NEW in 2.1.238 (0 hits in 2.1.220).
+    // WIRED: `crate::mode::ensure_live_messaging` binds the process UDS inbox
+    // at `traits::uds_inbox::default_socket_path(pid)`; this flag overrides
+    // that default via [`crate::mode::set_messaging_socket_override`].
+    #[arg(long = "messaging-socket-path", value_name = "path", hide = true)]
+    pub messaging_socket_path: Option<String>,
+
+    /// When resuming, only messages up to and including the chain entry with
+    /// <message.id> — any chain-entry UUID, typically the kept turn's last
+    /// entry (use with --resume in print mode)
+    //
+    // (CLI-13/SC-09) Oracle @307408593. The 2.1.238 wording replaced 2.1.220's
+    // "the assistant message with <message.id>" — the flag now takes ANY
+    // chain-entry uuid. `argParser(String)`, `.hideHelp()`.
+    #[arg(long = "resume-session-at", value_name = "message id", hide = true)]
+    pub resume_session_at: Option<String>,
+
+    /// With --resume-session-at in print mode: declare the prompt uuid of the
+    /// turn the truncating resume intends to discard; the resume is refused if
+    /// the discarded range contains anything not attributable to that turn
+    /// (absorbed queued messages, task notifications, content from other
+    /// turns). Ignored outside print mode, like --resume-session-at.
+    //
+    // (SC-09) Oracle @307408861 — NEW in 2.1.238 (0 hits in 2.1.220).
+    #[arg(long = "resume-drops-turn", value_name = "message id", hide = true)]
+    pub resume_drops_turn: Option<String>,
+
+    /// Restore files to state at the specified user message and exit (requires
+    /// --resume)
+    //
+    // (CLI-16) Oracle @307409495. WIRED: `run_cli` resolves the `--resume`
+    // target, verifies the uuid names a USER entry in that transcript, and
+    // calls `session::file_history::rewind_from_disk` — the machinery the port
+    // already had but never reached from argv.
+    #[arg(long = "rewind-files", value_name = "user-message-id", hide = true)]
+    pub rewind_files: Option<String>,
 }
 
 /// Recursively graft a hidden trailing catch-all positional onto every LEAF
@@ -954,7 +1179,9 @@ impl Argv {
     /// Collapses the new `Option<String>` filter back to the old on/off bool.
     #[must_use]
     pub fn debug_enabled(&self) -> bool {
-        self.debug.is_some() || self.mcp_debug || self.debug_file.is_some()
+        // `-d2e/--debug-to-stderr` carries `.implies({debug:!0})` in the oracle
+        // (@307399127), so it is a third alias onto the same switch.
+        self.debug.is_some() || self.mcp_debug || self.debug_file.is_some() || self.debug_to_stderr
     }
 
     /// The `--debug` category filter (e.g. "api,hooks" or "!1p,!file"), or
@@ -1195,6 +1422,135 @@ impl Argv {
             )
         }
     }
+
+    /// The effective `--prefill` text: `--prefill-b64` wins when present, since
+    /// the deep-link trampoline only ever sets one of the pair.
+    ///
+    /// Oracle argParser `Buffer.from(l,"base64url").toString("utf8")` — Node's
+    /// base64 decoder is LENIENT (it skips characters outside the alphabet and
+    /// tolerates missing padding) and never throws, and `toString("utf8")`
+    /// replaces invalid sequences with U+FFFD. [`decode_base64url_lenient`]
+    /// reproduces both halves, so a malformed value yields text rather than an
+    /// argv error.
+    #[must_use]
+    pub fn resolve_prefill(&self) -> Option<String> {
+        if let Some(ref b64) = self.prefill_b64 {
+            return Some(decode_base64url_lenient(b64));
+        }
+        self.prefill.clone()
+    }
+
+    /// The deep-link working directory from `--deep-link-cwd-b64`, decoded with
+    /// the same lenient base64url semantics as [`Self::resolve_prefill`].
+    #[must_use]
+    pub fn resolve_deep_link_cwd(&self) -> Option<String> {
+        self.deep_link_cwd_b64
+            .as_deref()
+            .map(decode_base64url_lenient)
+    }
+
+    /// `--deep-link-last-fetch <ms>` as a number, applying the oracle's
+    /// argParser (`let c=Number(l); return Number.isFinite(c)?c:void 0`): a
+    /// non-finite/unparseable token is silently DROPPED, never an argv error.
+    /// Empty and whitespace-only strings are `Number("") === 0` in JS, so they
+    /// resolve to `0.0` here too.
+    #[must_use]
+    pub fn deep_link_last_fetch_ms(&self) -> Option<f64> {
+        let raw = self.deep_link_last_fetch.as_deref()?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            // `Number("")` and `Number("   ")` are both `0`.
+            return Some(0.0);
+        }
+        trimmed.parse::<f64>().ok().filter(|v| v.is_finite())
+    }
+
+    /// The truncating-resume / rewind cross-flag gates, in the oracle's order
+    /// (`runHeadless` @307217327 — so they apply to PRINT mode only, matching
+    /// "Ignored outside print mode"):
+    ///
+    /// ```js
+    /// if(c.resumeSessionAt&&!c.resume){…"Error: --resume-session-at requires --resume"}
+    /// if(c.resumeDropsTurn!==void 0&&!c.resumeSessionAt){…"Error: --resume-drops-turn requires --resume-session-at"}
+    /// if(c.rewindFiles&&!c.resume){…"Error: --rewind-files requires --resume"}
+    /// if(c.rewindFiles&&t){…"Error: --rewind-files is a standalone operation and cannot be used with a prompt"}
+    /// ```
+    ///
+    /// Each writes the line (with its own `Error: ` prefix) to stderr and exits
+    /// 1. The strings returned here EXCLUDE the prefix, matching the sibling
+    /// gates' caller convention (`eprintln!("Error: {msg}")`).
+    ///
+    /// `t` in the fourth gate is the resolved headless input — a prompt string,
+    /// or the input iterator under `--input-format stream-json` (an object, so
+    /// truthy). The port keys the gate on those two argv-visible forms.
+    pub fn validate_truncating_resume_args(&self) -> Result<(), String> {
+        if !self.print {
+            return Ok(());
+        }
+        let has_resume = self.resume.is_some();
+        if self.resume_session_at.is_some() && !has_resume {
+            return Err("--resume-session-at requires --resume".to_string());
+        }
+        if self.resume_drops_turn.is_some() && self.resume_session_at.is_none() {
+            return Err("--resume-drops-turn requires --resume-session-at".to_string());
+        }
+        if self.rewind_files.is_some() {
+            if !has_resume {
+                return Err("--rewind-files requires --resume".to_string());
+            }
+            // `t` is the resolved headless input: a prompt STRING, or — with
+            // `--input-format stream-json` — the input iterator, which is a
+            // non-null object and therefore truthy. Both trip the fourth gate.
+            // (A prompt piped in on plain stdin is also `t` upstream; the port
+            // resolves that read later, so this gate keys on the argv-visible
+            // forms only.)
+            if self.is_stream_json_input() || self.prompt.as_deref().is_some_and(|p| !p.is_empty())
+            {
+                return Err(
+                    "--rewind-files is a standalone operation and cannot be used with a prompt"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Node's `Buffer.from(s, "base64url").toString("utf8")`.
+///
+/// Deliberately LENIENT, because the oracle's `--prefill-b64` /
+/// `--deep-link-cwd-b64` argParsers call exactly that and Node never throws
+/// here: characters outside the base64url alphabet are skipped, `=` padding is
+/// optional, a trailing group of one leftover character contributes nothing,
+/// and invalid UTF-8 in the decoded bytes becomes U+FFFD (`from_utf8_lossy`).
+/// A strict decoder would turn a malformed deep link into an argv error the
+/// oracle does not raise.
+fn decode_base64url_lenient(input: &str) -> String {
+    fn sextet(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            // base64url's `-`/`_` plus the standard `+`/`/`: Node's decoder
+            // accepts BOTH alphabets under the `base64url` label.
+            b'-' | b'+' => Some(62),
+            b'_' | b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for b in input.bytes() {
+        let Some(v) = sextet(b) else { continue };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]

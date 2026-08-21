@@ -189,6 +189,57 @@ pub enum AutoCompactWindowSource {
     ModelDefault,
     /// `"unknown-model"` (NEW in 2.1.238) — auto-compact will hold the session
     /// inside the window it *assumes* for a model this build does not recognize.
+    ///
+    /// # Divergence: the startup NOTICE is deliberately not rendered (SC-06)
+    ///
+    /// Upstream pairs this source with a one-shot startup warning, `Pk0`
+    /// (cc-238.js @306646044), emitted from the REPL launcher
+    /// (@306693668: `let Oo=Fby(zs,W,lc) … cz(Zl)`):
+    ///
+    /// ```text
+    /// "${model}" is not a model this version of Claude Code recognizes, so
+    /// auto-compact will keep this session within ${oc(window)} tokens (the
+    /// context window it assumes). ${hints}map it in the modelOverrides setting
+    /// or update Claude Code; CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1
+    /// restores the previous wait-for-the-API behavior.
+    /// ```
+    ///
+    /// where `hints` is `"To make it recognized, "`, or
+    /// `` `If the model accepts ${window<1e6?"more":"less"}, ${[…].join(", or ")}; to make it recognized, ` ``
+    /// over `"append [1m] to the model name for 1M"` (unless
+    /// `CLAUDE_CODE_DISABLE_1M_CONTEXT`) and
+    /// `"set CLAUDE_CODE_MAX_CONTEXT_TOKENS to its real window"` (when
+    /// `BCd(model)`, i.e. the model is not `claude-*`).
+    ///
+    /// The `source` half of `N8` ports cleanly and is live above. The notice
+    /// does not, for three reasons that are each sufficient:
+    ///
+    /// 1. **It would fire on almost every LingXi startup, wrongly.**
+    ///    [`model_window_is_assumed`] consults
+    ///    `llm_client::model::model_limits`, a process-global registry
+    ///    populated at CATALOG-ASSEMBLY time. The oracle emits its notice from
+    ///    the launcher, before that assembly, so at the emit point every
+    ///    non-Claude model looks unrecognized — including the ones the catalog
+    ///    is about to describe exactly. Upstream has no such window: `ICd` reads
+    ///    a table compiled into the binary.
+    /// 2. **Two of its three remedies do not exist here.** LingXi has no
+    ///    window-overrides setting (`modelOverrides` in
+    ///    `llm-client/src/model/allowlist.rs` is an unrelated Anthropic-id →
+    ///    provider-id map for the allowlist gate), and
+    ///    `LINGXI_MAX_CONTEXT_TOKENS` is honored only under `USER_TYPE=ant`
+    ///    (`llm_client::model::context_window`, a pre-existing documented
+    ///    divergence). Rendering the copy would tell users to do two things
+    ///    that cannot be done.
+    /// 3. **An unrecognized model is the normal case here, not an anomaly.**
+    ///    Multi-provider support is a user-confirmed LingXi divergence; a
+    ///    warning shown for every third-party model is noise, not parity.
+    ///
+    /// Nothing in the enforcement half is lost by this: the port does not clamp
+    /// on `unknown-model` either (the arm returns the bare model window, same
+    /// as [`Self::Auto`]), so there is no surprising behavior for the notice to
+    /// explain. If LingXi ever gains a real window-overrides setting and moves
+    /// registry assembly ahead of the launcher, port `Pk0` verbatim from the
+    /// offset above.
     UnknownModel,
     /// `"auto"` — no override applied.
     Auto,

@@ -1403,4 +1403,256 @@ mod tests {
             "--autocompact help copy drifted"
         );
     }
+
+    // (CLI-13/16 + SC-09, cc 2.1.238) The four truncating-resume / rewind
+    // cross-flag gates, in the oracle's order and with its byte-exact copy.
+    // They are the first four statements of `runHeadless` (@307217538), so they
+    // apply to PRINT mode only — both flags' own help says "Ignored outside
+    // print mode". The `Error: ` prefix is the caller's (`run_cli`), matching
+    // every sibling gate in this file.
+    #[test]
+    fn truncating_resume_gates_fire_in_the_oracle_order() {
+        let no_resume = Argv::from_iter(["lingxi-cli", "-p", "--resume-session-at", "m1"]).unwrap();
+        assert_eq!(
+            no_resume.validate_truncating_resume_args(),
+            Err("--resume-session-at requires --resume".to_string())
+        );
+
+        let drops_alone = Argv::from_iter([
+            "lingxi-cli",
+            "-p",
+            "--resume",
+            "s1",
+            "--resume-drops-turn",
+            "m1",
+        ])
+        .unwrap();
+        assert_eq!(
+            drops_alone.validate_truncating_resume_args(),
+            Err("--resume-drops-turn requires --resume-session-at".to_string())
+        );
+
+        let rewind_no_resume =
+            Argv::from_iter(["lingxi-cli", "-p", "--rewind-files", "m1"]).unwrap();
+        assert_eq!(
+            rewind_no_resume.validate_truncating_resume_args(),
+            Err("--rewind-files requires --resume".to_string())
+        );
+
+        // `if(c.rewindFiles&&t)` — `t` is the resolved headless input, so a
+        // prompt positional trips it...
+        let rewind_with_prompt = Argv::from_iter([
+            "lingxi-cli",
+            "-p",
+            "--resume",
+            "s1",
+            "--rewind-files",
+            "m1",
+            "hello",
+        ])
+        .unwrap();
+        assert_eq!(
+            rewind_with_prompt.validate_truncating_resume_args(),
+            Err(
+                "--rewind-files is a standalone operation and cannot be used with a prompt"
+                    .to_string()
+            )
+        );
+        // ...and so does the stream-json input iterator, which is a non-null
+        // object and therefore truthy in the same check.
+        let rewind_streaming = Argv::from_iter([
+            "lingxi-cli",
+            "-p",
+            "--resume",
+            "s1",
+            "--rewind-files",
+            "m1",
+            "--input-format",
+            "stream-json",
+        ])
+        .unwrap();
+        assert_eq!(
+            rewind_streaming.validate_truncating_resume_args(),
+            Err(
+                "--rewind-files is a standalone operation and cannot be used with a prompt"
+                    .to_string()
+            )
+        );
+
+        // The legal combination passes.
+        let ok = Argv::from_iter([
+            "lingxi-cli",
+            "-p",
+            "--resume",
+            "s1",
+            "--resume-session-at",
+            "m1",
+            "--resume-drops-turn",
+            "m0",
+        ])
+        .unwrap();
+        assert_eq!(ok.validate_truncating_resume_args(), Ok(()));
+    }
+
+    // The same argv OUTSIDE print mode is a true no-op: the oracle only reads
+    // these flags inside `runHeadless`, and both help strings promise they are
+    // "Ignored outside print mode".
+    #[test]
+    fn truncating_resume_gates_are_print_mode_only() {
+        for argv in [
+            vec!["lingxi-cli", "--resume-session-at", "m1"],
+            vec!["lingxi-cli", "--resume-drops-turn", "m1"],
+            vec!["lingxi-cli", "--rewind-files", "m1", "hello"],
+        ] {
+            let parsed = Argv::from_iter(argv.clone()).unwrap();
+            assert_eq!(
+                parsed.validate_truncating_resume_args(),
+                Ok(()),
+                "{argv:?} must be ignored outside --print"
+            );
+        }
+    }
+
+    // (CLI-17) The hidden root-flag surface. Each of these carries `.hideHelp()`
+    // in the 2.1.238 registration block, so each must PARSE and must NOT render
+    // in `--help`. A flag the oracle accepts must never become a clap
+    // "unexpected argument".
+    #[test]
+    fn hidden_root_flags_parse_and_stay_out_of_help() {
+        let valued = [
+            ("--task-budget", "4096"),
+            ("--workload", "cron"),
+            ("--managed-settings", "{}"),
+            ("--plugin-dir-no-mcp", "/tmp/p"),
+            ("--advisor", "opus"),
+            ("--sdk-url", "wss://example.invalid"),
+            ("--prefill", "hi"),
+            ("--prefill-b64", "aGk"),
+            ("--deep-link-repo", "org/repo"),
+            ("--deep-link-last-fetch", "1700000000000"),
+            ("--deep-link-cwd-b64", "L3RtcA"),
+            ("--messaging-socket-path", "/tmp/sock"),
+            ("--resume-session-at", "m1"),
+            ("--resume-drops-turn", "m0"),
+            ("--rewind-files", "m1"),
+        ];
+        for (flag, value) in valued {
+            assert!(
+                Argv::from_iter(["lingxi-cli", flag, value]).is_ok(),
+                "{flag} must parse"
+            );
+        }
+        for flag in [
+            "--debug-to-stderr",
+            "--init",
+            "--init-only",
+            "--maintenance",
+            "--session-mirror",
+            "--enable-auth-status",
+            "--deep-link-origin",
+            "--reply-on-resume",
+            "--enable-auto-mode",
+        ] {
+            assert!(
+                Argv::from_iter(["lingxi-cli", flag]).is_ok(),
+                "{flag} must parse"
+            );
+        }
+
+        let command = <Argv as clap::CommandFactory>::command();
+        for id in [
+            "debug_to_stderr",
+            "init",
+            "init_only",
+            "maintenance",
+            "session_mirror",
+            "task_budget",
+            "enable_auth_status",
+            "workload",
+            "managed_settings",
+            "plugin_dir_no_mcp",
+            "advisor",
+            "channels",
+            "dangerously_load_development_channels",
+            "sdk_url",
+            "prefill",
+            "prefill_b64",
+            "deep_link_origin",
+            "deep_link_repo",
+            "deep_link_last_fetch",
+            "deep_link_cwd_b64",
+            "reply_on_resume",
+            "enable_auto_mode",
+            "append_subagent_system_prompt",
+            "messaging_socket_path",
+            "resume_session_at",
+            "resume_drops_turn",
+            "rewind_files",
+        ] {
+            let arg = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .unwrap_or_else(|| panic!("{id} is a root flag"));
+            assert!(arg.is_hide_set(), "{id} carries .hideHelp() in the oracle");
+        }
+    }
+
+    // `-d2e, --debug-to-stderr` carries `.implies({debug:!0})` (@307399127), so
+    // it is a third alias onto the same switch as `--debug` / `--debug-file`.
+    #[test]
+    fn debug_to_stderr_implies_debug_mode() {
+        let a = Argv::from_iter(["lingxi-cli", "--debug-to-stderr"]).unwrap();
+        assert!(a.debug_to_stderr);
+        assert!(a.debug_enabled());
+    }
+
+    // `--task-budget`'s argParser rejects NaN, <= 0 and non-integers with one
+    // byte-exact message (@307403649).
+    #[test]
+    fn task_budget_rejects_everything_the_oracle_rejects() {
+        // (`-1` is not in this list: clap rejects a leading-hyphen VALUE before
+        // the parser ever runs, so it would assert commander's message against
+        // clap's "unexpected argument" — a different gate.)
+        for raw in ["0", "1.5", "abc", ""] {
+            let error = Argv::from_iter(["lingxi-cli", "--task-budget", raw])
+                .expect_err("value must be rejected")
+                .to_string();
+            assert!(
+                error.contains("--task-budget must be a positive integer"),
+                "rejection copy drifted for {raw}: {error}"
+            );
+        }
+        let ok = Argv::from_iter(["lingxi-cli", "--task-budget", "4096"]).unwrap();
+        assert_eq!(ok.task_budget, Some(4096));
+    }
+
+    // `--prefill-b64` / `--deep-link-cwd-b64` use Node's
+    // `Buffer.from(v,"base64url").toString("utf8")`, which never throws: a
+    // malformed value decodes leniently instead of becoming an argv error, and
+    // `--deep-link-last-fetch`'s `Number.isFinite` argParser DROPS a
+    // non-numeric value rather than rejecting it.
+    #[test]
+    fn deep_link_arg_parsers_are_lenient_like_node() {
+        let a = Argv::from_iter(["lingxi-cli", "--prefill-b64", "aGVsbG8"]).unwrap();
+        assert_eq!(a.resolve_prefill().as_deref(), Some("hello"));
+        // Out-of-alphabet characters are skipped, not rejected.
+        let b = Argv::from_iter(["lingxi-cli", "--prefill-b64", "aG!Vsb G8="]).unwrap();
+        assert_eq!(b.resolve_prefill().as_deref(), Some("hello"));
+        // `--prefill-b64` wins over `--prefill` (only one is ever set upstream).
+        let c =
+            Argv::from_iter(["lingxi-cli", "--prefill", "raw", "--prefill-b64", "aGk"]).unwrap();
+        assert_eq!(c.resolve_prefill().as_deref(), Some("hi"));
+
+        let d = Argv::from_iter(["lingxi-cli", "--deep-link-cwd-b64", "L3RtcA"]).unwrap();
+        assert_eq!(d.resolve_deep_link_cwd().as_deref(), Some("/tmp"));
+
+        let e = Argv::from_iter(["lingxi-cli", "--deep-link-last-fetch", "nope"]).unwrap();
+        assert_eq!(e.deep_link_last_fetch_ms(), None, "Number('nope') is NaN");
+        let f = Argv::from_iter(["lingxi-cli", "--deep-link-last-fetch", "1700000000000"]).unwrap();
+        assert!(
+            f.deep_link_last_fetch_ms()
+                .is_some_and(|ms| (ms - 1_700_000_000_000.0).abs() < 1.0),
+            "a finite epoch-ms value survives the argParser"
+        );
+    }
 }

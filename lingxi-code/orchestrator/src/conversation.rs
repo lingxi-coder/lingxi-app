@@ -968,6 +968,47 @@ pub(crate) struct DateChangeState {
     delivered_date: Option<String>,
 }
 
+/// `plan_mode` attachment cadence — 2.1.238 `X4T` @296525982 with
+/// `txl={TURNS_BETWEEN_ATTACHMENTS:5,FULL_REMINDER_EVERY_N_ATTACHMENTS:5}`
+/// (@296558044).
+///
+/// ```js
+/// if(t&&t.length>0){let{turnCount:y,foundPlanModeAttachment:_}=ixl(t);
+///   if(_&&y<txl.TURNS_BETWEEN_ATTACHMENTS)return[]}
+/// …
+/// let c=Y4T(t??[])+1;
+/// p = (…) || c%txl.FULL_REMINDER_EVERY_N_ATTACHMENTS===1 ? "full" : "sparse";
+/// ```
+///
+/// The oracle derives both numbers by walking the message log backwards:
+/// `ixl` (@296524028) counts non-meta user messages that carry NO `tool_result`
+/// block (`sxl`/`y3T` @296541952) since the most recent `plan_mode` /
+/// `plan_mode_reentry` attachment, and `Y4T` (@296525364) counts the
+/// `plan_mode` attachments emitted since the last `plan_mode_exit`.
+///
+/// LingXi's reminders are OUTGOING-ONLY (never appended to `session.history`),
+/// so neither walk is reconstructible from the log. This struct carries the two
+/// derived quantities instead: the real-user-turn watermark at the last
+/// emission, and the number of attachments emitted since plan mode was entered.
+/// It is reset whenever `SessionState::plan_reminder_shown` is observed `false`
+/// — the flag `EnterPlanMode` (`tools/plan/src/plan_mode.rs:333`) and
+/// `handle_impl.rs:702` clear on plan-mode ENTRY, which is exactly the
+/// `plan_mode_exit` boundary `Y4T` stops at.
+#[derive(Debug, Default)]
+pub(crate) struct PlanReminderCadence {
+    /// `Y4T(...)` — `plan_mode` attachments emitted since plan-mode entry.
+    attachments_emitted: u32,
+    /// The real-user-turn count (see `ixl`) at the last emission; `None` before
+    /// the first attachment of this plan-mode stretch, which is the oracle's
+    /// `foundPlanModeAttachment === false` and bypasses the cadence gate.
+    real_user_turns_at_last_emission: Option<usize>,
+}
+
+/// `txl.TURNS_BETWEEN_ATTACHMENTS` @296558044.
+const PLAN_TURNS_BETWEEN_ATTACHMENTS: usize = 5;
+/// `txl.FULL_REMINDER_EVERY_N_ATTACHMENTS` @296558044.
+const PLAN_FULL_REMINDER_EVERY_N_ATTACHMENTS: u32 = 5;
+
 const TOOL_TOKEN_COUNT_OVERHEAD: u64 = 500;
 
 /// Host-approved app-specific instructions appended after the immutable
@@ -1610,6 +1651,9 @@ pub struct ConversationOrchestrator {
     /// [`Self::skill_listing_reminder_message`] returns `None` (no reminder that
     /// turn). Process-/session-local, exactly like the TS module-scope map.
     pub(crate) sent_skill_names: Mutex<std::collections::HashSet<String>>,
+    /// `plan_mode` attachment cadence (2.1.238 `X4T` @296525982 + `txl`
+    /// @296558044). See [`PlanReminderCadence`].
+    pub(crate) plan_reminder_cadence: Mutex<PlanReminderCadence>,
     /// `date_change` (cc `Cop`) per-session state. See [`DateChangeState`].
     pub(crate) date_change: std::sync::Mutex<DateChangeState>,
     /// `agent_listing_delta` delta: agent TYPES already announced in a prior
@@ -1932,6 +1976,7 @@ impl ConversationOrchestrator {
             sent_nested_memory: Mutex::new(std::collections::HashSet::new()),
             nested_memory_roots: None,
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
+            plan_reminder_cadence: Mutex::new(PlanReminderCadence::default()),
             date_change: std::sync::Mutex::new(DateChangeState::default()),
             sent_agent_names: Mutex::new(std::collections::HashSet::new()),
             memory_prefetch: None,
@@ -6937,10 +6982,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // firings have no tool-use context `r`, so they fall through to `MB()`
         // (the main-thread agent type). `None` when no `--agent` was applied.
         let agent_type = self.main_thread_agent_type().await;
+        // `prompt_id` on the shared hook-input base (oracle `createBaseHookInput`
+        // / minified `c_`: `prompt_id:Vut()??void 0`). `Vut()` is the process-wide
+        // current prompt id — the same value stamped on the JSONL `user` lines and
+        // on the OTel `prompt.id` attribute — and is `undefined` until the first
+        // user input, which `current_prompt_id` reproduces exactly.
+        let prompt_id = self.current_prompt_id.lock().await.clone();
         HookContext {
             session_id,
             cwd: self.current_cwd(),
             transcript_path,
+            prompt_id,
             permission_mode: Some(permission_mode),
             stop_hook_active,
             last_assistant_message,
@@ -11537,10 +11589,57 @@ As you answer the user's questions, you can use the following context:\n\
     /// `query.ts:1580-1590` pushes the attachment after `toolResults`).
     pub(crate) async fn output_style_reminder_message(&self) -> Option<ConversationMessage> {
         let resolved = self.resolve_active_output_style().await?;
+        // 2.1.238 renderer (`Cqm.output_style`, table @296733172):
+        //
+        // ```js
+        // output_style:(e)=>{if(typeof e.style!=="string"||e.style==="")return[];
+        //  if(e.style.length>gFn)return T(`Output style name exceeds ${gFn} characters (${e.style.length}); suppressing its per-turn reminder`,{level:"error"}),[];
+        //  return Zy([kn({content:`${pze(e.style)} output style is active. ${e.turnReminder??"Remember to follow the specific guidelines for this style."}`,isMeta:!0})])},
+        // ```
+        //
+        // The empty-name arm is already covered by `resolve_active_output_style`
+        // (`None` for default/unknown). `gFn = 256` (@285128933) and the `pze`
+        // escape are new in 2.1.238; `e.style.length` is UTF-16 code units.
+        let name = resolved.name.as_str();
+        if name.is_empty() {
+            return None;
+        }
+        let name_len = name.encode_utf16().count();
+        if name_len > crate::prompt::sanitize::MAX_OUTPUT_STYLE_NAME_LEN {
+            tracing::error!(
+                "Output style name exceeds {} characters ({name_len}); suppressing its per-turn reminder",
+                crate::prompt::sanitize::MAX_OUTPUT_STYLE_NAME_LEN
+            );
+            return None;
+        }
+        // The oracle's `${e.turnReminder??"Remember to follow the specific
+        // guidelines for this style."}` fallback is what renders here, and for
+        // this port that is the ONLY reachable arm — re-checked at the oracle
+        // rather than assumed:
+        //
+        // * `turnReminder` exists on exactly TWO entries of the built-in style
+        //   table `lqe` (@287919803 `Proactive: {…, turnReminder: j3S}` and
+        //   @287920185 `Concise: {…, turnReminder: q3S}`, where
+        //   `j3S = "Execute autonomously, minimize interruptions, prefer action
+        //   over planning."` @287916942 and `q3S = "Be concise: lead with the
+        //   result, skip preamble and narration, keep only what the user
+        //   needs."` @287918225). `Explanatory` and `Learning` carry none.
+        // * The port ships exactly `Explanatory` and `Learning`
+        //   (`outputstyles::registry`) — neither of the two styles that have a
+        //   `turnReminder`.
+        // * A DISK style cannot supply one either: the whole binary has six
+        //   `turnReminder` occurrences (V8 string table, the two built-ins, the
+        //   producer `s3T` @296531424/439 and the renderer @296737701) and none
+        //   of them is a frontmatter key.
+        //
+        // So every style this port can resolve renders the fallback sentence,
+        // byte-for-byte. Should the Proactive/Concise built-ins ever be ported,
+        // `ResolvedOutputStyle` needs a `turn_reminder` field carrying `j3S`/
+        // `q3S` and this format string must prefer it.
         let content = format!(
             "<system-reminder>\n{} output style is active. \
              Remember to follow the specific guidelines for this style.\n</system-reminder>",
-            resolved.name
+            crate::prompt::sanitize::escape_reminder_text(name)
         );
         Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
@@ -11578,17 +11677,22 @@ As you answer the user's questions, you can use the following context:\n\
     /// invoked-skills bodies (`REg`) and the tool/mcp deltas (`gYt`/`YJn`), i.e.
     /// before the skill-listing reminder in the port's per-turn sequence.
     ///
-    /// `reminderType` is `"full"` (206 `LU_`) on the FIRST plan-mode turn and
-    /// `"sparse"` (206 `MU_`) thereafter — tracked by `plan_reminder_shown`,
-    /// which is reset to `false` on plan-mode ENTRY. `isSubAgent` is ALWAYS
-    /// `false` here: subagents never run through `ConversationOrchestrator`
-    /// (every orchestrator is a depth-0 main thread), so the `NU_` variant is
-    /// unreachable via this path. `customInstructions` stays `None` (wired by a
-    /// later unit). Appended ONLY to the per-turn OUTGOING snapshot (never
-    /// `session.history` / JSONL) so it never accumulates; `None` keeps the
-    /// locked turn-loop fixtures byte-identical (default: plan mode OFF).
+    /// CADENCE (2.1.238 `X4T` @296525982, `txl` @296558044 — see
+    /// [`PlanReminderCadence`]): at most ONE plan-mode reminder per
+    /// [`PLAN_TURNS_BETWEEN_ATTACHMENTS`] real user turns, and every
+    /// [`PLAN_FULL_REMINDER_EVERY_N_ATTACHMENTS`]th emitted attachment is the
+    /// FULL body (`c % 5 === 1` ⇒ #1, #6, #11 … full; the rest sparse). The port
+    /// previously emitted on EVERY model call, full exactly once and sparse
+    /// forever after — which both over-fired and never returned to the full body.
+    ///
+    /// `isSubAgent` is ALWAYS `false` here: subagents never run through
+    /// `ConversationOrchestrator` (every orchestrator is a depth-0 main thread),
+    /// so the `H5T` variant is unreachable via this path. Appended ONLY to the
+    /// per-turn OUTGOING snapshot (never `session.history` / JSONL) so it never
+    /// accumulates; `None` keeps the locked turn-loop fixtures byte-identical
+    /// (default: plan mode OFF).
     pub(crate) async fn plan_mode_reminder_message(&self) -> Option<ConversationMessage> {
-        let (path, exists, sparse) = {
+        let (path, exists, real_user_turns, entered_plan_mode) = {
             let mut s = self.session.lock().await;
             if !s.plan_mode {
                 return None;
@@ -11601,12 +11705,48 @@ As you answer the user's questions, you can use the following context:\n\
                 self.config.plans_directory.as_deref(),
             );
             let exists = std::path::Path::new(&path).exists();
-            // "full" on the first plan-mode turn (206 reminderType), "sparse"
-            // after. Read-then-arm under the lock so concurrent turns can't both
-            // render "full".
-            let sparse = s.plan_reminder_shown;
+            // `ixl`'s turn counter: non-meta user messages carrying NO
+            // `tool_result` block. Tool-result continuations within one turn are
+            // NOT turns, so the cadence gate holds the reminder for the whole
+            // multi-step turn rather than re-firing on every model call.
+            let real_user_turns = s
+                .history
+                .iter()
+                .filter(|m| match m {
+                    ConversationMessage::User {
+                        content,
+                        is_meta: false,
+                        ..
+                    } => !content
+                        .iter()
+                        .any(|b| matches!(b, protocol::ContentBlock::ToolResult { .. })),
+                    _ => false,
+                })
+                .count();
+            // `plan_reminder_shown == false` marks a fresh plan-mode ENTRY
+            // (`EnterPlanMode` / `handle_impl` clear it), i.e. the
+            // `plan_mode_exit` boundary `Y4T` stops counting at.
+            let entered_plan_mode = !s.plan_reminder_shown;
             s.plan_reminder_shown = true;
-            (path, exists, sparse)
+            (path, exists, real_user_turns, entered_plan_mode)
+        };
+        // Decide emission + full/sparse under the cadence lock so two concurrent
+        // turns cannot both render attachment `c`.
+        let sparse = {
+            let mut c = self.plan_reminder_cadence.lock().await;
+            if entered_plan_mode {
+                *c = PlanReminderCadence::default();
+            }
+            if let Some(last) = c.real_user_turns_at_last_emission {
+                // `if(_ && y < TURNS_BETWEEN_ATTACHMENTS) return []`
+                if real_user_turns.saturating_sub(last) < PLAN_TURNS_BETWEEN_ATTACHMENTS {
+                    return None;
+                }
+            }
+            c.attachments_emitted += 1;
+            c.real_user_turns_at_last_emission = Some(real_user_turns);
+            // `c % FULL_REMINDER_EVERY_N_ATTACHMENTS === 1 ? "full" : "sparse"`
+            c.attachments_emitted % PLAN_FULL_REMINDER_EVERY_N_ATTACHMENTS != 1
         };
         let params = crate::prompt::plan_reminder::PlanReminderParams {
             plan_file_path: &path,
@@ -11750,7 +11890,7 @@ As you answer the user's questions, you can use the following context:\n\
             compaction::context_window::context_window_for_model(&model, &self.api.active_betas())
                 as usize;
         let content = crate::prompt::skill_listing::render_reminder(&new_entries, Some(window))?;
-        Some(ConversationMessage::user(MessageId::new(), content))
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// The per-turn, transient `async_hook_response` reminder, or `None` when no
@@ -11780,17 +11920,19 @@ As you answer the user's questions, you can use the following context:\n\
     /// registry's terminal-not-notified tasks (CONSUME-ONCE — the registry marks
     /// each `notified` + evicts on drain) and renders their `<task-notification>`
     /// blocks (claude-code's per-task-type `enqueue*Notification` formats) inside
-    /// one `<system-reminder>` meta user message, stamped at the front with the
-    /// `NON_USER_INPUT_HEADER` provenance header (claude-code's `v6r`, applied to
-    /// every `task-notification`-origin user message so the model never treats a
-    /// machine-generated completion as user consent). Appended ONLY to the
+    /// one `<system-reminder>` meta user message whose first line is the
+    /// `NON_USER_INPUT_HEADER` provenance header (2.1.238 `b_a` @285068292,
+    /// applied to every `task-notification`-origin user message so the model
+    /// never treats a machine-generated completion as user consent; it also
+    /// escapes any literal `</system-reminder>` in the task output so a task
+    /// cannot close the envelope early). Appended ONLY to the
     /// per-turn OUTGOING snapshot, never `session.history` / JSONL, so it never
     /// accumulates. No delta set is needed — draining the registry IS the dedup.
     pub(crate) async fn task_notification_reminder_message(&self) -> Option<ConversationMessage> {
         let provider = self.task_notifications.as_ref()?;
         let notifications = provider.take_pending_task_notifications().await;
         let content = crate::prompt::task_notification::render_reminder(&notifications)?;
-        Some(ConversationMessage::user(MessageId::new(), content))
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// Finding #73: the per-turn `todo_reminder` (V1) / `task_reminder` (V2)
@@ -12298,7 +12440,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             .collect::<Vec<_>>()
             .join("\n");
         let content = format!("<system-reminder>\n{header}\n{lines}\n</system-reminder>");
-        Some(ConversationMessage::user(MessageId::new(), content))
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// §F: the per-turn, transient `conditional_rules` reminder — path-gated
@@ -12334,17 +12476,23 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// Per-turn, transient `<new-diagnostics>` reminder — newly-reported LSP
     /// diagnostics not yet surfaced to the model (claude-code's
     /// `formatDiagnosticsBlock` flow). `None` when no LSP source is wired (no
-    /// servers ⇒ the common case) or there are no new diagnostics. The block is
-    /// already wrapped in its own `<new-diagnostics>` tag (NOT `<system-reminder>`),
-    /// so it is injected as a bare meta user message, appended ONLY to the
-    /// outgoing snapshot (never `session.history` / JSONL).
+    /// servers ⇒ the common case) or there are no new diagnostics.
+    ///
+    /// The block carries its own `<new-diagnostics>` tag, and the oracle wraps
+    /// that in a `<system-reminder>` on top of it: 2.1.238 @296692400
+    /// `case"diagnostics":{…return Zy([kn({content:Bve.formatDiagnosticsBlock(n),isMeta:!0})])}`,
+    /// where `Zy` (@296675470) maps `NT` = `` `<system-reminder>\n${e}\n</system-reminder>` ``
+    /// (@296673554) over every message. The `<new-diagnostics>` literal
+    /// (@236015184) contains no envelope of its own, so the two tags nest.
+    /// Appended ONLY to the outgoing snapshot (never `session.history` / JSONL).
     pub(crate) async fn new_diagnostics_reminder_message(&self) -> Option<ConversationMessage> {
         let block = self
             .new_diagnostics_source
             .as_ref()?
             .take_new_diagnostics_block()
             .await?;
-        Some(ConversationMessage::user(MessageId::new(), block))
+        let content = format!("<system-reminder>\n{block}\n</system-reminder>");
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     pub(crate) async fn conditional_rules_reminder_message(&self) -> Option<ConversationMessage> {
@@ -12415,7 +12563,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             .map(|r| crate::prompt::conditional_rules::render_reminder(r))
             .collect::<Vec<_>>()
             .join("\n\n");
-        Some(ConversationMessage::user(MessageId::new(), content))
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// Hermetic override for the roots [`Self::nested_memory_reminder_message`]
@@ -12570,7 +12718,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             .map(crate::prompt::conditional_rules::render_reminder)
             .collect::<Vec<_>>()
             .join("\n\n");
-        Some(ConversationMessage::user(MessageId::new(), content))
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// Seed `read_file_state` for files surfaced as NESTED MEMORY — `k$o`'s
@@ -12914,7 +13062,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
 
         // render returns None on empty (TS `return []`).
         let content = skill_api::render_skill_discovery_block(&fresh)?;
-        Some(ConversationMessage::user(MessageId::new(), content))
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// Build the wire `tools` array for a turn from the registry's enabled tool

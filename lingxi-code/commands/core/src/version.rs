@@ -84,6 +84,15 @@ mod tests {
     async fn name_and_description() {
         let h = VersionHandler::new();
         assert_eq!(h.name(), "version");
-        assert_eq!(h.description(), "Print version information");
+        // SLASH-14: `Print version information` matched NEITHER oracle
+        // `/version` object. Both twins @2.1.238 296268759 are
+        // `isEnabled:()=>!1`, so the command is filtered out of `/help` and
+        // the palette (`names::STATICALLY_DISABLED_COMMANDS`) while staying
+        // dispatchable; the advertised string is now the interactive twin's,
+        // matching the `tui::command` row.
+        assert_eq!(
+            h.description(),
+            "Show this session's version (autoupdate may have a newer one)"
+        );
     }
 }

@@ -49,6 +49,7 @@ Commands:
   /permissions          Manage allow and deny tool permission rules
   /plan                 Enable plan mode or view the current session plan
   /plugin               Manage LingXi plugins
+  /powerup              Discover LingXi features through quick interactive lessons
   /privacy-settings     View and update your privacy settings
   /recap                Generate a one-line session recap now
   /release-notes        View release notes
@@ -76,6 +77,5 @@ Commands:
   /ultraplan            LingXi on the web drafts an advanced plan you can edit and approve
   /upgrade              Upgrade to Max for higher rate limits and more Opus
   /usage                Show session cost, plan usage, and what's contributing to your limits
-  /version              Print version information
   /voice                Toggle voice mode
   /workflows            Browse running and completed workflows

@@ -3507,7 +3507,20 @@ mod skill_listing_reminder_tests {
         // Injection armed the sparse flag.
         assert!(orch.session().lock().await.plan_reminder_shown);
 
-        // Second plan-mode turn ⇒ SPARSE (206 `MU_`).
+        // 2.1.238 `X4T` cadence: the NEXT model call in the same turn (and the
+        // next four user turns) get NOTHING — `if(_ && y < 5) return []`.
+        assert!(
+            orch.plan_mode_reminder_message().await.is_none(),
+            "no second attachment before 5 real user turns have passed"
+        );
+        push_real_user_turns(&orch, 4).await;
+        assert!(
+            orch.plan_mode_reminder_message().await.is_none(),
+            "4 turns is still under TURNS_BETWEEN_ATTACHMENTS"
+        );
+
+        // The 5th real user turn releases attachment #2 ⇒ SPARSE (`L5T`).
+        push_real_user_turns(&orch, 1).await;
         let t1 = orch
             .plan_mode_reminder_message()
             .await
@@ -3522,14 +3535,103 @@ mod skill_listing_reminder_tests {
         assert!(t1.contains("Follow 5-phase workflow."), "sparse body: {t1}");
     }
 
+    /// Append `n` non-meta, non-tool_result user messages — the only kind `ixl`
+    /// (2.1.238 @296524028) counts toward `TURNS_BETWEEN_ATTACHMENTS`.
+    async fn push_real_user_turns(orch: &ConversationOrchestrator, n: usize) {
+        let sess = orch.session();
+        let mut s = sess.lock().await;
+        for i in 0..n {
+            s.history.push(ConversationMessage::user(
+                MessageId::new(),
+                format!("turn {i}"),
+            ));
+        }
+    }
+
+    /// `c % FULL_REMINDER_EVERY_N_ATTACHMENTS === 1`: attachments #1 and #6 are
+    /// FULL, #2..#5 sparse. The pre-fix port emitted FULL exactly once and was
+    /// sparse forever after.
+    #[tokio::test]
+    async fn plan_mode_reminder_returns_to_full_every_fifth_attachment() {
+        let orch = orch_with(ToolRegistry::new(), None);
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            s.plan_mode = true;
+            s.plan_reminder_shown = false;
+        }
+        let full_prefix = "<system-reminder>\nPlan mode is active. The user indicated";
+        let sparse_prefix = "<system-reminder>\nPlan mode still active (see full instructions";
+
+        let mut forms = Vec::new();
+        for _ in 0..6 {
+            let t = orch
+                .plan_mode_reminder_message()
+                .await
+                .expect("attachment")
+                .text_content();
+            forms.push(if t.starts_with(full_prefix) {
+                "full"
+            } else {
+                assert!(t.starts_with(sparse_prefix), "unexpected body: {t}");
+                "sparse"
+            });
+            push_real_user_turns(&orch, 5).await;
+        }
+        assert_eq!(
+            forms,
+            vec!["full", "sparse", "sparse", "sparse", "sparse", "full"]
+        );
+    }
+
+    /// A tool-result continuation is NOT a turn (`sxl`/`y3T` @296541952), so it
+    /// never advances the cadence.
+    #[tokio::test]
+    async fn tool_result_continuations_do_not_advance_the_plan_cadence() {
+        let orch = orch_with(ToolRegistry::new(), None);
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            s.plan_mode = true;
+            s.plan_reminder_shown = false;
+        }
+        orch.plan_mode_reminder_message().await.expect("first");
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            for _ in 0..10 {
+                s.history.push(ConversationMessage::User {
+                    id: MessageId::new(),
+                    content: vec![protocol::ContentBlock::ToolResult {
+                        tool_use_id: protocol::ToolUseId::new(),
+                        content: "ok".into(),
+                        is_error: false,
+                        provider_tool_use_id: None,
+                        content_blocks: None,
+                    }],
+                    is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                });
+            }
+        }
+        assert!(
+            orch.plan_mode_reminder_message().await.is_none(),
+            "ten tool-result continuations are still zero real user turns"
+        );
+    }
+
     #[tokio::test]
     async fn plan_mode_reminder_reset_replays_full() {
         // After a sparse turn, re-entering plan mode (reset flag) replays FULL.
         let orch = orch_with(ToolRegistry::new(), None);
         orch.session().lock().await.plan_mode = true;
         let _full = orch.plan_mode_reminder_message().await.expect("full");
+        push_real_user_turns(&orch, 5).await;
         let _sparse = orch.plan_mode_reminder_message().await.expect("sparse");
         // Simulate EnterPlanMode / set_plan_mode(true) re-arming the tracker.
+        // Re-entry also resets the `X4T` cadence (the `plan_mode_exit` boundary
+        // `Y4T` stops counting at), so the very next call emits again.
         orch.session().lock().await.plan_reminder_shown = false;
         let again = orch
             .plan_mode_reminder_message()
@@ -3806,18 +3908,18 @@ mod skill_listing_reminder_tests {
             .await
             .expect("turn-0 task notification")
             .text_content();
-        let body = "<system-reminder>\n\
-<task-notification>\n\
+        // 2.1.238 `b_a` (@285068292): the provenance header sits INSIDE the
+        // `<system-reminder>` envelope.
+        let body = "<task-notification>\n\
 <task-id>b12345678</task-id>\n\
 <output-file>/tmp/tasks/b12345678.output</output-file>\n\
 <status>completed</status>\n\
 <summary>Background command \"run tests\" completed (exit code 0)</summary>\n\
-</task-notification>\n\
-</system-reminder>";
+</task-notification>";
         assert_eq!(
             t0,
             format!(
-                "{}{body}",
+                "<system-reminder>\n{}{body}\n</system-reminder>",
                 crate::prompt::task_notification::NON_USER_INPUT_HEADER
             )
         );
@@ -4247,7 +4349,17 @@ mod new_diagnostics_reminder_tests {
             .new_diagnostics_reminder_message()
             .await
             .expect("a block is injected");
-        assert_eq!(msg.text_content(), block);
+        // The diagnostics attachment renders through the SAME batch wrapper as
+        // every other reminder: oracle 2.1.238 @296693609 is
+        //   case"diagnostics": … return Zy([kn({content: formatDiagnosticsBlock(n), isMeta:!0})])
+        // and `Zy` maps `NT` = `<system-reminder>\n${e}\n</system-reminder>`.
+        // `formatDiagnosticsBlock` itself returns the BARE block (@289741641),
+        // which is why this test previously asserted the bare form — it was
+        // reading the formatter and not the renderer that consumes it.
+        assert_eq!(
+            msg.text_content(),
+            format!("<system-reminder>\n{block}\n</system-reminder>")
+        );
     }
 
     #[tokio::test]

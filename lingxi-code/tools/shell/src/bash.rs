@@ -1181,6 +1181,175 @@ fn invalidate_written_read_state(ctx: &BuiltinToolContext, cwd: &std::path::Path
     }
 }
 
+// ===== BASH-07 — `ghRateLimitHint` (claude-code 2.1.238 `ikf`) ==============
+
+/// The system-reminder the oracle appends when a `gh` command reports a GitHub
+/// API rate-limit error — byte-locked to `ikf`'s return value (oracle 2.1.238
+/// @113553697; the same bytes in 2.1.220).
+const GH_RATE_LIMIT_REMINDER: &str = "<system-reminder>GitHub API rate limit exceeded (5,000/hr shared across all tools and agents). Run `gh api rate_limit --jq .resources` and sleep until reset before further gh calls. If polling in a loop, use ScheduleWakeup instead of retrying.</system-reminder>";
+
+/// Oracle `Y_v = 60000` — once emitted, the reminder is suppressed for a minute
+/// so a retry loop does not repeat it on every call.
+const GH_RATE_LIMIT_BACKOFF_MS: i64 = 60_000;
+
+/// The subcommands the oracle's `gh`-invocation regex excludes — `V_v`'s
+/// `(?!auth\b|help\b|version\b|alias\b|completion\b|config\b)`. None of them
+/// spends API quota, so a rate-limit string in their output is not a hint.
+const GH_RATE_LIMIT_EXCLUDED_SUBCOMMANDS: [&str; 6] =
+    ["auth", "help", "version", "alias", "completion", "config"];
+
+/// Port of the oracle's per-session `toolState.get(y7a)` (`class y7a {
+/// backoffUntil = 0 }`), keyed by session id.
+///
+/// RESIDUAL: `ToolUseContext` exposes no generic per-session tool-state bag, so
+/// the backoff lives in a process-global map keyed by
+/// `BuiltinToolContext::session_id` (empty key when a context carries none —
+/// tests and the session-less shims, which then share one entry exactly as they
+/// share every other process-global here).
+static GH_RATE_LIMIT_BACKOFF_UNTIL: Lazy<std::sync::Mutex<HashMap<String, i64>>> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// JS `\w` — `[A-Za-z0-9_]`.
+fn is_js_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Port of oracle `V_v`:
+/// `/(?:^|[;&|]|\b(?:then|do)\b)\s*gh\s+(?!auth\b|help\b|version\b|alias\b|completion\b|config\b)/`
+/// — i.e. `gh` used as a COMMAND word (at the start, after a `;`/`&`/`|`
+/// separator, or after a `then`/`do` keyword) with a quota-spending subcommand.
+///
+/// Hand-scanned rather than compiled: `tool-shell` pulls in no regex crate (the
+/// same reason [`is_image_output`] scans by hand), and Rust's `regex` has no
+/// lookahead anyway.
+///
+/// One JS artifact is reproduced deliberately: `\s+` is GREEDY with
+/// backtracking, so when two or more whitespace characters separate `gh` from
+/// its subcommand the engine can end `\s+` ON a whitespace character, where no
+/// excluded keyword can match and the negative lookahead therefore always
+/// succeeds. Only a SINGLE separator pins the lookahead to the subcommand.
+fn command_invokes_rate_limited_gh(command: &str) -> bool {
+    let chars: Vec<char> = command.chars().collect();
+    let n = chars.len();
+    let mut i = 0usize;
+    while i + 1 < n {
+        if chars[i] != 'g' || chars[i + 1] != 'h' {
+            i += 1;
+            continue;
+        }
+        // `gh\s+` — at least one whitespace character must follow.
+        let after = i + 2;
+        let mut ws_end = after;
+        while ws_end < n && chars[ws_end].is_whitespace() {
+            ws_end += 1;
+        }
+        if ws_end == after {
+            i += 1;
+            continue;
+        }
+        // `(?:^|[;&|]|\b(?:then|do)\b)\s*` — walk back over the `\s*`, then
+        // test the three prefix alternatives at that position.
+        let mut j = i;
+        while j > 0 && chars[j - 1].is_whitespace() {
+            j -= 1;
+        }
+        let prefix_ok = if j == 0 {
+            true
+        } else {
+            let prev = chars[j - 1];
+            if prev == ';' || prev == '&' || prev == '|' {
+                true
+            } else if is_js_word_char(prev) && !is_js_word_char(chars[j]) {
+                // The trailing `\b` of `\b(?:then|do)\b` needs a non-word
+                // character at `j`; a zero-width `\s*` leaves `chars[j] == 'g'`
+                // there, which correctly rejects `dogh …`.
+                ["then", "do"].iter().any(|kw| {
+                    let k: Vec<char> = kw.chars().collect();
+                    j >= k.len()
+                        && chars[j - k.len()..j] == k[..]
+                        && (j == k.len() || !is_js_word_char(chars[j - k.len() - 1]))
+                })
+            } else {
+                false
+            }
+        };
+        if prefix_ok {
+            if ws_end - after >= 2 {
+                // `\s+` can backtrack onto whitespace ⇒ lookahead always passes.
+                return true;
+            }
+            let mut k = ws_end;
+            while k < n && is_js_word_char(chars[k]) {
+                k += 1;
+            }
+            let subcommand: String = chars[ws_end..k].iter().collect();
+            if !GH_RATE_LIMIT_EXCLUDED_SUBCOMMANDS.contains(&subcommand.as_str()) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// `\bNEEDLE\b` over an already-lowercased haystack. Needle and JS word chars
+/// are both ASCII, so byte-indexed boundary probes are safe: any byte of a
+/// multi-byte UTF-8 character is `>= 0x80` and therefore a non-word byte.
+fn contains_lowercase_word(haystack_lower: &str, needle_lower: &str) -> bool {
+    let hb = haystack_lower.as_bytes();
+    let is_word_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    haystack_lower.match_indices(needle_lower).any(|(at, _)| {
+        let end = at + needle_lower.len();
+        (at == 0 || !is_word_byte(hb[at - 1])) && (end >= hb.len() || !is_word_byte(hb[end]))
+    })
+}
+
+/// Port of oracle `K_v`:
+/// `/API rate limit (?:already )?exceeded|exceeded a secondary rate limit|\bRATE_LIMITED\b/i`.
+fn output_reports_gh_rate_limit(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("api rate limit exceeded")
+        || lower.contains("api rate limit already exceeded")
+        || lower.contains("exceeded a secondary rate limit")
+        || contains_lowercase_word(&lower, "rate_limited")
+}
+
+/// Port of claude-code 2.1.238 `ikf` — the `ghRateLimitHint` result field:
+///
+/// ```js
+/// function ikf(e,t,r){if(!V_v.test(e)||!K_v.test(t)||Date.now()<r.backoffUntil)return;
+///  return r.backoffUntil=Date.now()+Y_v,"<system-reminder>GitHub API rate limit exceeded …</system-reminder>"}
+/// ```
+///
+/// Wired as `q=_.backgroundTaskId?void 0:ikf(e.command,S,t.toolState.get(y7a))`
+/// and appended LAST to the model-facing content
+/// (`[h,g,y,p,f].filter(Boolean).join("\n")`, `f` = this hint).
+///
+/// `S` is the oracle's FULL command output; claude-code's bash provider merges
+/// the child's stderr into stdout (its analytics always report
+/// `stderr_length: 0`), so the port passes both streams here.
+fn gh_rate_limit_hint(
+    session_key: &str,
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    now_ms: i64,
+) -> Option<&'static str> {
+    if !command_invokes_rate_limited_gh(command) {
+        return None;
+    }
+    if !output_reports_gh_rate_limit(stdout) && !output_reports_gh_rate_limit(stderr) {
+        return None;
+    }
+    let mut state = GH_RATE_LIMIT_BACKOFF_UNTIL.lock().ok()?;
+    let backoff_until = state.get(session_key).copied().unwrap_or(0);
+    if now_ms < backoff_until {
+        return None;
+    }
+    state.insert(session_key.to_string(), now_ms + GH_RATE_LIMIT_BACKOFF_MS);
+    Some(GH_RATE_LIMIT_REMINDER)
+}
+
 // ===== Image-output handling (claude-code `BashTool/utils.ts`) ==============
 
 /// True when `content` is a base64 image data URI. 1:1 port of claude-code
@@ -1764,7 +1933,12 @@ impl Tool for BashTool {
             .get("run_in_background")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if sleep_block_enabled() && !run_bg {
+        // BASH-17 — the oracle's gate is `HSe() && !WA() && !e.run_in_background`
+        // (2.1.238 and 2.1.220 alike). The `!WA()` conjunct was missing here:
+        // with background tasks disabled the block's own remedy
+        // (`run_in_background: true`) does not exist, so the oracle stops
+        // blocking rather than dead-ending the model.
+        if sleep_block_enabled() && !crate::prompt::background_tasks_disabled() && !run_bg {
             if let Some(pattern) = detect_blocked_sleep_pattern(cmd) {
                 return Err(ValidationError(format!(
                     "Blocked: {pattern}. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block."
@@ -2457,6 +2631,33 @@ impl Tool for BashTool {
                     stale_read_file_state_hint(&self.ctx, &cmd_str, &cwd, call_start_ms);
                 invalidate_written_read_state(&self.ctx, &cwd, &cmd_str);
 
+                // BASH-07 `ghRateLimitHint` (`q` in the oracle's `call`): a
+                // non-background `gh` command whose output reports a GitHub API
+                // rate-limit error gets the system-reminder appended LAST,
+                // matching the mapper's `[h,g,y,p,f].filter(Boolean).join("\n")`
+                // order (`p` = staleReadFileStateHint, `f` = this).
+                let session_key = self
+                    .ctx
+                    .session_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let gh_hint = gh_rate_limit_hint(
+                    &session_key,
+                    &cmd_str,
+                    &stdout_final,
+                    &stderr_clean,
+                    SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                );
+                let trailing_notes = [stale_hint.as_deref(), gh_hint]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<&str>>()
+                    .join("\n");
+
                 // Model sees the plain-text `[stdout, stderr].join("\n")` render
                 // (`content` in the binary's tool_result mapper), NOT the JSON
                 // object — which stays for the TUI / PostToolUse hook.
@@ -2464,7 +2665,11 @@ impl Tool for BashTool {
                     &stdout_final,
                     &stderr_clean,
                     false,
-                    stale_hint.as_deref(),
+                    if trailing_notes.is_empty() {
+                        None
+                    } else {
+                        Some(trailing_notes.as_str())
+                    },
                 );
                 Ok(ToolCallResult {
                     // claude-code 2.1.191 `BashTool` outputSchema (pure metadata).
@@ -3538,6 +3743,30 @@ mod tests {
         result.expect("sleep 30 backgrounded must be allowed even with the gate on");
     }
 
+    /// BASH-17 — the oracle's gate is `HSe() && !WA() && !e.run_in_background`.
+    /// With background tasks disabled the block's own remedy
+    /// (`run_in_background: true`) is not even in the schema, so the oracle
+    /// stops blocking rather than dead-ending the model.
+    #[tokio::test]
+    async fn validate_input_does_not_block_sleep_when_background_tasks_are_disabled() {
+        let _g = SLEEP_GATE_LOCK.lock().await;
+        let tool = bash_tool_noop();
+        std::env::set_var("tengu_amber_sentinel", "1");
+        std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
+        let disabled = tool
+            .validate_input(&json!({"command": "sleep 30"}), &use_ctx())
+            .await;
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        // Same input, background tasks back on → still blocked, so the new
+        // conjunct is the only thing that changed the verdict.
+        let enabled = tool
+            .validate_input(&json!({"command": "sleep 30"}), &use_ctx())
+            .await;
+        std::env::remove_var("tengu_amber_sentinel");
+        disabled.expect("sleep 30 must be ALLOWED when background tasks are disabled");
+        enabled.expect_err("sleep 30 must still be blocked when background tasks are enabled");
+    }
+
     #[test]
     fn detect_blocked_sleep_pattern_threshold_and_fractional() {
         // Below the 25s threshold → not blocked.
@@ -3773,6 +4002,11 @@ mod tests {
     #[test]
     fn input_schema_omits_run_in_background_when_background_tasks_are_disabled() {
         let _g = background_tasks_env_lock();
+        // `LINGXI_DISABLE_BACKGROUND_TASKS` is now read by the sleep-block gate
+        // too (BASH-17), so hold that family's lock for the env window as well.
+        // Lock ORDER is fixed here (background → sleep) and nothing takes them
+        // the other way round, so this cannot deadlock.
+        let _s = SLEEP_GATE_LOCK.blocking_lock();
         let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -3990,6 +4224,128 @@ mod tests {
         assert_eq!(
             hint,
             "[This command modified 7 files you've previously read: f6.rs, f5.rs, f4.rs, f3.rs, f2.rs and 2 more. Call Read before editing.]"
+        );
+    }
+
+    // ===== BASH-07 — `ghRateLimitHint` (oracle `ikf`/`V_v`/`K_v`) ===========
+
+    /// `V_v` matches `gh` only as a COMMAND word, and only for a
+    /// quota-spending subcommand.
+    #[test]
+    fn gh_invocation_predicate_matches_the_oracle_regex() {
+        for yes in [
+            "gh pr list",
+            "gh api rate_limit",
+            "git fetch && gh pr view 12",
+            "cat x | gh pr create",
+            "foo; gh issue list",
+            "if x; then gh pr list; fi",
+            "for f in *; do gh pr view; done",
+            // No subcommand word at all — the lookahead cannot match `-h`.
+            "gh -h",
+            // `auth` only excludes the EXACT word (`auth\b`).
+            "gh authorize",
+        ] {
+            assert!(
+                command_invokes_rate_limited_gh(yes),
+                "expected a gh invocation: {yes:?}"
+            );
+        }
+        for no in [
+            // `gh` is an argument, not a command word.
+            "echo gh pr list",
+            "grep gh file",
+            // No whitespace after `gh` (`gh\s+` needs at least one).
+            "gh",
+            "ghost pr list",
+            // `\b(?:then|do)\b` must be a whole word.
+            "dogh pr list",
+            // Excluded subcommands.
+            "gh auth status",
+            "gh help",
+            "gh version",
+            "gh alias list",
+            "gh completion -s zsh",
+            "gh config get editor",
+        ] {
+            assert!(
+                !command_invokes_rate_limited_gh(no),
+                "expected NO gh invocation: {no:?}"
+            );
+        }
+    }
+
+    /// Reproduced JS artifact: `gh\s+` is greedy WITH backtracking, so two or
+    /// more separators let `\s+` end on a whitespace character where no excluded
+    /// keyword can match — the negative lookahead then always succeeds.
+    #[test]
+    fn gh_invocation_predicate_reproduces_the_greedy_whitespace_backtrack() {
+        assert!(!command_invokes_rate_limited_gh("gh auth status"));
+        assert!(command_invokes_rate_limited_gh("gh  auth status"));
+    }
+
+    /// `K_v = /API rate limit (?:already )?exceeded|exceeded a secondary rate
+    /// limit|\bRATE_LIMITED\b/i`.
+    #[test]
+    fn gh_rate_limit_output_predicate_matches_the_oracle_regex() {
+        for yes in [
+            "API rate limit exceeded for user ID 1.",
+            "api rate limit already exceeded",
+            "You have exceeded a secondary rate limit",
+            "type: RATE_LIMITED",
+            "rate_limited",
+        ] {
+            assert!(output_reports_gh_rate_limit(yes), "expected a hit: {yes:?}");
+        }
+        for no in [
+            "",
+            "API rate limit remaining: 4999",
+            // `\b` before `RATE_LIMITED` fails — `_` is a word character.
+            "X_RATE_LIMITED",
+            "RATE_LIMITEDX",
+        ] {
+            assert!(!output_reports_gh_rate_limit(no), "expected a miss: {no:?}");
+        }
+    }
+
+    /// `ikf` emits once, then backs off for `Y_v` = 60 000 ms.
+    #[test]
+    fn gh_rate_limit_hint_emits_once_then_backs_off_for_a_minute() {
+        let key = "bash-07-backoff";
+        let out = "API rate limit exceeded for user ID 1.";
+        assert_eq!(
+            gh_rate_limit_hint(key, "gh pr list", out, "", 1_000),
+            Some(GH_RATE_LIMIT_REMINDER)
+        );
+        // Within the 60s window: suppressed.
+        assert_eq!(gh_rate_limit_hint(key, "gh pr list", out, "", 60_999), None);
+        // At the boundary (`Date.now() < backoffUntil` is false): emitted again.
+        assert_eq!(
+            gh_rate_limit_hint(key, "gh pr list", out, "", 61_000),
+            Some(GH_RATE_LIMIT_REMINDER)
+        );
+    }
+
+    /// Both predicates gate the hint, and the reminder text is byte-locked.
+    #[test]
+    fn gh_rate_limit_hint_requires_both_a_gh_command_and_a_rate_limit_output() {
+        let out = "API rate limit exceeded";
+        // Command matches but output does not.
+        assert_eq!(
+            gh_rate_limit_hint("bash-07-a", "gh pr list", "ok", "", 0),
+            None
+        );
+        // Output matches but the command is not a gh invocation.
+        assert_eq!(gh_rate_limit_hint("bash-07-b", "curl x", out, "", 0), None);
+        // The oracle reads the FULL command output; the port checks both
+        // streams because it does not merge stderr into stdout.
+        assert_eq!(
+            gh_rate_limit_hint("bash-07-c", "gh pr list", "", out, 0),
+            Some(GH_RATE_LIMIT_REMINDER)
+        );
+        assert_eq!(
+            GH_RATE_LIMIT_REMINDER,
+            "<system-reminder>GitHub API rate limit exceeded (5,000/hr shared across all tools and agents). Run `gh api rate_limit --jq .resources` and sleep until reset before further gh calls. If polling in a loop, use ScheduleWakeup instead of retrying.</system-reminder>"
         );
     }
 
@@ -4758,9 +5114,22 @@ mod tests {
             !p.contains("# Committing changes with git"),
             "SHORT prompt must not carry the LONG git section"
         );
+        // BASH-14: the SHORT `# Git` section DOES carry the attribution
+        // bullets. The oracle builds them as
+        //   [r?`- End git commit messages with:\n${r}`:null,
+        //    o?`- End PR bodies with:\n${o}`:null].filter(Boolean).join("\n")
+        // so they appear whenever the attribution texts are non-empty — and
+        // `attribution_texts()` returns the DEFAULT pair, so they are.
+        //
+        // Confirmed against a live 2.1.238 session, whose concise `# Git`
+        // section is exactly the three bullets asserted above followed by
+        // "- End git commit messages with:" / "- End PR bodies with:".
+        // The old assertion asserted their ABSENCE on the premise that there is
+        // "no attribution source"; that premise stopped holding once the
+        // attribution slots were wired.
         assert!(
-            !p.contains("End git commit messages with:") && !p.contains("End PR bodies with:"),
-            "attribution bullets must be omitted (no attribution source, like the LONG prompt)"
+            p.contains("- End git commit messages with:") && p.contains("- End PR bodies with:"),
+            "SHORT prompt must carry both attribution bullets; got:\n{p}"
         );
         // Sandbox section absent (default test sandbox disabled).
         assert!(

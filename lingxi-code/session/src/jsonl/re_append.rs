@@ -54,6 +54,35 @@ use std::path::Path;
 /// 237851998, tail of `drainQueuesOnce`, with `skip_dedup = true`).
 pub const METADATA_REAPPEND_BACKSTOP_BYTES: usize = LITE_READ_BUF_SIZE / 2;
 
+// ── GAP (SC-08): the reclamation half of this backstop is not ported ────────
+//
+// This module is the GROWTH side: every backstop firing appends a fresh copy of
+// the whole metadata set, so a long session accumulates superseded sidecar
+// records without bound. Upstream pairs it with `performCompactTranscript`
+// (cc-238.js @296788068) — present in 2.1.220 too, so this is a pre-existing
+// gap, not 2.1.238 drift — which rewrites `<sid>.jsonl` through
+// `<sid>.jsonl.compact.tmp.<8 hex>`, dropping records superseded under the
+// `always` / `last-wins` persistence tables (`s9m` / `aqT`), then re-appends
+// the metadata set with `skip_dedup = true`.
+//
+// Constants (@296896686, @296899269): `I6m = 5_242_880` (skip below 5 MiB),
+// `Uyr = 20_971_520` (the backstop this arms on every compact boundary —
+// @296794903: `this.backstopThresholdBytes = Uyr, this.requestCompact(...)`),
+// `P6m = 8 * Uyr` (160 MiB ceiling), `O6m = 0.1` (a rewrite reclaiming under
+// 10 % doubles the backstop instead). Telemetry `tengu_transcript_compact
+// {bytesBefore,bytesAfter}` / `tengu_transcript_compact_failed{reason:
+// snapshot_mid_line|source_changed|rename_fallback|io}`; warn copy
+// `Transcript compact failed (…): …`.
+//
+// DEFERRED, deliberately, rather than half-ported: the oracle's safety
+// envelope is the whole feature — a stat-inode + three 4 KiB sample-window
+// re-verification before AND after the rewrite, a mid-line tail check on the
+// last window, a re-read of the bytes that arrived during the rewrite (trimmed
+// back to the last `\n`), an fsync, and an unlink of the temp file on every
+// failure path. Ported without all of that it silently truncates transcripts,
+// and it cannot be validated by reading. The growth side stays correct without
+// it; the cost of the gap is disk, not data.
+
 /// `normalizeLastPrompt` truncation width, in UTF-16 code units
 /// (oracle: `t.length>200?ma(t,200)…`).
 const LAST_PROMPT_MAX_UTF16: usize = 200;
@@ -612,25 +641,56 @@ pub fn plan_re_append(
             };
             match latest.iter().find(|(seen, _)| seen == ty) {
                 None => true,
-                Some((_, on_disk)) => without_timestamp(entry) != without_timestamp(on_disk),
+                Some((_, on_disk)) => dedup_key(entry) != dedup_key(on_disk),
             }
         })
         .collect();
     Some(ReAppendPlan { entries: kept })
 }
 
-/// The dedup comparator: `({timestamp, ...rest}) => JSON.stringify(rest)`.
+/// The dedup comparator (cc-238.js @296784560):
+///
+/// ```js
+/// let f=(m)=>{ if(m.type==="history-suppression") return Ie({type:m.type,sessionId:m.sessionId});
+///              let{timestamp:h, ts:g, ...y}=m; return Ie(y)};
+/// ```
 ///
 /// KEY ORDER SENSITIVE by construction — this is a string compare of the
 /// serialization, not a structural compare. A writer that emits the same fields
 /// in a different order defeats dedup and re-appends forever.
-fn without_timestamp(value: &Value) -> String {
+///
+/// Two changes from the 2.1.220 twin (`let p=(f)=>{let{timestamp:m,...g}=f;return Ie(g)}`),
+/// both landed here:
+///
+/// * `ts` is stripped alongside `timestamp`. Latent in the port today — nothing
+///   it writes carries a `ts` — but a record that gained one would otherwise
+///   re-append on every turn forever, which is exactly the failure the strip
+///   exists to prevent.
+/// * `history-suppression` compares on `{type, sessionId}` ONLY, so a repeat
+///   suppression record for the same session dedups no matter what else it
+///   carries. The record type is new in 2.1.238 (0 hits in 2.1.220) and the
+///   special case reproduces the oracle's key order verbatim: `type` first.
+fn dedup_key(value: &Value) -> String {
     match value {
         Value::Object(map) => {
             let mut stripped = Map::new();
-            for (key, val) in map {
-                if key != "timestamp" {
-                    stripped.insert(key.clone(), val.clone());
+            if map.get("type").and_then(Value::as_str) == Some("history-suppression") {
+                // `Ie({type:m.type,sessionId:m.sessionId})` — a fresh object,
+                // so both keys are present (as `null` when absent) in the
+                // oracle's order regardless of the source record's shape.
+                stripped.insert(
+                    "type".to_string(),
+                    map.get("type").cloned().unwrap_or(Value::Null),
+                );
+                stripped.insert(
+                    "sessionId".to_string(),
+                    map.get("sessionId").cloned().unwrap_or(Value::Null),
+                );
+            } else {
+                for (key, val) in map {
+                    if key != "timestamp" && key != "ts" {
+                        stripped.insert(key.clone(), val.clone());
+                    }
                 }
             }
             serde_json::to_string(&Value::Object(stripped)).unwrap_or_default()
@@ -1154,6 +1214,69 @@ mod tests {
             plan.is_empty(),
             "timestamp-only differences must not defeat dedup"
         );
+    }
+
+    /// SC-12. 2.1.238 destructures `{timestamp, ts, ...rest}`, not just
+    /// `{timestamp, ...rest}` — a record whose only difference is a `ts` field
+    /// dedups too. Asserted directly on the comparator because nothing the port
+    /// writes carries a `ts` yet, which is precisely why the strip would
+    /// otherwise rot unnoticed until the first writer that adds one bloats the
+    /// transcript on every turn.
+    #[test]
+    fn dedup_key_strips_ts_alongside_timestamp() {
+        let with_ts = serde_json::json!({
+            "type": "mode", "mode": "default", "sessionId": "S1",
+            "ts": 1_700_000_000_u64, "timestamp": "1999-01-01T00:00:00.000Z",
+        });
+        let bare = serde_json::json!({
+            "type": "mode", "mode": "default", "sessionId": "S1",
+        });
+        assert_eq!(dedup_key(&with_ts), dedup_key(&bare));
+        assert_eq!(
+            dedup_key(&bare),
+            r#"{"type":"mode","mode":"default","sessionId":"S1"}"#
+        );
+
+        // A real field difference still defeats dedup.
+        let changed = serde_json::json!({
+            "type": "mode", "mode": "plan", "sessionId": "S1", "ts": 1_700_000_000_u64,
+        });
+        assert_ne!(dedup_key(&with_ts), dedup_key(&changed));
+    }
+
+    /// SC-12. `history-suppression` is compared on `{type, sessionId}` ONLY, in
+    /// that key order — every other field is ignored, so a repeat suppression
+    /// record for the same session always dedups.
+    #[test]
+    fn dedup_key_special_cases_history_suppression() {
+        let planned = serde_json::json!({
+            "type": "history-suppression", "sessionId": "S1",
+        });
+        let on_disk = serde_json::json!({
+            "sessionId": "S1", "suppressedUuids": ["a", "b"],
+            "type": "history-suppression", "timestamp": "1999-01-01T00:00:00.000Z",
+        });
+        assert_eq!(
+            dedup_key(&planned),
+            dedup_key(&on_disk),
+            "payload and key order are both ignored for this type"
+        );
+        assert_eq!(
+            dedup_key(&planned),
+            r#"{"type":"history-suppression","sessionId":"S1"}"#
+        );
+
+        // A different session is a different record.
+        let other_session = serde_json::json!({
+            "type": "history-suppression", "sessionId": "S2",
+        });
+        assert_ne!(dedup_key(&planned), dedup_key(&other_session));
+
+        // The special case is keyed on the type — any other type still uses the
+        // full-record comparator.
+        let mode = serde_json::json!({"type": "mode", "sessionId": "S1", "mode": "plan"});
+        let mode2 = serde_json::json!({"type": "mode", "sessionId": "S1", "mode": "default"});
+        assert_ne!(dedup_key(&mode), dedup_key(&mode2));
     }
 
     /// The comparator is a STRING compare of the serialization, so a record

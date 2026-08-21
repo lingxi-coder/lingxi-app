@@ -1155,6 +1155,121 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(result.data["status"], "completed");
     }
 
+    // A10 (2.1.238 @292883815): the advertised-schema gate is
+    // `WA()||z1e()` — background-tasks kill-switch OR the RAW fork FEATURE flag.
+    // With `LINGXI_FORK_SUBAGENT` on, `run_in_background` must disappear from the
+    // advertised schema; the *dispatch* path is NOT gated by it (binary `U`'s only
+    // negative term is `!J` = `!WA()`, and the fork flag appears there as the
+    // POSITIVE term `Y`), so an omitted `run_in_background` still launches async.
+    #[test]
+    fn fork_feature_flag_omits_run_in_background_from_advertised_schema() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("LINGXI_FORK_SUBAGENT").ok();
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
+        let tool = AgentTool::new(wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let omitted = tool.input_schema()["properties"]
+            .get("run_in_background")
+            .is_none();
+        match saved {
+            Some(v) => std::env::set_var("LINGXI_FORK_SUBAGENT", v),
+            None => std::env::remove_var("LINGXI_FORK_SUBAGENT"),
+        }
+        assert!(
+            omitted,
+            "z1e() (fork feature flag) must omit run_in_background from the advertised schema"
+        );
+    }
+
+    // A10, the other half: a `pro` subscription must NOT touch the advertised
+    // schema. The port used to gate on `is_pro_plan()` here; all four
+    // `Cc()==="pro"` sites in 2.1.238 are elsewhere (plan predicate, model-picker
+    // suffix, Agent-prompt discouragement block, statusline hint) and none of them
+    // gates background agents. This test pins the OLD behaviour as WRONG.
+    #[test]
+    fn pro_plan_does_not_hide_run_in_background_from_advertised_schema() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("LINGXI_FORK_SUBAGENT").ok();
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        traits::subscription::set_current_subscription(Some(
+            traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("pro".into()),
+                ..traits::subscription::SubscriptionSnapshot::default()
+            },
+        ));
+        let tool = AgentTool::new(wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let present = tool.input_schema()["properties"]
+            .get("run_in_background")
+            .is_some();
+        traits::subscription::set_current_subscription(None);
+        match saved {
+            Some(v) => std::env::set_var("LINGXI_FORK_SUBAGENT", v),
+            None => std::env::remove_var("LINGXI_FORK_SUBAGENT"),
+        }
+        assert!(
+            present,
+            "the pro plan must not omit run_in_background — the binary never gates it on Cc()"
+        );
+    }
+
+    // A10, dispatch half: on a `pro` plan an omitted `run_in_background` still
+    // takes the ASYNC path. The port previously ANDed `!is_pro_plan()` into the
+    // dispatch gate, forcing every Pro-plan subagent to run synchronously.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn pro_plan_still_dispatches_agents_in_the_background() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        traits::subscription::set_current_subscription(Some(
+            traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("pro".into()),
+                ..traits::subscription::SubscriptionSnapshot::default()
+            },
+        ));
+        let tool = AgentTool::new(wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let result = tool
+            .call(
+                serde_json::json!({
+                    "description": "x",
+                    "subagent_type": "general-purpose",
+                    "prompt": "go",
+                    "run_in_background": true
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect("dispatch ok");
+        traits::subscription::set_current_subscription(None);
+        assert_eq!(
+            result.data["status"], "async_launched",
+            "a pro plan must not force a background agent to run synchronously"
+        );
+    }
+
     // P1-01 (parity 2.1.207): claude creates the isolation worktree BEFORE the
     // sync/async branch (`ye = await createAgentWorktree(...)` precedes the
     // `run_in_background` split) and threads the effective cwd (`cwd ??

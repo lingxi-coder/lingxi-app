@@ -3020,10 +3020,17 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             orch.permission_mode()
                 .unwrap_or_else(|| "default".to_string())
         });
+        // `prompt_id` on the shared hook-input base (oracle `createBaseHookInput`
+        // / minified `c_`: `prompt_id:Vut()??void 0`) — the process-wide current
+        // prompt id, shared with the JSONL `user` lines and the OTel `prompt.id`
+        // attribute, so a PreToolUse/PostToolUse hook's output joins to OTel
+        // events at prompt grain.
+        let prompt_id = orch.current_prompt_id.lock().await.clone();
         let hook_ctx = HookContext {
             session_id,
             cwd: orch.current_cwd(),
             transcript_path,
+            prompt_id,
             permission_mode,
             ..Default::default()
         };

@@ -44,7 +44,7 @@ pub use re_append::{
 // Tolerant-reader surface (real-transcript gap fix): the two-phase routed
 // loader output + its line-router + the transcript-message type predicate.
 pub use reader::{is_transcript_message_type, parse_pr_number, route_lines, LoadedTranscript};
-pub use schema::JsonlMessage;
+pub use schema::{session_kind, JsonlMessage, SESSION_KIND_ENV, SESSION_KIND_KEY};
 pub use uuid::validate_uuid;
 pub use writer::JsonlWriter;
 

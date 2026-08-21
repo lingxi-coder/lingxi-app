@@ -100,8 +100,25 @@ pub fn parse_pr_number(raw: &str) -> Option<u64> {
 /// | `forkContextRefs` | ⏭ deferred — fork-context subsystem absent | `"fork-context-ref"` |
 /// | `contentReplacements/agentContentReplacements` | ⏭ deferred — context-collapse-tied | `"content-replacement"` |
 /// | `isolationLatches` | ⏭ deferred — isolation/worktree out-of-process-scope | `"isolation-latch"` |
+/// | `atisLatch` | ⏭ deferred (SC-11) — see below | `"atis-latch"` |
 /// | `fileHistorySnapshots` | ⏭ deferred — file-history-snapshot subsystem absent | `"file-history-snapshot"` |
 /// | `agentColors` | ⏭ already handled by `agent_color.rs` (confirmed correct C6) | `"agent-color"` |
+///
+/// **`atis-latch` (SC-11, new in 2.1.238 — 15 hits there, 0 in 2.1.220).**
+/// Upstream writes it mid-chain from `insertMessageChain` (@296794049) and
+/// from `planReAppendSessionMetadata` (@296782335, between `isolation-latch`
+/// and `worktree-state`), reading it back here and in the fork loader with a
+/// `/^[\x21-\x7e]*$/` validator. Its VALUE has no derivation in the port: it
+/// is `TCe()` (@281057624) = `conversationAtisLatch`, an opaque server-supplied
+/// token captured off an Anthropic API response, latched per conversation and
+/// echoed as a request header (@286976717). LingXi carries no per-conversation
+/// latch infrastructure at all (`stickyBetas` and friends are likewise absent),
+/// and the transport it belongs to is Anthropic-specific. Adding the record
+/// slot alone would emit nothing — the gate is `!== undefined` on a value that
+/// is never set — so the field is left out rather than added as dead weight.
+/// A foreign transcript carrying such lines is unaffected: an unrecognized
+/// sidecar type is skipped without error by the router below, and
+/// [`crate::jsonl::re_append`] never plans a type it does not itself write.
 #[derive(Debug, Clone, Default)]
 pub struct LoadedTranscript {
     /// Number of non-empty lines dropped because they were malformed JSON or

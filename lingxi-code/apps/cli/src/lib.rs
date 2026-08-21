@@ -588,6 +588,26 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         std::env::set_var("LINGXI_BRIEF", "1");
     }
 
+    // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` (@307414302) pins
+    // the cross-session messaging socket instead of the auto-generated path.
+    // Recorded here, before ANY code path can bind the inbox
+    // (`mode::ensure_live_messaging` is the only binder and runs far later, in
+    // the TUI/session mounts).
+    if let Some(path) = parsed.messaging_socket_path.as_deref() {
+        crate::mode::set_messaging_socket_override(path);
+    }
+
+    // (CLI-15) `--append-subagent-system-prompt` carries the oracle's implication
+    // `wby(e,t=process.env){if(e)t.CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT="1"}`
+    // (@306637528) — the flag turns its own gate on. The SPLICE half (the
+    // subagent prompt assembler appending the text as the last section) lives in
+    // `tools/agent` and is NOT ported yet, so today this only sets the gate; the
+    // flag reaches no model bytes until that assembler consumes it. Nothing here
+    // claims otherwise.
+    if parsed.append_subagent_system_prompt.is_some() {
+        std::env::set_var("LINGXI_ENABLE_APPEND_SUBAGENT_PROMPT", "1");
+    }
+
     // (CLI-01, cc2.1.238) `--autocompact <auto|tokens>` projects onto
     // `LINGXI_AUTO_COMPACT_WINDOW`, the port's only auto-compact-window pin
     // (`compaction::thresholds::effective_context_window_size` clamps the model
@@ -832,6 +852,46 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return crate::background_dispatch::dispatch_background(&parsed, permission_mode).await;
     }
 
+    // (CLI-13/16 + SC-09, cc2.1.238) The truncating-resume / rewind cross-flag
+    // gates. In the oracle these are the FIRST four statements of `runHeadless`
+    // after `after_grove_check` (@307217538), ahead of every other headless
+    // gate, and each writes its line to stderr and exits 1:
+    //
+    // ```js
+    // if(c.resumeSessionAt&&!c.resume){…"Error: --resume-session-at requires --resume"}
+    // if(c.resumeDropsTurn!==void 0&&!c.resumeSessionAt){…"Error: --resume-drops-turn requires --resume-session-at"}
+    // if(c.rewindFiles&&!c.resume){…"Error: --rewind-files requires --resume"}
+    // if(c.rewindFiles&&t){…"Error: --rewind-files is a standalone operation and cannot be used with a prompt"}
+    // ```
+    //
+    // They are therefore print-mode-only, exactly as both flags' help text says
+    // ("Ignored outside print mode"); `validate_truncating_resume_args` carries
+    // that condition.
+    if let Err(msg) = parsed.validate_truncating_resume_args() {
+        eprintln!("Error: {msg}");
+        return exit_codes::ARGV_ERROR;
+    }
+
+    // The truncating resume itself is NOT ported: the oracle threads
+    // `resumeSessionAt`/`resumeDropsTurn` into the headless transcript load,
+    // which stops the chain at the named entry and REFUSES when the discarded
+    // range holds anything not attributable to the declared turn (absorbed
+    // queued messages, task notifications, a compaction summary, a non-furniture
+    // attachment). lingxi-cli has no read-side chain truncation and no such
+    // range classifier — `session::rewind` rewrites a transcript, which is a
+    // different operation. Silently ignoring the pair would be the worst
+    // outcome: the caller asks for a truncated history, gets the FULL one, and
+    // the turn then appends to it — so say so and stop, the same way `--chrome`
+    // and `--remote-control` refuse rather than accept an inert flag.
+    // Print-mode-only, because "Ignored outside print mode" is the oracle's
+    // documented behaviour for both flags and must stay a true no-op there.
+    if parsed.print && parsed.resume_session_at.is_some() {
+        eprintln!(
+            "lingxi-cli: --resume-session-at is not available: lingxi-cli has no truncating resume, and resuming the FULL session instead would silently contradict the flag."
+        );
+        return exit_codes::NOT_IMPLEMENTED;
+    }
+
     // P3 cross-flag validation for --input-format=stream-json and
     // --replay-user-messages (§4.1 SPEC-inferred.md, exact error strings).
     if let Err(msg) = parsed.validate_stream_json_input_args() {
@@ -887,6 +947,24 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     if let Err(msg) = parsed.validate_plan_mode_instructions_args() {
         eprintln!("Error: {msg}");
         return exit_codes::ARGV_ERROR;
+    }
+
+    // (CLI-16, cc2.1.238) `--rewind-files <user-message-id>` — "Restore files to
+    // state at the specified user message and exit (requires --resume)". In the
+    // oracle this branch sits inside `runHeadless` right after the transcript
+    // loads (@307222364) and ALWAYS exits, so it never reaches the prompt gate
+    // or the `--output-format=stream-json requires --verbose` gate below it —
+    // hence its position HERE, ahead of both output-format branches, rather
+    // than down with the `--continue`/`--resume` dispatch. Its two argv gates
+    // fired above; the sink is built inline because `make_sink` is defined
+    // after the `&mut parsed` startup-resource pass.
+    if parsed.print && parsed.rewind_files.is_some() {
+        let sink: Arc<dyn output::OutputSink> = if parsed.is_json_output() {
+            Arc::new(output::JsonSink::new(protocol::SessionId::new()))
+        } else {
+            Arc::new(output::PlainSink::new())
+        };
+        return run::run_rewind_files(&parsed, sink.as_ref()).await;
     }
 
     // stream-json: `--output-format stream-json --verbose` (print-only, no

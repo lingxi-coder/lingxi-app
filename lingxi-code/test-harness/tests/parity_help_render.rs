@@ -23,22 +23,26 @@ fn golden_has_81_lines() {
     // 1 header + 80 VISIBLE commands = 81 lines (each `\n`-terminated).
     // The hidden/disabled commands (is_palette_hidden) are filtered out,
     // matching claude-code's `commands.filter(c => !c.isHidden && !$te(c))`.
-    // (107 builtins − 27 hidden = 80, no DISABLE_*_COMMAND env set.)
-    // Was 80 lines / 79 visible until SLASH-06 moved one command across the
-    // hidden boundary: `share` left the stub table (it is `bug`'s alias, not a
-    // command) and `bug` joined the visible set. The builtin total is unchanged.
+    // (108 builtins − 28 hidden = 80, no DISABLE_*_COMMAND env set.)
+    // SLASH-06 moved `bug` into the visible set and dropped the phantom
+    // `share`; SLASH-14 then moved `/version` OUT of it — both of its oracle
+    // objects @296268759 carry `isEnabled:()=>!1`, so claude-code's own
+    // `!$te(c)` filter never lists it. SLASH-13 then raised the builtin total
+    // to 108 with the ungated `/powerup` object (@296124285).
     assert_eq!(GOLDEN.matches('\n').count(), 81);
 }
 
 #[test]
 fn golden_omits_hidden_and_disabled_commands() {
     use command_api::builtin_support::names::{
-        CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS, USAGE_CREDITS_BNR_GATED,
+        CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS, STATICALLY_DISABLED_COMMANDS,
+        USAGE_CREDITS_BNR_GATED,
     };
     for name in HIDDEN_PALETTE_COMMANDS
         .iter()
         .copied()
         .chain(USAGE_CREDITS_BNR_GATED.iter().copied())
+        .chain(STATICALLY_DISABLED_COMMANDS.iter().copied())
         .chain(CORRECT_BY_DESIGN_STUBS.iter().map(|(n, _)| *n))
     {
         assert!(

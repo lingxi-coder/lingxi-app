@@ -1067,6 +1067,42 @@ mod command_arm_tests {
         assert!(stdin.contains(r#""last_assistant_message":"finished work""#));
     }
 
+    /// End-to-end: a `HookContext::prompt_id` must reach the hook child's stdin
+    /// on a lifecycle event, and be OMITTED when the context has none. Oracle
+    /// `createBaseHookInput` (2.1.238 minified `c_`, BIN off 296935693) puts
+    /// `prompt_id:Vut()??void 0` on the base shared by all 31 events.
+    #[tokio::test]
+    async fn prompt_id_reaches_the_hook_child_stdin() {
+        let stdin = dispatch_and_capture_with_ctx(
+            HookEventType::Stop,
+            HookEvent::Stop {
+                reason: "done".into(),
+            },
+            HookContext {
+                prompt_id: Some("7f1f0e2a-0000-4000-8000-000000000001".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            stdin.contains(r#""prompt_id":"7f1f0e2a-0000-4000-8000-000000000001""#),
+            "{stdin}"
+        );
+
+        let without = dispatch_and_capture_with_ctx(
+            HookEventType::Stop,
+            HookEvent::Stop {
+                reason: "done".into(),
+            },
+            HookContext::default(),
+        )
+        .await;
+        assert!(
+            !without.contains("prompt_id"),
+            "absent until the first user input — the key must be omitted: {without}"
+        );
+    }
+
     #[tokio::test]
     async fn subagent_stop_serializes_live_context_fields() {
         let agent_id = protocol::AgentId::new();

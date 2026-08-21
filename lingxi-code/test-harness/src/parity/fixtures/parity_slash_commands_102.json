@@ -3,10 +3,10 @@
     "plan": "M5-09",
     "spec_section": "§3 M5-09 row + §4.6 (Slash commands)",
     "_claude_code_version": "see CHANGELOG v0.6.0 baseline",
-    "_count_history": "106-name surface (2026-07-14 H-BIN-11 slash-parity pass vs 2.1.207 added the five pre-lock-missed local-jsx commands background/cd/focus/tui/usage-credits, re-locking 101->106; unimplemented stays 47 because all five are target-implemented interactive_only). Prior: 101-name surface (2026-07-04 batch-8 tail added the net-new headless autocompact; the same batch-8 pass added fork/goal/recap/reload-skills/skill-doctor/stop -> 100; prior 94-name surface from the 2026-06-20 slash parity #66/#67). implemented is target runtime status. | 2026-07-25: x402 removed (0 hits in the 2.1.220 oracle binary), re-locking 106->105; /agents description rebranded .claude/agents/ -> .lingxi/agents/ to match this workspace's paths. | 2026-07-25 (b): +auto-mode-setup (2.1.220 WIZARD-06 `{type:\"local\",supportsNonInteractive:!0}`), re-locking 105->106. It is palette-HIDDEN (`get isHidden(){return!_n()}` with `_n()=!isInteractive`), so /help is unchanged at 79 lines. | 2026-07-29: /btw moved from entitlement-gated non-goal to the production isolated side-query handler, re-locking unimplemented 46->45. | 2026-08-13: +workflows, the pre-existing 2.1.205 local-jsx command already implemented by the TUI; shared/headless clients receive a live task-registry snapshot, re-locking 106->107. | 2026-08-20 (cc2.1.238 byte-alignment): one-in/one-out at 107 — `review` DELETED upstream (`name:\"review\"` 2.1.220 = 1 hit, 2.1.238 = 0; the PR-review surface moved into the bundled `code-review` skill), and `subtask` (`{type:\"local-jsx\",name:\"subtask\",argumentHint:\"<task>\"}` @ 2.1.238 296247354) added — it was already implemented by `command_core::subtask` and registered by batch 8, but was missing from BUILTIN_COMMAND_NAMES so it never reached /help or the palette. implemented/unimplemented counts are unchanged (both rows are implemented:true).",
-    "total_count_lock": 107,
+    "_count_history": "106-name surface (2026-07-14 H-BIN-11 slash-parity pass vs 2.1.207 added the five pre-lock-missed local-jsx commands background/cd/focus/tui/usage-credits, re-locking 101->106; unimplemented stays 47 because all five are target-implemented interactive_only). Prior: 101-name surface (2026-07-04 batch-8 tail added the net-new headless autocompact; the same batch-8 pass added fork/goal/recap/reload-skills/skill-doctor/stop -> 100; prior 94-name surface from the 2026-06-20 slash parity #66/#67). implemented is target runtime status. | 2026-07-25: x402 removed (0 hits in the 2.1.220 oracle binary), re-locking 106->105; /agents description rebranded .claude/agents/ -> .lingxi/agents/ to match this workspace's paths. | 2026-07-25 (b): +auto-mode-setup (2.1.220 WIZARD-06 `{type:\"local\",supportsNonInteractive:!0}`), re-locking 105->106. It is palette-HIDDEN (`get isHidden(){return!_n()}` with `_n()=!isInteractive`), so /help is unchanged at 79 lines. | 2026-07-29: /btw moved from entitlement-gated non-goal to the production isolated side-query handler, re-locking unimplemented 46->45. | 2026-08-13: +workflows, the pre-existing 2.1.205 local-jsx command already implemented by the TUI; shared/headless clients receive a live task-registry snapshot, re-locking 106->107. | 2026-08-20 (cc2.1.238 byte-alignment): one-in/one-out at 107 — `review` DELETED upstream (`name:\"review\"` 2.1.220 = 1 hit, 2.1.238 = 0; the PR-review surface moved into the bundled `code-review` skill), and `subtask` (`{type:\"local-jsx\",name:\"subtask\",argumentHint:\"<task>\"}` @ 2.1.238 296247354) added — it was already implemented by `command_core::subtask` and registered by batch 8, but was missing from BUILTIN_COMMAND_NAMES so it never reached /help or the palette. implemented/unimplemented counts are unchanged (both rows are implemented:true). | 2026-08-20 (SLASH-13): +powerup, re-locking 107->108. `Rkl={type:\"local-jsx\",name:\"powerup\",description:\"Discover Claude Code features through quick interactive lessons\",requires:{ink:!0}}` @ 2.1.238 296124285 is an UNGATED member of the builtin table `ijT()` (no isEnabled, no isHidden), so upstream advertises it in every interactive session; the 2026-07-04 triage had excluded it for having no LingXi body, which is inconsistent with the 39 other body-less rows the port already advertises. implemented:false, so unimplemented_count_lock 45->46. Its SLASH-13 siblings stay out on oracle evidence: scroll-speed needs Ws() (fullscreen renderer, statsig-off by default) and daemon hangs off open:()=>nXe() with nXe(){return!1}.",
+    "total_count_lock": 108,
     "core_count_lock": 19,
-    "unimplemented_count_lock": 45,
+    "unimplemented_count_lock": 46,
     "stub_literal_template": "{name}: not implemented in v0.6.0 (M5)",
     "unknown_literal_template": "Unknown command: /{name}"
   },
@@ -53,7 +53,7 @@
       "name": "auto-mode-setup",
       "is_core": true,
       "implemented": true,
-      "description": "Set up and customise auto mode — environment context, plus optional rule tweaks",
+      "description": "Teach auto mode about your environment, plus optional rule tweaks",
       "claude_type": "local",
       "rust_status": "implemented",
       "target_status": "implemented",
@@ -675,6 +675,16 @@
       "defer_reason": "requires interactive plugin manager UI"
     },
     {
+      "name": "powerup",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "local-jsx",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": true,
+      "defer_reason": "interactive lesson walkthrough UI (requires:{ink}) not built; advertised-only, pass-1 stub handler"
+    },
+    {
       "name": "privacy-settings",
       "is_core": false,
       "implemented": true,
@@ -1011,7 +1021,7 @@
       "name": "version",
       "is_core": true,
       "implemented": true,
-      "description": "Print version information",
+      "description": "Show this session's version (autoupdate may have a newer one)",
       "claude_type": "local",
       "rust_status": "implemented",
       "target_status": "implemented",

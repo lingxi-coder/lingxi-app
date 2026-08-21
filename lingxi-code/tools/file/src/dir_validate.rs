@@ -59,6 +59,36 @@ use tool_api::tool_trait::ValidationError;
 /// both tools' ENOENT message.
 const CWD_NOTE_PREFIX: &str = "Note: your current working directory is";
 
+/// ST-06 — 1:1 port of claude-code `h0i(toolName, fields)` (oracle 2.1.238
+/// @289924033), the FIRST guard in both search tools' `validateInput`:
+///
+/// ```js
+/// function h0i(e,t){let r=t.find(([,n])=>n?.includes("\x00"));
+///   if(r)return{result:!1,message:`${e} ${r[0]} cannot contain null bytes (\\0). Remove the null byte and try again.`,errorCode:2};
+///   return null}
+/// ```
+///
+/// `fields` is the tool's ORDERED field list — Glob passes
+/// `[("pattern",…),("path",…)]`, Grep
+/// `[("pattern",…),("path",…),("glob",…),("type",…)]` — and only the first
+/// offender is reported (JS `find`). Non-string values can't hold a NUL, which
+/// is why the caller passes `Value::as_str` results. The rendered message keeps
+/// the JS template's literal backslash-zero: `… null bytes (\0). …`.
+/// (errorCode 2 is dropped — [`ValidationError`] is message-only.)
+pub(crate) fn validate_no_null_bytes(
+    tool_name: &str,
+    fields: &[(&str, Option<&str>)],
+) -> Result<(), ValidationError> {
+    for (field, value) in fields {
+        if value.is_some_and(|v| v.contains('\0')) {
+            return Err(ValidationError(format!(
+                "{tool_name} {field} cannot contain null bytes (\\0). Remove the null byte and try again."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Glob's `validateInput({path})` — the path must be an existing DIRECTORY.
 /// `cwd` is the tool's effective working directory (`er()` analogue). Returns
 /// the byte-exact claude-code error when the path is missing (errorCode 1,

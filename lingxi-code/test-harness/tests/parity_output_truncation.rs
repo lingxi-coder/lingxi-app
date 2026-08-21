@@ -171,7 +171,14 @@ fn every_tool_with_output_calls_truncate_or_opts_out() {
             || body.contains("output_truncation::truncate")
             || body.contains("shared::truncate")
             || body.contains("truncate_shell_output")
-            || body.contains("OutputTruncated");
+            || body.contains("OutputTruncated")
+            // ST-10: a tool may declare its OWN cap instead of reusing the
+            // shared `MAX_TOOL_OUTPUT_LENGTH`, because upstream the caps differ
+            // per tool (Glob 100_000 vs Grep 20_000). Declaring
+            // `<TOOL>_MAX_RESULT_SIZE_CHARS` and returning it from
+            // `max_result_size_chars` is still truncation coverage — the
+            // framework enforces the value — so it satisfies this check.
+            || body.contains("_MAX_RESULT_SIZE_CHARS");
         // Files in the exempt set are allowed without a call (their tools
         // return bounded outputs). Their stem (without `.rs`) appears in
         // `exempt_tools()`.

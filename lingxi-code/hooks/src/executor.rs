@@ -1579,6 +1579,27 @@ impl Dispatcher {
                 emit_prompt_signal(hook, &outcome.signal, effective_timeout);
                 outcome.result
             }
+            HookExecutor::McpTool { server, tool, .. } => {
+                // `mcp_tool` hook (oracle `McpToolHookSchema`). The loader now
+                // LOADS the entry instead of dropping it silently, but calling a
+                // tool on a named MCP server needs an invoker this crate has no
+                // seam for. Mirror the `Command` / `Prompt` "not wired" shape
+                // exactly: a structured `Error` with no parsed response, so the
+                // hook never contributes a `Block` and never gates the turn.
+                tracing::warn!(
+                    hook_id = %hook.id,
+                    server = %server,
+                    tool = %tool,
+                    "mcp_tool hook loaded but not executed: no MCP invoker is wired into the hooks crate",
+                );
+                HookResult {
+                    outcome: HookOutcome::Error,
+                    stdout: String::new(),
+                    stderr: format!("Hook {} failed: mcp_tool executor not wired", hook.id),
+                    exit_code: None,
+                    response: None,
+                }
+            }
         }
     }
 }
@@ -2936,7 +2957,13 @@ fn attachment_timeout_ms(hook: &HookDefinition) -> u64 {
         HookExecutor::Http { .. } => HOOK_HTTP_TIMEOUT_MS,
         HookExecutor::Agent { .. } => HOOK_AGENT_TIMEOUT_MS,
         HookExecutor::Prompt { .. } => HOOK_PROMPT_TIMEOUT_MS,
-        HookExecutor::Command { .. } | HookExecutor::Builtin { .. } => HOOK_COMMAND_TIMEOUT_MS,
+        // `mcp_tool` carries only a per-hook `timeout` in the oracle schema
+        // ("Timeout in seconds for this specific tool call") with no arm-specific
+        // default, so an entry that omits it falls back to the generic hook
+        // default `q_ = 600000` — the same constant the Command/Builtin arms use.
+        HookExecutor::Command { .. }
+        | HookExecutor::Builtin { .. }
+        | HookExecutor::McpTool { .. } => HOOK_COMMAND_TIMEOUT_MS,
     }
 }
 

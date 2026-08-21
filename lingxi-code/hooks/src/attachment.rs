@@ -546,9 +546,11 @@ pub fn tool_use_id_for_event(event: &HookEvent) -> Option<String> {
 ///                return iSe(e)}
 /// ```
 ///
-/// The port has no `mcp_tool` / `callback` / `function` executor arms; its
-/// `Builtin` arm is the nearest analogue of claude's in-process `callback`
-/// hook, so it renders as the handler id.
+/// The `mcp_tool` arm is now ported ([`HookExecutor::McpTool`]) and renders
+/// server, slash, tool — the oracle's own `iSe` case, verified in the 2.1.238
+/// binary at offset 296901778. The port still has no `callback` / `function`
+/// executor arms; its `Builtin` arm is the nearest analogue of claude's
+/// in-process `callback` hook, so it renders as the handler id.
 #[must_use]
 pub fn attachment_command(hook: &HookDefinition) -> String {
     if let Some(status) = hook.status_message.as_ref() {
@@ -569,6 +571,7 @@ pub fn attachment_command(hook: &HookDefinition) -> String {
         }
         HookExecutor::Http { url, .. } => url.clone(),
         HookExecutor::Agent { prompt, .. } | HookExecutor::Prompt { prompt, .. } => prompt.clone(),
+        HookExecutor::McpTool { server, tool, .. } => format!("{server}/{tool}"),
         HookExecutor::Builtin { handler_id } => handler_id.clone(),
     }
 }
@@ -881,6 +884,15 @@ mod tests {
             timeout: std::time::Duration::from_secs(1),
         });
         assert_eq!(attachment_command(&http), "https://h/hook");
+
+        // SH-04: `y2e` (2.1.238 @ 296901596) renders an `mcp_tool` hook as
+        // server, slash, tool.
+        let mcp = base(HookExecutor::McpTool {
+            server: "linter".into(),
+            tool: "format_file".into(),
+            input: HashMap::new(),
+        });
+        assert_eq!(attachment_command(&mcp), "linter/format_file");
 
         let mut with_status = base(HookExecutor::Command {
             command: "./x.sh".into(),

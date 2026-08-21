@@ -1358,6 +1358,12 @@ fn hook_executor_type_and_content(executor: &hooks::HookExecutor) -> (String, St
         Ex::Http { url, .. } => ("http".to_string(), url.clone()),
         Ex::Agent { prompt, .. } => ("agent".to_string(), prompt.clone()),
         Ex::Prompt { prompt, .. } => ("prompt".to_string(), prompt.clone()),
+        // claude-code's content field for an `mcp_tool` hook is server, slash,
+        // tool — `y2e` in the 2.1.238 binary at offset 296901596
+        // (`case"mcp_tool"` → the server/tool pair). Its label there is
+        // "MCP tool" (`Cug`, offset 301222424); the label column is the
+        // divergent `/hooks` display template, so only the content matters here.
+        Ex::McpTool { server, tool, .. } => ("mcp_tool".to_string(), format!("{server}/{tool}")),
         Ex::Builtin { handler_id } => ("builtin".to_string(), handler_id.clone()),
     }
 }

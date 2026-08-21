@@ -4089,4 +4089,50 @@ mod prompt_dispatch_tests {
         assert!(matches!(r.outcome, HookOutcome::Error));
         assert!(r.stderr.contains("prompt executor not wired"));
     }
+
+    /// SH-04: an `mcp_tool` settings entry now LOADS (the loader used to drop it
+    /// silently) and reaches `dispatch`. With no MCP invoker wired into the
+    /// hooks crate the arm must behave exactly like the Command/Prompt arms
+    /// without their runner: a structured `Error`, never a `Block`, so a
+    /// non-executable hook can never gate a turn.
+    #[tokio::test]
+    async fn mcp_tool_hook_without_invoker_is_strict_noop() {
+        let mut registry = HookRegistry::new();
+        registry.register(HookDefinition {
+            id: HookId::new(),
+            name: "linter/format_file".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::McpTool {
+                server: "linter".into(),
+                tool: "format_file".into(),
+                input: std::collections::HashMap::new(),
+            },
+            source: HookSource::Project,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+        });
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(
+            agg.decision, None,
+            "an mcp_tool hook with no invoker can never block"
+        );
+        assert!(!agg.prevent_continuation);
+        let (_, r) = &agg.all_results[0];
+        assert!(matches!(r.outcome, HookOutcome::Error));
+        assert!(r.stderr.contains("mcp_tool executor not wired"));
+    }
 }

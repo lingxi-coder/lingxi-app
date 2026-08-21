@@ -3,6 +3,7 @@
 use crate::events::HookEventType;
 use protocol::HookId;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -183,6 +184,48 @@ pub enum HookExecutor {
         /// (a block ends the turn).
         #[serde(default)]
         continue_on_block: bool,
+    },
+    /// Call a tool on an already-configured MCP server (claude-code
+    /// `McpToolHookSchema`, settings `"type": "mcp_tool"`).
+    ///
+    /// Oracle 2.1.238 @ 282295711 (identical in 2.1.220 — this is an old port
+    /// gap, not 238 drift):
+    ///
+    /// ```js
+    /// be({type:At("mcp_tool").describe("MCP tool hook type"),
+    ///     server:H().describe("Name of an already-configured MCP server to invoke"),
+    ///     tool:H().describe("Name of the tool on that server to call"),
+    ///     input:lo(H(),Fn()).optional().describe('Arguments passed to the MCP tool. String values
+    ///       support ${path} interpolation from the hook input JSON (e.g. "${tool_input.file_path}").'),
+    ///     if:Pxn(), timeout:…, statusMessage:…, once:…})
+    /// ```
+    ///
+    /// The five hook schemas are a `z0("type", …)` DISCRIMINATED UNION, so the
+    /// oracle accepts an `mcp_tool` entry like any other; the port's loader used
+    /// to fall through its `build_executor` match and drop the entry SILENTLY.
+    /// This variant exists so the entry loads: the hook registers, matches, and
+    /// honors `matcher` / `if` / `once` / `statusMessage` / `timeout` like every
+    /// other hook.
+    ///
+    /// RESIDUAL (documented, not silent): actually invoking the tool needs an
+    /// MCP client by server NAME, which the `hooks` crate has no seam for (it
+    /// depends on `traits`, whose `McpTransport` is a raw per-connection
+    /// transport, not a name-addressed invoker). Until a runner is injected the
+    /// executor arm returns the same structured "not wired" error the
+    /// [`Self::Command`] and [`Self::Prompt`] arms return when THEIR runner is
+    /// absent — it never blocks a turn. The `${path}` interpolation of the
+    /// variant's `input` map belongs to that invocation step and is therefore
+    /// also deferred rather than implemented with no call site.
+    McpTool {
+        /// `server`: name of an already-configured MCP server to invoke.
+        server: String,
+        /// `tool`: name of the tool on that server to call.
+        tool: String,
+        /// `input`: arguments passed to the MCP tool. String values support
+        /// `${path}` interpolation from the hook input JSON (e.g.
+        /// `"${tool_input.file_path}"`), applied at invocation time.
+        #[serde(default)]
+        input: HashMap<String, Value>,
     },
     /// Dispatch to an in-process Rust handler registered via
     /// [`crate::HookExecutorImpl::register_builtin`].

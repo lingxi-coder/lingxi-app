@@ -1387,6 +1387,36 @@ impl Dispatcher {
                     .iter()
                     .map(|a| substitute_project_dir(a, &project_dir_str))
                     .collect();
+                // OBS-1 — a `command` hook with NO explicit argv is a SHELL
+                // STRING upstream, not a bare exec. claude-code 2.1.238 spawns
+                // it (binary @296948400) as
+                //   spawn(M, [], {env, cwd, shell: He, detached, windowsHide:!0})
+                // where `He = S ? <git-bash path> : !0` — so on POSIX it is
+                // literally `shell: true`, i.e. Node runs `/bin/sh -c <M>`.
+                // The exec form is a SEPARATE upstream branch, `if(I)
+                // spawn(I[0], I[1], …)`, taken only when an argv is supplied.
+                //
+                // The port used to hand `{command: "./fmt.sh --all", args: []}`
+                // straight to `Command::new(command)`, so every hook carrying
+                // arguments, a pipe, a redirect or `&&` died with ENOENT. No
+                // test caught it because the fixtures only ever PARSE such
+                // hooks. The manual `${LINGXI_PROJECT_DIR}` substitution above
+                // is a symptom of this same missing shell.
+                //
+                // `/bin/sh` rather than bash is deliberate twice over: it is
+                // what Node's `shell: true` uses on POSIX, AND
+                // `is_bash_provider_shell` matches on "bash"/"zsh", so `/bin/sh`
+                // keeps a hook child's `SHELL` REMOVED — which is the contract a
+                // `source:"harness"` child requires.
+                //
+                // RESIDUAL (Windows): upstream resolves Git Bash and THROWS when
+                // it is absent. The port has no Git-Bash discovery, so Windows
+                // keeps the bare-exec behaviour until that lands.
+                let (command, args) = if args.is_empty() && !cfg!(windows) {
+                    ("/bin/sh".to_string(), vec!["-c".to_string(), command])
+                } else {
+                    (command, args)
+                };
                 // claude-code writes `jsonStringify(hookInput) + '\n'` to the
                 // child's stdin then closes it (`hooks.ts:1006`/`1210`). The
                 // trailing newline is load-bearing: a bash `read -r line`

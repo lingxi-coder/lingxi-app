@@ -841,6 +841,57 @@ mod command_arm_tests {
         );
     }
 
+    /// OBS-1 — a `command` hook with NO argv is a SHELL STRING upstream.
+    ///
+    /// claude-code 2.1.238 spawns it as `spawn(M, [], {shell: He, …})`
+    /// (@296948400) with `He = true` on POSIX, i.e. `/bin/sh -c <M>`. The port
+    /// used to bare-exec the whole string, so `./fmt.sh --all` — and every hook
+    /// containing a pipe, a redirect or `&&` — died with ENOENT. Nothing caught
+    /// it because the fixtures only ever PARSED such hooks.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn shell_form_command_hook_runs_through_sh() {
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with_hook(
+            command_hook_with_cmd_args("./fmt.sh --all && echo done", &[]),
+            runner.clone(),
+        );
+
+        let _ = exec.execute(pre_event(), HookContext::default()).await;
+
+        let cmd = runner.recorded_command.lock().unwrap().clone().unwrap();
+        let args = runner.recorded_args.lock().unwrap().clone().unwrap();
+        assert_eq!(cmd, "/bin/sh", "shell-form hook must spawn a shell");
+        assert_eq!(
+            args,
+            vec!["-c".to_string(), "./fmt.sh --all && echo done".to_string()],
+            "the whole command string is handed to `sh -c`, unsplit"
+        );
+    }
+
+    /// The exec form is a SEPARATE upstream branch (`if(I) spawn(I[0], I[1],…)`)
+    /// and must NOT be wrapped — otherwise an argv hook would get its arguments
+    /// re-parsed by a shell.
+    #[tokio::test]
+    async fn exec_form_command_hook_is_not_shell_wrapped() {
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with_hook(
+            command_hook_with_cmd_args("./fmt.sh", &["--all", "a b"]),
+            runner.clone(),
+        );
+
+        let _ = exec.execute(pre_event(), HookContext::default()).await;
+
+        let cmd = runner.recorded_command.lock().unwrap().clone().unwrap();
+        let args = runner.recorded_args.lock().unwrap().clone().unwrap();
+        assert_eq!(cmd, "./fmt.sh", "argv form keeps its own binary");
+        assert_eq!(
+            args,
+            vec!["--all".to_string(), "a b".to_string()],
+            "an arg containing a space stays ONE arg — no shell re-splitting"
+        );
+    }
+
     #[tokio::test]
     async fn command_and_args_substitute_project_dir_token() {
         let runner = MockRunner::ok(output("", "", 0));

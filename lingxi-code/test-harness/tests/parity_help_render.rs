@@ -19,12 +19,15 @@ fn golden_starts_with_locked_header() {
 }
 
 #[test]
-fn golden_has_80_lines() {
-    // 1 header + 79 VISIBLE commands = 80 lines (each `\n`-terminated).
-    // The 27 hidden/disabled commands (is_palette_hidden) are filtered out,
+fn golden_has_81_lines() {
+    // 1 header + 80 VISIBLE commands = 81 lines (each `\n`-terminated).
+    // The hidden/disabled commands (is_palette_hidden) are filtered out,
     // matching claude-code's `commands.filter(c => !c.isHidden && !$te(c))`.
-    // (107 builtins − 28 hidden = 79, no DISABLE_*_COMMAND env set.)
-    assert_eq!(GOLDEN.matches('\n').count(), 80);
+    // (107 builtins − 27 hidden = 80, no DISABLE_*_COMMAND env set.)
+    // Was 80 lines / 79 visible until SLASH-06 moved one command across the
+    // hidden boundary: `share` left the stub table (it is `bug`'s alias, not a
+    // command) and `bug` joined the visible set. The builtin total is unchanged.
+    assert_eq!(GOLDEN.matches('\n').count(), 81);
 }
 
 #[test]

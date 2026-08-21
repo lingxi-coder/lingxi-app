@@ -38,20 +38,20 @@
 //! `hoe(messages)` @ **294688350** is the LAST assistant message's usage
 //! (`input + cache_creation + cache_read + output`), not an estimate.
 //!
-//! **DELIBERATE PORT DIVERGENCE — default OFF.** The oracle's default mode is
-//! `padded-countdown`, so a stock Claude Code emits this reminder on nearly
-//! every model step. LingXi defaults [`resolve_mode`] to [`TotalTokensMode::Off`]
-//! ([`PORT_DEFAULT_MODE`]) because flipping it ON changes the outgoing message
-//! list of every turn and would invalidate ~20 test files that assert on
-//! `MockApiClient::captured_msgs()` positions/lengths, plus the locked
-//! streaming fixtures — regenerating those is a separate, verifiable unit of
-//! work. The resolution chain, the tracker and the formatter below are the
-//! faithful oracle port, so the flip is one constant
-//! (`PORT_DEFAULT_MODE = ORACLE_DEFAULT_MODE`) once the fixtures are refreshed;
-//! setting `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown` already
-//! produces byte-identical output today. Precedent: `agent_listing_delta`,
-//! which the oracle also emits by default and the port gates behind
-//! `LINGXI_AGENT_LIST_IN_MESSAGES`.
+//! **DEFAULT ON, matching the oracle (2026-08-20).** This shipped one pass
+//! earlier defaulting to [`TotalTokensMode::Off`], on the reasoning that
+//! flipping it would churn every turn's outgoing message list and the locked
+//! fixtures. That deferral is now paid off: [`PORT_DEFAULT_MODE`] is
+//! [`ORACLE_DEFAULT_MODE`], so a stock LingXi session emits this reminder on
+//! nearly every model step exactly as a stock Claude Code session does.
+//!
+//! The oracle default was confirmed LIVE rather than inferred from the
+//! GrowthBook fallback literal: a real 2.1.238 session emits
+//! `<total_tokens>14999028 tokens left</total_tokens>`, i.e. `padded-countdown`
+//! counting down from [`DEFAULT_TOTAL_TOKENS_BUDGET`] (15_000_000).
+//!
+//! To turn it off for a session, set `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off`
+//! or the `totalTokensReminder` setting — the same two tiers the oracle reads.
 
 use std::collections::HashMap;
 
@@ -73,8 +73,13 @@ pub const TOTAL_TOKENS_MODES: &[&str] = &[
 /// The oracle's GrowthBook literal fallback for `tengu_lapis_anchor`.
 pub const ORACLE_DEFAULT_MODE: TotalTokensMode = TotalTokensMode::PaddedCountdown;
 
-/// LingXi's default — see the module-level divergence note.
-pub const PORT_DEFAULT_MODE: TotalTokensMode = TotalTokensMode::Off;
+/// LingXi's default. Now the SAME as [`ORACLE_DEFAULT_MODE`]: the reminder is
+/// on by default, as in a stock Claude Code session.
+///
+/// Confirmed live rather than inferred — a real 2.1.238 session emits
+/// `<total_tokens>14999028 tokens left</total_tokens>` against the 15_000_000
+/// [`DEFAULT_TOTAL_TOKENS_BUDGET`], i.e. `padded-countdown`.
+pub const PORT_DEFAULT_MODE: TotalTokensMode = ORACLE_DEFAULT_MODE;
 
 /// `srt()`'s result type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,12 +288,20 @@ mod tests {
         assert_eq!(ORACLE_DEFAULT_MODE, TotalTokensMode::PaddedCountdown);
     }
 
-    /// The documented, deliberate divergence — asserted so flipping it is a
-    /// conscious edit rather than an accident.
+    /// The port default now MATCHES the oracle. Asserted against
+    /// `ORACLE_DEFAULT_MODE` rather than a repeated literal, so the two can
+    /// never drift apart again the way they did while this was deferred.
     #[test]
-    fn port_default_is_off_pending_fixture_regeneration() {
-        assert_eq!(PORT_DEFAULT_MODE, TotalTokensMode::Off);
-        assert_eq!(resolve_mode(None), TotalTokensMode::Off);
+    fn port_default_matches_the_oracle() {
+        assert_eq!(PORT_DEFAULT_MODE, ORACLE_DEFAULT_MODE);
+        assert_eq!(resolve_mode(None), TotalTokensMode::PaddedCountdown);
+    }
+
+    /// Turning it off is still reachable through the same two tiers the oracle
+    /// reads, so a session that does not want the block can suppress it.
+    #[test]
+    fn settings_can_turn_the_reminder_off() {
+        assert_eq!(resolve_mode(Some("off")), TotalTokensMode::Off);
     }
 
     #[test]
@@ -297,8 +310,14 @@ mod tests {
             resolve_mode(Some("padded-countdown")),
             TotalTokensMode::PaddedCountdown
         );
-        // An unparseable value falls through, exactly like `cOi`'s guard.
-        assert_eq!(resolve_mode(Some("nonsense")), TotalTokensMode::Off);
+        // An unparseable value falls through, exactly like `cOi`'s guard — and
+        // "falls through" now means the ORACLE default, not `Off`, since the
+        // port default was aligned. A typo'd setting therefore leaves the
+        // reminder ON, which is what a stock Claude Code does too.
+        assert_eq!(
+            resolve_mode(Some("nonsense")),
+            TotalTokensMode::PaddedCountdown
+        );
     }
 
     #[test]

@@ -146,6 +146,16 @@
       "defer_reason": "headless uses the same isolated side query; TUI owns the reopenable exchange panel"
     },
     {
+      "name": "bug",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
       "name": "bughunter",
       "is_core": false,
       "implemented": false,
@@ -807,15 +817,6 @@
       "target_status": "deferred",
       "requires_tui": false,
       "defer_reason": "host/remote service dependency deferred"
-    },
-    {
-      "name": "share",
-      "is_core": false,
-      "implemented": false,
-      "claude_type": "stub",
-      "rust_status": "faithful_stub",
-      "target_status": "correct_by_design_stub",
-      "requires_tui": false
     },
     {
       "name": "skill-doctor",

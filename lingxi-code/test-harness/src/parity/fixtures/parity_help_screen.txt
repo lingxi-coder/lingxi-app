@@ -6,6 +6,7 @@ Commands:
   /branch               Create a branch of the current conversation at this point
   /bridge               Connect this terminal for remote-control sessions
   /btw                  Ask a quick side question without interrupting the main conversation
+  /bug                  Report a bug or share your conversation
   /cd                   Move this session to a new working directory
   /chrome               Open Claude in Chrome settings
   /clear                Start a new session with empty context; previous session stays on disk (resumable with /resume)

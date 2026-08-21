@@ -2011,14 +2011,18 @@ mod output_style_reminder_tests {
             .expect("streaming turn");
 
         // OUTGOING snapshot to the stream: [additionalContext(meta), user(prompt),
-        // reminder].
+        // output-style reminder, total_tokens reminder]. The total-tokens block
+        // comes LAST, matching the oracle's fan-out order
+        // (`…critical_system_reminder, silent_turn_reminder,
+        // total_tokens_reminder`), and it is present because that reminder
+        // defaults ON as it does upstream.
         let calls = streaming.captured_calls().await;
         assert_eq!(calls.len(), 1, "exactly one streaming call");
         let sent = &calls[0].messages;
         assert_eq!(
             sent.len(),
-            3,
-            "additionalContext + prompt + reminder; got {sent:?}"
+            4,
+            "additionalContext + prompt + style reminder + total_tokens; got {sent:?}"
         );
         assert!(
             is_additional_context(&sent[0]),
@@ -2028,8 +2032,13 @@ mod output_style_reminder_tests {
         assert_eq!(text_of(&sent[1]), "streaming prompt");
         assert!(
             is_reminder(&sent[2], LEARNING_REMINDER),
-            "trailing message must be the byte-exact Learning reminder; got {:?}",
+            "the style reminder must be the byte-exact Learning reminder; got {:?}",
             sent[2]
+        );
+        assert!(
+            text_of(&sent[3]).contains("<total_tokens>"),
+            "total-tokens reminder trails the batch; got {:?}",
+            sent[3]
         );
 
         // STORED history: reminder absent.
@@ -2077,12 +2086,15 @@ mod output_style_reminder_tests {
 
         let calls = streaming.captured_calls().await;
         assert_eq!(calls.len(), 1);
-        // No output-style reminder; only the leading additional-context meta
-        // (always present via `# currentDate`) prepends the prompt.
+        // No output-style reminder. The leading additional-context meta
+        // (always present via `# currentDate`) prepends the prompt, and the
+        // `total_tokens_reminder` trails it — that reminder defaults ON, as it
+        // does in a stock Claude Code session, so it is part of every outgoing
+        // list now. See `crate::prompt::total_tokens`.
         assert_eq!(
             calls[0].messages.len(),
-            2,
-            "additionalContext + prompt; got {:?}",
+            3,
+            "additionalContext + prompt + total_tokens_reminder; got {:?}",
             calls[0].messages
         );
         assert!(
@@ -2091,6 +2103,11 @@ mod output_style_reminder_tests {
             calls[0].messages[0]
         );
         assert_eq!(text_of(&calls[0].messages[1]), "only prompt");
+        assert!(
+            text_of(&calls[0].messages[2]).contains("<total_tokens>"),
+            "trailing total-tokens reminder; got {:?}",
+            calls[0].messages[2]
+        );
     }
 }
 

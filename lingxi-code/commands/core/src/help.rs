@@ -69,8 +69,11 @@ mod tests {
                 // Hidden/disabled commands are filtered out of /help.
                 assert!(!s.contains("  /heapdump "));
                 assert!(!s.contains("  /ant-trace "));
-                // 80 newlines total (1 header + 79 visible commands).
-                assert_eq!(s.matches('\n').count(), 80);
+                // 81 newlines total (1 header + 80 visible commands). Was 80
+                // until SLASH-06 gave `bug` its own visible row and dropped
+                // `share`, which is that command's alias rather than a command.
+                assert_eq!(s.matches('\n').count(), 81);
+                assert!(s.contains("  /bug "));
             }
             other => panic!("expected Done, got {other:?}"),
         }

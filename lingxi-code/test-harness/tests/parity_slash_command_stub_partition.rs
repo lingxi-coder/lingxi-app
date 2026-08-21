@@ -49,11 +49,13 @@ fn names_of(table: &[(&'static str, &'static str)]) -> HashSet<&'static str> {
 // ============================================================================
 
 #[test]
-fn correct_by_design_set_is_locked_at_23() {
+fn correct_by_design_set_is_locked_at_22() {
     assert_eq!(
         CORRECT_BY_DESIGN_STUBS.len(),
-        23,
-        "the correct-by-design faithful-stub set is locked at 23 commands"
+        22,
+        "the correct-by-design faithful-stub set is locked at 22 commands \
+         (23 until SLASH-06 removed `share`, which the shipped binary does not \
+         define as a command at all — it is the `bug` command's alias)"
     );
 }
 

@@ -2266,8 +2266,19 @@ mod tests {
         let terminal = draw_viewport(&mut app);
         let all = buffer_rows(&terminal).join("\n");
         assert!(all.contains("Permission required"), "{all}");
-        assert!(all.contains("Yes, allow once"), "{all}");
-        assert!(all.contains("No, deny"), "{all}");
+        // PERM-02: the 2.1.238 row labels. Row 1 is a plain "Yes" (rendered
+        // with the selection marker), row 3 names the product and carries the
+        // esc hint. The negative assertion is the load-bearing one: it fails if
+        // the invented "allow once" wording ever comes back.
+        assert!(all.contains("› Yes"), "{all}");
+        assert!(!all.contains("allow once"), "old invented label survived: {all}");
+        assert!(
+            all.contains(&format!(
+                "No, and tell {} what to do differently (esc)",
+                branding::PRODUCT_NAME
+            )),
+            "{all}"
+        );
     }
 
     #[test]
@@ -2515,8 +2526,22 @@ mod tests {
         let terminal = draw_viewport_at(&mut app, 40, 12);
         let all = buffer_rows(&terminal).join("\n");
         assert!(all.contains("Permission required"), "{all}");
-        assert!(all.contains("Yes, allow once"), "{all}");
-        assert!(all.contains("No, deny"), "{all}");
+        // PERM-02: the 2.1.238 row labels, seen at 40 columns. The deny row no
+        // longer fits, and CLIPPING IT IS THE POINT OF THIS TEST — so assert the
+        // visible prefix rather than the whole label (the 80-column test above
+        // pins the full string). What must still hold is that the row is there,
+        // is clipped inside the frame rather than escaping it, and that the old
+        // invented "allow once" wording has not come back.
+        assert!(all.contains("› Yes"), "{all}");
+        assert!(!all.contains("allow once"), "old invented label survived: {all}");
+        assert!(
+            all.contains(&format!("No, and tell {}", branding::PRODUCT_NAME)),
+            "clipped deny row missing: {all}"
+        );
+        assert!(
+            !all.contains("differently (esc)"),
+            "at 40 cols the deny row must be clipped, not overflowing: {all}"
+        );
     }
 
     /// One full tick (flush + draw) on a `height`-row terminal: must clip

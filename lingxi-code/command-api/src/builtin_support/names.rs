@@ -83,6 +83,11 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 107] = &[
     "bridge",
     "brief",
     "btw",
+    // SLASH-06: `bug` is its OWN command upstream, not an alias of `feedback`.
+    // Oracle 2.1.238 @248164336: `{aliases:["share"],type:"local-jsx",
+    // name:"bug",description:"Report a bug or share your conversation",
+    // argumentHint:"[report]",immediate:!0,requires:{ink:!0}}`.
+    "bug",
     "bughunter",
     "cd",
     "chrome",
@@ -152,7 +157,10 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 107] = &[
     "sandbox-toggle",
     "security-review",
     "session",
-    "share",
+    // SLASH-06: `share` is NOT a command — it is `bug`'s alias (oracle
+    // @248164336). `name:"share"` has ZERO hits in both the 2.1.220 and the
+    // 2.1.238 binary; the old "compiled stub" annotation came from the stale
+    // de-minified source, not from the shipped binary.
     "skill-doctor",
     "skills",
     "status",
@@ -276,7 +284,10 @@ pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
         "break-cache",
         "compiled stub in claude-code (internal cache control)",
     ),
-    ("share", "compiled stub in claude-code"),
+    // SLASH-06: `share` was listed here as a compiled stub. It is not a command
+    // at all — it is the `bug` command's alias (oracle 2.1.238 @248164336), and
+    // `name:"share"` has zero hits in the 2.1.220 and 2.1.238 binaries. The
+    // entry came from the stale de-minified source tree.
 ];
 
 // ============================================================================
@@ -372,10 +383,7 @@ pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
         "reset-limits",
         "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
     ),
-    (
-        "share",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
+    // SLASH-06: `share` removed — it is `bug`'s alias, not a stub command.
     (
         "summary",
         "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
@@ -467,11 +475,15 @@ pub const USAGE_CREDITS_BNR_GATED: &[&str] = &["usage-credits"];
 pub const COMMAND_ALIASES: &[(&str, &[&str])] = &[
     // H-BIN-11 cc2.1.207: `name:"background",aliases:["bg"]`.
     ("background", &["bg"]),
+    // SLASH-06: upstream these are TWO commands, and the alias hangs off `bug`,
+    // not `feedback` (oracle 2.1.238 @294965131 / @248164336):
+    //   feedback: {type:"local-jsx",name:"feedback",…}          — no aliases
+    //   bug:      {aliases:["share"],type:"local-jsx",name:"bug",…}
+    ("bug", &["share"]),
     ("clear", &["reset", "new"]),
     ("config", &["settings"]),
     ("desktop", &["app"]),
     ("exit", &["quit"]),
-    ("feedback", &["bug"]),
     ("mobile", &["ios", "android"]),
     ("permissions", &["allowed-tools"]),
     ("plugin", &["plugins", "marketplace"]),
@@ -623,6 +635,9 @@ pub fn core_description(name: &str) -> &'static str {
         "bridge" => "Connect this terminal for remote-control sessions",
         "cd" => "Move this session to a new working directory",
         "btw" => "Ask a quick side question without interrupting the main conversation",
+        // SLASH-06: byte-exact from oracle 2.1.238 @248164336. No product name
+        // appears in this string, so there is nothing to rebrand.
+        "bug" => "Report a bug or share your conversation",
         "chrome" => "Open Claude in Chrome settings",
         "color" => "Set the prompt bar color for this session",
         "commit" => "Create a git commit",
@@ -978,11 +993,13 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn intentionally_disabled_count_is_23() {
+    fn intentionally_disabled_count_is_22() {
         assert_eq!(
             INTENTIONALLY_DISABLED_COMMANDS.len(),
-            23,
-            "disabled command classification is locked at 23 commands"
+            22,
+            "disabled command classification is locked at 22 commands \
+             (23 until SLASH-06 removed `share`, which is not a command at all \
+             but the `bug` command's alias)"
         );
     }
 
@@ -1050,10 +1067,11 @@ mod tests {
         assert!(table.contains_key("thinkback-play"));
         // entitlement-gated.
         assert!(table.contains_key("brief"));
-        // compiled `name: 'stub'` files.
+        // compiled `name: 'stub'` files. `share` used to be listed here; it is
+        // not a command at all (SLASH-06 — it is `bug`'s alias), so it was
+        // removed rather than re-pointed.
         for n in [
             "env",
-            "share",
             "summary",
             "teleport",
             "autofix-pr",
@@ -1094,8 +1112,11 @@ mod tests {
     }
 
     #[test]
-    fn correct_by_design_count_is_23() {
-        assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 23);
+    fn correct_by_design_count_is_22() {
+        // 23 until SLASH-06: `share` was classified as a compiled stub on the
+        // strength of the stale de-minified source. The shipped binary has no
+        // `name:"share"` command — it is `bug`'s alias.
+        assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 22);
     }
 
     #[test]

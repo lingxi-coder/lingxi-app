@@ -62,9 +62,11 @@ async fn help_dispatch() {
             assert!(display.contains(
                 "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/"
             ));
-            // 80 newlines (header + 79 visible command lines); hidden and
-            // disabled commands remain filtered out.
-            assert_eq!(display.matches('\n').count(), 80);
+            // 81 newlines (header + 80 visible command lines); hidden and
+            // disabled commands remain filtered out. Was 80 until SLASH-06:
+            // `bug` became visible and `share` stopped being counted as a
+            // command (it is `bug`'s alias).
+            assert_eq!(display.matches('\n').count(), 81);
         }
         other => panic!("{other:?}"),
     }

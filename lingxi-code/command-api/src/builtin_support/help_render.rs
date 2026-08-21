@@ -85,18 +85,21 @@ mod tests {
 
     #[test]
     fn output_has_exactly_80_lines() {
-        // 1 header + 79 visible commands = 80 lines (each terminated by '\n').
-        // The 27 hidden/disabled commands (is_palette_hidden) are filtered out,
+        // 1 header + 80 visible commands = 81 lines (each terminated by '\n').
+        // The hidden/disabled commands (is_palette_hidden) are filtered out,
         // matching claude-code's `!isHidden && !$te` help/palette filter.
-        // (107 builtins − 28 hidden = 79 visible, with no DISABLE_* env set.)
+        // (107 builtins − 27 hidden = 80 visible, with no DISABLE_* env set.)
+        // Was 79 visible until SLASH-06: `share` left the hidden-stub table and
+        // `bug` joined the visible set, so one command moved from hidden to
+        // visible and the builtin total is unchanged.
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
         // `DISABLE_*_COMMAND` mutation can't transiently drop a counted command.
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 80,
-            "expected 80 newlines (1 header + 79 visible commands), got {n}"
+            n, 81,
+            "expected 81 newlines (1 header + 80 visible commands), got {n}"
         );
     }
 

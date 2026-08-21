@@ -396,7 +396,8 @@ fn implemented_set_matches_target_implemented_names() {
 
 #[test]
 fn correct_by_design_and_host_bound_sets_remain_explicit() {
-    assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 23);
+    // 22 since SLASH-06 — see the note on `CORRECT_BY_DESIGN_STUBS`.
+    assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 22);
     assert!(
         HOST_BOUND_DEFERRED_GAPS.is_empty(),
         "/btw now has a handle-bound command and reopenable TUI panel"

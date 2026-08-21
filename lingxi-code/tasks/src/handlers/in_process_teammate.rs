@@ -671,6 +671,7 @@ impl InProcessTeammateHandler {
             depth: 0,
             observer: None,
             permission_mode_override: None,
+            frozen_command_denies: Vec::new(),
         })
     }
 }

@@ -239,4 +239,12 @@ pub struct SubagentContext {
     /// frictionless. `None` ⇒ the child inherits the shared gate's live/boot mode
     /// (byte-identical to pre-2.1.207). The fork path never sets it.
     pub permission_mode_override: Option<String>,
+    /// Command-deny rules FROZEN at fork time (claude `freezeCommandDenies`),
+    /// carried from [`traits::subagent_spawn::SubagentSpawnRequest`] so the
+    /// runner can replay them on every dispatched tool call.
+    ///
+    /// See [`traits::tool_invoker::SubagentInvocationContext::frozen_command_denies`]
+    /// for why they exist and why a frozen deny beats a live allow. Empty for
+    /// every non-fork spawn, which keeps the dispatch path unchanged.
+    pub frozen_command_denies: Vec<String>,
 }

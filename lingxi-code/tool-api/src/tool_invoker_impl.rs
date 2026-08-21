@@ -13,6 +13,76 @@ use std::sync::Arc;
 use traits::permission_gate::PermissionGate;
 use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
+/// Turn fork-time frozen command denies into the `disallowed_tools` permission
+/// layer the fold understands (claude `freezeCommandDenies` → the
+/// `case"disallowed_tools"` arm of `gn(toolUseContext)`).
+///
+/// Returns an EMPTY vec when `frozen` is empty or nothing survives validation,
+/// which leaves [`traits::permission_gate::PermissionCheckContext::permission_layers`]
+/// empty and the fold byte-identical to a spawn that froze nothing.
+///
+/// ## Why entries are dropped rather than rejected
+///
+/// [`permission::PermissionRuleValue::from_rule_string`] is INFALLIBLE — a
+/// malformed rule silently degrades to a bare tool name rather than erroring.
+/// So "unparseable" cannot mean a parse failure here; it means the string does
+/// not round-trip, or it is not a `Bash` command rule at all. Either way the
+/// scoping record is corrupt or foreign, and the frozen entry cannot be honoured
+/// as written.
+///
+/// A corrupt entry is SKIPPED and logged rather than failing the resume: the
+/// alternative — refusing to resume — turns a damaged sidecar into an
+/// unrecoverable agent, and the surviving entries still tighten the policy.
+/// The log is what makes the silent degradation visible.
+#[must_use]
+fn frozen_command_deny_layers(frozen: &[String]) -> Vec<Value> {
+    if frozen.is_empty() {
+        return Vec::new();
+    }
+    let kept: Vec<String> = frozen
+        .iter()
+        .filter(|raw| {
+            let rule = raw.trim();
+            if rule.is_empty() {
+                tracing::warn!(
+                    "frozen_command_denies: dropping an empty rule from the scoping record"
+                );
+                return false;
+            }
+            let parsed = permission::PermissionRuleValue::from_rule_string(rule);
+            // `from_rule_string` never fails, so a mangled string arrives here as
+            // a bare tool name. A failed round-trip is the only signal that the
+            // input was not a well-formed rule.
+            if parsed.to_rule_string() != rule {
+                tracing::warn!(
+                    "frozen_command_denies: dropping {rule:?} — it does not round-trip as a \
+                     permission rule (scoping record corrupt or written by another version)"
+                );
+                return false;
+            }
+            // The snapshot is taken from the `Bash` deny bucket only, so anything
+            // else means the record was written by a different producer.
+            if parsed.tool_name != "Bash" {
+                tracing::warn!(
+                    "frozen_command_denies: dropping {rule:?} — expected a Bash command rule, \
+                     got tool {:?}",
+                    parsed.tool_name
+                );
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        return Vec::new();
+    }
+    vec![serde_json::json!({
+        "kind": "disallowed_tools",
+        "disallowedTools": kept,
+    })]
+}
+
 /// Wraps an `Arc<ToolRegistry>` as a `dyn ToolInvoker`.
 ///
 /// Cheap to construct; clones share the same registry `Arc`.
@@ -136,6 +206,12 @@ impl ToolInvoker for RegistryToolInvoker {
                 mode_override: ctx.mode_override.clone(),
                 is_non_interactive_session: ctx.is_non_interactive_session,
                 workspace_lease_token,
+                // Replay the fork-time command denies as a `disallowed_tools`
+                // LAYER. The fold applies layers ON TOP of the base policy, so a
+                // frozen deny wins over a live rule that would now allow the same
+                // command — which is the entire point: a settings edit made while
+                // a fork was parked must not WIDEN what it may run on resume.
+                permission_layers: frozen_command_deny_layers(&ctx.frozen_command_denies),
                 ..Default::default()
             };
             match gate
@@ -587,6 +663,7 @@ mod tests {
                     parent_model: None,
                     parent_model_profile: None,
                     mode_override: None,
+                    frozen_command_denies: Vec::new(),
                 },
             )
             .await
@@ -749,6 +826,7 @@ mod tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 
@@ -930,6 +1008,7 @@ mod tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 
@@ -1043,6 +1122,7 @@ mod tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 
@@ -1133,6 +1213,75 @@ mod tests {
             .clone()
             .expect("context gate consulted");
         assert!(ctx.requires_user_interaction);
+    }
+
+    #[tokio::test]
+    async fn dispatch_replays_frozen_command_denies_as_a_layer() {
+        // The consumer `frozen_command_denies` never had: the fork-time snapshot
+        // must reach the gate as a `disallowed_tools` LAYER, which the fold
+        // applies on top of the base policy. `policy_gate_test.rs`'s
+        // `a_disallowed_tools_layer_adds_a_command_source_deny_rule` proves such
+        // a layer denies even under BypassPermissions — i.e. the frozen deny wins.
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(ContextRecordingGate {
+            seen: seen.clone(),
+            outcome: traits::permission_gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let mut ctx = ctx_with_tool_use_id("toolu_fork");
+        ctx.frozen_command_denies = vec!["Bash(rm:*)".to_string()];
+        invoker
+            .invoke("TestEcho", json!({ "a": 1 }), ctx)
+            .await
+            .expect("allow dispatches");
+        let seen = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("context gate consulted");
+        assert_eq!(
+            seen.permission_layers,
+            vec![json!({
+                "kind": "disallowed_tools",
+                "disallowedTools": ["Bash(rm:*)"],
+            })],
+            "the frozen snapshot reaches the gate as a disallowed_tools layer"
+        );
+    }
+
+    #[test]
+    fn frozen_command_deny_layers_drops_entries_it_cannot_honour() {
+        // `from_rule_string` is INFALLIBLE — a mangled rule degrades to a bare
+        // tool name instead of erroring — so a failed ROUND-TRIP is the only
+        // signal that the scoping record is corrupt. Corrupt entries are skipped
+        // and logged rather than failing the resume, and the good ones survive.
+        let layers = frozen_command_deny_layers(&[
+            "Bash(rm:*)".to_string(),
+            "   ".to_string(),                 // empty after trim
+            "Bash(unbalanced".to_string(),     // no closing paren → bare name
+            "Read(/etc/passwd)".to_string(),   // not a command rule
+            "Bash(git push:*)".to_string(),
+        ]);
+        assert_eq!(
+            layers,
+            vec![json!({
+                "kind": "disallowed_tools",
+                "disallowedTools": ["Bash(rm:*)", "Bash(git push:*)"],
+            })],
+            "only well-formed Bash command rules survive"
+        );
+    }
+
+    #[test]
+    fn frozen_command_deny_layers_is_empty_when_nothing_survives() {
+        // No layer at all — NOT an empty layer — so the fold is byte-identical
+        // to a spawn that froze nothing.
+        assert!(frozen_command_deny_layers(&[]).is_empty());
+        assert!(frozen_command_deny_layers(&["Read(x)".to_string()]).is_empty());
     }
 
     #[tokio::test]

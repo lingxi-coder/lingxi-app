@@ -1233,6 +1233,7 @@ impl PoolSubagentSpawner {
             // definition permission mode (non-fork only). `None` = inherit the
             // live/boot gate mode.
             permission_mode_override: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 
@@ -1534,6 +1535,16 @@ impl PoolSubagentSpawner {
         // rendered context verbatim, so it never applies a mode override.
         ctx.permission_mode_override =
             effective_permission_mode.map(|m| crate::permission_mode::wire_mode_str(m).to_string());
+        // Carry the fork-time command-deny snapshot through to the runner, which
+        // replays it on every dispatched tool call (claude `freezeCommandDenies`).
+        // Only the fork path populates it; every other spawn leaves it empty and
+        // the dispatch path is unchanged.
+        //
+        // This is the consumer the field never had: it was computed, persisted to
+        // the scoping sidecar and read back into the spawn request, but nothing
+        // ever APPLIED it — so a settings edit made while a fork was parked could
+        // silently widen what the resumed fork was allowed to run.
+        ctx.frozen_command_denies = request.frozen_command_denies.clone();
         // A persistent (background/resumable) agent parks after each turn-set;
         // `is_async` marks background scheduling (vs the foreground one-shot).
         ctx.persistent = persistent;

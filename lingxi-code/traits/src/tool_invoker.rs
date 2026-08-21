@@ -103,6 +103,24 @@ pub struct SubagentInvocationContext {
     /// mode override — byte-identical to before). Mapped straight into
     /// [`crate::permission_gate::PermissionCheckContext::mode_override`].
     pub mode_override: Option<String>,
+    /// Command-deny rules FROZEN when a background fork launched, replayed for
+    /// every tool call this subagent makes (claude `freezeCommandDenies`).
+    ///
+    /// Upstream rebuilds the permission context from LIVE app state on resume,
+    /// so a settings edit made while a fork was parked could REMOVE a deny that
+    /// was in force when it launched. These rules are re-applied as a
+    /// `disallowed_tools` permission LAYER, which the fold applies ON TOP of the
+    /// base policy — so a frozen deny WINS over a live rule that would now allow
+    /// the same command.
+    ///
+    /// The port's own exposure is narrower than upstream's: `PolicyPermissionGate`
+    /// holds a boot-snapshot policy, so within ONE process the frozen set and the
+    /// live set cannot drift. The scoping record outlives the process, though, and
+    /// a cross-session resume reads it against a freshly loaded policy — which is
+    /// exactly the window this closes.
+    ///
+    /// Empty ⇒ no layer is added and the fold is byte-identical to before.
+    pub frozen_command_denies: Vec<String>,
 }
 
 /// Failure modes for [`ToolInvoker::invoke`].

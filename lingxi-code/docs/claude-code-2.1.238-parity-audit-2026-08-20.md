@@ -1420,3 +1420,74 @@ Two consequences worth carrying forward:
 * **Never read a non-zero exit with zero parsed failures as a pass.** Cross-check
   the exit code against how many test binaries actually reported, and against the
   compiler's own `error:` lines.
+
+## Waves C and D — 2026-08-21 (`a90892a6b`, `3e8ff9edc`)
+
+Wave C ran nine implementers over the remaining 62 P2/P3 findings; three lost
+their connection mid-run, but their work was already on disk and compiled. Wave D
+picked up the nine findings they never reached.
+
+**Register closed out at ~108 of 148.** The rest are not "unfinished" — they are
+adjudicated, each naming the substrate it needs:
+
+| bucket | count | meaning |
+|---|---|---|
+| closed | ~108 | landed and verified |
+| partial | 8 | renderer/half landed, producer named |
+| rejected | 5 | finding wrong, or duplicate, or would ship dead code |
+| deferred | 15 | verified at the oracle; blocked on a named missing mechanism |
+
+### The deferrals are evidence, not fatigue
+
+`PERM-04` and `PERM-05` are the clearest case. The permission agent edited **zero
+files** and instead established the load-bearing fact: the port has no per-call
+permission-layer substrate at all. `PermissionPolicy` is constructed once at boot,
+is not `Clone`, and lives behind a shared `Arc`; upstream's `gn(toolUseContext)`
+fold over `permissionLayers` has no counterpart. Both findings sit on top of that
+layer, so landing them would have produced definitions no caller can reach.
+
+The same test applies to `SH-01/02/05/06/07` and to `BASH-10/18/19` from Wave C:
+`check_permissions`, `coerce_input` and `user_facing_name_for_input` have **zero
+production call sites**, so implementing them inside the tool crate would ship
+dead code that reads as parity in a diff.
+
+## Two defects found while proving the deferrals — NEITHER IS FIXED
+
+These are worth more than the findings that produced them.
+
+### 1. POSIX command hooks never run through a shell
+
+The oracle spawns a command hook as
+`spawn(M,[],{env,cwd,shell:He,detached,windowsHide:!0})` — the whole command
+string, shell-interpreted, with an **empty argv**. The port does a bare exec:
+`Command::new(&inner.command).args(&inner.args)` at
+`platforms/posix/src/process/runner.rs:196`.
+
+So `{"type":"command","command":"./fmt.sh --all"}` — or any hook containing a
+pipe, redirect or `&&` — fails with ENOENT on LingXi. **Existing fixtures are only
+parsed, never executed**, so nothing in the suite catches it. This is a bug in a
+shipped feature, not a parity nicety, and it should land before any `shell:`
+selector work (`SH-06`).
+
+### 2. `frozen_command_denies` — a security guarantee that does not exist
+
+Constructed at `tools/skill/src/skill.rs:302`, threaded through
+`traits/src/subagent_spawn.rs:266` into the scoping sidecar at
+`apps/engine-desktop/src/background_agent.rs:99` — and **read by nothing**. No
+consumer applies it as a command-deny set on resume.
+
+Its tests (`tools/skill/src/fork.rs:458-481`, `skill_test.rs:1570-1605`) assert
+only that the spawn request and sidecar field are populated, so they pass while
+the guarantee the field exists for is absent. This is the "named, computed, never
+WIRED" pattern with a security consequence.
+
+## Scoreboard for the pattern this audit kept hitting
+
+- **6 times** a GREEN test was pinning the bug, including one asserting a field
+  must be ABSENT that the oracle always emits (`SC-05`), and one asserting text
+  ripgrep never prints (`ST-13`).
+- **3 defects** traced to a port "fact" read off the de-minified `claude-code/src`
+  tree rather than the shipped binary (`ST-01`, `SLASH-06`, `SC-05`).
+- **4 "named, computed, never wired"** cases found (`SC-07`, `CLI-16`,
+  `frozen_command_denies`, and the `ReportFindings` name in a test's expected list
+  with no implementing tool).

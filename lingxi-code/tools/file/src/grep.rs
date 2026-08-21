@@ -91,7 +91,7 @@ const GREP_DESCRIPTION: &str = r#"A powerful search tool built on ripgrep
   - Supports full regex syntax (e.g., "log.*Error", "function\s+\w+")
   - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
   - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
-  - Use Agent tool for open-ended searches requiring multiple rounds
+  - Use Agent tool (if available) for open-ended searches requiring multiple rounds
   - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\{\}` to find `interface{}` in Go code)
   - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \{[\s\S]*?field`, use `multiline: true`
 "#;
@@ -497,17 +497,19 @@ impl Tool for GrepTool {
         true
     }
 
-    /// 1:1 with claude-code Grep `validateInput({path})` (identical to Glob's):
-    /// a supplied `path` must be an existing directory, else the distinct
-    /// "Directory does not exist" / "Path is not a directory" message (see
-    /// [`crate::dir_validate`]). The cwd (`Pt()`) is the tool's workspace.
+    /// 1:1 with claude-code Grep `validateInput({path})` (oracle `Uve`,
+    /// cc-238.js @226429938). ST-04/ST-05: this is NOT Glob's validator — Grep
+    /// accepts a FILE path (`rg PATH`; there is no `isDirectory()` arm) and its
+    /// only rejection is ENOENT, worded `Path does not exist: …` rather than
+    /// Glob's `Directory does not exist: …` (see [`crate::dir_validate`]).
+    /// The cwd (`er()`) is the tool's live workspace.
     async fn validate_input(
         &self,
         input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         if let Some(path) = input.get("path").and_then(Value::as_str) {
-            crate::dir_validate::validate_search_directory(path, &self.cwd_now())?;
+            crate::dir_validate::validate_grep_path(path, &self.cwd_now())?;
         }
         Ok(())
     }
@@ -1859,6 +1861,22 @@ mod tests {
         );
     }
 
+    /// ST-04: the oracle's Grep `validateInput` has no `isDirectory()` arm, so
+    /// `Grep(pattern="x", path="src/main.rs")` is legal — it searches that one
+    /// file. The port used to route Grep through Glob's directory-only
+    /// validator and refuse with `Path is not a directory: …`.
+    #[tokio::test]
+    async fn validate_input_accepts_a_file_path() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("main.rs");
+        std::fs::write(&file, b"needle\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        tool.validate_input(&json!({ "pattern": "needle", "path": file.to_str().unwrap() }), &fresh_ctx())
+            .await
+            .expect("a file path must validate for Grep");
+    }
+
     #[tokio::test]
     async fn live_cwd_cell_drives_path_not_found_note() {
         let tmp = TempDir::new().unwrap();
@@ -1872,11 +1890,13 @@ mod tests {
             .await
             .unwrap_err();
         // The note prints the LIVE cwd (canonicalized sub), NOT the workspace.
+        // ST-05: Grep's lead is `Path does not exist:`, not Glob's
+        // `Directory does not exist:`.
         let canon_sub = std::fs::canonicalize(&sub).unwrap();
         assert_eq!(
             err.0,
             format!(
-                "Directory does not exist: no_such_dir. Note: your current working directory is {}.",
+                "Path does not exist: no_such_dir. Note: your current working directory is {}.",
                 canon_sub.display()
             )
         );

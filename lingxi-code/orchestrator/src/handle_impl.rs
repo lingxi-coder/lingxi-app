@@ -255,6 +255,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             turn_id: runtime.turn_id,
             consecutive_failures: runtime.consecutive_failures,
             consecutive_rapid_refills: runtime.consecutive_rapid_refills,
+            // Transient in-call state (SC-04); never restored from metadata.
+            ..Default::default()
         };
         self.tools
             .deferral()

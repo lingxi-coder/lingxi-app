@@ -77,7 +77,7 @@ const GLOB_DESCRIPTION: &str = r#"- Fast file pattern matching tool that works w
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
 - Returns matching file paths sorted by modification time
 - Use this tool when you need to find files by name patterns
-- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead"#;
+- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead (if available)"#;
 
 /// The SHORT Glob prompt — byte-locked VERBATIM to claude-code `Jhi(e)`'s
 /// `Dh(e)===true` branch (binary offset 195605886), served to current-gen
@@ -198,17 +198,20 @@ impl Tool for GlobTool {
         true
     }
 
-    /// 1:1 with claude-code Glob `validateInput({path})`: a supplied `path` must
-    /// be an existing directory, else a distinct "Directory does not exist" /
-    /// "Path is not a directory" message (see [`crate::dir_validate`]). The cwd
-    /// (`Pt()`) is the tool's workspace.
+    /// 1:1 with claude-code Glob `validateInput({path})` (oracle `lhe`,
+    /// cc-238.js @226421955): a supplied `path` must be an existing DIRECTORY,
+    /// else a distinct "Directory does not exist" / "Path is not a directory"
+    /// message. ST-04/ST-05: this directory-only rule is Glob's ALONE — Grep's
+    /// validator accepts a file and words its ENOENT error "Path does not
+    /// exist" (see [`crate::dir_validate`]). The cwd (`er()`) is the tool's
+    /// live workspace.
     async fn validate_input(
         &self,
         input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         if let Some(path) = input.get("path").and_then(Value::as_str) {
-            crate::dir_validate::validate_search_directory(path, &self.cwd_now())?;
+            crate::dir_validate::validate_glob_directory(path, &self.cwd_now())?;
         }
         Ok(())
     }
@@ -1098,7 +1101,7 @@ mod tests {
             d.starts_with("- Fast file pattern matching tool that works with any codebase size\n")
         );
         assert!(d.contains("- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\""));
-        assert!(d.ends_with("use the Agent tool instead"));
+        assert!(d.ends_with("use the Agent tool instead (if available)"));
         // prompt() equals DESCRIPTION for Glob.
         let p = tool
             .prompt(&PromptOptions {

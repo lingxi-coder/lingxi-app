@@ -198,6 +198,7 @@ fn truncate_to_token_budget(
     token_count: u64,
     max_tokens: u64,
     total_lines: u64,
+    full_file_path: &str,
 ) -> GracefulTruncation {
     let cap = max_tokens as f64;
     let token_count_f = token_count.max(1) as f64;
@@ -251,16 +252,20 @@ fn truncate_to_token_budget(
     };
 
     // Note branch: line-paging when `!W && S < h`, else the long-lines/char note.
+    //
+    // FT-08: BOTH branches open with `${r}: `, where `r` is the resolved
+    // fullFilePath — `R=…gmt+`${r}: showing lines 1-…`` (cc-238.js @294616079).
+    // LingXi dropped that segment; `full_file_path` restores it.
     let note = if !char_based && line_count < total_lines {
         format!(
-            "{PARTIAL_VIEW_PREFIX}showing lines 1-{line_count} of {total_lines} total ({token_count} tokens, cap {max_tokens}). Call {read_name} with offset={next} limit={line_count} for the next page, or {grep_name} to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]",
+            "{PARTIAL_VIEW_PREFIX}{full_file_path}: showing lines 1-{line_count} of {total_lines} total ({token_count} tokens, cap {max_tokens}). Call {read_name} with offset={next} limit={line_count} for the next page, or {grep_name} to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]",
             read_name = TOOL_NAME,
             grep_name = GREP_TOOL_NAME,
             next = line_count + 1,
         )
     } else {
         format!(
-            "{PARTIAL_VIEW_PREFIX}showing the first {shown} of {full} characters ({token_count} tokens, cap {max_tokens}); this file has very long lines and cannot be paginated by line. Use {grep_name} to find a specific section, or {read_name} with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]",
+            "{PARTIAL_VIEW_PREFIX}{full_file_path}: showing the first {shown} of {full} characters ({token_count} tokens, cap {max_tokens}); this file has very long lines and cannot be paginated by line. Use {grep_name} to find a specific section, or {read_name} with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]",
             shown = head.len(),
             full = content.len(),
             grep_name = GREP_TOOL_NAME,
@@ -698,7 +703,7 @@ fn get_alternate_screenshot_path(file_path: &std::path::Path) -> Option<PathBuf>
 /// `.env` Rust's stem is `.env` while TS `basename('.env', extname('.env'))`
 /// is also `.env` since `extname('.env') === ''` — they agree.)
 #[must_use]
-fn find_similar_file(file_path: &std::path::Path) -> Option<String> {
+pub(crate) fn find_similar_file(file_path: &std::path::Path) -> Option<String> {
     let dir = file_path.parent()?;
     let target_stem = file_path.file_stem()?;
     let entries = std::fs::read_dir(dir).ok()?;
@@ -718,7 +723,41 @@ fn find_similar_file(file_path: &std::path::Path) -> Option<String> {
 /// claude-code's UI renderers check for this prefix to show a short
 /// "File not found" message; the port keeps it verbatim so the model-facing
 /// string matches.
-const FILE_NOT_FOUND_CWD_NOTE: &str = "Note: your current working directory is";
+pub(crate) const FILE_NOT_FOUND_CWD_NOTE: &str = "Note: your current working directory is";
+
+/// Build the byte-locked file-not-found message shared by Read (`FileReadTool`
+/// ENOENT arm) and Edit (`FileEditTool.validateInput`, errorCode 4). Both sites
+/// are the SAME three lines in claude-code 2.1.238:
+///
+/// ```text
+/// let similar = await findSimilarFile(p), corrected = await suggestPathUnderCwd(p)
+/// let message = `File does not exist. ${FILE_NOT_FOUND_CWD_NOTE} ${getCwd()}.`
+/// if (corrected)    message += ` Did you mean ${corrected}?`
+/// else if (similar) message += ` Did you mean ${similar}?`
+/// ```
+///
+/// `live_cwd` is the caller's live cwd (`Ct()`); it is realpath-resolved here
+/// (falling back to the unresolved path) so the rendered cwd AND the
+/// [`suggest_path_under_cwd`] prefix comparison both use the same resolved form.
+#[must_use]
+pub(crate) fn file_not_found_message(
+    canon: &std::path::Path,
+    live_cwd: &std::path::Path,
+) -> String {
+    let cwd = std::fs::canonicalize(live_cwd).unwrap_or_else(|_| live_cwd.to_path_buf());
+    let mut message = format!(
+        "File does not exist. {FILE_NOT_FOUND_CWD_NOTE} {}.",
+        cwd.display()
+    );
+    // The cwd "dropped repo folder" suggestion takes PRECEDENCE over the
+    // same-stem sibling. Both suffixes are the VERBATIM `" Did you mean {x}?"`.
+    if let Some(cwd_suggestion) = suggest_path_under_cwd(canon, &cwd) {
+        message.push_str(&format!(" Did you mean {cwd_suggestion}?"));
+    } else if let Some(similar) = find_similar_file(canon) {
+        message.push_str(&format!(" Did you mean {similar}?"));
+    }
+    message
+}
 
 /// `suggestPathUnderCwd(requestedPath)` — 1:1 with `utils/file.ts:228-267`.
 /// Detects the "dropped repo folder" pattern: the model builds an absolute path
@@ -752,7 +791,7 @@ const FILE_NOT_FOUND_CWD_NOTE: &str = "Note: your current working directory is";
 /// strictly under `cwdParent`, the `relative` is exactly the suffix after
 /// `cwdParent`, which [`std::path::Path::strip_prefix`] yields.
 #[must_use]
-fn suggest_path_under_cwd(requested: &std::path::Path, cwd: &std::path::Path) -> Option<String> {
+pub(crate) fn suggest_path_under_cwd(requested: &std::path::Path, cwd: &std::path::Path) -> Option<String> {
     use std::path::MAIN_SEPARATOR;
 
     // `cwdParent = dirname(cwd)`. A cwd with no parent (the filesystem root) has
@@ -1304,21 +1343,7 @@ impl FileReadTool {
         // `getCwd()` analog: the LIVE cwd (`Ct()`), realpath-resolved (matching
         // TS's already-resolved cwd) with a fallback to the unresolved path.
         let live_cwd = self.cwd_now();
-        let cwd = std::fs::canonicalize(&live_cwd).unwrap_or_else(|_| live_cwd.clone());
-        // Base message: `File does not exist. ${FILE_NOT_FOUND_CWD_NOTE} ${cwd}.`.
-        let mut message = format!(
-            "File does not exist. {FILE_NOT_FOUND_CWD_NOTE} {}.",
-            cwd.display()
-        );
-        // The cwd "dropped repo folder" suggestion takes PRECEDENCE over the
-        // same-stem sibling (`FileReadTool.ts:642-645`). Both suffixes are the
-        // VERBATIM TS `" Did you mean {x}?"`.
-        if let Some(cwd_suggestion) = suggest_path_under_cwd(canon, &cwd) {
-            message.push_str(&format!(" Did you mean {cwd_suggestion}?"));
-        } else if let Some(similar) = find_similar_file(canon) {
-            message.push_str(&format!(" Did you mean {similar}?"));
-        }
-        Err(ToolError::Io(message))
+        Err(ToolError::Io(file_not_found_message(canon, &live_cwd)))
     }
 
     /// Process an image file and return it as multimodal content. The pixels
@@ -1336,6 +1361,22 @@ impl FileReadTool {
         original_size: u64,
         started: Instant,
     ) -> Result<ToolCallResult, ToolError> {
+        // FT-09: `q_l`'s two pre-decode guards (cc-238.js @294617599), which run
+        // BEFORE any decode/resize. Without them LingXi surfaced the `image`
+        // crate's own text (`Image file is empty (0 bytes)` / `failed to decode
+        // image: …`), which names neither the path nor what the bytes actually
+        // are.
+        if bytes.is_empty() {
+            self.emit_failed(invocation_id, "image_empty").await;
+            return Err(ToolError::Io(crate::image_read::format_image_empty(canon)));
+        }
+        if crate::image_read::sniff_image_media_type(&bytes).is_none() {
+            self.emit_failed(invocation_id, "image_bad_magic").await;
+            return Err(ToolError::Io(crate::image_read::format_image_bad_magic(
+                canon, &bytes,
+            )));
+        }
+
         let processed = match crate::image_read::process_image(bytes) {
             Ok(p) => p,
             Err(e) => {
@@ -1995,6 +2036,43 @@ impl Tool for FileReadTool {
             return Err(ToolError::Io(format_binary(&canon)));
         }
 
+        // FT-04: notebook stat guards. The oracle's `Sgm` dispatches the
+        // `.ipynb` branch FIRST (`if(BXt(n)){let F=await K0f(n) …}`,
+        // cc-238.js @294612195), and `K0f` (@289994340) stats the path before
+        // touching its bytes:
+        //   if(!n.isFile()&&!n.isDirectory())throw new Wur(<NOT_REGULAR_FILE>);
+        //   if(n.size>aV)throw new Wur(l8n());
+        //   let o=await …readFileBytes(r,aV+1); if(o.length>aV)throw new Wur(l8n());
+        // Both literals are NEW in 2.1.238 (0 hits in 2.1.220). They run before
+        // the generic 256 KB cap below so a >100 MB notebook reports the
+        // notebook message, not the generic one.
+        //
+        // Divergence recorded, NOT fixed here: upstream the notebook branch also
+        // preempts the generic `maxSizeBytes` cap entirely (it compares the
+        // SERIALIZED cells JSON, not the file size — see the `cells_json_bytes`
+        // check further down). LingXi still applies the generic cap to `.ipynb`
+        // at `size > MAX_FILE_READ_SIZE` below; realigning that ordering is a
+        // separate finding.
+        if std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
+        {
+            if !metadata.is_file() && !metadata.is_dir() {
+                self.emit_failed(&invocation_id, "notebook_not_regular_file")
+                    .await;
+                return Err(ToolError::Io(
+                    crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE.to_string(),
+                ));
+            }
+            if size > crate::notebook_read::MAX_NOTEBOOK_READ_SIZE {
+                self.emit_failed(&invocation_id, "notebook_too_large").await;
+                return Err(ToolError::Io(
+                    crate::notebook_read::notebook_too_large_message(),
+                ));
+            }
+        }
+
         // TS applies the byte cap ONLY when no `limit` is supplied
         // (`readFileInRange(..., limit === undefined ? maxSizeBytes : undefined)`
         // — FileReadTool.ts:1026). A ranged read (offset+limit) of a >256KB file
@@ -2185,16 +2263,25 @@ impl Tool for FileReadTool {
             // Notebook byte-size cap (`FileReadTool.ts:826-836`): if the serialized
             // cells JSON exceeds `maxSizeBytes` (the 256 KB default — LingXi has no
             // `fileReadingLimits` override), error with the jq-suggestion message
-            // VERBATIM from TS, before the token gate / state record. `file_path`
-            // is the ORIGINAL input path (TS uses the un-expanded `file_path` in the
-            // `cat "..."` snippets), and both sizes use `format_file_size`.
+            // VERBATIM from the binary (`$Ka()` @2.1.238), before the token gate /
+            // state record. 2.1.238 de-parameterised the PATH: 2.1.220 interpolated
+            // the real path into `cat "<path>"` (quoted), 2.1.238 emits the literal
+            // placeholder `cat <notebook_path>` (unquoted) — verified at the oracle
+            // (238 @113219062 vs 220 @109111686). The SHELL TOOL NAME is still an
+            // interpolation slot in BOTH builds, not the literal `Bash`; LingXi
+            // renders that slot as "a registered shell tool" repo-wide because it
+            // registers more than one shell tool (Bash + PowerShell). That is an
+            // intentional divergence, asserted by `grep.rs`'s
+            // `description_is_byte_faithful` and `agent/src/builtins.rs:722` —
+            // do NOT "align" it to `Bash`. Both sizes use `format_file_size`.
             let cells_json_bytes = cells_json.len() as u64;
             if cells_json_bytes > MAX_FILE_READ_SIZE {
                 self.emit_failed(&invocation_id, "notebook_too_large").await;
                 return Err(ToolError::Io(format!(
-                    "Notebook content ({}) exceeds maximum allowed size ({}). Use a registered shell tool with jq to read specific portions:\n  cat \"{file_path}\" | jq '.cells[:20]' # First 20 cells\n  cat \"{file_path}\" | jq '.cells[100:120]' # Cells 100-120\n  cat \"{file_path}\" | jq '.cells | length' # Count total cells\n  cat \"{file_path}\" | jq '.cells[] | select(.cell_type==\"code\") | .source' # All code sources",
+                    "Notebook content ({}) exceeds maximum allowed size ({}). {}",
                     format_file_size(cells_json_bytes),
                     format_file_size(MAX_FILE_READ_SIZE),
+                    crate::notebook_read::NOTEBOOK_JQ_GUIDANCE,
                 )));
             }
 
@@ -2311,6 +2398,7 @@ impl Tool for FileReadTool {
                     token_estimate,
                     max_output_tokens,
                     total_lines,
+                    &canon.display().to_string(),
                 );
                 slice = trunc.content;
                 read_lines = trunc.line_count;
@@ -3554,6 +3642,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ipynb_cell_without_source_is_refused() {
+        // FT-02: the oracle's `X2t` per-cell gate — `cells:[{...}]` with no
+        // `source` is NOT a readable notebook. Before FT-02 LingXi accepted it
+        // and rendered an empty cell.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nosource.ipynb");
+        std::fs::write(
+            &target,
+            r#"{"cells":[{"cell_type":"code","id":"c1"}],"metadata":{}}"#,
+        )
+        .unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::Io(m) => {
+                assert_eq!(m, crate::notebook_read::INVALID_NOTEBOOK_SHAPE);
+            }
+            other => panic!("expected Io with the invalid-shape message, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ipynb_fifo_is_refused_as_not_a_regular_file() {
+        // FT-04: `K0f`'s `if(!n.isFile()&&!n.isDirectory())` guard. A FIFO is
+        // neither, so the notebook branch refuses before reading a byte.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("fifo.ipynb");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&target)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            // No `mkfifo` on this host — nothing to assert.
+            return;
+        }
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::Io(m) => {
+                assert_eq!(m, crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE);
+            }
+            other => panic!("expected Io with the not-a-regular-file message, got {other:?}"),
+        }
+    }
+
     // ───────────────────────── Read dedup (file_unchanged) ──────────────────
 
     #[tokio::test]
@@ -3883,10 +4035,15 @@ mod tests {
             .await
             .expect("over-budget full read must gracefully truncate, not error");
         let mc = result.model_content.as_deref().unwrap();
-        // Exact note shape (line-paging branch): prefix + em-dash + range.
+        // Exact note shape (line-paging branch): prefix + em-dash +
+        // fullFilePath + `: ` + range (FT-08 — `${r}: showing lines 1-…`).
+        let canon = std::fs::canonicalize(&target).unwrap();
         assert!(
-            mc.contains("[Truncated: PARTIAL view \u{2014} showing lines 1-"),
-            "model_content must carry the partial-view note, tail: {}",
+            mc.contains(&format!(
+                "[Truncated: PARTIAL view \u{2014} {}: showing lines 1-",
+                canon.display()
+            )),
+            "model_content must carry the partial-view note WITH the full path, tail: {}",
             &mc[mc.len().saturating_sub(400)..]
         );
         assert!(mc.contains(" total ("));
@@ -4515,6 +4672,64 @@ mod tests {
             res.new_messages.is_empty(),
             "unresized image must inject NO messages (the image rides the tool_result)"
         );
+    }
+
+    #[cfg(feature = "image-read")]
+    #[tokio::test]
+    async fn image_extension_with_html_content_gets_the_magic_byte_refusal() {
+        // FT-09: `q_l`'s `Cle(o)===null` guard — a "download" that actually saved
+        // a login page. Before FT-09 this fell through to the `image` crate's
+        // `failed to decode image: …`.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("shot.png");
+        std::fs::write(&target, b"<!DOCTYPE html><html><head><title>Login</title>").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let canon = std::fs::canonicalize(&target).unwrap();
+        match err {
+            ToolError::Io(m) => assert_eq!(
+                m,
+                crate::image_read::format_image_bad_magic(
+                    &canon,
+                    b"<!DOCTYPE html><html><head><title>Login</title>"
+                )
+            ),
+            other => panic!("expected Io with the bad-magic message, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "image-read")]
+    #[tokio::test]
+    async fn empty_image_file_gets_the_empty_refusal() {
+        // FT-09: `if(i===0)throw new ht(\`Image file is empty: ${e}\`, …)`.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("empty.png");
+        std::fs::write(&target, b"").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let canon = std::fs::canonicalize(&target).unwrap();
+        match err {
+            ToolError::Io(m) => {
+                assert_eq!(m, format!("Image file is empty: {}", canon.display()));
+            }
+            other => panic!("expected Io with the empty-image message, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "image-read")]

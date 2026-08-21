@@ -1093,6 +1093,21 @@ fn strip_surrounding_quotes(s: &str) -> &str {
     &t[..end]
 }
 
+/// Strip EVERY quote character (claude-code 2.1.238 `wW`: the GLOBAL
+/// `/['"\u{2018}-\u{201F}]+/g` replace). 2.1.220's path guard used the ANCHORED
+/// strip (`z2`, now spelled `Hce` and kept here as
+/// [`strip_surrounding_quotes`]); 2.1.238's `w$i` switched its base
+/// normalization to this global form.
+fn strip_quote_chars(s: &str) -> String {
+    s.chars().filter(|c| !is_quote_char(*c)).collect()
+}
+
+/// True when the path carries a quote character anywhere — claude-code `w$i`'s
+/// `i = wW(e) !== e`.
+fn has_quote_chars(s: &str) -> bool {
+    s.chars().any(is_quote_char)
+}
+
 /// Strip a leading whitespace run + any PowerShell comments (claude-code `Gee`):
 /// leading `\s᠎`, then repeatedly a `<# … #>` block comment or a
 /// `# … <newline>` line comment (each followed by another leading-ws strip).
@@ -1387,6 +1402,12 @@ pub mod ps_path_reasons {
     /// A glob in a read operation.
     pub const GLOB_READ: &str =
         "Glob patterns in paths cannot be statically validated \u{2014} symlinks inside the glob expansion are not examined. Requires manual approval.";
+    /// A path that carried quote characters anywhere — claude-code 2.1.238
+    /// `w$i`'s `s(m)` verdict (new since 2.1.220). Emitted when quote-stripping
+    /// changed the path AND the stripped path would otherwise have been allowed
+    /// (or hits the `..`-bearing glob-read arm).
+    pub const QUOTE_CHARS: &str =
+        "Paths containing quote characters cannot be statically validated and require manual approval";
 }
 
 /// Reason for a Windows drive-relative path (claude-code interpolates the path).
@@ -1576,8 +1597,13 @@ pub fn classify_ps_path(
     home: Option<&str>,
 ) -> PsPathClass {
     use ps_path_reasons as R;
-    // i = UKn(L1(e)).replaceAll("\\","/")
-    let mut i = expand_tilde(strip_surrounding_quotes(raw), home).replace('\\', "/");
+    // 2.1.238 `w$i`: `let o=wW(e), i=o!==e;` … `l=Veo(o).replaceAll("\\","/")`.
+    // The base normalization moved from the ANCHORED quote strip (2.1.220 `z2`)
+    // to the GLOBAL one (`wW`), and `quoted` records that the raw path carried
+    // quote characters at all.
+    let unquoted = strip_quote_chars(raw);
+    let quoted = unquoted != raw;
+    let mut i = expand_tilde(&unquoted, home).replace('\\', "/");
 
     let blocked = |resolved: &str, reason: String| PsPathClass::Blocked {
         resolved: resolved.to_string(),
@@ -1596,9 +1622,14 @@ pub fn classify_ps_path(
     if i.contains("::") {
         return blocked(&i, R::PROVIDER_QUALIFIED.to_string());
     }
-    // Windows drive-relative
+    // Windows drive-relative. 2.1.238 interpolates `${i?e:l}` — the RAW path when
+    // quote-stripping changed it, else the normalized one (2.1.220 always used
+    // the normalized path).
     if is_windows && is_drive_relative(&i) {
-        return blocked(&i, drive_relative_reason(&i));
+        return blocked(
+            &i,
+            drive_relative_reason(if quoted { raw } else { i.as_str() }),
+        );
     }
     // tGi short-name expansion, then UNC / WebDAV / SSL
     i = short_name_expand(&i, is_windows);
@@ -1620,10 +1651,15 @@ pub fn classify_ps_path(
     if has_traversal_after_segment(&i, is_windows) {
         return blocked(&i, R::TRAVERSAL.to_string());
     }
-    // glob
+    // glob. 2.1.238 inserts `if(i)return s(v);` ahead of the read-glob reason in
+    // the `p4e(l)` (`..`-segment-bearing) arm only — the dir-prefix arm keeps
+    // GLOB_READ even for a quoted path.
     if glob_index(&i).is_some() {
         let reason = if matches!(op, PsOperation::Write | PsOperation::Create) {
             R::GLOB_WRITE
+        } else if quoted && has_dotdot_segment(&i) {
+            // `p4e(l)` — the same `/(?:^|[\\/])\.\.(?:[\\/]|$)/` predicate.
+            R::QUOTE_CHARS
         } else {
             R::GLOB_READ
         };
@@ -1668,6 +1704,15 @@ pub enum PsPathOutcome {
 /// `is_windows` selects the Windows-specific guard variants (drive-relative,
 /// provider min length). Deny-RULE resolution is handled upstream in the policy
 /// gate (see [`classify_ps_path`]).
+///
+/// PERM-03 (2.1.238): `w$i`'s tail `if(i&&f.allowed)return s(d)` is ported — a
+/// path carrying quote characters can never auto-allow. Its sibling arm
+/// (`i && !f.allowed && decisionReason.type==="safetyCheck"` → the
+/// `"…resolves near a sensitive file under quote-stripping…"` reason) has no
+/// counterpart here because this port of `vRg`/`eme` performs only working-dir
+/// containment — the `_lt` sensitive-file safety walk that mints the
+/// `safetyCheck` reason is a pre-existing, separately deferred scope omission,
+/// so the arm could only ever be dead code.
 ///
 /// PERM-PS-VRG-01: `mode` carries claude-code `vRg`'s in-working-dir auto-allow
 /// gate (`if(s){{if(r==="read"||t.mode==="acceptEdits")return{{allowed:!0}}}}`): an
@@ -1725,8 +1770,18 @@ pub fn check_ps_path(
                 if matches!(op, PsOperation::Read)
                     || matches!(mode, crate::mode::PermissionMode::AcceptEdits)
                 {
-                    PsPathOutcome::Allowed {
-                        resolved: resolved.to_string_lossy().into_owned(),
+                    // 2.1.238 `w$i` tail: `if(i&&f.allowed)return s(d)` — a path
+                    // that carried quote characters never auto-allows, it
+                    // degrades to the QUOTE_CHARS manual approval.
+                    if has_quote_chars(raw) {
+                        PsPathOutcome::AskReason {
+                            resolved: resolved.to_string_lossy().into_owned(),
+                            reason: ps_path_reasons::QUOTE_CHARS.to_string(),
+                        }
+                    } else {
+                        PsPathOutcome::Allowed {
+                            resolved: resolved.to_string_lossy().into_owned(),
+                        }
                     }
                 } else {
                     PsPathOutcome::AskContainment {

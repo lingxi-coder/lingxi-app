@@ -109,6 +109,6 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = HooksHandler::new(mock);
         assert_eq!(h.name(), "hooks");
-        assert_eq!(h.description(), "Manage hooks");
+        assert_eq!(h.description(), "View hook configurations for tool events");
     }
 }

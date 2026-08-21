@@ -102,10 +102,25 @@ fn is_env_truthy(name: &str) -> bool {
     traits::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
 
+/// Port of claude-code `areBackgroundTasksDisabled` (2.1.238 `WA()`:
+/// `getSettings().backgroundTasksDisabled || env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`).
+///
+/// LingXi has no `backgroundTasksDisabled` settings key in this crate, so only
+/// the env half is modelled (the settings half defaults to `false`, so the env
+/// check is the sole observable gate here).
+///
+/// Two call sites depend on it, exactly as the oracle does: the prompt's
+/// `run_in_background` bullet (`getBackgroundUsageNote`) and the Bash INPUT
+/// SCHEMA, which drops the `run_in_background` property entirely when background
+/// tasks are off (oracle `egm`: `WA() ? Qhm().omit({run_in_background:!0, …}) : …`).
+pub(crate) fn background_tasks_disabled() -> bool {
+    is_env_truthy("LINGXI_DISABLE_BACKGROUND_TASKS")
+}
+
 /// Port of `getBackgroundUsageNote` (`prompt.ts:35`). Returns `None` when
 /// `LINGXI_DISABLE_BACKGROUND_TASKS` is truthy.
 fn background_usage_note() -> Option<String> {
-    if is_env_truthy("LINGXI_DISABLE_BACKGROUND_TASKS") {
+    if background_tasks_disabled() {
         return None;
     }
     Some(
@@ -147,6 +162,36 @@ fn dedup(items: &[String]) -> Vec<String> {
             out.push(s.clone());
         }
     }
+    out
+}
+
+/// Maximum number of sandbox paths/hosts rendered into the prompt before the
+/// list is truncated — claude-code 2.1.238 `D_l = 50` (`prompt.ts`, oracle
+/// binary @132228439 for the marker string).
+const SANDBOX_PROMPT_LIST_MAX: usize = 50;
+
+/// Port of claude-code `Phr` (2.1.238):
+///
+/// ```js
+/// function Phr(e){if(!e||e.length<=D_l)return e;let t=e.length-D_l;
+///   return[...e.slice(0,D_l),`... and ${t} more (truncated for prompt size)`]}
+/// ```
+///
+/// Applied to EVERY list rendered into the `## Command sandbox` JSON —
+/// `read.denyOnly`, `read.allowWithinDeny`, `write.allowOnly`,
+/// `write.denyWithinAllow`, `allowedHosts`, `deniedHosts`, `allowUnixSockets` —
+/// AFTER dedup / `$TMPDIR` normalization, matching the oracle's
+/// `Phr(gXr(list))` / `Phr(l(t.allowOnly))` nesting.
+fn truncate_for_prompt(items: Vec<String>) -> Vec<String> {
+    if items.len() <= SANDBOX_PROMPT_LIST_MAX {
+        return items;
+    }
+    let extra = items.len() - SANDBOX_PROMPT_LIST_MAX;
+    let mut out: Vec<String> = items
+        .into_iter()
+        .take(SANDBOX_PROMPT_LIST_MAX)
+        .collect::<Vec<_>>();
+    out.push(format!("... and {extra} more (truncated for prompt size)"));
     out
 }
 
@@ -237,12 +282,12 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     let mut read = serde_json::Map::new();
     read.insert(
         "denyOnly".into(),
-        serde_json::json!(dedup(&cfg.filesystem.deny_read)),
+        serde_json::json!(truncate_for_prompt(dedup(&cfg.filesystem.deny_read))),
     );
     if !cfg.filesystem.allow_read.is_empty() {
         read.insert(
             "allowWithinDeny".into(),
-            serde_json::json!(dedup(&cfg.filesystem.allow_read)),
+            serde_json::json!(truncate_for_prompt(dedup(&cfg.filesystem.allow_read))),
         );
     }
 
@@ -252,8 +297,8 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     let filesystem = serde_json::json!({
         "read": serde_json::Value::Object(read),
         "write": {
-            "allowOnly": normalize_allow_only(&cfg.filesystem.allow_write),
-            "denyWithinAllow": dedup(&cfg.filesystem.deny_write),
+            "allowOnly": truncate_for_prompt(normalize_allow_only(&cfg.filesystem.allow_write)),
+            "denyWithinAllow": truncate_for_prompt(dedup(&cfg.filesystem.deny_write)),
         },
     });
 
@@ -264,19 +309,19 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     if !cfg.network.allowed_domains.is_empty() {
         network.insert(
             "allowedHosts".into(),
-            serde_json::json!(dedup(&cfg.network.allowed_domains)),
+            serde_json::json!(truncate_for_prompt(dedup(&cfg.network.allowed_domains))),
         );
     }
     if !cfg.network.denied_domains.is_empty() {
         network.insert(
             "deniedHosts".into(),
-            serde_json::json!(dedup(&cfg.network.denied_domains)),
+            serde_json::json!(truncate_for_prompt(dedup(&cfg.network.denied_domains))),
         );
     }
     if !cfg.network.allow_unix_sockets.is_empty() {
         network.insert(
             "allowUnixSockets".into(),
-            serde_json::json!(dedup(&cfg.network.allow_unix_sockets)),
+            serde_json::json!(truncate_for_prompt(dedup(&cfg.network.allow_unix_sockets))),
         );
     }
 
@@ -313,7 +358,7 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
             Bullet::Sub(vec![
                 "Immediately retry with `dangerouslyDisableSandbox: true` (don't ask, just do it)".into(),
                 "Briefly explain what sandbox restriction likely caused the failure. Be sure to mention that the user can use the `/sandbox` command to manage restrictions.".into(),
-                "This will prompt the user for permission".into(),
+                "This goes through the permission gate (a user prompt, or the auto-mode classifier when auto mode is active)".into(),
             ]),
             Bullet::Item("Treat each command you execute with `dangerouslyDisableSandbox: true` individually. Even if you have recently run a command with this setting, you should default to running future commands within the sandbox.".into()),
             Bullet::Item("Do not suggest adding sensitive paths like ~/.bashrc, ~/.zshrc, ~/.ssh/*, or credential files to the sandbox allowlist.".into()),
@@ -378,7 +423,7 @@ You can call multiple tools in a single response. When multiple independent piec
 
 Git Safety Protocol:
 - NEVER update the git config
-- NEVER run destructive git commands (push --force, reset --hard, checkout ., restore ., clean -f, branch -D) unless the user explicitly requests these actions. Taking unauthorized destructive actions is unhelpful and can result in lost work, so it's best to ONLY run these commands when given direct instructions
+- NEVER run destructive git commands (push --force, reset --hard, checkout ., restore ., clean -f, branch -D) unless the user explicitly requests these actions. Taking unauthorized destructive actions is unhelpful and can result in lost work, so it's best to ONLY run these commands when given direct instructions 
 - NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it
 - NEVER run force push to main/master, warn the user if they request it
 - CRITICAL: Always create NEW commits rather than amending, unless the user explicitly requests a git amend. When a pre-commit hook fails, the commit did NOT happen — so --amend would modify the PREVIOUS commit, which may result in destroying work or losing previous changes. Instead, after hook failure, fix the issue, re-stage, and create a NEW commit
@@ -486,12 +531,10 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
     // External (non-embedded) avoid-list includes find/grep.
     let avoid_commands = "`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
 
-    let multiple_commands_subitems = vec![
-        format!("If the commands are independent and can run in parallel, make multiple {BASH_TOOL_NAME} tool calls in a single message. Example: if you need to run \"git status\" and \"git diff\", send a single message with two {BASH_TOOL_NAME} tool calls in parallel."),
-        format!("If the commands depend on each other and must run sequentially, use a single {BASH_TOOL_NAME} call with '&&' to chain them together."),
-        "Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.".into(),
-        "DO NOT use newlines to separate commands (newlines are ok in quoted strings).".into(),
-    ];
+    // NOTE: claude-code's Bash `u` instruction list has NO "When issuing
+    // multiple commands:" item — in 2.1.238 or 2.1.220. The only oracle hit for
+    // that header belongs to the PowerShell tool prompt (cc-238.js @230911843),
+    // with different wording. Do not re-add a Bash-flavoured rewrite here.
 
     let git_subitems = vec![
         "Prefer to create a new commit rather than amending an existing commit.".to_string(),
@@ -524,8 +567,6 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
     if let Some(note) = background_note {
         instruction_items.push(Bullet::Item(note));
     }
-    instruction_items.push(Bullet::Item("When issuing multiple commands:".into()));
-    instruction_items.push(Bullet::Sub(multiple_commands_subitems));
     instruction_items.push(Bullet::Item("For git commands:".into()));
     instruction_items.push(Bullet::Sub(git_subitems));
     instruction_items.push(Bullet::Item("Avoid unnecessary `sleep` commands:".into()));
@@ -641,6 +682,13 @@ fn concise_git_section() -> String {
 /// - `o` = avoid-list. `Zw()` (embedded-search-tools) is the gated ant-native
 ///   path; the external default takes the find/grep-INCLUSIVE list — IDENTICAL
 ///   to the VERBOSE prompt's hardcoded `avoid_commands`.
+/// - 2.1.238 `hcT` additionally emits
+///   `"- Command output is displayed to you, not reliably to the user."`
+///   UNCONDITIONALLY, right after the IMPORTANT avoid-list bullet and before the
+///   `timeout` bullet. 2.1.220's `$ry` gated it on `KFc(t)` /
+///   `CLAUDE_CODE_MARL_CORMORANT`; that env gate no longer exists in 2.1.238 and
+///   the builder lost its `model` parameter, so the `_model` argument here is
+///   vestigial (kept for call-site compatibility).
 /// - `t` (`gXa()!==null`) ⟺ [`background_usage_note`] is `Some` (gated by
 ///   `LINGXI_DISABLE_BACKGROUND_TASKS`). When present, the detached
 ///   `run_in_background` bullet is emitted; `sq()` (the `tengu_amber_sentinel`
@@ -653,11 +701,14 @@ fn concise_git_section() -> String {
 ///
 /// Em-dash is U+2014 (the binary stores it as the JS escape `—`).
 #[must_use]
-pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, model: Option<&str>) -> String {
-    // CONCISE avoid-list — the Dh-true (SHORT) branch DROPS `find`/`grep` vs the
-    // LONG prompt (verified against the v2.1.183 binary's qUp builder + the
-    // rendered opus-4-8 output: the SHORT list starts at `cat`). NOT config-gated.
-    let avoid_commands = "`cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
+pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, _model: Option<&str>) -> String {
+    // CONCISE avoid-list — claude-code 2.1.238 `hcT` picks it with the SAME
+    // `VH()` (embedded-search-tools) predicate the VERBOSE builder `Yhm` uses:
+    //   VH() ? "`cat`, …" : "`find`, `grep`, `cat`, …"
+    // LingXi ships Glob and Grep as real tools, i.e. the non-embedded branch —
+    // exactly what the VERBOSE prompt already hardcodes. Both prompts must agree
+    // on the one boolean, so the CONCISE list is the find/grep-INCLUSIVE one.
+    let avoid_commands = "`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
 
     let mut lines: Vec<String> = vec![
         "Executes a bash command and returns its output.".into(),
@@ -666,14 +717,11 @@ pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, model: Option<&str>
         "- Working directory persists between calls, but prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.".into(),
         format!("- IMPORTANT: Avoid using this tool to run {avoid_commands} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user."),
     ];
-    if model.is_some_and(|model| {
-        traits::model_capabilities::has_capability(
-            model,
-            traits::model_capabilities::ModelCapability::Opus5PromptBundle,
-        )
-    }) {
-        lines.push("- Command output is displayed to you, not reliably to the user.".into());
-    }
+    // UNCONDITIONAL in 2.1.238: `hcT` emits this as a bare array element and no
+    // longer receives a model argument at all. The 2.1.220 gate
+    // (`KFc(t)` / `CLAUDE_CODE_MARL_CORMORANT`) was deleted between the builds,
+    // so every lean-prompt model gets the bullet, not just opus-5.
+    lines.push("- Command output is displayed to you, not reliably to the user.".into());
     lines.push(format!(
         "- `timeout` is in milliseconds: default {}, max {}.",
         bash_default_timeout_ms(),
@@ -874,17 +922,34 @@ mod tests {
     }
 
     #[test]
-    fn concise_prompt_adds_only_the_opus_5_output_visibility_bullet() {
-        let opus_5 = simple_prompt_concise(&disabled_sandbox(), Some("claude-opus-5[1m]"));
-        let opus_48 = simple_prompt_concise(&disabled_sandbox(), Some("claude-opus-4-8"));
-        let added = "- Command output is displayed to you, not reliably to the user.";
+    fn concise_prompt_output_visibility_bullet_is_unconditional() {
+        // 2.1.238 `hcT` emits this bullet as a bare array element — the 2.1.220
+        // `CLAUDE_CODE_MARL_CORMORANT` gate was deleted and the builder no
+        // longer takes a model at all, so EVERY lean-prompt model gets it.
+        let bullet = "- Command output is displayed to you, not reliably to the user.";
+        for model in [
+            None,
+            Some("claude-opus-5[1m]"),
+            Some("claude-opus-4-8"),
+            Some("claude-fable-5"),
+        ] {
+            let p = simple_prompt_concise(&disabled_sandbox(), model);
+            assert!(p.contains(bullet), "missing for model {model:?}");
+            assert!(
+                p.contains("IMPORTANT: Avoid using this tool"),
+                "the confirmed existing warning must not be deleted"
+            );
+        }
+    }
 
-        assert!(opus_5.contains(added));
-        assert!(!opus_48.contains(added));
-        assert!(
-            opus_5.contains("IMPORTANT: Avoid using this tool"),
-            "the confirmed existing warning must not be deleted"
-        );
+    #[test]
+    fn concise_prompt_avoid_list_matches_the_verbose_one() {
+        // Oracle `hcT` and `Yhm` read the SAME `VH()` predicate; LingXi is on
+        // the non-embedded branch (Glob/Grep are real tools), so both prompts
+        // must carry the find/grep-INCLUSIVE list.
+        let long = "`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
+        let p = simple_prompt_concise(&disabled_sandbox(), Some("claude-opus-5[1m]"));
+        assert!(p.contains(long), "concise avoid-list must include find/grep");
     }
 
     #[test]
@@ -982,6 +1047,65 @@ mod tests {
             !p2.contains("allowWithinDeny"),
             "allowWithinDeny must be absent when allow_read empty; got:\n{p2}"
         );
+    }
+
+    // ===== BASH-11 — `Phr` truncation at D_l = 50 =========================
+
+    /// `function Phr(e){if(!e||e.length<=D_l)return e;let t=e.length-D_l;
+    ///  return[...e.slice(0,D_l),`... and ${t} more (truncated for prompt size)`]}`
+    #[test]
+    fn truncate_for_prompt_caps_at_fifty_with_the_oracle_marker() {
+        // At the cap: untouched, no marker.
+        let fifty: Vec<String> = (0..50).map(|i| format!("/p{i}")).collect();
+        assert_eq!(truncate_for_prompt(fifty.clone()), fifty);
+        // One over: 50 kept + the marker (51 entries), NOT 49 + marker.
+        let fifty_one: Vec<String> = (0..51).map(|i| format!("/p{i}")).collect();
+        let out = truncate_for_prompt(fifty_one);
+        assert_eq!(out.len(), 51);
+        assert_eq!(out[49], "/p49");
+        assert_eq!(out[50], "... and 1 more (truncated for prompt size)");
+        // Well over.
+        let many: Vec<String> = (0..73).map(|i| format!("/p{i}")).collect();
+        let out = truncate_for_prompt(many);
+        assert_eq!(out.last().unwrap(), "... and 23 more (truncated for prompt size)");
+    }
+
+    /// The cap must apply to EVERY list the sandbox section renders, AFTER the
+    /// dedup / `$TMPDIR` normalization (oracle `Phr(gXr(list))` /
+    /// `Phr(l(t.allowOnly))`).
+    #[test]
+    fn sandbox_section_truncates_every_oversized_list() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let paths = |prefix: &str| -> Vec<String> {
+            (0..60).map(|i| format!("{prefix}{i}")).collect()
+        };
+        let cfg = SandboxRuntimeConfig {
+            enabled: true,
+            filesystem: sandbox::runtime_config::FilesystemRestrictionConfig {
+                deny_read: paths("/dr"),
+                allow_read: paths("/ar"),
+                allow_write: paths("/aw"),
+                deny_write: paths("/dw"),
+                ..Default::default()
+            },
+            network: sandbox::runtime_config::NetworkRestrictionConfig {
+                allowed_domains: (0..60).map(|i| format!("a{i}.com")).collect(),
+                denied_domains: (0..60).map(|i| format!("d{i}.com")).collect(),
+                allow_unix_sockets: paths("/sock"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p = simple_prompt(&cfg);
+        // Seven lists × one marker each.
+        assert_eq!(
+            p.matches("... and 10 more (truncated for prompt size)").count(),
+            7,
+            "every sandbox list must be capped at 50; got:\n{p}"
+        );
+        // The 50th entry survives, the 51st does not.
+        assert!(p.contains("\"/dr49\""), "entry 50 must survive; got:\n{p}");
+        assert!(!p.contains("\"/dr50\""), "entry 51 must be dropped; got:\n{p}");
     }
 
     #[test]

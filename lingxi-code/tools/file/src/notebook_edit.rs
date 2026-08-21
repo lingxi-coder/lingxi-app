@@ -377,7 +377,7 @@ Usage:\n\
             .ok_or_else(|| {
                 // Binary `readNotebook` (atl): byte-locked invalid-cells error.
                 ToolError::InvalidInput(
-                    "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects).".into(),
+                    "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects, each with a string or string-array \"source\").".into(),
                 )
             })?;
         let cells_len = cells.len();

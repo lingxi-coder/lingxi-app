@@ -652,11 +652,17 @@ const ABORT_MARKER: &str = "<error>Command was aborted before completion</error>
 /// - `d` = an optional background-run note,
 ///
 /// then the non-empty parts are joined by `\n`.
+/// `trailing_note` is the mapper's tail slot. The oracle joins
+/// `[stdout, stderr, backgroundNote, staleReadFileStateHint, ghRateLimitHint]`
+/// with `\n`; the background note and the stale-read hint are MUTUALLY
+/// EXCLUSIVE (the hint is only computed when `!backgroundTaskId`), so one slot
+/// reproduces both positions byte-for-byte. `ghRateLimitHint` has no port
+/// surface yet.
 fn bash_model_content(
     stdout: &str,
     stderr: &str,
     interrupted: bool,
-    background_note: Option<&str>,
+    trailing_note: Option<&str>,
 ) -> String {
     let c = crate::shared::normalize_stdout(stdout);
     let mut u = stderr.trim().to_string();
@@ -673,7 +679,7 @@ fn bash_model_content(
     if !u.is_empty() {
         parts.push(u);
     }
-    if let Some(d) = background_note {
+    if let Some(d) = trailing_note {
         if !d.is_empty() {
             parts.push(d.to_string());
         }
@@ -707,6 +713,7 @@ fn bash_result_data(
     no_output_expected: bool,
     background_task_id: Option<&str>,
     timed_out_after_ms: Option<u64>,
+    background_ends_with_final_response: bool,
 ) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     m.insert(
@@ -741,7 +748,83 @@ fn bash_result_data(
             serde_json::Value::Number(ms.into()),
         );
     }
+    // claude-code 2.1.238 `backgroundEndsWithFinalResponse` — schema
+    // `At(!0).optional()`, i.e. a LITERAL-`true` optional: the oracle sets it to
+    // `!0` or leaves it `undefined` (`let Z=_.backgroundTaskId!==void 0 &&
+    // wKo(t.agentContext)?!0:void 0`), so `false` is never serialised. It sits
+    // directly after `timedOutAfterMs`/`backgroundCwdHint` in the output schema.
+    if background_ends_with_final_response {
+        m.insert(
+            "backgroundEndsWithFinalResponse".into(),
+            serde_json::Value::Bool(true),
+        );
+    }
     serde_json::Value::Object(m)
+}
+
+/// Port of claude-code 2.1.238 `L0i` — the model-facing note attached to a
+/// backgrounded command (`mapToolResultToToolResultBlockParam`'s `y`).
+///
+/// ```js
+/// function L0i({backgroundTaskId:e,outputPath:t,backgroundedByUser:r,timedOutAfterMs:n,
+///               reapedAtFinalResponse:o,readToolName:i}){
+///  let s=r?`Command was manually backgrounded by user with ID: ${e}. Output is being written to: ${t}.`
+///       :n!==void 0?`Command did not complete within its ${Math.max(1,Math.round(n/1000))}s timeout and was moved to the background (ID: ${e}). Output is being written to: ${t}.`
+///       :`Command running in background with ID: ${e}. Output is being written to: ${t}.`,
+///   a=o?"If it exits while you are still working…":r?void 0:"You will be notified when it completes.",
+///   l=r?void 0:`To check interim output, use ${i} on that file path.`;
+///  return[s,a,l].filter(Boolean).join(" ")}
+/// ```
+///
+/// RESIDUAL (unchanged by this port): LingXi has no Ctrl+B manual-background
+/// path, so the `backgroundedByUser` arm has no call site and is not modelled.
+fn background_note(
+    background_task_id: &str,
+    output_path: &str,
+    timed_out_after_ms: Option<u64>,
+    reaped_at_final_response: bool,
+) -> String {
+    let head = match timed_out_after_ms {
+        // Seconds shown = `Math.max(1, Math.round(timeoutMs / 1000))`.
+        Some(ms) => {
+            let secs = (((ms as f64) / 1000.0).round() as i64).max(1);
+            format!(
+                "Command did not complete within its {secs}s timeout and was moved to the background (ID: {background_task_id}). Output is being written to: {output_path}."
+            )
+        }
+        None => format!(
+            "Command running in background with ID: {background_task_id}. Output is being written to: {output_path}."
+        ),
+    };
+    // NOTE the U+2014 EM DASH in the reaped sentence (oracle stores it as the
+    // JS escape `—`).
+    let lifetime = if reaped_at_final_response {
+        "If it exits while you are still working you will be notified, but it is terminated when you give your final response and no notification can follow that — so do not end your turn to wait for it; if you need its result, wait for it before giving your final response."
+    } else {
+        "You will be notified when it completes."
+    };
+    format!("{head} {lifetime} To check interim output, use Read on that file path.")
+}
+
+/// Port of claude-code 2.1.238 `wKo(agentContext)`:
+/// `e!==void 0 && e.agentType==="subagent" && e.isAsync===!1` — TRUE only for a
+/// SYNCHRONOUS subagent, whose backgrounded commands are reaped when it gives
+/// its final response.
+///
+/// LingXi mapping, and its one documented residual:
+/// - `agentType==="subagent"` → `ctx.agent_id.is_some()`. This is the SAME
+///   discriminator the port already uses for the oracle's `v=!t.agentId`
+///   (`prevent_cwd_changes` below), so the two stay consistent.
+/// - `isAsync===false` → `!ctx.options.is_non_interactive_session`. The dispatch
+///   invoker sets `is_non_interactive_session = is_async ||
+///   effective_non_interactive_session()` (`agent/src/runner.rs`), so this is
+///   exact in an interactive session and CONSERVATIVE in a headless one: a
+///   synchronous subagent inside `-p`/scheduled work is classified as
+///   "survives", i.e. it keeps the pre-2.1.238 wording rather than gaining a
+///   false reaped warning. Making it exact needs `is_async` threaded onto
+///   `ToolUseContext` (tool-api), which is outside this crate.
+fn background_ends_with_final_response(ctx: &ToolUseContext) -> bool {
+    ctx.agent_id.is_some() && !ctx.options.is_non_interactive_session
 }
 
 /// Build the SUCCESSFUL `tool_result` for a timed-out / interrupted Bash run,
@@ -848,6 +931,7 @@ fn build_interrupted_result(
             crate::silent::is_silent_bash_command(cmd_str),
             None,
             None,
+            false,
         ),
         model_content: Some(model_content),
         new_messages: vec![],
@@ -855,6 +939,227 @@ fn build_interrupted_result(
         is_error: false,
         mcp_meta: None,
     }
+}
+
+// ===== `staleReadFileStateHint` (claude-code 2.1.238 `OcT` + the `te` note) ==
+
+/// Port of claude-code's `WRITE_COMMAND_MARKERS` regex `PcT`:
+///
+/// ```js
+/// PcT=new RegExp(["--write","--fix","--in-place","--auto-correct",
+///  "\\brun\\s+format\\b","\\brun\\s+fix\\b","\\b(yarn|pnpm)\\s+format\\b",
+///  "\\blint:file\\b","\\blint:fix\\b","\\bblack\\b","\\bisort\\b",
+///  "\\bruff\\s+format\\b","\\bcargo\\s+(fmt|fix)\\b","\\brustfmt\\b",
+///  "\\bgo\\s+fmt\\b","\\bterraform\\s+fmt\\b","\\bdprint\\s+fmt\\b",
+///  "\\bswiftformat\\b","\\bphpcbf\\b"].join("|"));
+/// ```
+///
+/// No `i` flag ⇒ case-SENSITIVE. Hand-rolled rather than pulled through a regex
+/// crate: `tool-shell` has no `regex` dependency and this alternation is only
+/// bare substrings, `\b`-anchored words, and `word \s+ word` pairs.
+fn command_looks_like_a_writer(command: &str) -> bool {
+    const BARE: [&str; 4] = ["--write", "--fix", "--in-place", "--auto-correct"];
+    const WORDS: [&str; 7] = [
+        "lint:file",
+        "lint:fix",
+        "black",
+        "isort",
+        "rustfmt",
+        "swiftformat",
+        "phpcbf",
+    ];
+    // `\bA\s+B\b` pairs, in the oracle's alternation order.
+    const PAIRS: [(&str, &str); 10] = [
+        ("run", "format"),
+        ("run", "fix"),
+        ("yarn", "format"),
+        ("pnpm", "format"),
+        ("ruff", "format"),
+        ("cargo", "fmt"),
+        ("cargo", "fix"),
+        ("go", "fmt"),
+        ("terraform", "fmt"),
+        ("dprint", "fmt"),
+    ];
+    BARE.iter().any(|m| command.contains(m))
+        || WORDS.iter().any(|w| contains_word(command, w))
+        || PAIRS
+            .iter()
+            .any(|(a, b)| contains_word_pair(command, a, b))
+}
+
+/// ASCII `\w` — the character class JS `\b` is defined against.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// True when `needle` occurs in `haystack` with a JS `\b` on BOTH sides.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    word_match_end(haystack, needle, 0).is_some()
+}
+
+/// Index just past the first `\b`-anchored occurrence of `needle` at or after
+/// `from`, or `None`.
+fn word_match_end(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let hb = haystack.as_bytes();
+    let nb = needle.as_bytes();
+    if nb.is_empty() || nb.len() > hb.len() {
+        return None;
+    }
+    // Byte-wise scan: every needle here is pure ASCII, and an ASCII byte never
+    // occurs inside a multi-byte UTF-8 sequence, so a byte match is always on a
+    // char boundary.
+    let mut start = from;
+    while start + nb.len() <= hb.len() {
+        if &hb[start..start + nb.len()] == nb {
+            let end = start + nb.len();
+            let left_ok = start == 0 || !(is_word_byte(hb[start - 1]) && is_word_byte(nb[0]));
+            let right_ok =
+                end == hb.len() || !(is_word_byte(hb[end]) && is_word_byte(nb[nb.len() - 1]));
+            if left_ok && right_ok {
+                return Some(end);
+            }
+        }
+        start += 1;
+    }
+    None
+}
+
+/// True when `haystack` matches `\b<first>\s+<second>\b`.
+fn contains_word_pair(haystack: &str, first: &str, second: &str) -> bool {
+    let mut from = 0usize;
+    while let Some(end) = word_match_end(haystack, first, from) {
+        let rest = &haystack[end..];
+        let ws = rest.len() - rest.trim_start().len();
+        if ws > 0 {
+            let after = &haystack[end + ws..];
+            if after.starts_with(second) {
+                let tail = end + ws + second.len();
+                let hb = haystack.as_bytes();
+                let sb = second.as_bytes();
+                if tail == hb.len()
+                    || !(is_word_byte(hb[tail]) && is_word_byte(sb[sb.len() - 1]))
+                {
+                    return true;
+                }
+            }
+        }
+        from = end;
+    }
+    false
+}
+
+/// Port of Node's `path.relative(from, to)` for the two ABSOLUTE paths this
+/// call site always has. Returns `""` when the paths are equal (the oracle
+/// relies on that falsiness: `path.relative(cwd,X) || X`).
+fn path_relative(from: &std::path::Path, to: &std::path::Path) -> String {
+    let f: Vec<_> = from.components().collect();
+    let t: Vec<_> = to.components().collect();
+    let common = f.iter().zip(t.iter()).take_while(|(a, b)| a == b).count();
+    // Different roots (e.g. another Windows drive): Node returns `to` verbatim.
+    if common == 0 && !f.is_empty() && !t.is_empty() {
+        return to.to_string_lossy().into_owned();
+    }
+    let mut parts: Vec<String> = std::iter::repeat("..".to_string())
+        .take(f.len() - common)
+        .collect();
+    parts.extend(
+        t[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    parts.join(std::path::MAIN_SEPARATOR_STR)
+}
+
+/// Port of claude-code 2.1.238 `OcT` + the `te` note it feeds
+/// (`staleReadFileStateHint`):
+///
+/// ```js
+/// async function OcT(e,t,r){if(!PcT.test(e))return[];let n=[];
+///  return await Promise.all(Array.from(t.entries(),([o,i])=>f4e(o).then((s)=>{
+///    if(s>r&&s>i.timestamp)n.push(o)}).catch(()=>{}))),n}
+/// …
+/// let re=await OcT(e.command,t.readFileState,i);
+/// if(re.length>0){let oe=er(),fe=re.slice(0,5).map(X=>path.relative(oe,X)||X).join(", "),
+///   ne=re.length>5?` and ${re.length-5} more`:"";
+///   te=`[This command modified ${re.length} ${Et(re.length,"file")} you've previously read: ${fe}${ne}. Call Read before editing.]`}
+/// ```
+///
+/// `since_ms` is the oracle's `i = Math.floor(Date.now()/1000)*1000`, sampled at
+/// the top of `call`.
+///
+/// RESIDUAL: the registry exposes no non-promoting `(path, entry)` iterator, so
+/// the LRU recency read is deferred to the CANDIDATES only — paths whose on-disk
+/// mtime already bumped past `since_ms`. lru-cache's `entries()` promotes
+/// nothing; here a file the command actually rewrote is promoted. Untouched
+/// files (the overwhelming majority) are never `get`-ed, so eviction order is
+/// unchanged in the common case.
+fn stale_read_file_state_hint(
+    ctx: &BuiltinToolContext,
+    command: &str,
+    cwd: &std::path::Path,
+    since_ms: i64,
+) -> Option<String> {
+    if !command_looks_like_a_writer(command) {
+        return None;
+    }
+    // `Array.from(readFileState.entries())` — lru-cache yields MRU first, which
+    // is exactly `keys()`'s order here.
+    let paths = {
+        let state = ctx.read_file_state.lock().ok()?;
+        state.keys()
+    };
+    let mut modified: Vec<std::path::PathBuf> = Vec::new();
+    for path in paths {
+        // `f4e(o)` = `Math.floor((await stat(o)).mtimeMs)`; a stat failure is
+        // swallowed by the oracle's `.catch(()=>{})`.
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let Ok(mtime) = meta.modified() else {
+            continue;
+        };
+        let mtime_ms = tool_api::read_file_state::mtime_ms_floor(mtime);
+        if mtime_ms <= since_ms {
+            continue;
+        }
+        let entry_mtime = {
+            let Ok(mut state) = ctx.read_file_state.lock() else {
+                continue;
+            };
+            state.get(&path).map(|e| e.mtime_ms)
+        };
+        if entry_mtime.is_some_and(|t| mtime_ms > t) {
+            modified.push(path);
+        }
+    }
+    if modified.is_empty() {
+        return None;
+    }
+    let n = modified.len();
+    let listed = modified
+        .iter()
+        .take(5)
+        .map(|p| {
+            let rel = path_relative(cwd, p);
+            if rel.is_empty() {
+                p.to_string_lossy().into_owned()
+            } else {
+                rel
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    // `Et(n,"file")` — the shared pluralizer.
+    let noun = if n == 1 { "file" } else { "files" };
+    let more = if n > 5 {
+        format!(" and {} more", n - 5)
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "[This command modified {n} {noun} you've previously read: {listed}{more}. Call Read before editing.]"
+    ))
 }
 
 fn invalidate_written_read_state(ctx: &BuiltinToolContext, cwd: &std::path::Path, command: &str) {
@@ -1281,8 +1586,13 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "type": "number",
                 "description": format!("Optional timeout in milliseconds (max {})", bash_max_timeout_ms())
             },
-            "run_in_background": { "type": "boolean", "description": "Set to true to run this command in the background." },
+            // Property ORDER is byte-significant: `serde_json` is built with
+            // `preserve_order`, so this insertion order is what serialises into
+            // the tool definition. claude-code 2.1.238 `Qhm` orders
+            // `command, timeout, description, run_in_background,
+            // dangerouslyDisableSandbox`.
             "description":       { "type": "string", "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"" },
+            "run_in_background": { "type": "boolean", "description": "Set to true to run this command in the background." },
             // BASH.5: 1:1 with claude-code `BashTool.tsx` schema —
             // `dangerouslyDisableSandbox: z.boolean().optional().describe(...)`.
             "dangerouslyDisableSandbox": {
@@ -1297,6 +1607,31 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+/// The Bash input schema with `run_in_background` OMITTED — claude-code 2.1.238
+/// `egm`:
+///
+/// ```js
+/// egm=we(()=>(WA()?Qhm().omit({run_in_background:!0,_simulatedSedEdit:!0})
+///                 :Qhm().omit({_simulatedSedEdit:!0})).superRefine(…))
+/// ```
+///
+/// When background tasks are disabled the oracle strips the property from the
+/// tool definition entirely, so the model is never offered a parameter the
+/// prompt no longer explains (`getBackgroundUsageNote` already drops its bullet
+/// on the same switch). Derived from [`INPUT_SCHEMA`] so the two can never drift
+/// in contents or KEY ORDER (`serde_json` is built with `preserve_order`, and
+/// removing one key leaves the rest in their original insertion order).
+static INPUT_SCHEMA_NO_BACKGROUND: Lazy<Value> = Lazy::new(|| {
+    let mut schema = INPUT_SCHEMA.clone();
+    if let Some(props) = schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+    {
+        props.remove("run_in_background");
+    }
+    schema
+});
+
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
@@ -1307,8 +1642,17 @@ impl Tool for BashTool {
         Some("execute shell commands")
     }
 
+    /// claude-code 2.1.238 `egm` selects between the full schema and one with
+    /// `run_in_background` omitted, keyed on `WA()` (background tasks disabled).
+    /// Evaluated per call — like the oracle's `we(...)` memo, which re-reads the
+    /// same switch — so a session that flips the env var sees a consistent
+    /// prompt + schema pair.
     fn input_schema(&self) -> &Value {
-        &INPUT_SCHEMA
+        if crate::prompt::background_tasks_disabled() {
+            &INPUT_SCHEMA_NO_BACKGROUND
+        } else {
+            &INPUT_SCHEMA
+        }
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -1474,6 +1818,13 @@ impl Tool for BashTool {
         }
 
         let started_at = SystemTime::now();
+        // claude-code 2.1.238 `call`'s `i = Math.floor(Date.now()/1000)*1000` —
+        // the second-truncated call-start stamp the `staleReadFileStateHint`
+        // compares on-disk mtimes against.
+        let call_start_ms: i64 = started_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_millis() as i64 / 1000) * 1000)
+            .unwrap_or(0);
         let request_id = ephemeral_id("bash");
         let hash = cmd_hash(&cmd_str);
 
@@ -1620,13 +1971,13 @@ impl Tool for BashTool {
             return match self.ctx.process.spawn_background(&sandboxed).await {
                 Ok(handle) => {
                     let out_path = task_output_path(&handle.task_id).display().to_string();
-                    // Model-facing background note (`d` in the binary's mapper):
-                    // `Command running in background with ID: … Output is being
-                    // written to: … use Read on that file path.` (offset 183106320).
-                    let mut note = format!(
-                        "Command running in background with ID: {}. Output is being written to: {}. You will be notified when it completes. To check interim output, use Read on that file path.",
-                        handle.task_id, out_path
-                    );
+                    // Model-facing background note (`y` in the binary's mapper,
+                    // built by `L0i`): `Command running in background with ID: …
+                    // Output is being written to: … use Read on that file path.`
+                    // (offset 183106320), with the 2.1.238 lifetime sentence
+                    // selected by `reapedAtFinalResponse`.
+                    let reaped = background_ends_with_final_response(&ctx);
+                    let mut note = background_note(&handle.task_id, &out_path, None, reaped);
                     // PARITY 2.1.210 (`backgroundCwdHint`): when the backgrounded
                     // command contains a statement-level `cd`/`pushd`/`popd`/`chdir`
                     // (`ror`), the binary appends this hint on a new line so the
@@ -1652,6 +2003,7 @@ impl Tool for BashTool {
                             crate::silent::is_silent_bash_command(&cmd_str),
                             Some(&handle.task_id),
                             None,
+                            reaped,
                         ),
                         model_content: Some(model_content),
                         new_messages: vec![],
@@ -1778,13 +2130,11 @@ impl Tool for BashTool {
                 meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
                 self.ctx.bus.log_event(BASH_TIMEOUT, meta).await;
                 let out_path = task_output_path(&handle.task_id).display().to_string();
-                // Seconds shown = `Math.max(1, Math.round(timeoutMs / 1000))`
-                // (the binary's `${Math.max(1,Math.round(l/1000))}s`).
-                let secs = (((timeout_ms as f64) / 1000.0).round() as i64).max(1);
-                let mut note = format!(
-                    "Command did not complete within its {secs}s timeout and was moved to the background (ID: {}). Output is being written to: {}. You will be notified when it completes. To check interim output, use Read on that file path.",
-                    handle.task_id, out_path
-                );
+                // `L0i`'s `timedOutAfterMs !== undefined` arm; the seconds shown
+                // are `Math.max(1, Math.round(timeoutMs / 1000))`.
+                let reaped = background_ends_with_final_response(&ctx);
+                let mut note =
+                    background_note(&handle.task_id, &out_path, Some(timeout_ms), reaped);
                 // PARITY 2.1.210 (`backgroundCwdHint`): same hint as an explicit
                 // background launch — a timed-out-and-backgrounded command whose
                 // text contains a statement-level `cd` never mutates the session
@@ -1809,6 +2159,7 @@ impl Tool for BashTool {
                         crate::silent::is_silent_bash_command(&cmd_str),
                         Some(&handle.task_id),
                         Some(timeout_ms),
+                        reaped,
                     ),
                     model_content: Some(model_content),
                     new_messages: vec![],
@@ -2045,6 +2396,7 @@ impl Tool for BashTool {
                                 crate::silent::is_silent_bash_command(&cmd_str),
                                 None,
                                 None,
+                                false,
                             ),
                             // Display-only (egress ignores it when content_blocks
                             // is Some); claude's wire form has no text.
@@ -2096,12 +2448,24 @@ impl Tool for BashTool {
                 );
                 meta.insert("truncated".into(), AnalyticsValue::Bool(truncated_out));
                 self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
+                // `staleReadFileStateHint` — computed BEFORE the read-state
+                // refresh (oracle order: `te = …OcT(…)` then `await Zmm(…)`),
+                // and only on the non-interrupted, non-image, non-background
+                // arm (`if(!g&&!J&&!_.backgroundTaskId)`). This arm is exactly
+                // that one.
+                let stale_hint =
+                    stale_read_file_state_hint(&self.ctx, &cmd_str, &cwd, call_start_ms);
                 invalidate_written_read_state(&self.ctx, &cwd, &cmd_str);
 
                 // Model sees the plain-text `[stdout, stderr].join("\n")` render
                 // (`content` in the binary's tool_result mapper), NOT the JSON
                 // object — which stays for the TUI / PostToolUse hook.
-                let model_content = bash_model_content(&stdout_final, &stderr_clean, false, None);
+                let model_content = bash_model_content(
+                    &stdout_final,
+                    &stderr_clean,
+                    false,
+                    stale_hint.as_deref(),
+                );
                 Ok(ToolCallResult {
                     // claude-code 2.1.191 `BashTool` outputSchema (pure metadata).
                     // A completed text command: `interrupted: false`, `isImage:
@@ -2116,6 +2480,7 @@ impl Tool for BashTool {
                         crate::silent::is_silent_bash_command(&cmd_str),
                         None,
                         None,
+                        false,
                     ),
                     model_content: Some(model_content),
                     new_messages: vec![],
@@ -3330,8 +3695,23 @@ mod tests {
         assert_eq!(res.data["noOutputExpected"], false);
     }
 
+    /// Serializes every test that reads or mutates the process-global
+    /// `LINGXI_DISABLE_BACKGROUND_TASKS` gate. `input_schema()` now selects
+    /// between the full schema and the `run_in_background`-omitted one on that
+    /// env var (claude-code `egm`/`WA()`), so an unguarded parallel test that
+    /// sets it would flip the schema out from under the order assertions.
+    static BACKGROUND_TASKS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Poison-tolerant guard (payload is `()`).
+    fn background_tasks_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        BACKGROUND_TASKS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn input_schema_uses_timeout_not_timeout_ms() {
+        let _g = background_tasks_env_lock();
         // claude-code `BashTool.tsx:229` names the param `timeout` (ms).
         let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
             stdout: String::new(),
@@ -3351,6 +3731,265 @@ mod tests {
         assert_eq!(
             props["timeout"]["description"],
             "Optional timeout in milliseconds (max 600000)"
+        );
+    }
+
+    /// claude-code 2.1.238 `Qhm` (and `sdk-tools-238.d.ts`) declare the Bash input
+    /// schema keys in this order; `serde_json` is built with `preserve_order`, so
+    /// insertion order is what the model actually sees in the tool definition.
+    #[test]
+    fn input_schema_property_order_matches_oracle() {
+        let _g = background_tasks_env_lock();
+        let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        let props = tool.input_schema()["properties"]
+            .as_object()
+            .expect("properties object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            props,
+            vec![
+                "command".to_string(),
+                "timeout".to_string(),
+                "description".to_string(),
+                "run_in_background".to_string(),
+                "dangerouslyDisableSandbox".to_string(),
+            ]
+        );
+    }
+
+    /// BASH-09 / claude-code 2.1.238 `egm`:
+    /// `WA()?Qhm().omit({run_in_background:!0,_simulatedSedEdit:!0}):…`.
+    /// With background tasks disabled the property must vanish from the tool
+    /// definition entirely — the prompt already drops its bullet on the same
+    /// switch (`getBackgroundUsageNote`), so advertising the parameter would
+    /// offer the model something nothing explains.
+    #[test]
+    fn input_schema_omits_run_in_background_when_background_tasks_are_disabled() {
+        let _g = background_tasks_env_lock();
+        let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
+        let keys = tool.input_schema()["properties"]
+            .as_object()
+            .expect("properties object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        // Every OTHER key keeps its oracle order and contents.
+        assert_eq!(
+            keys,
+            vec![
+                "command".to_string(),
+                "timeout".to_string(),
+                "description".to_string(),
+                "dangerouslyDisableSandbox".to_string(),
+            ]
+        );
+        // And it comes back when the gate is off.
+        assert!(tool.input_schema()["properties"]
+            .get("run_in_background")
+            .is_some());
+    }
+
+    // ===== BASH-03 — `backgroundEndsWithFinalResponse` (2.1.238) =============
+
+    /// `L0i` with `reapedAtFinalResponse` absent: byte-identical to the
+    /// pre-2.1.238 note (both the explicit-background and the
+    /// timeout-auto-background heads).
+    #[test]
+    fn background_note_default_keeps_the_notified_sentence() {
+        assert_eq!(
+            background_note("7", "/p", None, false),
+            "Command running in background with ID: 7. Output is being written to: /p. You will be notified when it completes. To check interim output, use Read on that file path."
+        );
+        assert_eq!(
+            background_note("7", "/p", Some(5000), false),
+            "Command did not complete within its 5s timeout and was moved to the background (ID: 7). Output is being written to: /p. You will be notified when it completes. To check interim output, use Read on that file path."
+        );
+    }
+
+    /// The 2.1.238 lifetime sentence, oracle binary @289989687. Note the U+2014
+    /// EM DASH and the semicolon before "if you need its result".
+    #[test]
+    fn background_note_for_a_synchronous_subagent_warns_about_the_final_response() {
+        assert_eq!(
+            background_note("7", "/p", None, true),
+            "Command running in background with ID: 7. Output is being written to: /p. If it exits while you are still working you will be notified, but it is terminated when you give your final response and no notification can follow that \u{2014} so do not end your turn to wait for it; if you need its result, wait for it before giving your final response. To check interim output, use Read on that file path."
+        );
+    }
+
+    /// `wKo(agentContext)` = subagent AND NOT async.
+    #[test]
+    fn background_ends_with_final_response_only_for_a_synchronous_subagent() {
+        let mut ctx = use_ctx();
+        // Main loop (no agent id) — the command survives the turn.
+        assert!(!background_ends_with_final_response(&ctx));
+        ctx.agent_id = Some(protocol::AgentId::new());
+        assert!(background_ends_with_final_response(&ctx));
+        // Async / headless subagent: `is_non_interactive_session` is set by the
+        // dispatch invoker from `is_async || effective_non_interactive_session()`.
+        ctx.options.is_non_interactive_session = true;
+        assert!(!background_ends_with_final_response(&ctx));
+    }
+
+    /// Output schema `At(!0).optional()` — the literal-`true` optional is
+    /// emitted only when set, never as `false`, and sits after `timedOutAfterMs`.
+    #[test]
+    fn bash_result_data_emits_background_ends_with_final_response_only_when_true() {
+        let reaped = bash_result_data("", "", false, false, None, false, Some("t1"), Some(5000), true);
+        assert_eq!(reaped["backgroundEndsWithFinalResponse"], true);
+        let keys = reaped
+            .as_object()
+            .expect("object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let idx = |k: &str| keys.iter().position(|x| x == k).expect(k);
+        assert!(idx("backgroundEndsWithFinalResponse") > idx("timedOutAfterMs"));
+        let survives = bash_result_data("", "", false, false, None, false, Some("t1"), None, false);
+        assert!(
+            survives.get("backgroundEndsWithFinalResponse").is_none(),
+            "`false` must be OMITTED, not serialised"
+        );
+    }
+
+    // ===== BASH-06 — `staleReadFileStateHint` (`OcT` + `PcT`) ================
+
+    #[test]
+    fn write_command_markers_match_the_oracle_alternation() {
+        for cmd in [
+            "prettier --write .",
+            "eslint --fix src",
+            "sed --in-place s/a/b/ f",
+            "rubocop --auto-correct",
+            "npm run format",
+            "npm run  fix",
+            "yarn format",
+            "pnpm format",
+            "npm run lint:file",
+            "npm run lint:fix",
+            "black .",
+            "isort .",
+            "ruff format .",
+            "cargo fmt",
+            "cargo fix --allow-dirty",
+            "rustfmt src/x.rs",
+            "go fmt ./...",
+            "terraform fmt",
+            "dprint fmt",
+            "swiftformat .",
+            "phpcbf",
+        ] {
+            assert!(command_looks_like_a_writer(cmd), "should match: {cmd}");
+        }
+        for cmd in [
+            "ls -la",
+            "git status",
+            "cargo build",
+            "cargo   test",
+            "blacklist-check",
+            "myisort",
+            "echo run",
+            "rungo format",
+            "go fmtx ./...",
+        ] {
+            assert!(!command_looks_like_a_writer(cmd), "must NOT match: {cmd}");
+        }
+    }
+
+    /// Node `path.relative` for the two absolute paths the hint always has.
+    #[test]
+    fn path_relative_matches_node_semantics() {
+        use std::path::Path;
+        assert_eq!(path_relative(Path::new("/a/b"), Path::new("/a/b/c.rs")), "c.rs");
+        assert_eq!(path_relative(Path::new("/a/b"), Path::new("/a/b")), "");
+        assert_eq!(
+            path_relative(Path::new("/a/b/c"), Path::new("/a/d/e.rs")),
+            format!("..{s}..{s}d{s}e.rs", s = std::path::MAIN_SEPARATOR)
+        );
+    }
+
+    fn seed_read_entry(ctx: &BuiltinToolContext, path: &std::path::Path, mtime_ms: i64) {
+        tool_api::read_file_state::set(
+            &ctx.read_file_state,
+            path.to_path_buf(),
+            tool_api::ReadFileEntry {
+                content: "old".into(),
+                mtime_ms,
+                offset: None,
+                limit: None,
+                from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
+            },
+        );
+    }
+
+    fn noop_ctx() -> BuiltinToolContext {
+        shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        })
+    }
+
+    #[test]
+    fn stale_read_file_state_hint_names_the_files_the_command_rewrote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, "new").expect("write");
+        let ctx = noop_ctx();
+        // The recorded read predates the on-disk mtime.
+        seed_read_entry(&ctx, &file, 0);
+        let hint = stale_read_file_state_hint(&ctx, "cargo fmt", dir.path(), 0)
+            .expect("hint for a rewritten, previously-read file");
+        assert_eq!(
+            hint,
+            "[This command modified 1 file you've previously read: a.rs. Call Read before editing.]"
+        );
+    }
+
+    #[test]
+    fn stale_read_file_state_hint_is_silent_without_a_write_marker_or_a_bump() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, "new").expect("write");
+        let ctx = noop_ctx();
+        seed_read_entry(&ctx, &file, 0);
+        // `PcT` does not match ⇒ the oracle returns [] before any stat.
+        assert!(stale_read_file_state_hint(&ctx, "ls -la", dir.path(), 0).is_none());
+        // Write marker, but the file's mtime predates the call start.
+        assert!(stale_read_file_state_hint(&ctx, "cargo fmt", dir.path(), i64::MAX).is_none());
+    }
+
+    #[test]
+    fn stale_read_file_state_hint_caps_the_list_at_five_and_pluralizes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = noop_ctx();
+        for i in 0..7 {
+            let file = dir.path().join(format!("f{i}.rs"));
+            std::fs::write(&file, "new").expect("write");
+            seed_read_entry(&ctx, &file, 0);
+        }
+        let hint = stale_read_file_state_hint(&ctx, "prettier --write .", dir.path(), 0)
+            .expect("hint");
+        // `keys()` is MRU-first, so the most recently seeded five are listed.
+        assert_eq!(
+            hint,
+            "[This command modified 7 files you've previously read: f6.rs, f5.rs, f4.rs, f3.rs, f2.rs and 2 more. Call Read before editing.]"
         );
     }
 
@@ -4080,16 +4719,19 @@ mod tests {
             p.contains("- Working directory persists between calls, but prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile."),
             "SHORT working-directory bullet missing/incorrect; got:\n{p}"
         );
-        // IMPORTANT avoid-list bullet — the SHORT (Dh-true) branch DROPS
-        // `find`/`grep` vs the LONG prompt (starts at `cat`; verified vs the
-        // v2.1.183 binary + rendered opus-4-8 output).
+        // IMPORTANT avoid-list bullet — claude-code 2.1.238 `hcT` selects it with
+        // the SAME `VH()` predicate the LONG builder `Yhm` uses. LingXi ships
+        // Glob/Grep as real tools ⇒ the non-embedded (find/grep-INCLUSIVE) branch,
+        // identical to the LONG prompt's list.
         assert!(
-            p.contains("- IMPORTANT: Avoid using this tool to run `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed"),
+            p.contains("- IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed"),
             "SHORT avoid-list bullet missing/incorrect; got:\n{p}"
         );
+        // Output-visibility bullet — UNCONDITIONAL in 2.1.238 (the 2.1.220
+        // `CLAUDE_CODE_MARL_CORMORANT` gate was deleted), so opus-4-8 gets it too.
         assert!(
-            !p.contains("`find`, `grep`"),
-            "SHORT avoid-list must NOT include find/grep (those are LONG-only); got:\n{p}"
+            p.contains("- Command output is displayed to you, not reliably to the user."),
+            "SHORT output-visibility bullet missing; got:\n{p}"
         );
         // Raw timeout bullet (no `/ N minutes` conversion).
         assert!(

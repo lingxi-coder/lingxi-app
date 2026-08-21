@@ -258,6 +258,21 @@ impl MessageAccum {
                     "ephemeral_1h_input_tokens": self.usage_cache_creation
                 },
                 "output_tokens": self.usage_output,
+                // SC-01 (2.1.238): the canonical usage object gained
+                // `output_tokens_details`. `nTe` — the `message_start` /
+                // `message_delta` usage merge that produces the assistant
+                // frame's `usage` (cc-238.js @297183459) — places it directly
+                // after `output_tokens`:
+                //   output_tokens_details:{thinking_tokens:
+                //     t.output_tokens_details?.thinking_tokens
+                //       ?? e.output_tokens_details.thinking_tokens}
+                // and the seed `e` is `DR` (@283631657), whose
+                // `output_tokens_details` is `{thinking_tokens:0}`. `emit_usage`
+                // is fed by a fixed four-token trait signature with no
+                // thinking-token channel, so the merge always lands on the
+                // seed's `0` here; the KEY and its position are the parity fix.
+                // (`output_tokens_details` has 0 hits in the 2.1.220 binary.)
+                "output_tokens_details": {"thinking_tokens": 0_u64},
                 "service_tier": "standard",
                 "inference_geo": "not_available"
             },
@@ -913,8 +928,31 @@ impl StreamJsonStream {
     }
 
     /// Build the `usage` sub-block (snake_case per GROUND-TRUTH).
+    ///
+    /// SC-01 (2.1.238): the `result` frame's `usage` is `gXl()` (cc-238.js
+    /// @300232503), which spreads the canonical zero-usage object `DR`
+    /// (@283631657) and overrides only the four token counters plus
+    /// `web_search_requests`:
+    ///
+    /// ```text
+    /// DR={output_tokens_details:{thinking_tokens:0},input_tokens:0,
+    ///     cache_creation_input_tokens:0,cache_read_input_tokens:0,output_tokens:0,
+    ///     server_tool_use:{web_search_requests:0,web_fetch_requests:0},
+    ///     service_tier:"standard",
+    ///     cache_creation:{ephemeral_1h_input_tokens:0,ephemeral_5m_input_tokens:0},
+    ///     inference_geo:"",iterations:[],speed:"standard"}
+    /// function gXl(){…return{...DR,input_tokens:…,output_tokens:…,
+    ///   cache_read_input_tokens:…,cache_creation_input_tokens:…,
+    ///   server_tool_use:{...DR.server_tool_use,web_search_requests:…}}}
+    /// ```
+    ///
+    /// The 2.1.220 twin `jw` (@233167154) is byte-identical MINUS
+    /// `output_tokens_details` (0 hits in that binary), so the new key is the
+    /// only delta — and because `gXl` never overrides it, the spread keeps
+    /// `DR`'s literal `{thinking_tokens:0}` and its position as the FIRST key.
     fn build_usage_block(cost: &CostSnapshot) -> Value {
         json!({
+            "output_tokens_details": {"thinking_tokens": 0_u64},
             "input_tokens": cost.input_tokens,
             "cache_creation_input_tokens": cost.cache_creation_tokens,
             "cache_read_input_tokens": cost.cache_read_tokens,
@@ -2142,6 +2180,66 @@ mod tests {
             .await;
         let text = stream.get_last_result_text().await;
         assert_eq!(text, "pong", "last_result_text should be 'pong'");
+    }
+
+    /// SC-01 (2.1.238): both usage objects the stream-json surface emits carry
+    /// `output_tokens_details.thinking_tokens`, in the oracle's key position.
+    ///
+    /// * `result` frame — `gXl()` spreads `DR`, whose FIRST key is
+    ///   `output_tokens_details` (cc-238.js @283631657 / @300232503).
+    /// * `assistant` frame — the `nTe` usage merge (@297183459) places it
+    ///   directly after `output_tokens`.
+    ///
+    /// The 2.1.220 binary has 0 hits for `output_tokens_details`, so this is
+    /// upstream drift, not a long-standing port choice.
+    #[tokio::test]
+    async fn sc01_usage_objects_carry_output_tokens_details() {
+        let stream = StreamJsonStream::new(make_params("sess-otd"));
+        let cost = CostSnapshot {
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_read_tokens: 50,
+            cache_creation_tokens: 5,
+            ..Default::default()
+        };
+        let frame = stream
+            .build_result_success_frame("pong", "end_turn", &cost, "claude-opus-4-8", "off", None, &[])
+            .await;
+        let usage = frame["usage"].as_object().unwrap();
+        let keys: Vec<&str> = usage.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "output_tokens_details",
+                "input_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+                "output_tokens",
+                "server_tool_use",
+                "service_tier",
+                "cache_creation",
+                "inference_geo",
+                "iterations",
+                "speed",
+            ],
+            "result/usage must match DR's key order, output_tokens_details first"
+        );
+        assert_eq!(usage["output_tokens_details"]["thinking_tokens"], 0_u64);
+
+        // Assistant frame: after `output_tokens`, before `service_tier`.
+        stream
+            .emit_message_start("msg_otd", "claude-opus-4-8")
+            .await;
+        stream.emit_text("hi").await;
+        let acc = stream.accum.lock().await;
+        let message = acc.to_message_json(Some("end_turn"));
+        drop(acc);
+        let usage = message["usage"].as_object().unwrap();
+        let keys: Vec<&str> = usage.keys().map(String::as_str).collect();
+        let idx = |k: &str| keys.iter().position(|&x| x == k).unwrap();
+        assert_eq!(idx("output_tokens_details"), idx("output_tokens") + 1);
+        assert_eq!(idx("service_tier"), idx("output_tokens_details") + 1);
+        assert_eq!(usage["output_tokens_details"]["thinking_tokens"], 0_u64);
     }
 
     /// Verify that the result/success frame has the correct 20-key order.

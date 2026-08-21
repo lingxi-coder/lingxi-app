@@ -10,6 +10,18 @@ mod tests {
         MockBudgetEnforcerHandle, MockSubagentSpawner,
     };
 
+    /// The binary's LEAN gate `m = qk(model)` (`tool_api::dh_simple_system_prompt`)
+    /// selects the SHORT Agent-tool prompt for the current-generation models.
+    /// Every pre-existing `build_prompt` assertion in this file was written
+    /// against that SHORT arm, so they pin a lean model explicitly.
+    const LEAN_MODEL: Option<&str> = Some("claude-opus-5");
+
+    /// A classic (sonnet-class) model takes the LONG arm — `## When not to use`,
+    /// `## Usage notes`, `## Writing the prompt`, and the `Example usage:`
+    /// blocks. `None` (no model known) also takes the LONG arm, mirroring the
+    /// binary's `Dh(undefined) === false`.
+    const LONG_MODEL: Option<&str> = Some("claude-sonnet-4-5");
+
     // claude `Agt()` normalized-type key: lowercase + strip whitespace, dashes,
     // and underscores so case/spacing/punctuation variants of a subagent type
     // collapse to one comparable form (drives the fuzzy fallback match).
@@ -23,6 +35,30 @@ mod tests {
         assert_eq!(normalize_agent_type("General Purpose"), "generalpurpose");
         // em-dash (U+2014) is Unicode Pd and is stripped too.
         assert_eq!(normalize_agent_type("a—b"), "ab");
+    }
+
+    // 2.1.238 `YLi` (@292880950): `function YLi(e){return e.join(", ")||"none"}`.
+    // Every `Available agents: …` tail routes through it, so a fully
+    // deny-filtered (or empty) catalog renders the word `none`, not an empty
+    // tail. 2.1.220 interpolated a bare `join(", ")` at each site.
+    #[test]
+    fn render_available_agents_falls_back_to_none_when_empty() {
+        assert_eq!(render_available_agents(&[]), "none");
+        assert_eq!(
+            render_available_agents(&["general-purpose".to_string()]),
+            "general-purpose"
+        );
+        assert_eq!(
+            render_available_agents(&[
+                "general-purpose".to_string(),
+                "Explore".to_string(),
+                "Plan".to_string(),
+            ]),
+            "general-purpose, Explore, Plan"
+        );
+        // A single empty-string entry is NOT the empty list: JS `[""].join(", ")`
+        // is `""`, which is falsy, so `YLi` returns "none" there too.
+        assert_eq!(render_available_agents(&[String::new()]), "none");
     }
 
     // (2.1.212 `--forward-subagent-text`) The nested-progress forwarder decodes
@@ -684,7 +720,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         assert_eq!(
             AGENT_INPUT_SCHEMA["properties"]["run_in_background"]["description"],
-            json!("Agents run in the background by default; you will be notified when one completes. Set to false to run this agent synchronously when you need its result before continuing.")
+            json!("Agents run in the background by default; you will be notified when one completes. Set to false only when your very next action depends on this agent's result and nothing else could usefully happen while it runs — otherwise leave it in the background so the user can hand you other work.")
         );
     }
 
@@ -1921,6 +1957,234 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert!(spawner.invocations().is_empty());
     }
 
+    /// 2.1.238 `p7f(agents, allowedAgentTypes)` (@292880236): the
+    /// general-purpose probe accepts an EXACT `general-purpose` entry, or a
+    /// SINGLE normalized match when the exact name is absent.
+    #[test]
+    fn general_purpose_probe_matches_exact_then_single_normalized() {
+        let entry = |t: &str| traits::subagent_spawn::SubagentListingEntry {
+            agent_type: t.into(),
+            when_to_use: "x".into(),
+            tools_description: "All tools".into(),
+        };
+        assert!(general_purpose_is_available(&[entry("general-purpose")]));
+        // A single normalized match resolves.
+        assert!(general_purpose_is_available(&[entry("General_Purpose")]));
+        // Two normalized matches with no exact name do NOT.
+        assert!(!general_purpose_is_available(&[
+            entry("General_Purpose"),
+            entry("general purpose")
+        ]));
+        // …but an exact entry wins even alongside a normalized twin.
+        assert!(general_purpose_is_available(&[
+            entry("general-purpose"),
+            entry("General_Purpose")
+        ]));
+        assert!(!general_purpose_is_available(&[entry("Explore")]));
+        assert!(!general_purpose_is_available(&[]));
+    }
+
+    fn prompt_agents() -> Vec<traits::subagent_spawn::SubagentListingEntry> {
+        vec![
+            traits::subagent_spawn::SubagentListingEntry {
+                agent_type: "general-purpose".into(),
+                when_to_use: "use for anything".into(),
+                tools_description: "All tools".into(),
+            },
+            traits::subagent_spawn::SubagentListingEntry {
+                agent_type: "Explore".into(),
+                when_to_use: "search".into(),
+                tools_description: "All tools except Edit".into(),
+            },
+        ]
+    }
+
+    // The binary's Agent-tool prompt is `CGf({model:e,…})` and splits on
+    // `m = qk(e)` (`tool_api::dh_simple_system_prompt`): `if(m){…SHORT…}` then
+    // `return …LONG…`. The port used to DISCARD `PromptOptions`, so a
+    // sonnet/haiku/`claude-3-*`/`opus-4-0..4-7` session was served the SHORT arm
+    // and never saw `## When not to use`, `## Usage notes`, `## Writing the
+    // prompt`, or the `Example usage:` blocks.
+    #[test]
+    fn build_prompt_lean_gate_selects_short_or_long_arm() {
+        let agents = prompt_agents();
+
+        let short = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
+        assert!(short.contains("\n\n## When to use\n\n"), "{short}");
+        assert!(!short.contains("## When not to use"));
+        assert!(!short.contains("## Usage notes"));
+        assert!(!short.contains("## Writing the prompt"));
+        assert!(!short.contains("Example usage:"));
+
+        let long = AgentTool::build_prompt(&agents, &[], false, LONG_MODEL, true);
+        // The LONG arm has NO `## When to use` — that heading is lean-only.
+        assert!(!long.contains("## When to use"), "{long}");
+        assert!(long.contains("\n\n## When not to use\n\n"));
+        assert!(long.contains("\n\n## Usage notes\n\n"));
+        assert!(long.contains("\n\n## Writing the prompt\n\n"));
+        assert!(long.contains("Example usage:\n\n<example>"));
+
+        // `Dh(undefined) === false` ⇒ an unknown model also takes the LONG arm.
+        assert_eq!(
+            AgentTool::build_prompt(&agents, &[], false, None, true),
+            long
+        );
+    }
+
+    // Byte-exact spot checks on the LONG arm's fixed spine (binary `CGf`'s
+    // fall-through return, offsets 292443300–292445600). `${Ns}` = `Read`,
+    // `${Am}` = `Grep`, `${Zm}` = `SendMessage`, `${Ci}` = `Agent`; the
+    // `.claude/agents/*.md` path is rebranded `.lingxi/agents/*.md` per the
+    // accepted naming divergence (the SHORT arm already does this).
+    #[test]
+    fn build_prompt_long_arm_spine_is_byte_exact() {
+        let long = AgentTool::build_prompt(&prompt_agents(), &[], false, LONG_MODEL, true);
+        assert!(
+            long.contains(
+                "\n\n## When not to use\n\nIf the target is already known, use the direct tool: Read for a known path, the Grep tool for a specific symbol or string. Reserve this tool for open-ended questions that span the codebase, or tasks that match an available agent type.\n\n## Usage notes\n\n- Always include a short description summarizing what the agent will do\n- When the agent is done, its final report is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.\n- Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done."
+            ),
+            "{long}"
+        );
+        assert!(long.contains(
+            "\n- Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.\n- **Foreground vs background**: Pass `run_in_background: false` only when your very next action depends on the agent's result and nothing else could usefully happen while it runs — e.g., a research agent whose finding gates the edit you're about to make. Otherwise let it run in the background (the default) — this includes fire-and-forget work, independent investigations, and anything where the user might hand you something else in the meantime. Wanting the result \"next\" is not enough on its own."
+        ));
+        assert!(long.contains(
+            "\n- **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.\n- To continue a previously spawned agent, use SendMessage with the agent's ID or name as the `to` field — that resumes it with full context. A new Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.\n- Each agent type's model, reasoning effort, and tool access are set in its definition (`.lingxi/agents/*.md` frontmatter, or the SDK `agents` option); the `model` parameter here overrides the definition for this one call.\n- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since a fresh agent is not aware of the user's intent"
+        ));
+        assert!(long.contains(
+            "\n- With `isolation: \"worktree\"`, the worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.\n\n## Writing the prompt\n\nBrief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters."
+        ));
+        assert!(long.contains(
+            "\n\nTerse command-style prompts produce shallow, generic work.\n\n**Never delegate understanding.**"
+        ));
+        // `${i?c:f}` — the non-fork `f` block, which ends with `d`.
+        assert!(
+            long.ends_with(
+                "Agent({\n  description: \"Independent migration review\",\n  subagent_type: \"code-reviewer\",\n  prompt: \"Review migration 0042_user_schema.sql for safety. Context: we're adding a NOT NULL column to a 50M-row table. Existing rows get a backfill default. I want a second opinion on whether the backfill approach is safe under concurrent writes — I've checked locking behavior but want independent verification. Report: is this safe, and if not, what specifically breaks?\"\n})\n<commentary>\nThe agent starts with no context from this conversation, so the prompt briefs it: what to assess, the relevant background, and what form the answer should take.\n</commentary>\n</example>\n"
+            ),
+            "{long}"
+        );
+    }
+
+    /// `LINGXI_SUBAGENT_STEER` is process-global; serialize the tests that
+    /// flip it.
+    static STEER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // Binary `g = DZ()==="default"` gates the `## When to use` LEAD sentence
+    // (@292441984): a non-default steer keeps the heading but drops "Reach for
+    // this when…", leaving `R` alone. The port already has the gate
+    // (`traits::live_sessions::subagent_steer_is_default`, used by the system
+    // prompt) — it just wasn't consulted here.
+    #[test]
+    fn build_prompt_steer_gate_drops_the_reach_lead() {
+        let _g = STEER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_SUBAGENT_STEER");
+        let agents = prompt_agents();
+        let default_steer = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
+        assert!(default_steer.contains(
+            "\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result."
+        ));
+        let long_default = AgentTool::build_prompt(&agents, &[], false, LONG_MODEL, true);
+        assert!(long_default.contains("\n- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first.\n- If the user specifies that they want you to run agents \"in parallel\", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls."));
+
+        std::env::set_var("LINGXI_SUBAGENT_STEER", "1");
+        let steered = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
+        let long_steered = AgentTool::build_prompt(&agents, &[], false, LONG_MODEL, true);
+        std::env::remove_var("LINGXI_SUBAGENT_STEER");
+
+        assert!(steered.contains(
+            "\n\n## When to use\n\nFor a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result."
+        ));
+        assert!(!steered.contains("Reach for this when the task matches"));
+        // The LONG arm's `${g?…:""}` pair is dropped too.
+        assert!(!long_steered.contains("should be used proactively"));
+        assert!(!long_steered.contains("in parallel\", you MUST send a single message"));
+    }
+
+    // 2.1.238's NEW `generalPurposeAvailable` (`n`) argument: when the
+    // general-purpose agent is not reachable, "If omitted, the general-purpose
+    // agent is used." is replaced by `Gri` + ", so choose one of the listed
+    // agent types.", and the LONG arm's leading (subagent_type-less) example is
+    // dropped entirely (`${!n?"":…}`). 2.1.220 had neither arm.
+    #[test]
+    fn build_prompt_requires_subagent_type_when_general_purpose_is_unavailable() {
+        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "Explore".into(),
+            when_to_use: "search".into(),
+            tools_description: "All tools except Edit".into(),
+        }];
+        let short = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, false);
+        assert!(
+            short.contains(
+                "When using the Agent tool, specify a subagent_type parameter to select which agent type to use. subagent_type is required: the general-purpose agent is not available in this session, so choose one of the listed agent types."
+            ),
+            "{short}"
+        );
+        assert!(!short.contains("If omitted, the general-purpose agent is used."));
+
+        let long = AgentTool::build_prompt(&agents, &[], false, LONG_MODEL, false);
+        assert!(long.contains(
+            "Example usage:\n\n<example>\nuser: \"Can you get a second opinion on whether this migration is safe?\""
+        ));
+        assert!(!long.contains("Branch ship-readiness audit"));
+
+        // With general-purpose present the 2.1.220 sentence and the leading
+        // example both come back.
+        let with_gp = AgentTool::build_prompt(&prompt_agents(), &[], false, LONG_MODEL, true);
+        assert!(with_gp.contains("If omitted, the general-purpose agent is used."));
+        assert!(with_gp.contains(
+            "Example usage:\n\n<example>\nuser: \"What's left on this branch before we can ship?\""
+        ));
+    }
+
+    // 2.1.238 @292889305 (0 hits in 2.1.220): an OMITTED `subagent_type` is only
+    // defaulted to `general-purpose` when `p7f` says that agent is reachable;
+    // otherwise the spawn is rejected with `${Gri}. Available agents: ${YLi(…)}`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // brief; serializes the fork-gate env var
+    async fn call_rejects_omitted_subagent_type_when_general_purpose_is_unavailable() {
+        // With `LINGXI_FORK_SUBAGENT` ON an omitted subagent_type takes the FORK
+        // path, not this one — serialize against the gate-ON tests.
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        let spawner = arc_mock_spawner();
+        spawner.set_agent_listing(vec![
+            traits::subagent_spawn::SubagentListingEntry {
+                agent_type: "Explore".into(),
+                when_to_use: "search".into(),
+                tools_description: "All tools except Edit".into(),
+            },
+            traits::subagent_spawn::SubagentListingEntry {
+                agent_type: "Plan".into(),
+                when_to_use: "plan".into(),
+                tools_description: "All tools except Edit".into(),
+            },
+        ]);
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let input = serde_json::json!({
+            "description": "desc here",
+            "prompt": "do a thing"
+        });
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let err = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => assert_eq!(
+                msg,
+                "subagent_type is required: the general-purpose agent is not available in this session. Available agents: Explore, Plan"
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert!(spawner.invocations().is_empty());
+    }
+
     // build_prompt's coordinator branch returns the slim intro only (no
     // `## When to use` / bullets), matching binary `if(t)return p`. The
     // non-coordinator SHORT form carries `## When to use`.
@@ -1936,8 +2200,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        let full = AgentTool::build_prompt(&agents, &[], false);
-        let slim = AgentTool::build_prompt(&agents, &[], true);
+        let full = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
+        let slim = AgentTool::build_prompt(&agents, &[], true, LEAN_MODEL, true);
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(full.contains("## When to use"));
         assert!(!slim.contains("## When to use"));
@@ -1962,7 +2226,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        let prompt = AgentTool::build_prompt(&agents, &[], false);
+        let prompt = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(
             prompt.contains(
@@ -1992,7 +2256,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
         // Default (unknown plan): no pro-block, `## When to use` present.
         traits::subscription::set_current_subscription(None);
-        let p_default = AgentTool::build_prompt(&agents, &[], false);
+        let p_default = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         assert!(!p_default.contains("**Do not spawn agents unless the user asks.**"));
         assert!(p_default.contains("## When to use"));
 
@@ -2004,7 +2268,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 ..traits::subscription::SubscriptionSnapshot::default()
             },
         ));
-        let p_pro = AgentTool::build_prompt(&agents, &[], false);
+        let p_pro = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         traits::subscription::set_current_subscription(None);
 
         assert!(
@@ -2023,7 +2287,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert!(p_pro.contains("conversation.\n\n**Do not spawn agents unless the user asks.**"));
         // The four bullets are NOT gated on the plan.
         assert!(p_pro.contains(
-            "- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing."
+            "- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` only when your very next action depends on the result and nothing else could usefully happen while it runs — otherwise background it so the user can interject."
         ));
     }
 
@@ -2045,7 +2309,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 ..traits::subscription::SubscriptionSnapshot::default()
             },
         ));
-        let p = AgentTool::build_prompt(&agents, &[], false);
+        let p = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         traits::subscription::set_current_subscription(None);
         assert!(!p.contains("**Do not spawn agents unless the user asks.**"));
         assert!(p.contains("## When to use"));
@@ -2069,7 +2333,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
         // Default (fork env OFF): non-fork subagent_type sentence, no addendum.
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
-        let p_off = AgentTool::build_prompt(&agents, &[], false);
+        let p_off = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         assert!(
             p_off.contains("specify a subagent_type parameter to select which agent type to use")
         );
@@ -2079,7 +2343,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // Fork ON: env truthy + interactive (non_interactive=false) + non-coordinator.
         traits::session_flags::set_non_interactive_session(false);
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
-        let p_on = AgentTool::build_prompt(&agents, &[], false);
+        let p_on = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         assert!(
@@ -2090,7 +2354,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         assert!(
             p_on.contains(
-                "A fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate."
+                "A fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate. Subagents run in the background; you'll be notified when one completes. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
             ),
             "fork addendum missing"
         );
@@ -2120,7 +2384,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }];
         traits::session_flags::set_non_interactive_session(true);
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
-        let p = AgentTool::build_prompt(&agents, &[], false);
+        let p = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
         traits::session_flags::set_non_interactive_session(false);
         assert!(
@@ -2146,10 +2410,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
 
         let interactive = traits::session_flags::scope_non_interactive_session(false, async {
-            AgentTool::build_prompt(&agents, &[], false)
+            AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
         });
         let headless = traits::session_flags::scope_non_interactive_session(true, async {
-            AgentTool::build_prompt(&agents, &[], false)
+            AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
         });
         let (interactive, headless) = tokio::join!(interactive, headless);
 
@@ -2175,7 +2439,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        let p = AgentTool::build_prompt(&agents, &["github".into(), "linear".into()], false);
+        let p = AgentTool::build_prompt(
+            &agents,
+            &["github".into(), "linear".into()],
+            false,
+            LEAN_MODEL,
+            true,
+        );
         assert!(
             !p.contains("# MCP Servers"),
             "v2.1.193 has no per-tool MCP-servers note; was:\n{p}"
@@ -2198,7 +2468,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             when_to_use: "anything".into(),
             tools_description: "All tools".into(),
         }];
-        let p = AgentTool::build_prompt(&agents, &[], false);
+        let p = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
 
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
 

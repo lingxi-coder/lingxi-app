@@ -19,17 +19,16 @@ expression: names
 - Glob
 - Grep
 - LSP
-- ListMcpResourcesTool
+- ListAgents
 - MCP
 - McpAuth
 - Monitor
-- MultiEdit
 - NotebookEdit
 - PowerShell
 - PushNotification
 - Read
-- ReadMcpResourceTool
 - RemoteTrigger
+- ReportFindings
 - ScheduleWakeup
 - SendMessage
 - SendUserMessage
@@ -46,6 +45,7 @@ expression: names
 - TeamDelete
 - TodoWrite
 - ToolSearch
+- WaitForMcpServers
 - WebFetch
 - WebSearch
 - Write

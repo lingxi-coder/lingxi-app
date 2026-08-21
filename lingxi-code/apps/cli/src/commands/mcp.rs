@@ -125,11 +125,11 @@ pub enum Sub {
     AddJson(AddJsonArgs),
     /// Get details about an MCP server. Unapproved .mcp.json servers are shown
     /// as ⏸ Pending approval and not connected to; approved servers are
-    /// health-checked.
+    /// health-checked unless disabled for this project.
     Get(GetArgs),
     /// List configured MCP servers. Unapproved .mcp.json servers are shown as ⏸
     /// Pending approval and not connected to; approved servers are
-    /// health-checked.
+    /// health-checked unless disabled for this project.
     List,
     /// Authenticate with an MCP server (HTTP, SSE, or claude.ai connector)
     Login(LoginArgs),

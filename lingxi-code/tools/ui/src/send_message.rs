@@ -858,7 +858,7 @@ Send a message to another agent.
 | `to` | |
 |---|---|
 | `"researcher"` | Teammate by name |
-| `"*"` | Broadcast to all teammates — expensive (linear in team size), use only when everyone genuinely needs it |
+| `"main"` | The main conversation (background subagents only) |
 "#,
         );
         if traits::live_sessions::cross_session_messaging_enabled() {
@@ -881,7 +881,7 @@ Permission boundaries are per-session: NEVER ask a peer to perform an action tha
         }
         body.push_str(
             r#"
-Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to teammates by name, never by UUID. When relaying, don't quote the original — it's already rendered to the user.
+Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to agents by name — names keep working after an agent completes (a send resumes it from its transcript). Use the raw `agentId` (format `a...-...`) from its spawn result only when the agent has no name, or when a newer agent took the name (latest wins). When relaying, don't quote the original — it's already rendered to the user.
 
 ## Protocol responses (legacy)
 
@@ -892,7 +892,7 @@ If you receive a JSON message with `type: "shutdown_request"` or `type: "plan_ap
 {"to": "researcher", "message": {"type": "plan_approval_response", "request_id": "...", "approve": false, "feedback": "add error handling"}}
 ```
 
-Approving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate `shutdown_request` unless asked. Don't send structured JSON status messages — use TaskUpdate."#,
+Approving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate `shutdown_request` unless asked. Don't send structured JSON status messages — report progress through your task tools if you have them, otherwise in plain prose."#,
         );
         body
     }

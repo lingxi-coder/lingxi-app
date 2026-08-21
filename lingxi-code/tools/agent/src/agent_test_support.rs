@@ -57,6 +57,11 @@ pub struct MockSubagentSpawner {
     async_unwired: Mutex<bool>,
     /// Scripted active-subagent count for the 2.1.217 concurrency-cap gate.
     concurrent_subagents: AtomicUsize,
+    /// Optional override for `agent_listing` — `None` ⇒ the default
+    /// general-purpose / Explore / Plan catalog. Used by the 2.1.238
+    /// `subagent_type is required` tests, which need a catalog WITHOUT
+    /// `general-purpose`.
+    listing_override: Mutex<Option<Vec<SubagentListingEntry>>>,
 }
 
 #[derive(Clone)]
@@ -93,7 +98,13 @@ impl MockSubagentSpawner {
             registered_names: Mutex::new(Vec::new()),
             async_unwired: Mutex::new(false),
             concurrent_subagents: AtomicUsize::new(0),
+            listing_override: Mutex::new(None),
         }
+    }
+
+    /// Replace the catalog returned by `agent_listing`.
+    pub fn set_agent_listing(&self, entries: Vec<SubagentListingEntry>) {
+        *self.listing_override.lock().unwrap() = Some(entries);
     }
 
     /// Set the active-subagent count returned at the pre-spawn boundary.
@@ -305,6 +316,9 @@ impl SubagentSpawner for MockSubagentSpawner {
     /// budget-gate test (which spawns `Plan`) clears the type validation that now
     /// precedes the budget gate.
     async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
+        if let Some(entries) = self.listing_override.lock().unwrap().clone() {
+            return entries;
+        }
         vec![
             SubagentListingEntry {
                 agent_type: "general-purpose".into(),

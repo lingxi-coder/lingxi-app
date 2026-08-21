@@ -7,13 +7,32 @@
 //! passed in, so the priority logic is exhaustively testable without env or
 //! IO. The caller (the CLI) reads the merged settings and process env.
 //!
-//! Documented omissions vs TS (no GrowthBook/Statsig substrate in this build):
+//! Documented omissions vs TS:
 //! - Statsig `tengu_disable_bypass_permissions_mode` gate (and its
-//!   `"…disabled by your organization policy"` notice) — no Statsig substrate;
-//!   only the settings-disable notice is reachable.
+//!   `"…disabled by your organization policy"` notice) — originally omitted for
+//!   lack of a Statsig substrate. As of 2.1.238 the omission is CORRECT, not a
+//!   gap: upstream DELETED both (binary counts 2.1.220 → 2.1.238: the gate
+//!   7 → 0, the notice 4 → 0), leaving `"Bypass permissions mode was disabled
+//!   by settings"` (4 → 4) as the only reachable notice — which this resolver
+//!   emits.
 //! - `LINGXI_REMOTE` filtering of settings `defaultMode` (CCR) — `LingXi`
 //!   has no CCR remote entrypoint; the `tengu_ccr_unsupported_default_mode_ignored`
 //!   event is not reproduced. The caller passes `default_mode` straight through.
+//! - PERM-09 (2.1.238, DEFERRED): `kqd` grew an IDE-owned-session branch,
+//!   `if(YCe())`, where `YCe() = entrypoint==="claude-vscode" && !childSession
+//!   && !CLAUDECODE`. Inside it a settings `defaultMode: "bypassPermissions"`
+//!   is honored only when `--dangerously-skip-permissions` or
+//!   `--allow-dangerously-skip-permissions` was passed; otherwise it is replaced
+//!   by `default` with the notice `Permission mode bypassPermissions from
+//!   settings was ignored — enable the "Claude Code: Allow Dangerously Skip
+//!   Permissions" setting in VS Code to consent to it` plus
+//!   `tengu_settings_bypass_unconsented_noninteractive_ignored`. Not ported:
+//!   `LingXi` ships no VS Code extension, so nothing can ever set that
+//!   entrypoint, and the notice instructs the user to enable a *Claude Code*
+//!   VS Code setting that does not exist in this product — emitting it would be
+//!   worse than omitting it. The branch also re-reads `defaultMode` from the
+//!   raw settings FILES (`Rfa()`), not from the merged view this pure resolver
+//!   is handed. Revisit only if an IDE-owned entrypoint is ever added.
 
 use crate::mode::PermissionMode;
 

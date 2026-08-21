@@ -1188,6 +1188,15 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // raw `session.history`.
     turn_reminders: &[ConversationMessage],
 ) -> Result<PtlCallOutcome, OrchestratorError> {
+    // SC-04: the compaction-failure detail is per-CALL state (the oracle reads
+    // it off THIS iteration's `precomputeOutcome`), so clear any leftover before
+    // the preempt — a failure recorded for an earlier call must never colour
+    // this call's prompt-too-long surface.
+    orch.compaction_tracking
+        .lock()
+        .await
+        .last_compact_failure_detail = None;
+
     // (1) Blocking-limit preempt. `is_at_blocking_limit` is
     // `token_usage >= effective_window − MANUAL_COMPACT_BUFFER_TOKENS`
     // (`autoCompact.ts` `calculateTokenWarningState`). `auto_compact_enabled`
@@ -1465,6 +1474,19 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 )
                 .await
         };
+        // SC-04 (oracle `Fol`, cc-238.js @228433532): a FAILED rescue compact is
+        // what upgrades the bare `Prompt is too long` into
+        // `Prompt is too long · automatic compaction failed: <detail>`. Stash the
+        // detail so `surface_prompt_too_long` can render the composed copy the
+        // way the oracle's `ep({content:Fol(qn)??_V,…})` does; it is consumed
+        // once, and cleared on entry to this fn, so it can never leak into a
+        // later turn's preempt.
+        if let Err(err) = &compact_result {
+            orch.compaction_tracking
+                .lock()
+                .await
+                .last_compact_failure_detail = Some(err.to_string());
+        }
         if let Ok(result) = compact_result {
             let compact_duration = api_started.elapsed();
             orch.record_compaction_usage(&result, compact_duration)
@@ -1616,13 +1638,29 @@ async fn reissue_after_model_fallback(
 /// `pub(crate)` so the streaming turn driver's RECOV.1 blocking-limit preempt
 /// (`conversation.rs`) can surface the same byte-exact message as the batched
 /// path before ending the turn.
+///
+/// SC-04 (claude-code 2.1.238): the content is `Fol(compactFailure) ?? _V` —
+/// when the rescue compaction for THIS call failed, the message becomes
+/// `Prompt is too long · automatic compaction failed: <first line, ≤300 cols>`
+/// (`ep({content:Fol(qn)??_V,error:"invalid_request",…})`, cc-238.js
+/// @228721216 and its reactive twin @228749977). With no recorded failure the
+/// bare [`PROMPT_TOO_LONG_ERROR_MESSAGE`] is surfaced exactly as before. The
+/// detail is CONSUMED here (one-shot), so a later turn can never inherit it.
 pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> MessageId {
+    let compact_failure = orch
+        .compaction_tracking
+        .lock()
+        .await
+        .last_compact_failure_detail
+        .take();
+    let text = compact_failure
+        .as_deref()
+        .and_then(crate::api_error_copy::automatic_compaction_failed_text)
+        .unwrap_or_else(|| PROMPT_TOO_LONG_ERROR_MESSAGE.to_string());
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
-        content: vec![ContentBlock::Text {
-            text: PROMPT_TOO_LONG_ERROR_MESSAGE.to_string(),
-        }],
+        content: vec![ContentBlock::Text { text: text.clone() }],
         stop_reason: Some("prompt_too_long".to_string()),
     };
     {
@@ -1634,7 +1672,7 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
     // assistant line (here a single text block → one line either way) — the
     // per-block split is streaming-only.
     orch.persist_message_to_jsonl(&assistant_msg).await;
-    orch.output.emit_text(PROMPT_TOO_LONG_ERROR_MESSAGE).await;
+    orch.output.emit_text(&text).await;
     assistant_id
 }
 

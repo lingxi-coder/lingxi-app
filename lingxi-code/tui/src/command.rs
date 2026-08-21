@@ -271,7 +271,10 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/memory",
         aliases: &[],
-        description: "Open a memory file in your editor",
+        // cc2.1.238 `cyT`: "Edit CLAUDE.md files and memory settings"
+        // (2.1.220 was "Open a memory file in your editor"); LingXi brands the
+        // memory file LINGXI.md, matching `/init`'s row.
+        description: "Edit LINGXI.md files and memory settings",
         dynamic_description: None,
         hint: "",
         args: ArgSpec::None,
@@ -430,16 +433,6 @@ pub const BUILTIN: &[SlashCommand] = &[
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_commit_push_pr,
-    },
-    SlashCommand {
-        name: "/review",
-        aliases: &[],
-        description: "Review a GitHub pull request; for your working diff use /code-review",
-        dynamic_description: None,
-        hint: "[pr number]",
-        args: ArgSpec::Optional,
-        advertised: true,
-        run: ChatWidget::cmd_review,
     },
     SlashCommand {
         name: "/security-review",
@@ -616,15 +609,41 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/fork",
         aliases: &[],
-        description: "Spawn a background agent that inherits the full conversation",
+        // Agent view is ON by default, so the registered upstream object is
+        // `b$m` (cc2.1.238 @296246436), NOT the `y$m` disabled-branch twin:
+        // `description:"Copy this conversation into a new background session
+        // and keep working here",argumentHint:"[prompt]"`.
+        description: "Copy this conversation into a new background session and keep working here",
         dynamic_description: None,
-        hint: "<directive>",
-        // Optional (NOT Required): a bare `/fork` must reach the handler so it
-        // renders its own "Usage: /fork <directive>" line rather than falling
-        // through as an LLM prompt.
+        hint: "[prompt]",
+        // Optional (NOT Required): a bare `/fork` must reach the handler
+        // rather than falling through as an LLM prompt. NOTE: `cmd_fork` still
+        // dispatches the legacy `ForkHandler` (`y$m`), whose empty-argument arm
+        // prints "Usage: /fork <directive>"; only the advertised copy is
+        // aligned here. Switching the TUI to `ForkBackgroundHandler` needs a
+        // live `fork_to_background_session` override and is out of scope.
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_fork,
+    },
+    SlashCommand {
+        // cc2.1.238 `w$m` @296247354: `{type:"local-jsx",name:"subtask",
+        // description:"Send a subagent off with your full context; its result
+        // comes back here",argumentHint:"<task>",isEnabled:()=>!sv()}`. `sv()`
+        // = "is a coordinator session", so it is visible by default; the
+        // handler has been registered by batch 8 all along, but neither
+        // advertising surface listed it.
+        name: "/subtask",
+        aliases: &[],
+        description: "Send a subagent off with your full context; its result comes back here",
+        dynamic_description: None,
+        hint: "<task>",
+        // Optional (NOT Required): a bare `/subtask` must reach the handler so
+        // it renders its own "Usage: /subtask \<task\>" line rather than
+        // falling through as an LLM prompt (same rationale as `/fork`).
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_subtask,
     },
     SlashCommand {
         name: "/branch",
@@ -1048,6 +1067,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// cc2.1.238 deleted `/review` outright (`name:"review"`: 2.1.220 = 1 hit,
+    /// 2.1.238 = 0) — the PR-review surface is now the bundled `code-review`
+    /// skill. It must not resolve or be advertised.
+    #[test]
+    fn review_removed_in_2_1_238_is_not_registered() {
+        assert!(
+            resolve("/review").is_none(),
+            "/review should not resolve (removed in claude-code 2.1.238)"
+        );
+        assert!(!BUILTIN.iter().any(|c| c.name == "/review"));
+        // `/security-review` is a different command and stays.
+        assert_eq!(
+            resolve("/security-review").expect("registered").0.name,
+            "/security-review"
+        );
     }
 
     /// Deliberately dropped commands stay dropped: claude-code 2.1.205 removed

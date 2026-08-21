@@ -19,6 +19,8 @@
 //! (`/connect`), NOT the oracle's `/login` — see that constant.
 
 use serde_json::Value;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Oracle `IT` — the prefix every rendered API error carries.
 pub(crate) const API_ERROR: &str = "API Error";
@@ -454,6 +456,91 @@ pub(crate) const CREDIT_BALANCE_TOO_LOW: &str = "Credit balance is too low";
 /// Also bare: `yu({content:Jq,error:"invalid_request"})`.
 pub(crate) const PROMPT_TOO_LONG: &str = "Prompt is too long";
 
+/// Oracle `z$v` (cc-238.js @228441394) — the width budget `Fol` truncates the
+/// compaction-failure detail to.
+const COMPACT_FAILURE_DETAIL_WIDTH: usize = 300;
+
+/// SC-04 / oracle `Fol` (2.1.238 @228433532, 0 hits in 2.1.220) — the
+/// prompt-too-long surface when the automatic compaction that would have
+/// rescued the turn failed:
+///
+/// ```js
+/// function Fol(e){
+///   if(e?.reason!=="error"||!e.detail)return;
+///   return `${_V} \xB7 automatic compaction failed: `+Yl(e.detail,z$v,!0)
+/// }
+/// ```
+///
+/// `_V` is [`PROMPT_TOO_LONG`], the separator is U+00B7 (never a hyphen), and
+/// the detail runs through `Yl(detail, 300, true)` — first line only, with an
+/// ellipsis when a newline was cut, clamped to 300 display columns.
+///
+/// Both oracle call sites fall back to the bare `_V` when this returns
+/// `undefined` (`ep({content:Fol(qn)??_V,error:"invalid_request",…})`
+/// @228721216 and the reactive twin @228749977), which is exactly what the
+/// `None` here means for the caller. An empty detail yields `None`
+/// (`!e.detail`).
+#[must_use]
+pub(crate) fn automatic_compaction_failed_text(detail: &str) -> Option<String> {
+    if detail.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{PROMPT_TOO_LONG} {SEP} automatic compaction failed: {}",
+        truncate_first_line(detail, COMPACT_FAILURE_DETAIL_WIDTH)
+    ))
+}
+
+/// Oracle `Yl(e,t,r=!1)` with `r=true` (cc-238.js @220255323):
+///
+/// ```js
+/// function Yl(e,t,r=!1){let n=e;
+///   if(r){let o=e.indexOf(`\n`);
+///     if(o!==-1){if(n=e.substring(0,o),ar(n)+1>t)return is(`${n}…`,t);
+///       return `${n}…`}}
+///   if(ar(n)<=t)return n;
+///   return is(n,t)}
+/// ```
+///
+/// `ar` is the display width and `is` the grapheme-wise width clamp below. Note
+/// the oracle appends the ellipsis BEFORE clamping in the over-long first-line
+/// branch, so the ellipsis itself is what gets dropped — transcribed as-is.
+fn truncate_first_line(text: &str, width: usize) -> String {
+    if let Some(nl) = text.find('\n') {
+        let head = &text[..nl];
+        let ellipsized = format!("{head}\u{2026}");
+        if head.width() + 1 > width {
+            return clamp_to_width(&ellipsized, width);
+        }
+        return ellipsized;
+    }
+    if text.width() <= width {
+        return text.to_string();
+    }
+    clamp_to_width(text, width)
+}
+
+/// Oracle `is(e,t)` (cc-238.js, immediately above `Yl`): keep whole grapheme
+/// clusters while the accumulated display width stays within `t`.
+///
+/// ```js
+/// let r=0,n="";for(let{segment:o}of H_().segment(e)){let i=ar(o);
+///   if(r+i>t)break;n+=o,r+=i}return n
+/// ```
+fn clamp_to_width(text: &str, width: usize) -> String {
+    let mut used = 0usize;
+    let mut out = String::new();
+    for cluster in text.graphemes(true) {
+        let w = cluster.width();
+        if used + w > width {
+            break;
+        }
+        out.push_str(cluster);
+        used += w;
+    }
+    out
+}
+
 /// Oracle `le_` — the first-party variant of the rejection label, used instead
 /// of `Request rejected (429)` when the limit is the server's rather than the
 /// account's.
@@ -761,6 +848,53 @@ pub(crate) fn persistence_suffix(route: ErrorRoute<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SC-04: `Fol` — the composed prompt-too-long surface, byte for byte.
+    #[test]
+    fn the_automatic_compaction_failure_hint_is_byte_exact() {
+        assert_eq!(
+            automatic_compaction_failed_text("summarizer 500").unwrap(),
+            "Prompt is too long \u{b7} automatic compaction failed: summarizer 500"
+        );
+        // The separator is U+00B7, not a hyphen or a bullet.
+        assert!(automatic_compaction_failed_text("x")
+            .unwrap()
+            .contains('\u{b7}'));
+        // `!e.detail` → no hint at all; the caller falls back to the bare `_V`.
+        assert!(automatic_compaction_failed_text("").is_none());
+    }
+
+    /// SC-04: `Yl(detail, 300, true)` — first line only, ellipsised when a
+    /// newline was cut, and clamped to 300 columns.
+    #[test]
+    fn the_compaction_failure_detail_is_first_line_only_and_clamped() {
+        // A newline anywhere → the head plus U+2026 (never `...`).
+        assert_eq!(
+            automatic_compaction_failed_text("boom\nstack frame 1\nstack frame 2").unwrap(),
+            "Prompt is too long \u{b7} automatic compaction failed: boom\u{2026}"
+        );
+        // No newline and within budget → verbatim, no ellipsis.
+        let short = "a".repeat(COMPACT_FAILURE_DETAIL_WIDTH);
+        assert_eq!(truncate_first_line(&short, COMPACT_FAILURE_DETAIL_WIDTH), short);
+        // No newline, over budget → clamped to exactly 300 columns, no ellipsis
+        // (`is(n,t)`, not `is(n+"…",t)`).
+        let long = "a".repeat(COMPACT_FAILURE_DETAIL_WIDTH + 50);
+        let clamped = truncate_first_line(&long, COMPACT_FAILURE_DETAIL_WIDTH);
+        assert_eq!(clamped.width(), COMPACT_FAILURE_DETAIL_WIDTH);
+        assert!(!clamped.ends_with('\u{2026}'));
+        // First line over budget → the oracle appends the ellipsis and THEN
+        // clamps, so the ellipsis is the character that gets dropped.
+        let long_head = format!("{}\ntail", "b".repeat(COMPACT_FAILURE_DETAIL_WIDTH + 10));
+        let cut = truncate_first_line(&long_head, COMPACT_FAILURE_DETAIL_WIDTH);
+        assert_eq!(cut, "b".repeat(COMPACT_FAILURE_DETAIL_WIDTH));
+        // Width is display columns, not chars: wide graphemes count double, and
+        // clusters are never split.
+        let wide = "宽".repeat(200);
+        assert_eq!(
+            truncate_first_line(&wide, COMPACT_FAILURE_DETAIL_WIDTH).chars().count(),
+            COMPACT_FAILURE_DETAIL_WIDTH / 2
+        );
+    }
 
     /// Both of these render BARE — no `API Error:` prefix — which is the easy
     /// thing to get wrong when every neighbouring string has one.

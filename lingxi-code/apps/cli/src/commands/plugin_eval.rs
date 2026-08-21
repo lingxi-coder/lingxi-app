@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -30,10 +30,15 @@ const MAX_STAGE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 1_048_576;
 const MAX_GRADER_OUTPUT_BYTES: usize = 262_144;
 
-/// Run eval cases (evals/**/case.yaml or evals/**/prompt.md + graders/*.md)
-/// against a plugin and report scored results. Target is a path, a plugin name,
-/// or a `plugin@marketplace` id — installed and skills-dir plugins both resolve
-/// (and add a no-plugin baseline arm).
+/// The eval directory used when neither `--eval-dir` nor the manifest's
+/// `experimental.evals` names one (oracle: "else evals/").
+const DEFAULT_EVAL_DIR: &str = "evals";
+
+/// Run eval cases (<eval dir>/**/case.yaml or prompt.md + graders/*.md; the eval
+/// dir is evals/ unless --eval-dir or the manifest says otherwise) against a
+/// plugin and report scored results. Target is a path, a plugin name, or a
+/// `plugin@marketplace` id — installed and skills-dir plugins both resolve (and
+/// add a no-plugin baseline arm).
 #[derive(Debug, Clone, Args)]
 pub struct Cli {
     /// Optional nested eval command.
@@ -41,8 +46,10 @@ pub struct Cli {
     pub command: Option<EvalSub>,
 
     /// Run a no-plugin baseline arm and report the score delta (none |
-    /// with-without; default: with-without when targeting a plugin by name,
-    /// none for a path).
+    /// with-without; default: with-without whenever a plugin resolves — by
+    /// name, or from the target path — and none when nothing does; under
+    /// with-without, graders marked with-only, incl. `tool_used: Skill`, are a
+    /// plugin-fired indicator rather than part of the score).
     #[arg(long, value_name = "mode", value_parser = ["none", "with-without"])]
     pub ablation: Option<String>,
 
@@ -55,6 +62,20 @@ pub struct Cli {
     /// Filter cases by name glob.
     #[arg(long = "case", value_name = "glob")]
     pub case_filter: Option<String>,
+
+    /// Directory name (below the plugin) that holds the eval cases; results go
+    /// to <plugin>/<dir>/results/ — for an installed-plugin target,
+    /// ./<dir>/results/ with this flag, else ./evals/results/ (default dir: the
+    /// manifest's experimental.evals value, else evals/)
+    //
+    // CLI-04 (cc 2.1.238, cc-238.js @235153733 / binary @298656168): NEW in
+    // 2.1.238 (0 hits in 2.1.220). WIRED: `resolve_eval_dir` feeds
+    // `discover_cases` (case lookup below the plugin root) and `run_init`
+    // (where the scaffold is written); the CWD-relative results dir follows the
+    // flag verbatim per this help text ("./<dir>/results/ with this flag, else
+    // ./evals/results/") and is therefore NOT rerouted by a manifest default.
+    #[arg(long = "eval-dir", value_name = "dir")]
+    pub eval_dir: Option<String>,
 
     /// Print JSON to stdout, or write it to an optional path.
     #[arg(
@@ -82,20 +103,35 @@ pub struct Cli {
     #[arg(long, value_name = "model")]
     pub model: Option<String>,
 
+    /// Keep the HTML report local only; skip publishing it to claude.ai
+    //
+    // CLI-04 (cc 2.1.238, cc-238.js @235153173 / binary @298657852): NEW in
+    // 2.1.238 (0 hits in 2.1.220). In 2.1.238 publishing became the DEFAULT
+    // when the account supports it, so the oracle needs an opt-out; LingXi does
+    // not implement the claude.ai report-upload protocol at all (its
+    // `--publish-report` twin returns the not-implemented path below), so the
+    // report is already local-only and this flag is honoured by construction.
+    // Declared so scripts written against 2.1.238 parse, and so the day the
+    // upload lands the opt-out is already the operator's to set.
+    #[arg(long = "no-publish")]
+    pub no_publish: bool,
+
     /// Explicitly skip case scaffold scripts.
     #[arg(long = "no-scaffold", conflicts_with = "scaffold")]
     pub no_scaffold: bool,
 
     /// Directory for aggregate-result.json (default:
-    /// ./evals/results/<timestamp>/).
+    /// ./<eval dir>/results/<timestamp>/).
     #[arg(long = "output-dir", value_name = "dir")]
     pub output_dir: Option<PathBuf>,
 
-    /// Publish the HTML report privately to claude.ai and print its link.
+    /// Also require publishing the report to claude.ai (already the default
+    /// when your account supports it); explains why if unavailable.
     #[arg(long = "publish-report")]
     pub publish_report: bool,
 
-    /// Write a self-contained HTML report (scores, prompts, grader verdicts).
+    /// Write the self-contained HTML report (scores, prompts, grader verdicts)
+    /// to <path> instead of the results dir.
     #[arg(long, value_name = "path")]
     pub report: Option<PathBuf>,
 
@@ -115,7 +151,8 @@ pub struct Cli {
     #[arg(long, value_name = "0..1", default_value = "1.0", value_parser = parse_threshold)]
     pub threshold: f64,
 
-    /// Stream child traces to stderr.
+    /// Log per-message trace events to the debug log (use --debug-file to read
+    /// them).
     #[arg(long)]
     pub verbose: bool,
 
@@ -127,8 +164,9 @@ pub struct Cli {
 /// Nested `plugin eval` commands.
 #[derive(Debug, Clone, Subcommand)]
 pub enum EvalSub {
-    /// Author an eval suite under evals/ via an interview that sources inputs
-    /// and designs graders. Use --bare <name> for a blank single-case template.
+    /// Author an eval suite under the eval dir (evals/ unless --eval-dir or the
+    /// manifest says otherwise) via an interview that sources inputs and
+    /// designs graders. Use --bare <name> for a blank single-case template.
     Init(InitArgs),
 }
 
@@ -138,6 +176,37 @@ pub struct InitArgs {
     /// Write a blank prompt + criteria template instead of starting the interview.
     #[arg(long)]
     pub bare: bool,
+
+    /// Directory (below the current directory) to write cases into (default:
+    /// experimental.evals from the plugin.json in the current directory, else
+    /// evals/)
+    //
+    // CLI-05 (cc 2.1.238, cc-238.js @235153940): NEW in 2.1.238. The oracle
+    // resolves `evalDir: c.evalDir ?? a.opts().evalDir`, i.e. this flag falls
+    // back to the PARENT `plugin eval --eval-dir` — mirrored in `run`.
+    #[arg(long = "eval-dir", value_name = "dir")]
+    pub eval_dir: Option<String>,
+
+    /// Run the authoring interview (already the default in a terminal);
+    /// requires an interactive terminal
+    //
+    // CLI-05 (cc 2.1.238, cc-238.js @235153940): NEW in 2.1.238. The oracle's
+    // handler `sSw` computes `o = !t.bare && (t.forceInteractive || isTTY)` and
+    // refuses with a byte-exact message when `o && !isTTY` — so `--bare` WINS
+    // over `-i`, and `-i` only ever adds the refusal. LingXi already runs the
+    // interview whenever `--bare` is absent (it does not fall back to a blank
+    // template off-TTY — a pre-existing divergence), so this flag contributes
+    // exactly the TTY refusal.
+    #[arg(short = 'i', long)]
+    pub interactive: bool,
+
+    /// Alias for --interactive
+    //
+    // CLI-05: `.addOption(new bp("--interview","Alias for --interactive")
+    // .hideHelp())` — hidden in the oracle's help, OR-ed with `--interactive`
+    // (`forceInteractive: c.interactive || c.interview`).
+    #[arg(long, hide = true)]
+    pub interview: bool,
 
     /// Eval suite name.
     #[arg(value_name = "name")]
@@ -537,7 +606,7 @@ impl Drop for RunTemp {
 /// Run the eval command.
 pub async fn run(cli: &Cli, plugins_dir: &Path, home: &Path, cwd: &Path) -> i32 {
     if let Some(EvalSub::Init(args)) = &cli.command {
-        return run_init(args, cwd).await;
+        return run_init(args, cli.eval_dir.as_deref(), cwd).await;
     }
     if cli.publish_report {
         eprintln!(
@@ -573,7 +642,8 @@ async fn run_evaluation(
     let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let target_text = cli.target.clone().unwrap_or_else(|| ".".to_string());
     let target = resolve_target(&target_text, plugins_dir, home, cwd).await?;
-    let mut cases = discover_cases(&target.root)?;
+    let eval_dir = resolve_eval_dir(cli.eval_dir.as_deref(), &target.root)?;
+    let mut cases = discover_cases(&target.root, &eval_dir)?;
     cases.retain(|case| selected_case(case, cli));
 
     let ablation = cli.ablation.clone().unwrap_or_else(|| {
@@ -1863,8 +1933,8 @@ fn looks_like_path(target: &str) -> bool {
         || target.contains(std::path::MAIN_SEPARATOR)
 }
 
-fn discover_cases(plugin_root: &Path) -> Result<Vec<EvalCase>, String> {
-    let evals_root = plugin_root.join("evals");
+fn discover_cases(plugin_root: &Path, eval_dir: &str) -> Result<Vec<EvalCase>, String> {
+    let evals_root = plugin_root.join(eval_dir);
     if !evals_root.is_dir() {
         return Ok(Vec::new());
     }
@@ -2335,9 +2405,18 @@ fn glob_matches(pattern: &str, value: &str) -> bool {
     table[pattern.len()][value.len()]
 }
 
-async fn run_init(args: &InitArgs, cwd: &Path) -> i32 {
+async fn run_init(args: &InitArgs, parent_eval_dir: Option<&str>, cwd: &Path) -> i32 {
     let name = args.name.as_deref().unwrap_or("eval");
-    let suite_dir = match eval_suite_dir(cwd, name) {
+    // `evalDir: c.evalDir ?? a.opts().evalDir` — init's own flag, else the
+    // parent `plugin eval --eval-dir`, else the manifest / `evals/`.
+    let eval_dir = match resolve_eval_dir(args.eval_dir.as_deref().or(parent_eval_dir), cwd) {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("lingxi-cli plugin eval init: {error}");
+            return RUNTIME_ERROR;
+        }
+    };
+    let suite_dir = match eval_suite_dir(cwd, &eval_dir, name) {
         Ok(path) => path,
         Err(error) => {
             eprintln!("lingxi-cli plugin eval init: {error}");
@@ -2347,7 +2426,9 @@ async fn run_init(args: &InitArgs, cwd: &Path) -> i32 {
     if args.bare {
         return match write_bare_template(&suite_dir, name) {
             Ok(()) => {
-                println!("Created evals/{name}/prompt.md and evals/{name}/graders/criteria.md");
+                println!(
+                    "Created {eval_dir}/{name}/prompt.md and {eval_dir}/{name}/graders/criteria.md"
+                );
                 SUCCESS
             }
             Err(error) => {
@@ -2355,6 +2436,26 @@ async fn run_init(args: &InitArgs, cwd: &Path) -> i32 {
                 RUNTIME_ERROR
             }
         };
+    }
+
+    // `o = !t.bare && (t.forceInteractive || isTTY)`, then `if (o && !isTTY)`
+    // refuse. `--bare` already returned above, so the reachable half of the
+    // oracle's gate is: an EXPLICIT `-i/--interactive` (or its hidden
+    // `--interview` alias) off-TTY is refused with the byte-exact copy (product
+    // noun rebranded `claude` → `lingxi-cli`).
+    if (args.interactive || args.interview)
+        && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal())
+    {
+        if let Some(case_name) = args.name.as_deref() {
+            eprintln!(
+                "The authoring interview requires an interactive terminal (TTY). Run `lingxi-cli plugin eval init` in a terminal, or drop --interactive to write a blank template for `{case_name}` instead."
+            );
+        } else {
+            eprintln!(
+                "The authoring interview requires an interactive terminal (TTY). Run `lingxi-cli plugin eval init` in a terminal, or drop --interactive and pass a case name (e.g. `lingxi-cli plugin eval init my-case`) to write a blank template instead."
+            );
+        }
+        return RUNTIME_ERROR;
     }
 
     if suite_dir.exists() {
@@ -2380,7 +2481,7 @@ async fn run_init(args: &InitArgs, cwd: &Path) -> i32 {
         "Author an evaluation suite named {name:?} for the plugin snapshot in the current \
          directory. Interview the user \
          to source representative inputs and design objective graders. Write only beneath \
-         evals/{name}/, using prompt.md plus graders/*.md or case.yaml. Do not modify plugin \
+         {eval_dir}/{name}/, using prompt.md plus graders/*.md or case.yaml. Do not modify plugin \
          runtime code. The snapshot is isolated; only the validated eval suite will be copied \
          back to the original plugin."
     );
@@ -2412,14 +2513,14 @@ async fn run_init(args: &InitArgs, cwd: &Path) -> i32 {
         }
     };
     debug_assert!(status.success());
-    let staged_suite = staged_plugin.join("evals").join(name);
-    if let Err(error) = validate_authored_suite(&staged_plugin, &staged_suite) {
+    let staged_suite = staged_plugin.join(&eval_dir).join(name);
+    if let Err(error) = validate_authored_suite(&staged_plugin, &eval_dir, &staged_suite) {
         eprintln!("lingxi-cli plugin eval init: {error}");
         return RUNTIME_ERROR;
     }
     match install_authored_suite(&staged_suite, &suite_dir) {
         Ok(()) => {
-            println!("Created evals/{name}/");
+            println!("Created {eval_dir}/{name}/");
             SUCCESS
         }
         Err(error) => {
@@ -2494,7 +2595,7 @@ fn copy_plugin_snapshot(source: &Path, destination: &Path) -> Result<(), String>
     Ok(())
 }
 
-fn validate_authored_suite(plugin_root: &Path, suite: &Path) -> Result<(), String> {
+fn validate_authored_suite(plugin_root: &Path, eval_dir: &str, suite: &Path) -> Result<(), String> {
     if !suite.is_dir() {
         return Err(format!(
             "authoring session did not create {}",
@@ -2502,7 +2603,7 @@ fn validate_authored_suite(plugin_root: &Path, suite: &Path) -> Result<(), Strin
         ));
     }
     validate_tree_confined(suite)?;
-    let cases = discover_cases(plugin_root)?;
+    let cases = discover_cases(plugin_root, eval_dir)?;
     if !cases.iter().any(|case| case.source.starts_with(suite)) {
         return Err("authoring session did not create a valid eval case".to_string());
     }
@@ -2532,7 +2633,7 @@ fn install_authored_suite(source: &Path, destination: &Path) -> Result<(), Strin
         .map_err(|error| format!("failed to install {}: {error}", destination.display()))
 }
 
-fn eval_suite_dir(cwd: &Path, name: &str) -> Result<PathBuf, String> {
+fn eval_suite_dir(cwd: &Path, eval_dir: &str, name: &str) -> Result<PathBuf, String> {
     if name.is_empty()
         || name.contains('/')
         || name.contains('\\')
@@ -2541,7 +2642,51 @@ fn eval_suite_dir(cwd: &Path, name: &str) -> Result<PathBuf, String> {
     {
         return Err(format!("invalid eval suite name {name:?}"));
     }
-    Ok(cwd.join("evals").join(name))
+    Ok(cwd.join(eval_dir).join(name))
+}
+
+/// Resolve the eval directory that holds the cases: `--eval-dir` wins,
+/// otherwise the plugin manifest's `experimental.evals` value, otherwise
+/// `evals/` — 1:1 with the oracle's "(default dir: the manifest's
+/// experimental.evals value, else evals/)".
+fn resolve_eval_dir(flag: Option<&str>, plugin_root: &Path) -> Result<String, String> {
+    if let Some(name) = flag {
+        return validate_eval_dir_name(name);
+    }
+    match manifest_eval_dir(plugin_root) {
+        Some(name) => validate_eval_dir_name(&name),
+        None => Ok(DEFAULT_EVAL_DIR.to_string()),
+    }
+}
+
+/// `experimental.evals` from the plugin manifest at `<root>/<manifest dir>/
+/// plugin.json`, when it is a non-empty string.
+fn manifest_eval_dir(plugin_root: &Path) -> Option<String> {
+    let manifest = plugin_root
+        .join(branding::PLUGIN_MANIFEST_DIR)
+        .join("plugin.json");
+    let text = fs::read_to_string(manifest).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    value
+        .get("experimental")?
+        .get("evals")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The eval dir names ONE directory below the plugin root — no separators, no
+/// traversal. A trailing `/` (the manifest's `evals/` spelling) is tolerated.
+fn validate_eval_dir_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim().trim_end_matches('/');
+    if trimmed.is_empty()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed == "."
+    {
+        return Err(format!("invalid eval dir {name:?}"));
+    }
+    Ok(trimmed.to_string())
 }
 
 fn write_bare_template(suite_dir: &Path, _name: &str) -> Result<(), String> {
@@ -2564,8 +2709,16 @@ fn write_bare_template(suite_dir: &Path, _name: &str) -> Result<(), String> {
 fn emit_outputs(cli: &Cli, result: &AggregateResult, cwd: &Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(result)
         .map_err(|error| format!("failed to serialize eval result: {error}"))?;
+    // "results go to … ./<dir>/results/ with this flag, else ./evals/results/"
+    // — the CWD-relative results dir tracks the FLAG, not a manifest default.
+    let results_root = cli
+        .eval_dir
+        .as_deref()
+        .map(validate_eval_dir_name)
+        .transpose()?
+        .unwrap_or_else(|| DEFAULT_EVAL_DIR.to_string());
     let output_dir = cli.output_dir.clone().unwrap_or_else(|| {
-        cwd.join("evals")
+        cwd.join(&results_root)
             .join("results")
             .join(chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string())
     });
@@ -2918,9 +3071,113 @@ mod tests {
             eval.command,
             Some(EvalSub::Init(InitArgs {
                 bare: true,
-                name: Some(ref name)
+                name: Some(ref name),
+                ..
             })) if name == "smoke"
         ));
+    }
+
+    // CLI-04/CLI-05 (cc 2.1.238): the four flags 2.1.238 added to the
+    // `plugin eval` family, each with 0 hits in 2.1.220 —
+    // `eval --eval-dir <dir>`, `eval --no-publish`, `eval init -i/--interactive`
+    // (plus its hidden `--interview` alias), and `eval init --eval-dir <dir>`.
+    #[test]
+    fn clap_surface_accepts_the_2_1_238_eval_flags() {
+        let eval = parse_eval([
+            "lingxi-cli",
+            "plugin",
+            "eval",
+            "--eval-dir",
+            "checks",
+            "--no-publish",
+            ".",
+        ]);
+        assert_eq!(eval.eval_dir.as_deref(), Some("checks"));
+        assert!(eval.no_publish);
+
+        // init's own `--eval-dir` plus `-i`.
+        let eval = parse_eval([
+            "lingxi-cli",
+            "plugin",
+            "eval",
+            "init",
+            "-i",
+            "--eval-dir",
+            "checks",
+            "smoke",
+        ]);
+        let Some(EvalSub::Init(init)) = eval.command else {
+            panic!("expected eval init");
+        };
+        assert!(init.interactive);
+        assert!(!init.interview);
+        assert_eq!(init.eval_dir.as_deref(), Some("checks"));
+
+        // The hidden `--interview` alias parses and is OR-ed with
+        // `--interactive` by `run_init`.
+        let eval = parse_eval(["lingxi-cli", "plugin", "eval", "init", "--interview"]);
+        let Some(EvalSub::Init(init)) = eval.command else {
+            panic!("expected eval init");
+        };
+        assert!(init.interview);
+        assert!(!init.interactive);
+    }
+
+    fn parse_eval<'a>(argv: impl IntoIterator<Item = &'a str>) -> Cli {
+        let parsed = Argv::from_iter(argv).unwrap();
+        let crate::commands::Commands::Plugin(plugin) = parsed.command.unwrap() else {
+            panic!("expected plugin command");
+        };
+        let crate::commands::plugin::Sub::Eval(eval) = plugin.command.unwrap() else {
+            panic!("expected eval command");
+        };
+        eval
+    }
+
+    // CLI-04: the eval dir resolves flag → manifest `experimental.evals` →
+    // `evals/`, and `discover_cases` really looks below that name.
+    #[test]
+    fn eval_dir_resolves_flag_then_manifest_then_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        assert_eq!(resolve_eval_dir(None, root).unwrap(), DEFAULT_EVAL_DIR);
+        assert_eq!(resolve_eval_dir(Some("checks"), root).unwrap(), "checks");
+
+        let manifest_dir = root.join(branding::PLUGIN_MANIFEST_DIR);
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(
+            manifest_dir.join("plugin.json"),
+            br#"{"name":"p","experimental":{"evals":"nested/suites"}}"#,
+        )
+        .unwrap();
+        // A manifest value naming a nested path is refused, not silently joined.
+        assert!(resolve_eval_dir(None, root).is_err());
+
+        // The manifest's `evals/` spelling (trailing slash) is tolerated.
+        fs::write(
+            manifest_dir.join("plugin.json"),
+            br#"{"name":"p","experimental":{"evals":"suites/"}}"#,
+        )
+        .unwrap();
+        assert_eq!(resolve_eval_dir(None, root).unwrap(), "suites");
+        // The flag still wins over the manifest.
+        assert_eq!(resolve_eval_dir(Some("checks"), root).unwrap(), "checks");
+
+        // Traversal is refused wherever it comes from.
+        assert!(resolve_eval_dir(Some("../escape"), root).is_err());
+        assert!(resolve_eval_dir(Some(""), root).is_err());
+
+        // And the resolved name is what discovery walks.
+        let suite = root.join("suites").join("case");
+        fs::create_dir_all(suite.join("graders")).unwrap();
+        fs::write(suite.join("prompt.md"), "do the thing").unwrap();
+        fs::write(
+            suite.join("graders").join("criteria.md"),
+            "---\ntype: llm\nweight: 1\n---\n\nlooks right\n",
+        )
+        .unwrap();
+        assert!(discover_cases(root, DEFAULT_EVAL_DIR).unwrap().is_empty());
+        assert_eq!(discover_cases(root, "suites").unwrap().len(), 1);
     }
 
     #[test]
@@ -2954,7 +3211,7 @@ mod tests {
         )
         .unwrap();
 
-        let cases = discover_cases(temp.path()).unwrap();
+        let cases = discover_cases(temp.path(), DEFAULT_EVAL_DIR).unwrap();
         assert_eq!(cases.len(), 2);
         assert_eq!(cases[0].name, "markdown");
         assert!(matches!(cases[0].graders[0], GraderDefinition::Llm { .. }));
@@ -3096,7 +3353,7 @@ mod tests {
     #[test]
     fn init_template_is_atomic_and_refuses_existing_suite() {
         let temp = tempfile::tempdir().unwrap();
-        let suite = eval_suite_dir(temp.path(), "smoke").unwrap();
+        let suite = eval_suite_dir(temp.path(), DEFAULT_EVAL_DIR, "smoke").unwrap();
         write_bare_template(&suite, "smoke").unwrap();
         assert_eq!(
             fs::read(suite.join("prompt.md")).unwrap(),
@@ -3107,7 +3364,7 @@ mod tests {
             b"---\ntype: llm\nweight: 1\n---\n\nTODO: describe what a successful response looks like\n"
         );
         assert!(write_bare_template(&suite, "smoke").is_err());
-        assert!(eval_suite_dir(temp.path(), "../escape").is_err());
+        assert!(eval_suite_dir(temp.path(), DEFAULT_EVAL_DIR, "../escape").is_err());
     }
 
     #[test]
@@ -3262,7 +3519,7 @@ mod tests {
         let outside = temp.path().join("outside.md");
         fs::write(&outside, "secret").unwrap();
         symlink(&outside, evals.join("prompt.md")).unwrap();
-        let error = discover_cases(temp.path()).unwrap_err();
+        let error = discover_cases(temp.path(), DEFAULT_EVAL_DIR).unwrap_err();
         assert!(error.contains("symlink"));
     }
 }

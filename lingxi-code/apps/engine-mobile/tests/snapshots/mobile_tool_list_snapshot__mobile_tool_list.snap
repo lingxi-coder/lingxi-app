@@ -1,6 +1,6 @@
 ---
 source: apps/engine-mobile/tests/mobile_tool_list_snapshot.rs
-assertion_line: 52
+assertion_line: 55
 expression: names
 ---
 - AskUserQuestion
@@ -13,11 +13,12 @@ expression: names
 - ExitPlanMode
 - Glob
 - Grep
-- MultiEdit
+- ListAgents
 - NotebookEdit
 - PushNotification
 - Read
 - RemoteTrigger
+- ReportFindings
 - ScheduleWakeup
 - SendMessage
 - SendUserMessage

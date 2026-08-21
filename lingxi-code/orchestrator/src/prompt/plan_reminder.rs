@@ -1,4 +1,4 @@
-//! Byte-locked "plan-mode reminder" assembler — INERT (no caller yet).
+//! Byte-locked "plan-mode reminder" assembler — the BODY only.
 //!
 //! Port of the Claude Code 2.1.206 per-turn plan-mode system-reminder text.
 //! The 206 dispatch is:
@@ -25,9 +25,12 @@
 //! Em-dashes (`\u{2014}`) in the 206 source appear as `—` unicode escapes
 //! inside template literals; they render as U+2014 and are emitted as such here.
 //!
-//! This module is deliberately NOT wired into the turn loop / orchestrator yet
-//! (a later unit calls it and wraps the String as an `isMeta` user message), so
-//! the default build stays byte-identical.
+//! These renderers return the BARE body. The oracle's three plan-mode renderers
+//! all return through the batch wrapper `Zy` (2.1.238 @296675470), which maps
+//! `NT` (@296673554) = `` `<system-reminder>\n${e}\n</system-reminder>` `` over
+//! every message and marks it `isMeta:!0`; that envelope is applied by the
+//! single caller, `ConversationOrchestrator::plan_mode_reminder_message`, so the
+//! byte-exact body assertions below stay readable.
 //!
 //! `render_full` keeps the 206 single-letter locals `r`/`n`/`o` (plan count /
 //! explore count / subagents-available) for a 1:1 read against `LU_`.

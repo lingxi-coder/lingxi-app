@@ -147,6 +147,17 @@ pub struct McpRegistry {
     /// `Disconnected` entries read from `.mcp.json` before the engine
     /// connects, and so engine-side tests can seed states directly.
     pub connections: RwLock<HashMap<String, McpConnectionState>>,
+    /// Synchronous mirror of claude-code 2.1.238's `eZf()`
+    /// (`bdl(b7e()??[]).length>0`, `cc-238.js @229641619`) — "at least one MCP
+    /// client is `type === "pending"`".
+    ///
+    /// [`Self::connections`] lives behind an async `RwLock`, but the predicate
+    /// is needed from `Tool::is_enabled`, which is synchronous. Callers that can
+    /// `await` refresh it with [`Self::refresh_pending_servers`] before building
+    /// a tool list; [`Self::has_pending_servers`] then reads it without
+    /// blocking. Starts `false`, so a host that never refreshes behaves exactly
+    /// as it did before this mirror existed.
+    pending_servers: std::sync::atomic::AtomicBool,
     /// Serializes connect/disconnect/reconnect for each logical server without
     /// holding the public connection-state lock across transport or OAuth I/O.
     /// Different servers still progress independently.
@@ -251,6 +262,7 @@ impl McpRegistry {
         let (catalog_changes, _unused_rx) = broadcast::channel(64);
         Self {
             connections: RwLock::new(HashMap::new()),
+            pending_servers: std::sync::atomic::AtomicBool::new(false),
             lifecycle_locks: StdMutex::new(HashMap::new()),
             clients: RwLock::new(IndexMap::new()),
             catalog_changes,
@@ -1976,6 +1988,40 @@ impl McpRegistry {
             })
             .map(|s| s.name().to_string())
             .collect()
+    }
+
+    /// Recompute and store the [`Self::has_pending_servers`] mirror, returning
+    /// the fresh value.
+    ///
+    /// This is claude-code's `eZf()` (`bdl(b7e()??[]).length>0`,
+    /// `cc-238.js @229641619`), where `bdl` filters MCP clients on
+    /// `type === "pending"`. [`project_action_state`] reproduces that
+    /// discriminant, so `needs-auth` (a SEPARATE client type upstream) does NOT
+    /// count as pending here — unlike [`Self::servers_pending`], which
+    /// deliberately folds `AwaitingOAuth` in for the `AgentTool` required-MCP
+    /// poll-wait.
+    ///
+    /// Call it from an async seam right before assembling a tool list; the
+    /// `WaitForMcpServers` tool's synchronous `is_enabled` then reads the
+    /// mirror.
+    pub async fn refresh_pending_servers(&self) -> bool {
+        let pending = self
+            .connections
+            .read()
+            .await
+            .values()
+            .any(|s| project_action_state(s) == traits::McpActionState::Pending);
+        self.pending_servers
+            .store(pending, std::sync::atomic::Ordering::Relaxed);
+        pending
+    }
+
+    /// Synchronous read of the pending-server mirror last written by
+    /// [`Self::refresh_pending_servers`].
+    #[must_use]
+    pub fn has_pending_servers(&self) -> bool {
+        self.pending_servers
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Names of servers in a terminal FAILED state (`Failed` — exhausted retries;

@@ -674,8 +674,37 @@ impl PolicyPermissionGate {
             PermissionResult::Ask {
                 ref reason,
                 ref metadata,
+                ref prompt,
                 ..
             } => {
+                // PERM-07 (claude-code 2.1.238 `STv`): inside the Auto-mode ask
+                // arm (`if($mt(d)||h)`), a hook-established ask floor in a
+                // session that cannot surface prompts is a hard DENY, not a
+                // delegated ask:
+                //   let S=a.hookAskFloor===!0;
+                //   if(S&&!Ski()&&u.shouldAvoidPermissionPrompts)return DJa(l.message);
+                // (`Ski()` is a constant `false` in the shipped build, so the
+                // `!Ski()` conjunct is always satisfied.) 2.1.238 wraps the ask
+                // message in the new `Ixf` copy; 2.1.220's `G8s` forwarded it
+                // verbatim. `$mt(d)` is `auto || (plan && autoActive)`; the
+                // `plan && autoActive` half and the `h` chrome-consent disjunct
+                // have no port counterpart, so only `auto` is gated here.
+                if mode == PermissionMode::Auto
+                    && ctx.hook_ask_floor
+                    && ctx.is_non_interactive_session
+                {
+                    let message = prompts_unavailable_deny_message(&prompt.message);
+                    self.inner
+                        .on_permission_denied(
+                            name,
+                            ctx,
+                            Some("asyncAgent"),
+                            Some(PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON),
+                            &message,
+                        )
+                        .await;
+                    return Ok(PermissionOutcome::Deny { reason: message });
+                }
                 // HOOK-ASKFLOOR-03: when a PreToolUse hook returned `ask`
                 // (`ctx.hook_ask_floor`), the Auto-mode classifier's ALLOW must NOT
                 // silently defeat the hook's ask — CC's `hookAskFloor` keeps the ask
@@ -1665,6 +1694,29 @@ fn deny_reason_string(reason: &PermissionDecisionReason, tool_name: &str) -> Str
 /// `` `Permission to use ${tool} has been denied. ${Rws}` `` (see
 /// [`crate::headless_gate::DenyOnAskGate`]).
 pub(crate) const DENIAL_WORKAROUND_GUIDANCE: &str = "IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.";
+
+/// The `asyncAgent` decision reason claude-code attaches to `DJa`'s deny —
+/// byte-identical in 2.1.220 (`G8s`) and 2.1.238 (`DJa`).
+pub(crate) const PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON: &str =
+    "Action requires interactive approval and permission prompts are not available in this context";
+
+/// PERM-07 — claude-code 2.1.238 `Ixf`: the model-visible copy that now WRAPS
+/// the ask message when an action needs interactive approval in a session that
+/// cannot prompt.
+///
+/// 2.1.220's `G8s(e)` forwarded the raw ask message as the deny message; 2.1.238
+/// splits the builder out as
+/// `` DJa(e) => {behavior:"deny", message: Ixf(e), decisionReason:{type:"asyncAgent", reason: `` [`PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON`] `}}`.
+///
+/// This is a DIFFERENT site from the port's headless `Ask`→`Deny` transport
+/// ([`crate::headless_gate::DenyOnAskGate`]), which implements the separate
+/// `xxf`/`GRu` message — unchanged between 2.1.220 and 2.1.238.
+#[must_use]
+pub fn prompts_unavailable_deny_message(ask_message: &str) -> String {
+    format!(
+        "Permission for this tool use was denied: it requires interactive approval, and permission prompts are not available in this session. The action was NOT performed. Do not claim it succeeded, and do not retry it in this session \u{2014} report the limitation to the user, or suggest an alternative. What was requested: {ask_message}"
+    )
+}
 
 /// Compute the stdio `classifier_approvable` value from the structured
 /// decision reason.  Claude Code emits this field only when at least one

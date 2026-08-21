@@ -89,6 +89,54 @@ const AGENT_MAX_RESULT_SIZE_CHARS: usize = 100_000;
 /// AgentTool.tsx:322).
 const GENERAL_PURPOSE_AGENT_TYPE: &str = "general-purpose";
 
+/// 2.1.238 `Gri` (@285270080), NEW in 2.1.238 (0 hits in 2.1.220):
+/// the message head used both by the Agent-tool prompt (as the tail of the
+/// `subagent_type` sentence when the general-purpose agent is unavailable) and
+/// by the spawn path when `subagent_type` is OMITTED and `p7f` says
+/// general-purpose is not in the catalog.
+const SUBAGENT_TYPE_REQUIRED_MESSAGE: &str =
+    "subagent_type is required: the general-purpose agent is not available in this session";
+
+/// The `prompt:` body shared by the binary's `c` (fork) and `f` (non-fork)
+/// `Example usage:` blocks — identical bytes in both, hoisted so the two
+/// renderings cannot drift.
+const EXAMPLE_SHIP_AUDIT_PROMPT: &str = "Audit what's left before this branch can ship. Check: uncommitted changes, commits ahead of main, whether tests exist, whether the GrowthBook gate is wired up, whether CI-relevant files changed. Report a punch list — done vs. missing. Under 200 words.";
+
+/// The `prompt:` body shared by the binary's `d` (code-reviewer) example and
+/// the fork `c` block's third example.
+const EXAMPLE_MIGRATION_REVIEW_PROMPT: &str = "Review migration 0042_user_schema.sql for safety. Context: we're adding a NOT NULL column to a 50M-row table. Existing rows get a backfill default. I want a second opinion on whether the backfill approach is safe under concurrent writes — I've checked locking behavior but want independent verification. Report: is this safe, and if not, what specifically breaks?";
+
+/// 2.1.238 `p7f(agents, allowedAgentTypes)` (@292880236) — the
+/// general-purpose-availability probe threaded into the Agent-tool prompt as
+/// `generalPurposeAvailable` and consulted by the spawn path when
+/// `subagent_type` is omitted:
+///
+/// ```js
+/// function p7f(e,t){
+///   let r=XQe(hRe.agentType), n=e.filter((s)=>XQe(s.agentType)===r),
+///       o=(s)=>t?.includes(s.agentType)??!0, i=n.find((s)=>s.agentType===hRe.agentType);
+///   if(i)return o(i);
+///   return n.length===1&&o(n[0])
+/// }
+/// ```
+///
+/// `t` (`allowedAgentTypes`, the `att()` wildcard-rule allowlist) has no port
+/// seam, so `o(...)` is the JS `?? !0` default — always true.
+fn general_purpose_is_available(agents: &[traits::subagent_spawn::SubagentListingEntry]) -> bool {
+    let target = normalize_agent_type(GENERAL_PURPOSE_AGENT_TYPE);
+    let matches = agents
+        .iter()
+        .filter(|a| normalize_agent_type(&a.agent_type) == target)
+        .count();
+    if agents
+        .iter()
+        .any(|a| a.agent_type == GENERAL_PURPOSE_AGENT_TYPE)
+    {
+        return true;
+    }
+    matches == 1
+}
+
 /// Input shape accepted by `AgentTool`.
 ///
 /// Mirrors claude-code's `AgentTool` Zod schema (`AgentTool.tsx:82-101` +
@@ -159,6 +207,20 @@ fn normalize_agent_type(s: &str) -> String {
         .flat_map(char::to_lowercase)
         .filter(|c| !(c.is_whitespace() || *c == '_' || is_pd_dash(*c)))
         .collect()
+}
+
+/// 2.1.238 `YLi` (@292880950): `function YLi(e){return e.join(", ")||"none"}`.
+///
+/// Every `Available agents: …` tail in 2.1.238 routes through this helper, so
+/// an empty (or fully deny-filtered) catalog renders the word `none` instead of
+/// an empty tail. 2.1.220 interpolated a bare `join(", ")` at each site.
+fn render_available_agents(types: &[String]) -> String {
+    let joined = types.join(", ");
+    if joined.is_empty() {
+        "none".to_string()
+    } else {
+        joined
+    }
 }
 
 /// Decode a forwarded-subagent-message progress line (`--forward-subagent-text`,
@@ -274,7 +336,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "run_in_background": {
                 "type": "boolean",
-                "description": "Agents run in the background by default; you will be notified when one completes. Set to false to run this agent synchronously when you need its result before continuing."
+                "description": "Agents run in the background by default; you will be notified when one completes. Set to false only when your very next action depends on this agent's result and nothing else could usefully happen while it runs — otherwise leave it in the background so the user can hand you other work."
             },
             "name": {
                 "type": "string",
@@ -571,11 +633,13 @@ impl AgentTool {
     /// 2.1.193 default); an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
     /// opt-out keeps a LEGACY inline-catalog body (not a 2.1.193 form).
     ///
-    /// The body is the 2.1.193 SHORT form (`if(c)` branch — the live default):
-    /// intro + `## When to use` + four terse bullets. (The FULL `if(c)`-false
-    /// form — `## When not to use` + `## Usage notes` + `<example>`s — is the
-    /// alternate; we render the SHORT form, which is what a live 2.1.193 session
-    /// emits.)
+    /// The body is MODEL-GATED, exactly as the binary's `if(m){…}` split
+    /// (`m = qk(model)` = `tool_api::dh_simple_system_prompt`): a lean-prompt
+    /// model gets the SHORT form (intro + `## When to use` + four terse
+    /// bullets); every classic model (sonnet / haiku / `claude-3-*` /
+    /// `opus-4-0..4-7`) — and an unknown/absent model, since `Dh(undefined)` is
+    /// `false` — gets the LONG form: `## When not to use`, `## Usage notes`,
+    /// `## Writing the prompt`, and the `Example usage:` `<example>` blocks.
     ///
     /// `is_coordinator` selects the slim coordinator prompt (intro only; the
     /// coordinator system prompt already covers usage / examples).
@@ -597,14 +661,25 @@ impl AgentTool {
     /// subagent_type: "fork", …)` qualifier. Inert unless `LINGXI_FORK_SUBAGENT`
     /// is set (default OFF) ⇒ the non-fork text, byte-identical to the pre-F4 prompt.
     ///
-    /// Deferred vs binary (no behavioral surface here): the `m` embedded-grep hint
-    /// swap, teammate (`yB`/`_m`) notes, and the remote-isolation (`V8t`) note. The
+    /// Deferred vs binary (no behavioral surface here): the embedded-grep hint
+    /// swap (`S = VH()&&Sh()?…`, which only fires in sessions where Glob/Grep
+    /// are REMOVED — LingXi always registers them), teammate (`yB`/`_m`) notes,
+    /// and the remote-isolation (`V8t`) note. The
     /// fabricated "# MCP Servers" note (NOT present in the 2.1.193 binary) is
     /// removed; `_mcp_server_names` is retained for signature stability.
+    ///
+    /// `model` is the binary's `CGf({model:e,…})` argument, consumed by the
+    /// LEAN/LONG gate `m = qk(e)` (`tool_api::dh_simple_system_prompt`);
+    /// `general_purpose_available` is 2.1.238's `generalPurposeAvailable`
+    /// (`p7f(agents, allowedAgentTypes)`), computed by the caller from the
+    /// PRE-deny-filter listing exactly as the binary's `prompt({agents,…})`
+    /// wrapper does (@292885292).
     fn build_prompt(
         agents: &[traits::subagent_spawn::SubagentListingEntry],
         mcp_server_names: &[String],
         is_coordinator: bool,
+        model: Option<&str>,
+        general_purpose_available: bool,
     ) -> String {
         // Binary `l=!DT()&&!aZ()` @234652470.
         //   `DT()` @230660586 = `return Z.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
@@ -625,6 +700,8 @@ impl AgentTool {
             mcp_server_names,
             is_coordinator,
             async_agents_available,
+            model,
+            general_purpose_available,
         )
     }
 
@@ -635,6 +712,8 @@ impl AgentTool {
         _mcp_server_names: &[String],
         is_coordinator: bool,
         async_agents_available: bool,
+        model: Option<&str>,
+        general_purpose_available: bool,
     ) -> String {
         // Catalog placement (binary intro `p`): the 2.1.193 default externalizes
         // the catalog to the orchestrator's `<system-reminder>` attachment, so the
@@ -684,13 +763,36 @@ impl AgentTool {
         );
 
         // Subagent_type sentence — fork variant (binary `${o?…:…}`).
+        //
+        // 2.1.238 threads a NEW `generalPurposeAvailable` (`n`) argument into
+        // BOTH arms (@292433588): when the general-purpose agent is not in the
+        // catalog, the "omit it" fallback is replaced by `Gri`
+        // ([`SUBAGENT_TYPE_REQUIRED_MESSAGE`]) + ", so choose … one of the
+        // listed agent types." 2.1.220's non-fork arm was an unconditional
+        // literal ending "If omitted, the general-purpose agent is used.".
+        //   `s = `${Gri}, so choose ${i?'`"fork"` or ':""}one of the listed agent types.``
+        let agent_type_required_hint = format!(
+            "{SUBAGENT_TYPE_REQUIRED_MESSAGE}, so choose {}one of the listed agent types.",
+            if is_fork { "`\"fork\"` or " } else { "" }
+        );
         let subagent_sentence = if is_fork {
+            let tail = if general_purpose_available {
+                "any other type — or omitting it — starts a fresh agent (general-purpose by default)."
+                    .to_string()
+            } else {
+                format!("any other type starts a fresh agent. {agent_type_required_hint}")
+            };
             format!(
-                "When using the {AGENT_TOOL_NAME} tool, specify a subagent_type to select an agent: `\"fork\"` forks yourself (the fork inherits your full conversation context and always runs on your model — a `model` override is ignored); any other type — or omitting it — starts a fresh agent (general-purpose by default)."
+                "When using the {AGENT_TOOL_NAME} tool, specify a subagent_type to select an agent: `\"fork\"` forks yourself (the fork inherits your full conversation context and always runs on your model — a `model` override is ignored); {tail}"
             )
         } else {
+            let tail = if general_purpose_available {
+                "If omitted, the general-purpose agent is used.".to_string()
+            } else {
+                agent_type_required_hint.clone()
+            };
             format!(
-                "When using the {AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used."
+                "When using the {AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. {tail}"
             )
         };
 
@@ -712,91 +814,308 @@ impl AgentTool {
             return intro;
         }
 
-        // Non-coordinator SHORT form (binary `if(c)` branch — the live 2.1.193
-        // default): `## When to use` + four terse bullets. NO `## When not to
-        // use`, NO `## Usage notes`, NO `<example>`s (those are the FULL form).
-        // Em-dashes are U+2014. The `run_in_background` bullet is the
-        // background-enabled 2.1.206 default (the binary's `T`). The
-        // `LINGXI_DISABLE_BACKGROUND_TASKS` suppression IS modeled — see the
-        // `async_agents_available` (`l`) gate on the tail bullets below. The
-        // teammate suppressions (binary `v = aZ()?…:o_()?…:""`) and the remote
-        // isolation bullet (`b = ian()?…:""`, gate `tengu_neapolitan`) are
-        // gated OFF by default and remain unmodeled.
-        //
-        // `## When to use` is SUPPRESSED on the pro plan (binary `${d?"":…}`):
-        // when the pro-block is present, the discouragement replaces the
-        // when-to-use guidance. The four bullets are NOT gated and always render.
-        let when_to_use = if pro_block.is_empty() {
-            // Binary `${d?"":`\n\n## When to use\n\nReach…`}` — DOUBLE `\n` before
-            // the heading AND before the paragraph (od -c verified on 2.1.195).
-            "\n\n## When to use\n\n\
-Reach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result."
-        } else {
-            ""
-        };
-        // Fork addendum (binary `${o?…:""}`), after `## When to use`, before the
-        // bullets.
-        let fork_addendum = if is_fork {
-            // Binary `${o?`\n\nA fork runs…`:""}` — DOUBLE leading `\n` (od -c
-            // verified on 2.1.195).
-            "\n\nA fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate."
-        } else {
-            ""
-        };
-        // SendMessage bullet — fork qualifier (binary `${o?' (except …)':""}`).
-        let send_message_bullet = if is_fork {
-            format!(
-                "- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh (except subagent_type: \"fork\", which inherits your context)."
-            )
-        } else {
-            format!(
-                "- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh."
-            )
-        };
-        // Binary: `…re-delegate.`:""}\n\n- The agent's final message…\n- Use…`
-        // — DOUBLE `\n` before the FIRST bullet, SINGLE `\n` between subsequent
-        // bullets (od -c verified on 2.1.195).
-        //
-        // The agent-definition bullet is an unconditional fixed literal between
-        // the SendMessage bullet and the isolation bullet (2.1.207 binary @
-        // ~222815108: `- Each agent type's model, reasoning effort, and tools come
-        // from its definition (\`.claude/agents/*.md\` frontmatter or SDK
-        // \`agents\`).`). Ported verbatim except the path is rebranded
-        // `.claude/agents/*.md` → `.lingxi/agents/*.md` per the accepted .lingxi
-        // naming divergence (cf. sandbox-runtime path_utils.rs `.lingxi/agents`).
-        //
-        // FIRST tail bullet — binary @234659244 is a TERNARY on `l`:
-        //   `- ${l?"The agent's final report is not shown to the user — relay
-        //         what matters.":"The agent's final message is returned to you
-        //         as the tool result; it is not shown to the user — relay what
-        //         matters."}`
-        // (the two "relay what matters" occurrences are @234659308 / @234659430).
-        // `l` is TRUE by default, so the port previously emitted the WRONG arm.
-        let final_report_bullet = if async_agents_available {
-            "- The agent's final report is not shown to the user — relay what matters."
-        } else {
-            "- The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters."
-        };
-        // BACKGROUND bullet — binary @234657319:
-        //   `let T = l && !o ? (n ? <SHORT> : <LONG>) : ""`
-        // where `n` is the fork FEATURE flag (`TSe()` @230723430, default
-        // "disabled") and `o = n && (allowFork ?? true)` is the port's
-        // `is_fork`. The port has no separate `n`, so the `n=true && o=false`
-        // SHORT arm ("Subagents run in the background; …", no
-        // `run_in_background: false` sentence) is UNMODELED — unreachable while
-        // `is_fork` implies the feature is on. `l=false` OR `is_fork` ⇒ the
-        // bullet is dropped entirely, not shortened.
-        let background_bullet = if async_agents_available && !is_fork {
-            "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
-        } else {
-            ""
-        };
-        format!(
-            "{intro}{when_to_use}{fork_addendum}\n\n\
+        // Steer gate `g = DZ()==="default"` (binary @292441984 / the `${g?…:…}`
+        // arms). Already ported as
+        // `traits::live_sessions::subagent_steer_is_default` and consumed by the
+        // system-prompt bullet at `orchestrator/src/prompt/body_sections.rs`;
+        // the Agent tool prompt consults the SAME gate.
+        let steer_is_default = traits::live_sessions::subagent_steer_is_default();
+
+        // LEAN/LONG split (binary `m = qk(e)`, the shared `Dh(model)` gate the
+        // port already implements as `tool_api::dh_simple_system_prompt`):
+        // `if(m){ …SHORT… } return …LONG…`. Every other ported tool consults it
+        // through `PromptOptions.model` (Read/Bash/Glob/Grep/Write/TodoWrite);
+        // the Agent tool used to discard `PromptOptions` entirely and always
+        // render the SHORT arm, so a sonnet / haiku / `claude-3-*` /
+        // `opus-4-0..4-7` session never saw `## When not to use`,
+        // `## Usage notes`, `## Writing the prompt`, or the `<example>` blocks.
+        if tool_api::dh_simple_system_prompt(model) {
+            // ---- SHORT (lean) arm — binary `if(m){…}` ----
+            //
+            // `## When to use` + four terse bullets. NO `## When not to use`, NO
+            // `## Usage notes`, NO `<example>`s (those are the LONG form).
+            // Em-dashes are U+2014. The teammate suppressions (binary `C =
+            // kae()?…:sS()?…:""`) and the remote isolation bullet (`k =
+            // qJn()?…:""`, gate `tengu_neapolitan`) are gated OFF by default and
+            // remain unmodeled.
+            //
+            // `## When to use` is SUPPRESSED on the pro plan (binary
+            // `${y?"":g?…:…}`): when the pro-block is present, the
+            // discouragement replaces the when-to-use guidance. When the steer
+            // is NOT `"default"` the heading survives but the "Reach for this
+            // when…" lead sentence is dropped and `R` stands alone. The four
+            // bullets are NOT gated and always render.
+            const WHEN_TO_USE_SEARCH_DIRECTLY: &str = "For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.";
+            let when_to_use = if !pro_block.is_empty() {
+                String::new()
+            } else if steer_is_default {
+                // Binary `${g?`\n\n## When to use\n\nReach…`}` — DOUBLE `\n`
+                // before the heading AND before the paragraph (od -c verified on
+                // 2.1.195).
+                format!(
+                    "\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. {WHEN_TO_USE_SEARCH_DIRECTLY}"
+                )
+            } else {
+                format!("\n\n## When to use\n\n{WHEN_TO_USE_SEARCH_DIRECTLY}")
+            };
+            // Fork addendum (binary `${A}`), after `## When to use`, before the
+            // bullets.
+            let fork_addendum = if is_fork {
+                // Binary `A=i?`\n\nA fork runs…`:""` — DOUBLE leading `\n` (od -c
+                // verified on 2.1.195). 2.1.238 (@292444519) appends the two
+                // "Subagents run in the background" / "Never fabricate…"
+                // sentences that 2.1.220 (@234658240) did not carry.
+                "\n\nA fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate. Subagents run in the background; you'll be notified when one completes. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
+            } else {
+                ""
+            };
+            // SendMessage bullet — fork qualifier (binary `${i?' (except …)':""}`).
+            let send_message_bullet = if is_fork {
+                format!(
+                    "- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh (except subagent_type: \"fork\", which inherits your context)."
+                )
+            } else {
+                format!(
+                    "- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh."
+                )
+            };
+            // Binary: `…re-delegate.`:""}\n\n- The agent's final message…\n- Use…`
+            // — DOUBLE `\n` before the FIRST bullet, SINGLE `\n` between subsequent
+            // bullets (od -c verified on 2.1.195).
+            //
+            // The agent-definition bullet is an unconditional fixed literal between
+            // the SendMessage bullet and the isolation bullet. Ported verbatim
+            // except the path is rebranded `.claude/agents/*.md` →
+            // `.lingxi/agents/*.md` per the accepted .lingxi naming divergence.
+            //
+            // FIRST tail bullet — binary @234659244 is a TERNARY on `u`:
+            //   `- ${u?"The agent's final report is not shown to the user —
+            //         relay what matters.":"The agent's final message is returned
+            //         to you as the tool result; it is not shown to the user —
+            //         relay what matters."}`
+            let final_report_bullet = if async_agents_available {
+                "- The agent's final report is not shown to the user — relay what matters."
+            } else {
+                "- The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters."
+            };
+            // BACKGROUND bullet — binary `w = u&&!i ? (o ? <SHORT> : <LONG>) : ""`
+            // where `o` is the fork FEATURE flag (`z1e()`) and `i = o && forkAvailable`
+            // is the port's `is_fork`. The port has no separate `o`, so the
+            // `o=true && i=false` SHORT arm ("Subagents run in the background; …",
+            // no `run_in_background: false` sentence) is UNMODELED — unreachable
+            // while `is_fork` implies the feature is on. `u=false` OR `is_fork`
+            // ⇒ the bullet is dropped entirely, not shortened.
+            let background_bullet = if async_agents_available && !is_fork {
+                "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` only when your very next action depends on the result and nothing else could usefully happen while it runs — otherwise background it so the user can interject. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
+            } else {
+                ""
+            };
+            return format!(
+                "{intro}{when_to_use}{fork_addendum}\n\n\
 {final_report_bullet}\n\
 {send_message_bullet}\n\
 - Each agent type's model, reasoning effort, and tools come from its definition (`.lingxi/agents/*.md` frontmatter or SDK `agents`).\n\
 - `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged).{background_bullet}"
+            );
+        }
+
+        // ---- LONG (standard) arm — binary `CGf`'s fall-through `return` ----
+
+        // `v` — `## When not to use`, emitted ONLY on this arm and only when
+        // fork is OFF (`v = i ? "" : …`).
+        //
+        // The binary's search-tool hint is
+        // `S = VH()&&Sh() ? "`grep` via the Bash tool" : `the ${Am} tool``
+        // (`Am = "Grep"`, @286224107). `VH()&&Sh()` is the EMBEDDED-GREP swap:
+        // when it holds, `FNt()` (@287931338) returns `new Set([Glob, Grep])` —
+        // i.e. those two tools are REMOVED from the session and `grep` is run
+        // through Bash instead. LingXi registers Grep (and Glob) and has no
+        // embedded-grep path, so the port takes the `${Am}` arm — "the Grep
+        // tool" — which is the truthful hint for the port's own tool set.
+        let when_not_to_use = if is_fork {
+            ""
+        } else {
+            "\n## When not to use\n\nIf the target is already known, use the direct tool: Read for a known path, the Grep tool for a specific symbol or string. Reserve this tool for open-ended questions that span the codebase, or tasks that match an available agent type.\n"
+        };
+
+        // `- ${u?…:…}` — the async-agents arm of the final-report note.
+        let final_report_note = if async_agents_available {
+            "When the agent is done, its final report is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result."
+        } else {
+            "When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result."
+        };
+
+        // `${u&&!o?…:""}` — the background / foreground-vs-background pair.
+        // `o` is the fork FEATURE flag; the port has no separate `o` (see the
+        // SHORT-arm note above), so `is_fork` stands in for both `o` and `i`.
+        let background_notes = if async_agents_available && !is_fork {
+            "\n- Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.\n- **Foreground vs background**: Pass `run_in_background: false` only when your very next action depends on the agent's result and nothing else could usefully happen while it runs — e.g., a research agent whose finding gates the edit you're about to make. Otherwise let it run in the background (the default) — this includes fire-and-forget work, independent investigations, and anything where the user might hand you something else in the meantime. Wanting the result \"next\" is not enough on its own."
+        } else {
+            ""
+        };
+        // `${u&&!i?…:""}` — the "Don't race" bullet.
+        let dont_race_note = if async_agents_available && !is_fork {
+            "\n- **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess."
+        } else {
+            ""
+        };
+        // `${i?' (except subagent_type: "fork")':""}`.
+        let fork_memory_qualifier = if is_fork {
+            " (except subagent_type: \"fork\")"
+        } else {
+            ""
+        };
+        // `${g?…:""}` — the proactive-use / run-in-parallel pair, gated on the
+        // subagent steer being `"default"`.
+        let proactive_notes = if steer_is_default {
+            format!(
+                "\n- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first.\n- If the user specifies that they want you to run agents \"in parallel\", you MUST send a single message with multiple {AGENT_TOOL_NAME} tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls."
+            )
+        } else {
+            String::new()
+        };
+        // `a` — the fork-only `## When to fork` section (binary `a=i?…:""`).
+        let when_to_fork = if is_fork {
+            "\n\n## When to fork\n\nFork yourself (pass `subagent_type: \"fork\"`) when the intermediate tool output isn't worth keeping in your context. The criterion is qualitative — \"will I need this output again\" — not task size. Fork open-ended questions. If research can be broken into independent questions, launch parallel forks in one message. A fork beats a fresh subagent for this — it inherits context and shares your cache.\n\nForks are cheap because they share your prompt cache.\n\n**Don't peek.** The tool result includes an `output_file` path — do not Read or tail it. You get a completion notification; trust it. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking.\n\n**Don't race.** After launching, you know nothing about what the fork found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.\n\n**Writing a fork prompt.** Since the fork inherits your context, the prompt is a *directive* — what to do, not what the situation is. Be specific about scope: what's in, what's out, what another agent is handling. Don't re-explain background.\n"
+        } else {
+            ""
+        };
+        // `l` — the UNCONDITIONAL `## Writing the prompt` section.
+        let writing_the_prompt = format!(
+            "\n\n## Writing the prompt\n\n{}Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.\n\
+- Explain what you're trying to accomplish and why.\n\
+- Describe what you've already learned or ruled out.\n\
+- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.\n\
+- If you need a short response, say so (\"report in under 200 words\").\n\
+- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.\n\n\
+{} command-style prompts produce shallow, generic work.\n\n\
+**Never delegate understanding.** Don't write \"based on your findings, fix the bug\" or \"based on the research, implement it.\" Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.",
+            if is_fork {
+                "Any agent other than a fork starts with zero context. "
+            } else {
+                ""
+            },
+            if is_fork { "For fresh agents, terse" } else { "Terse" }
+        );
+
+        // `d` — the code-reviewer example, shared by both `Example usage:` blocks.
+        let code_reviewer_example = format!(
+            "<example>\n\
+user: \"Can you get a second opinion on whether this migration is safe?\"\n\
+assistant: <thinking>I'll ask the code-reviewer agent — it won't see my analysis, so it can give an independent read.</thinking>\n\
+{AGENT_TOOL_NAME}({{\n  \
+description: \"Independent migration review\",\n  \
+subagent_type: \"code-reviewer\",\n  \
+prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
+}})\n\
+<commentary>\n\
+The agent starts with no context from this conversation, so the prompt briefs it: what to assess, the relevant background, and what form the answer should take.\n\
+</commentary>\n\
+</example>\n"
+        );
+        // `f`'s leading example — dropped entirely when general-purpose is
+        // unavailable (`${!n?"":u?…:…}`), because it omits `subagent_type`.
+        let general_purpose_example = if !general_purpose_available {
+            String::new()
+        } else if async_agents_available {
+            format!(
+                "<example>\n\
+user: \"What's left on this branch before we can ship?\"\n\
+assistant: <thinking>A survey question across git state, tests, and config. I'll delegate it and ask for a short report so the raw command output stays out of my context.</thinking>\n\
+{AGENT_TOOL_NAME}({{\n  \
+description: \"Branch ship-readiness audit\",\n  \
+prompt: \"{EXAMPLE_SHIP_AUDIT_PROMPT}\"\n\
+}})\n\
+assistant: Ship-readiness audit running in the background.\n\
+<commentary>\n\
+The prompt is self-contained: it states the goal, lists what to check, and caps the response length. The agent runs in the background (the default), so the turn ends here — nothing about its findings is known yet. The report arrives in a SEPARATE turn, as a completion notification from outside; it is never something you write yourself.\n\
+</commentary>\n\
+[later turn — notification arrives as user message]\n\
+assistant: Audit's back. Three blockers: no tests for the new prompt path, GrowthBook gate wired but not in build_flags.yaml, and one uncommitted file.\n\
+</example>\n\n\
+<example>\n\
+user: \"so is the gate wired up or not\"\n\
+<commentary>\n\
+User asks mid-wait. The audit was launched to answer exactly this, and it hasn't returned. Give status, not a fabricated result.\n\
+</commentary>\n\
+assistant: Still waiting on the audit — that's one of the things it's checking. Should land shortly.\n\
+</example>\n\n"
+            )
+        } else {
+            format!(
+                "<example>\n\
+user: \"What's left on this branch before we can ship?\"\n\
+assistant: <thinking>A survey question across git state, tests, and config. I'll delegate it and ask for a short report so the raw command output stays out of my context.</thinking>\n\
+{AGENT_TOOL_NAME}({{\n  \
+description: \"Branch ship-readiness audit\",\n  \
+prompt: \"{EXAMPLE_SHIP_AUDIT_PROMPT}\"\n\
+}})\n\
+<commentary>\n\
+The prompt is self-contained: it states the goal, lists what to check, and caps the response length. The agent's report comes back as the tool result; relay the findings to the user.\n\
+</commentary>\n\
+</example>\n\n"
+            )
+        };
+        // `${i?c:f}` — the fork example block replaces the whole non-fork one.
+        let examples = if is_fork {
+            format!(
+                "Example usage:\n\n\
+<example>\n\
+user: \"What's left on this branch before we can ship?\"\n\
+assistant: <thinking>Forking this — it's a survey question. I want the punch list, not the git output in my context.</thinking>\n\
+{AGENT_TOOL_NAME}({{\n  \
+subagent_type: \"fork\",\n  \
+name: \"ship-audit\",\n  \
+description: \"Branch ship-readiness audit\",\n  \
+prompt: \"{EXAMPLE_SHIP_AUDIT_PROMPT}\"\n\
+}})\n\
+assistant: Ship-readiness audit running.\n\
+<commentary>\n\
+Turn ends here. The coordinator knows nothing about the findings yet. What follows is a SEPARATE turn — the notification arrives from outside, as a user-role message. It is not something the coordinator writes.\n\
+</commentary>\n\
+[later turn — notification arrives as user message]\n\
+assistant: Audit's back. Three blockers: no tests for the new prompt path, GrowthBook gate wired but not in build_flags.yaml, and one uncommitted file.\n\
+</example>\n\n\
+<example>\n\
+user: \"so is the gate wired up or not\"\n\
+<commentary>\n\
+User asks mid-wait. The audit fork was launched to answer exactly this, and it hasn't returned. The coordinator does not have this answer. Give status, not a fabricated result.\n\
+</commentary>\n\
+assistant: Still waiting on the audit — that's one of the things it's checking. Should land shortly.\n\
+</example>\n\n\
+<example>\n\
+user: \"Can you get a second opinion on whether this migration is safe?\"\n\
+assistant: <thinking>I'll ask the code-reviewer agent — it won't see my analysis, so it can give an independent read.</thinking>\n\
+<commentary>\n\
+A non-fork subagent_type is specified, so the agent starts fresh. It needs full context in the prompt. The briefing explains what to assess and why.\n\
+</commentary>\n\
+{AGENT_TOOL_NAME}({{\n  \
+name: \"migration-review\",\n  \
+description: \"Independent migration review\",\n  \
+subagent_type: \"code-reviewer\",\n  \
+prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
+}})\n\
+</example>\n"
+            )
+        } else {
+            format!("Example usage:\n\n{general_purpose_example}{code_reviewer_example}")
+        };
+
+        // Binary tail: `${_}\n${v}\n## Usage notes\n\n- …${k}${C}${a}${l}\n\n${i?c:f}`.
+        // `k` (remote CCR isolation, gate `qJn()`/`tengu_neapolitan`) is EXCLUDED
+        // (remote/cloud surface); `C` (the in-process-SDK `kae()` / teammate
+        // `sS()` parameter-suppression note) is inert in the port — `kae()` is a
+        // constant `false` and the teammate path is frozen.
+        format!(
+            "{intro}\n{when_not_to_use}\n## Usage notes\n\n\
+- Always include a short description summarizing what the agent will do\n\
+- {final_report_note}\n\
+- Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.{background_notes}{dont_race_note}\n\
+- To continue a previously spawned agent, use SendMessage with the agent's ID or name as the `to` field — that resumes it with full context. A new {AGENT_TOOL_NAME} call starts a fresh agent with no memory of prior runs{fork_memory_qualifier}, so the prompt must be self-contained.\n\
+- Each agent type's model, reasoning effort, and tool access are set in its definition (`.lingxi/agents/*.md` frontmatter, or the SDK `agents` option); the `model` parameter here overrides the definition for this one call.\n\
+- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since a fresh agent is not aware of the user's intent{proactive_notes}\n\
+- With `isolation: \"worktree\"`, the worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.{when_to_fork}{writing_the_prompt}\n\n\
+{examples}"
         )
     }
 
@@ -1395,7 +1714,7 @@ impl Tool for AgentTool {
         "Launch a new agent".into()
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> String {
         // claude-code builds the Agent tool prompt dynamically (getPrompt,
         // AgentTool/prompt.ts:66-287): it injects the live agent catalog (one
         // `formatAgentLine` per resolved AgentDefinition) and the available MCP
@@ -1405,6 +1724,11 @@ impl Tool for AgentTool {
             Some(s) => s.agent_listing().await,
             None => Vec::new(),
         };
+        // 2.1.238 `generalPurposeAvailable` (`p7f(agents, allowedAgentTypes)`,
+        // @292885292): computed from the RAW listing, before the `Agent(<x>)`
+        // deny filter below — the binary's `prompt({agents,…})` wrapper passes
+        // the unfiltered `agents` to `p7f` and handles deny separately.
+        let general_purpose_available = general_purpose_is_available(&agents);
         // Filter out agent types denied by a content-ful `Agent(<x>)` rule, so the
         // advertised catalog the model sees excludes them (claude-code `Pxe` —
         // the 2.1.186 Agent(type)-restriction prompt filter). No gate / no rules
@@ -1432,7 +1756,13 @@ impl Tool for AgentTool {
             .coordinator_mode
             .as_ref()
             .is_some_and(|m| m.is_enabled());
-        Self::build_prompt(&agents, &mcp_server_names, is_coordinator)
+        Self::build_prompt(
+            &agents,
+            &mcp_server_names,
+            is_coordinator,
+            opts.model.as_deref(),
+            general_purpose_available,
+        )
     }
 
     async fn call(
@@ -1598,7 +1928,46 @@ impl Tool for AgentTool {
                 }
             }
             match parsed.subagent_type.as_deref() {
-                None => GENERAL_PURPOSE_AGENT_TYPE.to_string(),
+                None => {
+                    // 2.1.238 @292889305 (NEW — 2.1.220 @234673007 went straight
+                    // to `let lt = t ?? $Fe.agentType`): an OMITTED
+                    // `subagent_type` only defaults to `general-purpose` when
+                    // that agent is actually reachable
+                    // (`if(t===void 0&&!p7f(k,A)){…throw new ISt(
+                    //   `${Gri}. Available agents: ${YLi(Ot)}`)}`).
+                    //
+                    // The available-agents tail is the DENY-FILTERED catalog
+                    // (`Xt = $Gr(k,A,y).map(agentType)`) routed through `YLi`
+                    // (the `"none"` fallback). The binary's
+                    // `Ot = x && f7f(B)===null ? [GAe, ...Xt] : Xt` fork prepend
+                    // is unreachable here: the port only reaches this arm when
+                    // `is_fork` is false, and `is_fork` is exactly
+                    // "fork enabled AND subagent_type omitted".
+                    let listing = spawner.agent_listing().await;
+                    if !general_purpose_is_available(&listing) {
+                        let denied = match &self.ctx.permission_gate {
+                            Some(gate) => gate.agent_deny_content_types().await,
+                            None => Vec::new(),
+                        };
+                        let available = listing
+                            .iter()
+                            .filter(|a| !denied.iter().any(|d| d == &a.agent_type))
+                            .map(|a| a.agent_type.clone())
+                            .collect::<Vec<_>>();
+                        Self::emit_failed(
+                            &bus,
+                            &invocation_id,
+                            "agent_type_missing",
+                            started.elapsed().as_millis() as u64,
+                        )
+                        .await;
+                        return Err(ToolError::InvalidInput(format!(
+                            "{SUBAGENT_TYPE_REQUIRED_MESSAGE}. Available agents: {}",
+                            render_available_agents(&available)
+                        )));
+                    }
+                    GENERAL_PURPOSE_AGENT_TYPE.to_string()
+                }
                 Some(explicit) => {
                     let listing = spawner.agent_listing().await;
                     if listing.iter().any(|a| a.agent_type == explicit) {
@@ -1619,6 +1988,11 @@ impl Tool for AgentTool {
                                 .map(|a| a.agent_type.clone())
                                 .collect::<Vec<_>>()
                         };
+                        // 2.1.238 routes every `Available agents:` list through
+                        // `YLi` (@292880950): `e.join(", ")||"none"`, so an
+                        // empty catalog renders the word `none` rather than an
+                        // empty tail. 2.1.220 interpolated a bare `join(", ")`.
+                        let available_display = || render_available_agents(&available());
                         // claude `Agt()` normalized fallback (AgentTool.tsx): when the
                         // exact name misses, match candidates whose normalized form
                         // (NFKC/lowercase/strip ws+dash+underscore) equals the
@@ -1648,7 +2022,7 @@ impl Tool for AgentTool {
                             let tail = if avail_matches.is_empty() {
                                 format!(
                                     "None of these are available. Available agents: {}",
-                                    available().join(", ")
+                                    available_display()
                                 )
                             } else {
                                 format!(
@@ -1683,7 +2057,7 @@ impl Tool for AgentTool {
                             .await;
                             return Err(ToolError::InvalidInput(format!(
                                 "Agent type '{explicit}' not found. Available agents: {}",
-                                available().join(", ")
+                                available_display()
                             )));
                         }
                     }
@@ -2414,6 +2788,11 @@ mod f_description_l_gate_tests {
         }]
     }
 
+    /// Every assertion in this module targets the SHORT (lean) arm of the
+    /// binary's `m = qk(model)` split, so the model is pinned to a lean-prompt
+    /// one. `general_purpose_available` is `true` — `agents()` lists it.
+    const LEAN_MODEL: Option<&str> = Some("claude-opus-5");
+
     /// Binary @234659244: the first tail bullet is a TERNARY on
     /// `l=!DT()&&!aZ()`. `l` is TRUE by default (`DT()` @230660586 reads an
     /// unset env; `aZ()` @227950071 is the in-process-SDK
@@ -2423,7 +2802,14 @@ mod f_description_l_gate_tests {
     #[test]
     fn first_tail_bullet_uses_the_l_true_arm_by_default() {
         let p =
-            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(
+                &agents(),
+                &[],
+                false,
+                true,
+                LEAN_MODEL,
+                true,
+            ));
         assert!(
             p.contains(
                 "\n\n- The agent's final report is not shown to the user \u{2014} relay what matters.\n- Use "
@@ -2443,25 +2829,39 @@ mod f_description_l_gate_tests {
     #[test]
     fn first_tail_bullet_uses_the_l_false_arm_when_async_agents_unavailable() {
         let p =
-            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false));
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(
+                &agents(),
+                &[],
+                false,
+                false,
+                LEAN_MODEL,
+                true,
+            ));
         assert!(p.contains(
             "\n\n- The agent's final message is returned to you as the tool result; it is not shown to the user \u{2014} relay what matters.\n- Use "
         ));
         assert!(!p.contains("The agent's final report is not shown to the user"));
     }
 
-    /// Binary @234657319: `T = l && !o ? (n ? SHORT : LONG) : ""`. With the
-    /// fork feature off (`n=false`) the LONG arm runs, and it does NOT stop at
-    /// "before continuing." — two more sentences follow. Anchored with
-    /// `ends_with` because the truncated text is a strict PREFIX of the correct
-    /// text, so `contains` on the old string does not discriminate.
+    /// Binary 2.1.238 @292443853: `w = u && !i ? (o ? SHORT : LONG) : ""`. With
+    /// the fork feature off (`o=false`) the LONG arm runs, and it does NOT stop
+    /// at "so the user can interject." — two more sentences follow. Anchored
+    /// with `ends_with` because the truncated text is a strict PREFIX of the
+    /// correct text, so `contains` on the old string does not discriminate.
     #[test]
     fn background_bullet_carries_the_full_long_arm() {
         let p =
-            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(
+                &agents(),
+                &[],
+                false,
+                true,
+                LEAN_MODEL,
+                true,
+            ));
         assert!(
             p.ends_with(
-                "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing. Never fabricate or predict a pending agent's results \u{2014} the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
+                "\n- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` only when your very next action depends on the result and nothing else could usefully happen while it runs — otherwise background it so the user can interject. Never fabricate or predict a pending agent's results \u{2014} the notification is never something you write yourself; if the user asks before it arrives, say it's still running."
             ),
             "background bullet must be the FULL long arm and must be last; got tail: {:?}",
             &p[p.len().saturating_sub(400)..]
@@ -2473,7 +2873,14 @@ mod f_description_l_gate_tests {
     #[test]
     fn background_bullet_absent_when_async_agents_unavailable() {
         let p =
-            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, false));
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(
+                &agents(),
+                &[],
+                false,
+                false,
+                LEAN_MODEL,
+                true,
+            ));
         assert!(
             !p.contains("Subagents run in the background"),
             "l=false must drop the background bullet entirely"
@@ -2489,7 +2896,14 @@ mod f_description_l_gate_tests {
     #[test]
     fn tail_bullet_order_matches_the_binary() {
         let p =
-            prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true));
+            prompt_env(|| AgentTool::build_prompt_with_async_agents(
+                &agents(),
+                &[],
+                false,
+                true,
+                LEAN_MODEL,
+                true,
+            ));
         let i1 = p.find("- The agent's final report is not shown").unwrap();
         let i2 = p.find("- Use SendMessage").unwrap();
         let i3 = p.find("- Each agent type's model").unwrap();
@@ -2507,7 +2921,14 @@ mod f_description_l_gate_tests {
     fn coordinator_branch_has_no_tail_bullets_either_way() {
         for l in [true, false] {
             let p =
-                prompt_env(|| AgentTool::build_prompt_with_async_agents(&agents(), &[], true, l));
+                prompt_env(|| AgentTool::build_prompt_with_async_agents(
+                    &agents(),
+                    &[],
+                    true,
+                    l,
+                    LEAN_MODEL,
+                    true,
+                ));
             assert!(!p.contains("relay what matters"));
             assert!(!p.contains("Subagents run in the background"));
         }

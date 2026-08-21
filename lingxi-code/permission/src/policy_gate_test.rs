@@ -1530,6 +1530,78 @@ mod tests {
         );
     }
 
+    /// PERM-07 (claude-code 2.1.238 `STv` → `DJa` → `Ixf`): Auto mode + a
+    /// PreToolUse hook ask floor + a session that cannot surface prompts is a
+    /// hard DENY carrying the 2.1.238 wrapper copy — the inner transport is
+    /// never consulted. 2.1.220's `G8s` forwarded the ask message verbatim.
+    #[tokio::test]
+    async fn prompts_unavailable_ask_floor_denies_with_2_1_238_copy() {
+        // The builder itself, byte-for-byte.
+        assert_eq!(
+            prompts_unavailable_deny_message("<ask>"),
+            "Permission for this tool use was denied: it requires interactive approval, and permission prompts are not available in this session. The action was NOT performed. Do not claim it succeeded, and do not retry it in this session \u{2014} report the limitation to the user, or suggest an alternative. What was requested: <ask>"
+        );
+        assert_eq!(
+            PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON,
+            "Action requires interactive approval and permission prompts are not available in this context"
+        );
+
+        let input = serde_json::json!({ "command": "cargo test -p permission" });
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        let ctx = PermissionCheckContext {
+            hook_ask_floor: true,
+            is_non_interactive_session: true,
+            ..Default::default()
+        };
+        match gate.check_with_context("Bash", &input, &ctx).await {
+            PermissionOutcome::Deny { reason } => {
+                assert!(
+                    reason.starts_with(
+                        "Permission for this tool use was denied: it requires interactive approval,"
+                    ),
+                    "deny must carry the Ixf wrapper: {reason}"
+                );
+                assert!(
+                    reason.contains(" What was requested: "),
+                    "the ask message must be interpolated: {reason}"
+                );
+                // NOT the separate, unchanged headless `xxf`/`GRu` message.
+                assert!(
+                    !reason.starts_with("Permission to use Bash has been denied."),
+                    "must not fall through to the headless GRu message: {reason}"
+                );
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+        assert_eq!(
+            inner.calls(),
+            0,
+            "the prompts-unavailable deny must not reach the inner transport"
+        );
+
+        // An INTERACTIVE session with the same floor still delegates the ask.
+        let policy2 = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let inner2 = RecordingInner::new(PermissionDecision::Allow);
+        let gate2 = PolicyPermissionGate::new(policy2, inner2.clone());
+        let ctx2 = PermissionCheckContext {
+            hook_ask_floor: true,
+            ..Default::default()
+        };
+        let _ = gate2.check_with_context("Bash", &input, &ctx2).await;
+        assert!(
+            inner2.calls() >= 1,
+            "an interactive ask floor must still delegate to the prompt"
+        );
+    }
+
     #[tokio::test]
     async fn auto_mode_classifier_deny_has_classifier_source() {
         let policy = Arc::new(PermissionPolicy::from_rules(

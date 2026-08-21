@@ -263,6 +263,88 @@ fn process_cell(cell: &Value, index: usize, code_language: &str) -> Value {
     Value::Object(m)
 }
 
+/// `aV` (cc-238.js @289991xxx, `var aV=104857600`) — the hard byte cap `K0f`
+/// applies to a notebook BEFORE parsing it, both to `stat().size` and to the
+/// `aV+1` probe read. Absent from 2.1.220 (`Notebook file exceeds the maximum
+/// size` → 0 hits in 220, 2 in 238).
+pub const MAX_NOTEBOOK_READ_SIZE: u64 = 104_857_600;
+
+/// `K0f`'s first guard (cc-238.js @289994340):
+/// `if(!n.isFile()&&!n.isDirectory())throw new Wur(…)`. New in 2.1.238
+/// (0 hits in 2.1.220). Note that a DIRECTORY passes this leg upstream — the
+/// subsequent read is what fails — so the port mirrors the same disjunction.
+pub const NOTEBOOK_NOT_REGULAR_FILE: &str =
+    "Notebook path is not a regular file (device, FIFO, or socket).";
+
+/// `$Ka()`'s POSIX branch (cc-238.js @289991300), shared by
+/// [`notebook_too_large_message`] and the Read tool's "Notebook content (…)
+/// exceeds maximum allowed size (…)" error.
+///
+/// Two things to know before touching these bytes:
+///   * 2.1.238 de-parameterised the PATH — 2.1.220 interpolated the real,
+///     QUOTED path (`cat "${t}" | jq …`, 220 @109111686); 238 emits the literal
+///     placeholder `cat <notebook_path>` unquoted (238 @113219062).
+///   * `Use ${Oi} with jq` is an interpolation SLOT (`Oi="Bash"`), not a
+///     literal. LingXi renders that slot as "a registered shell tool" repo-wide
+///     because it registers Bash AND PowerShell — an intentional, test-pinned
+///     divergence (`grep.rs::description_is_byte_faithful`). Do NOT "align" it.
+pub const NOTEBOOK_JQ_GUIDANCE: &str = "Use a registered shell tool with jq to read specific portions:\n  cat <notebook_path> | jq '.cells[:20]' # First 20 cells\n  cat <notebook_path> | jq '.cells[100:120]' # Cells 100-120\n  cat <notebook_path> | jq '.cells | length' # Count total cells\n  cat <notebook_path> | jq '.cells[] | select(.cell_type==\"code\") | .source' # All code sources";
+
+/// `l8n()` (cc-238.js @289991xxx):
+/// ``Notebook file exceeds the maximum size this tool can read (${Ba(aV)}). ${$Ka()}``.
+/// `Ba(104857600)` renders `100MB` (verified against the oracle's `Ba`
+/// @281639906 and the port's [`crate::read::format_file_size`]).
+#[must_use]
+pub fn notebook_too_large_message() -> String {
+    format!(
+        "Notebook file exceeds the maximum size this tool can read ({}). {NOTEBOOK_JQ_GUIDANCE}",
+        crate::read::format_file_size(MAX_NOTEBOOK_READ_SIZE),
+    )
+}
+
+/// Byte-locked `$0i` (cc-238.js @289994340, live JS; string table @74017843) —
+/// the message `K0f` throws when [`is_valid_notebook_shape`] refuses. 2.1.220
+/// carried the shorter `…array of cell objects).` form (0 hits in 238, 2 hits
+/// in 220); 238 appended the `source` clause (2 hits in 238, 0 in 220).
+pub const INVALID_NOTEBOOK_SHAPE: &str = "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects, each with a string or string-array \"source\").";
+
+/// One cell of `X2t` (cc-238.js @289990631):
+///
+/// ```js
+/// r===null||typeof r!=="object"
+///   ||typeof r.source!=="string"
+///      &&!(Array.isArray(r.source)&&r.source.every((n)=>typeof n==="string"))
+/// ```
+///
+/// i.e. a cell must be a non-null object whose `source` is either a string or
+/// an array of strings (an EMPTY array passes — JS `[].every` is `true`). A
+/// missing `source` is `undefined`, which is neither, so it fails. 2.1.220 only
+/// had the null/object half; 2.1.238 added the `source` type check. LingXi had
+/// neither before FT-02.
+fn is_valid_cell(cell: &Value) -> bool {
+    let Some(obj) = cell.as_object() else {
+        // Covers JS's `r===null` and `typeof r!=="object"`. A JSON array cell
+        // is `typeof "object"` upstream but then fails the `source` leg, so
+        // rejecting it here reaches the same verdict.
+        return false;
+    };
+    match obj.get("source") {
+        Some(Value::String(_)) => true,
+        Some(Value::Array(items)) => items.iter().all(Value::is_string),
+        _ => false,
+    }
+}
+
+/// `X2t` (cc-238.js @289990631): a value is a readable notebook iff its `cells`
+/// is an array and every element passes [`is_valid_cell`].
+#[must_use]
+pub fn is_valid_notebook_shape(notebook: &Value) -> bool {
+    notebook
+        .get("cells")
+        .and_then(Value::as_array)
+        .is_some_and(|cells| cells.iter().all(is_valid_cell))
+}
+
 /// Parse + process a whole notebook into structured cells — 1:1 with TS
 /// `readNotebook(path)` (no `cellId`, so every cell is processed with
 /// `includeLargeOutputs = false`). Returns the cells array on success, or an
@@ -282,13 +364,13 @@ pub fn read_notebook(raw: &str) -> Result<Vec<Value>, String> {
         .and_then(Value::as_str)
         .unwrap_or("python")
         .to_string();
-    // Binary `readNotebook` (atl): byte-locked invalid-cells error.
+    // Binary `readNotebook` (`K0f`): `if(!X2t(s))throw new Wur($0i)` — the
+    // shape gate is [`is_valid_notebook_shape`], NOT merely "cells is an array".
     let cells = notebook
         .get("cells")
         .and_then(Value::as_array)
-        .ok_or_else(|| {
-            "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects).".to_string()
-        })?;
+        .filter(|cells| cells.iter().all(is_valid_cell))
+        .ok_or_else(|| INVALID_NOTEBOOK_SHAPE.to_string())?;
     Ok(cells
         .iter()
         .enumerate()
@@ -571,6 +653,117 @@ mod tests {
     #[test]
     fn missing_cells_array_errors() {
         assert!(read_notebook("{\"metadata\":{}}").is_err());
+    }
+
+    // ── FT-02: `X2t` per-cell shape gate ─────────────────────────────────────
+
+    #[test]
+    fn invalid_notebook_shape_message_is_byte_locked() {
+        // `$0i`, cc-238.js @289994340 (238 adds the `source` clause; the 220
+        // form `…array of cell objects).` has 0 hits in 238).
+        assert_eq!(
+            INVALID_NOTEBOOK_SHAPE,
+            "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects, each with a string or string-array \"source\")."
+        );
+    }
+
+    #[test]
+    fn null_cell_is_refused() {
+        // JS leg `r===null`.
+        let err = read_notebook(&nb(json!([null]), None)).unwrap_err();
+        assert_eq!(err, INVALID_NOTEBOOK_SHAPE);
+    }
+
+    #[test]
+    fn non_object_cell_is_refused() {
+        // JS leg `typeof r!=="object"`.
+        for cell in [json!("a string cell"), json!(7), json!(true)] {
+            let err = read_notebook(&nb(json!([cell]), None)).unwrap_err();
+            assert_eq!(err, INVALID_NOTEBOOK_SHAPE);
+        }
+    }
+
+    #[test]
+    fn cell_without_source_is_refused() {
+        // JS leg `typeof r.source!=="string" && !(Array.isArray(...))` with
+        // `r.source === undefined`. Before FT-02 the port accepted this and
+        // rendered `source: null`.
+        let err = read_notebook(&nb(json!([{ "cell_type": "code", "id": "c1" }]), None)).unwrap_err();
+        assert_eq!(err, INVALID_NOTEBOOK_SHAPE);
+    }
+
+    #[test]
+    fn cell_with_non_string_source_is_refused() {
+        for src in [json!(42), json!(null), json!({ "a": 1 })] {
+            let err =
+                read_notebook(&nb(json!([{ "cell_type": "code", "source": src }]), None)).unwrap_err();
+            assert_eq!(err, INVALID_NOTEBOOK_SHAPE);
+        }
+    }
+
+    #[test]
+    fn cell_with_mixed_source_array_is_refused() {
+        // `r.source.every((n)=>typeof n==="string")` fails on the `1`.
+        let err = read_notebook(&nb(
+            json!([{ "cell_type": "code", "source": ["ok", 1] }]),
+            None,
+        ))
+        .unwrap_err();
+        assert_eq!(err, INVALID_NOTEBOOK_SHAPE);
+    }
+
+    #[test]
+    fn empty_source_array_is_accepted() {
+        // JS `[].every(...)` is `true`, so an empty array is a VALID source —
+        // the gate must not over-reject.
+        let cells = read_notebook(&nb(
+            json!([{ "cell_type": "code", "id": "c1", "source": [] }]),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(cells[0]["source"], "");
+    }
+
+    #[test]
+    fn one_bad_cell_refuses_the_whole_notebook() {
+        // `!t.some(...)` — the gate is all-or-nothing, not per-cell filtering.
+        let err = read_notebook(&nb(
+            json!([
+                { "cell_type": "code", "id": "c1", "source": "ok" },
+                { "cell_type": "code", "id": "c2" }
+            ]),
+            None,
+        ))
+        .unwrap_err();
+        assert_eq!(err, INVALID_NOTEBOOK_SHAPE);
+    }
+
+    #[test]
+    fn is_valid_notebook_shape_mirrors_x2t() {
+        assert!(is_valid_notebook_shape(
+            &json!({ "cells": [{ "source": "x" }] })
+        ));
+        assert!(is_valid_notebook_shape(&json!({ "cells": [] })));
+        assert!(!is_valid_notebook_shape(&json!({ "cells": {} })));
+        assert!(!is_valid_notebook_shape(&json!({})));
+        assert!(!is_valid_notebook_shape(&json!({ "cells": [{}] })));
+    }
+
+    // ── FT-04: the 100 MiB cap + non-regular-file guard ──────────────────────
+
+    #[test]
+    fn notebook_size_cap_and_guards_are_byte_locked() {
+        // `var aV=104857600` and `K0f`'s first throw (cc-238.js @289994340).
+        assert_eq!(MAX_NOTEBOOK_READ_SIZE, 104_857_600);
+        assert_eq!(
+            NOTEBOOK_NOT_REGULAR_FILE,
+            "Notebook path is not a regular file (device, FIFO, or socket)."
+        );
+        // `l8n()` — `Ba(104857600)` renders `100MB`.
+        assert_eq!(
+            notebook_too_large_message(),
+            "Notebook file exceeds the maximum size this tool can read (100MB). Use a registered shell tool with jq to read specific portions:\n  cat <notebook_path> | jq '.cells[:20]' # First 20 cells\n  cat <notebook_path> | jq '.cells[100:120]' # Cells 100-120\n  cat <notebook_path> | jq '.cells | length' # Count total cells\n  cat <notebook_path> | jq '.cells[] | select(.cell_type==\"code\") | .source' # All code sources"
+        );
     }
 
     #[test]

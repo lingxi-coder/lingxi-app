@@ -50,7 +50,7 @@ When building AI applications, default to the latest and most capable Claude mod
 web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
         " - Fast mode for LingXi uses Claude Opus with faster output \
 (it does not downgrade to a smaller model). It can be toggled with /fast and is \
-available on Opus 5/4.8/4.7.",
+available on Opus 5/4.8.",
     ]
     .join("\n");
     assert_eq!(out, expected, "env_block byte-lock mismatch");

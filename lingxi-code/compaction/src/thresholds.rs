@@ -116,6 +116,17 @@ pub struct AutoCompactTrackingState {
     /// [`RAPID_REFILL_TURN_WINDOW`] turns of the previous one
     /// (`consecutiveRapidRefills`). Drives the thrashing breaker.
     pub consecutive_rapid_refills: u32,
+    /// SC-04: the failure detail of the compaction attempt that was supposed to
+    /// rescue THIS API call, mirroring the oracle's
+    /// `precomputeOutcome.kind==="failed" ? precomputeOutcome.compactFailure : undefined`
+    /// (cc-238.js @228721216). Consumed once by the prompt-too-long surface,
+    /// which renders it through `Fol` (`Prompt is too long · automatic
+    /// compaction failed: …`) instead of the bare `Prompt is too long`.
+    ///
+    /// Transient loop state, never persisted: `#[serde(skip)]` keeps the resume
+    /// runtime-metadata wire shape byte-identical.
+    #[serde(skip)]
+    pub last_compact_failure_detail: Option<String>,
 }
 
 /// The rapid-refill (thrashing) count for `state`: how many consecutive
@@ -143,26 +154,196 @@ pub fn rapid_refill_count(state: &AutoCompactTrackingState) -> u32 {
     }
 }
 
+/// Where the auto-compact window came from.
+///
+/// 1:1 with the `source` field of claude-code's `N8` / `resolveAutoCompactWindow`
+/// (cc-238.js @286413238). [`Self::as_str`] returns the oracle's wire spellings,
+/// which the `/autocompact` status renderer `sgT` switches on.
+///
+/// Precedence (the whole `N8` chain, in order):
+/// `env → settings → clientdata → experiment → model-default → unknown-model → auto`.
+/// The 2.1.220 twin `aY` stops at `model-default → auto`; the `unknown-model`
+/// arm is new in 2.1.238 (`source:"unknown-model"` has 0 hits in the 2.1.220
+/// binary), which is why this taxonomy exists at all — the port previously
+/// resolved a bare `u64` with no source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoCompactWindowSource {
+    /// `"env"` — pinned by `LINGXI_AUTO_COMPACT_WINDOW`.
+    Env,
+    /// `"settings"` — pinned by the `autoCompactWindow` setting.
+    Settings,
+    /// `"clientdata"` — the server-pushed client-data window.
+    ///
+    /// Unreachable in LingXi: `TyS` reads the `rowan_thicket` client-data cache,
+    /// which has no Rust equivalent (same deferral as the GrowthBook branches
+    /// already documented in `llm-client/src/model/context_window.rs`).
+    ClientData,
+    /// `"experiment"` — the `gRa` experiment override.
+    ///
+    /// Unreachable in LingXi for the same reason as [`Self::ClientData`].
+    Experiment,
+    /// `"model-default"` — a per-model default window.
+    ///
+    /// Unreachable in LingXi: `N8` selects it from the `byS` model set and the
+    /// `ovp` model-overrides table, neither of which the port carries.
+    ModelDefault,
+    /// `"unknown-model"` (NEW in 2.1.238) — auto-compact will hold the session
+    /// inside the window it *assumes* for a model this build does not recognize.
+    UnknownModel,
+    /// `"auto"` — no override applied.
+    Auto,
+}
+
+impl AutoCompactWindowSource {
+    /// The oracle's wire spelling for this source.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Env => "env",
+            Self::Settings => "settings",
+            Self::ClientData => "clientdata",
+            Self::Experiment => "experiment",
+            Self::ModelDefault => "model-default",
+            Self::UnknownModel => "unknown-model",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+/// The `{window, configured, source}` triple `N8` returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedAutoCompactWindow {
+    /// The window actually applied — `min(model_window, configured)`.
+    pub window: u64,
+    /// The window the source asked for, before the model clamp. Equal to
+    /// [`Self::window`] unless the model's own window is smaller (the oracle
+    /// renders that gap as ` · capped to N by model`).
+    pub configured: u64,
+    /// Which branch of `N8` produced it.
+    pub source: AutoCompactWindowSource,
+}
+
+/// Env kill-switch for the `unknown-model` branch.
+///
+/// `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT` upstream, renamed to
+/// the `LINGXI_` prefix like every other window/threshold knob in this module
+/// (`LINGXI_AUTO_COMPACT_WINDOW`, `LINGXI_MAX_CONTEXT_TOKENS`, …).
+pub const DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV: &str =
+    "LINGXI_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT";
+
+/// `true` when this build has no real window for `model` and
+/// [`context_window_for_model`] is therefore returning its assumed default.
+///
+/// The oracle's predicate is `!jpt(e,n)` — `ICd(canonical)`, "is the canonical
+/// name in the model registry". LingXi's registry split is:
+///
+/// * non-Claude ids resolve through the catalog-fed
+///   `llm_client::model::model_limits` registry — the SAME
+///   lookup [`context_window_for_model`] uses to decide whether it knows the
+///   model, so `lookup(...).is_none()` is exactly "unrecognized" here, with no
+///   second table to drift out of sync;
+/// * Claude-family ids have no "known id" set at all (`canonical_name` falls
+///   back to the raw string), so they are treated as recognized. Conservative
+///   on purpose: the port never warns about a `claude-*` id it might well know.
+fn model_window_is_assumed(model: &str) -> bool {
+    !llm_client::model::context_window::is_claude_family(model)
+        && llm_client::model::model_limits::lookup(model).is_none()
+}
+
+/// Resolve the auto-compact window together with the source that produced it.
+///
+/// 1:1 with `N8` (cc-238.js @286413238) for the branches LingXi can decide:
+///
+/// ```text
+/// function N8(e,t,r=Ox()){ let n=Fo(e),o=OR(e,r);
+///   if(process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW){…return{window:Math.min(o,c),configured:c,source:"env"}}
+///   if(t!==void 0) return{window:Math.min(o,t),configured:t,source:"settings"};
+///   … clientdata … experiment … model-default …
+///   if(iO()&&!V.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT&&!vyS(e,r)&&!C1r(e)&&!jpt(e,n))
+///     return{window:o,configured:o,source:"unknown-model"};
+///   return{window:o,configured:o,source:"auto"} }
+/// ```
+///
+/// The 1M guard `vyS(e,r)` (`[1m]` suffix, or the 1M beta header on a
+/// 1M-capable model) is folded into `model_window >= 1_000_000`: every path that
+/// satisfies `vyS` is a path on which [`context_window_for_model`] already
+/// returned `1e6`, so this reads the same derivation instead of duplicating the
+/// suffix/beta tables. `C1r(e)` (an unresolved Bedrock
+/// `application-inference-profile`) has no port analogue.
+///
+/// Deferred: the oracle validates the env value through `dXe(…, Lli=1e5,
+/// hRa=1e6)` and then floors it with `Math.max(Lli, effective)`. The port's
+/// pre-existing [`parse_positive_u64`] rule is kept verbatim so this refactor
+/// does not move [`effective_context_window_size`]; the clamp is a separate,
+/// pre-existing divergence.
+#[must_use]
+pub fn resolve_auto_compact_window(
+    model: &str,
+    betas: &[String],
+    settings_window: Option<u64>,
+    auto_compact_enabled: bool,
+) -> ResolvedAutoCompactWindow {
+    let model_window = context_window_for_model(model, betas);
+
+    if let Ok(raw) = std::env::var("LINGXI_AUTO_COMPACT_WINDOW") {
+        if let Some(configured) = parse_positive_u64(&raw) {
+            return ResolvedAutoCompactWindow {
+                window: model_window.min(configured),
+                configured,
+                source: AutoCompactWindowSource::Env,
+            };
+        }
+    }
+
+    if let Some(configured) = settings_window {
+        return ResolvedAutoCompactWindow {
+            window: model_window.min(configured),
+            configured,
+            source: AutoCompactWindowSource::Settings,
+        };
+    }
+
+    // clientdata / experiment / model-default: see AutoCompactWindowSource.
+
+    let source = if auto_compact_enabled
+        && !env_truthy(DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV)
+        && model_window < 1_000_000
+        && model_window_is_assumed(model)
+    {
+        AutoCompactWindowSource::UnknownModel
+    } else {
+        AutoCompactWindowSource::Auto
+    };
+
+    ResolvedAutoCompactWindow {
+        window: model_window,
+        configured: model_window,
+        source,
+    }
+}
+
 /// Returns the context window size minus the max output tokens reserved for the
 /// compaction summary.
 ///
-/// Mirrors `getEffectiveContextWindowSize` (`autoCompact.ts:33-49`):
-/// `context_window − min(max_output_tokens, MAX_OUTPUT_TOKENS_FOR_SUMMARY)`,
-/// honoring the `LINGXI_AUTO_COMPACT_WINDOW` env clamp (a positive integer
-/// caps the context window via `min`).
+/// Mirrors `getEffectiveContextWindowSize` (`autoCompact.ts:33-49`) — the
+/// oracle's `USe(e,t)`, which is `N8(e,n).window − min(max_output, avp)`. The
+/// window half is delegated to [`resolve_auto_compact_window`] so there is
+/// exactly ONE derivation of it; every branch that survives in the port returns
+/// the same number this function returned before the source taxonomy landed
+/// (`unknown-model` and `auto` both yield the bare model window), so the value
+/// is unchanged.
+///
+/// `settings_window` is `None` here: the port has no writable
+/// `autoCompactWindow` setting (its only knob is `LINGXI_AUTO_COMPACT_WINDOW`),
+/// as `commands/core/src/autocompact.rs` already documents.
 #[must_use]
 pub fn effective_context_window_size(model: &str, betas: &[String]) -> u64 {
     let reserved_tokens_for_summary =
         max_output_tokens_for_model(model).min(MAX_OUTPUT_TOKENS_FOR_SUMMARY);
-    let mut context_window = context_window_for_model(model, betas);
 
-    if let Ok(raw) = std::env::var("LINGXI_AUTO_COMPACT_WINDOW") {
-        if let Some(parsed) = parse_positive_u64(&raw) {
-            context_window = context_window.min(parsed);
-        }
-    }
-
-    context_window.saturating_sub(reserved_tokens_for_summary)
+    resolve_auto_compact_window(model, betas, None, is_auto_compact_enabled(true))
+        .window
+        .saturating_sub(reserved_tokens_for_summary)
 }
 
 /// Returns the token count at which autocompact should fire.
@@ -358,6 +539,7 @@ mod tests {
         "USER_TYPE",
         "DISABLE_COMPACT",
         "DISABLE_AUTO_COMPACT",
+        DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV,
     ];
 
     /// Snapshot the env vars this module manipulates, clear them, run `body`,
@@ -389,6 +571,94 @@ mod tests {
     const MODEL: &str = "claude-sonnet-4-6-20251001";
     const EFFECTIVE: u64 = 180_000;
     const AUTOCOMPACT: u64 = EFFECTIVE - AUTOCOMPACT_BUFFER_TOKENS; // 167_000
+
+    /// A model this build has no real window for resolves through the
+    /// `unknown-model` branch `N8` gained in 2.1.238 — and the window it
+    /// reports is unchanged, so routing `effective_context_window_size` through
+    /// the resolver is source-only.
+    #[test]
+    fn sc06_unrecognized_model_resolves_to_the_unknown_model_source() {
+        with_clean_env(|| {
+            // Non-Claude id absent from the catalog registry: the port is
+            // ASSUMING MODEL_CONTEXT_WINDOW_DEFAULT for it.
+            const UNKNOWN: &str = "mysteryprovider/mystery-9-turbo";
+            let r = resolve_auto_compact_window(UNKNOWN, &[], None, true);
+            assert_eq!(r.source, AutoCompactWindowSource::UnknownModel);
+            assert_eq!(r.window, crate::context_window::MODEL_CONTEXT_WINDOW_DEFAULT);
+            assert_eq!(r.configured, r.window);
+
+            // The kill switch restores the previous behavior (source `auto`).
+            std::env::set_var(DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV, "1");
+            assert_eq!(
+                resolve_auto_compact_window(UNKNOWN, &[], None, true).source,
+                AutoCompactWindowSource::Auto
+            );
+            std::env::remove_var(DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV);
+
+            // `iO()` gate: auto-compact off ⇒ never `unknown-model`.
+            assert_eq!(
+                resolve_auto_compact_window(UNKNOWN, &[], None, false).source,
+                AutoCompactWindowSource::Auto
+            );
+
+            // A Claude-family id is treated as recognized.
+            assert_eq!(
+                resolve_auto_compact_window(MODEL, &[], None, true).source,
+                AutoCompactWindowSource::Auto
+            );
+
+            // `vyS(e,r)`: a 1M opt-in is never called unrecognized.
+            assert_eq!(
+                resolve_auto_compact_window("mysteryprovider/mystery-9[1m]", &[], None, true).source,
+                AutoCompactWindowSource::Auto
+            );
+
+            // The window an unrecognized model reports is the same one the
+            // pre-taxonomy code returned.
+            assert_eq!(
+                effective_context_window_size(UNKNOWN, &[]),
+                crate::context_window::MODEL_CONTEXT_WINDOW_DEFAULT
+                    - max_output_tokens_for_model(UNKNOWN).min(MAX_OUTPUT_TOKENS_FOR_SUMMARY)
+            );
+        });
+    }
+
+    /// `N8`'s env → settings precedence, and the byte-exact `source` spellings
+    /// the `/autocompact` status renderer switches on.
+    #[test]
+    fn sc06_window_source_precedence_and_wire_spellings() {
+        with_clean_env(|| {
+            std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "150000");
+            let r = resolve_auto_compact_window(MODEL, &[], Some(120_000), true);
+            assert_eq!(r.source, AutoCompactWindowSource::Env, "env outranks settings");
+            assert_eq!(r.window, 150_000);
+            assert_eq!(r.configured, 150_000);
+            std::env::remove_var("LINGXI_AUTO_COMPACT_WINDOW");
+
+            let r = resolve_auto_compact_window(MODEL, &[], Some(120_000), true);
+            assert_eq!(r.source, AutoCompactWindowSource::Settings);
+            assert_eq!(r.window, 120_000);
+
+            // `Math.min(o, t)` — the model window caps the configured one.
+            let r = resolve_auto_compact_window(MODEL, &[], Some(900_000), true);
+            assert_eq!(r.window, 200_000, "clamped to the model window");
+            assert_eq!(r.configured, 900_000, "configured keeps the raw ask");
+        });
+
+        assert_eq!(AutoCompactWindowSource::Env.as_str(), "env");
+        assert_eq!(AutoCompactWindowSource::Settings.as_str(), "settings");
+        assert_eq!(AutoCompactWindowSource::ClientData.as_str(), "clientdata");
+        assert_eq!(AutoCompactWindowSource::Experiment.as_str(), "experiment");
+        assert_eq!(
+            AutoCompactWindowSource::ModelDefault.as_str(),
+            "model-default"
+        );
+        assert_eq!(
+            AutoCompactWindowSource::UnknownModel.as_str(),
+            "unknown-model"
+        );
+        assert_eq!(AutoCompactWindowSource::Auto.as_str(), "auto");
+    }
 
     #[test]
     fn effective_and_autocompact_baseline() {

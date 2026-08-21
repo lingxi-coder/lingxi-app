@@ -62,6 +62,81 @@ const EXPLAIN_AUTO_RECOMMENDED: &str = "The auto setting picks a window tuned fo
 const EXPLAIN_OVERRIDE_WARNING: &str =
     "Overriding auto may result in high token usage, especially when resuming long sessions.";
 
+/// Where the reported auto-compact window came from — 1:1 with the `source`
+/// field of claude-code's `N8` (`resolveAutoCompactWindow`) as consumed by the
+/// status renderer `sgT` (cc-238.js @294999853):
+///
+/// ```text
+/// `Auto-compact window: ${o==="auto"?"auto"
+///   :o==="experiment"||o==="clientdata"?`${oc(n)} tokens)${i}`
+///   :o==="env"?`${oc(n)} tokens (from CLAUDE_CODE_AUTO_COMPACT_WINDOW)${i}`
+///   :o==="unknown-model"?`${oc(n)} tokens (default for an unrecognized model)${i}`
+///   :o==="model-default"?`${oc(n)} tokens (default for this model)${i}`
+///   :`${oc(n)} tokens (from settings)${i}`}`
+/// ```
+///
+/// SC-03: the `unknown-model` and `model-default` arms are **new in 2.1.238**
+/// (`" tokens (default for this model)"` has 0 hits in the 2.1.220 binary; the
+/// 2.1.220 twin `$ly` @236076164 is the same expression without them).
+///
+/// LingXi reach today: the handler resolves only [`WindowSource::Env`] (the
+/// `LINGXI_AUTO_COMPACT_WINDOW` override) and [`WindowSource::Auto`], because
+/// `compaction::thresholds::effective_context_window_size` returns a bare `u64`
+/// with no source taxonomy and the slash-command handler has no access to the
+/// main-loop model (the oracle reads `t.options.mainLoopModel`). The remaining
+/// arms carry the byte-exact upstream copy and are selected as soon as that
+/// resolver returns a `(window, configured, source)` triple.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowSource {
+    /// `source:"auto"` — no override and no model-specific default applied.
+    Auto,
+    /// `source:"env"` — pinned by `LINGXI_AUTO_COMPACT_WINDOW`.
+    Env(u64),
+    /// `source:"settings"` — pinned by `settings.autoCompactWindow`.
+    Settings(u64),
+    /// `source:"model-default"` — the model's own default window (new in 2.1.238).
+    ModelDefault(u64),
+    /// `source:"unknown-model"` — the assumed window for a model this build does
+    /// not recognize (new in 2.1.238).
+    UnknownModel(u64),
+}
+
+impl WindowSource {
+    /// The `Auto-compact window: …` line for this source, byte-exact with `sgT`.
+    ///
+    /// The upstream `${i}` (` · capped to N by model`) suffix is not rendered:
+    /// it needs the `configured`-vs-`window` split the port's resolver does not
+    /// expose yet (pre-existing, also absent in the port against 2.1.220).
+    fn window_line(self) -> String {
+        match self {
+            Self::Auto => "Auto-compact window: auto".to_string(),
+            Self::Env(n) => format!(
+                "Auto-compact window: {} tokens (from {WINDOW_ENV_VAR})",
+                format_tokens_compact(n)
+            ),
+            Self::Settings(n) => format!(
+                "Auto-compact window: {} tokens (from settings)",
+                format_tokens_compact(n)
+            ),
+            Self::ModelDefault(n) => format!(
+                "Auto-compact window: {} tokens (default for this model)",
+                format_tokens_compact(n)
+            ),
+            Self::UnknownModel(n) => format!(
+                "Auto-compact window: {} tokens (default for an unrecognized model)",
+                format_tokens_compact(n)
+            ),
+        }
+    }
+
+    /// `if(o==="env"||o==="settings") a.push(…)` — the "Overriding auto…" line
+    /// is pinned to the two *user*-set sources only; a model default (or an
+    /// unrecognized-model fallback) is not an override.
+    fn is_user_override(self) -> bool {
+        matches!(self, Self::Env(_) | Self::Settings(_))
+    }
+}
+
 /// `/autocompact` handler (headless, read-only). See module docs.
 #[derive(Debug, Default, Clone)]
 pub struct AutocompactHandler;
@@ -84,23 +159,24 @@ impl AutocompactHandler {
             .filter(|&n| n > 0)
     }
 
-    /// Render the no-argument status block (`M$m`). `window` is the env override
-    /// (`Some`) or `None` (model default = `auto`).
-    fn status_block(window: Option<u64>) -> String {
+    /// Render the no-argument status block (`M$m`) for a resolved window
+    /// [`WindowSource`].
+    fn status_block(source: WindowSource) -> String {
         let mut lines: Vec<String> = Vec::with_capacity(4);
-        match window {
-            Some(n) => lines.push(format!(
-                "Auto-compact window: {} tokens (from {WINDOW_ENV_VAR})",
-                format_tokens_compact(n)
-            )),
-            None => lines.push("Auto-compact window: auto".to_string()),
-        }
+        lines.push(source.window_line());
         lines.push(EXPLAIN_THRESHOLD.to_string());
         lines.push(EXPLAIN_AUTO_RECOMMENDED.to_string());
-        if window.is_some() {
+        if source.is_user_override() {
             lines.push(EXPLAIN_OVERRIDE_WARNING.to_string());
         }
         lines.join("\n")
+    }
+
+    /// The window source the port can resolve today: the env override, else
+    /// `auto`. (See [`WindowSource`] for why `model-default`/`unknown-model`
+    /// are not selectable from this handler yet.)
+    fn resolved_source(window: Option<u64>) -> WindowSource {
+        window.map_or(WindowSource::Auto, WindowSource::Env)
     }
 }
 
@@ -133,7 +209,7 @@ impl BuiltinCommandHandler for AutocompactHandler {
 
         let display = if arg.is_empty() {
             // No argument → status block (`M$m`).
-            Self::status_block(window)
+            Self::status_block(Self::resolved_source(window))
         } else if window.is_some() {
             // Set-argument while the env override is active → byte-exact
             // env-precedence note (`EQt` short-circuit).
@@ -142,7 +218,7 @@ impl BuiltinCommandHandler for AutocompactHandler {
             // Set-argument, no env override: LingXi has no writable settings
             // store for the window (the only knob is the env var), so this is
             // read-only — report the current (model-default) resolution.
-            Self::status_block(None)
+            Self::status_block(WindowSource::Auto)
         };
 
         CommandResult::Done {
@@ -189,6 +265,47 @@ mod tests {
         assert_eq!(format_tokens_compact(1_000_000), "1m");
         assert_eq!(format_tokens_compact(1_500_000), "1.5m");
         assert_eq!(format_tokens_compact(50_000), "50k");
+    }
+
+    /// SC-03: the two window-source labels 2.1.238 added to `sgT` are rendered
+    /// byte-exactly, and neither one is treated as a user override (so the
+    /// "Overriding auto…" line stays off, matching `o==="env"||o==="settings"`).
+    #[test]
+    fn sc03_new_window_source_labels_are_byte_exact() {
+        assert_eq!(
+            WindowSource::ModelDefault(200_000).window_line(),
+            "Auto-compact window: 200k tokens (default for this model)"
+        );
+        assert_eq!(
+            WindowSource::UnknownModel(200_000).window_line(),
+            "Auto-compact window: 200k tokens (default for an unrecognized model)"
+        );
+        assert_eq!(
+            WindowSource::Settings(500_000).window_line(),
+            "Auto-compact window: 500k tokens (from settings)"
+        );
+        assert_eq!(
+            WindowSource::Env(1_000_000).window_line(),
+            "Auto-compact window: 1m tokens (from LINGXI_AUTO_COMPACT_WINDOW)"
+        );
+        assert_eq!(WindowSource::Auto.window_line(), "Auto-compact window: auto");
+
+        for source in [
+            WindowSource::Auto,
+            WindowSource::ModelDefault(200_000),
+            WindowSource::UnknownModel(200_000),
+        ] {
+            assert!(
+                !AutocompactHandler::status_block(source).contains(EXPLAIN_OVERRIDE_WARNING),
+                "{source:?} is not a user override"
+            );
+        }
+        for source in [WindowSource::Env(200_000), WindowSource::Settings(200_000)] {
+            assert!(
+                AutocompactHandler::status_block(source).ends_with(EXPLAIN_OVERRIDE_WARNING),
+                "{source:?} is a user override"
+            );
+        }
     }
 
     #[tokio::test]

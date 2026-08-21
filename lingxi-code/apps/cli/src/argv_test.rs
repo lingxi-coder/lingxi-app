@@ -1317,4 +1317,90 @@ mod tests {
         let a = Argv::from_iter(["lingxi-cli", "--input-format", "text", "hi"]).unwrap();
         assert!(!a.is_stream_json_input());
     }
+
+    // CLI-01 (cc 2.1.238): `--autocompact <auto|tokens>` is a NEW *visible*
+    // root flag. Its argParser is `DUn` (cc-238.js @222905882) — the acceptance
+    // set pinned below is that function's, not a re-derivation:
+    // `auto`; `k`/`m` suffixes via `parseFloat` on the SUFFIXED string; a bare
+    // 100..=1000 meaning thousands; `By`'s exponent and grouped-thousands
+    // spellings; and the `[1e5, 1e6]` clamp (`Lli`/`hRa`).
+    #[test]
+    fn autocompact_parses_the_oracle_acceptance_set() {
+        let auto = Argv::from_iter(["lingxi-cli", "--autocompact", "AUTO"]).unwrap();
+        assert_eq!(auto.autocompact, Some(AutocompactWindow::Auto));
+
+        for (raw, tokens) in [
+            ("500k", 500_000_u64),
+            ("1m", 1_000_000),
+            ("0.5m", 500_000),
+            ("100k", 100_000),
+            // A bare 100..=1000 is shorthand for thousands.
+            ("200", 200_000),
+            ("1000", 1_000_000),
+            // Outside the shorthand band the number is taken literally.
+            ("200000", 200_000),
+            // `By` = `T8y(t) ?? parseInt(t,10)`: exponent + grouped-thousands.
+            ("2e5", 200_000),
+            ("2.5e5", 250_000),
+            ("200,000", 200_000),
+        ] {
+            let parsed = Argv::from_iter(["lingxi-cli", "--autocompact", raw]).unwrap();
+            assert_eq!(
+                parsed.autocompact,
+                Some(AutocompactWindow::Tokens(tokens)),
+                "--autocompact {raw}"
+            );
+        }
+    }
+
+    // The clamp and the byte-exact rejection copy from the `j3t` throw at
+    // cc-238.js @243908809.
+    #[test]
+    fn autocompact_rejects_out_of_range_and_unparseable_values() {
+        for raw in ["99k", "1001", "1.5m", "2m", "abc", "-500k", ""] {
+            assert!(
+                Argv::from_iter(["lingxi-cli", "--autocompact", raw]).is_err(),
+                "--autocompact {raw} should be rejected"
+            );
+        }
+        let error = Argv::from_iter(["lingxi-cli", "--autocompact", "99k"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                "It must be 'auto', or between 100k and 1M (e.g. 500k, 200000, or 200 as shorthand)"
+            ),
+            "rejection copy drifted: {error}"
+        );
+    }
+
+    // `--autocompact` carries no `.hideHelp()` in 2.1.238 (unlike its
+    // `--advisor` neighbour), so it must render in root `--help` with the
+    // oracle's spec and description. Asserted through clap's `Arg`
+    // introspection rather than the rendered screen: `wrap_help` re-flows the
+    // help column to the terminal width, which would let an en dash drift to a
+    // hyphen without a `contains` ever noticing.
+    #[test]
+    fn autocompact_is_a_visible_root_flag_with_the_oracle_copy() {
+        let command = <Argv as clap::CommandFactory>::command();
+        let arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "autocompact")
+            .expect("--autocompact is a root flag");
+        assert!(!arg.is_hide_set(), "--autocompact must render in --help");
+        assert_eq!(arg.get_long(), Some("autocompact"));
+        assert_eq!(
+            arg.get_value_names()
+                .map(|names| names.iter().map(ToString::to_string).collect::<Vec<_>>()),
+            Some(vec!["auto|tokens".to_string()])
+        );
+        // EN DASH, not a hyphen: cc-238.js @243908809 stores
+        // "Auto-compact window size (auto, or 100k\u2013(U+2013)1M tokens)".
+        let expected = "Auto-compact window size (auto, or 100k\u{2013}1M tokens)";
+        assert_eq!(
+            arg.get_help().map(ToString::to_string).as_deref(),
+            Some(expected),
+            "--autocompact help copy drifted"
+        );
+    }
 }

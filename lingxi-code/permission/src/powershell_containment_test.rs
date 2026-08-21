@@ -564,6 +564,106 @@ fn check_ps_path_honors_additional_working_dirs() {
     ));
 }
 
+/// PERM-03 (claude-code 2.1.238 `w$i`): a path that carried quote characters
+/// never auto-allows — the `if(i&&f.allowed)return s(d)` tail degrades an
+/// otherwise-allowed in-cwd path to the byte-exact QUOTE_CHARS manual approval.
+#[test]
+fn check_ps_path_quoted_path_requires_manual_approval() {
+    let roots = ps_roots();
+    assert_eq!(
+        ps_path_reasons::QUOTE_CHARS,
+        "Paths containing quote characters cannot be statically validated and require manual approval"
+    );
+    // Same path unquoted → auto-allowed (read, in cwd).
+    assert!(matches!(
+        check_ps_path(
+            "notes.txt",
+            PsOperation::Read,
+            &roots,
+            &[],
+            false,
+            PermissionMode::Default,
+        ),
+        PsPathOutcome::Allowed { .. }
+    ));
+    // Surrounding quotes → manual approval, not Allowed.
+    match check_ps_path(
+        "'notes.txt'",
+        PsOperation::Read,
+        &roots,
+        &[],
+        false,
+        PermissionMode::Default,
+    ) {
+        PsPathOutcome::AskReason { reason, resolved } => {
+            assert_eq!(reason, ps_path_reasons::QUOTE_CHARS);
+            assert_eq!(resolved, "/proj/work/notes.txt");
+        }
+        other => panic!("expected AskReason, got {other:?}"),
+    }
+    // An INTERIOR quote also counts (2.1.238 `wW` is the GLOBAL strip; 2.1.220's
+    // anchored `z2` would have left the quote in place and blocked elsewhere).
+    match check_ps_path(
+        "no\"tes.txt",
+        PsOperation::Read,
+        &roots,
+        &[],
+        false,
+        PermissionMode::Default,
+    ) {
+        PsPathOutcome::AskReason { reason, resolved } => {
+            assert_eq!(reason, ps_path_reasons::QUOTE_CHARS);
+            assert_eq!(resolved, "/proj/work/notes.txt");
+        }
+        other => panic!("expected AskReason, got {other:?}"),
+    }
+    // A quoted path OUTSIDE the working dirs keeps the containment ask — the
+    // quote verdict only replaces an `allowed` outcome.
+    match check_ps_path(
+        "'/etc/passwd'",
+        PsOperation::Read,
+        &roots,
+        &[],
+        false,
+        PermissionMode::Default,
+    ) {
+        PsPathOutcome::AskContainment { resolved } => assert_eq!(resolved, "/etc/passwd"),
+        other => panic!("expected AskContainment, got {other:?}"),
+    }
+}
+
+/// PERM-03: quoting does not override an earlier string guard, and in the glob
+/// branch it only replaces the read reason on the `..`-segment (`p4e`) arm.
+#[test]
+fn classify_quoted_glob_and_guard_ordering() {
+    use ps_path_reasons as R;
+    // A guard that fires before the tail wins over the quote verdict.
+    assert_eq!(
+        reason_of(&classify("'~bob/x'", PsOperation::Read)),
+        R::TILDE_USER
+    );
+    // Quoted read-glob WITHOUT a `..` segment keeps GLOB_READ.
+    assert_eq!(
+        reason_of(&classify("'logs/*.txt'", PsOperation::Read)),
+        R::GLOB_READ
+    );
+    // Quoted read-glob WITH a `..` segment takes the quote verdict.
+    assert_eq!(
+        reason_of(&classify("'../logs/*.txt'", PsOperation::Read)),
+        R::QUOTE_CHARS
+    );
+    // Unquoted, same shape → still GLOB_READ.
+    assert_eq!(
+        reason_of(&classify("../logs/*.txt", PsOperation::Read)),
+        R::GLOB_READ
+    );
+    // A write glob is GLOB_WRITE regardless of quoting.
+    assert_eq!(
+        reason_of(&classify("'../out/*.log'", PsOperation::Write)),
+        R::GLOB_WRITE
+    );
+}
+
 #[test]
 fn check_ps_path_string_guard_wins_over_containment() {
     let roots = ps_roots();

@@ -366,67 +366,81 @@ impl tool_api::Tool for PromptAgentTool {
     }
 }
 
-/// Byte manifest for the clean-room 2.1.220 prompt assembler.
+/// Byte manifest for the prompt assembler — **regenerated for claude-code
+/// 2.1.238 on 2026-08-20**.
+///
+/// PROVENANCE, so nobody mistakes these for oracle facts: these lengths and
+/// digests are hashes of LingXi's OWN normalized prompt body. They are a
+/// regression lock that catches unintended prompt drift; they are NOT extracted
+/// from the Claude Code binary. The oracle-derived truth for this prompt lives
+/// in the per-sentence assertions in `orchestrator/src/prompt/body_sections.rs`
+/// and `env_block.rs`, which is where a byte claim must actually be proven.
+///
+/// They moved from the 2.1.220 values because the 2.1.238 alignment pass
+/// rewrote `# Communicating with the user` (SP-1…SP-4: four em-dash clauses
+/// re-punctuated, "the PR merges" -> "the change merges"), the `action_caution`
+/// tail (SP-5), the Fable/Mythos autonomy tail (SP-6), the fork bullet (SP-7),
+/// and dropped Opus 4.7 from the `# Environment` fast-mode line (SP-8).
 ///
 /// Claude emits one extra first block carrying a private
 /// `x-anthropic-billing-header` attestation. LingXi deliberately does not
 /// spoof that private billing identity, so its request contains the remaining
 /// two observable blocks: the LingXi brand prefix and the normalized body.
 #[test]
-fn production_prompt_bodies_match_normalized_2_1_220_manifests() {
+fn production_prompt_bodies_match_normalized_2_1_238_manifests() {
     let temp = tempfile::tempdir().expect("temp cwd");
     let cwd = temp.path().canonicalize().expect("physical cwd");
     let memory_dir = cwd.join(".lingxi/projects/oracle/memory");
     let cases = [
         (
             "claude-fable-5",
-            10_447,
-            "ff68e4014cb242baa9d9783b0ea5fd791f755e2124801e374d446442f4c30aa0",
+            10_449,
+            "cf1c325030407204d13bb0ef18112538177527add11387a9ade102d8db509a46",
         ),
         (
             "claude-haiku-4-5-20251001",
-            27_522,
-            "45e67aa66f564c77eb58957f8d9f36e4826b5d28a27d07d6e706b73b6f0f7d54",
+            27_530,
+            "f374890bd85e1c7ccc39f4408849db9efb3d785ea631b6b5b8abe098f14260c2",
         ),
         (
             "claude-mythos-5",
-            9_753,
-            "b54f1bfeaa66b3e77ea3c37fb546d148192c6f9e9b7a2e2b0de130fe3535cabb",
+            9_755,
+            "be335dfb8bda35d5cd5c7bcd0e3522e815d26df8195c143dba37a882333fe002",
         ),
         (
             "claude-opus-4-5",
-            27_506,
-            "d5662d7be2d4edee5bdc891c69e054ee889d517f2a3a455eaf4d5a60ec7fb4fb",
+            27_514,
+            "d7012ba94b9acac26f3bbf8434c8fe6d97dddac5d68cf523a3100e50fa61bd75",
         ),
         (
             "claude-opus-4-6",
-            27_506,
-            "c680f464e2c36ad786bf5de027c0c18426e4d3f7e48c0bf5562bd051fd335bd6",
+            27_514,
+            "cb79937b876361530ecab7720e5ae2c91dad53cdb7f16ea801dcbb912597ef23",
         ),
         (
             "claude-opus-4-7",
-            27_510,
-            "2ca2d14861ed25c9948fd3fb20a5191cf3d5a6b2ec70f475d4b3e8acf0d0b705",
+            27_518,
+            "efa1aa1482f0796dc980f70e22e1b0e53a0667fd5d11754cf1b80ec62607e77f",
         ),
         (
             "claude-opus-4-8",
-            5_977,
-            "7fd74b56286245351c20029097549f8876d759ee62da8340eaccd10f9be3b6f4",
+            5_970,
+            "f981d9468098943aba71a17c07006d48dc34fca1ed59cae6216b8ca5757cead5",
         ),
         (
             "claude-opus-5",
-            9_313,
-            "395690a718a5688e0628e737783f16a7f7c317448cacf7e305088cb230bfac74",
+            9_309,
+            "f662f5e2797c7e846c707af3033d51cf58dc9c0d5dec9f72bf8b443efe3e76f1",
         ),
         (
             "claude-sonnet-4-6",
-            27_513,
-            "64b5db782dcdd868e92e4591850642a344e1e648d3f8ab4a8c4911c43ea6503b",
+            27_521,
+            "2f18032d2e1f7257f751561637ff4d4a226cc8a1fcc720129e45cceea54a2c6a",
         ),
         (
             "claude-sonnet-5",
-            27_510,
-            "4c5f9c0feed16ed6765cd22945dab6bbad87da9c495a18c840b14678d5446292",
+            27_518,
+            "6765e2aae1d5cc5ee568dfb90badb98fd264905965adb711328bc89d8b948c0b",
         ),
     ];
 
@@ -561,28 +575,28 @@ async fn live_orchestrator_prompt_uses_production_context() {
 
     let normalized = normalize_live_prompt(&prompt, &cwd);
     let digest = format!("{:x}", Sha256::digest(normalized.as_bytes()));
-    assert_eq!(normalized.len(), 14_774, "live prompt length drifted");
+    assert_eq!(normalized.len(), 14_705, "live prompt length drifted");
     assert_eq!(
-        digest, "b2d353a6094baeff8485d60ddc1373c2c02620e7d4ad7b252bb805ce3563a9a9",
+        digest, "c6e1b2fed7004891c636dbc2e8a66d74e64a86756a70071a0b79fe221c784e37",
         "live normalized production prompt drifted"
     );
 }
 
 #[test]
-fn production_output_style_bodies_match_normalized_2_1_220_manifests() {
+fn production_output_style_bodies_match_normalized_2_1_238_manifests() {
     let temp = tempfile::tempdir().expect("temp cwd");
     let cwd = temp.path().canonicalize().expect("physical cwd");
     let memory_dir = cwd.join(".lingxi/projects/oracle/memory");
     let cases = [
         (
             "Explanatory",
-            10_324,
-            "419f8d461df1c76540feaa2dd010eb36b7fb4bb6ec9f00b71959edcdf9f77fae",
+            10_320,
+            "28096b3c4fdc3a69ab15fa6db7eef0236c118027c16cc8638bafd2a993628fbc",
         ),
         (
             "Learning",
-            14_200,
-            "fd67d12f861db3b30ca42932cdd44a2f04ab2b278f5a8e69c2cac99d6a8fd821",
+            14_196,
+            "77c6495beab3631d860386817db1d59e02a399d1cea4ef0676989db6af3fe752",
         ),
     ];
 

@@ -30,6 +30,206 @@ fn parse_positive_budget_usd(value: &str) -> Result<f64, String> {
     Ok(amount)
 }
 
+/// Resolved `--autocompact <auto|tokens>` value.
+///
+/// 1:1 with the return of claude-code 2.1.238's `DUn` (cc-238.js @222905882):
+/// the string `"auto"` or a rounded token count inside `[Lli, hRa]`
+/// (`Lli=1e5`, `hRa=1e6`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutocompactWindow {
+    /// `auto` — no pinned window (the oracle's `lvp` maps this to `undefined`,
+    /// dropping any configured `autoCompactWindow`).
+    Auto,
+    /// A pinned auto-compact window, in tokens (100_000..=1_000_000).
+    Tokens(u64),
+}
+
+/// JS `parseFloat` — parse the longest leading decimal-literal prefix, ignoring
+/// trailing garbage; `NaN` when there is no such prefix. This is what the
+/// oracle's `--autocompact` `k`/`m` branches call on the SUFFIXED string
+/// (`parseFloat("500k") === 500`).
+fn js_parse_float(value: &str) -> f64 {
+    let bytes = value.as_bytes();
+    let mut end = 0usize;
+    if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+        end += 1;
+    }
+    let int_start = end;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    let mut has_digits = end > int_start;
+    if end < bytes.len() && bytes[end] == b'.' {
+        let frac_start = end + 1;
+        let mut frac_end = frac_start;
+        while frac_end < bytes.len() && bytes[frac_end].is_ascii_digit() {
+            frac_end += 1;
+        }
+        if has_digits || frac_end > frac_start {
+            has_digits = true;
+            end = frac_end;
+        }
+    }
+    if !has_digits {
+        return f64::NAN;
+    }
+    // Optional exponent, only when it is complete (`"1e"` parses as `1`).
+    if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
+        let mut exp_end = end + 1;
+        if exp_end < bytes.len() && (bytes[exp_end] == b'+' || bytes[exp_end] == b'-') {
+            exp_end += 1;
+        }
+        let digits_start = exp_end;
+        while exp_end < bytes.len() && bytes[exp_end].is_ascii_digit() {
+            exp_end += 1;
+        }
+        if exp_end > digits_start {
+            end = exp_end;
+        }
+    }
+    value[..end].parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// JS `parseInt(value, 10)` — leading sign + decimal digits, trailing garbage
+/// ignored; `NaN` when no digits lead.
+fn js_parse_int(value: &str) -> f64 {
+    let bytes = value.as_bytes();
+    let mut end = 0usize;
+    if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+        end += 1;
+    }
+    let digits_start = end;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == digits_start {
+        return f64::NAN;
+    }
+    value[..end].parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// The oracle's `By` (cc-238.js @217558529): `T8y(t) ?? parseInt(t, 10)`, where
+/// `T8y` (@217558371) accepts, for inputs of at most 32 chars, an exponent
+/// literal that is an integer (`v8y`) or a grouped-thousands literal (`Ggu`,
+/// separators `_ , NBSP NNBSP SPACE` stripped via `Vgu`).
+fn js_parse_loose_number(value: &str) -> f64 {
+    if value.chars().count() <= 32 {
+        if matches_exponent_number(value) {
+            let parsed = value.parse::<f64>().unwrap_or(f64::NAN);
+            // `Number.isInteger(t) ? t : NaN`.
+            return if parsed.is_finite() && parsed.fract() == 0.0 {
+                parsed
+            } else {
+                f64::NAN
+            };
+        }
+        if matches_grouped_thousands(value) {
+            let stripped: String = value
+                .chars()
+                .filter(|c| !matches!(c, '_' | ',' | '\u{00A0}' | '\u{202F}' | ' '))
+                .collect();
+            return js_parse_int(&stripped);
+        }
+    }
+    js_parse_int(value)
+}
+
+/// `v8y = /^[+-]?(\d+(\.\d*)?|\.\d+)[eE][+-]?\d+$/`.
+fn matches_exponent_number(value: &str) -> bool {
+    let rest = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let Some((mantissa, exponent)) = rest.split_once(['e', 'E']) else {
+        return false;
+    };
+    let mantissa_ok = match mantissa.split_once('.') {
+        Some((int_part, frac_part)) => {
+            (!int_part.is_empty() && int_part.bytes().all(|b| b.is_ascii_digit())
+                && frac_part.bytes().all(|b| b.is_ascii_digit()))
+                || (int_part.is_empty()
+                    && !frac_part.is_empty()
+                    && frac_part.bytes().all(|b| b.is_ascii_digit()))
+        }
+        None => !mantissa.is_empty() && mantissa.bytes().all(|b| b.is_ascii_digit()),
+    };
+    let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+    mantissa_ok && !exponent.is_empty() && exponent.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `Ggu = /^[+-]?\d{1,3}([_,\u00A0\u202F ])\d{3}(?:\1\d{3})*$/`.
+fn matches_grouped_thousands(value: &str) -> bool {
+    let rest = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let mut chars = rest.chars();
+    let mut lead = String::new();
+    let separator = loop {
+        match chars.next() {
+            Some(c) if c.is_ascii_digit() => {
+                lead.push(c);
+                if lead.len() > 3 {
+                    return false;
+                }
+            }
+            Some(c) if matches!(c, '_' | ',' | '\u{00A0}' | '\u{202F}' | ' ') => break c,
+            _ => return false,
+        }
+    };
+    if lead.is_empty() {
+        return false;
+    }
+    let mut groups = 0usize;
+    loop {
+        let group: String = chars.by_ref().take(3).collect();
+        if group.len() != 3 || !group.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        groups += 1;
+        match chars.next() {
+            None => return groups >= 1,
+            Some(c) if c == separator => {}
+            Some(_) => return false,
+        }
+    }
+}
+
+/// clap value-parser for `--autocompact <auto|tokens>`, 1:1 with the oracle's
+/// `argParser` (cc-238.js @243908809 → `DUn` @222905882):
+///
+/// ```js
+/// function DUn(e){let t=e.trim().toLowerCase();if(t==="auto")return"auto";let r;
+/// if(t.endsWith("m"))r=parseFloat(t)*1e6;else if(t.endsWith("k"))r=parseFloat(t)*1000;
+/// else{let n=By(t);r=n>=100&&n<=1000?n*1000:n}
+/// if(!Number.isFinite(r)||r<Lli||r>hRa)return;return Math.round(r)}
+/// ```
+///
+/// The rejection copy is byte-exact from the `j3t` throw at the same offset.
+fn parse_autocompact_window(value: &str) -> Result<AutocompactWindow, String> {
+    const INVALID: &str =
+        "It must be 'auto', or between 100k and 1M (e.g. 500k, 200000, or 200 as shorthand)";
+    let normalized = value.trim().to_lowercase();
+    if normalized == "auto" {
+        return Ok(AutocompactWindow::Auto);
+    }
+    // `parseFloat` runs on the SUFFIXED string — it stops at the `k`/`m`.
+    let tokens = if normalized.ends_with('m') {
+        js_parse_float(&normalized) * 1e6
+    } else if normalized.ends_with('k') {
+        js_parse_float(&normalized) * 1000.0
+    } else {
+        let bare = js_parse_loose_number(&normalized);
+        if (100.0..=1000.0).contains(&bare) {
+            bare * 1000.0
+        } else {
+            bare
+        }
+    };
+    if !tokens.is_finite() || tokens < 100_000.0 || tokens > 1_000_000.0 {
+        return Err(INVALID.to_string());
+    }
+    // `Math.round(r)`: `r` is positive here (anything below 1e5 was rejected),
+    // so JS's round-half-up and Rust's round-half-away-from-zero agree.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rounded = tokens.round() as u64;
+    Ok(AutocompactWindow::Tokens(rounded))
+}
+
 /// Normalize Claude's ordered comma-separated fallback list while keeping the
 /// existing public field backward compatible as a single CSV string.
 fn parse_fallback_model_list(value: &str) -> Result<String, String> {
@@ -638,6 +838,24 @@ pub struct Argv {
     // swallow a following prompt token), matching commander's boolean-ish flag.
     #[arg(long = "tmux", value_name = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     pub tmux: Option<String>,
+
+    /// Auto-compact window size (auto, or 100k–1M tokens)
+    //
+    // claude-code 2.1.238 `--autocompact <auto|tokens>` (cc-238.js @243908809,
+    // binary @307413819). NEW in 2.1.238 (0 hits in 2.1.220) and NOT hidden —
+    // unlike its `--advisor` neighbour it carries no `.hideHelp()`, so it
+    // renders in root `--help`. The oracle's main action resolves it with
+    // `lvp(t.autocompact, Vo().autoCompactWindow)` (`lvp` @222906138:
+    // `e===void 0 ? t : e==="auto" ? void 0 : e`) — absent ⇒ the configured
+    // window, `auto` ⇒ no pin, a number ⇒ that pin.
+    //
+    // WIRED: `run_cli` projects this onto `LINGXI_AUTO_COMPACT_WINDOW`, the
+    // port's only auto-compact-window knob (read by
+    // `compaction::thresholds::effective_context_window_size`, and the source
+    // the `/autocompact` handler reports). `auto` CLEARS a pre-set env pin,
+    // matching `lvp`'s `void 0`.
+    #[arg(long = "autocompact", value_name = "auto|tokens", value_parser = parse_autocompact_window)]
+    pub autocompact: Option<AutocompactWindow>,
 
     /// Start the session as a background agent and return immediately (manage
     /// with `lingxi-cli agents`)

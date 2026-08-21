@@ -1089,9 +1089,10 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            // Fix #3: stale-changed-content now returns Vbn (the richer linter
-            // message) instead of FILE_UNEXPECTEDLY_MODIFIED_ERROR.
-            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_CONTENT_CHANGED_LINTER_MESSAGE),
+            // FT-07: stale-changed-content returns the oracle's
+            // `validateInput` errorCode-3 literal (cc-238.js @226416137),
+            // not the call-phase race sentence `WVo`.
+            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
         // Write refused → file left as the external content.

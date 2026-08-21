@@ -2951,9 +2951,23 @@ fn ps_element_is_cd_like(name: &str) -> bool {
 /// (claude-code `CZn` → validateInput `{result:!1,behavior:"ask",message:eLi,
 /// errorCode:13}`). Tagged [`PermissionDecisionReason::Other`] carrying the
 /// byte-locked `eLi` message.
+///
+/// PERM-01 (claude-code 2.1.238): the message is now split by tool. 2.1.238
+/// defines the pair side by side (cc-238.js @283747794)
+/// `ssa="File is covered by a Read deny rule in your permission settings and
+/// cannot be edited.",asa="…and cannot be written."`; `Write` is the ONLY
+/// consumer of `asa` (validateInput `{result:!1,message:asa,errorCode:13}` and
+/// the `call`-phase `throw new Q4e(asa)`), while Edit/MultiEdit/NotebookEdit
+/// keep `ssa`. The `asa` spelling has 0 hits in 2.1.220, so this is new drift.
+/// (The oracle's Write arm carries no `behavior:"ask"` — that hard-validation
+/// shape lives in the Write TOOL's `validateInput`, not in the permission
+/// engine, so this gate keeps its Ask shape for both spellings.)
 fn ask_edit_read_deny_covered(tool_name: &str) -> PermissionResult {
-    let message =
-        "File is covered by a Read deny rule in your permission settings and cannot be edited.";
+    let message = if tool_name == "Write" {
+        "File is covered by a Read deny rule in your permission settings and cannot be written."
+    } else {
+        "File is covered by a Read deny rule in your permission settings and cannot be edited."
+    };
     PermissionResult::Ask {
         reason: PermissionDecisionReason::Other {
             reason: message.to_string(),

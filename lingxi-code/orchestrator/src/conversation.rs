@@ -1325,6 +1325,34 @@ pub struct ConversationOrchestrator {
     /// the most recent call's input total here. `0` until the first successful
     /// call — the prefix guard is then a strict no-op (prefix `0 ≤ threshold`).
     pub(crate) last_response_input_tokens: std::sync::atomic::AtomicU64,
+    /// The last API response's OUTPUT token count, recorded alongside
+    /// [`Self::last_response_input_tokens`] by
+    /// [`Self::record_response_input_tokens`].
+    ///
+    /// Together the two reconstruct claude-code's `hoe(messages)` (2.1.238
+    /// @294688350) — the LAST assistant message's
+    /// `input + cache_creation + cache_read + output` — which the
+    /// `total_tokens_reminder` producer `D3T` (@296556375) feeds to the padded
+    /// countdown. `protocol` carries no per-message `usage` object, so the
+    /// orchestrator caches the scalar the same way the PTL prefix guard already
+    /// caches the input total. `0` until the first successful call.
+    pub(crate) last_response_output_tokens: std::sync::atomic::AtomicU64,
+    /// `Z3f` (2.1.238 @292021xxx) — the per-agent padded-countdown ledger
+    /// behind the `total_tokens_reminder`. Keyed by agent id (`"main"` for this
+    /// orchestrator, which is always depth-0). A `std::sync::Mutex` because the
+    /// reminder is computed inside the async turn drivers but never held across
+    /// an await.
+    pub(crate) total_tokens_ledger:
+        std::sync::Mutex<crate::prompt::total_tokens::TotalTokensLedger>,
+    /// `history.len()` captured at each `silent_turn_reminder` emission.
+    ///
+    /// The oracle keeps its emitted attachments IN the message list, so `Ezm`
+    /// (@296525002) counts `remindersInStretch` by walking them. LingXi's
+    /// per-turn reminders are transient (outgoing snapshot only, never
+    /// `session.history` / JSONL), so the emission POSITIONS are recorded here
+    /// and spliced back into the walk by
+    /// [`crate::prompt::silent_turn::scan_silent_stretch`].
+    pub(crate) silent_turn_reminder_marks: std::sync::Mutex<Vec<usize>>,
     /// Shared output-token pool backing a workflow script's `budget.spent()`.
     /// Every successful main-loop API response adds its output tokens here (in
     /// [`Self::record_response_input_tokens`]); a launched `LocalWorkflowHandler`
@@ -1871,6 +1899,11 @@ impl ConversationOrchestrator {
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
             compaction_cumulative_dropped_tokens: std::sync::atomic::AtomicU64::new(0),
             last_response_input_tokens: std::sync::atomic::AtomicU64::new(0),
+            last_response_output_tokens: std::sync::atomic::AtomicU64::new(0),
+            total_tokens_ledger: std::sync::Mutex::new(
+                crate::prompt::total_tokens::TotalTokensLedger::default(),
+            ),
+            silent_turn_reminder_marks: std::sync::Mutex::new(Vec::new()),
             output_token_pool: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_start_output_baseline: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_safe_slot: None,
@@ -4207,6 +4240,14 @@ impl ConversationOrchestrator {
             .saturating_add(usage.billable_tokens.cache_write);
         self.last_response_input_tokens
             .store(total_input, std::sync::atomic::Ordering::Relaxed);
+        // `hoe(messages)` (2.1.238 @294688350) sums the last assistant usage
+        // INCLUDING output tokens; the `total_tokens_reminder` needs that total,
+        // so cache the output half here at the same chokepoint.
+        self.last_response_output_tokens
+            .store(
+                usage.billable_tokens.output,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         // Feed the shared workflow `budget.spent()` pool: this is the single
         // per-response chokepoint both turn drivers call, so adding the
         // response's output tokens here accumulates the main-loop side of the
@@ -8724,8 +8765,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // Finding #73 (streaming twin): per-turn, transient `todo_reminder`
             // (V1) / `task_reminder` (V2) reminder. Same gates as the batched
             // twin (killswitch / tool-present / Brief-absent / non-empty history
-            // / both counters at threshold). Body emitted RAW (no
-            // `<system-reminder>` wrap, matching `Ln({content:r,isMeta:!0})`).
+            // / both counters at threshold). The body is wrapped in a
+            // `<system-reminder>` envelope and marked `isMeta`, matching the
+            // oracle's `Zy([kn({content:o,isMeta:!0})])` (2.1.238 @296690005).
             // Placed after the agent-listing reminder and before the async-hook
             // reminder, mirroring the binary `ytl` order (`todo_reminders` in the
             // core `A` array, before the main-only `async_hook_responses`).
@@ -8773,6 +8815,34 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // prefetch is wired (default OFF) / empty / everything already
             // surfaced. See [`Self::skill_discovery_reminder_message`].
             if let Some(reminder) = self.skill_discovery_reminder_message().await {
+                turn_reminders.push(reminder);
+            }
+
+            // `silent_turn_reminder` (streaming twin, NEW in 2.1.238): nudge the
+            // model to say something when it has worked several turns in a row
+            // in silence. Producer `K4T` @296525255, gate @296520120 (main agent,
+            // tool-round continuation only, model capability / env). The port has
+            // no model-capability table, so the DEFAULT IS OFF (`None`) and the
+            // locked streaming fixtures stay byte-identical. Positioned late in
+            // the batch, mirroring the oracle's fan-out order
+            // (`…critical_system_reminder, silent_turn_reminder,
+            // total_tokens_reminder, budget_usd`). Appended to THIS turn's
+            // OUTGOING snapshot only. See [`Self::silent_turn_reminder_message`].
+            if let Some(reminder) = self.silent_turn_reminder_message().await {
+                turn_reminders.push(reminder);
+            }
+
+            // `total_tokens_reminder` (streaming twin): the
+            // `<total_tokens>N tokens left</total_tokens>` budget block. Producer
+            // `D3T` @296556375; the oracle emits it after every tool-result batch
+            // and (with `totalTokensReminderAfterUserTurn`) after each regular
+            // user prompt. DEFAULT OFF in the port — see the divergence note on
+            // [`crate::prompt::total_tokens`] — so this is a strict no-op unless
+            // `CLAUDE_CODE_TOTAL_TOKENS_REMINDER` is set. Placed directly after
+            // the silent-turn reminder, matching the oracle's fan-out order.
+            // Appended to THIS turn's OUTGOING snapshot only. See
+            // [`Self::total_tokens_reminder_message`].
+            if let Some(reminder) = self.total_tokens_reminder_message().await {
                 turn_reminders.push(reminder);
             }
 
@@ -9813,8 +9883,36 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             let mut s = self.session.lock().await;
                             s.history.push(user_msg.clone());
                         }
+                        // `bash_output_audience_note` (NEW in 2.1.238, gate `kpm`
+                        // @294267076, emission @294300924): a Bash result whose
+                        // stdout is longer than the few lines the user's terminal
+                        // shows gets a one-line note telling the model the user
+                        // did NOT see it. The oracle pushes it into the message
+                        // STREAM right after the `tool_result` line, so it lands
+                        // in history + JSONL like any other attachment message.
+                        // Gated on the model capability
+                        // `bash_output_audience_note` / the
+                        // `CLAUDE_CODE_BASH_OUTPUT_AUDIENCE_NOTE` env var; the
+                        // port has no capability table ⇒ DEFAULT OFF ⇒ strict
+                        // no-op, so the locked streaming fixtures are unaffected.
+                        //
+                        // Computed BEFORE the persist below: the JSONL writer
+                        // CONSUMES the recorded `toolUseResult` (it moves into
+                        // the line's `toolUseResult` field), and the gate needs
+                        // that payload's `stdout`.
+                        let audience_note = match &drained_tool_use_id {
+                            Some(id) => self.bash_output_audience_note_message(id).await,
+                            None => None,
+                        };
                         self.persist_message_to_jsonl_with_parent(&user_msg, parent_uuid)
                             .await;
+                        if let Some(note) = audience_note {
+                            {
+                                let mut s = self.session.lock().await;
+                                s.history.push(note.clone());
+                            }
+                            self.persist_message_to_jsonl(&note).await;
+                        }
                         if let Some(id) = &drained_tool_use_id {
                             self.flush_hook_attachments(id).await;
                         }
@@ -11485,8 +11583,15 @@ As you answer the user's questions, you can use the following context:\n\
             is_subagent: false,
             reminder_type_sparse: sparse,
         };
-        let content = crate::prompt::plan_reminder::render_plan_mode_reminder(&params);
-        Some(ConversationMessage::user(MessageId::new(), content))
+        // All three plan-mode renderers (`M5T` full / `L5T` sparse / `H5T`
+        // subagent) return through the batch wrapper `Zy` (2.1.238 @296675470),
+        // which maps `NT` = `` `<system-reminder>\n${e}\n</system-reminder>` ``
+        // (@296673554) over every message and marks it `isMeta:!0`. The body
+        // renderer stays pure (its byte-exact unit tests pin the bare body); the
+        // envelope is applied here, exactly as the other per-turn reminders do.
+        let body = crate::prompt::plan_reminder::render_plan_mode_reminder(&params);
+        let content = format!("<system-reminder>\n{body}\n</system-reminder>");
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// Resolve this session's plan file path (206 `ON(agentId)` →
@@ -11667,8 +11772,10 @@ As you answer the user's questions, you can use the following context:\n\
     /// 5. BOTH counters reach their thresholds (`turns_since_last_todo_write >=
     ///    TURNS_SINCE_WRITE && turns_since_last_reminder >= TURNS_BETWEEN_REMINDERS`).
     ///
-    /// On fire it renders the RAW body (no `<system-reminder>` wrapper —
-    /// `Ln({content:r,isMeta:!0})`) and RESETS `turns_since_last_reminder` to
+    /// On fire it renders the body inside a `<system-reminder>` envelope as a
+    /// META user message — the oracle's `Zy([kn({content:o,isMeta:!0})])`
+    /// (2.1.238 @296690005 / @296690634, `Zy` @296675470 mapping `NT`
+    /// @296673554) — and RESETS `turns_since_last_reminder` to
     /// `0`. V1 reads `session.todos`; V2 reads the wired
     /// [`crate::prompt::todo_reminder::TodoReminderTaskProvider`] (no provider ⇒
     /// base text only, an empty store). Appended ONLY to the per-turn OUTGOING
@@ -11721,8 +11828,14 @@ As you answer the user's questions, you can use the following context:\n\
                     .collect();
                 s.turns_since_last_reminder = 0;
                 drop(s);
-                let content = tool_task::reminder::render_v1(&items);
-                Some(ConversationMessage::user(MessageId::new(), content))
+                // `case"todo_reminder"` returns `Zy([kn({content:o,isMeta:!0})])`
+                // (2.1.238 @296690005), i.e. the body wrapped by `NT` =
+                // `` `<system-reminder>\n${e}\n</system-reminder>` `` and marked
+                // meta. The body renderer stays pure (byte-locked in
+                // `tool_task::reminder`); the envelope is applied here.
+                let body = tool_task::reminder::render_v1(&items);
+                let content = format!("<system-reminder>\n{body}\n</system-reminder>");
+                Some(ConversationMessage::user_meta(MessageId::new(), content))
             }
             tool_task::reminder::ReminderMode::V2Task => {
                 // (3) TaskUpdate must be present this turn.
@@ -11743,8 +11856,11 @@ As you answer the user's questions, you can use the following context:\n\
                             .collect(),
                         None => Vec::new(),
                     };
-                let content = tool_task::reminder::render_v2(&items);
-                Some(ConversationMessage::user(MessageId::new(), content))
+                // `case"task_reminder"` — same `Zy([kn({…,isMeta:!0})])` envelope
+                // as the V1 branch (2.1.238 @296690634).
+                let body = tool_task::reminder::render_v2(&items);
+                let content = format!("<system-reminder>\n{body}\n</system-reminder>");
+                Some(ConversationMessage::user_meta(MessageId::new(), content))
             }
         }
     }
@@ -11782,13 +11898,209 @@ As you answer the user's questions, you can use the following context:\n\
             return None;
         }
         drop(state);
-        // Byte-exact reminder body (renderer @238108493), wrapped by `Ww`:
-        // `<system-reminder>\n{e}\n</system-reminder>`.
+        // Byte-exact reminder body (2.1.238 renderer @296739637, string-table
+        // copy @256746832), wrapped by `NT`:
+        // `<system-reminder>\n{e}\n</system-reminder>`. The tail sentence was
+        // rewritten upstream between 2.1.220 ("DO NOT mention this to the user
+        // explicitly because they are already aware.") and 2.1.238; the dash is
+        // U+2014.
         let content = format!(
             "<system-reminder>\nThe date has changed. Today's date is now {today}. \
-DO NOT mention this to the user explicitly because they are already aware.\n</system-reminder>"
+No need to announce the new date \u{2014} the user's own clock shows it.\n</system-reminder>"
         );
         Some(ConversationMessage::user_meta(MessageId::new(), content))
+    }
+
+    /// Does THIS model step continue a tool round rather than follow a fresh
+    /// user prompt?
+    ///
+    /// The oracle's attachment fan-out (@296520120) distinguishes the two with
+    /// `e === null` (no new prompt was handed to `getAttachments`) plus
+    /// `!s?.isRegularUserPrompt`. LingXi's turn drivers re-enter the same
+    /// assembly for both cases, so the discriminator is recovered from the
+    /// history tail: a step that follows tool execution ends on a user line
+    /// carrying `tool_result` blocks (claude's `sxl`, @296542062).
+    pub(crate) fn step_follows_tool_results(history: &[ConversationMessage]) -> bool {
+        matches!(
+            history.last(),
+            Some(ConversationMessage::User { content, .. })
+                if content
+                    .iter()
+                    .any(|b| matches!(b, protocol::ContentBlock::ToolResult { .. }))
+        )
+    }
+
+    /// The per-turn, transient `silent_turn_reminder` (2.1.238, producer `K4T`
+    /// @296525255), or `None` when the gate is off or the stretch is too short.
+    ///
+    /// Gate, 1:1 with the fan-out condition @296520120:
+    /// `p && e===null && !s?.isRegularUserPrompt && !CDt() && u3m(model)` —
+    /// main agent only (every `ConversationOrchestrator` is depth-0, so `p` is
+    /// always true), only on a tool-round continuation, and only when the
+    /// capability/env gate is on. `CDt()` is the focus/brief-transcript view
+    /// mode, which LingXi does not have ⇒ always `false` ⇒ never suppresses.
+    ///
+    /// `u3m` (@296477528) consults `CLAUDE_CODE_SILENT_TURN_REMINDER` and then
+    /// the model capability table; the port has no capability table, so the
+    /// DEFAULT IS OFF and this method is a strict no-op for stock sessions —
+    /// the locked streaming fixtures stay byte-identical.
+    ///
+    /// On fire the body is wrapped in the usual `<system-reminder>` envelope
+    /// (renderer @296738727: `[kn({content:NT(e.text),isMeta:!0})]`) and the
+    /// emission position is recorded so `Ezm`'s `remindersInStretch` can be
+    /// reconstructed on later turns. Appended to THIS turn's OUTGOING snapshot
+    /// only — never `session.history` / JSONL.
+    pub(crate) async fn silent_turn_reminder_message(&self) -> Option<ConversationMessage> {
+        if !crate::prompt::silent_turn::is_enabled() {
+            return None;
+        }
+        let history = {
+            let s = self.session.lock().await;
+            s.history.clone()
+        };
+        if !Self::step_follows_tool_results(&history) {
+            return None;
+        }
+        let mut marks = self
+            .silent_turn_reminder_marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stretch = crate::prompt::silent_turn::scan_silent_stretch(&history, marks.as_slice());
+        if !crate::prompt::silent_turn::should_emit(
+            stretch,
+            crate::prompt::silent_turn::turns_between_reminders(),
+        ) {
+            return None;
+        }
+        marks.push(history.len());
+        drop(marks);
+        let body = crate::prompt::silent_turn::reminder_text();
+        let content = format!("<system-reminder>\n{body}\n</system-reminder>");
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
+    }
+
+    /// The per-turn, transient `total_tokens_reminder` (producer `D3T`
+    /// @296556375), or `None` when the mode resolves to `off`.
+    ///
+    /// ```js
+    /// let i=srt(); if(i==="off")return[];
+    /// let s=n??"main", a=hoe(t), l=RYn.of(e);
+    /// if(o) l.reanchorTaskBudget(s,a);
+    /// let c = i==="countdown" ? OR(r,Ox())-a : i==="padded-countdown" ? uOi()-l.cumulativeUsed(s,a) : 0;
+    /// return [{type:"total_tokens_reminder", text:dOi(i,c)}]
+    /// ```
+    ///
+    /// The fan-out only calls `D3T` when the step continues a tool round
+    /// (`e===null`) or when a regular user prompt arrived AND
+    /// `totalTokensReminderAfterUserTurn` is on — the latter also being the
+    /// `reanchor` flag. `hoe(messages)` (@294688350) is the LAST assistant
+    /// message's `input + cache_creation + cache_read + output`, cached here as
+    /// [`Self::last_response_input_tokens`] + [`Self::last_response_output_tokens`].
+    ///
+    /// **Default OFF in the port** — see the divergence note on
+    /// [`crate::prompt::total_tokens`]. Stock sessions get `None`, so the
+    /// locked streaming fixtures stay byte-identical.
+    pub(crate) async fn total_tokens_reminder_message(&self) -> Option<ConversationMessage> {
+        use crate::prompt::total_tokens as tt;
+        let mode = tt::resolve_mode(None);
+        if mode == tt::TotalTokensMode::Off {
+            return None;
+        }
+        let (history_tail_is_tool_results, model) = {
+            let s = self.session.lock().await;
+            (
+                Self::step_follows_tool_results(&s.history),
+                s.model.clone(),
+            )
+        };
+        let reanchor = !history_tail_is_tool_results && tt::after_user_turn(None);
+        if !history_tail_is_tool_results && !reanchor {
+            return None;
+        }
+        let used = i64::try_from(
+            self.last_response_input_tokens
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .saturating_add(
+                    self.last_response_output_tokens
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+        )
+        .unwrap_or(i64::MAX);
+        let context_window = i64::try_from(compaction::effective_context_window_size(
+            &model,
+            &self.api.active_betas(),
+        ))
+        .unwrap_or(i64::MAX);
+        let budget = tt::resolve_budget(None);
+        let body = {
+            let mut ledger = self
+                .total_tokens_ledger
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if reanchor {
+                ledger.reanchor_task_budget("main", used);
+            }
+            let remaining =
+                tt::remaining_tokens(mode, &mut ledger, "main", used, context_window, budget);
+            tt::format_total_tokens(mode, remaining)
+        };
+        // Renderer @296738663: `[kn({content:NT(e.text),isMeta:!0})]`.
+        let content = format!("<system-reminder>\n{body}\n</system-reminder>");
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
+    }
+
+    /// The `bash_output_audience_note` attachment (2.1.238, gate `kpm`
+    /// @294267076, emission @294300924), or `None` when the gate says no.
+    ///
+    /// Unlike the per-turn reminders this one belongs to the message STREAM: it
+    /// follows the `tool_result` line for a Bash call whose stdout is longer
+    /// than the few lines the user's terminal showed. Gated on the model
+    /// capability `bash_output_audience_note` / the
+    /// `CLAUDE_CODE_BASH_OUTPUT_AUDIENCE_NOTE` env var, which the port has no
+    /// capability table for ⇒ **default OFF**.
+    pub(crate) async fn bash_output_audience_note_message(
+        &self,
+        tool_use_id: &protocol::ToolUseId,
+    ) -> Option<ConversationMessage> {
+        if !crate::prompt::bash_output_note::is_enabled() {
+            return None;
+        }
+        let tool_name = self.tool_name_for_use_id(tool_use_id).await?;
+        let data = self
+            .tool_use_results
+            .lock()
+            .await
+            .get(&tool_use_id.to_string())
+            .cloned();
+        if !crate::prompt::bash_output_note::should_attach(
+            &tool_name,
+            data.as_ref(),
+            self.config.interactive_session,
+        ) {
+            return None;
+        }
+        let content = format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            crate::prompt::bash_output_note::BASH_OUTPUT_AUDIENCE_NOTE
+        );
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
+    }
+
+    /// The tool name that issued `tool_use_id`, recovered from the assistant
+    /// line that carried the `tool_use` block.
+    async fn tool_name_for_use_id(&self, tool_use_id: &protocol::ToolUseId) -> Option<String> {
+        let s = self.session.lock().await;
+        s.history.iter().rev().find_map(|msg| {
+            let ConversationMessage::Assistant { content, .. } = msg else {
+                return None;
+            };
+            content.iter().find_map(|b| match b {
+                protocol::ContentBlock::ToolUse { id, name, .. } if id == tool_use_id => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+        })
     }
 
     /// Return the local date memoized for `session_id`, seeding it exactly once.
@@ -12808,11 +13120,61 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
         Some(ConversationMessage::user_meta(MessageId::new(), body))
     }
 
+    /// `getTools`' (`iJ`) 2.1.238 tail block — the path that puts
+    /// `WaitForMcpServers` in front of the model while MCP servers are still
+    /// connecting:
+    ///
+    /// ```text
+    /// if(eZf()&&!l.some((c)=>il(c,y0))&&!l.some((c)=>il(c,Qze)))l=[...l,...Ohe([Sdl],e)];
+    /// ```
+    ///
+    /// (`cc-238.js @230759940`; `y0="ToolSearch"`, `Qze="WaitForMcpServers"`,
+    /// `Ohe` = the deny-rule filter, `eZf(){return bdl(b7e()??[]).length>0}` =
+    /// "at least one MCP client is `type === "pending"`"). 2.1.220's `d6` has no
+    /// such block; the TOOL itself is not new (2.1.220 registers it too).
+    ///
+    /// The composite is: `WaitForMcpServers` is advertised iff at least one MCP
+    /// server is still pending AND `ToolSearch` is not in the final list.
+    ///
+    /// The first half is `Sdl.isEnabled`'s `bdl(t).length>0` leg, delivered
+    /// through the registry's synchronous pending mirror (refreshed here, read
+    /// by `WaitForMcpServersTool::is_enabled` so `available_tools` still sorts
+    /// the tool into the builtin prefix at its `locale_cmp` position). The
+    /// second half is the tail block's `!l.some((c)=>il(c,y0))` guard, applied
+    /// as a removal because `is_enabled` cannot see the rest of the list.
+    ///
+    /// `Ohe`'s deny filter runs over the whole list in the caller, so a deny
+    /// rule naming `WaitForMcpServers` still removes it — no separate pass is
+    /// needed for the appended tool the way the oracle needs `Ohe([Sdl],e)`.
+    fn apply_wait_for_mcp_servers_gate(
+        tools: &mut Vec<std::sync::Arc<dyn tool_api::tool_trait::Tool>>,
+    ) {
+        // Name literals rather than `tool_mcp::…::WAIT_FOR_MCP_SERVERS_TOOL_NAME`
+        // / `tool_meta::tool_search::TOOL_SEARCH_TOOL_NAME`: `orchestrator` does
+        // not (and should not) depend on the tool crates. Pinned by
+        // `tool_mcp::wait_for_mcp_servers::tests::name_is_byte_exact`.
+        const WAIT_FOR_MCP_SERVERS: &str = "WaitForMcpServers";
+        const TOOL_SEARCH: &str = "ToolSearch";
+
+        if !tools.iter().any(|t| t.name() == WAIT_FOR_MCP_SERVERS) {
+            return;
+        }
+        if tools.iter().any(|t| t.name() == TOOL_SEARCH) {
+            tools.retain(|t| t.name() != WAIT_FOR_MCP_SERVERS);
+        }
+    }
+
     async fn filtered_available_tools(
         &self,
     ) -> Vec<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
         use tool_api::tool_trait::ToolStaticContext;
 
+        // `eZf()` — refresh the registry's synchronous pending-server mirror
+        // before the enable-filter runs, so `WaitForMcpServersTool::is_enabled`
+        // observes the live state. See `apply_wait_for_mcp_servers_gate`.
+        if let Some(registry) = self.mcp_registry.as_ref() {
+            registry.refresh_pending_servers().await;
+        }
         let mut tools = self.tools.available_tools(&ToolStaticContext::default());
         let denied = self.perms.tool_wide_deny_names().await;
         if !denied.is_empty() {
@@ -12822,6 +13184,7 @@ DO NOT mention this to the user explicitly because they are already aware.\n</sy
                     .any(|d| permission::tool_wide_name_matches(d, t.name()))
             });
         }
+        Self::apply_wait_for_mcp_servers_gate(&mut tools);
         {
             let guard = self.main_thread_agent.read().await;
             if let Some(agent) = guard.as_ref() {

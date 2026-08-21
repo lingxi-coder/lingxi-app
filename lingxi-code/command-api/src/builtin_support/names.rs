@@ -37,7 +37,8 @@
 //! terminal`, `isEnabled:()=>!0`), `focus` (`Toggle focus view: just your
 //! prompt, summary, and response`, `requires:{ink}`), `tui` (`Set the terminal
 //! UI renderer (default | fullscreen)`, ungated), and `usage-credits`
-//! (`Configure usage credits to keep working when you hit a limit`, two objects
+//! (`Configure usage credits or request them from your admin when you hit a
+//! limit`, two objects
 //! gated by `bnr()` = `!DISABLE_EXTRA_USAGE_COMMAND && (rateLimitStatus!==null
 //! || isOverageProvisioningAllowed())`, split interactive/non-interactive on
 //! `isNonInteractiveSession()`). That oracle total was **106**: 105 after
@@ -49,6 +50,16 @@
 //! four are visible. The 2026-08-13 follow-up adds the pre-existing 2.1.205
 //! `local-jsx` `/workflows` command already implemented by the TUI, re-locking
 //! the shared registry surface at **107**.
+//!
+//! The 2026-08-20 byte-alignment pass vs claude-code **2.1.238** keeps the
+//! total at **107** through a one-in / one-out swap: `review` was DELETED
+//! upstream (`name:"review"` 2.1.220 = 1 hit, 2.1.238 = 0; the PR-review
+//! surface moved into the bundled `code-review` skill), and `subtask`
+//! (`{type:"local-jsx",name:"subtask",description:"Send a subagent off with
+//! your full context; its result comes back here",argumentHint:"<task>"}`
+//! @ 2.1.238 296247354) — long implemented by `command_core::subtask` but
+//! never listed here, so never advertised in `/help` or the palette — takes
+//! its slot.
 
 /// Every built-in slash command's runtime name (without leading `/`),
 /// ASCII-sorted. Locked at length **107** for the current oracle.
@@ -137,7 +148,6 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 107] = &[
     "rename",
     "reset-limits",
     "resume",
-    "review",
     "rewind",
     "sandbox-toggle",
     "security-review",
@@ -149,6 +159,7 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 107] = &[
     "statusline",
     "stickers",
     "stop",
+    "subtask",
     "summary",
     "tag",
     "tasks",
@@ -465,7 +476,7 @@ pub const COMMAND_ALIASES: &[(&str, &[&str])] = &[
     ("permissions", &["allowed-tools"]),
     ("plugin", &["plugins", "marketplace"]),
     ("resume", &["continue"]),
-    ("rewind", &["checkpoint"]),
+    ("rewind", &["checkpoint", "undo"]),
     ("session", &["remote"]),
     ("tasks", &["bashes"]),
     ("usage", &["cost", "stats"]),
@@ -585,12 +596,12 @@ pub fn core_description(name: &str) -> &'static str {
         "doctor" => "Diagnose and verify your LingXi installation and settings",
         "exit" => "Exit the CLI",
         "help" => "Show help and available commands",
-        "hooks" => "Manage hooks",
+        "hooks" => "View hook configurations for tool events",
         "init" => "Initialize a new LINGXI.md file with codebase documentation",
         "login" => "Sign in with your Anthropic account",
         "logout" => "Sign out from your Anthropic account",
         "mcp" => "Manage MCP servers",
-        "memory" => "Open a memory file in your editor",
+        "memory" => "Edit LINGXI.md files and memory settings",
         "model" => "Set the AI model for LingXi",
         "permissions" => "Manage allow and deny tool permission rules",
         "status" => "Show LingXi status including version, model, account, API connectivity, and tool statuses",
@@ -600,7 +611,7 @@ pub fn core_description(name: &str) -> &'static str {
         "version" => "Print version information",
         // (cp-01) Remaining visible builtins — real claude-code descriptions.
         "add-dir" => "Add a new working directory",
-        "advisor" => "Configure the advisor model",
+        "advisor" => "Let Claude consult a stronger model at key moments",
         // Net-new headless auto-compact-window reporter (see
         // `command_core::autocompact`). Verbatim from the 2.1.198 binary's
         // headless `type:"local"` autocompact command object.
@@ -612,7 +623,7 @@ pub fn core_description(name: &str) -> &'static str {
         "bridge" => "Connect this terminal for remote-control sessions",
         "cd" => "Move this session to a new working directory",
         "btw" => "Ask a quick side question without interrupting the main conversation",
-        "chrome" => "Claude in Chrome (Beta) settings",
+        "chrome" => "Open Claude in Chrome settings",
         "color" => "Set the prompt bar color for this session",
         "commit" => "Create a git commit",
         "commit-push-pr" => "Commit, push, and open a PR",
@@ -632,7 +643,7 @@ pub fn core_description(name: &str) -> &'static str {
         "install" => "Install LingXi native build",
         "install-github-app" => "Set up Claude GitHub Actions for a repository",
         "install-slack-app" => "Install the Claude Slack app",
-        "keybindings" => "Open or create your keybindings configuration file",
+        "keybindings" => "Open your keyboard shortcuts file",
         "mobile" => "Show QR code to download the Claude mobile app",
         "passes" => "Share a free week of LingXi with friends and earn extra usage",
         "plan" => "Enable plan mode or view the current session plan",
@@ -644,7 +655,6 @@ pub fn core_description(name: &str) -> &'static str {
         "remote-setup" => "Setup LingXi on the web (requires connecting your GitHub account)",
         "rename" => "Rename the current conversation",
         "resume" => "Resume a previous conversation",
-        "review" => "Review a pull request",
         "rewind" => "Restore the code and/or conversation to a previous point",
         "sandbox-toggle" => "Toggle sandbox mode for bash commands",
         "security-review" => "Complete a security review of the pending changes on the current branch",
@@ -652,13 +662,15 @@ pub fn core_description(name: &str) -> &'static str {
         "skills" => "List available skills",
         "statusline" => "Set up LingXi's status line UI",
         "stickers" => "Order LingXi stickers",
-        "tasks" => "List and manage background tasks",
+        "tasks" => "View and manage everything running in the background",
         "terminal-setup" => "Install Shift+Enter key binding for newlines",
         "theme" => "Change the theme",
         "tui" => "Set the terminal UI renderer (default | fullscreen)",
         "ultraplan" => "LingXi on the web drafts an advanced plan you can edit and approve",
         "upgrade" => "Upgrade to Max for higher rate limits and more Opus",
-        "usage-credits" => "Configure usage credits to keep working when you hit a limit",
+        "usage-credits" => {
+            "Configure usage credits or request them from your admin when you hit a limit"
+        }
         // Deprecated hidden alias of `/usage-credits`
         // (`name:"extra-usage",description:"Renamed to /usage-credits",isHidden:!0`).
         "extra-usage" => "Renamed to /usage-credits",
@@ -667,12 +679,16 @@ pub fn core_description(name: &str) -> &'static str {
         // Batch-8 implemented commands (real handlers in `command-core`); their
         // `description()` bodies carry the verbatim oracle strings, mirrored here
         // so the palette / `/help` rows never show the placeholder fallback.
-        "fork" => "Spawn a background agent that inherits the full conversation",
+        "fork" => "Copy this conversation into a new background session and keep working here",
         "goal" => "Set a goal — keep working until the condition is met",
         "recap" => "Generate a one-line session recap now",
         "reload-skills" => "Pick up skills added or changed on disk during this session",
         "skill-doctor" => "Show which loaded skills are unused and costing context",
         "stop" => "Stop this background session; transcript and worktree are kept",
+        // cc2.1.238 `w$m` (`/subtask`, registered by `register_core_batch_8`
+        // whenever agent view is on — the default). Verbatim command-object
+        // description; without this row `/help` showed the placeholder.
+        "subtask" => "Send a subagent off with your full context; its result comes back here",
         _ => "(unimplemented in v0.6.0)",
     }
 }
@@ -737,8 +753,61 @@ mod tests {
         );
         assert_eq!(
             core_description("usage-credits"),
-            "Configure usage credits to keep working when you hit a limit"
+            "Configure usage credits or request them from your admin when you hit a limit"
         );
+    }
+
+    /// cc2.1.238 byte-alignment: the one-in / one-out membership swap plus the
+    /// six `/help` one-liners and the two changed descriptions, each verbatim
+    /// from a 2.1.238 command object.
+    #[test]
+    fn cc_2_1_238_command_surface() {
+        // `/review` was DELETED upstream (`name:"review"`: 220 = 1, 238 = 0);
+        // `/subtask` takes its slot in the 107-name lock.
+        assert!(
+            !BUILTIN_COMMAND_NAMES.contains(&"review"),
+            "/review was removed in claude-code 2.1.238"
+        );
+        assert!(
+            BUILTIN_COMMAND_NAMES.contains(&"subtask"),
+            "/subtask is registered by batch 8 and must be advertised"
+        );
+        assert!(!is_palette_hidden("subtask"));
+        assert_eq!(
+            core_description("subtask"),
+            "Send a subagent off with your full context; its result comes back here"
+        );
+
+        // `/rewind` carries THREE names upstream:
+        // `aliases:["checkpoint","undo"]` (238 and 220 alike).
+        assert_eq!(command_aliases("rewind"), &["checkpoint", "undo"]);
+
+        // 220 -> 238 description changes (LingXi brands CLAUDE.md as LINGXI.md).
+        assert_eq!(
+            core_description("memory"),
+            "Edit LINGXI.md files and memory settings"
+        );
+        // Agent view is on by default, so `/fork` advertises `b$m`, the twin
+        // `register_core_batch_8` actually registers.
+        assert_eq!(
+            core_description("fork"),
+            "Copy this conversation into a new background session and keep working here"
+        );
+
+        // Six one-liners that matched NO oracle command object on any surface.
+        for (name, want) in [
+            ("hooks", "View hook configurations for tool events"),
+            ("keybindings", "Open your keyboard shortcuts file"),
+            ("tasks", "View and manage everything running in the background"),
+            ("chrome", "Open Claude in Chrome settings"),
+            ("advisor", "Let Claude consult a stronger model at key moments"),
+            (
+                "usage-credits",
+                "Configure usage credits or request them from your admin when you hit a limit",
+            ),
+        ] {
+            assert_eq!(core_description(name), want, "/{name} description drift");
+        }
     }
 
     // ── #63 DISABLE_*_COMMAND env gates ──────────────────────────────────────

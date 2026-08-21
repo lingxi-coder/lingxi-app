@@ -2445,7 +2445,7 @@ You should not respond to this context unless it is highly relevant to your task
         let today = crate::prompt::env_meta::current_date_string();
         format!(
             "<system-reminder>\nThe date has changed. Today's date is now {today}. \
-DO NOT mention this to the user explicitly because they are already aware.\n</system-reminder>"
+No need to announce the new date \u{2014} the user's own clock shows it.\n</system-reminder>"
         )
     }
 
@@ -3459,14 +3459,20 @@ mod skill_listing_reminder_tests {
 
         // First plan-mode turn ⇒ FULL (206 `LU_`): the aIp banner + the 5-phase
         // workflow scaffold.
-        let t0 = orch
+        let m0 = orch
             .plan_mode_reminder_message()
             .await
-            .expect("plan-mode full reminder")
-            .text_content();
+            .expect("plan-mode full reminder");
+        // 2.1.238 `Zy`/`NT` envelope + `isMeta:!0` (@296675470 / @296673554).
+        assert!(m0.is_meta(), "plan_mode reminder must be isMeta");
+        let t0 = m0.text_content();
         assert!(
-            t0.starts_with("Plan mode is active. The user indicated"),
-            "turn-0 must be the FULL reminder, got: {t0}"
+            t0.starts_with("<system-reminder>\nPlan mode is active. The user indicated"),
+            "turn-0 must be the FULL reminder inside the system-reminder envelope, got: {t0}"
+        );
+        assert!(
+            t0.ends_with("\n</system-reminder>"),
+            "envelope must close: {t0}"
         );
         assert!(
             t0.contains("## Plan Workflow"),
@@ -3492,7 +3498,7 @@ mod skill_listing_reminder_tests {
             .text_content();
         assert!(
             t1.starts_with(
-                "Plan mode still active (see full instructions earlier in conversation)."
+                "<system-reminder>\nPlan mode still active (see full instructions earlier in conversation)."
             ),
             "turn-1 must be the SPARSE reminder, got: {t1}"
         );
@@ -3514,7 +3520,7 @@ mod skill_listing_reminder_tests {
             .expect("full again after reset")
             .text_content();
         assert!(
-            again.starts_with("Plan mode is active. The user indicated"),
+            again.starts_with("<system-reminder>\nPlan mode is active. The user indicated"),
             "got: {again}"
         );
     }
@@ -7359,7 +7365,8 @@ mod pumped_visible_text_tests {
 //   relevant tool is present, the Brief tool is absent, history is non-empty,
 //   and the killswitch is not "off";
 // - the body is byte-exact (V1 with/without items; V2 with items) and emitted
-//   RAW (no `<system-reminder>` wrapper).
+//   inside a `<system-reminder>` envelope as a META user message (oracle
+//   `Zy([kn({content:o,isMeta:!0})])`, 2.1.238 @296690005).
 // The byte-level renderer is additionally covered in `tool_task::reminder::tests`.
 // ============================================================================
 #[cfg(test)]
@@ -7647,10 +7654,13 @@ mod todo_reminder_tests {
         let orch = orch_with(reg_with(&["TodoWrite"]));
         prime_session(&orch, 10, 10).await;
         let msg = orch.todo_reminder_message().await.expect("fires");
-        // RAW body — NOT wrapped in <system-reminder>.
+        // `Zy`/`NT` envelope + `isMeta:!0` (2.1.238 @296690005). NOTE the body's
+        // own trailing `\n` sits directly before the wrapper's, exactly as the
+        // oracle's `` `<system-reminder>\n${o}\n</system-reminder>` `` produces.
+        assert!(msg.is_meta(), "todo_reminder must be isMeta");
         assert_eq!(
             msg.text_content(),
-            "The TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
+            "<system-reminder>\nThe TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n\n</system-reminder>"
         );
         // The reminder counter reset to 0 on fire.
         assert_eq!(orch.session.lock().await.turns_since_last_reminder, 0);
@@ -7681,7 +7691,7 @@ mod todo_reminder_tests {
         }
         let msg = orch.todo_reminder_message().await.expect("fires");
         assert!(msg.text_content().ends_with(
-            "\n\nHere are the existing contents of your todo list:\n\n[1. [pending] first\n2. [in_progress] second]"
+            "\n\nHere are the existing contents of your todo list:\n\n[1. [pending] first\n2. [in_progress] second]\n</system-reminder>"
         ), "got: {:?}", msg.text_content());
         std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
@@ -7708,13 +7718,14 @@ mod todo_reminder_tests {
         prime_session(&orch, 10, 10).await;
         let msg = orch.todo_reminder_message().await.expect("fires");
         let text = msg.text_content();
+        assert!(msg.is_meta(), "task_reminder must be isMeta");
         assert!(
-            text.starts_with("The task tools haven't been used recently."),
+            text.starts_with("<system-reminder>\nThe task tools haven't been used recently."),
             "got: {text}"
         );
         assert!(
             text.ends_with(
-                "\n\nHere are the existing tasks:\n\n#1. [completed] alpha\n#2. [pending] beta"
+                "\n\nHere are the existing tasks:\n\n#1. [completed] alpha\n#2. [pending] beta\n</system-reminder>"
             ),
             "got: {text:?}"
         );
@@ -7731,7 +7742,7 @@ mod todo_reminder_tests {
         let msg = orch.todo_reminder_message().await.expect("fires");
         assert_eq!(
             msg.text_content(),
-            "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
+            "<system-reminder>\nThe task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n\n</system-reminder>"
         );
         std::env::remove_var("LINGXI_ENABLE_TASKS");
     }

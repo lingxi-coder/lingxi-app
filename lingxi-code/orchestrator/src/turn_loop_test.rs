@@ -5677,3 +5677,91 @@ mod memdir_index_cap_tests {
         );
     }
 }
+
+// ============================================================================
+// SC-04 (claude-code 2.1.238 `Fol`, cc-238.js @228433532): when the rescue
+// compaction for THIS call failed, the prompt-too-long surface carries the
+// composed copy `Prompt is too long · automatic compaction failed: <detail>`
+// (`ep({content:Fol(qn)??_V,error:"invalid_request",…})` @228721216) instead of
+// the bare `Prompt is too long`. The detail is one-shot.
+// ============================================================================
+#[cfg(test)]
+mod compaction_failure_hint_tests {
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::turn_loop::surface_prompt_too_long;
+    use crate::OrchestratorConfig;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    fn orch_with_output(output: Arc<MockOutputStream>) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output,
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// No recorded compaction failure → the bare, byte-exact message, exactly as
+    /// before this finding (`Fol(undefined) ?? _V`).
+    #[tokio::test]
+    async fn without_a_compact_failure_the_bare_message_is_surfaced() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_with_output(output.clone());
+        surface_prompt_too_long(&orch).await;
+        assert_eq!(output.text_events().await, vec!["Prompt is too long"]);
+    }
+
+    /// A recorded failure upgrades the copy — and is CONSUMED, so the next
+    /// surface falls back to the bare message.
+    #[tokio::test]
+    async fn a_recorded_compact_failure_is_rendered_once() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_with_output(output.clone());
+        orch.compaction_tracking
+            .lock()
+            .await
+            .last_compact_failure_detail = Some("summarizer 500\nstack frame".to_string());
+
+        surface_prompt_too_long(&orch).await;
+        surface_prompt_too_long(&orch).await;
+
+        assert_eq!(
+            output.text_events().await,
+            vec![
+                // First line only, ellipsised because a newline was cut.
+                "Prompt is too long \u{b7} automatic compaction failed: summarizer 500\u{2026}"
+                    .to_string(),
+                "Prompt is too long".to_string(),
+            ]
+        );
+        // The composed message is also what lands in history.
+        let session = orch.session();
+        let history = session.lock().await.history.clone();
+        let first = history
+            .iter()
+            .find_map(|m| match m {
+                protocol::ConversationMessage::Assistant { content, .. } => {
+                    content.iter().find_map(|b| match b {
+                        protocol::ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("an assistant message was pushed");
+        assert_eq!(
+            first,
+            "Prompt is too long \u{b7} automatic compaction failed: summarizer 500\u{2026}"
+        );
+    }
+}

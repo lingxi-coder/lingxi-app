@@ -588,6 +588,22 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         std::env::set_var("LINGXI_BRIEF", "1");
     }
 
+    // (CLI-01, cc2.1.238) `--autocompact <auto|tokens>` projects onto
+    // `LINGXI_AUTO_COMPACT_WINDOW`, the port's only auto-compact-window pin
+    // (`compaction::thresholds::effective_context_window_size` clamps the model
+    // context window with it, and `/autocompact` reports it as
+    // `WindowSource::Env`). The oracle resolves the flag with
+    // `lvp(t.autocompact, Vo().autoCompactWindow)`: `auto` yields `undefined`
+    // and therefore DROPS the configured window, so an explicit `auto` clears a
+    // pre-set env pin here rather than merely leaving it alone.
+    match parsed.autocompact {
+        Some(argv::AutocompactWindow::Auto) => std::env::remove_var("LINGXI_AUTO_COMPACT_WINDOW"),
+        Some(argv::AutocompactWindow::Tokens(tokens)) => {
+            std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", tokens.to_string());
+        }
+        None => {}
+    }
+
     // Custom beta headers are an API-key-only Anthropic surface. Validate at
     // startup so OAuth/non-key sessions do not appear to accept an inert flag.
     if let Some(raw_betas) = parsed.betas.as_mut() {

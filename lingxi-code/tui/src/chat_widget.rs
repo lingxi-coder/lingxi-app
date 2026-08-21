@@ -3542,11 +3542,6 @@ impl ChatWidget {
         )
     }
 
-    /// `/review`: inject the pull-request review prompt.
-    pub(crate) fn cmd_review(&mut self, args: &str) -> ChatOutcome {
-        self.run_core_command("review", args, &command_core::review::ReviewHandler::new())
-    }
-
     /// `/security-review`: inject the security-review prompt.
     pub(crate) fn cmd_security_review(&mut self, args: &str) -> ChatOutcome {
         self.run_core_command(
@@ -3692,6 +3687,22 @@ impl ChatWidget {
             return self.show_system_text("/fork is unavailable (no engine handle wired)", true);
         };
         self.run_core_command("fork", args, &command_core::fork::ForkHandler::new(handle))
+    }
+
+    /// `/subtask`: send a subagent off with the full conversation context; its
+    /// result comes back in this session. cc2.1.238 `w$m` — registered upstream
+    /// (and by `register_core_batch_8`) whenever agent view is on, i.e. by
+    /// default. Bare `/subtask` reaches the handler's byte-exact
+    /// "Usage: /subtask \<task\>" text.
+    pub(crate) fn cmd_subtask(&mut self, args: &str) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/subtask is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command(
+            "subtask",
+            args,
+            &command_core::subtask::SubtaskHandler::new(handle),
+        )
     }
 
     /// `/branch [name]`: create a branch of the conversation at this point and

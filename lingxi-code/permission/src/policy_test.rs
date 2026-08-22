@@ -3752,6 +3752,40 @@ mod tests {
         }
     }
 
+    /// PERM-01 (claude-code 2.1.238): `Write` gets its OWN spelling —
+    /// `asa="…and cannot be written."` — while Edit/NotebookEdit keep
+    /// `ssa="…and cannot be edited."`.
+    #[test]
+    fn perm01_write_read_deny_says_cannot_be_written() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Read(secrets/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Write", &edit("/proj/secrets/keys.txt")) {
+            PermissionResult::Ask { prompt, .. } => assert_eq!(
+                prompt.message,
+                "File is covered by a Read deny rule in your permission settings and cannot be written."
+            ),
+            other => panic!("expected read-deny-covers ask for Write, got {other:?}"),
+        }
+        // Every other Editor-kind tool keeps the Edit spelling.
+        for tool in ["Edit", "MultiEdit", "NotebookEdit"] {
+            let input = if tool == "NotebookEdit" {
+                serde_json::json!({ "notebook_path": "/proj/secrets/keys.txt" })
+            } else {
+                edit("/proj/secrets/keys.txt")
+            };
+            match p.authorize(tool, &input) {
+                PermissionResult::Ask { prompt, .. } => assert_eq!(
+                    prompt.message,
+                    "File is covered by a Read deny rule in your permission settings and cannot be edited.",
+                    "{tool} must keep the Edit spelling"
+                ),
+                other => panic!("expected read-deny-covers ask for {tool}, got {other:?}"),
+            }
+        }
+    }
+
     // ---- PS-CD-03: P5r cd-like element detection --------------------------
 
     #[test]

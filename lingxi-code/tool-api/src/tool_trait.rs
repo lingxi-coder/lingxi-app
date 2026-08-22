@@ -158,6 +158,34 @@ pub trait Tool: Send + Sync {
     /// Tools may strip secrets, redact paths, or canonicalize ordering.
     fn backfill_observable_input(&self, _input: &mut Value) {}
 
+    /// Normalize a model-supplied input BEFORE JSON-schema validation — the
+    /// port of claude-code's `Tool.coerceInput(input)`.
+    ///
+    /// The oracle threads it through the shared helper
+    /// `K7(tool, input) = tool.inputSchema.safeParse(tool.coerceInput?.(input)?.input ?? input)`
+    /// (2.1.238 BIN off **284321584**) and, on the execution path, inline at the
+    /// top of `checkPermissionsAndCallTool` (BIN off **294282716**):
+    ///
+    /// ```js
+    /// let h=r,g=null;
+    /// if(e.coerceInput){ if(g=e.coerceInput(r), g!==null) h=g.input }
+    /// let y=e.inputSchema.safeParse(h);
+    /// ```
+    ///
+    /// So a coercion that fires REPLACES the input for schema validation,
+    /// `validateInput`, the hooks and `call` alike; `None` (the oracle's `null`)
+    /// leaves the raw input untouched. Implementations must be PURE and return
+    /// `None` when they changed nothing — the oracle's own
+    /// `return r.length ? {input:t, shapeClass:r.join(",")} : null` shape, which
+    /// deliberately DISCARDS a partially-rewritten copy when no key was actually
+    /// coerced (see [`crate::tool_trait::CoercedInput`]).
+    ///
+    /// Defaults to `None` so every existing `Tool` impl is unaffected
+    /// (frozen-trait rule).
+    fn coerce_input(&self, _input: &Value) -> Option<CoercedInput> {
+        None
+    }
+
     /// Validate the input before any side-effects.
     ///
     /// # Errors
@@ -286,6 +314,23 @@ pub struct SearchReadInfo {
     pub is_read: bool,
     /// True if this invocation lists directory contents.
     pub is_list: bool,
+}
+
+/// A successful [`Tool::coerce_input`] rewrite — the port of the object
+/// claude-code's `coerceInput` returns (`{input, shapeClass}`).
+///
+/// `shape_class` is the oracle's comma-joined list of the keys that were
+/// coerced (e.g. `"timeout_ms"`, `"path,old_str"`). The oracle uses it only as
+/// the `shapeClass` dimension of its `tengu_tool_input_coerced` analytics event;
+/// it never reaches the model, so nothing on the wire depends on it. The port
+/// keeps the field so the value is available to a future analytics wiring rather
+/// than being recomputed.
+#[derive(Debug, Clone)]
+pub struct CoercedInput {
+    /// The rewritten input the dispatcher must use from here on.
+    pub input: Value,
+    /// Comma-joined list of coerced keys, in the order the tool applied them.
+    pub shape_class: String,
 }
 
 /// How a tool should react when an in-flight call is interrupted.
@@ -674,5 +719,18 @@ mod user_facing_name_default_tests {
         let input = serde_json::json!({});
         assert_eq!(t.user_facing_name_for_input(&input), None);
         assert_eq!(t.user_facing_name_background_color(&input), None);
+    }
+
+    /// BASH-18: the new `coerce_input` seam is OPT-IN — a tool that does not
+    /// override it returns `None`, which the dispatcher reads as "use the raw
+    /// input" (oracle `e.coerceInput?.(t) ?? null`).
+    #[test]
+    fn coerce_input_defaults_to_none() {
+        let t = BareTool {
+            schema: serde_json::json!({"type": "object"}),
+        };
+        assert!(t
+            .coerce_input(&serde_json::json!({ "timeout_ms": 5000 }))
+            .is_none());
     }
 }

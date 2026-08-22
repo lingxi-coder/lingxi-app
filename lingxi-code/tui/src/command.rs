@@ -271,7 +271,10 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/memory",
         aliases: &[],
-        description: "Open a memory file in your editor",
+        // cc2.1.238 `cyT`: "Edit CLAUDE.md files and memory settings"
+        // (2.1.220 was "Open a memory file in your editor"); LingXi brands the
+        // memory file LINGXI.md, matching `/init`'s row.
+        description: "Edit LINGXI.md files and memory settings",
         dynamic_description: None,
         hint: "",
         args: ArgSpec::None,
@@ -378,10 +381,45 @@ pub const BUILTIN: &[SlashCommand] = &[
         advertised: true,
         run: ChatWidget::cmd_clear,
     },
+    // SLASH-11 (cc2.1.238): the oracle ships TWO independent `local-jsx`
+    // objects with no cross-alias —
+    //   @296226382 {type:"local-jsx",name:"tui",
+    //     description:"Set the terminal UI renderer (default | fullscreen)",
+    //     argumentHint:"[default|fullscreen]"}
+    //   @296317867 {type:"local-jsx",name:"focus",
+    //     description:"Toggle focus view: just your prompt, summary, and
+    //     response",immediate:!0,requires:{ink:!0}}
+    // `command-api`'s table already carries both names with those exact
+    // strings; this row now matches its `/tui` half (description + hint +
+    // an argument tail that dispatches instead of falling through to the
+    // model as a prompt). Upstream `/focus` is NOT an alias of `/tui` —
+    // it has its own palette row, its own description and its own help line —
+    // so `/focus` gets its own advertised row below instead of hiding inside
+    // `/tui`'s alias list, and the two surfaces finally agree.
+    //
+    // RESIDUAL GAP (deliberate, deferred): both rows still dispatch to
+    // [`ChatWidget::cmd_tui`], whose only outcome is
+    // `ChatOutcome::ToggleFullscreen` — a pure toggle owned by `App`. So
+    // `/tui default|fullscreen` toggles rather than sets (observable only when
+    // the requested mode is already active), and `/focus` toggles the
+    // fullscreen renderer that upstream's focus view is built on rather than
+    // the focus view itself (LingXi's ratatui backend has no focus renderer).
+    // Both halves need `chat_widget`/`app` changes — a set-mode outcome and a
+    // focus view — which is why only the advertised metadata moved here.
     SlashCommand {
         name: "/tui",
-        aliases: &["/focus"],
-        description: "Toggle full-screen mode",
+        aliases: &[],
+        description: "Set the terminal UI renderer (default | fullscreen)",
+        dynamic_description: None,
+        hint: "[default|fullscreen]",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_tui,
+    },
+    SlashCommand {
+        name: "/focus",
+        aliases: &[],
+        description: "Toggle focus view: just your prompt, summary, and response",
         dynamic_description: None,
         hint: "",
         args: ArgSpec::None,
@@ -430,16 +468,6 @@ pub const BUILTIN: &[SlashCommand] = &[
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_commit_push_pr,
-    },
-    SlashCommand {
-        name: "/review",
-        aliases: &[],
-        description: "Review a GitHub pull request; for your working diff use /code-review",
-        dynamic_description: None,
-        hint: "[pr number]",
-        args: ArgSpec::Optional,
-        advertised: true,
-        run: ChatWidget::cmd_review,
     },
     SlashCommand {
         name: "/security-review",
@@ -616,15 +644,41 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/fork",
         aliases: &[],
-        description: "Spawn a background agent that inherits the full conversation",
+        // Agent view is ON by default, so the registered upstream object is
+        // `b$m` (cc2.1.238 @296246436), NOT the `y$m` disabled-branch twin:
+        // `description:"Copy this conversation into a new background session
+        // and keep working here",argumentHint:"[prompt]"`.
+        description: "Copy this conversation into a new background session and keep working here",
         dynamic_description: None,
-        hint: "<directive>",
-        // Optional (NOT Required): a bare `/fork` must reach the handler so it
-        // renders its own "Usage: /fork <directive>" line rather than falling
-        // through as an LLM prompt.
+        hint: "[prompt]",
+        // Optional (NOT Required): a bare `/fork` must reach the handler
+        // rather than falling through as an LLM prompt. NOTE: `cmd_fork` still
+        // dispatches the legacy `ForkHandler` (`y$m`), whose empty-argument arm
+        // prints "Usage: /fork <directive>"; only the advertised copy is
+        // aligned here. Switching the TUI to `ForkBackgroundHandler` needs a
+        // live `fork_to_background_session` override and is out of scope.
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_fork,
+    },
+    SlashCommand {
+        // cc2.1.238 `w$m` @296247354: `{type:"local-jsx",name:"subtask",
+        // description:"Send a subagent off with your full context; its result
+        // comes back here",argumentHint:"<task>",isEnabled:()=>!sv()}`. `sv()`
+        // = "is a coordinator session", so it is visible by default; the
+        // handler has been registered by batch 8 all along, but neither
+        // advertising surface listed it.
+        name: "/subtask",
+        aliases: &[],
+        description: "Send a subagent off with your full context; its result comes back here",
+        dynamic_description: None,
+        hint: "<task>",
+        // Optional (NOT Required): a bare `/subtask` must reach the handler so
+        // it renders its own "Usage: /subtask \<task\>" line rather than
+        // falling through as an LLM prompt (same rationale as `/fork`).
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_subtask,
     },
     SlashCommand {
         name: "/branch",
@@ -1048,6 +1102,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// cc2.1.238 deleted `/review` outright (`name:"review"`: 2.1.220 = 1 hit,
+    /// 2.1.238 = 0) — the PR-review surface is now the bundled `code-review`
+    /// skill. It must not resolve or be advertised.
+    #[test]
+    fn review_removed_in_2_1_238_is_not_registered() {
+        assert!(
+            resolve("/review").is_none(),
+            "/review should not resolve (removed in claude-code 2.1.238)"
+        );
+        assert!(!BUILTIN.iter().any(|c| c.name == "/review"));
+        // `/security-review` is a different command and stays.
+        assert_eq!(
+            resolve("/security-review").expect("registered").0.name,
+            "/security-review"
+        );
     }
 
     /// Deliberately dropped commands stay dropped: claude-code 2.1.205 removed

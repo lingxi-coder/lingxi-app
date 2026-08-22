@@ -103,10 +103,32 @@ impl PermissionView {
                     dialog: DialogView::new(
                         "Permission required",
                         vec![format!("{who} wants to use {tool_name}:"), input],
+                        // PERM-02 (claude-code 2.1.238 @302829842). The oracle
+                        // builds this row set as
+                        //   [{label:"Yes",value:"yes"},
+                        //    ...(persistRow ? [{label:<composed>,value:"yes-dont-ask-again"}] : []),
+                        //    {label:"No, and tell Claude what to do differently (esc)",value:"no"}]
+                        // Rows 1 and 3 are fixed strings and are now byte-exact
+                        // (with the LingXi rebrand in row 3).
+                        //
+                        // Row 2 is NOT fixed upstream: the oracle composes it
+                        // from the permission result's `suggestions`
+                        // (`ma0` @302931138 renders "Yes, and don't ask again
+                        // for " + the bolded rule display) and OMITS the row
+                        // entirely when no rule can be derived. The port has
+                        // `permission_suggestions` as a field but no engine
+                        // source for it (hooks/src/hook_payload.rs:639,
+                        // executor.rs:2184 pass None), so the rule display
+                        // cannot be composed here yet and the row stays
+                        // unconditional with its own wording. Closing that gap
+                        // is the suggestions engine, not a copy fix.
                         vec![
-                            "Yes, allow once".to_string(),
+                            "Yes".to_string(),
                             "Yes, allow always".to_string(),
-                            "No, deny".to_string(),
+                            format!(
+                                "No, and tell {} what to do differently (esc)",
+                                branding::PRODUCT_NAME
+                            ),
                         ],
                     ),
                     fixed_height: Some(VIEWPORT_HEIGHT),

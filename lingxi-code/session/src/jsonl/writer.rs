@@ -7,9 +7,13 @@
 use crate::jsonl::re_append::{
     plan_re_append, read_tail, SessionMetadataState, METADATA_REAPPEND_BACKSTOP_BYTES,
 };
-use crate::jsonl::schema::JsonlMessage;
+use crate::jsonl::schema::{session_kind, JsonlMessage, SESSION_KIND_KEY};
+use crate::jsonl::transcript_compact::{
+    local_gc_enabled, next_backstop, perform_compact_transcript, CompactOutcome, CompactStats,
+    COMPACT_BACKSTOP_BYTES,
+};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -24,6 +28,32 @@ pub enum WriterError {
     /// `serde_json::to_string` failed (e.g. malformed `Value`).
     #[error("serialize failure: {0}")]
     Serialize(#[from] serde_json::Error),
+}
+
+/// SC-07 — stamp `sessionKind` on a chain entry that does not carry one.
+///
+/// The oracle sets it inside the persistence layer, on every entry
+/// `insertMessageChain` writes (@296794533: `…, sessionKind:a3e(), userType,
+/// …`), not at the message factories — which is why this lives here and not in
+/// the callers that build [`JsonlMessage`]. `a3e()` is process-global
+/// ([`session_kind`]), so one env read per line is the whole derivation.
+///
+/// Returns `None` — "nothing to change, serialize the caller's value" — in the
+/// overwhelmingly common case: no session kind set, or the entry already
+/// carries one (a resumed foreign line round-tripping through `extra`, which
+/// must keep the value the ORIGINAL writer stamped rather than adopt this
+/// process's). Only a genuine `bg` / `daemon` / `daemon-worker` process pays
+/// the clone.
+fn stamp_session_kind(msg: &JsonlMessage) -> Option<JsonlMessage> {
+    let kind = session_kind()?;
+    if msg.extra.contains_key(SESSION_KIND_KEY) {
+        return None;
+    }
+    let mut stamped = msg.clone();
+    stamped
+        .extra
+        .insert(SESSION_KIND_KEY.to_string(), serde_json::Value::String(kind));
+    Some(stamped)
 }
 
 /// Append-only writer for one session's `<uuid>.jsonl`.
@@ -55,6 +85,30 @@ pub struct JsonlWriter {
     /// threaded from the composition root through the resume path to reach the
     /// same place.
     metadata_state: Mutex<SessionMetadataState>,
+    /// Bytes appended to the active transcript since the last SUCCESSFUL
+    /// transcript rewrite — the oracle's `bytesSinceCompact`
+    /// (increment site @296775839, trigger @296777239).
+    ///
+    /// Separate counter from [`Self::bytes_since_metadata_re_append`] on
+    /// purpose: they fire three orders of magnitude apart (32 KiB vs. 20 MiB)
+    /// and the rewrite resets both, but a re-append resets only its own.
+    bytes_since_compact: AtomicU64,
+    /// `backstopThresholdBytes` — starts at
+    /// [`COMPACT_BACKSTOP_BYTES`], doubles (capped) after a rewrite that
+    /// reclaimed under 10 %, and is reset to the base every time a compact
+    /// boundary is written (@296794903).
+    compact_backstop_bytes: AtomicU64,
+}
+
+/// `eI(e)` — the compact-boundary predicate, applied to an outgoing chain entry.
+///
+/// Upstream arms the transcript rewrite from inside `insertMessageChain`
+/// (@296794903: `if(y&&!t&&this.sessionFile&&l===zt()) this.backstopThresholdBytes=Uyr,
+/// this.requestCompact(this.sessionFile,a)`), i.e. at the moment the boundary
+/// line is persisted — not from the compaction engine. Same seam here.
+fn writes_compact_boundary(msg: &JsonlMessage) -> bool {
+    msg.message_type == "system"
+        && msg.extra.get("subtype").and_then(serde_json::Value::as_str) == Some("compact_boundary")
 }
 
 impl JsonlWriter {
@@ -71,6 +125,8 @@ impl JsonlWriter {
             lock: Mutex::new(()),
             bytes_since_metadata_re_append: AtomicUsize::new(0),
             metadata_state: Mutex::new(SessionMetadataState::default()),
+            bytes_since_compact: AtomicU64::new(0),
+            compact_backstop_bytes: AtomicU64::new(COMPACT_BACKSTOP_BYTES),
         }
     }
 
@@ -115,15 +171,23 @@ impl JsonlWriter {
     pub async fn append(&self, msg: &JsonlMessage) -> Result<(), WriterError> {
         {
             let _g = self.lock.lock().await;
-            let line = serde_json::to_string(msg)?;
+            let stamped = stamp_session_kind(msg);
+            let line = serde_json::to_string(stamped.as_ref().unwrap_or(msg))?;
             let mut payload = String::with_capacity(line.len() + 1);
             payload.push_str(&line);
             payload.push('\n');
             self.append_payload(&payload).await?;
         }
-        // Drive the backstop from the ordinary append path. Deliberately AFTER
-        // the critical section above: `maybe_re_append_metadata` re-takes
+        // Drive both backstops from the ordinary append path. Deliberately
+        // AFTER the critical section above: each of these re-takes
         // `self.lock`, so polling inside would deadlock.
+        //
+        // Order matches the oracle's `drainQueuesOnce` tail (@296777200):
+        // the transcript rewrite runs FIRST, then the metadata re-append —
+        // otherwise the re-append's freshly written records are the ones the
+        // rewrite would immediately supersede.
+        self.maybe_compact_transcript(writes_compact_boundary(msg))
+            .await;
         self.maybe_re_append_metadata().await;
         Ok(())
     }
@@ -164,8 +228,12 @@ impl JsonlWriter {
             .await?;
         // `bytesSinceMetadataReAppend += Buffer.byteLength(t,"utf8")` — counted
         // only on a SUCCESSFUL write, matching the oracle's post-await position.
+        // `appendToFile` (@296775839) bumps BOTH counters from the same
+        // `Buffer.byteLength`, so they never drift apart.
         self.bytes_since_metadata_re_append
             .fetch_add(payload.len(), Ordering::Relaxed);
+        self.bytes_since_compact
+            .fetch_add(payload.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -240,6 +308,109 @@ impl JsonlWriter {
                 0
             }
         }
+    }
+
+    /// Bytes appended since the last successful transcript rewrite
+    /// (`bytesSinceCompact`).
+    #[must_use]
+    pub fn bytes_since_compact(&self) -> u64 {
+        self.bytes_since_compact.load(Ordering::Relaxed)
+    }
+
+    /// The current transcript-rewrite byte backstop (`backstopThresholdBytes`).
+    #[must_use]
+    pub fn compact_backstop_bytes(&self) -> u64 {
+        self.compact_backstop_bytes.load(Ordering::Relaxed)
+    }
+
+    /// The RECLAMATION half of the metadata backstop — SC-08.
+    ///
+    /// THIS is what makes [`crate::jsonl::transcript_compact`] live. Without it
+    /// the port ships only the growth side: every 32 KiB the metadata set is
+    /// re-appended, and nothing ever removes the copy it superseded.
+    ///
+    /// Two triggers, both from the oracle:
+    ///
+    /// * `boundary_written` — a `compact_boundary` line was just persisted
+    ///   (@296794903). The threshold is reset to [`COMPACT_BACKSTOP_BYTES`] and
+    ///   a rewrite is requested immediately: a boundary is exactly the moment
+    ///   the largest amount of the file became reclaimable.
+    /// * the byte backstop — `bytesSinceCompact >= backstopThresholdBytes`
+    ///   (@296777239).
+    ///
+    /// # Inert in a default install
+    ///
+    /// Gated on [`local_gc_enabled`], which is `false` unless
+    /// `LINGXI_TRANSCRIPT_LOCAL_GC` is set — the same shape as upstream's
+    /// `localGcEnabled`, whose only setter reads
+    /// `CLAUDE_CODE_TRANSCRIPT_LOCAL_GC ?? gate("tengu_transcript_local_gc", false)`.
+    /// So this costs one env read per append today and nothing else; flipping
+    /// the env matches upstream with the gate on.
+    ///
+    /// Best-effort, like the metadata backstop: a rewrite failure must never
+    /// fail the append that triggered it.
+    pub async fn maybe_compact_transcript(&self, boundary_written: bool) -> Option<CompactStats> {
+        if !local_gc_enabled() {
+            return None;
+        }
+        if boundary_written {
+            self.compact_backstop_bytes
+                .store(COMPACT_BACKSTOP_BYTES, Ordering::Relaxed);
+        }
+        let due = self.bytes_since_compact() >= self.compact_backstop_bytes();
+        if !boundary_written && !due {
+            return None;
+        }
+        if due {
+            // `this.bytesSinceCompact=0, await this.performCompactTranscript(...)`
+            // — the backstop path zeroes BEFORE the rewrite so a slow rewrite
+            // cannot re-arm itself. The boundary path does not; the rewrite
+            // zeroes it on success either way.
+            self.bytes_since_compact.store(0, Ordering::Relaxed);
+        }
+
+        let outcome = {
+            // Hold the append lock across the rewrite. The safety envelope
+            // tolerates concurrent appends, but there is no reason to make it
+            // work for appends THIS writer controls — and holding it keeps
+            // `bytes_since_compact` honest.
+            let _g = self.lock.lock().await;
+            let path = self.active_path();
+            match tokio::task::spawn_blocking(move || perform_compact_transcript(&path)).await {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    tracing::warn!("Transcript compact failed (io): {e}");
+                    return None;
+                }
+            }
+        };
+
+        let CompactOutcome::Compacted(stats) = outcome else {
+            return None;
+        };
+        self.bytes_since_compact.store(0, Ordering::Relaxed);
+        self.compact_backstop_bytes.store(
+            next_backstop(
+                self.compact_backstop_bytes(),
+                stats.bytes_before,
+                stats.bytes_after,
+            ),
+            Ordering::Relaxed,
+        );
+        // `if(e===this.sessionFile) await this.reAppendSessionMetadataAsync(!1,!0)`
+        // — the rewrite just deleted every superseded metadata record, so the
+        // survivors have to be re-stated at the tail with dedup SKIPPED (the
+        // tail it would have deduped against no longer exists).
+        if let Some(sid) = self.session_id_from_path() {
+            let mut state = self.metadata_state.lock().await;
+            if let Err(e) = self
+                .re_append_session_metadata(&mut state, &sid, false, true)
+                .await
+            {
+                tracing::error!("Metadata re-append after transcript compact failed: {e}");
+            }
+        }
+        Some(stats)
     }
 
     /// Re-append the session's metadata sidecar records — 1:1 with

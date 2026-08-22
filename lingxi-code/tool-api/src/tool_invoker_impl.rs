@@ -13,6 +13,94 @@ use std::sync::Arc;
 use traits::permission_gate::PermissionGate;
 use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
+/// Turn fork-time frozen command denies into the `disallowed_tools` permission
+/// layer the fold understands (claude `freezeCommandDenies` → the
+/// `case"disallowed_tools"` arm of `gn(toolUseContext)`).
+///
+/// Returns an EMPTY vec when `frozen` is empty or nothing survives, which
+/// leaves [`traits::permission_gate::PermissionCheckContext::permission_layers`]
+/// empty and the fold byte-identical to a spawn that froze nothing.
+///
+/// ## Entries are CANONICALIZED, not round-trip-tested
+///
+/// The gate re-parses whatever this emits — `PolicyPermissionGate::
+/// extend_command_rules` feeds every layer string back through
+/// [`permission::PermissionRuleValue::from_rule_string`]. So emitting a string
+/// the parser reads differently than intended is the one failure that matters,
+/// and it fails OPEN: a padded `" Bash(rm:*) "` parses to a BARE rule for a tool
+/// literally named `" Bash(rm:*) "`, which matches nothing, so the deny silently
+/// evaporates.
+///
+/// Rejecting anything that does not round-trip byte-for-byte fails open in the
+/// other direction: `from_rule_string` deliberately normalizes (`Bash(*)` and
+/// `Bash()` collapse to the tool-wide form, content parens are re-escaped,
+/// legacy tool names are rewritten), so a round-trip test discards legitimate —
+/// and in the `Bash(*)` case, maximally strict — rules as "corrupt". Upstream
+/// `jLa` validates nothing at all; it spreads the strings straight into
+/// `alwaysDenyRules.command`.
+///
+/// Emitting `parsed.to_rule_string()` gets both: every rule the parser
+/// understood survives, in exactly the spelling the gate will re-parse.
+///
+/// Non-`Bash` rules are SKIPPED and logged rather than failing the resume:
+/// refusing to resume would turn a damaged sidecar into an unrecoverable agent,
+/// and the surviving entries still tighten the policy.
+///
+/// KNOWN DIVERGENCE — do not "fix" one half of this alone. Claude reads
+/// `alwaysDenyRules.command`, which is keyed by rule SOURCE, not by tool: the
+/// `command` bucket legitimately holds `Read(...)` / `WebFetch(...)` / `Edit(...)`
+/// rules (claude unions a skill's frontmatter `disallowed-tools` straight into
+/// it). This port instead freezes only tool-`Bash` rules, in BOTH halves — the
+/// producer (`tools/skill/src/skill.rs::frozen_command_denies`) and the filter
+/// below. Correcting the producer to read `PermissionRuleSource::Command`
+/// WITHOUT also dropping this filter would make every non-`Bash` rule it newly
+/// captures get silently discarded here and logged as a corrupt record.
+#[must_use]
+fn frozen_command_deny_layers(frozen: &[String]) -> Vec<Value> {
+    let kept: Vec<String> = frozen
+        .iter()
+        .filter_map(|raw| {
+            let rule = raw.trim();
+            if rule.is_empty() {
+                tracing::warn!(
+                    target: "permission",
+                    "frozen_command_denies: dropping an empty rule from the scoping record"
+                );
+                return None;
+            }
+            // `from_rule_string` is INFALLIBLE — a mangled string degrades to a
+            // bare tool name rather than erroring — so malformed input has to be
+            // caught by inspecting what it parsed INTO.
+            //
+            // The check is no longer "is this Bash?": the frozen set is the
+            // `command` SOURCE bucket, which legitimately holds rules for any
+            // tool. What a real tool name can never contain is a paren, so an
+            // unbalanced rule like `"Bash(unbalanced"` — which parses as a tool
+            // NAMED `"Bash(unbalanced"` — is still rejected here, while
+            // `"Read(/etc/passwd)"` and the tool-wide `"Bash(*)"` both survive.
+            let parsed = permission::PermissionRuleValue::from_rule_string(rule);
+            if parsed.tool_name.contains('(') || parsed.tool_name.contains(')') {
+                tracing::warn!(
+                    target: "permission",
+                    "frozen_command_denies: dropping {rule:?} — parsed tool name {:?} contains a \
+                     paren, so the rule was malformed (scoping record corrupt or written by \
+                     another producer)",
+                    parsed.tool_name
+                );
+                return None;
+            }
+            Some(parsed.to_rule_string())
+        })
+        .collect();
+    if kept.is_empty() {
+        return Vec::new();
+    }
+    // Built through the layer type that OWNS this wire spelling, so the
+    // `disallowed_tools` / `disallowedTools` keys cannot drift from the
+    // `PermissionLayer::from_wire` that reads them back.
+    vec![permission::PermissionLayer::DisallowedTools(kept).to_wire()]
+}
+
 /// Wraps an `Arc<ToolRegistry>` as a `dyn ToolInvoker`.
 ///
 /// Cheap to construct; clones share the same registry `Arc`.
@@ -76,6 +164,22 @@ impl ToolInvoker for RegistryToolInvoker {
             .find_by_name(name)
             .ok_or_else(|| ToolInvokerError::NotFound(name.to_string()))?;
 
+        // BASH-18 `coerceInput` (claude-code 2.1.238 BIN off **294282716**): the
+        // tool's own pre-validation normalization of the model's raw arguments.
+        // The oracle applies it once, at the TOP of `checkPermissionsAndCallTool`,
+        // and the rewritten value is what the permission check and `call` both
+        // see — so the subagent dispatch surface must coerce here too, BEFORE the
+        // gate below, or a subagent's `Bash{timeout_ms}` would silently lose its
+        // timeout where the main loop honours it. `None` for every tool but
+        // `Bash` ⇒ strict no-op.
+        //
+        // (This surface still has no JSON-schema gate and no `validate_input`
+        // call — a pre-existing, separately-tracked divergence from the main
+        // loop; the coercion is correct with or without them.)
+        if let Some(coerced) = tool.coerce_input(&input) {
+            input = coerced.input;
+        }
+
         // Permission gate (enforcement 3b). The subagent/teammate dispatch
         // surface now consults the same gate as the main loop — previously it
         // dispatched any registered tool unconditionally (the bypass). A `Deny`
@@ -120,6 +224,12 @@ impl ToolInvoker for RegistryToolInvoker {
                 mode_override: ctx.mode_override.clone(),
                 is_non_interactive_session: ctx.is_non_interactive_session,
                 workspace_lease_token,
+                // Replay the fork-time command denies as a `disallowed_tools`
+                // LAYER. The fold applies layers ON TOP of the base policy, so a
+                // frozen deny wins over a live rule that would now allow the same
+                // command — which is the entire point: a settings edit made while
+                // a fork was parked must not WIDEN what it may run on resume.
+                permission_layers: frozen_command_deny_layers(&ctx.frozen_command_denies),
                 ..Default::default()
             };
             match gate
@@ -571,6 +681,7 @@ mod tests {
                     parent_model: None,
                     parent_model_profile: None,
                     mode_override: None,
+                    frozen_command_denies: Vec::new(),
                 },
             )
             .await
@@ -733,6 +844,7 @@ mod tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 
@@ -914,6 +1026,7 @@ mod tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 
@@ -1027,6 +1140,7 @@ mod tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 
@@ -1117,6 +1231,134 @@ mod tests {
             .clone()
             .expect("context gate consulted");
         assert!(ctx.requires_user_interaction);
+    }
+
+    #[tokio::test]
+    async fn dispatch_replays_frozen_command_denies_as_a_layer() {
+        // The consumer `frozen_command_denies` never had: the fork-time snapshot
+        // must reach the gate as a `disallowed_tools` LAYER, which the fold
+        // applies on top of the base policy. `policy_gate_test.rs`'s
+        // `a_disallowed_tools_layer_adds_a_command_source_deny_rule` proves such
+        // a layer denies even under BypassPermissions — i.e. the frozen deny wins.
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(ContextRecordingGate {
+            seen: seen.clone(),
+            outcome: traits::permission_gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let mut ctx = ctx_with_tool_use_id("toolu_fork");
+        ctx.frozen_command_denies = vec!["Bash(rm:*)".to_string()];
+        invoker
+            .invoke("TestEcho", json!({ "a": 1 }), ctx)
+            .await
+            .expect("allow dispatches");
+        let seen = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("context gate consulted");
+        assert_eq!(
+            seen.permission_layers,
+            vec![json!({
+                "kind": "disallowed_tools",
+                "disallowedTools": ["Bash(rm:*)"],
+            })],
+            "the frozen snapshot reaches the gate as a disallowed_tools layer"
+        );
+    }
+
+    #[test]
+    fn frozen_command_deny_layers_drops_entries_it_cannot_honour() {
+        // `from_rule_string` is INFALLIBLE — a mangled rule degrades to a bare
+        // tool name instead of erroring — so malformed input is caught by what
+        // it parsed INTO: a real tool name can never contain a paren.
+        //
+        // The frozen set is the `command` SOURCE bucket, which legitimately
+        // holds rules for ANY tool, so `Read(...)` is kept — it used to be
+        // dropped by a `tool_name == "Bash"` filter that read the bucket as if
+        // `command` named the Bash tool.
+        let layers = frozen_command_deny_layers(&[
+            "Bash(rm:*)".to_string(),
+            "   ".to_string(),               // empty after trim → dropped
+            "Bash(unbalanced".to_string(),   // unbalanced → tool name holds a paren → dropped
+            "Read(/etc/passwd)".to_string(), // a non-Bash command-source rule → KEPT
+            "Bash(*)".to_string(),           // tool-wide; canonicalizes to "Bash"
+            "Bash(git push:*)".to_string(),
+        ]);
+        assert_eq!(
+            layers,
+            vec![json!({
+                "kind": "disallowed_tools",
+                "disallowedTools": [
+                    "Bash(rm:*)",
+                    "Read(/etc/passwd)",
+                    "Bash",
+                    "Bash(git push:*)",
+                ],
+            })],
+            "every well-formed rule survives regardless of tool; only malformed ones drop"
+        );
+    }
+
+    #[test]
+    fn frozen_command_deny_layers_emits_the_canonical_spelling() {
+        // The string this emits is re-parsed by `extend_command_rules`, so it
+        // must be the spelling the parser round-trips — NOT the raw record text.
+        //
+        // Two ways the raw text betrays the deny, both fail-OPEN:
+        //   * padding — `from_rule_string(" Bash(rm:*) ")` sees a trailing space
+        //     after the `)`, so it degrades to a BARE rule for a tool literally
+        //     named `" Bash(rm:*) "`, which matches nothing;
+        //   * `Bash(*)` / `Bash()` — the parser collapses both to the tool-wide
+        //     form, so a byte-for-byte round-trip test would discard the single
+        //     strictest rule the record can carry.
+        let layers = frozen_command_deny_layers(&[
+            " Bash(rm:*) ".to_string(),
+            "Bash(*)".to_string(),
+            "\tBash(git push:*)\n".to_string(),
+        ]);
+        assert_eq!(
+            layers,
+            vec![json!({
+                "kind": "disallowed_tools",
+                "disallowedTools": ["Bash(rm:*)", "Bash", "Bash(git push:*)"],
+            })],
+            "every rule the parser understood survives, in canonical spelling"
+        );
+    }
+
+    #[test]
+    fn frozen_command_deny_layers_are_the_layer_type_the_fold_reads_back() {
+        // Guard against the wire spelling drifting from `PermissionLayer`: the
+        // producer and the fold must agree, and asserting a hand-written literal
+        // on both sides cannot catch a rename. Parse + fold the emitted value
+        // through the REAL consumer instead.
+        let layers = frozen_command_deny_layers(&["Bash(rm:*)".to_string()]);
+        let folded = permission::fold_permission_layers(
+            &permission::parse_permission_layers(&layers),
+            permission::LayerFoldInputs::default(),
+        );
+        assert_eq!(
+            folded.deny_command_rules,
+            vec!["Bash(rm:*)".to_string()],
+            "the emitted layer must reach the fold's command-deny bucket"
+        );
+    }
+
+    #[test]
+    fn frozen_command_deny_layers_is_empty_when_nothing_survives() {
+        // No layer at all — NOT an empty layer — so the fold is byte-identical
+        // to a spawn that froze nothing.
+        assert!(frozen_command_deny_layers(&[]).is_empty());
+        // Only MALFORMED entries drop now. `Read(x)` would be kept (the frozen
+        // set is the command SOURCE bucket, not a Bash-only one), so this uses
+        // an unbalanced rule instead.
+        assert!(frozen_command_deny_layers(&["Bash(oops".to_string()]).is_empty());
+        assert!(frozen_command_deny_layers(&["  ".to_string()]).is_empty());
     }
 
     #[tokio::test]

@@ -7,13 +7,26 @@
 //! passed in, so the priority logic is exhaustively testable without env or
 //! IO. The caller (the CLI) reads the merged settings and process env.
 //!
-//! Documented omissions vs TS (no GrowthBook/Statsig substrate in this build):
+//! Documented omissions vs TS:
 //! - Statsig `tengu_disable_bypass_permissions_mode` gate (and its
-//!   `"…disabled by your organization policy"` notice) — no Statsig substrate;
-//!   only the settings-disable notice is reachable.
+//!   `"…disabled by your organization policy"` notice) — originally omitted for
+//!   lack of a Statsig substrate. As of 2.1.238 the omission is CORRECT, not a
+//!   gap: upstream DELETED both (binary counts 2.1.220 → 2.1.238: the gate
+//!   7 → 0, the notice 4 → 0), leaving `"Bypass permissions mode was disabled
+//!   by settings"` (4 → 4) as the only reachable notice — which this resolver
+//!   emits.
 //! - `LINGXI_REMOTE` filtering of settings `defaultMode` (CCR) — `LingXi`
 //!   has no CCR remote entrypoint; the `tengu_ccr_unsupported_default_mode_ignored`
 //!   event is not reproduced. The caller passes `default_mode` straight through.
+//! - PERM-09 (2.1.238): `kqd` grew an IDE-owned-session branch, `if(YCe())`,
+//!   where `YCe() = entrypoint==="claude-vscode" && !childSession &&
+//!   !CLAUDECODE`. It is now PORTED - see [`IdeSessionInputs`] and
+//!   [`IDE_BYPASS_UNCONSENTED_MSG`]. Two documented narrowings: the branch
+//!   re-reads `defaultMode` from the RAW settings files (`Rfa()`) while this
+//!   pure resolver is handed the already-merged value, and the
+//!   `tengu_settings_bypass_unconsented_noninteractive_ignored` telemetry event
+//!   is emitted by the caller, not here (this layer is IO-free and returns the
+//!   notice instead).
 
 use crate::mode::PermissionMode;
 
@@ -117,6 +130,84 @@ pub(crate) const ENV_SCRUB_FORCED_TO_DEFAULT_MSG: &str = "Permission mode forced
 /// U+2014.
 pub(crate) const BYPASS_DISCLAIMER_DOWNGRADE_MSG: &str = "Permission mode downgraded to default \u{2014} bypass requires accepting the disclaimer interactively first";
 
+/// PERM-09 / claude-code `kqd`'s IDE branch: the byte-exact notice shown when a
+/// settings `defaultMode: "bypassPermissions"` is IGNORED because a VS
+/// Code-owned session never consented to it. Em-dash is U+2014; the quoted
+/// setting name is Claude Code's own VS Code setting and is reproduced verbatim.
+pub const IDE_BYPASS_UNCONSENTED_MSG: &str = "Permission mode bypassPermissions from settings was ignored \u{2014} enable the \"Claude Code: Allow Dangerously Skip Permissions\" setting in VS Code to consent to it";
+
+/// `YCe()` (binary @281977270) — is this session OWNED BY THE IDE, and did the
+/// user consent to bypass in it?
+///
+/// ```js
+/// function YCe(){let e=tDr();
+///   return e.entrypoint==="claude-vscode" && !e.childSession && !e.claudecode}
+/// // …initialized from env:
+/// t.setEntrypoint(V.CLAUDE_CODE_ENTRYPOINT),
+/// t.setChildSession(Boolean(V.CLAUDE_CODE_CHILD_SESSION)),
+/// t.setClaudecode(Boolean(V.CLAUDECODE))
+/// ```
+///
+/// Upstream reads a PROCESS-GLOBAL host record seeded from env at startup, so
+/// the equivalent inputs are read from the process here too
+/// ([`Self::from_process`]) rather than threaded through
+/// [`CliModeSettings`] — which keeps
+/// [`initial_permission_mode_from_cli`]'s signature (and therefore every
+/// existing caller) untouched while still making the branch REACHABLE at boot.
+/// Tests construct the struct directly, so the resolver stays pure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IdeSessionInputs {
+    /// `YCe()` — an IDE-owned (VS Code) session that is neither a child session
+    /// nor running inside another `LingXi`/Claude Code shell.
+    pub is_ide_owned_session: bool,
+    /// `t.allowDangerouslySkipPermissions` — the
+    /// `--allow-dangerously-skip-permissions` launch flag, i.e. the user's
+    /// explicit consent for bypass in an IDE-owned session. (The
+    /// `--dangerously-skip-permissions` flag counts too and is the resolver's
+    /// existing `dangerously_skip` argument, matching upstream's
+    /// `if(s||t.allowDangerouslySkipPermissions)`.)
+    pub bypass_consent: bool,
+}
+
+impl IdeSessionInputs {
+    /// No IDE ownership and no consent — the shape every non-IDE session has,
+    /// and the one the tests use for the pre-existing scenarios.
+    pub const NONE: Self = Self {
+        is_ide_owned_session: false,
+        bypass_consent: false,
+    };
+
+    /// Read `YCe()`'s three env inputs + the consent flag from THIS process.
+    ///
+    /// Env names: `CLAUDE_CODE_ENTRYPOINT` is kept in its upstream spelling (the
+    /// port already reads it that way, e.g. `tool-api/src/artifact_gate.rs`);
+    /// `CLAUDE_CODE_CHILD_SESSION` / `CLAUDECODE` are `LINGXI_CHILD_SESSION` /
+    /// `LINGXI` in this port (`platforms/posix/src/process/wrap.rs`), the
+    /// accepted `LINGXI_` branding divergence.
+    ///
+    /// Truthiness matches upstream's `Boolean(V.X)`: any non-empty value counts.
+    #[must_use]
+    pub fn from_process() -> Self {
+        let set = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .is_some_and(|value| !value.is_empty())
+        };
+        let is_ide_owned_session = std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref()
+            == Some("claude-vscode")
+            && !set("LINGXI_CHILD_SESSION")
+            && !set("LINGXI");
+        Self {
+            is_ide_owned_session,
+            // The pure resolver has no parsed-argv handle, so the flag is read
+            // from the process argv it was parsed from. Only consulted inside
+            // the IDE branch.
+            bypass_consent: is_ide_owned_session
+                && std::env::args().any(|arg| arg == "--allow-dangerously-skip-permissions"),
+        }
+    }
+}
+
 /// `initialPermissionModeFromCLI` (`permissionSetup.ts:689-812`): resolve the
 /// session permission mode from CLI flags + settings, returning the mode plus
 /// an optional user-facing notice (set when the bypass killswitch suppresses a
@@ -142,6 +233,27 @@ pub fn initial_permission_mode_from_cli(
     agent_frontmatter_mode: Option<PermissionMode>,
     env_scrub_active: bool,
     settings: &CliModeSettings,
+) -> (PermissionMode, Option<String>) {
+    initial_permission_mode_from_cli_with_ide(
+        permission_mode_cli,
+        dangerously_skip,
+        agent_frontmatter_mode,
+        env_scrub_active,
+        settings,
+        IdeSessionInputs::from_process(),
+    )
+}
+
+/// [`initial_permission_mode_from_cli`] with `YCe()`'s inputs supplied
+/// explicitly, so the IDE branch is testable without touching process env.
+#[must_use]
+pub fn initial_permission_mode_from_cli_with_ide(
+    permission_mode_cli: Option<&str>,
+    dangerously_skip: bool,
+    agent_frontmatter_mode: Option<PermissionMode>,
+    env_scrub_active: bool,
+    settings: &CliModeSettings,
+    ide: IdeSessionInputs,
 ) -> (PermissionMode, Option<String>) {
     let cli_mode = permission_mode_cli.map(permission_mode_from_cli_string);
 
@@ -193,7 +305,44 @@ pub fn initial_permission_mode_from_cli(
     if let Some(frontmatter) = agent_frontmatter_mode {
         ordered.push(frontmatter);
     }
-    if let Some(default_mode) = settings.default_mode {
+    if ide.is_ide_owned_session {
+        // PERM-09 (`kqd`'s `if(YCe())` arm, cc-238 @284422794). A VS Code-owned
+        // session handles the settings `defaultMode` ITSELF and does NOT fall
+        // through to the ordinary arm below:
+        //
+        // ```js
+        // else if(_==="bypassPermissions"){
+        //   if(s||t.allowDangerouslySkipPermissions)p.push(_);
+        //   else if(p.length===0){f=<notice>;…;p.push("default")}}
+        // else if(_==="auto"){if(!u)p.push(_);else T(<circuit-breaker warn>)}
+        // else if(_!=null)p.push(_)
+        // ```
+        //
+        // Note the two deliberate differences from the non-IDE arm: bypass needs
+        // EXPLICIT consent (a settings file alone cannot grant it to an IDE-owned
+        // session), and `auto` is NOT subject to the trusted-source gate
+        // (`Iqd()`), only to the auto-mode circuit breaker.
+        if let Some(default_mode) = settings.default_mode {
+            match default_mode {
+                PermissionMode::BypassPermissions => {
+                    if dangerously_skip || ide.bypass_consent {
+                        ordered.push(default_mode);
+                    } else if ordered.is_empty() {
+                        // `else if(p.length===0)` — a mode already requested on
+                        // the command line wins, and the notice is NOT shown.
+                        notification = Some(IDE_BYPASS_UNCONSENTED_MSG.to_string());
+                        ordered.push(PermissionMode::Default);
+                    }
+                }
+                PermissionMode::Auto => {
+                    if !settings.auto_mode_disabled {
+                        ordered.push(default_mode);
+                    }
+                }
+                other => ordered.push(other),
+            }
+        }
+    } else if let Some(default_mode) = settings.default_mode {
         // MODE-SETTINGS-AUTO-TRUST-01: a settings `defaultMode: "auto"` is only
         // honored when a trusted tier (policy/user/flag) granted it. From the
         // repo-controllable projectSettings/localSettings tiers it is IGNORED
@@ -245,6 +394,165 @@ mod tests {
             skip_dangerous_mode_permission_prompt: false,
             bypass_permissions_mode_accepted: false,
         }
+    }
+
+    fn ide() -> IdeSessionInputs {
+        IdeSessionInputs {
+            is_ide_owned_session: true,
+            bypass_consent: false,
+        }
+    }
+
+    fn settings_default(mode: PermissionMode) -> CliModeSettings {
+        CliModeSettings {
+            default_mode: Some(mode),
+            ..no_settings()
+        }
+    }
+
+    // ── PERM-09: `kqd`'s `if(YCe())` IDE-owned-session branch ──
+
+    #[test]
+    fn ide_session_ignores_unconsented_settings_bypass_with_the_byte_exact_notice() {
+        let (mode, notice) = initial_permission_mode_from_cli_with_ide(
+            None,
+            false,
+            None,
+            false,
+            &settings_default(PermissionMode::BypassPermissions),
+            ide(),
+        );
+        assert_eq!(mode, PermissionMode::Default);
+        assert_eq!(notice.as_deref(), Some(IDE_BYPASS_UNCONSENTED_MSG));
+        assert_eq!(
+            IDE_BYPASS_UNCONSENTED_MSG,
+            "Permission mode bypassPermissions from settings was ignored \u{2014} enable the \
+\"Claude Code: Allow Dangerously Skip Permissions\" setting in VS Code to consent to it"
+        );
+    }
+
+    #[test]
+    fn ide_session_honours_settings_bypass_once_consented() {
+        // `if(s||t.allowDangerouslySkipPermissions)p.push(_)` — either flag.
+        let consented = IdeSessionInputs {
+            is_ide_owned_session: true,
+            bypass_consent: true,
+        };
+        let (mode, notice) = initial_permission_mode_from_cli_with_ide(
+            None,
+            false,
+            None,
+            false,
+            &settings_default(PermissionMode::BypassPermissions),
+            consented,
+        );
+        assert_eq!(mode, PermissionMode::BypassPermissions);
+        assert!(notice.is_none());
+
+        let (mode, notice) = initial_permission_mode_from_cli_with_ide(
+            None,
+            true,
+            None,
+            false,
+            &settings_default(PermissionMode::BypassPermissions),
+            ide(),
+        );
+        assert_eq!(mode, PermissionMode::BypassPermissions);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn ide_bypass_notice_is_suppressed_when_a_mode_was_already_requested() {
+        // `else if(p.length===0)` — the CLI `--permission-mode plan` already
+        // pushed a candidate, so the settings bypass is dropped SILENTLY.
+        let (mode, notice) = initial_permission_mode_from_cli_with_ide(
+            Some("plan"),
+            false,
+            None,
+            false,
+            &settings_default(PermissionMode::BypassPermissions),
+            ide(),
+        );
+        assert_eq!(mode, PermissionMode::Plan);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn a_non_ide_session_still_honours_settings_bypass_without_consent() {
+        // The branch must be scoped to `YCe()`: an ordinary CLI session keeps
+        // the pre-2.1.238 behavior.
+        let (mode, notice) = initial_permission_mode_from_cli_with_ide(
+            None,
+            false,
+            None,
+            false,
+            &settings_default(PermissionMode::BypassPermissions),
+            IdeSessionInputs::NONE,
+        );
+        assert_eq!(mode, PermissionMode::BypassPermissions);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn ide_session_skips_the_auto_trusted_source_gate_but_not_the_circuit_breaker() {
+        // IDE arm: `else if(_==="auto"){if(!u)p.push(_)}` — NO `Iqd()` check, so
+        // an untrusted (project-settings) `auto` IS honoured here, unlike the
+        // non-IDE arm.
+        let untrusted_auto = CliModeSettings {
+            default_mode: Some(PermissionMode::Auto),
+            auto_default_from_trusted: false,
+            ..no_settings()
+        };
+        let (mode, _) =
+            initial_permission_mode_from_cli_with_ide(None, false, None, false, &untrusted_auto, ide());
+        assert_eq!(mode, PermissionMode::Auto);
+        // Non-IDE: the same settings are IGNORED (MODE-SETTINGS-AUTO-TRUST-01).
+        let (mode, _) = initial_permission_mode_from_cli_with_ide(
+            None,
+            false,
+            None,
+            false,
+            &untrusted_auto,
+            IdeSessionInputs::NONE,
+        );
+        assert_eq!(mode, PermissionMode::Default);
+        // …but the circuit breaker still drops it in the IDE arm.
+        let broken = CliModeSettings {
+            auto_mode_disabled: true,
+            ..untrusted_auto
+        };
+        let (mode, _) =
+            initial_permission_mode_from_cli_with_ide(None, false, None, false, &broken, ide());
+        assert_ne!(mode, PermissionMode::Auto);
+    }
+
+    #[test]
+    fn ide_session_passes_every_other_settings_mode_straight_through() {
+        // `else if(_!=null)p.push(_)`.
+        for wanted in [
+            PermissionMode::Plan,
+            PermissionMode::AcceptEdits,
+            PermissionMode::DontAsk,
+            PermissionMode::Default,
+        ] {
+            let (mode, notice) = initial_permission_mode_from_cli_with_ide(
+                None,
+                false,
+                None,
+                false,
+                &settings_default(wanted),
+                ide(),
+            );
+            assert_eq!(mode, wanted);
+            assert!(notice.is_none());
+        }
+    }
+
+    #[test]
+    fn the_public_resolver_is_inert_outside_an_ide_session() {
+        // `from_process()` must report NOT-IDE in an ordinary process, so the
+        // wrapper every caller uses behaves exactly as before.
+        assert!(!IdeSessionInputs::from_process().is_ide_owned_session);
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub mod bg_worker;
 pub mod daemon;
 pub mod doctor;
 pub mod gateway;
+pub mod import;
 pub mod install;
 pub mod mcp;
 pub mod mcp_xaa;
@@ -46,6 +47,7 @@ pub mod plugin_tag;
 pub mod project;
 pub mod remote_control;
 pub mod rm;
+pub mod sandbox;
 pub mod setup_token;
 pub mod ultrareview;
 pub mod update;
@@ -94,6 +96,22 @@ pub enum Commands {
     /// Set up a long-lived authentication token (requires Claude subscription)
     #[command(name = "setup-token")]
     SetupToken(setup_token::Cli),
+    /// Import config from another AI coding agent into LingXi
+    //
+    // (CLI-14, cc2.1.238) `r.command("import")` — visible, positional
+    // `[source]`, `--dry-run`, `--yes[=<digest>]`.
+    Import(import::Cli),
+    /// Import a session archive into the transcript store (internal).
+    //
+    // (CLI-14) `r.command("import-conversations <exportPath>",{hidden:!0})`.
+    #[command(name = "import-conversations", hide = true)]
+    ImportConversations(import::ConversationsCli),
+    /// Windows sandbox provisioning (internal).
+    //
+    // (CLI-10, cc2.1.238) `r.command("sandbox",{hidden:!0})` with the
+    // `install` / `status` children — NEW in 2.1.238.
+    #[command(name = "sandbox", hide = true)]
+    Sandbox(sandbox::Cli),
     /// Manage background agents
     Agents(agents::Cli),
     /// Open a background session here; Ctrl+Z returns to the shell
@@ -138,6 +156,9 @@ impl Commands {
             Commands::Project(_) => "project",
             Commands::RemoteControl(_) => "remote-control",
             Commands::SetupToken(_) => "setup-token",
+            Commands::Import(_) => "import",
+            Commands::ImportConversations(_) => "import-conversations",
+            Commands::Sandbox(_) => "sandbox",
             Commands::Agents(_) => "agents",
             Commands::Attach(_) => "attach",
             Commands::Rm(_) => "rm",
@@ -163,6 +184,9 @@ impl Commands {
             Commands::Project(c) => project::run(c).await,
             Commands::RemoteControl(c) => remote_control::run(c).await,
             Commands::SetupToken(c) => setup_token::run(c).await,
+            Commands::Import(c) => import::run(c).await,
+            Commands::ImportConversations(c) => import::run_conversations(c).await,
+            Commands::Sandbox(c) => sandbox::run(c).await,
             Commands::Agents(c) => agents::run(c).await,
             Commands::Attach(c) => attach::run(c).await,
             Commands::Rm(c) => rm::run(c).await,

@@ -117,10 +117,33 @@ In code: default to writing no comments. Never write multi-paragraph docstrings 
 /// Keep this on the shared capability/profile registry. Raw substring matching
 /// here previously let a model named `vendor-compat-claude-sonnet-5` inherit
 /// Claude-only prompt bytes despite resolving to `FullHarness`.
+/// `v9T` @297082655 — the `turn_updates` variant of the `communication` slot,
+/// new in 2.1.238 (`CC_VER=2.1.220 oracle.sh count` → 0).
+///
+/// `T9T(e)` opens with
+/// `if(JJr("turn_updates",V.CLAUDE_CODE_TURN_UPDATES,Fo(e)))return v9T;`, so
+/// when it fires it REPLACES the whole communication section — heading and all
+/// — with this bare paragraph, for every model. `JJr(key, env, model)` prefers
+/// the env value and otherwise falls back to the model capability `key`;
+/// `turn_updates` occurs only twice in the whole binary (the V8 string table and
+/// this call site), so NO model declares it and the env var is the only way in.
+pub(crate) const TURN_UPDATES_SECTION: &str = "Before you start, say in a line what you're about to do; brief updates while you work help the user follow along. Close with a short recap that stands on its own \u{2014} what you found, what you did, and what's next \u{2014} so a reader who only sees the last message has the full picture.";
+
+/// `CLAUDE_CODE_TURN_UPDATES` — the env half of `JJr("turn_updates", …)`. Kept
+/// under the oracle's spelling, like every other `CLAUDE_CODE_*` knob the port
+/// honours (`CLAUDE_CODE_SILENT_TURN_REMINDER`, `CLAUDE_CODE_TOTAL_TOKENS_REMINDER`).
+fn turn_updates_enabled() -> bool {
+    traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_TURN_UPDATES").ok().as_deref())
+}
+
 #[must_use]
 fn anti_verbosity_section(model: &str) -> String {
     use traits::model_capabilities::{prompt_profile_for, PromptProfile};
 
+    // `T9T`'s FIRST branch, ahead of every model check.
+    if turn_updates_enabled() {
+        return TURN_UPDATES_SECTION.to_string();
+    }
     match prompt_profile_for(model) {
         PromptProfile::ClaudeLean if is_communicating_model(model) => {
             communicating_with_the_user_section(true)
@@ -146,8 +169,12 @@ pub(crate) fn is_communicating_model(model: &str) -> bool {
 
 /// `# Communicating with the user` — claude-code `UJh` current-gen arm. The
 /// `r` (fable-5/mythos-5) flag selects the first-sentence variant and gates the
-/// extra "Text you write between tool calls…" paragraph. Em-dashes are U+2014;
-/// the arrow in "A → B → fails" is U+2192; apostrophes are ASCII. The heading
+/// extra "Text you write between tool calls…" paragraph. 2.1.238 re-punctuated
+/// four clauses that 2.1.220 set off with U+2014 em-dashes — the final-message
+/// list ("turn, including … and deliverables, must"), "what did you find":",
+/// "Calibrate to the user:", and "can't show, never to say" — and changed "the
+/// moment the PR merges" to "the change merges" (oracle @297049247).
+/// The arrow in "A → B → fails" is U+2192; apostrophes are ASCII. The heading
 /// is followed by a BLANK line (`\n\n`), unlike `# Text output`.
 #[must_use]
 fn communicating_with_the_user_section(r: bool) -> String {
@@ -157,12 +184,12 @@ fn communicating_with_the_user_section(r: bool) -> String {
         "Your text output is what the user reads between tool calls; they usually can't see your thinking or the raw tool results."
     };
     let final_message_paragraph = if r {
-        "\n\nText you write between tool calls may not be shown to the user. Everything the user needs from this turn \u{2014} answers, summaries, findings, conclusions, deliverables \u{2014} must be in the final text message of your turn, with no tool calls after it. Keep text between tool calls to brief status notes. If something important appeared only mid-turn or in your thinking, restate it in that final message."
+        "\n\nText you write between tool calls may not be shown to the user. Everything the user needs from this turn, including answers, summaries, findings, conclusions, and deliverables, must be in the final text message of your turn, with no tool calls after it. Keep text between tool calls to brief status notes. If something important appeared only mid-turn or in your thinking, restate it in that final message."
     } else {
         ""
     };
     format!(
-        "# Communicating with the user\n\n{first_sentence} Write it for a teammate who stepped away and is catching up, not for a log file: they don't know the codenames or shorthand you created along the way, and they didn't watch your process unfold. Before your first tool call, say in a sentence what you're about to do; while working, give brief updates when you find something load-bearing or change direction.{final_message_paragraph}\n\nLead with the outcome. Your first sentence after finishing should answer \"what happened\" or \"what did you find\" \u{2014} the thing the user would ask for if they said \"just give me the TLDR.\" Supporting detail and reasoning come after, for readers who want them.\n\nBeing readable and being concise are different things, and readable matters more. If the user has to reread your summary or ask you to explain, any time saved by brevity is gone. The way to keep output short is to be selective about what you include (drop details that don't change what the reader would do next), not to compress the writing into fragments, abbreviations, arrow chains like `A \u{2192} B \u{2192} fails`, or jargon. What you do include, write in complete sentences with the technical terms spelled out. Don't make the reader cross-reference labels or numbering you invented earlier; say what you mean in place.\n\nMatch the response to the question: a simple question gets a direct answer in prose, not headers and sections. Use tables only for short enumerable facts, with explanations in the surrounding prose rather than the cells. Calibrate to the user \u{2014} a bit tighter for an expert, more explanatory for someone newer.\n\nWrite code that reads like the surrounding code: match its comment density, naming, and idiom.\nOnly write a code comment to state a constraint the code itself can't show \u{2014} never to say where it came from, what the next line does, or why your change is correct; that's you talking to the reviewer, not the next reader, and it's noise the moment the PR merges."
+        "# Communicating with the user\n\n{first_sentence} Write it for a teammate who stepped away and is catching up, not for a log file: they don't know the codenames or shorthand you created along the way, and they didn't watch your process unfold. Before your first tool call, say in a sentence what you're about to do; while working, give brief updates when you find something load-bearing or change direction.{final_message_paragraph}\n\nLead with the outcome. Your first sentence after finishing should answer \"what happened\" or \"what did you find\": the thing the user would ask for if they said \"just give me the TLDR.\" Supporting detail and reasoning come after, for readers who want them.\n\nBeing readable and being concise are different things, and readable matters more. If the user has to reread your summary or ask you to explain, any time saved by brevity is gone. The way to keep output short is to be selective about what you include (drop details that don't change what the reader would do next), not to compress the writing into fragments, abbreviations, arrow chains like `A \u{2192} B \u{2192} fails`, or jargon. What you do include, write in complete sentences with the technical terms spelled out. Don't make the reader cross-reference labels or numbering you invented earlier; say what you mean in place.\n\nMatch the response to the question: a simple question gets a direct answer in prose, not headers and sections. Use tables only for short enumerable facts, with explanations in the surrounding prose rather than the cells. Calibrate to the user: a bit tighter for an expert, more explanatory for someone newer.\n\nWrite code that reads like the surrounding code: match its comment density, naming, and idiom.\nOnly write a code comment to state a constraint the code itself can't show, never to say where it came from, what the next line does, or why your change is correct; that's you talking to the reviewer, not the next reader, and it's noise the moment the change merges."
     )
 }
 
@@ -230,7 +257,7 @@ fn session_guidance(
     // standard specialized-agent text.
     if has_agent_tool && !lean {
         if fork_mode_enabled {
-            bullets.push("Calling Agent with subagent_type: \"fork\" creates a fork \u{2014} it inherits your full conversation context, runs in the background, and keeps its tool output out of your context \u{2014} so you can keep chatting with the user while it works. Reach for it when research or multi-step implementation work would otherwise fill your context with raw output you won't need again. Other subagent_type values (or omitting it) start fresh agents with no context. **If you ARE the fork** \u{2014} execute directly; do not re-delegate.".to_string());
+            bullets.push("Calling Agent with subagent_type: \"fork\" creates a fork \u{2014} it inherits your full conversation context, runs in the background, and keeps its tool output out of your context \u{2014} so you can keep chatting with the user while it works. Reach for it when research or multi-step implementation work would otherwise fill your context with raw output you won't need again. Other subagent_type values start fresh agents with no context. **If you ARE the fork** \u{2014} execute directly; do not re-delegate.".to_string());
         } else if traits::live_sessions::subagent_steer_is_default() {
             bullets.push("Use the Agent tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.".to_string());
         } else {
@@ -310,7 +337,7 @@ fn action_caution_section(model: &str) -> String {
     let extra = if has_opus_5_prompt_bundle(model) {
         ""
     } else {
-        " \u{2014} if what you find contradicts how it was described, or you didn't create it, surface that instead of proceeding"
+        ". If what you find contradicts how it was described, or you didn't create it, surface that instead of proceeding"
     };
     format!(
         "For actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target{extra}. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging."
@@ -348,9 +375,48 @@ const ACT_DONT_REDERIVE_SECTION: &str = "When you have enough information to act
 /// The Fable-only identity paragraph in the pinned 2.1.220 prompt.
 const FABLE_IDENTITY_SECTION: &str = "This iteration of Claude is Claude Fable 5, the first model in Anthropic's new Claude 5 family and part of a new Mythos-class model tier that sits above Claude Opus in capability. Claude Fable 5 and Claude Mythos 5 share the same underlying model. Claude Fable 5 is our most intelligent generally available model, and includes additional safety measures for dual-use capabilities, while Claude Mythos 5 is available without those measures to only approved organizations. Fable 5 is the most advanced generally available Claude model. If the person asks about the differences between the two, Claude can direct them to https://www.anthropic.com/news/claude-fable-5-mythos-5 for more information.";
 
+/// SP-10 — `k9T` @**297083649** (also in 2.1.220 as `lMy` @237498803, so this is
+/// a long-standing port gap, not 2.1.238 drift): the `tool_param_json` slot.
+///
+/// One paragraph, registered between `fable_identity` and `session_guidance`
+/// (@297072456):
+///
+/// ```js
+/// aB("tool_param_json",()=>z4d()||($Xe(i)||Vpe(t))&&it("tengu_silent_harbor",!1)?k9T:null)
+/// ```
+const TOOL_PARAM_JSON_SECTION: &str = "Object and array parameter values must be a single JSON value \u{2014} never write parameter-tag markup inside a JSON value.";
+
+/// The `tool_param_json` gate.
+///
+/// * `z4d()` = `g1n().toolParamStrictness` = the GrowthBook `juniper_shoal.
+///   bracken_spool` flag — absent in a stock install, so **false**. Port
+///   stand-in: `LINGXI_TOOL_PARAM_STRICTNESS`.
+/// * `($Xe(i)||Vpe(t))&&it("tengu_silent_harbor",!1)` — a model-family
+///   predicate AND a second GrowthBook flag whose literal default is **false**,
+///   so this whole arm is off in a stock install regardless of the model.
+///   `Vpe` is the same predicate the `fable_identity` slot uses
+///   (`tBr(i)||Vpe(t)?C9T:null`), which the port models as the
+///   [`traits::model_capabilities::ModelCapability::Fable5Mitigations`]
+///   capability; the flag stand-in is `LINGXI_SILENT_HARBOR`.
+///
+/// Both arms are therefore OFF by default and this section is INERT — the
+/// system prompt is byte-identical to before. It exists so that flipping either
+/// gate matches upstream.
+fn tool_param_json_enabled(model: &str) -> bool {
+    let env = |key: &str| traits::env::is_env_truthy(std::env::var(key).ok().as_deref());
+    if env("LINGXI_TOOL_PARAM_STRICTNESS") {
+        return true;
+    }
+    env("LINGXI_SILENT_HARBOR")
+        && traits::model_capabilities::has_capability(
+            model,
+            traits::model_capabilities::ModelCapability::Fable5Mitigations,
+        )
+}
+
 /// Autonomous-session mitigation appended after context management for Fable
 /// and Mythos in the pinned 2.1.220 build.
-const FABLE_MYTHOS_MITIGATIONS: &str = "You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work. For reversible actions that follow from the original request, proceed without asking. Stop only for destructive actions or genuine scope changes the user must decide. Offering follow-ups after the task is done is fine; asking permission before doing the work is not.\n\nException: when the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment. Report your findings and stop. Don't apply a fix until they ask for one.\n\nBefore ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.\n\nBefore running a command that changes system state — restarts, deletes, config edits — check that the evidence actually supports that specific action. A signal that pattern-matches to a known failure may have a different cause.";
+const FABLE_MYTHOS_MITIGATIONS: &str = "You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work. For reversible actions that follow from the original request, proceed without asking. Stop only for destructive actions or genuine scope changes the user must decide. Offering follow-ups after the task is done is fine; asking permission before doing the work is not.\n\nException: when the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment. Report your findings and stop. Don't apply a fix until they ask for one.\n\nBefore ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.\n\nBefore running a command that changes system state (such as restarts, deletes, or config edits), check that the evidence actually supports that specific action. A signal that pattern-matches to a known failure may have a different cause.";
 
 const OPUS_5_TERMINAL_RESTRICTIONS: &str = "Do not call the AgentTool unless the user requested it\nDo not use workflows or deep-research unless the user requested it";
 
@@ -579,6 +645,12 @@ pub fn format(
     ) {
         sections.push(FABLE_IDENTITY_SECTION.to_string());
     }
+    // SP-10 `tool_param_json` — slot order @297072456 puts it directly between
+    // `fable_identity` and `session_guidance`. Inert by default; see
+    // [`tool_param_json_enabled`].
+    if tool_param_json_enabled(model) {
+        sections.push(TOOL_PARAM_JSON_SECTION.to_string());
+    }
     // NOTE: `task_continuity` (`sMy`) is deliberately NOT ported. Its gate is
     // `function tBc(e){return!1}` — hard-disabled in 2.1.220, so the oracle
     // never emits it. Porting the text would ADD a section the oracle does not
@@ -726,6 +798,52 @@ mod tests {
         }
     }
 
+    /// SP-10: `tool_param_json` is INERT by default (both upstream gates are
+    /// GrowthBook flags that are unset in a stock install), and lands between
+    /// `fable_identity` and `# Session-specific guidance` when enabled.
+    #[test]
+    fn tool_param_json_is_inert_by_default_and_slots_after_fable_identity() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        const BODY: &str = "Object and array parameter values must be a single JSON value";
+
+        let default = format(false, true, &[], true, false, false, "claude-fable-5", false);
+        assert!(
+            !default.contains(BODY),
+            "both gates default OFF ⇒ the paragraph must not ship"
+        );
+
+        std::env::set_var("LINGXI_TOOL_PARAM_STRICTNESS", "1");
+        let on = format(false, true, &[], true, false, false, "claude-fable-5", false);
+        std::env::remove_var("LINGXI_TOOL_PARAM_STRICTNESS");
+        assert_eq!(
+            on.matches(BODY).count(),
+            1,
+            "`toolParamStrictness` alone enables the slot"
+        );
+        assert!(
+            on.contains(&format!(
+                "{FABLE_IDENTITY_SECTION}\n\n{TOOL_PARAM_JSON_SECTION}"
+            )),
+            "slot order @297072456: directly after `fable_identity`"
+        );
+    }
+
+    /// The second arm needs BOTH the model predicate and `tengu_silent_harbor`;
+    /// neither alone is enough.
+    #[test]
+    fn the_silent_harbor_arm_needs_the_flag_and_the_model() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!tool_param_json_enabled("claude-fable-5"), "flag unset");
+        std::env::set_var("LINGXI_SILENT_HARBOR", "1");
+        let fable = tool_param_json_enabled("claude-fable-5");
+        let opus47 = tool_param_json_enabled("claude-opus-4-7");
+        std::env::remove_var("LINGXI_SILENT_HARBOR");
+        assert!(fable, "a Fable-mitigations model takes the arm");
+        assert!(!opus47, "a non-Fable model does not");
+    }
+
     /// `action_caution` is the lean arm's replacement for
     /// `# Executing actions with care`. Emitting the lean body without it
     /// would delete the confirm-before-irreversible guidance outright.
@@ -772,7 +890,9 @@ mod tests {
     /// the model that produced the sample, wrong for the other three.
     #[test]
     fn action_caution_tail_clause_is_opus_5_suppressed_only() {
-        let tail = "if what you find contradicts how it was described";
+        // 2.1.238 (SP-5) split this off the em-dash and made it its own
+        // sentence, so the clause now starts with a capital `If`.
+        let tail = "If what you find contradicts how it was described";
         let o5 = format(false, true, &[], true, false, false, "claude-opus-5", false);
         assert!(!o5.contains(tail), "opus-5 gets the SHORT form:\n{o5}");
         for m in ["claude-opus-4-8", "claude-fable-5"] {
@@ -1157,11 +1277,12 @@ mod tests {
         // paragraph. Heading followed by a BLANK line.
         let s = anti_verbosity_section("claude-fable-5");
         assert!(s.starts_with("# Communicating with the user\n\nYour text output is what the user reads; they usually can't see your thinking or the raw tool results. Write it for a teammate who stepped away"));
-        // r-only paragraph present, em-dashes U+2014.
-        assert!(s.contains("Text you write between tool calls may not be shown to the user. Everything the user needs from this turn \u{2014} answers, summaries, findings, conclusions, deliverables \u{2014} must be in the final text message of your turn, with no tool calls after it."));
+        // r-only paragraph present; 2.1.238 spells the list with commas, not
+        // em-dashes.
+        assert!(s.contains("Text you write between tool calls may not be shown to the user. Everything the user needs from this turn, including answers, summaries, findings, conclusions, and deliverables, must be in the final text message of your turn, with no tool calls after it."));
         // Arrow is U+2192.
         assert!(s.contains("arrow chains like `A \u{2192} B \u{2192} fails`, or jargon."));
-        assert!(s.ends_with("that's you talking to the reviewer, not the next reader, and it's noise the moment the PR merges."));
+        assert!(s.ends_with("that's you talking to the reviewer, not the next reader, and it's noise the moment the change merges."));
         assert!(!s.contains("# Text output"));
     }
 

@@ -44,6 +44,48 @@ use traits::{
 /// keeps the full Bash-spawn contract unchanged.
 const HOOK_COMMAND_AUDIT_REASON: &str = "hook_command";
 
+/// SH-07 — drain `r` to EOF into `buf`, pushing every chunk to `observer` as it
+/// is read.
+///
+/// This is the live half of claude-code's `hook_progress` polling: upstream's
+/// `tWi` reads a growing accumulator every second, which only works because the
+/// child's `stdout`/`stderr` `data` listeners append to it as bytes arrive. A
+/// `read_to_end` publishes nothing until EOF, so a progress poll layered over it
+/// would emit exactly zero frames.
+///
+/// Chunks are handed over as raw bytes — decoding per chunk would corrupt a
+/// multi-byte UTF-8 sequence that straddles a read boundary.
+async fn drain_observed<R>(
+    r: &mut R,
+    buf: &mut Vec<u8>,
+    observer: Option<&std::sync::Arc<dyn traits::HookOutputObserver>>,
+    is_stderr: bool,
+) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    // No observer ⇒ the cheap bulk read, byte-identical to the previous code.
+    if observer.is_none() {
+        r.read_to_end(buf).await?;
+        return Ok(());
+    }
+    let mut chunk = vec![0u8; 8192];
+    loop {
+        let n = r.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(obs) = observer {
+            if is_stderr {
+                obs.on_chunk(&[], &chunk[..n]).await;
+            } else {
+                obs.on_chunk(&chunk[..n], &[]).await;
+            }
+        }
+    }
+}
+
 /// Auth / session / OTEL env keys claude-code STRIPS from a hook command's
 /// environment. Mirrors `WO()` (claude-code BIN off ~195508064), which builds
 /// the hook child env from `process.env` and then `delete`s each of these keys
@@ -648,6 +690,25 @@ impl ProcessRunner for PosixProcess {
         cmd: &SandboxedCommand,
         default_async_timeout: std::time::Duration,
     ) -> Result<HookRunOutcome, ProcessError> {
+        self.run_hook_with_async_detection_observed(cmd, default_async_timeout, None)
+            .await
+    }
+
+    /// SH-07 — the observed variant. Identical to the buffered one except that
+    /// every chunk read off the child's stdout/stderr is pushed to `observer` as
+    /// it arrives, which is what lets the hook layer run claude-code's `tWi`
+    /// progress poll (oracle 2.1.238 @ 296463298) over a live accumulator.
+    ///
+    /// RESIDUAL: the BACKGROUNDED (`{"async":true}` first line) arm detaches the
+    /// child into a drain task; upstream keeps polling it through the pending-
+    /// async-hook registry (`n3m`). The port's detached drain carries no
+    /// observer, so a backgrounded hook emits no further `hook_progress` frames.
+    async fn run_hook_with_async_detection_observed(
+        &self,
+        cmd: &SandboxedCommand,
+        default_async_timeout: std::time::Duration,
+        observer: Option<std::sync::Arc<dyn traits::HookOutputObserver>>,
+    ) -> Result<HookRunOutcome, ProcessError> {
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -683,6 +744,11 @@ impl ProcessRunner for PosixProcess {
             Err(_) => return Err(ProcessError::Timeout),
             Ok(Err(e)) => return Err(ProcessError::Io(e.to_string())),
             Ok(Ok(_)) => {}
+        }
+        // Upstream attaches its `data` listeners BEFORE writing stdin, so the
+        // first line is part of the observed output too.
+        if let (Some(obs), false) = (observer.as_ref(), first_line.is_empty()) {
+            obs.on_chunk(&first_line, &[]).await;
         }
 
         // Runtime async detection: a first line of `{"async":true,...}` backgrounds
@@ -744,17 +810,22 @@ impl ProcessRunner for PosixProcess {
         // `wait_with_output` does, so a large stderr can't deadlock the stdout
         // read), then wait — all bounded by the same deadline.
         let mut stderr_pipe = child.stderr.take();
+        let obs_out = observer.clone();
+        let obs_err = observer.clone();
         let complete = async {
             let mut rest: Vec<u8> = Vec::new();
             let mut stderr_buf: Vec<u8> = Vec::new();
             let stderr_read = async {
                 if let Some(se) = stderr_pipe.as_mut() {
-                    se.read_to_end(&mut stderr_buf).await
+                    drain_observed(se, &mut stderr_buf, obs_err.as_ref(), true).await
                 } else {
-                    Ok(0)
+                    Ok(())
                 }
             };
-            let (rest_res, stderr_res) = tokio::join!(reader.read_to_end(&mut rest), stderr_read);
+            let (rest_res, stderr_res) = tokio::join!(
+                drain_observed(&mut reader, &mut rest, obs_out.as_ref(), false),
+                stderr_read
+            );
             rest_res.map_err(|e| ProcessError::Io(e.to_string()))?;
             stderr_res.map_err(|e| ProcessError::Io(e.to_string()))?;
             let status = child

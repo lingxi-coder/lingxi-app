@@ -2011,14 +2011,18 @@ mod output_style_reminder_tests {
             .expect("streaming turn");
 
         // OUTGOING snapshot to the stream: [additionalContext(meta), user(prompt),
-        // reminder].
+        // output-style reminder, total_tokens reminder]. The total-tokens block
+        // comes LAST, matching the oracle's fan-out order
+        // (`…critical_system_reminder, silent_turn_reminder,
+        // total_tokens_reminder`), and it is present because that reminder
+        // defaults ON as it does upstream.
         let calls = streaming.captured_calls().await;
         assert_eq!(calls.len(), 1, "exactly one streaming call");
         let sent = &calls[0].messages;
         assert_eq!(
             sent.len(),
-            3,
-            "additionalContext + prompt + reminder; got {sent:?}"
+            4,
+            "additionalContext + prompt + style reminder + total_tokens; got {sent:?}"
         );
         assert!(
             is_additional_context(&sent[0]),
@@ -2028,8 +2032,13 @@ mod output_style_reminder_tests {
         assert_eq!(text_of(&sent[1]), "streaming prompt");
         assert!(
             is_reminder(&sent[2], LEARNING_REMINDER),
-            "trailing message must be the byte-exact Learning reminder; got {:?}",
+            "the style reminder must be the byte-exact Learning reminder; got {:?}",
             sent[2]
+        );
+        assert!(
+            text_of(&sent[3]).contains("<total_tokens>"),
+            "total-tokens reminder trails the batch; got {:?}",
+            sent[3]
         );
 
         // STORED history: reminder absent.
@@ -2077,12 +2086,15 @@ mod output_style_reminder_tests {
 
         let calls = streaming.captured_calls().await;
         assert_eq!(calls.len(), 1);
-        // No output-style reminder; only the leading additional-context meta
-        // (always present via `# currentDate`) prepends the prompt.
+        // No output-style reminder. The leading additional-context meta
+        // (always present via `# currentDate`) prepends the prompt, and the
+        // `total_tokens_reminder` trails it — that reminder defaults ON, as it
+        // does in a stock Claude Code session, so it is part of every outgoing
+        // list now. See `crate::prompt::total_tokens`.
         assert_eq!(
             calls[0].messages.len(),
-            2,
-            "additionalContext + prompt; got {:?}",
+            3,
+            "additionalContext + prompt + total_tokens_reminder; got {:?}",
             calls[0].messages
         );
         assert!(
@@ -2091,6 +2103,11 @@ mod output_style_reminder_tests {
             calls[0].messages[0]
         );
         assert_eq!(text_of(&calls[0].messages[1]), "only prompt");
+        assert!(
+            text_of(&calls[0].messages[2]).contains("<total_tokens>"),
+            "trailing total-tokens reminder; got {:?}",
+            calls[0].messages[2]
+        );
     }
 }
 
@@ -2445,7 +2462,7 @@ You should not respond to this context unless it is highly relevant to your task
         let today = crate::prompt::env_meta::current_date_string();
         format!(
             "<system-reminder>\nThe date has changed. Today's date is now {today}. \
-DO NOT mention this to the user explicitly because they are already aware.\n</system-reminder>"
+No need to announce the new date \u{2014} the user's own clock shows it.\n</system-reminder>"
         )
     }
 
@@ -3459,14 +3476,20 @@ mod skill_listing_reminder_tests {
 
         // First plan-mode turn ⇒ FULL (206 `LU_`): the aIp banner + the 5-phase
         // workflow scaffold.
-        let t0 = orch
+        let m0 = orch
             .plan_mode_reminder_message()
             .await
-            .expect("plan-mode full reminder")
-            .text_content();
+            .expect("plan-mode full reminder");
+        // 2.1.238 `Zy`/`NT` envelope + `isMeta:!0` (@296675470 / @296673554).
+        assert!(m0.is_meta(), "plan_mode reminder must be isMeta");
+        let t0 = m0.text_content();
         assert!(
-            t0.starts_with("Plan mode is active. The user indicated"),
-            "turn-0 must be the FULL reminder, got: {t0}"
+            t0.starts_with("<system-reminder>\nPlan mode is active. The user indicated"),
+            "turn-0 must be the FULL reminder inside the system-reminder envelope, got: {t0}"
+        );
+        assert!(
+            t0.ends_with("\n</system-reminder>"),
+            "envelope must close: {t0}"
         );
         assert!(
             t0.contains("## Plan Workflow"),
@@ -3484,7 +3507,20 @@ mod skill_listing_reminder_tests {
         // Injection armed the sparse flag.
         assert!(orch.session().lock().await.plan_reminder_shown);
 
-        // Second plan-mode turn ⇒ SPARSE (206 `MU_`).
+        // 2.1.238 `X4T` cadence: the NEXT model call in the same turn (and the
+        // next four user turns) get NOTHING — `if(_ && y < 5) return []`.
+        assert!(
+            orch.plan_mode_reminder_message().await.is_none(),
+            "no second attachment before 5 real user turns have passed"
+        );
+        push_real_user_turns(&orch, 4).await;
+        assert!(
+            orch.plan_mode_reminder_message().await.is_none(),
+            "4 turns is still under TURNS_BETWEEN_ATTACHMENTS"
+        );
+
+        // The 5th real user turn releases attachment #2 ⇒ SPARSE (`L5T`).
+        push_real_user_turns(&orch, 1).await;
         let t1 = orch
             .plan_mode_reminder_message()
             .await
@@ -3492,11 +3528,97 @@ mod skill_listing_reminder_tests {
             .text_content();
         assert!(
             t1.starts_with(
-                "Plan mode still active (see full instructions earlier in conversation)."
+                "<system-reminder>\nPlan mode still active (see full instructions earlier in conversation)."
             ),
             "turn-1 must be the SPARSE reminder, got: {t1}"
         );
         assert!(t1.contains("Follow 5-phase workflow."), "sparse body: {t1}");
+    }
+
+    /// Append `n` non-meta, non-tool_result user messages — the only kind `ixl`
+    /// (2.1.238 @296524028) counts toward `TURNS_BETWEEN_ATTACHMENTS`.
+    async fn push_real_user_turns(orch: &ConversationOrchestrator, n: usize) {
+        let sess = orch.session();
+        let mut s = sess.lock().await;
+        for i in 0..n {
+            s.history.push(ConversationMessage::user(
+                MessageId::new(),
+                format!("turn {i}"),
+            ));
+        }
+    }
+
+    /// `c % FULL_REMINDER_EVERY_N_ATTACHMENTS === 1`: attachments #1 and #6 are
+    /// FULL, #2..#5 sparse. The pre-fix port emitted FULL exactly once and was
+    /// sparse forever after.
+    #[tokio::test]
+    async fn plan_mode_reminder_returns_to_full_every_fifth_attachment() {
+        let orch = orch_with(ToolRegistry::new(), None);
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            s.plan_mode = true;
+            s.plan_reminder_shown = false;
+        }
+        let full_prefix = "<system-reminder>\nPlan mode is active. The user indicated";
+        let sparse_prefix = "<system-reminder>\nPlan mode still active (see full instructions";
+
+        let mut forms = Vec::new();
+        for _ in 0..6 {
+            let t = orch
+                .plan_mode_reminder_message()
+                .await
+                .expect("attachment")
+                .text_content();
+            forms.push(if t.starts_with(full_prefix) {
+                "full"
+            } else {
+                assert!(t.starts_with(sparse_prefix), "unexpected body: {t}");
+                "sparse"
+            });
+            push_real_user_turns(&orch, 5).await;
+        }
+        assert_eq!(
+            forms,
+            vec!["full", "sparse", "sparse", "sparse", "sparse", "full"]
+        );
+    }
+
+    /// A tool-result continuation is NOT a turn (`sxl`/`y3T` @296541952), so it
+    /// never advances the cadence.
+    #[tokio::test]
+    async fn tool_result_continuations_do_not_advance_the_plan_cadence() {
+        let orch = orch_with(ToolRegistry::new(), None);
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            s.plan_mode = true;
+            s.plan_reminder_shown = false;
+        }
+        orch.plan_mode_reminder_message().await.expect("first");
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            for _ in 0..10 {
+                s.history.push(ConversationMessage::User {
+                    id: MessageId::new(),
+                    content: vec![protocol::ContentBlock::ToolResult {
+                        tool_use_id: protocol::ToolUseId::new(),
+                        content: "ok".into(),
+                        is_error: false,
+                        provider_tool_use_id: None,
+                        content_blocks: None,
+                    }],
+                    is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                });
+            }
+        }
+        assert!(
+            orch.plan_mode_reminder_message().await.is_none(),
+            "ten tool-result continuations are still zero real user turns"
+        );
     }
 
     #[tokio::test]
@@ -3505,8 +3627,11 @@ mod skill_listing_reminder_tests {
         let orch = orch_with(ToolRegistry::new(), None);
         orch.session().lock().await.plan_mode = true;
         let _full = orch.plan_mode_reminder_message().await.expect("full");
+        push_real_user_turns(&orch, 5).await;
         let _sparse = orch.plan_mode_reminder_message().await.expect("sparse");
         // Simulate EnterPlanMode / set_plan_mode(true) re-arming the tracker.
+        // Re-entry also resets the `X4T` cadence (the `plan_mode_exit` boundary
+        // `Y4T` stops counting at), so the very next call emits again.
         orch.session().lock().await.plan_reminder_shown = false;
         let again = orch
             .plan_mode_reminder_message()
@@ -3514,7 +3639,7 @@ mod skill_listing_reminder_tests {
             .expect("full again after reset")
             .text_content();
         assert!(
-            again.starts_with("Plan mode is active. The user indicated"),
+            again.starts_with("<system-reminder>\nPlan mode is active. The user indicated"),
             "got: {again}"
         );
     }
@@ -3783,18 +3908,18 @@ mod skill_listing_reminder_tests {
             .await
             .expect("turn-0 task notification")
             .text_content();
-        let body = "<system-reminder>\n\
-<task-notification>\n\
+        // 2.1.238 `b_a` (@285068292): the provenance header sits INSIDE the
+        // `<system-reminder>` envelope.
+        let body = "<task-notification>\n\
 <task-id>b12345678</task-id>\n\
 <output-file>/tmp/tasks/b12345678.output</output-file>\n\
 <status>completed</status>\n\
 <summary>Background command \"run tests\" completed (exit code 0)</summary>\n\
-</task-notification>\n\
-</system-reminder>";
+</task-notification>";
         assert_eq!(
             t0,
             format!(
-                "{}{body}",
+                "<system-reminder>\n{}{body}\n</system-reminder>",
                 crate::prompt::task_notification::NON_USER_INPUT_HEADER
             )
         );
@@ -4169,6 +4294,129 @@ mod agent_listing_reminder_tests {
             "delta must NOT re-emit an already-announced type; got: {t1}"
         );
     }
+
+    /// AGT-15 — the INITIAL listing carries the concurrency note when the plan
+    /// is not Pro and the subagent steer is `default`
+    /// (`showConcurrencyNote:Cc()!=="pro"&&DZ()==="default"`, oracle
+    /// @296530704), and a later DELTA never does (`e.isInitial` guard,
+    /// @296704484). Sections are joined by a BLANK line.
+    #[tokio::test]
+    async fn gate_on_initial_listing_carries_the_concurrency_note() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
+        let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
+            "alpha-agent",
+            "the alpha agent",
+            AgentToolPolicy::All {
+                use_exact_tools: false,
+            },
+        )]));
+        let orch = orch_with(reg_with_agent_tool(), Some(catalog.clone()));
+
+        let t0 = orch
+            .agent_listing_reminder_message()
+            .await
+            .expect("turn-0")
+            .text_content();
+        const NOTE: &str = "When you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently.";
+        assert!(t0.contains(NOTE), "initial listing must carry it; got: {t0}");
+        // Its own section ⇒ a blank line separates it from the listing lines.
+        assert!(t0.contains(&format!("\n\n{NOTE}\n</system-reminder>")), "got: {t0}");
+
+        catalog.write().await.push(agent_def(
+            "gamma-agent",
+            "the gamma agent",
+            AgentToolPolicy::All {
+                use_exact_tools: false,
+            },
+        ));
+        let t1 = orch
+            .agent_listing_reminder_message()
+            .await
+            .expect("turn-1 delta")
+            .text_content();
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+        assert!(
+            !t1.contains(NOTE),
+            "the note is gated on isInitial; got: {t1}"
+        );
+    }
+
+    /// AGT-15 — an agent type that DISAPPEARS from the catalog emits the
+    /// `removedTypes` section plus the shared ambient-context trailer, and is
+    /// dropped from the announced set so it is re-announced if it returns
+    /// (oracle `s.delete(p)` replay @296530704).
+    #[tokio::test]
+    async fn gate_on_removed_type_emits_the_removal_branch_and_the_ambient_trailer() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
+        let catalog = Arc::new(tokio::sync::RwLock::new(vec![
+            agent_def(
+                "zeta-agent",
+                "the zeta agent",
+                AgentToolPolicy::All {
+                    use_exact_tools: false,
+                },
+            ),
+            agent_def(
+                "beta-agent",
+                "the beta agent",
+                AgentToolPolicy::All {
+                    use_exact_tools: false,
+                },
+            ),
+        ]));
+        let orch = orch_with(reg_with_agent_tool(), Some(catalog.clone()));
+
+        let t0 = orch
+            .agent_listing_reminder_message()
+            .await
+            .expect("turn-0")
+            .text_content();
+        assert!(t0.contains("- zeta-agent:") && t0.contains("- beta-agent:"));
+
+        // Both project agents vanish (a plugin/MCP catalog reload).
+        catalog.write().await.clear();
+        let t1 = orch
+            .agent_listing_reminder_message()
+            .await
+            .expect("turn-1 removal")
+            .text_content();
+        assert!(
+            t1.contains("The following agent types are no longer available:\n- beta-agent\n- zeta-agent"),
+            "removed list must be plain-sorted; got: {t1}"
+        );
+        assert!(
+            t1.contains(crate::prompt::memory_update::AMBIENT_CONTEXT_TRAILER),
+            "the removal branch pushes the ambient trailer; got: {t1}"
+        );
+        // No ADDED section this turn ⇒ neither header appears.
+        assert!(!t1.contains("agent types for the Agent tool:"), "got: {t1}");
+
+        // The type comes back ⇒ it is re-announced (the announced set dropped it).
+        catalog.write().await.push(agent_def(
+            "beta-agent",
+            "the beta agent",
+            AgentToolPolicy::All {
+                use_exact_tools: false,
+            },
+        ));
+        let t2 = orch
+            .agent_listing_reminder_message()
+            .await
+            .expect("turn-2 re-announce")
+            .text_content();
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+        assert!(
+            t2.contains("New agent types are now available for the Agent tool:")
+                && t2.contains("- beta-agent:"),
+            "a returning type must be re-announced; got: {t2}"
+        );
+    }
 }
 
 // ── §F: per-turn, transient `conditional_rules` reminder ──────────────────────
@@ -4224,7 +4472,17 @@ mod new_diagnostics_reminder_tests {
             .new_diagnostics_reminder_message()
             .await
             .expect("a block is injected");
-        assert_eq!(msg.text_content(), block);
+        // The diagnostics attachment renders through the SAME batch wrapper as
+        // every other reminder: oracle 2.1.238 @296693609 is
+        //   case"diagnostics": … return Zy([kn({content: formatDiagnosticsBlock(n), isMeta:!0})])
+        // and `Zy` maps `NT` = `<system-reminder>\n${e}\n</system-reminder>`.
+        // `formatDiagnosticsBlock` itself returns the BARE block (@289741641),
+        // which is why this test previously asserted the bare form — it was
+        // reading the formatter and not the renderer that consumes it.
+        assert_eq!(
+            msg.text_content(),
+            format!("<system-reminder>\n{block}\n</system-reminder>")
+        );
     }
 
     #[tokio::test]
@@ -6542,11 +6800,14 @@ mod persist_with_parent_tests {
         assert_eq!(inner["stop_sequence"], serde_json::Value::Null);
         assert_eq!(inner["usage"], usage);
 
-        // Synthetic path (no model/usage) → the synthetic BetaMessage envelope
-        // (baseCreateAssistantMessage `QBl` → createAssistantAPIErrorMessage `tc`,
-        // binary @205978440): model "<synthetic>", `usage` OMITTED, `stop_reason`
-        // hardcoded "stop_sequence" (NOT the message's own "end_turn"), with
-        // container/stop_details/context_management = null.
+        // Synthetic path (no model/usage) → the synthetic BetaMessage envelope.
+        // SC-05: re-derived from claude-code 2.1.238 `Mqm` (cc-238 @296633254).
+        // This assertion previously pinned a 2.1.185 reading that was wrong on
+        // two counts — it demanded `diagnostics` be ABSENT and `usage` be
+        // OMITTED. Both are present upstream: `diagnostics:null` is the first
+        // key, and `Mqm`'s `usage` parameter DEFAULTS to a zeroed usage object,
+        // so the key is always serialized. `stop_reason` stays hardcoded
+        // "stop_sequence" (NOT the message's own "end_turn").
         let plain = orch.to_jsonl_message_with_inner_id(
             &msg,
             "sess",
@@ -6570,6 +6831,7 @@ mod persist_with_parent_tests {
         assert_eq!(
             pkeys,
             vec![
+                "diagnostics",
                 "id",
                 "container",
                 "model",
@@ -6578,6 +6840,7 @@ mod persist_with_parent_tests {
                 "stop_reason",
                 "stop_sequence",
                 "type",
+                "usage",
                 "content",
                 "context_management"
             ],
@@ -6593,10 +6856,39 @@ mod persist_with_parent_tests {
         assert_eq!(pinner["stop_sequence"], serde_json::json!(""));
         assert_eq!(pinner["type"], serde_json::json!("message"));
         assert_eq!(pinner["context_management"], serde_json::Value::Null);
-        // `usage` is omitted (tc calls QBl without a usage arg).
-        assert!(
-            !pinner.contains_key("usage"),
-            "synthetic envelope must omit usage"
+        // `usage` is PRESENT and is `Mqm`'s zeroed default, key order included.
+        assert_eq!(pinner["diagnostics"], serde_json::Value::Null);
+        let pusage = pinner["usage"].as_object().expect("synthetic usage object");
+        assert_eq!(
+            pusage.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "output_tokens_details",
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+                "server_tool_use",
+                "service_tier",
+                "cache_creation",
+                "inference_geo",
+                "iterations",
+                "speed"
+            ],
+            "Mqm default usage key order"
+        );
+        assert_eq!(pusage["output_tokens_details"], serde_json::Value::Null);
+        assert_eq!(pusage["input_tokens"], serde_json::json!(0));
+        assert_eq!(pusage["output_tokens"], serde_json::json!(0));
+        assert_eq!(
+            pusage["server_tool_use"],
+            serde_json::json!({"web_search_requests": 0, "web_fetch_requests": 0})
+        );
+        assert_eq!(
+            pusage["cache_creation"],
+            serde_json::json!({
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+            })
         );
         assert_eq!(pinner["content"][0]["type"], serde_json::json!("text"));
         assert_eq!(pinner["content"][0]["text"], serde_json::json!("hi"));
@@ -7536,7 +7828,8 @@ mod pumped_visible_text_tests {
 //   relevant tool is present, the Brief tool is absent, history is non-empty,
 //   and the killswitch is not "off";
 // - the body is byte-exact (V1 with/without items; V2 with items) and emitted
-//   RAW (no `<system-reminder>` wrapper).
+//   inside a `<system-reminder>` envelope as a META user message (oracle
+//   `Zy([kn({content:o,isMeta:!0})])`, 2.1.238 @296690005).
 // The byte-level renderer is additionally covered in `tool_task::reminder::tests`.
 // ============================================================================
 #[cfg(test)]
@@ -7824,10 +8117,13 @@ mod todo_reminder_tests {
         let orch = orch_with(reg_with(&["TodoWrite"]));
         prime_session(&orch, 10, 10).await;
         let msg = orch.todo_reminder_message().await.expect("fires");
-        // RAW body — NOT wrapped in <system-reminder>.
+        // `Zy`/`NT` envelope + `isMeta:!0` (2.1.238 @296690005). NOTE the body's
+        // own trailing `\n` sits directly before the wrapper's, exactly as the
+        // oracle's `` `<system-reminder>\n${o}\n</system-reminder>` `` produces.
+        assert!(msg.is_meta(), "todo_reminder must be isMeta");
         assert_eq!(
             msg.text_content(),
-            "The TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
+            "<system-reminder>\nThe TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n\n</system-reminder>"
         );
         // The reminder counter reset to 0 on fire.
         assert_eq!(orch.session.lock().await.turns_since_last_reminder, 0);
@@ -7858,7 +8154,7 @@ mod todo_reminder_tests {
         }
         let msg = orch.todo_reminder_message().await.expect("fires");
         assert!(msg.text_content().ends_with(
-            "\n\nHere are the existing contents of your todo list:\n\n[1. [pending] first\n2. [in_progress] second]"
+            "\n\nHere are the existing contents of your todo list:\n\n[1. [pending] first\n2. [in_progress] second]\n</system-reminder>"
         ), "got: {:?}", msg.text_content());
         std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
@@ -7885,13 +8181,14 @@ mod todo_reminder_tests {
         prime_session(&orch, 10, 10).await;
         let msg = orch.todo_reminder_message().await.expect("fires");
         let text = msg.text_content();
+        assert!(msg.is_meta(), "task_reminder must be isMeta");
         assert!(
-            text.starts_with("The task tools haven't been used recently."),
+            text.starts_with("<system-reminder>\nThe task tools haven't been used recently."),
             "got: {text}"
         );
         assert!(
             text.ends_with(
-                "\n\nHere are the existing tasks:\n\n#1. [completed] alpha\n#2. [pending] beta"
+                "\n\nHere are the existing tasks:\n\n#1. [completed] alpha\n#2. [pending] beta\n</system-reminder>"
             ),
             "got: {text:?}"
         );
@@ -7908,7 +8205,7 @@ mod todo_reminder_tests {
         let msg = orch.todo_reminder_message().await.expect("fires");
         assert_eq!(
             msg.text_content(),
-            "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
+            "<system-reminder>\nThe task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n\n</system-reminder>"
         );
         std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
@@ -9245,5 +9542,786 @@ mod plans_dir_tests {
             .join("docs/plans")
             .join(format!("{}.md", sid.as_uuid()));
         assert_eq!(path, expected.to_string_lossy());
+    }
+}
+
+// ── REM-05: the per-turn `edited_text_file` (changed-files) reminders ─────────
+//
+// Proves [`ConversationOrchestrator::changed_files_reminder_messages`], the
+// port of the oracle producer `Izm` @296537358:
+// - a tracked file whose on-disk mtime moved and whose bytes differ ⇒ ONE
+//   wrapped meta reminder carrying the 2.1.238 copy and the numbered diff;
+// - the reminder does NOT repeat next turn (the re-read refreshes the entry);
+// - partial reads (`offset`/`limit`) and seeded/partial-view entries never fire;
+// - an mtime bump with identical bytes fires nothing (`vNe`);
+// - a vanished file drops its read-state entry.
+#[cfg(test)]
+mod changed_files_reminder_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use crate::ConversationOrchestrator;
+    use crate::OrchestratorConfig;
+    use protocol::MessageId;
+    use tool_api::registry::ToolRegistry;
+
+    fn orch() -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        )
+    }
+
+    fn seed(
+        orch: &ConversationOrchestrator,
+        path: &std::path::Path,
+        content: &str,
+        mtime_ms: i64,
+        entry: tool_api::read_file_state::ReadFileEntry,
+    ) {
+        tool_api::read_file_state::set_with_model_context(
+            &orch.read_state_map,
+            path.to_path_buf(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: content.to_string(),
+                mtime_ms,
+                ..entry
+            },
+            true,
+        );
+    }
+
+    fn full_read(content: &str) -> tool_api::read_file_state::ReadFileEntry {
+        tool_api::read_file_state::ReadFileEntry {
+            content: content.to_string(),
+            mtime_ms: 0,
+            offset: None,
+            limit: None,
+            from_read: true,
+            seeded_from_context: false,
+            is_partial_view: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_changed_on_disk_emits_one_wrapped_reminder_and_does_not_repeat() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let orch = orch();
+        // The model read the OLD bytes; the file has since been rewritten.
+        seed(&orch, &path, "a\nOLD\nc\n", 0, full_read("a\nOLD\nc\n"));
+
+        let msgs = orch.changed_files_reminder_messages().await;
+        assert_eq!(msgs.len(), 1, "exactly one changed file");
+        let text = msgs[0].text_content();
+        assert!(text.starts_with("<system-reminder>\n"), "got: {text}");
+        assert!(text.ends_with("\n</system-reminder>"), "got: {text}");
+        assert!(
+            text.contains("changed on disk since you last read it."),
+            "2.1.238 copy expected; got: {text}"
+        );
+        assert!(
+            !text.contains("either by the user or by a linter"),
+            "the 2.1.220 wording must be gone; got: {text}"
+        );
+        assert!(
+            text.contains("Here are the relevant changes (shown with line numbers):\n1\ta\n2\tb\n3\tc"),
+            "numbered diff expected; got: {text}"
+        );
+
+        // The re-read refreshed the entry ⇒ silent next turn.
+        assert!(orch.changed_files_reminder_messages().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_mtime_bump_with_identical_bytes_emits_nothing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "same\n").unwrap();
+        let orch = orch();
+        seed(&orch, &path, "same\n", 0, full_read("same\n"));
+        assert!(
+            orch.changed_files_reminder_messages().await.is_empty(),
+            "`vNe` content compare suppresses the reminder"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_and_seeded_entries_never_fire() {
+        let dir = TempDir::new().unwrap();
+        let orch = orch();
+
+        let partial = dir.path().join("partial.rs");
+        std::fs::write(&partial, "x\ny\n").unwrap();
+        seed(
+            &orch,
+            &partial,
+            "OLD\n",
+            0,
+            tool_api::read_file_state::ReadFileEntry {
+                offset: Some(1),
+                limit: Some(10),
+                ..full_read("OLD\n")
+            },
+        );
+
+        let seeded = dir.path().join("LINGXI.md");
+        std::fs::write(&seeded, "# real\n").unwrap();
+        seed(
+            &orch,
+            &seeded,
+            "# stripped\n",
+            0,
+            tool_api::read_file_state::ReadFileEntry {
+                seeded_from_context: true,
+                is_partial_view: true,
+                ..full_read("# stripped\n")
+            },
+        );
+
+        assert!(orch.changed_files_reminder_messages().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_vanished_file_drops_its_read_state_entry() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("gone.rs");
+        let orch = orch();
+        seed(&orch, &path, "old\n", 0, full_read("old\n"));
+        assert!(orch.changed_files_reminder_messages().await.is_empty());
+        assert!(
+            !orch
+                .read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&path),
+            "`if(ur(c))e.readFileState.delete(s)` — the entry must be dropped"
+        );
+    }
+
+    /// The 16384-char cross-file budget (`m3T`): once the accumulator has
+    /// crossed it, every LATER file renders the "diff is omitted here" arm.
+    ///
+    /// Iteration is MRU→LRU, so the file seeded FIRST is visited LAST — the two
+    /// big files (each snippet capped at 8192 by `truncate_snippet`, together
+    /// over the budget) are visited before it.
+    #[tokio::test]
+    async fn the_snippet_budget_blanks_later_files() {
+        let dir = TempDir::new().unwrap();
+        let orch = orch();
+
+        let small = dir.path().join("small.rs");
+        std::fs::write(&small, "new\n").unwrap();
+        seed(&orch, &small, "old\n", 0, full_read("old\n"));
+
+        let bulk: String = (0..4000).map(|i| format!("l{i}\n")).collect();
+        for name in ["big1.rs", "big2.rs"] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, &bulk).unwrap();
+            seed(&orch, &p, "l0\n", 0, full_read("l0\n"));
+        }
+
+        let msgs = orch.changed_files_reminder_messages().await;
+        assert_eq!(msgs.len(), 3, "three changed files");
+        let last = msgs[2].text_content();
+        assert!(
+            last.contains(&small.to_string_lossy().to_string()),
+            "the LRU-oldest entry is rendered last; got: {last}"
+        );
+        assert!(
+            last.contains(
+                "The diff is omitted here because other changed files this turn already filled \
+the snippet budget; use Read if you need the current content."
+            ),
+            "the post-budget file must be blanked; got: {last}"
+        );
+        assert!(
+            msgs[0]
+                .text_content()
+                .contains("Here are the relevant changes (shown with line numbers):"),
+            "the first file keeps its snippet"
+        );
+    }
+}
+
+// ── REM-14: the per-turn `memory_update` reminders ───────────────────────────
+//
+// Proves the two halves of the port of `jzm` @296554545:
+// - ENQUEUE: a terminal `dream` task notification queues a pending update
+//   (`ConversationOrchestrator::enqueue_memory_updates_from`, reached from
+//   `task_notification_reminder_message`, which BOTH turn drivers call);
+// - DRAIN: `memory_update_reminder_messages` renders it once, with the memdir
+//   files that moved and the subset the model is still holding.
+#[cfg(test)]
+mod memory_update_reminder_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use async_trait::async_trait;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use crate::ConversationOrchestrator;
+    use crate::OrchestratorConfig;
+    use protocol::MessageId;
+    use tool_api::registry::ToolRegistry;
+
+    struct InlineRuntime;
+    #[async_trait]
+    impl traits::RuntimeSpawner for InlineRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            tokio::spawn(task);
+            Ok(traits::BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: 0,
+            })
+        }
+        async fn sleep(&self, _d: std::time::Duration) {}
+        async fn cancel(
+            &self,
+            _h: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    struct NoopSideQuery;
+    #[async_trait]
+    impl sidequery::SideQueryClient for NoopSideQuery {
+        async fn query(
+            &self,
+            _r: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            Ok(sidequery::SideQueryResponse {
+                text: Some("{\"filenames\":[]}".into()),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
+
+    fn orch_with_memdir(memdir: &std::path::Path) -> ConversationOrchestrator {
+        let prefetch = memory::prefetch::MemoryPrefetch::new(
+            Arc::new(memory::selector::MemorySelector::new(Arc::new(NoopSideQuery))),
+            Arc::new(InlineRuntime),
+            memory::memdir::MemdirRoots {
+                user_memdir: memdir.to_path_buf(),
+                session_memdir: memdir.join("session-memory"),
+                team_memdir: None,
+            },
+        );
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        )
+        .with_memory_prefetch(Arc::new(prefetch))
+    }
+
+    /// The producer only reports memdir files whose mtime is NEWER than the
+    /// previous scan, and the constructor seeds that floor with "now". Push it
+    /// back so the fixture files (written milliseconds later) always qualify.
+    fn reset_scan_floor(orch: &ConversationOrchestrator) {
+        orch.last_memory_scan_ms
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn dream_notification(result: Option<&str>, status: &str) -> traits::task_registry::TaskNotification {
+        traits::task_registry::TaskNotification {
+            task_id: "d12345678".into(),
+            task_type: "dream".into(),
+            status: status.into(),
+            description: "memory consolidation".into(),
+            tool_use_id: None,
+            output_path: None,
+            exit_code: None,
+            error: None,
+            result: result.map(str::to_string),
+            usage: None,
+            killed_by: None,
+            worktree_path: None,
+            worktree_branch: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_completed_dream_emits_the_three_line_reminder_once() {
+        let dir = TempDir::new().unwrap();
+        let orch = orch_with_memdir(dir.path());
+        reset_scan_floor(&orch);
+        // A memory file the model is currently holding, plus one it is not.
+        let loaded = dir.path().join("loaded.md");
+        let other = dir.path().join("other.md");
+        std::fs::write(&loaded, "a").unwrap();
+        std::fs::write(&other, "b").unwrap();
+        tool_api::read_file_state::set_with_model_context(
+            &orch.read_state_map,
+            loaded.clone(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: "a".into(),
+                mtime_ms: 0,
+                offset: None,
+                limit: None,
+                from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
+            },
+            true,
+        );
+
+        orch.enqueue_memory_updates_from(&[dream_notification(Some("merged 3 notes"), "completed")]);
+        let msgs = orch.memory_update_reminder_messages().await;
+        assert_eq!(msgs.len(), 1);
+        let text = msgs[0].text_content();
+        assert!(text.starts_with("<system-reminder>\n") && text.ends_with("\n</system-reminder>"));
+        assert!(
+            text.contains(
+                "Background memory consolidation updated your memory directory: merged 3 notes"
+            ),
+            "got: {text}"
+        );
+        assert!(text.contains("Files changed: "), "got: {text}");
+        assert!(
+            text.contains(&format!(
+                "Your loaded copy of {} is now stale relative to disk",
+                loaded.to_string_lossy()
+            )),
+            "only the in-context path is named stale; got: {text}"
+        );
+        assert!(
+            !text.contains(&format!(
+                "Your loaded copy of {}",
+                other.to_string_lossy()
+            )),
+            "got: {text}"
+        );
+        assert!(
+            text.contains(crate::prompt::memory_update::AMBIENT_CONTEXT_TRAILER),
+            "got: {text}"
+        );
+
+        // Consume-once: the queue is drained.
+        assert!(orch.memory_update_reminder_messages().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_dream_queues_nothing_and_the_result_falls_back_to_the_description() {
+        let dir = TempDir::new().unwrap();
+        let orch = orch_with_memdir(dir.path());
+
+        orch.enqueue_memory_updates_from(&[dream_notification(Some("x"), "failed")]);
+        assert!(
+            orch.pending_memory_updates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a failed consolidation changed nothing"
+        );
+
+        orch.enqueue_memory_updates_from(&[dream_notification(Some("   "), "completed")]);
+        let queued = orch
+            .pending_memory_updates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].summary, "memory consolidation");
+    }
+
+    /// The BATCHED driver enqueues but never drains, so the queue is capped.
+    #[tokio::test]
+    async fn the_queue_is_capped_dropping_the_oldest() {
+        let dir = TempDir::new().unwrap();
+        let orch = orch_with_memdir(dir.path());
+        for i in 0..(ConversationOrchestrator::MAX_PENDING_MEMORY_UPDATES + 3) {
+            orch.enqueue_memory_updates_from(&[dream_notification(
+                Some(&format!("run{i}")),
+                "completed",
+            )]);
+        }
+        let queued = orch
+            .pending_memory_updates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            queued.len(),
+            ConversationOrchestrator::MAX_PENDING_MEMORY_UPDATES
+        );
+        assert_eq!(queued[0].summary, "run3", "the OLDEST entries are dropped");
+    }
+}
+
+// ── REM-09: the goal check-in deferral pass ──────────────────────────────────
+//
+// Proves [`ConversationOrchestrator::goal_checkin_pass`], reached from
+// `fire_stop_hooks` (which computes it from the same `background_tasks`
+// snapshot the Stop payload carries) and gating whether the goal's Stop hook
+// disposition is consulted at all this turn.
+#[cfg(test)]
+mod goal_checkin_wiring_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use crate::ConversationOrchestrator;
+    use crate::OrchestratorConfig;
+    use protocol::MessageId;
+    use tool_api::registry::ToolRegistry;
+
+    fn orch() -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        )
+    }
+
+    fn task(id: &str, kind: &str, agent_type: Option<&str>) -> hooks::HookBackgroundTask {
+        hooks::HookBackgroundTask {
+            id: id.into(),
+            r#type: kind.into(),
+            status: "running".into(),
+            description: "doing things".into(),
+            command: None,
+            agent_type: agent_type.map(str::to_string),
+            server: None,
+            tool: None,
+            name: None,
+        }
+    }
+
+    async fn set_goal(orch: &ConversationOrchestrator, condition: &str) {
+        let mut s = orch.session.lock().await;
+        s.active_goal = Some(engine::session::ActiveGoalState {
+            condition: condition.into(),
+            set_at: std::time::SystemTime::now(),
+            last_reason: None,
+            iterations: 0,
+            tokens_at_start: 0,
+        });
+    }
+
+    #[tokio::test]
+    async fn no_active_goal_never_defers() {
+        let orch = orch();
+        assert!(!orch.goal_checkin_pass(&[task("b1", "shell", None)]).await);
+    }
+
+    #[tokio::test]
+    async fn a_running_shell_defers_the_goal_evaluation_and_arms_the_clock() {
+        let orch = orch();
+        set_goal(&orch, "ship it").await;
+        assert!(
+            orch.goal_checkin_pass(&[task("b1", "shell", None)]).await,
+            "background work ⇒ the goal is NOT evaluated this turn"
+        );
+        assert!(orch
+            .goal_checkin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deferred_since
+            .is_some());
+        // The first pass only starts the clock — no interstitial yet.
+        assert!(orch.session.lock().await.history.is_empty());
+    }
+
+    /// `_qf` keeps only agent-ish + shell tasks, and never the `main-session`
+    /// agent; a monitor / dream / MCP task must NOT defer the goal.
+    #[tokio::test]
+    async fn non_deferring_task_kinds_leave_the_goal_evaluable() {
+        let orch = orch();
+        set_goal(&orch, "ship it").await;
+        assert!(
+            !orch
+                .goal_checkin_pass(&[
+                    task("m1", "monitor", None),
+                    task("d1", "dream", None),
+                    task("x1", "MCP task", None),
+                    task("a1", "subagent", Some("main-session")),
+                ])
+                .await,
+            "none of these defer a goal"
+        );
+    }
+
+    /// Once the deferral has run past the interval, the interstitial is appended
+    /// as a plain meta user message — NOT `<system-reminder>`-wrapped.
+    #[tokio::test]
+    async fn past_the_interval_the_interstitial_is_appended_unwrapped() {
+        let orch = orch();
+        set_goal(&orch, "ship it").await;
+        // Pretend the stretch started an hour ago.
+        {
+            let mut state = orch
+                .goal_checkin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.deferred_since = Some(0);
+            state.last_deferral_pass_at = Some(0);
+            state.last_deferring_ids = vec!["b1".into()];
+        }
+        assert!(orch.goal_checkin_pass(&[task("b1", "shell", None)]).await);
+
+        let history = orch.session.lock().await.history.clone();
+        assert_eq!(history.len(), 1);
+        let text = history[0].text_content();
+        assert!(
+            text.starts_with("Goal check-in: \u{ab}ship it\u{bb} is still active, and evaluation has been deferred for "),
+            "got: {text}"
+        );
+        assert!(
+            !text.contains("<system-reminder>"),
+            "the interstitial is a bare meta message; got: {text}"
+        );
+        assert!(text.contains("- b1 \u{b7} shell \u{b7} doing things"), "got: {text}");
+    }
+
+    /// The `else if(L.deferredSince!==void 0)` arm: background work finished ⇒
+    /// the deferral bookkeeping is dropped and the goal is evaluated again.
+    #[tokio::test]
+    async fn an_empty_task_set_clears_the_deferral_state() {
+        let orch = orch();
+        set_goal(&orch, "ship it").await;
+        assert!(orch.goal_checkin_pass(&[task("b1", "shell", None)]).await);
+        assert!(!orch.goal_checkin_pass(&[]).await);
+        assert_eq!(
+            *orch
+                .goal_checkin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            crate::prompt::goal_checkin::GoalDeferralState::default()
+        );
+    }
+}
+
+// ── REM-10: the periodic `tool_search_usage_reminder` ────────────────────────
+//
+// Proves [`ConversationOrchestrator::tool_search_usage_reminder_message`], the
+// port of `Uzm` @296553134. The reminder is INERT by default (its upstream gate
+// is a GrowthBook payload absent from a stock install), so these tests drive the
+// port's env stand-in under a lock.
+#[cfg(test)]
+mod tool_search_usage_reminder_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use crate::ConversationOrchestrator;
+    use crate::OrchestratorConfig;
+    use protocol::MessageId;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    struct DeferTool {
+        name: &'static str,
+        defer: bool,
+    }
+    #[async_trait]
+    impl Tool for DeferTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn should_defer(&self) -> bool {
+            self.defer
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(
+                || serde_json::json!({ "type": "object", "properties": {} }),
+            );
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other { reason: "t".into() },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            String::new()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: serde_json::json!({}),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    fn registry(deferral_enabled: bool) -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        reg.register_builtin(Arc::new(DeferTool {
+            name: "ToolSearch",
+            defer: false,
+        }));
+        for name in ["Zeta", "Alpha"] {
+            reg.register_builtin(Arc::new(DeferTool { name, defer: true }));
+        }
+        if deferral_enabled {
+            reg.set_deferral(Arc::new(tool_api::defer::DeferralState::new(
+                tool_api::defer::ToolSearchMode::Enabled,
+                false,
+            )));
+        }
+        reg.refresh_tool_search_view();
+        reg
+    }
+
+    async fn orch(reg: ToolRegistry, assistant_turns: usize) -> ConversationOrchestrator {
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(reg),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        );
+        {
+            let mut s = orch.session.lock().await;
+            for _ in 0..assistant_turns {
+                s.history.push(protocol::ConversationMessage::Assistant {
+                    id: MessageId::new(),
+                    content: vec![protocol::ContentBlock::Text { text: "ok".into() }],
+                    stop_reason: None,
+                });
+            }
+        }
+        orch
+    }
+
+    #[tokio::test]
+    async fn the_gate_is_off_by_default() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_TOOL_SEARCH_REMINDER");
+        let orch = orch(registry(true), 40).await;
+        assert!(
+            orch.tool_search_usage_reminder_message(false).await.is_none(),
+            "`Lda()` is null in a stock install ⇒ `Uzm` returns [] immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_the_gate_on_it_lists_the_undiscovered_tools_sorted() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LINGXI_TOOL_SEARCH_REMINDER", "1");
+        let orch = orch(registry(true), 40).await;
+        let msg = orch.tool_search_usage_reminder_message(false).await;
+        std::env::remove_var("LINGXI_TOOL_SEARCH_REMINDER");
+        let text = msg.expect("40 turns > everyNTurns=15").text_content();
+        assert!(text.starts_with("<system-reminder>\n"), "got: {text}");
+        assert!(
+            text.contains("not loaded in this conversation yet: Alpha, Zeta."),
+            "sorted, no remainder; got: {text}"
+        );
+        // The mark was recorded ⇒ the next call is inside the interval.
+        assert!(orch.tool_search_usage_reminder_message(false).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn it_never_fires_alongside_a_todo_reminder_or_with_deferral_off() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LINGXI_TOOL_SEARCH_REMINDER", "1");
+
+        let with_todo = orch(registry(true), 40).await;
+        let a = with_todo.tool_search_usage_reminder_message(true).await;
+
+        // `mBr()!=="tst"` — deferral off ⇒ mode is `Standard`.
+        let no_defer = orch(registry(false), 40).await;
+        let b = no_defer.tool_search_usage_reminder_message(false).await;
+
+        // Not enough assistant turns yet.
+        let too_soon = orch(registry(true), 3).await;
+        let c = too_soon.tool_search_usage_reminder_message(false).await;
+
+        std::env::remove_var("LINGXI_TOOL_SEARCH_REMINDER");
+        assert!(a.is_none(), "task_reminder_same_turn");
+        assert!(b.is_none(), "mode_not_tst");
+        assert!(c.is_none(), "turnsSinceLastToolSearch < everyNTurns");
     }
 }

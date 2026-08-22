@@ -23,6 +23,7 @@ pub mod auto_mode_setup;
 pub mod auto_mode_wizard;
 #[cfg(feature = "bash-ast")]
 pub mod bash_ast_security;
+pub mod bash_command_clamp;
 pub mod bash_security;
 #[cfg(feature = "bash-ast")]
 pub mod bash_tree_sitter;
@@ -40,7 +41,9 @@ mod model_path;
 pub mod gate;
 pub mod git_bare_repo;
 pub mod headless_gate;
+pub mod host_context;
 pub mod internal_writes;
+pub mod layers;
 pub mod loader;
 pub mod mode;
 pub mod mode_policy;
@@ -76,11 +79,18 @@ pub use auto_gate::{
     apply_auto_mode_gate, auto_mode_available, auto_mode_denial_reason, cannot_set_auto_message,
     model_supports_auto_mode, provider_allows_auto_mode, AutoGateDenialReason, AutoGateInputs,
 };
+pub use bash_command_clamp::{
+    clamp_bash_deny_message, clamp_crash_deny_message, clamp_surface_deny_message, find_clamp_miss,
+    ClampMiss, ClampMissKind, CLAMP_FAIL_CLOSED_REASON, CLAMP_NO_MATCH_REASON,
+    MONITOR_WEBSOCKET_SURFACE, POWERSHELL_CLAMP_DENY_MESSAGE,
+};
 pub use bash_security::{bash_command_is_safe, BashSafetyVerdict};
 pub use bypass_guard::{enforce_bypass_safety, BypassEnv};
 pub use classifier::is_classifier_permissions_enabled;
 pub use cli_mode::{
-    initial_permission_mode_from_cli, permission_mode_from_cli_string, CliModeSettings,
+    initial_permission_mode_from_cli, initial_permission_mode_from_cli_with_ide,
+    permission_mode_from_cli_string, CliModeSettings, IdeSessionInputs,
+    IDE_BYPASS_UNCONSENTED_MSG,
 };
 pub use command_path_containment::check_command_path_containment;
 pub use dangerous_patterns::{
@@ -101,6 +111,10 @@ pub use gate::{
 };
 pub use headless_gate::DenyOnAskGate;
 pub use internal_writes::{consume_internal_write, mark_internal_write};
+pub use layers::{
+    apply_context_layers, fold_permission_layers, layer_mode_from_wire, parse_permission_layers,
+    strip_widening_permission_layers, FoldedPermissionContext, LayerFoldInputs, PermissionLayer,
+};
 pub use loader::{
     additional_directories_from_settings_json,
     allow_managed_permission_rules_only_from_settings_json, auto_mode_disabled_from_settings_json,

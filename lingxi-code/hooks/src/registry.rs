@@ -26,6 +26,16 @@ pub struct HookContext {
     pub agent_id: Option<AgentId>,
     /// Engine cwd at the moment of dispatch.
     pub cwd: PathBuf,
+    /// UUID correlating a user prompt with every subsequent hook event until
+    /// the next prompt, spliced into the shared hook-input base as `prompt_id`
+    /// (oracle `createBaseHookInput`, 2.1.238 minified `c_` @ BIN off
+    /// 296935693: `{session_id, transcript_path, cwd, prompt_id:Vut()??void 0,
+    /// permission_mode, agent_id, agent_type, effort}`). The same value the
+    /// OpenTelemetry `prompt.id` attribute carries, so hook output joins to
+    /// OTel events at prompt grain. `None` — the additive default — omits the
+    /// key, faithful to "absent until the first user input of the process
+    /// lifetime".
+    pub prompt_id: Option<String>,
     /// Path to the on-disk transcript file backing this session. Used by
     /// HTTP / command hooks to splice into their payload (`transcript_path`
     /// per claude-code `BaseHookInputSchema`). M5-06.
@@ -1384,6 +1394,7 @@ mod match_event_matcher_tests {
                 args: vec![],
                 env: std::collections::HashMap::new(),
                 cwd: None,
+                shell: None,
             },
             source: HookSource::User,
             blocking: true,

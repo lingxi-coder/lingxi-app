@@ -13,6 +13,14 @@
 //! Note: `/review` is a builtin but non-core command, so
 //! `core_description("review")` resolves to the shared fallback string rather
 //! than a dedicated description.
+//!
+//! **UNWIRED since the cc2.1.238 pass.** claude-code 2.1.238 deleted the
+//! command outright (`name:"review"`: 2.1.220 = 1 hit, 2.1.238 = 0; likewise
+//! `Review a GitHub pull request` 2 → 0) — the PR-review surface moved into
+//! the bundled `code-review` skill. `review` was therefore dropped from
+//! `BUILTIN_COMMAND_NAMES`, `core_description`, `register_core_batch_3` and
+//! the TUI palette. This module is retained (byte-exact prompt template and
+//! its tests) as the source for a future skill port; nothing registers it.
 
 use async_trait::async_trait;
 use command_api::builtin_support::names::core_description;

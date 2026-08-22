@@ -2754,6 +2754,57 @@ pub trait OutputStream: Send + Sync {
     /// outcome. The default remains a no-op for non-interactive output sinks.
     async fn emit_hook_progress_finished(&self, _progress_id: &str) {}
 
+    /// SH-07 — `Q9i(hookEvent)` (oracle 2.1.238 @ 296463298): is this sink
+    /// currently streaming hook lifecycle frames for `hook_event`?
+    ///
+    /// ```js
+    /// function Q9i(e){ if(TjT.includes(e))return!0;
+    ///   return Z4m().allHookEventsEnabled&&n9.includes(e) }
+    /// ```
+    /// with `TjT=["SessionStart","Setup"]`.
+    ///
+    /// Upstream reads it as the HEAD of `tWi` — `if(!Q9i(e.hookEvent))return
+    /// ()=>{}` — so a host that is not streaming hook events never pays for the
+    /// 1 s progress poll or the live pipe reads at all. The hook executor asks
+    /// this before arming the poll for the same reason.
+    ///
+    /// **Default `false`**: a sink that does not implement
+    /// [`Self::emit_hook_progress_frame`] would drop the frames anyway, so the
+    /// default keeps every non-stream-json host (TUI, mocks) on the cheap
+    /// buffered read path.
+    fn hook_events_streamed(&self, _hook_event: &str) -> bool {
+        false
+    }
+
+    /// SH-07 — emit a `system/hook_progress` stream-json frame
+    /// (`--include-hook-events`).
+    ///
+    /// This is the WIRE frame, not the transient TUI row that
+    /// [`Self::emit_hook_progress_started`] drives. Oracle 2.1.238 @ 296463298:
+    ///
+    /// ```js
+    /// function EjT(e){ if(!Q9i(e.hookEvent))return;
+    ///   u0({type:"system",subtype:"hook_progress",hook_id:e.hookId,
+    ///       hook_name:e.hookName,hook_event:e.hookEvent,
+    ///       stdout:e.stdout,stderr:e.stderr,output:e.output}) }
+    /// ```
+    ///
+    /// It shares the `hook_started`/`hook_response` gate (`Q9i`): SessionStart
+    /// and Setup always stream, everything else needs the flag.
+    ///
+    /// **Default no-op**: every pre-existing `OutputStream` impl keeps
+    /// compiling unchanged. Only `StreamJsonStream` overrides this.
+    async fn emit_hook_progress_frame(
+        &self,
+        _hook_id: &str,
+        _hook_name: &str,
+        _hook_event: &str,
+        _stdout: &str,
+        _stderr: &str,
+        _output: &str,
+    ) {
+    }
+
     /// Emit a `system/hook_response` frame for `--include-hook-events`.
     ///
     /// Called after each hook completes. Parameters carry the hook identity

@@ -54,6 +54,55 @@
 //!   (`` `${WMl(o.lastReason)}` ``) with no confirmed static prefix text. Since
 //!   the binary fragment is incomplete, [`GoalHandler::status`]'s suffix format
 //!   is a best-effort placeholder, clearly marked, not a confirmed port.
+//!
+//! ## PORTED — SLASH-04: auto-clear on an unrecoverable turn error
+//!
+//! claude-code 2.1.238 added `Cqf` (@292182815, statsig `tengu_quartz_pipit`
+//! **default `true`**), which tears the goal down when a turn dies for a
+//! reason the user cannot retry past. It is absent from 2.1.220, so this is
+//! genuine 2.1.238 drift.
+//!
+//! It does NOT live in this file: the trigger is the conversation turn-error
+//! path, so the port lives with the turn loop that owns the terminal reasons —
+//! `orchestrator::turn_loop::clear_goal_after_unrecoverable_error`, called from
+//! all four terminal arms of `execute_one_turn_with_recovery_tracked`
+//! (`PromptTooLong`, `BlockingLimit`, `RapidRefillBreaker` → `context_limit`,
+//! and the graceful api-error `Err(e)` arm → the errorKind switch). The
+//! teardown reuses this command's own clear path
+//! (`clear_active_goal_state_and_hook`), so the Stop hook is removed exactly as
+//! `/goal clear` removes it. The byte-level spec, kept here for reference:
+//!
+//! ```text
+//! if(!it("tengu_quartz_pipit",!0)||!e||t.agentId||t.abortController.signal.aborted||PH(r)!=="main")return;
+//! let o=w4v(n);if(o===null)return;let{label:i,errorCode:s}=v4v[o];
+//! t.sessionHooksRegistry.remove(zt(),"Stop",{type:"prompt",prompt:e.condition}),
+//! cFe(e,o==="context_limit"?"context_limit":"api_error"),de("goal_met",s),
+//! yield{type:"active_goal",value:void 0},yield bOi(!0,e.condition),
+//! yield jBt(`Goal cleared after an unrecoverable error (${i}): "${Yl(e.condition,T4v,!0)}". Run /goal again to continue.`,"warning")
+//! ```
+//!
+//! Preconditions: main agent only (`agentId` unset, `PH(r)==="main"`), not
+//! aborted, a goal is active. `T4v=80` is the condition-truncation width.
+//! Label / telemetry map (`v4v`, @292183854):
+//!
+//! ```text
+//! auth             -> "authentication failed"    / cleared_auth
+//! billing          -> "credit balance too low"   / cleared_billing
+//! context_limit    -> "context limit reached"    / cleared_context_limit
+//! model_unavailable-> "model unavailable"        / cleared_model_unavailable
+//! ```
+//!
+//! Reason -> bucket (`w4v`): `blocking_limit | prompt_too_long |
+//! rapid_refill_breaker` -> `context_limit`; `api_error` -> `null` when
+//! `isTransient`, else by `errorKind`: `authentication_failed |
+//! oauth_org_not_allowed` -> `auth` UNLESS remote (`CLAUDE_CODE_REMOTE ||
+//! j2() || BYt()!==null`), `account_on_hold` -> `auth`, `billing_error` ->
+//! `billing`, `model_not_found` -> `model_unavailable`, and `overloaded |
+//! server_error | max_output_tokens | rate_limit | invalid_request | unknown |
+//! undefined` -> `null`. Every non-`api_error` reason (`image_error`,
+//! `model_error`, `malformed_tool_use_exhausted`, `aborted_streaming`,
+//! `aborted_tools`, `stop_hook_prevented`, `hook_stopped`, `tool_deferred`,
+//! `max_turns`, `background_requested`, `completed`) -> `null` (no clear).
 
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};

@@ -717,6 +717,13 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         self.inner.agent_listing().await
     }
 
+    /// Delegated alongside `agent_listing` so the workflow-isolated pool and the
+    /// catalog it advertises agree on which agents are actually available
+    /// (claude 2.1.238 `NJa`, @290291941).
+    async fn tools_denied_agent_types(&self) -> Vec<String> {
+        self.inner.tools_denied_agent_types().await
+    }
+
     async fn resolve_required_mcp_servers(&self, subagent_type: &str) -> Vec<String> {
         self.inner.resolve_required_mcp_servers(subagent_type).await
     }

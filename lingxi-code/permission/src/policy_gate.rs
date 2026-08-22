@@ -38,12 +38,16 @@
 //! is built at boot only behind an OPT-IN toggle; the default remains the
 //! always-allow `NoOpPermissionGate`.
 
-use crate::classifier::{classify_tool_call, reason_allows_classifier, AutoModeClassifierVerdict};
+use crate::classifier::{AutoModeClassifierVerdict, reason_allows_classifier};
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{
     MatchedAskRule, PermissionAbort, PermissionCheckContext, PermissionDecision,
     PermissionDecisionSource, PermissionGate, PermissionOutcome, PermissionResolution,
     PromptDefault,
+};
+use crate::layers::{
+    FoldedPermissionContext, LayerFoldInputs, PermissionLayer, apply_context_layers,
+    fold_permission_layers, parse_permission_layers,
 };
 use crate::mode::PermissionMode;
 use crate::policy::PermissionPolicy;
@@ -397,7 +401,12 @@ impl PolicyPermissionGate {
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
-        let (mode, verdict) = self.rule_or_safety_verdict(name, input, ctx.workspace_lease_token);
+        let (mode, verdict) = self.rule_or_safety_verdict(
+            name,
+            input,
+            ctx.workspace_lease_token,
+            &self.fold_call_context(ctx),
+        );
         match verdict {
             Some(PermissionResult::Deny {
                 reason,
@@ -486,13 +495,19 @@ impl PolicyPermissionGate {
         name: &str,
         input: &Value,
         workspace_lease_token: Option<u64>,
+        folded: &FoldedPermissionContext,
     ) -> (PermissionMode, Option<PermissionResult>) {
         let mode = self.effective_mode_for_tool(name);
-        let result = self.authorize_with_live_state(
+        // `_pt` is mode-less, but it still reads `gn(t)` for the RULE state — so
+        // the call's layer delta (extra command allow/deny rules and, above all,
+        // an active `bashCommandClamp`) binds here too. A hook `allow` must not
+        // be able to defeat a per-spawn clamp.
+        let result = self.authorize_with_layers(
             name,
             input,
             PermissionMode::Default,
             workspace_lease_token,
+            folded,
         );
         let verdict = match &result {
             // Deny rules + the tool's own `checkPermissions` denies. (A
@@ -579,6 +594,7 @@ impl PolicyPermissionGate {
         mode: PermissionMode,
         workspace_lease_token: Option<u64>,
     ) -> PermissionResult {
+        let folded = FoldedPermissionContext::default();
         // GUEST-COORD (mobile DIVERGENCE). The model names files in guest
         // coordinates while every root in `FsRoots` is a host path, so a rule
         // like `Edit(./**)` relativizes the target to `../…` and matches
@@ -587,7 +603,6 @@ impl PolicyPermissionGate {
         // local. `permission` only ever emits `updated_input: None`, so the
         // prompt transport, the `updatedInput` back-flow, and the tool body
         // all keep seeing the model's own coordinates.
-        let policy = self.live_policy();
         let Some(rewritten) = self
             .path_translator
             .as_ref()
@@ -596,12 +611,7 @@ impl PolicyPermissionGate {
             // Desktop, non-file tools, relative paths, host-coordinate paths,
             // and fenced guest regions: one evaluation, byte-identical to the
             // pre-existing behavior.
-            return policy.authorize_with_mode_and_workspace_lease(
-                name,
-                input,
-                mode,
-                workspace_lease_token,
-            );
+            return self.authorize_with_layers(name, input, mode, workspace_lease_token, &folded);
         };
 
         // UNION OF BOTH COORDINATE SPACES, with the lattice
@@ -622,12 +632,8 @@ impl PolicyPermissionGate {
         // a guest path failing to match is precisely the bug being repaired.
         // Letting it veto would make the host Allow unreachable and leave
         // every write prompting.
-        let host_verdict = policy.authorize_with_mode_and_workspace_lease(
-            name,
-            &rewritten,
-            mode,
-            workspace_lease_token,
-        );
+        let host_verdict =
+            self.authorize_with_layers(name, &rewritten, mode, workspace_lease_token, &folded);
         // COST, accepted: a file-tool call whose path actually needs
         // translation walks the rule set twice and deep-clones the tool input
         // (a `Write`'s `content` included). Both are inherent to joining two
@@ -644,12 +650,8 @@ impl PolicyPermissionGate {
         if Self::coordinate_rank(&host_verdict) == Self::RANK_DECIDED_DENY {
             return host_verdict;
         }
-        let guest_verdict = policy.authorize_with_mode_and_workspace_lease(
-            name,
-            input,
-            mode,
-            workspace_lease_token,
-        );
+        let guest_verdict =
+            self.authorize_with_layers(name, input, mode, workspace_lease_token, &folded);
         // Ties go to the GUEST form. Equal rank means both spaces decided the
         // same way, so the verdicts are interchangeable in strength — but only
         // the guest one carries paths the model actually used. `ask_plan_mutation`
@@ -660,6 +662,164 @@ impl PolicyPermissionGate {
             host_verdict
         } else {
             guest_verdict
+        }
+    }
+
+    /// Build THIS call's ordered permission-layer stack — the port of
+    /// `toolUseContext.permissionLayers` (claude-code `gn`, binary @287028951).
+    ///
+    /// Two of the ten upstream layer kinds already existed in this port as FLAT
+    /// fields on [`PermissionCheckContext`]; they are hoisted to the HEAD of the
+    /// stack in the order upstream's spawn path appends them, so a richer
+    /// `ctx.permission_layers` entry can still override them:
+    ///
+    /// * `is_non_interactive_session` → `avoid_prompts`;
+    /// * `mode_override` (a spawned subagent's clamped spawn mode) →
+    ///   `permission_mode`.
+    ///
+    /// Everything else comes from the raw wire array
+    /// [`PermissionCheckContext::permission_layers`].
+    fn call_layers(ctx: &PermissionCheckContext) -> Vec<PermissionLayer> {
+        let mut base: Vec<PermissionLayer> = Vec::new();
+        if ctx.is_non_interactive_session {
+            base.push(PermissionLayer::AvoidPrompts);
+        }
+        if let Some(mode) = ctx.mode_override.as_deref() {
+            base.push(PermissionLayer::PermissionMode(mode.to_string()));
+        }
+        apply_context_layers(&base, &parse_permission_layers(&ctx.permission_layers))
+    }
+
+    /// `gn(toolUseContext)` for THIS call.
+    ///
+    /// `isBypassPermissionsModeAvailable` is the boot grant OR "the session is
+    /// already running in `bypassPermissions`" — a session whose live mode IS
+    /// bypass necessarily has the grant, and folding that in keeps the
+    /// pre-layer `mode_override` behavior byte-identical while still honouring
+    /// the settings killswitch (`gq()`), which upstream checks first.
+    fn fold_call_context(&self, ctx: &PermissionCheckContext) -> FoldedPermissionContext {
+        let layers = Self::call_layers(ctx);
+        if layers.is_empty() {
+            return FoldedPermissionContext::default();
+        }
+        fold_permission_layers(
+            &layers,
+            LayerFoldInputs {
+                bypass_killswitch_active: self.policy.bypass_killswitch_active,
+                bypass_permissions_available: self.policy.bypass_permissions_available
+                    || self.effective_mode() == PermissionMode::BypassPermissions,
+            },
+        )
+    }
+
+    /// Authorize under the live overlay PLUS this call's folded layer delta.
+    ///
+    /// With an EMPTY fold this is exactly `live_policy().authorize_with_mode…`,
+    /// i.e. byte-identical to the pre-layer path — which is the case for every
+    /// call that carries no layers.
+    fn authorize_with_layers(
+        &self,
+        name: &str,
+        input: &Value,
+        mode: PermissionMode,
+        workspace_lease_token: Option<u64>,
+        folded: &FoldedPermissionContext,
+    ) -> PermissionResult {
+        let policy = self.live_policy_with_layers(folded);
+        if folded.bash_command_clamps.is_empty() {
+            return policy.authorize_with_mode_and_workspace_lease(
+                name,
+                input,
+                mode,
+                workspace_lease_token,
+            );
+        }
+        // `wTv` / `FJa` (binary @290295374) — while a `bashCommandClamp` is
+        // attached the tool declares a FAIL-CLOSED posture through
+        // `permissionCheckFailureDecision`, so a permission check that CRASHES
+        // must DENY with `gCi`'s byte-locked message rather than propagate:
+        // "denying rather than running an unverified command". Gated on an
+        // active clamp exactly as upstream is, so an unclamped session keeps
+        // today's unwind semantics untouched.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            policy.authorize_with_mode_and_workspace_lease(name, input, mode, workspace_lease_token)
+        })) {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::error!(
+                    target: "permission",
+                    "permission check for {name} crashed under an active bashCommandClamp; denying"
+                );
+                PermissionResult::Deny {
+                    reason: PermissionDecisionReason::Other {
+                        reason: crate::bash_command_clamp::CLAMP_FAIL_CLOSED_REASON.to_string(),
+                    },
+                    explanation: Some(crate::bash_command_clamp::clamp_crash_deny_message(name)),
+                    metadata: PermissionMetadata::default(),
+                }
+            }
+        }
+    }
+
+    /// The live policy with this call's folded layer delta applied:
+    /// `allowed_tools` / `disallowed_tools` land in the `command` rule source
+    /// (upstream `ULa`/`jLa` write `alwaysAllowRules.command` /
+    /// `alwaysDenyRules.command`), `working_directory` appends one additional
+    /// working dir, and `bash_command_clamp` groups are attached for
+    /// [`PermissionPolicy::bash_command_clamps`].
+    fn live_policy_with_layers(&self, folded: &FoldedPermissionContext) -> PermissionPolicy {
+        if folded.is_empty() {
+            return self.live_policy();
+        }
+        let live = self
+            .live_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut allow_rules = live.allow_rules;
+        let mut deny_rules = live.deny_rules;
+        let mut working_dirs = live.additional_working_dirs;
+        Self::extend_command_rules(
+            &mut allow_rules,
+            &folded.allow_command_rules,
+            PermissionBehavior::Allow,
+        );
+        Self::extend_command_rules(
+            &mut deny_rules,
+            &folded.deny_command_rules,
+            PermissionBehavior::Deny,
+        );
+        if let Some(dir) = folded.additional_working_directory.as_ref() {
+            if !working_dirs.iter().any(|existing| existing == dir) {
+                working_dirs.push(dir.clone());
+            }
+        }
+        self.policy
+            .clone_with_live_state(allow_rules, deny_rules, live.ask_rules, working_dirs)
+            .with_bash_command_clamps(folded.bash_command_clamps.clone())
+    }
+
+    /// `ULa` / `jLa` — append rule strings to the `command` source bucket,
+    /// deduped (`to(...)`).
+    fn extend_command_rules(
+        bucket: &mut HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+        specs: &[String],
+        behavior: PermissionBehavior,
+    ) {
+        if specs.is_empty() {
+            return;
+        }
+        let rules = bucket.entry(PermissionRuleSource::Command).or_default();
+        for spec in specs {
+            let value = PermissionRuleValue::from_rule_string(spec);
+            if rules.iter().any(|existing| existing.value == value) {
+                continue;
+            }
+            rules.push(PermissionRule {
+                value,
+                behavior,
+                source: PermissionRuleSource::Command,
+            });
         }
     }
 
@@ -804,8 +964,37 @@ impl PolicyPermissionGate {
             PermissionResult::Ask {
                 ref reason,
                 ref metadata,
+                ref prompt,
                 ..
             } => {
+                // PERM-07 (claude-code 2.1.238 `STv`): inside the Auto-mode ask
+                // arm (`if($mt(d)||h)`), a hook-established ask floor in a
+                // session that cannot surface prompts is a hard DENY, not a
+                // delegated ask:
+                //   let S=a.hookAskFloor===!0;
+                //   if(S&&!Ski()&&u.shouldAvoidPermissionPrompts)return DJa(l.message);
+                // (`Ski()` is a constant `false` in the shipped build, so the
+                // `!Ski()` conjunct is always satisfied.) 2.1.238 wraps the ask
+                // message in the new `Ixf` copy; 2.1.220's `G8s` forwarded it
+                // verbatim. `$mt(d)` is `auto || (plan && autoActive)`; the
+                // `plan && autoActive` half and the `h` chrome-consent disjunct
+                // have no port counterpart, so only `auto` is gated here.
+                if mode == PermissionMode::Auto
+                    && ctx.hook_ask_floor
+                    && ctx.is_non_interactive_session
+                {
+                    let message = prompts_unavailable_deny_message(&prompt.message);
+                    self.inner
+                        .on_permission_denied(
+                            name,
+                            ctx,
+                            Some("asyncAgent"),
+                            Some(PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON),
+                            &message,
+                        )
+                        .await;
+                    return Ok(PermissionOutcome::Deny { reason: message });
+                }
                 // HOOK-ASKFLOOR-03: when a PreToolUse hook returned `ask`
                 // (`ctx.hook_ask_floor`), the Auto-mode classifier's ALLOW must NOT
                 // silently defeat the hook's ask — CC's `hookAskFloor` keeps the ask
@@ -1008,7 +1197,25 @@ impl PolicyPermissionGate {
                 return Ok(AutoModeClassifierResult::NoDecision);
             }
         }
-        match classify_tool_call(name, input) {
+        // SH-01 — the auto-mode classifier is the DESTINATION for every
+        // `classifierContext` a `PostToolUse` hook attached (oracle 2.1.238
+        // @ 296466460 / 296974134). The hooks executor publishes them to
+        // `host_context::store()`; this is where they are read back and handed
+        // to the classifier. Without this read the whole hook-side pipeline
+        // would be a parse with no consumer.
+        let host_context = crate::host_context::store().snapshot();
+        let classified =
+            crate::classifier::classify_tool_call_with_host_context(name, input, &host_context);
+        if !host_context.is_empty() {
+            tracing::debug!(
+                target: "permission",
+                "auto-mode classifier saw {} host-context line(s), {} eligible as user intent (inert for this verdict: {})",
+                host_context.len(),
+                classified.eligible_live_contexts,
+                classified.host_context_is_inert_for_this_verdict,
+            );
+        }
+        match classified.verdict {
             AutoModeClassifierVerdict::Allow { score, .. } => {
                 self.record_auto_mode_non_deny(mode);
                 Ok(AutoModeClassifierResult::Classified(
@@ -1430,24 +1637,62 @@ impl PermissionGate for PolicyPermissionGate {
         }
     }
 
+    /// BASH-10 substrate — resolve a TOOL-originated ask straight through the
+    /// inner prompt transport.
+    ///
+    /// The default trait impl delegates to [`Self::check_with_context`], which
+    /// for THIS gate would re-run `authorize_with_layers` and re-derive the very
+    /// allow the tool's own `check_permissions` just escalated — silently
+    /// defeating the escalation. Override it to do what
+    /// `decide_outcome_with_context`'s Ask arm does after it has decided to
+    /// prompt: hand the call to `self.inner` (the transport) and keep the
+    /// auto-mode / `updatedPermissions` bookkeeping every allow arm records.
+    ///
+    /// The classifier and `read_only_default_auto_allows` short-circuits are
+    /// DELIBERATELY not re-run here: the oracle's protected-reason arm
+    /// (`decisionReason?.type === "sandboxOverride"`) returns the ask ahead of
+    /// every auto-allow arm in `a6e`, so a classifier must not be able to
+    /// re-allow it.
+    async fn ask_via_transport(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        let outcome = self.inner.check_with_context(name, input, ctx).await;
+        if let PermissionOutcome::Allow {
+            permission_updates, ..
+        } = &outcome
+        {
+            self.record_auto_mode_non_deny(self.effective_mode_for_tool(name));
+            if !permission_updates.is_empty() {
+                PolicyPermissionGate::apply_permission_updates(self, permission_updates);
+            }
+        }
+        outcome
+    }
+
     async fn check_with_context_or_abort(
         &self,
         name: &str,
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> Result<PermissionOutcome, PermissionAbort> {
-        // A PER-CALL mode override (a spawned subagent's clamped spawn mode,
-        // claude-code 2.1.207 `ve` → the child's `toolPermissionContext.mode`)
-        // authorizes THIS call under that mode; else the live/boot mode. Only this
-        // dispatch seam reads it, so the shared gate's mode is never mutated (the
-        // parent's own checks are unaffected).
-        let (mode, result) = match ctx.mode_override.as_deref().and_then(parse_settable_mode) {
-            Some(m) => (
-                m,
-                self.authorize_with_live_state(name, input, m, ctx.workspace_lease_token),
-            ),
-            None => self.effective_authorize_with_lease(name, input, ctx.workspace_lease_token),
-        };
+        // PER-CALL PERMISSION LAYERS — `gn(toolUseContext)` (binary @287028951).
+        // This is the fold's PRIMARY call site: every subagent / teammate /
+        // local-app tool dispatch reaches the gate here, so a spawn's
+        // `permission_mode` (its clamped spawn mode), `avoid_prompts`,
+        // `allowed_tools` / `disallowed_tools`, `working_directory` and
+        // `bash_command_clamp` layers all take effect on THIS call without
+        // mutating the shared boot policy (the parent's own checks are
+        // unaffected). An empty stack folds to nothing and the path below is
+        // byte-identical to the pre-layer behavior.
+        let folded = self.fold_call_context(ctx);
+        let mode = folded
+            .mode
+            .unwrap_or_else(|| self.effective_mode_for_tool(name));
+        let result =
+            self.authorize_with_layers(name, input, mode, ctx.workspace_lease_token, &folded);
         self.decide_outcome_with_context(mode, result, name, input, ctx)
             .await
     }
@@ -1550,7 +1795,8 @@ impl PermissionGate for PolicyPermissionGate {
         name: &str,
         input: &Value,
     ) -> PermissionDecision {
-        let (mode, verdict) = self.rule_or_safety_verdict(name, input, None);
+        let (mode, verdict) =
+            self.rule_or_safety_verdict(name, input, None, &FoldedPermissionContext::default());
         match verdict {
             Some(PermissionResult::Deny {
                 reason,
@@ -1641,9 +1887,24 @@ impl PermissionGate for PolicyPermissionGate {
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> Result<PermissionResolution, PermissionAbort> {
-        let (mode, result) =
-            self.effective_authorize_with_lease(name, input, ctx.workspace_lease_token);
-        self.resolve_with_mode(mode, result, name, input, ctx.is_non_interactive_session)
+        // Same per-call layer fold as `check_with_context_or_abort` — the main
+        // turn loop resolves through THIS surface, so a layer stack attached to
+        // a dispatch is honoured on both the source-first and the outcome path.
+        let folded = self.fold_call_context(ctx);
+        let mode = folded
+            .mode
+            .unwrap_or_else(|| self.effective_mode_for_tool(name));
+        let result =
+            self.authorize_with_layers(name, input, mode, ctx.workspace_lease_token, &folded);
+        // An `avoid_prompts` LAYER is the per-call twin of the flat
+        // `is_non_interactive_session` field (`shouldAvoidPermissionPrompts`).
+        self.resolve_with_mode(
+            mode,
+            result,
+            name,
+            input,
+            ctx.is_non_interactive_session || folded.should_avoid_permission_prompts,
+        )
     }
 
     /// Surface the wrapped policy's TOOL-WIDE deny-rule names so the orchestrator
@@ -1840,6 +2101,29 @@ fn deny_reason_string(reason: &PermissionDecisionReason, tool_name: &str) -> Str
 /// `` `Permission to use ${tool} has been denied. ${Rws}` `` (see
 /// [`crate::headless_gate::DenyOnAskGate`]).
 pub(crate) const DENIAL_WORKAROUND_GUIDANCE: &str = "IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.";
+
+/// The `asyncAgent` decision reason claude-code attaches to `DJa`'s deny —
+/// byte-identical in 2.1.220 (`G8s`) and 2.1.238 (`DJa`).
+pub(crate) const PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON: &str =
+    "Action requires interactive approval and permission prompts are not available in this context";
+
+/// PERM-07 — claude-code 2.1.238 `Ixf`: the model-visible copy that now WRAPS
+/// the ask message when an action needs interactive approval in a session that
+/// cannot prompt.
+///
+/// 2.1.220's `G8s(e)` forwarded the raw ask message as the deny message; 2.1.238
+/// splits the builder out as
+/// `` DJa(e) => {behavior:"deny", message: Ixf(e), decisionReason:{type:"asyncAgent", reason: `` [`PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON`] `}}`.
+///
+/// This is a DIFFERENT site from the port's headless `Ask`→`Deny` transport
+/// ([`crate::headless_gate::DenyOnAskGate`]), which implements the separate
+/// `xxf`/`GRu` message — unchanged between 2.1.220 and 2.1.238.
+#[must_use]
+pub fn prompts_unavailable_deny_message(ask_message: &str) -> String {
+    format!(
+        "Permission for this tool use was denied: it requires interactive approval, and permission prompts are not available in this session. The action was NOT performed. Do not claim it succeeded, and do not retry it in this session \u{2014} report the limitation to the user, or suggest an alternative. What was requested: {ask_message}"
+    )
+}
 
 /// Compute the stdio `classifier_approvable` value from the structured
 /// decision reason.  Claude Code emits this field only when at least one

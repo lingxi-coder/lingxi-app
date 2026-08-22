@@ -21,6 +21,11 @@ use similar::{ChangeTag, TextDiff};
 /// jsdiff `structuredPatch` default `options.context`.
 const PATCH_CONTEXT: i64 = 4;
 
+/// The `{context:8}` claude-code's changed-files differ passes
+/// (2.1.238 `SEf` @289903016:
+/// `F2t("file.txt","file.txt",e,t,void 0,void 0,{context:8,timeout:JEi})`).
+pub const CHANGED_FILE_PATCH_CONTEXT: i64 = 8;
+
 /// One hunk of a [`build_structured_patch`] result. Serializes to the binary's
 /// camelCase keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -50,9 +55,30 @@ struct Seg {
     lines: Vec<String>,
 }
 
-/// Build the `structuredPatch` hunk array for `before` → `after`, 1:1 with jsdiff.
+/// Build the `structuredPatch` hunk array for `before` → `after`, 1:1 with jsdiff,
+/// at jsdiff's DEFAULT context of 4 — the value the Edit/Write tools'
+/// `data.structuredPatch` is built with.
 #[must_use]
 pub fn build_structured_patch(before: &str, after: &str) -> Vec<StructuredPatchHunk> {
+    build_structured_patch_with_context(before, after, PATCH_CONTEXT)
+}
+
+/// Build the `structuredPatch` hunk array with an explicit `options.context`.
+///
+/// Additive: `build_structured_patch` is this function at jsdiff's default 4.
+/// The changed-files (`edited_text_file`) reminder needs **8**
+/// ([`CHANGED_FILE_PATCH_CONTEXT`]) — 2.1.238 `SEf` @289903016 calls
+/// `structuredPatch(..., {context:8})`.
+///
+/// `context` is clamped at 0; jsdiff treats a negative context as 0 through its
+/// `Math.min`/slice arithmetic.
+#[must_use]
+pub fn build_structured_patch_with_context(
+    before: &str,
+    after: &str,
+    context: i64,
+) -> Vec<StructuredPatchHunk> {
+    let patch_context = context.max(0);
     // 1. Group the line-level diff into jsdiff-style segments (runs of the same
     //    tag). For a replacement, `similar` emits the deleted lines then the
     //    inserted lines, matching jsdiff's removed-before-added ordering.
@@ -100,7 +126,7 @@ pub fn build_structured_patch(before: &str, after: &str) -> Vec<StructuredPatchH
                         // Leading context = the last `PATCH_CONTEXT` lines of the
                         // preceding (unchanged) segment.
                         let prev = &segs[t - 1].lines;
-                        let take = prev.len().min(PATCH_CONTEXT as usize);
+                        let take = prev.len().min(patch_context as usize);
                         for l in &prev[prev.len() - take..] {
                             lines.push(format!(" {l}"));
                         }
@@ -120,14 +146,14 @@ pub fn build_structured_patch(before: &str, after: &str) -> Vec<StructuredPatchH
             }
             SegKind::Unchanged => {
                 if old_start != 0 {
-                    if s_len <= PATCH_CONTEXT * 2 && (t as i64) < n - 2 {
+                    if s_len <= patch_context * 2 && (t as i64) < n - 2 {
                         // Small gap → keep the hunk open, fold it in as context.
                         for l in &seg.lines {
                             lines.push(format!(" {l}"));
                         }
                     } else {
                         // Close the hunk with `min(gap, context)` trailing context.
-                        let e = s_len.min(PATCH_CONTEXT);
+                        let e = s_len.min(patch_context);
                         for l in seg.lines.iter().take(e as usize) {
                             lines.push(format!(" {l}"));
                         }

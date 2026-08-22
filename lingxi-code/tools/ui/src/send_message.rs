@@ -858,7 +858,7 @@ Send a message to another agent.
 | `to` | |
 |---|---|
 | `"researcher"` | Teammate by name |
-| `"*"` | Broadcast to all teammates — expensive (linear in team size), use only when everyone genuinely needs it |
+| `"main"` | The main conversation (background subagents only) |
 "#,
         );
         if traits::live_sessions::cross_session_messaging_enabled() {
@@ -868,20 +868,21 @@ Send a message to another agent.
 | `"worker [3fa9c1]"` | Same, plus its `[ref]` — only when a listing or an error shows one |
 
 ## Cross-session
+
 Use `ListAgents` to discover targets. Every row leads with the agent's `name [ref]` — the name IS the address; there is no separate address syntax.
 ```json
 {"to": "worker", "message": "check if tests pass over there"}
 {"to": "worker [3fa9c1]", "message": "you, specifically"}
 ```
 Send the bare name — a name that exactly matches one live agent or session (on this machine) delivers directly. Append the ` [ref]` only when the bare name is not enough — `ListAgents` shows two rows with it, or an error asks you to disambiguate (you typed only a prefix, or a session list could not be checked). A ref you did not just read from a listing or an error will not resolve, and if the same name also names an in-process agent, the bare name always wins — use the in-process one.
-A listed peer is alive and will process your message — no "busy" state; messages enqueue and drain at the receiver's next tool round. Your message arrives wrapped as `<cross-session-message from="...">`. **To reply to an incoming message, copy its `from` attribute as your `to`.**
+A listed peer is alive and will process your message; messages enqueue and drain at the receiver's next tool round (its `ListAgents` row says whether it is busy or idle right now). Your message arrives wrapped as `<cross-session-message from="...">`. **To reply to an incoming message, copy its `from` attribute as your `to`.**
 Permission boundaries are per-session: NEVER ask a peer to perform an action that was denied or blocked in your session, or that you expect your own permission settings would block — a peer doing it for you bypasses the user's permission decision (cross-session permission laundering). Route blocked work back to your user instead.
 "#,
             );
         }
         body.push_str(
             r#"
-Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to teammates by name, never by UUID. When relaying, don't quote the original — it's already rendered to the user.
+Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to agents by name — names keep working after an agent completes (a send resumes it from its transcript). Use the raw `agentId` (format `a...-...`) from its spawn result only when the agent has no name, or when a newer agent took the name (latest wins). When relaying, don't quote the original — it's already rendered to the user.
 
 ## Protocol responses (legacy)
 
@@ -892,7 +893,7 @@ If you receive a JSON message with `type: "shutdown_request"` or `type: "plan_ap
 {"to": "researcher", "message": {"type": "plan_approval_response", "request_id": "...", "approve": false, "feedback": "add error handling"}}
 ```
 
-Approving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate `shutdown_request` unless asked. Don't send structured JSON status messages — use TaskUpdate."#,
+Approving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate `shutdown_request` unless asked. Don't send structured JSON status messages — report progress through your task tools if you have them, otherwise in plain prose."#,
         );
         body
     }
@@ -1173,6 +1174,32 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         }
+    }
+
+    /// 2.1.238 @293558417 (`Xnm`'s `n` block): the cross-session liveness
+    /// sentence. The port previously asserted `— no "busy" state`, which the
+    /// oracle never said; 2.1.238 points the model at the `ListAgents` row
+    /// instead. `## Cross-session` is followed by a BLANK line in the oracle
+    /// template (`` `\n\n## Cross-session\n\nUse \`${Yy}\`…` ``).
+    #[tokio::test]
+    async fn cross_session_block_matches_the_2_1_238_bytes() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LINGXI_HARBOR_KITE", "1");
+        let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
+        let p = tool.prompt(&PromptOptions::default()).await;
+        std::env::remove_var("LINGXI_HARBOR_KITE");
+
+        assert!(
+            p.contains("\n\n## Cross-session\n\nUse `ListAgents` to discover targets."),
+            "heading must be followed by a blank line"
+        );
+        assert!(p.contains(
+            "A listed peer is alive and will process your message; messages enqueue and drain at the receiver's next tool round (its `ListAgents` row says whether it is busy or idle right now). Your message arrives wrapped as `<cross-session-message from=\"...\">`."
+        ));
+        assert!(
+            !p.contains("no \"busy\" state"),
+            "the 2.1.220-era claim must be gone"
+        );
     }
 
     fn env_lock() -> &'static Mutex<()> {

@@ -21,7 +21,7 @@
     clippy::manual_let_else
 )]
 
-/// Suffix claude-code appends to a successful Edit/Write/MultiEdit result (binary
+/// Suffix claude-code appends to a successful Edit/Write result (binary
 /// const `Pyn`, with a U+2014 em-dash), telling the model it already holds the
 /// current file content. claude-code gates it on the file not being
 /// user-modified / stale-recovered; LingXi's non-interactive path is always
@@ -37,7 +37,6 @@ pub mod glob;
 pub mod grep;
 #[cfg(feature = "image-read")]
 pub mod image_read;
-pub mod multi_edit;
 pub mod notebook_edit;
 pub mod notebook_read;
 #[cfg(feature = "pdf-read")]
@@ -56,7 +55,6 @@ pub mod write;
 pub use edit::FileEditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
-pub use multi_edit::MultiEditTool;
 pub use notebook_edit::NotebookEditTool;
 pub use read::FileReadTool;
 pub use write::FileWriteTool;
@@ -66,29 +64,23 @@ pub use write::FileWriteTool;
 /// floor-truncated mtime advanced past the recorded read timestamp, and the
 /// full-read content-equality fallback did not save it).
 ///
-/// Shared by all three write tools (Batch F).
+/// Shared by all three write tools.
 ///
-/// # Byte-exactness vs the TS reference (verified)
-/// claude-code raises this in two distinct code paths with two *different*
-/// strings:
-///   * the user-facing validate / permission guard (`FileEditTool.ts:305-306`,
-///     `FileWriteTool.ts:215-216`, `NotebookEditTool.ts:233-234`) returns
-///     `behavior:'ask'` with the message
-///     `"File has been modified since read, either by the user or by a linter.
-///     Read it again before attempting to write it."` — this is the string the
-///     model actually sees when the guard trips during validation.
-///   * the call-time re-check (`FileEditTool.ts:465`,
-///     `FileWriteTool.ts:292`, `NotebookEditTool.ts:292`) throws the
-///     `FILE_UNEXPECTEDLY_MODIFIED_ERROR` constant from
-///     `FileEditTool/constants.ts:10-11`, whose value is the *shorter*
-///     `"File has been unexpectedly modified. Read it again before attempting
-///     to write it."`.
+/// # Byte-exactness vs the oracle (FT-07, re-verified against 2.1.238)
+/// claude-code raises staleness from two distinct phases with two DIFFERENT
+/// strings, and the one a model normally sees is the **validate** phase:
+///   * `validateInput` — Edit `errorCode:7` (cc-238.js @226407883), Write
+///     `errorCode:3` (@226416137), NotebookEdit `errorCode:10` (@226495421),
+///     all three carrying THIS literal. Identical in 2.1.220.
+///   * the **call**-phase re-check (`Ehv` @226404058 for Edit, @226410437 for
+///     Write) `throw new Q4e(WVo)` — the richer linter/formatter sentence,
+///     [`FILE_CONTENT_CHANGED_LINTER_MESSAGE`]. That branch is only reachable
+///     on a validate→call race, so it is NOT the common path.
 ///
-/// The Rust tools have a single `call` entry point (no separate validate vs
-/// call phase), and the model-facing guard in claude-code is the
-/// validate-phase one, so we port the **validate-phase** "modified since read"
-/// wording here (matching the spec's directive). The shorter `constants.ts`
-/// literal is intentionally NOT used — documented divergence.
+/// LingXi's tools have a single `call` entry point (no separate validate vs
+/// call phase), so the guard emits the validate-phase literal — the bytes the
+/// model actually gets upstream. (Before FT-07 the port emitted `WVo` here,
+/// i.e. the oracle's RARE branch, for every stale case.)
 pub const FILE_UNEXPECTEDLY_MODIFIED_ERROR: &str =
     "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.";
 
@@ -103,21 +95,14 @@ pub const FILE_UNEXPECTEDLY_MODIFIED_ERROR: &str =
 pub const FILE_NOT_READ_ERROR: &str =
     "File has not been read yet. Read it first before writing to it.";
 
-/// Richer stale-file message for the call-time re-check — byte-locked to
-/// claude-code `Vbn` (binary offset confirmed via grep: "This commonly happens
-/// when a linter or formatter run via Bash rewrites the file"). This is the
-/// message from `m5p()` (the call-time stale detector in `FileEditTool.ts`),
-/// distinct from the validate-phase [`FILE_UNEXPECTEDLY_MODIFIED_ERROR`].
-/// `m5p` throws a `FileStateError(Vbn)` on the stale path when the edit can
-/// potentially apply (`hnl(lTo(...)) === true`) but the file was modified; the
-/// error propagates to `validateInput`'s caller. LingXi uses a unified `call`
-/// path (no separate validate vs call phase), so `Vbn` belongs at the same
-/// `stale_read` site as `FILE_UNEXPECTEDLY_MODIFIED_ERROR`, distinguishable by
-/// whether a partial-apply is feasible (binary: `hnl(lTo(...))` true). For
-/// simplicity, LingXi emits `Vbn` as the primary staleness message whenever
-/// the `check_read_before_write` guard detects a changed mtime with different
-/// content, bringing the model-facing text into parity with the binary's most
-/// common stale-path.
+/// Richer stale-file message for the CALL-phase re-check — byte-locked to
+/// claude-code `WVo` (cc-238.js @220242969, the constant block next to
+/// `qVo`/`ssa`/`asa`). It is thrown only from `Ehv` (@226404058) / the Write
+/// twin (@226410437) — the validate→call race — never from `validateInput`.
+///
+/// LingXi has a unified `call` path, so the guard below reports the
+/// validate-phase [`FILE_UNEXPECTEDLY_MODIFIED_ERROR`] instead; this constant
+/// stays byte-locked here as the oracle's other branch (FT-07).
 pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
     "File content has changed since it was last read. This commonly happens when a linter or formatter run via Bash rewrites the file. Call Read on this file to refresh, then retry the edit.";
 
@@ -133,7 +118,8 @@ pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
 ///     ([`read_covers_full_file`] = `wMe`) and its recorded content still
 ///     equals the current on-disk content (`RMe`) → proceed (cloud sync /
 ///     antivirus touched the mtime without changing bytes);
-///   * otherwise → [`FILE_CONTENT_CHANGED_LINTER_MESSAGE`] (claude-code `LWn`).
+///   * otherwise → [`FILE_UNEXPECTEDLY_MODIFIED_ERROR`] (the oracle's
+///     `validateInput` errorCode 7/3/10 literal).
 ///
 /// ## 2.1.212 fix — offset/limit reads are no longer rejected
 /// Before 2.1.212 (and in LingXi's prior guard) a read done WITH `offset`/
@@ -212,11 +198,12 @@ pub fn check_read_before_write(
         return Ok(());
     }
 
-    // The file changed on disk since the read → stale. claude-code throws
-    // `gPe(LWn)`, and in 2.1.212 `LWn` is exactly the linter/formatter-context
-    // message — byte-locked to [`FILE_CONTENT_CHANGED_LINTER_MESSAGE`].
+    // The file changed on disk since the read → stale. FT-07: the oracle's
+    // `validateInput` arm (Edit errorCode 7 / Write 3 / NotebookEdit 10) is the
+    // branch a model normally hits, so emit ITS literal — not the call-phase
+    // race sentence `WVo` ([`FILE_CONTENT_CHANGED_LINTER_MESSAGE`]).
     Err(ToolError::InvalidInput(
-        FILE_CONTENT_CHANGED_LINTER_MESSAGE.into(),
+        FILE_UNEXPECTEDLY_MODIFIED_ERROR.into(),
     ))
 }
 
@@ -254,17 +241,21 @@ fn read_covers_full_file(entry: &tool_api::read_file_state::ReadFileEntry) -> bo
     !entry.content.is_empty() && (entry.content.matches('\n').count() as u64 + 1) < limit
 }
 
-/// Register all seven file/search tools against `reg`.
+/// Register all six file/search tools against `reg`.
 ///
-/// The binary's built-in-tool-names array (offset 188243808) includes
-/// `MultiEdit` after `Edit`: `Read,Write,Edit,MultiEdit,Bash,Glob,Grep,…`.
-/// `MultiEditTool` is name-routed into Edit dispatch (claude-code parity) and
-/// registered here alongside the other built-ins.
+/// TR-05: `MultiEdit` is deliberately NOT registered. 2.1.238 has no MultiEdit
+/// tool object — all 12 binary hits are name strings (permission-rule advice
+/// @282361899, the ultrareview allow-list `qTv` @290346662, the activity map
+/// `qKT` @297388763, the trust-dialog set `XA0` @306721162, docs, V8-snapshot
+/// copies), `sdk-tools-238.d.ts` has 0 hits, and the `"edits" in t` dispatch
+/// shim this module once claimed has 0 hits in BOTH 2.1.238 and 2.1.220. The
+/// name strings elsewhere in LingXi (permission classifier, turn_loop, skill
+/// prefetch, TUI display maps) are kept — the oracle carries those too.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     register_all_with_live_cwd(reg, ctx, None);
 }
 
-/// Register all seven file/search tools, injecting an optional shared live-cwd
+/// Register all six file/search tools, injecting an optional shared live-cwd
 /// cell (claude-code `getCwd()`/`Ct()`) into the tools that read the live cwd:
 /// `Read` (the "File does not exist" note), `Glob`, and `Grep` (their default
 /// search dir, "does not exist" notes, and result relativization). When `None`
@@ -284,7 +275,6 @@ pub fn register_all_with_live_cwd(
     reg.register_builtin(Arc::new(read));
     reg.register_builtin(Arc::new(FileWriteTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(FileEditTool::new(ctx.clone())));
-    reg.register_builtin(Arc::new(MultiEditTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(NotebookEditTool::new(ctx.clone())));
     let glob = match &live_cwd {
         Some(cell) => GlobTool::new(ctx.clone()).with_live_cwd(cell.clone()),
@@ -317,24 +307,23 @@ mod staleness_guard_tests {
 
     #[test]
     fn modified_error_is_byte_locked_to_validate_phase_string() {
-        // The model-facing validate-phase guard message
-        // (FileEditTool.ts:305-306 / FileWriteTool.ts:215-216 /
-        // NotebookEditTool.ts:233-234). NOTE: this intentionally differs from
-        // the shorter `FileEditTool/constants.ts:10-11`
-        // `FILE_UNEXPECTEDLY_MODIFIED_ERROR` literal (documented divergence).
+        // The model-facing validate-phase guard message — Edit errorCode 7
+        // (cc-238.js @226407883), Write errorCode 3 (@226416137), NotebookEdit
+        // errorCode 10 (@226495421). This is what the guard emits (FT-07).
         assert_eq!(
             FILE_UNEXPECTEDLY_MODIFIED_ERROR,
             "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it."
         );
     }
 
-    // ── Fix #3: Vbn stale-file message (linter/formatter context) ─────────────
+    // ── `WVo`: the CALL-phase stale-file message (linter/formatter context) ──
 
     #[test]
     fn file_content_changed_linter_message_is_byte_locked() {
-        // Binary `Vbn` literal (confirmed via grep -cF "This commonly happens when
-        // a linter or formatter" = 2 hits in the oracle binary). Byte-exact to
-        // claude-code's `Vbn` constant from the call-time stale-check `m5p()`.
+        // Oracle `WVo` (cc-238.js @220242969), thrown only from the call-phase
+        // re-check `Ehv` (@226404058) / its Write twin (@226410437). Pinned here
+        // as the oracle's OTHER branch; the guard emits the validateInput
+        // literal (FT-07).
         assert_eq!(
             FILE_CONTENT_CHANGED_LINTER_MESSAGE,
             "File content has changed since it was last read. This commonly happens when a linter or formatter run via Bash rewrites the file. Call Read on this file to refresh, then retry the edit."
@@ -345,9 +334,11 @@ mod staleness_guard_tests {
     }
 
     #[test]
-    fn vbn_variant_emitted_on_stale_changed_content() {
-        // When mtime advanced AND content differs, the staleness guard emits
-        // FILE_CONTENT_CHANGED_LINTER_MESSAGE (Vbn), NOT FILE_UNEXPECTEDLY_MODIFIED_ERROR.
+    fn validate_phase_message_emitted_on_stale_changed_content() {
+        // FT-07: when mtime advanced AND content differs, the staleness guard
+        // emits the oracle's validateInput literal
+        // (FILE_UNEXPECTEDLY_MODIFIED_ERROR), NOT the call-phase race sentence
+        // `WVo` (FILE_CONTENT_CHANGED_LINTER_MESSAGE).
         let map = new_read_file_state_map();
         let p = PathBuf::from("/x");
         set(
@@ -366,9 +357,9 @@ mod staleness_guard_tests {
         let r = check_read_before_write(&map, &p, 200, "new content");
         match r.unwrap_err() {
             tool_api::tool_trait::ToolError::InvalidInput(m) => {
-                assert_eq!(m, FILE_CONTENT_CHANGED_LINTER_MESSAGE);
+                assert_eq!(m, FILE_UNEXPECTEDLY_MODIFIED_ERROR);
             }
-            other => panic!("expected InvalidInput with Vbn, got {other:?}"),
+            other => panic!("expected InvalidInput with the validateInput literal, got {other:?}"),
         }
     }
 
@@ -398,9 +389,9 @@ mod staleness_guard_tests {
         let r = check_read_before_write(&map, &p, 200, "body\n");
         match r.unwrap_err() {
             tool_api::tool_trait::ToolError::InvalidInput(m) => {
-                assert_eq!(m, FILE_CONTENT_CHANGED_LINTER_MESSAGE);
+                assert_eq!(m, FILE_UNEXPECTEDLY_MODIFIED_ERROR);
             }
-            other => panic!("expected InvalidInput with Vbn, got {other:?}"),
+            other => panic!("expected InvalidInput with the validateInput literal, got {other:?}"),
         }
         // Control: the SAME entry with `is_partial_view: false` proceeds via
         // the content-equality fallback — proving the flag is what refused.
@@ -499,7 +490,7 @@ mod staleness_guard_tests {
         );
         assert_err_msg(
             check_read_before_write(&map, &p, 200, "whole new file"),
-            FILE_CONTENT_CHANGED_LINTER_MESSAGE,
+            FILE_UNEXPECTEDLY_MODIFIED_ERROR,
         );
     }
 
@@ -615,11 +606,12 @@ mod staleness_guard_tests {
                 is_partial_view: false,
             },
         );
-        // Now returns the richer Vbn message (linter/formatter context) — parity
-        // with the binary's `m5p()` / `FileStateError(Vbn)` call-time path.
+        // FT-07: returns the oracle's `validateInput` literal (Edit errorCode 7 /
+        // Write 3 / NotebookEdit 10) — the branch a model normally hits — not
+        // the call-phase race sentence `WVo`.
         assert_err_msg(
             check_read_before_write(&map, &p, 200, "new"),
-            FILE_CONTENT_CHANGED_LINTER_MESSAGE,
+            FILE_UNEXPECTEDLY_MODIFIED_ERROR,
         );
     }
 }

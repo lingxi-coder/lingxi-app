@@ -51,11 +51,11 @@ async fn run_turn_passes_assembled_system_prompt_to_api_client() {
     assert!(!s.contains("<env>"));
     assert!(!s.contains("Notes:"));
     // The env block is still present; context management follows it.
-    // Opus 5 joined the fast-mode list in the oracle; verified in the 2.1.220
-    // binary @113736244 as `toggled with /fast and is available on Opus
-    // 5/4.8/4.7.` This assertion still named the older two-model form, so it
-    // was pinning text the product had already moved past.
-    assert!(s.contains("available on Opus 5/4.8/4.7."));
+    // Opus 5 joined the fast-mode list in 2.1.220 (@113736244: `toggled with
+    // /fast and is available on Opus 5/4.8/4.7.`); 2.1.238 then dropped 4.7
+    // from the copy — `is available on Opus 5/4.8.` counts 238=4 / 220=0
+    // (fns K9T @297075805 and Y9T @297076453).
+    assert!(s.contains("available on Opus 5/4.8."));
     assert!(s.contains("# Context management"));
     // The act-don't-re-derive section (`ACT_DONT_REDERIVE_SECTION`) now follows
     // context management, so THAT is the tail. Verified in the 2.1.220 binary

@@ -1,8 +1,25 @@
 //! `ListAgents` (alias `ListPeers`) — 2.1.232 `zy` / `SDd`.
 //!
-//! Lists other local live sessions this process can `SendMessage` to.
-//! In-process teammates are addressed by the name they were spawned with, not
-//! this list. Cloud / Remote Control rows are omitted (carve-out).
+//! Lists the agents this process can `SendMessage` to. Cloud / Remote Control
+//! rows are omitted (carve-out); the surviving clauses are the oracle's
+//! (2.1.238 `YmS` @286282922, identical opening in 2.1.220).
+//!
+//! KNOWN GAP (structural, not copy): the oracle's `formatForModel` (`roT`)
+//! renders the in-process `local_agent` tasks FIRST and the peer sessions
+//! second; `format_listing` below still renders only the peer sessions.
+//!
+//! KNOWN GAP (structural): the oracle's peer row is
+//! `V2i(name, [formerNames, kind, p.status, tmux, started …])` (@294228478) —
+//! `status` is the peer's live `busy`/`idle`/`waiting` state, computed by
+//! `KHg` (@302105762: `{status: e.isLoading||e.delegatedActive?"busy":"idle"}`)
+//! and published into the session registry. `traits::live_sessions::
+//! LiveSessionRecord` has no `status` field and nothing publishes one, so
+//! `format_listing` cannot render it. `SendMessage`'s 2.1.238 cross-session
+//! paragraph points the model at that column ("its `ListAgents` row says
+//! whether it is busy or idle right now"), so the copy is ahead of the data
+//! until a turn-boundary status publisher exists — that publisher (a
+//! `status` field on `LiveSessionRecord` plus a writer on the turn
+//! start/end edges) is the seam this gap needs.
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -23,8 +40,8 @@ pub const LIST_AGENTS_TOOL_NAME: &str = "ListAgents";
 pub const LIST_PEERS_TOOL_NAME: &str = "ListPeers";
 
 const DESCRIPTION: &str = concat!(
-    "Lists other local Claude sessions on this machine you can SendMessage to. ",
-    "In-process teammates are addressed by the name they were spawned with, not this list. ",
+    "Lists agents you can SendMessage to — in-process subagents you spawned, ",
+    "other local Claude sessions on this machine. ",
     "Names are the address: send with `SendMessage({to: \"<name>\", message: \"...\"})`, ",
     "copying the name exactly as a row prints it. Append a row's ` [ref]` only when the ",
     "bare name is not enough — two rows share it, or an error asks you to disambiguate."
@@ -217,6 +234,32 @@ mod tests {
     fn names_are_byte_exact() {
         assert_eq!(LIST_AGENTS_TOOL_NAME, "ListAgents");
         assert_eq!(LIST_PEERS_TOOL_NAME, "ListPeers");
+    }
+
+    /// 2.1.238 `YmS` (@286282922, identical opening clause in 2.1.220): the
+    /// description LEADS with the in-process-subagents clause. Trimming the
+    /// cloud / Remote-Control clauses is the accepted LingXi carve-out;
+    /// INVERTING the in-process clause (the port used to say those agents are
+    /// "addressed by the name they were spawned with, not this list") is not.
+    #[test]
+    fn description_keeps_the_oracle_in_process_clause() {
+        assert!(
+            DESCRIPTION.starts_with(
+                "Lists agents you can SendMessage to \u{2014} in-process subagents you spawned, other local Claude sessions on this machine. "
+            ),
+            "opening clause diverged; got: {}",
+            DESCRIPTION
+        );
+        assert!(
+            !DESCRIPTION.contains("not this list"),
+            "the inverted in-process clause must not come back"
+        );
+        assert!(DESCRIPTION.contains(
+            "Names are the address: send with `SendMessage({to: \"<name>\", message: \"...\"})`, copying the name exactly as a row prints it."
+        ));
+        assert!(DESCRIPTION.ends_with(
+            "Append a row's ` [ref]` only when the bare name is not enough \u{2014} two rows share it, or an error asks you to disambiguate."
+        ));
     }
 
     #[test]

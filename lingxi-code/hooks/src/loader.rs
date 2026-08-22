@@ -14,8 +14,11 @@
 //! }
 //! ```
 //! Missing or empty `hooks` block yields `vec![]`. Unknown event names and
-//! entries lacking a `command` are silently skipped — the loader is a
-//! best-effort projection, not a strict validator.
+//! entries lacking their type's required field are skipped — the loader is a
+//! best-effort projection, not a strict validator. An entry whose `type` is
+//! unrecognized (or absent) is skipped WITH a `tracing::warn!`; the oracle's
+//! config validator (`n8s`) records every rejected entry as
+//! `{path:"hooks.<Event>", reason:…}` rather than dropping it silently.
 //!
 //! ## Event-name coverage
 //!
@@ -25,10 +28,16 @@
 //!
 //! ## Per-hook fields
 //!
-//! The `"command"`, `"http"`, `"agent"`, and `"prompt"` hook types are parsed
-//! (mapping onto [`HookExecutor::Command`] / [`HookExecutor::Http`] /
-//! [`HookExecutor::Agent`] / [`HookExecutor::Prompt`] respectively; the executor
-//! already routes each variant to its runner in `executor.rs`). The `"prompt"`
+//! All five of the oracle's settings hook types — `"command"`, `"http"`,
+//! `"agent"`, `"prompt"`, and `"mcp_tool"` — are parsed (mapping onto
+//! [`HookExecutor::Command`] / [`HookExecutor::Http`] / [`HookExecutor::Agent`] /
+//! [`HookExecutor::Prompt`] / [`HookExecutor::McpTool`] respectively; the
+//! executor already routes each variant to its runner in `executor.rs`). The
+//! `"mcp_tool"` arm (`server` + `tool` required, optional `input` map) loads the
+//! hook so it registers and matches; its INVOCATION is the documented residual
+//! on [`HookExecutor::McpTool`] (no name-addressed MCP invoker seam exists in
+//! this crate), and its executor arm reports the same structured "not wired"
+//! error the `Command`/`Prompt` arms report without their runner. The `"prompt"`
 //! type (`schemas/hooks.ts:67-95`) is the inline single-turn LLM evaluator
 //! (`execPromptHook.ts`): its `prompt` (required) and optional `model` are
 //! carried onto [`HookExecutor::Prompt`], and `prompt_executor.rs` runs it
@@ -227,6 +236,16 @@ struct HookEntry {
     /// (the executor already supports it; the loader previously dropped it).
     #[serde(default)]
     args: Option<Vec<String>>,
+    /// `command` hook `shell` selector (oracle 2.1.238 @ 282293705,
+    /// `shell:Mr(w$u).optional()` with `w$u=["bash","powershell"]`):
+    /// "Shell interpreter. 'bash' uses your $SHELL (bash/zsh/sh); 'powershell'
+    /// uses pwsh. Defaults to bash (powershell on Windows without Git Bash)."
+    ///
+    /// Kept as a raw `String` so an out-of-enum value can be rejected the way
+    /// zod's `Mr(w$u)` rejects it — the whole entry is dropped — rather than
+    /// silently defaulting. Carried onto [`HookExecutor::Command`]'s `shell`.
+    #[serde(default)]
+    shell: Option<String>,
     /// `http` hook endpoint URL (`schemas/hooks.ts:99`). Always sent via POST.
     #[serde(default)]
     url: Option<String>,
@@ -240,6 +259,24 @@ struct HookEntry {
     /// any interpolation to occur.
     #[serde(default, rename = "allowedEnvVars")]
     allowed_env_vars: Option<Vec<String>>,
+    /// `mcp_tool` hook target server (oracle `McpToolHookSchema.server`,
+    /// 2.1.238 @ 282295711: "Name of an already-configured MCP server to
+    /// invoke"). Required by the `mcp_tool` arm.
+    #[serde(default)]
+    server: Option<String>,
+    /// `mcp_tool` hook target tool on [`Self::server`] (oracle
+    /// `McpToolHookSchema.tool`: "Name of the tool on that server to call").
+    /// Required by the `mcp_tool` arm.
+    #[serde(default)]
+    tool: Option<String>,
+    /// `mcp_tool` arguments (oracle `McpToolHookSchema.input`,
+    /// `lo(H(),Fn()).optional()`): "Arguments passed to the MCP tool. String
+    /// values support `${path}` interpolation from the hook input JSON (e.g.
+    /// `"${tool_input.file_path}"`)." Carried onto
+    /// the `input` map of [`HookExecutor::McpTool`]; the interpolation happens at
+    /// invocation time (see that variant's residual note).
+    #[serde(default)]
+    input: Option<HashMap<String, serde_json::Value>>,
     /// `agent` / `prompt` hook prompt text (`schemas/hooks.ts:138-142` /
     /// `67-73`). For an `agent` hook it is the verifier prompt; for a `prompt`
     /// hook it is the inline-LLM evaluation prompt (with `$ARGUMENTS`).
@@ -308,10 +345,11 @@ const DEFAULT_AGENT_TYPE: &str = "general-purpose";
 /// Parse the raw JSON string of a settings file into hook definitions.
 ///
 /// Unknown event names are silently skipped. An entry whose `type` is
-/// `"command"`/`"http"`/`"agent"`/`"prompt"` but is missing the field that type
-/// requires (`command` / `url` / `prompt` / `prompt`) is skipped, as is any
-/// entry whose `type` is unrecognized or absent. Returns `Ok(vec![])` when the
-/// input has no `hooks` block at all.
+/// `"command"`/`"http"`/`"agent"`/`"prompt"`/`"mcp_tool"` but is missing a field
+/// that type requires (`command` / `url` / `prompt` / `prompt` /
+/// `server`+`tool`) is skipped; an entry whose `type` is unrecognized or absent
+/// is skipped with a `tracing::warn!`. Returns `Ok(vec![])` when the input has
+/// no `hooks` block at all.
 ///
 /// `source` is propagated onto every returned [`HookDefinition`] so the
 /// registry can later display trust info per origin.
@@ -425,11 +463,29 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
     match entry.kind.as_deref() {
         Some("command") => {
             let command = entry.command.clone()?;
+            // `shell:Mr(w$u).optional()` — an omitted field is `None` (resolved
+            // at spawn time by `default_hook_shell`); a PRESENT value outside
+            // `["bash","powershell"]` fails the zod enum, which rejects the
+            // whole hook entry, so we return `None` and the caller skips it.
+            let shell = match entry.shell.as_deref() {
+                None => None,
+                Some(raw) => match crate::definition::HookShell::from_wire(raw) {
+                    Some(parsed) => Some(parsed),
+                    None => {
+                        tracing::warn!(
+                            "Hook {command:?} has an unrecognized shell: {raw:?}; \
+                             valid values are \"bash\" and \"powershell\". Hook ignored."
+                        );
+                        return None;
+                    }
+                },
+            };
             let executor = HookExecutor::Command {
                 command: command.clone(),
                 args: entry.args.clone().unwrap_or_default(),
                 env: HashMap::new(),
                 cwd: None,
+                shell,
             };
             Some((command, executor))
         }
@@ -477,8 +533,39 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
             // name the hook `"prompt"` (the type) to stay short and stable.
             Some(("prompt".to_string(), executor))
         }
-        // Any other unknown type and a missing `type` are skipped.
-        _ => None,
+        Some("mcp_tool") => {
+            // `mcp_tool` hook (oracle `McpToolHookSchema`, 2.1.238 @ 282295711;
+            // byte-identical in 2.1.220). `server` + `tool` are REQUIRED by the
+            // schema (`H()`, not `.optional()`), so an entry missing either is
+            // skipped exactly like a `command` entry with no `command`.
+            let server = entry.server.clone()?;
+            let tool = entry.tool.clone()?;
+            let executor = HookExecutor::McpTool {
+                server: server.clone(),
+                tool: tool.clone(),
+                input: entry.input.clone().unwrap_or_default(),
+            };
+            // The oracle's own hook-display function names an `mcp_tool` hook
+            // `${server}/${tool}` (2.1.238 @ 296901778:
+            // `case"mcp_tool":return`${e.server}/${e.tool}``), so use that as the
+            // hook name — the same "name it after its primary user-supplied
+            // field" convention the other arms follow.
+            Some((format!("{server}/{tool}"), executor))
+        }
+        // Any other unknown type and a missing `type` are skipped — but NOT
+        // silently: the oracle's `n8s` config validator records every rejected
+        // entry as `{path:"hooks.<Event>", reason:…}` and surfaces it, so a
+        // dropped entry must at least leave a trace here.
+        other => {
+            match other {
+                Some(kind) => tracing::warn!(
+                    "Ignoring hook entry with unsupported type {kind:?} (supported: \
+                     command, http, agent, prompt, mcp_tool)"
+                ),
+                None => tracing::warn!("Ignoring hook entry with no \"type\" field"),
+            }
+            None
+        }
     }
 }
 
@@ -1005,6 +1092,95 @@ mod tests {
         );
     }
 
+    /// SH-04: an `mcp_tool` settings entry used to fall through `build_executor`
+    /// and be dropped SILENTLY. The oracle's five hook schemas are a
+    /// `z0("type", …)` discriminated union, so it accepts the entry like any
+    /// other; the port must now load it, name it `${server}/${tool}` (oracle
+    /// `y2e`, 2.1.238 @ 296901596), and carry `input` / `timeout` / `once` /
+    /// `statusMessage` / the group matcher.
+    #[test]
+    fn mcp_tool_hook_parses_to_mcp_tool_executor() {
+        let raw = r#"{
+          "hooks": {
+            "PostToolUse": [{ "matcher": "Write|Edit", "hooks": [
+              { "type": "mcp_tool",
+                "server": "linter",
+                "tool": "format_file",
+                "input": { "path": "${tool_input.file_path}", "fix": true },
+                "timeout": 12,
+                "statusMessage": "Formatting…",
+                "once": true }
+            ]}]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::Project).unwrap();
+        assert_eq!(hooks.len(), 1, "an mcp_tool entry must no longer be dropped");
+        assert_eq!(hooks[0].events, vec![HookEventType::PostToolUse]);
+        assert_eq!(hooks[0].timeout, Some(Duration::from_secs(12)));
+        assert!(hooks[0].once);
+        assert_eq!(hooks[0].status_message.as_deref(), Some("Formatting…"));
+        assert_eq!(
+            hooks[0].if_condition.as_ref().map(|c| c.pattern.as_str()),
+            Some("Write|Edit"),
+        );
+        // Oracle hook display/name for `mcp_tool` is `${server}/${tool}`.
+        assert_eq!(hooks[0].name, "linter/format_file");
+        let HookExecutor::McpTool {
+            server,
+            tool,
+            input,
+        } = &hooks[0].executor
+        else {
+            panic!("expected McpTool executor, got {:?}", hooks[0].executor);
+        };
+        assert_eq!(server, "linter");
+        assert_eq!(tool, "format_file");
+        // `input` is carried verbatim; the `${path}` interpolation is applied at
+        // invocation time, so the raw template must survive the load.
+        assert_eq!(
+            input.get("path").and_then(serde_json::Value::as_str),
+            Some("${tool_input.file_path}"),
+        );
+        assert_eq!(
+            input.get("fix").and_then(serde_json::Value::as_bool),
+            Some(true),
+        );
+    }
+
+    /// `input` is `.optional()` in the oracle schema — an entry without it loads
+    /// with an empty argument map rather than being skipped.
+    #[test]
+    fn mcp_tool_hook_without_input_defaults_to_empty_map() {
+        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "mcp_tool", "server": "audit", "tool": "check" }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert_eq!(hooks.len(), 1);
+        let HookExecutor::McpTool { input, .. } = &hooks[0].executor else {
+            panic!("expected McpTool executor");
+        };
+        assert!(input.is_empty());
+    }
+
+    /// `server` and `tool` are REQUIRED (`H()`, not `.optional()`), so an entry
+    /// missing either is skipped — the same rule the `command`/`url`/`prompt`
+    /// arms apply to their own required field.
+    #[test]
+    fn mcp_tool_hook_missing_server_or_tool_is_skipped() {
+        let no_tool = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "mcp_tool", "server": "audit" }
+        ]}]}}"#;
+        assert!(parse_hooks_from_settings_json(no_tool, HookSource::User)
+            .unwrap()
+            .is_empty());
+        let no_server = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "mcp_tool", "tool": "check" }
+        ]}]}}"#;
+        assert!(parse_hooks_from_settings_json(no_server, HookSource::User)
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn mixed_command_http_agent_prompt_in_one_group_all_parse() {
         // One matcher group carrying a command, an http, an agent, and a prompt
@@ -1032,6 +1208,52 @@ mod tests {
         assert!(matches!(hooks[1].executor, HookExecutor::Http { .. }));
         assert!(matches!(hooks[2].executor, HookExecutor::Agent { .. }));
         assert!(matches!(hooks[3].executor, HookExecutor::Prompt { .. }));
+    }
+
+    // ---- SH-06: the `shell` selector ---------------------------------------
+
+    /// `shell:"bash"` / `shell:"powershell"` reach `HookExecutor::Command`.
+    /// Before SH-06 the loader had no `shell` field at all, so BOTH of these
+    /// parsed to an executor that could only ever run `/bin/sh -c`.
+    #[test]
+    fn shell_selector_reaches_the_command_executor() {
+        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "command", "command": "a.sh", "shell": "bash" },
+            { "type": "command", "command": "b.ps1", "shell": "powershell" },
+            { "type": "command", "command": "c.sh" }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert_eq!(hooks.len(), 3);
+        let shells: Vec<Option<crate::definition::HookShell>> = hooks
+            .iter()
+            .map(|h| match &h.executor {
+                HookExecutor::Command { shell, .. } => *shell,
+                other => panic!("expected Command, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shells,
+            vec![
+                Some(crate::definition::HookShell::Bash),
+                Some(crate::definition::HookShell::Powershell),
+                // Omitted stays `None` so the spawn path can apply `Otr()`.
+                None,
+            ],
+        );
+    }
+
+    /// `shell:Mr(w$u)` is a zod ENUM: a value outside `["bash","powershell"]`
+    /// fails the schema, which drops the whole entry. Defaulting instead would
+    /// silently run a typo'd `"shell": "pwsh"` hook through `/bin/sh`.
+    #[test]
+    fn an_out_of_enum_shell_value_drops_the_hook() {
+        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "command", "command": "a.sh", "shell": "pwsh" },
+            { "type": "command", "command": "b.sh" }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert_eq!(hooks.len(), 1, "only the valid entry survives");
+        assert_eq!(hooks[0].name, "b.sh");
     }
 
     // ---- #41: managed-policy hook gate (vBr / h$) --------------------------

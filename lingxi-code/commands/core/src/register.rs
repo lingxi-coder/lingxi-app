@@ -5,7 +5,7 @@
 use command_api::CommandRegistry;
 use std::sync::Arc;
 
-/// Register all 107 built-in slash commands into `reg`.
+/// Register all 108 built-in slash commands into `reg`.
 ///
 /// The non-core names point at per-name instances of
 /// [`command_api::builtin_support::UnimplementedCommandHandler`] that return the locked
@@ -25,7 +25,7 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
         core_description, UnimplementedCommandHandler, BUILTIN_COMMAND_NAMES,
     };
 
-    // Pass 1: register all 107 with per-name unimplemented handler instances.
+    // Pass 1: register all 108 with per-name unimplemented handler instances.
     //
     // Each name needs its own handler **instance** because the handler
     // carries its own `name` field used to substitute the locked literal.
@@ -203,8 +203,8 @@ pub fn register_core_batch_4(
 
 /// Register the batch-3 (M-parity) handle-free slash commands.
 ///
-/// These 9 commands (`commit`, `commit-push-pr`, `init-verifiers`, `insights`,
-/// `release-notes`, `review`, `security-review`, `statusline`, `stickers`)
+/// These 8 commands (`commit`, `commit-push-pr`, `init-verifiers`, `insights`,
+/// `release-notes`, `security-review`, `statusline`, `stickers`)
 /// carry no orchestrator or auth handle: each is a static prompt-injection
 /// (`InjectMessage`) or a static display message (`Done`). They are wired
 /// unconditionally at the end of [`register_all_builtin_commands`], overwriting
@@ -215,15 +215,18 @@ pub fn register_core_batch_4(
 ///
 /// NOTE: `output-style` and `pr-comments` were removed in claude-code v2.1.183
 /// (0 command objects in the binary) and are no longer LingXi builtins (slash
-/// parity #67), so their former batch-3 handlers were deleted.
+/// parity #67), so their former batch-3 handlers were deleted. `review` went
+/// the same way in v2.1.238 (`name:"review"`: 2.1.220 = 1 hit, 2.1.238 = 0 —
+/// the PR-review surface is now the bundled `code-review` skill), so it is no
+/// longer registered here either; `command_core::review` is retained only as
+/// an unwired module.
 ///
 /// Deferred commands (e.g. `ant-trace`) are intentionally left on the shared
 /// [`command_api::builtin_support::UnimplementedCommandHandler`].
 pub fn register_core_batch_3(reg: &mut CommandRegistry) {
     use crate::{
         CommitHandler, CommitPushPrHandler, InitVerifiersHandler, InsightsHandler,
-        ReleaseNotesHandler, ReviewHandler, SecurityReviewHandler, StatuslineHandler,
-        StickersHandler,
+        ReleaseNotesHandler, SecurityReviewHandler, StatuslineHandler, StickersHandler,
     };
 
     reg.register_builtin_handler(Arc::new(CommitHandler::new()));
@@ -231,7 +234,6 @@ pub fn register_core_batch_3(reg: &mut CommandRegistry) {
     reg.register_builtin_handler(Arc::new(InitVerifiersHandler::new()));
     reg.register_builtin_handler(Arc::new(InsightsHandler::new()));
     reg.register_builtin_handler(Arc::new(ReleaseNotesHandler::new()));
-    reg.register_builtin_handler(Arc::new(ReviewHandler::new()));
     reg.register_builtin_handler(Arc::new(SecurityReviewHandler::new()));
     reg.register_builtin_handler(Arc::new(StatuslineHandler::new()));
     reg.register_builtin_handler(Arc::new(StickersHandler::new()));
@@ -492,10 +494,10 @@ mod registry_tests {
     use command_api::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_107_names() {
+    fn register_all_registers_exactly_108_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 107);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 108);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(name).is_some(),
@@ -723,7 +725,7 @@ mod batch_3_tests {
         register_all_builtin_commands(&mut reg);
 
         // Sample of the InjectMessage (`inject`-kind) batch-3 commands.
-        for name in ["commit", "review", "security-review", "init-verifiers"] {
+        for name in ["commit", "security-review", "init-verifiers"] {
             let h = reg
                 .get_handler(name)
                 .unwrap_or_else(|| panic!("/{name} handler missing"));
@@ -781,7 +783,7 @@ mod batch_3_tests {
     }
 
     #[test]
-    fn all_9_batch_3_names_resolve_after_register_all() {
+    fn all_8_batch_3_names_resolve_after_register_all() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
         for name in [
@@ -790,7 +792,6 @@ mod batch_3_tests {
             "init-verifiers",
             "insights",
             "release-notes",
-            "review",
             "security-review",
             "statusline",
             "stickers",
@@ -1082,6 +1083,27 @@ mod batch_8_tests {
     use command_api::parser::ParsedSlashCommand;
     use orchestrator::test_support::MockOrchestratorHandle;
 
+    /// Dispatch a bare `/subtask` against `reg` and return the `Done` display
+    /// text. Used by the agent-view-DISABLED tests to prove batch-8 left the
+    /// `UnimplementedCommandHandler` stub in place (since the cc2.1.238 pass
+    /// `subtask` is a `BUILTIN_COMMAND_NAMES` member, pass 1 of
+    /// `register_all_builtin_commands` always registers a stub for it, so
+    /// "not registered" can no longer be expressed as `get_handler` == None).
+    async fn subtask_display(reg: &CommandRegistry) -> String {
+        let h = reg
+            .get_handler("subtask")
+            .expect("/subtask always has at least its unimplemented stub");
+        let parsed = ParsedSlashCommand {
+            name: "subtask".to_string(),
+            raw_args: String::new(),
+            positional_args: vec![],
+        };
+        match h.handle(&parsed).await {
+            CommandResult::Done { display: Some(s) } => s,
+            other => panic!("/subtask expected Done with display, got {other:?}"),
+        }
+    }
+
     fn batch_8(
         reg: &mut CommandRegistry,
         handle: Arc<dyn traits::OrchestratorHandle>,
@@ -1138,10 +1160,19 @@ mod batch_8_tests {
     }
 
     /// cc2.1.212 fallback (agent view DISABLED via the env half of `vO()`):
-    /// batch-8 registers the legacy subagent-spawn `/fork` (`SAd`) and NO
+    /// batch-8 registers the legacy subagent-spawn `/fork` (`SAd`) and NO real
     /// `/subtask`.
-    #[test]
-    fn legacy_fork_only_when_agent_view_disabled() {
+    ///
+    /// Since the cc2.1.238 pass, `subtask` is a member of
+    /// `BUILTIN_COMMAND_NAMES` (so `/help` and the palette advertise it on the
+    /// default agent-view-ON surface), so pass 1 of
+    /// `register_all_builtin_commands` always leaves an
+    /// `UnimplementedCommandHandler` behind it. "NO `/subtask`" therefore means
+    /// "batch-8 never overwrote that stub" — asserted by dispatching and
+    /// getting the locked M5 stub literal back instead of the real handler's
+    /// usage text.
+    #[tokio::test]
+    async fn legacy_fork_only_when_agent_view_disabled() {
         let _g = agent_view_env_lock();
         std::env::set_var("CLAUDE_CODE_DISABLE_AGENT_VIEW", "1");
 
@@ -1154,9 +1185,7 @@ mod batch_8_tests {
             .expect("/fork must resolve")
             .description
             .clone();
-        let subtask = reg
-            .resolve("subtask")
-            .and_then(|_| reg.get_handler("subtask"));
+        let subtask = subtask_display(&reg).await;
 
         // Restore the env before asserting so a failure never leaks the override.
         std::env::remove_var("CLAUDE_CODE_DISABLE_AGENT_VIEW");
@@ -1165,9 +1194,9 @@ mod batch_8_tests {
             fork_desc,
             "Spawn a background agent that inherits the full conversation"
         );
-        assert!(
-            subtask.is_none(),
-            "/subtask must NOT be registered when agent view is disabled"
+        assert_eq!(
+            subtask, "subtask: not implemented in v0.6.0 (M5)",
+            "/subtask must NOT get its real handler when agent view is disabled"
         );
     }
 
@@ -1175,8 +1204,8 @@ mod batch_8_tests {
     /// (`settings.disableAgentView === true`, env unset): batch-8 registers the
     /// legacy subagent-spawn `/fork` (`SAd`) and NO `/subtask`, exactly like the
     /// env override. Verifies M-03 threads `is_enabled_with_setting`.
-    #[test]
-    fn legacy_fork_only_when_agent_view_disabled_by_setting() {
+    #[tokio::test]
+    async fn legacy_fork_only_when_agent_view_disabled_by_setting() {
         let _g = agent_view_env_lock();
         // env unset (agent_view_env_lock clears it); disable via the setting.
         let mut reg = CommandRegistry::new();
@@ -1187,11 +1216,10 @@ mod batch_8_tests {
             reg.resolve("fork").expect("/fork must resolve").description,
             "Spawn a background agent that inherits the full conversation"
         );
-        assert!(
-            reg.resolve("subtask")
-                .and_then(|_| reg.get_handler("subtask"))
-                .is_none(),
-            "/subtask must NOT be registered when the disableAgentView setting is true"
+        assert_eq!(
+            subtask_display(&reg).await,
+            "subtask: not implemented in v0.6.0 (M5)",
+            "/subtask must NOT get its real handler when the disableAgentView setting is true"
         );
     }
 

@@ -1,11 +1,11 @@
-//! Parity: lock the 107 builtin slash-command names plus the per-command
+//! Parity: lock the 108 builtin slash-command names plus the per-command
 //! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 6. Locks (2026-06-20 slash-parity pass #66/#67 re-locked from 99→94 —
 //! removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style):
 //!
-//! - Total name count = 107
+//! - Total name count = 108
 //! - Core name count = 18
 //! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
@@ -178,7 +178,6 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "reload-skills",
     "rename",
     "resume",
-    "review",
     "rewind",
     "security-review",
     "skill-doctor",
@@ -187,6 +186,7 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "statusline",
     "stickers",
     "stop",
+    "subtask",
     "tasks",
     "terminal-setup",
     "theme",
@@ -211,9 +211,9 @@ fn fixture_v2() -> ParityFileV2 {
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
-    assert_eq!(f.meta.total_count_lock, 107);
-    assert_eq!(f.commands.len(), 107);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 107);
+    assert_eq!(f.meta.total_count_lock, 108);
+    assert_eq!(f.commands.len(), 108);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 108);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 
@@ -396,7 +396,8 @@ fn implemented_set_matches_target_implemented_names() {
 
 #[test]
 fn correct_by_design_and_host_bound_sets_remain_explicit() {
-    assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 23);
+    // 22 since SLASH-06 — see the note on `CORRECT_BY_DESIGN_STUBS`.
+    assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 22);
     assert!(
         HOST_BOUND_DEFERRED_GAPS.is_empty(),
         "/btw now has a handle-bound command and reopenable TUI panel"

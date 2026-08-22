@@ -103,6 +103,30 @@ pub struct SubagentInvocationContext {
     /// mode override — byte-identical to before). Mapped straight into
     /// [`crate::permission_gate::PermissionCheckContext::mode_override`].
     pub mode_override: Option<String>,
+    /// Command-deny rules FROZEN when a background fork launched, replayed for
+    /// every tool call this subagent makes (claude `freezeCommandDenies`).
+    ///
+    /// Upstream rebuilds the permission context from LIVE app state on resume,
+    /// so a settings edit made while a fork was parked could REMOVE a deny that
+    /// was in force when it launched. These rules are re-applied as a
+    /// `disallowed_tools` permission LAYER, which the fold applies ON TOP of the
+    /// base policy — so a frozen deny WINS over a live rule that would now allow
+    /// the same command.
+    ///
+    /// The port is exposed in BOTH directions, so this is not a cross-session-only
+    /// concern: `PolicyPermissionGate::apply_permission_update` mutates the gate's
+    /// `live_state` deny rules in-process (`addRules` / `replaceRules` /
+    /// `removeRules`), so a host permission update can remove an in-force deny
+    /// while a fork is parked in the SAME process. The scoping record additionally
+    /// outlives the process, and a cross-session resume reads it against a freshly
+    /// loaded policy.
+    ///
+    /// Note the converse gap, which this field does not close: the snapshot is
+    /// taken from the BOOT policy (`PermissionPolicy::deny_rules`), not from the
+    /// gate's `live_state`, so a deny ADDED at runtime is never frozen.
+    ///
+    /// Empty ⇒ no layer is added and the fold is byte-identical to before.
+    pub frozen_command_denies: Vec<String>,
 }
 
 /// Failure modes for [`ToolInvoker::invoke`].

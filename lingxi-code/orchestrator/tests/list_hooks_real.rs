@@ -108,6 +108,7 @@ async fn list_hooks_maps_executor_type_content_and_source() {
             args: vec!["--write".into()],
             env: std::collections::HashMap::new(),
             cwd: None,
+            shell: None,
         },
         source: HookSource::Project,
         blocking: true,

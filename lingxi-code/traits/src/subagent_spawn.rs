@@ -808,6 +808,36 @@ pub trait SubagentSpawner: Send + Sync {
         Vec::new()
     }
 
+    /// The agent types that are UNAVAILABLE because every tool they may use is
+    /// denied by the current permission settings — claude 2.1.238 `NJa`
+    /// (@290291941), the availability filter behind `vki` / `$Gr` and the
+    /// single-agent probe `mdr`:
+    ///
+    /// ```js
+    /// function NJa(e,t){return e.filter((r)=>{
+    ///   if(r.source!=="built-in"||!r.tools||r.tools.length===0||att(r.tools)!==null)return!0;
+    ///   return r.tools.some((n)=>{ if(n==="*")return!1;
+    ///     let o=Lp(n).toolName; return!ak(t,{name:o})&&_Tv(o) })})}
+    /// function mdr(e,t){return NJa([e],t).length===0}
+    /// ```
+    ///
+    /// This is the DATA SEAM `AgentTool` lacks on its own: the raw per-agent
+    /// `tools` list and the live tool-wide deny rules both live behind the
+    /// spawner ([`SubagentListingEntry`] carries only a pre-rendered
+    /// `tools_description`), and `tool-agent` must not depend on the `agent`
+    /// engine crate. Returning the already-computed TYPE NAMES keeps the seam
+    /// additive: `AgentTool` treats the result exactly like the `Agent(<type>)`
+    /// deny list — the types are dropped from every `Available agents:` tail and
+    /// from the advertised catalog, and requesting one raises claude `hdr`'s
+    /// "every tool it may use is denied" error.
+    ///
+    /// Defaulted to EMPTY so existing impls / mocks / tests need no change
+    /// (frozen-crate rule) and an unwired host filters nothing; the production
+    /// [`SubagentSpawner`] overrides it.
+    async fn tools_denied_agent_types(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Resolve the `required_mcp_servers` declared by the agent definition that
     /// `subagent_type` resolves to (claude-code `AgentDefinition.requiredMcpServers`,
     /// `loadAgentsDir.ts:122`). `AgentTool` calls this BEFORE the spawn to run the

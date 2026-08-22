@@ -307,6 +307,59 @@ pub type DefaultModelSelectionProvider =
 /// Resolves whether a configured provider profile is Anthropic first-party.
 pub type ProviderFirstPartyResolver = Arc<dyn Fn(&str) -> Option<bool> + Send + Sync>;
 
+/// Gate for [`append_subagent_system_prompt_suffix`] — the port of
+/// `CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT`. `--append-subagent-system-prompt`
+/// sets it implicitly (oracle `wby` @306637528:
+/// `if(e)t.CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT="1"`), which is why the
+/// flag's help text says "Implies …=1".
+pub const APPEND_SUBAGENT_PROMPT_GATE_ENV: &str = "LINGXI_ENABLE_APPEND_SUBAGENT_PROMPT";
+
+/// Transport for the `--append-subagent-system-prompt <prompt>` VALUE
+/// (`r.options.appendSubagentSystemPrompt`). Set by `apps/cli` alongside the
+/// gate, before any runtime is built.
+pub const APPEND_SUBAGENT_PROMPT_VALUE_ENV: &str = "LINGXI_APPEND_SUBAGENT_SYSTEM_PROMPT";
+
+/// (CLI-15) The operator-supplied suffix appended to every Task-tool subagent's
+/// system prompt, or `None` when the flag was not passed or its gate is off.
+///
+/// Oracle @292360822, inside the subagent query builder:
+///
+/// ```js
+/// Xt=UWf(vt,C??!1,(d?.suppressScratchpad||d?.isolatedContext)??!1),
+/// Zt=!C&&!d?.isolatedContext
+///    &&Un(process.env.CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT)
+///    &&r.options.appendSubagentSystemPrompt
+///    ?Rm([...Xt,r.options.appendSubagentSystemPrompt]):Xt
+/// ```
+///
+/// `Rm` is the identity brand (`function Rm(e){return e}`, @290379857), so the
+/// text becomes one more SECTION at the end of the prompt array. LingXi renders
+/// the subagent prompt as a single string, and its section separator is `\n\n`
+/// (the same join the subagent `<env>` block already uses), so the splice site
+/// appends `"\n\n" + suffix`.
+///
+/// `Un` is the env-truthiness predicate (`{1,true,yes,on}` after
+/// lower-case + trim), NOT mere presence — `…=0` leaves the suffix off.
+///
+/// Two oracle guards have no LingXi analogue at this seam and are therefore not
+/// replicated: `C` is the caller's `useExactTools` and `d?.isolatedContext` is
+/// an isolated-context spawn override; neither concept exists in
+/// `SubagentSpawnRequest`. Both suppress the append upstream, so LingXi's
+/// version is strictly wider — recorded rather than guessed at.
+#[must_use]
+pub fn append_subagent_system_prompt_suffix() -> Option<String> {
+    if !traits::env::is_env_truthy(
+        std::env::var(APPEND_SUBAGENT_PROMPT_GATE_ENV).ok().as_deref(),
+    ) {
+        return None;
+    }
+    // `&&r.options.appendSubagentSystemPrompt` — an empty string is falsy in
+    // JS, so it does not append either.
+    std::env::var(APPEND_SUBAGENT_PROMPT_VALUE_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
 impl PoolSubagentSpawner {
     /// Construct an adapter wrapping `pool` with no API client (legacy stub
     /// runner). Use [`Self::with_api_client`] to enable the real multi-turn
@@ -1180,6 +1233,7 @@ impl PoolSubagentSpawner {
             // definition permission mode (non-fork only). `None` = inherit the
             // live/boot gate mode.
             permission_mode_override: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 
@@ -1376,6 +1430,15 @@ impl PoolSubagentSpawner {
                 ctx.rendered_system_prompt = Some(Arc::from(format!("{body}{addendum}")));
             }
         }
+        // (CLI-15) `--append-subagent-system-prompt <prompt>`: the operator's
+        // suffix, appended to EVERY Task-tool subagent's system prompt and
+        // therefore to nested subagents too (they spawn through this same
+        // function in the same process).
+        if let Some(suffix) = append_subagent_system_prompt_suffix() {
+            if let Some(body) = ctx.rendered_system_prompt.as_ref() {
+                ctx.rendered_system_prompt = Some(Arc::from(format!("{body}\n\n{suffix}")));
+            }
+        }
         // Hand the child the parent's tool invoker + budget enforcer + our model
         // API seam (recursion-lock / budget-inheritance invariants).
         ctx.tool_invoker = Some(inherit.tool_invoker);
@@ -1472,6 +1535,16 @@ impl PoolSubagentSpawner {
         // rendered context verbatim, so it never applies a mode override.
         ctx.permission_mode_override =
             effective_permission_mode.map(|m| crate::permission_mode::wire_mode_str(m).to_string());
+        // Carry the fork-time command-deny snapshot through to the runner, which
+        // replays it on every dispatched tool call (claude `freezeCommandDenies`).
+        // Only the fork path populates it; every other spawn leaves it empty and
+        // the dispatch path is unchanged.
+        //
+        // This is the consumer the field never had: it was computed, persisted to
+        // the scoping sidecar and read back into the spawn request, but nothing
+        // ever APPLIED it — so a settings edit made while a fork was parked could
+        // silently widen what the resumed fork was allowed to run.
+        ctx.frozen_command_denies = request.frozen_command_denies.clone();
         // A persistent (background/resumable) agent parks after each turn-set;
         // `is_async` marks background scheduling (vs the foreground one-shot).
         ctx.persistent = persistent;
@@ -1621,6 +1694,95 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
         .collect();
     entries.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
     entries
+}
+
+/// claude 2.1.238 `NJa` (@290291941) — filter a definition slice down to the
+/// agent types that are UNAVAILABLE because every tool they may use is denied:
+///
+/// ```js
+/// function NJa(e,t){return e.filter((r)=>{
+///   if(r.source!=="built-in"||!r.tools||r.tools.length===0||att(r.tools)!==null)return!0;
+///   return r.tools.some((n)=>{ if(n==="*")return!1;
+///     let o=Lp(n).toolName; return!ak(t,{name:o})&&_Tv(o) })})}
+/// ```
+///
+/// Guard-by-guard:
+/// * `r.source!=="built-in"` — only BUILT-IN definitions are subject; a user /
+///   project / plugin agent is never withheld for this reason.
+/// * `!r.tools` — a TS definition with no `tools` (the port's
+///   [`AgentToolPolicy::Except`], i.e. `disallowedTools`-only) is skipped.
+/// * `r.tools.length===0` — an empty explicit list is skipped.
+/// * `att(r.tools)!==null` (@290070773) — `att` returns non-null unless the list
+///   contains `"*"`, so a wildcard list ([`AgentToolPolicy::All`]) is skipped.
+/// * the surviving case is a non-empty, wildcard-free explicit allow-list; the
+///   agent stays available iff SOME entry is both un-denied (`!ak(t,{name:o})`,
+///   a deny rule matched against the bare tool NAME ⇒ the port's tool-wide deny
+///   names, matched with [`permission::tool_wide_name_matches`] — the SAME
+///   matcher [`crate::tool_resolver::resolve_subagent_tools`] uses to strip the
+///   spawn's pool, so this predicate cannot disagree with the pool the agent
+///   would actually get) and usable
+///   (`_Tv(o) = o!==cm||Vs(wjr)` — `WebFetch` additionally needs the
+///   `allow_web_fetch` entitlement,
+///   [`crate::builtins::web_fetch_policy_allowed`]).
+///
+/// `Lp(n).toolName` strips a rule's content (`Bash(git:*)` → `Bash`), so an
+/// allow-list entry written in rule form resolves to its tool name here too.
+///
+/// Definitions are de-duplicated later-wins first, matching
+/// [`agent_listing_entries`], so a catalog entry that overrides a built-in is
+/// judged (and, being non-built-in, exempted) in the built-in's place.
+#[must_use]
+pub fn tools_denied_agent_types(
+    defs: &[AgentDefinition],
+    tool_wide_deny: &[String],
+) -> Vec<String> {
+    let mut by_type: HashMap<String, &AgentDefinition> = HashMap::new();
+    for def in defs {
+        by_type.insert(def.agent_type.clone(), def);
+    }
+    let mut out: Vec<String> = by_type
+        .into_values()
+        .filter(|def| every_tool_denied(def, tool_wide_deny))
+        .map(|def| def.agent_type.clone())
+        .collect();
+    out.sort();
+    out
+}
+
+/// claude `mdr(e,t)` (@290291941) = `NJa([e],t).length===0` — the single-agent
+/// arm of [`tools_denied_agent_types`].
+fn every_tool_denied(def: &AgentDefinition, tool_wide_deny: &[String]) -> bool {
+    // `r.source!=="built-in"` ⇒ kept (never withheld).
+    if !matches!(def.source, AgentSource::BuiltIn) {
+        return false;
+    }
+    // `!r.tools` / `r.tools.length===0` / `att(r.tools)!==null` ⇒ kept.
+    let AgentToolPolicy::Explicit(names) = &def.tools else {
+        return false;
+    };
+    if names.is_empty() || names.iter().any(|n| n == "*") {
+        return false;
+    }
+    // `!r.tools.some(...)` — no entry is both un-denied and usable.
+    !names.iter().any(|name| {
+        let tool = rule_tool_name(name);
+        let denied = tool_wide_deny
+            .iter()
+            .any(|d| permission::tool_wide_name_matches(d, tool));
+        // `_Tv(o) = o !== cm || Vs(wjr)`
+        let usable = tool != crate::builtins::WEB_FETCH_TOOL_NAME
+            || crate::builtins::web_fetch_policy_allowed();
+        !denied && usable
+    })
+}
+
+/// claude `Lp(n).toolName` — the bare tool name of a permission-rule-shaped
+/// string (`Bash(git status:*)` → `Bash`); a plain name is returned unchanged.
+fn rule_tool_name(rule: &str) -> &str {
+    match rule.find('(') {
+        Some(i) => rule[..i].trim_end(),
+        None => rule,
+    }
 }
 
 /// Cancel-safety guard for [`PoolSubagentSpawner::spawn`]. The runner runs as a
@@ -2051,6 +2213,22 @@ impl SubagentSpawner for PoolSubagentSpawner {
     /// [`Self::listing_entries`].
     async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
         self.listing_entries().await
+    }
+
+    /// claude 2.1.238 `NJa` (@290291941) — the agent types every one of whose
+    /// tools is denied by the current permission settings. Computed over the
+    /// SAME merged catalog [`Self::listing_entries`] renders, against the boot
+    /// policy's tool-wide deny names (the set-once cell filled by the
+    /// composition root; UNFILLED / EMPTY ⇒ nothing denied ⇒ empty result, so
+    /// this is regression-safe for every host that never wires it).
+    async fn tools_denied_agent_types(&self) -> Vec<String> {
+        let empty: Vec<String> = Vec::new();
+        let denied = self.tool_wide_deny_names.get().unwrap_or(&empty).clone();
+        let mut defs: Vec<AgentDefinition> = self.builtins.values().cloned().collect();
+        if let Some(catalog) = self.agent_catalog.get() {
+            defs.extend(catalog.read().await.iter().cloned());
+        }
+        crate::tools_denied_agent_types(&defs, &denied)
     }
 
     /// Resolve the `required_mcp_servers` declared by `subagent_type`'s
@@ -3725,6 +3903,113 @@ mod tests {
         );
     }
 
+    /// (CLI-15) The gate + value pair behind `--append-subagent-system-prompt`.
+    /// `Un(...)` is env TRUTHINESS, not presence, and an empty value is falsy
+    /// in the oracle's `&&r.options.appendSubagentSystemPrompt` conjunct.
+    #[test]
+    fn append_subagent_suffix_reads_the_gate_and_value() {
+        let _g = APPEND_SUBAGENT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let restore = || {
+            std::env::remove_var(super::APPEND_SUBAGENT_PROMPT_GATE_ENV);
+            std::env::remove_var(super::APPEND_SUBAGENT_PROMPT_VALUE_ENV);
+        };
+        restore();
+        assert_eq!(super::append_subagent_system_prompt_suffix(), None);
+
+        // Value without the gate → nothing.
+        std::env::set_var(super::APPEND_SUBAGENT_PROMPT_VALUE_ENV, "BE TERSE");
+        assert_eq!(super::append_subagent_system_prompt_suffix(), None);
+
+        // Gate + value → the value.
+        std::env::set_var(super::APPEND_SUBAGENT_PROMPT_GATE_ENV, "1");
+        assert_eq!(
+            super::append_subagent_system_prompt_suffix().as_deref(),
+            Some("BE TERSE")
+        );
+
+        // A non-truthy gate value keeps it off (`Un`, not presence).
+        std::env::set_var(super::APPEND_SUBAGENT_PROMPT_GATE_ENV, "0");
+        assert_eq!(super::append_subagent_system_prompt_suffix(), None);
+        std::env::set_var(super::APPEND_SUBAGENT_PROMPT_GATE_ENV, "yes");
+        assert_eq!(
+            super::append_subagent_system_prompt_suffix().as_deref(),
+            Some("BE TERSE")
+        );
+
+        // Empty value is falsy.
+        std::env::set_var(super::APPEND_SUBAGENT_PROMPT_VALUE_ENV, "");
+        assert_eq!(super::append_subagent_system_prompt_suffix(), None);
+        restore();
+    }
+
+    /// (CLI-15) …and the SPLICE: the suffix is the last section of the spawned
+    /// subagent's rendered system prompt. Without a call site the helper above
+    /// would be dead code that merely reads like parity.
+    #[tokio::test]
+    async fn spawned_subagent_prompt_ends_with_the_append_suffix() {
+        let _g = APPEND_SUBAGENT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(super::APPEND_SUBAGENT_PROMPT_GATE_ENV);
+        std::env::remove_var(super::APPEND_SUBAGENT_PROMPT_VALUE_ENV);
+
+        let build = || async {
+            let runtime = Arc::new(MockRuntimeSpawner::default());
+            let pool = Arc::new(StateMachinePool::new(runtime, 4));
+            let spawner = PoolSubagentSpawner::new(pool);
+            let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+                "subagent_type": "Explore",
+                "prompt": "inspect"
+            }))
+            .expect("minimal spawn request");
+            spawner
+                .build_subagent_context(
+                    &request,
+                    SubagentInheritance {
+                        tool_invoker: Arc::new(DummyInvoker),
+                        budget: Arc::new(DummyBudget),
+                    },
+                    false,
+                )
+                .await
+                .expect("spawn context")
+        };
+
+        let baseline = build().await;
+        let baseline_sys = baseline
+            .rendered_system_prompt
+            .as_deref()
+            .expect("Explore has a system prompt")
+            .to_string();
+        assert!(!baseline_sys.ends_with("OPERATOR SUFFIX"));
+
+        std::env::set_var(super::APPEND_SUBAGENT_PROMPT_GATE_ENV, "1");
+        std::env::set_var(super::APPEND_SUBAGENT_PROMPT_VALUE_ENV, "OPERATOR SUFFIX");
+        let with_suffix = build().await;
+        let sys = with_suffix
+            .rendered_system_prompt
+            .as_deref()
+            .expect("system prompt")
+            .to_string();
+        assert!(
+            sys.ends_with("\n\nOPERATOR SUFFIX"),
+            "the suffix is the final section, joined by a blank line: {sys}"
+        );
+        assert_eq!(
+            sys.len(),
+            baseline_sys.len() + "\n\nOPERATOR SUFFIX".len(),
+            "nothing else about the prompt changed"
+        );
+
+        std::env::remove_var(super::APPEND_SUBAGENT_PROMPT_GATE_ENV);
+        std::env::remove_var(super::APPEND_SUBAGENT_PROMPT_VALUE_ENV);
+    }
+
+    /// Serializes the two CLI-15 tests: they mutate process-wide env.
+    static APPEND_SUBAGENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn make_subagent_context_seeds_task_prompt_as_user_msg_and_def_body_as_system() {
         let def = AgentDefinition {
@@ -3966,6 +4251,86 @@ mod tests {
         assert_eq!(explore.tools_description, "Read");
         // Still 5 (override, not addition).
         assert_eq!(entries.len(), 5);
+    }
+
+    /// claude 2.1.238 `NJa` (@290291941) guard-by-guard.
+    #[test]
+    fn tools_denied_agent_types_ports_nja_guards() {
+        let named = |ty: &str, tools: AgentToolPolicy| AgentDefinition {
+            agent_type: ty.into(),
+            ..agent_def(tools)
+        };
+        let deny = vec!["Read".to_string(), "Edit".to_string()];
+
+        // Subject to the check: built-in + non-empty, wildcard-free explicit
+        // allow-list, every entry denied ⇒ unavailable.
+        let all_denied = named(
+            "statusline-setup",
+            AgentToolPolicy::Explicit(vec!["Read".into(), "Edit".into()]),
+        );
+        // One surviving tool ⇒ still available (`r.tools.some(...)`).
+        let one_survives = named(
+            "partly",
+            AgentToolPolicy::Explicit(vec!["Read".into(), "Bash".into()]),
+        );
+        // `att(r.tools)!==null` — a `"*"` entry short-circuits the check.
+        let wildcard = named(
+            "wild",
+            AgentToolPolicy::Explicit(vec!["*".into(), "Read".into()]),
+        );
+        // `r.tools.length===0` and `!r.tools` (the port's `Except`/`All`).
+        let empty = named("empty", AgentToolPolicy::Explicit(vec![]));
+        let excepting = named("excepting", AgentToolPolicy::Except(vec!["Read".into()]));
+        let all = named(
+            "all",
+            AgentToolPolicy::All {
+                use_exact_tools: false,
+            },
+        );
+        // `r.source!=="built-in"` — a user agent is never withheld.
+        let user = AgentDefinition {
+            source: AgentSource::UserDefined,
+            ..named(
+                "user-agent",
+                AgentToolPolicy::Explicit(vec!["Read".into(), "Edit".into()]),
+            )
+        };
+        // `Lp(n).toolName` strips rule content before matching.
+        let rule_form = named(
+            "rule-form",
+            AgentToolPolicy::Explicit(vec!["Read(src/**)".into()]),
+        );
+
+        let defs = vec![
+            all_denied, one_survives, wildcard, empty, excepting, all, user, rule_form,
+        ];
+        assert_eq!(
+            crate::tools_denied_agent_types(&defs, &deny),
+            vec!["rule-form".to_string(), "statusline-setup".to_string()]
+        );
+        // No deny rules ⇒ nothing withheld (the regression-safe default).
+        assert!(crate::tools_denied_agent_types(&defs, &[]).is_empty());
+    }
+
+    /// claude `_Tv(o) = o!==cm||Vs(wjr)`: WebFetch counts as usable only while
+    /// the `allow_web_fetch` entitlement holds. LingXi has no entitlement map,
+    /// so `Vs` takes its no-map `true` arm and a WebFetch-only agent survives
+    /// unless WebFetch is itself denied.
+    #[test]
+    fn web_fetch_only_agent_follows_the_allow_web_fetch_term() {
+        let wf = AgentDefinition {
+            agent_type: crate::builtins::WEB_FETCH_AGENT_TYPE.into(),
+            ..agent_def(AgentToolPolicy::Explicit(vec!["WebFetch".into()]))
+        };
+        assert!(crate::builtins::web_fetch_policy_allowed());
+        assert!(crate::tools_denied_agent_types(std::slice::from_ref(&wf), &[]).is_empty());
+        assert_eq!(
+            crate::tools_denied_agent_types(
+                std::slice::from_ref(&wf),
+                &["WebFetch".to_string()]
+            ),
+            vec!["web-fetch".to_string()]
+        );
     }
 
     #[test]

@@ -176,10 +176,16 @@ mod tests {
                 assert!(!mc.contains("file state is current"));
             } else {
                 let err = outcome.expect_err("default (flag off) must keep the stale error");
+                // FT-07: the refusal a stale Edit actually hits is the oracle's
+                // VALIDATE-phase message (6 hits in 2.1.238), not the rare
+                // call-phase `File content has changed since it was last read`
+                // (2 hits) the port used to emit here. That call-phase constant
+                // is still kept, byte-locked, for its own branch.
                 assert!(
-                    err.to_string()
-                        .contains("File content has changed since it was last read"),
-                    "expected J2n stale error, got: {err}"
+                    err.to_string().contains(
+                        "File has been modified since read, either by the user or by a linter."
+                    ),
+                    "expected the validate-phase stale error, got: {err}"
                 );
                 // File untouched on the error path.
                 assert_eq!(
@@ -810,7 +816,19 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("File does not exist"));
+        // FT-06: byte-locked `FileEditTool.validateInput` errorCode-4 message —
+        // the same sentence Read emits, including the cwd note. No sibling
+        // shares `missing`'s stem and the path is under cwd, so neither
+        // `" Did you mean ...?"` suffix fires.
+        let cwd = std::fs::canonicalize(tmp.path()).unwrap();
+        let msg = err.to_string();
+        assert!(
+            msg.ends_with(&format!(
+                "File does not exist. Note: your current working directory is {}.",
+                cwd.display()
+            )),
+            "expected the byte-locked cwd-note message, got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1375,9 +1393,10 @@ that bypasses Perforce tracking."
             .await
             .unwrap_err();
         match err {
-            // Fix #3: stale-changed-content now returns Vbn (the richer linter
-            // message) instead of FILE_UNEXPECTEDLY_MODIFIED_ERROR.
-            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_CONTENT_CHANGED_LINTER_MESSAGE),
+            // FT-07: stale-changed-content returns the oracle's
+            // `validateInput` errorCode-7 literal (cc-238.js @226407883),
+            // not the call-phase race sentence `WVo`.
+            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
         // Edit refused → file left as the external content.

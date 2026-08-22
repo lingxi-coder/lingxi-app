@@ -32,8 +32,8 @@
 //!   gitignore NEGATION (`!pattern`) interplay within one root — permission
 //!   rule strings never carry `!`, so the case does not arise.
 //! - [`expand_path`] itself is lexical, matching the orchestrator's `expandPath`
-//!   mirror. Working-directory containment separately adds native and Windows
-//!   Git-Bash cookie symlink forms, like `getPathsForPermissionCheck`.
+//!   mirror. Working-directory containment separately adds the natively
+//!   symlink-resolved forms, like `getPathsForPermissionCheck`.
 //! - The wider `checkRead/checkWritePermissionForTool` flow (internal-path
 //!   allowances, `.git`/`.claude` safety asks, suggestions) is NOT reproduced
 //!   here — `authorize` keeps its deny→allow→mode shape; see its docs for what
@@ -57,59 +57,14 @@
 //! lexical form, matching claude-code's exception-swallowing resolver.
 
 use crate::rule::PermissionRuleSource;
-#[cfg(windows)]
-use std::ffi::OsString;
-use std::fs::File;
-use std::io::Read;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 
-const WINDOWS_COOKIE_SYMLINK_PREFIX: &[u8] = b"!<symlink>";
-const WINDOWS_COOKIE_SYMLINK_READ_BYTES: usize = WINDOWS_COOKIE_SYMLINK_PREFIX.len() + 2 + 8192;
 const PERMISSION_PATH_RESOLUTION_MAX_HOPS: usize = 64;
-
-/// A decoded Git-Bash cookie target. BOM-prefixed UTF-16 stays as raw code
-/// units because JavaScript strings preserve lone surrogates and Windows
-/// `OsString` can represent them; converting through Rust `String` would
-/// replace them with U+FFFD and change the path being checked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum WindowsCookieSymlinkTarget {
-    Text(String),
-    Utf16(Vec<u16>),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PermissionPathForms {
     Paths(Vec<PathBuf>),
     FailClosed,
-}
-
-impl WindowsCookieSymlinkTarget {
-    fn into_path_buf(self) -> PathBuf {
-        match self {
-            Self::Text(target) => PathBuf::from(target.replace('\\', "/")),
-            Self::Utf16(mut target) => {
-                // Oracle: `target.replace(/\\/g, "/")` before path resolution.
-                for unit in &mut target {
-                    if *unit == u16::from(b'\\') {
-                        *unit = u16::from(b'/');
-                    }
-                }
-                #[cfg(windows)]
-                {
-                    PathBuf::from(OsString::from_wide(&target))
-                }
-                #[cfg(not(windows))]
-                {
-                    // Cookie symlinks are enabled only on Windows. This branch
-                    // keeps Unix helper tests useful for well-formed targets;
-                    // native Windows execution above remains lossless.
-                    PathBuf::from(String::from_utf16_lossy(&target))
-                }
-            }
-        }
-    }
 }
 
 /// The filesystem roots a [`PermissionRuleSource`] resolves against, supplied
@@ -313,7 +268,7 @@ fn permission_paths_to_check(path: &Path, roots: &FsRoots) -> PermissionPathForm
     }
 
     let mut out = vec![absolute.clone()];
-    for resolved in resolve_additional_permission_paths(&absolute, cfg!(windows)) {
+    for resolved in resolve_additional_permission_paths(&absolute) {
         if resolved != absolute && !out.contains(&resolved) {
             out.push(resolved);
         }
@@ -330,10 +285,7 @@ fn path_resolution_must_fail_closed(path: &Path) -> bool {
         && resolve_dangling_symlink(path).is_none()
 }
 
-fn resolve_additional_permission_paths(
-    absolute_path: &Path,
-    enable_windows_cookie_symlinks: bool,
-) -> Vec<PathBuf> {
+fn resolve_additional_permission_paths(absolute_path: &Path) -> Vec<PathBuf> {
     let mut resolved = Vec::new();
     if let Some(collapsed) = resolve_deepest_existing_ancestor(absolute_path) {
         if collapsed != absolute_path {
@@ -365,20 +317,7 @@ fn resolve_additional_permission_paths(
                 }
                 current = next;
             }
-            Err(err) => {
-                if is_cookie_symlink_fallback_error(&err)
-                    && current == absolute_path
-                    && enable_windows_cookie_symlinks
-                {
-                    if let Some(cookie_target) = resolve_windows_cookie_symlink_path(absolute_path)
-                    {
-                        if !resolved.contains(&cookie_target) {
-                            resolved.push(cookie_target);
-                        }
-                    }
-                }
-                break;
-            }
+            Err(_) => break,
         }
     }
 
@@ -389,115 +328,6 @@ fn resolve_additional_permission_paths(
     }
 
     resolved
-}
-
-fn resolve_windows_cookie_symlink_path(path: &Path) -> Option<PathBuf> {
-    for ancestor in path.ancestors() {
-        let Ok(meta) = std::fs::symlink_metadata(ancestor) else {
-            continue;
-        };
-        if !meta.file_type().is_file() {
-            continue;
-        }
-        let Some(bytes) = read_windows_cookie_symlink_bytes(ancestor) else {
-            continue;
-        };
-        let Some(target) = decode_windows_cookie_symlink_target(&bytes) else {
-            continue;
-        };
-
-        let tail = path.strip_prefix(ancestor).ok()?;
-        let parent = ancestor.parent()?;
-        let target_path = target.into_path_buf();
-        let absolute_target = if target_path.is_absolute() {
-            target_path
-        } else {
-            parent.join(&target_path)
-        };
-        return Some(normalize_lexically(&absolute_target).join(tail));
-    }
-    None
-}
-
-fn read_windows_cookie_symlink_bytes(path: &Path) -> Option<Vec<u8>> {
-    let mut reader = File::open(path)
-        .ok()?
-        .take(WINDOWS_COOKIE_SYMLINK_READ_BYTES as u64);
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes).ok()?;
-    if !bytes.starts_with(WINDOWS_COOKIE_SYMLINK_PREFIX) {
-        return None;
-    }
-    Some(bytes)
-}
-
-fn decode_windows_cookie_symlink_target(bytes: &[u8]) -> Option<WindowsCookieSymlinkTarget> {
-    let Some(payload) = bytes.strip_prefix(WINDOWS_COOKIE_SYMLINK_PREFIX) else {
-        return None;
-    };
-    if payload.is_empty() {
-        return None;
-    }
-
-    if let Some(utf16_payload) = payload.strip_prefix(&[0xFF, 0xFE]) {
-        let utf16_payload = &utf16_payload[..utf16_payload.len() - (utf16_payload.len() % 2)];
-        if utf16_payload.is_empty() {
-            return None;
-        }
-        let code_units: Vec<u16> = utf16_payload
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
-        let nul = code_units
-            .iter()
-            .position(|unit| *unit == 0)
-            .unwrap_or(code_units.len());
-        if nul == 0 {
-            return None;
-        }
-        return Some(WindowsCookieSymlinkTarget::Utf16(
-            code_units[..nul].to_vec(),
-        ));
-    }
-
-    if let Ok(utf8) = std::str::from_utf8(payload) {
-        if let Some(utf8) = truncate_string_at_first_nul(utf8.to_owned()) {
-            return Some(WindowsCookieSymlinkTarget::Text(utf8));
-        }
-    }
-    truncate_string_at_first_nul(payload.iter().map(|byte| char::from(*byte)).collect())
-        .map(WindowsCookieSymlinkTarget::Text)
-}
-
-fn truncate_string_at_first_nul(s: String) -> Option<String> {
-    let trimmed = s.split_once('\0').map_or(s.as_str(), |(head, _)| head);
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn is_cookie_symlink_fallback_error(err: &std::io::Error) -> bool {
-    if err.kind() == std::io::ErrorKind::NotFound {
-        return true;
-    }
-
-    #[cfg(unix)]
-    {
-        if err.raw_os_error() == Some(20) {
-            return true;
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        if err.raw_os_error() == Some(267) {
-            return true;
-        }
-    }
-
-    false
 }
 
 /// Resolve the deepest existing ancestor of `absolute_path` through the real
@@ -870,11 +700,6 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[cfg(unix)]
-    fn write_windows_cookie_symlink(path: &Path, payload: &[u8]) {
-        std::fs::write(path, [WINDOWS_COOKIE_SYMLINK_PREFIX, payload].concat()).unwrap();
     }
 
     fn roots() -> FsRoots {
@@ -1286,76 +1111,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_windows_cookie_symlink_target_prefers_utf8_primary() {
-        let decoded = decode_windows_cookie_symlink_target(b"!<symlink>caf\xC3\xA9").unwrap();
-        assert_eq!(
-            decoded,
-            WindowsCookieSymlinkTarget::Text("café".to_string())
-        );
-    }
-
-    #[test]
-    fn decode_windows_cookie_symlink_target_supports_utf16le_bom() {
-        let decoded = decode_windows_cookie_symlink_target(&[
-            b'!', b'<', b's', b'y', b'm', b'l', b'i', b'n', b'k', b'>', 0xFF, 0xFE, b'd', 0, b'i',
-            0, b'r', 0, b'\\', 0, b'f', 0, b'i', 0, b'l', 0, b'e', 0, 0, 0,
-        ])
-        .unwrap();
-        assert_eq!(
-            decoded,
-            WindowsCookieSymlinkTarget::Utf16("dir\\file".encode_utf16().collect())
-        );
-    }
-
-    #[test]
-    fn decode_windows_cookie_symlink_target_ignores_empty_targets() {
-        assert!(decode_windows_cookie_symlink_target(b"!<symlink>").is_none());
-        assert!(decode_windows_cookie_symlink_target(b"!<symlink>\xFF\xFE\0\0").is_none());
-    }
-
-    #[test]
-    fn decode_windows_cookie_symlink_target_trims_at_first_nul() {
-        let decoded = decode_windows_cookie_symlink_target(b"!<symlink>target\0tail").unwrap();
-        assert_eq!(
-            decoded,
-            WindowsCookieSymlinkTarget::Text("target".to_string())
-        );
-    }
-
-    #[test]
-    fn decode_windows_cookie_symlink_target_truncates_odd_utf16le_tail() {
-        let decoded = decode_windows_cookie_symlink_target(b"!<symlink>\xFF\xFEa\0b").unwrap();
-        assert_eq!(
-            decoded,
-            WindowsCookieSymlinkTarget::Utf16(vec![u16::from(b'a')])
-        );
-    }
-
-    #[test]
-    fn decode_windows_cookie_symlink_target_preserves_lone_surrogates_like_node() {
-        let decoded =
-            decode_windows_cookie_symlink_target(b"!<symlink>\xFF\xFE\x00\xD8x\0").unwrap();
-        assert_eq!(
-            decoded,
-            WindowsCookieSymlinkTarget::Utf16(vec![0xD800, 0x0078])
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_cookie_utf16_into_path_buf_preserves_lone_surrogate_and_normalizes_slashes() {
-        use std::os::windows::ffi::OsStrExt;
-
-        let path =
-            WindowsCookieSymlinkTarget::Utf16(vec![0xD800, u16::from(b'\\'), u16::from(b'x')])
-                .into_path_buf();
-        assert_eq!(
-            path.as_os_str().encode_wide().collect::<Vec<u16>>(),
-            vec![0xD800, u16::from(b'/'), u16::from(b'x')]
-        );
-    }
-
-    #[test]
     fn allowed_working_path_iterates_dirs() {
         let r = roots();
         let dirs = vec![PathBuf::from("/proj"), PathBuf::from("/extra/work")];
@@ -1383,98 +1138,6 @@ mod tests {
             &[],
             &r
         ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn windows_cookie_symlink_resolution_keeps_remaining_tail() {
-        let tmp = unique_temp_dir("windows_cookie_tail");
-        let workspace = tmp.join("workspace");
-        let outside = tmp.join("outside");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        write_windows_cookie_symlink(&workspace.join("link"), b"../outside");
-
-        let resolved =
-            resolve_additional_permission_paths(&workspace.join("link/secret.txt"), true);
-        assert!(resolved.contains(&outside.join("secret.txt")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn windows_cookie_utf16le_relative_target_keeps_remaining_tail() {
-        let tmp = unique_temp_dir("windows_cookie_utf16_tail");
-        let workspace = tmp.join("workspace");
-        let outside = tmp.join("outside");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        write_windows_cookie_symlink(
-            &workspace.join("link"),
-            &[
-                0xFF, 0xFE, b'.', 0, b'.', 0, b'/', 0, b'o', 0, b'u', 0, b't', 0, b's', 0, b'i', 0,
-                b'd', 0, b'e', 0,
-            ],
-        );
-
-        assert_eq!(
-            resolve_windows_cookie_symlink_path(&workspace.join("link/nested/secret.txt")),
-            Some(outside.join("nested/secret.txt"))
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn malformed_windows_cookie_symlink_is_ignored() {
-        let tmp = unique_temp_dir("windows_cookie_malformed");
-        let workspace = tmp.join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        write_windows_cookie_symlink(&workspace.join("link"), &[0xFF, 0xFE, b'a']);
-
-        assert_eq!(
-            resolve_windows_cookie_symlink_path(&workspace.join("link/secret.txt")),
-            None
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn oversized_windows_cookie_symlink_read_is_bounded_like_oracle() {
-        let tmp = unique_temp_dir("windows_cookie_oversized");
-        let workspace = tmp.join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        write_windows_cookie_symlink(
-            &workspace.join("link"),
-            &vec![b'a'; WINDOWS_COOKIE_SYMLINK_READ_BYTES + 128],
-        );
-
-        let bytes = read_windows_cookie_symlink_bytes(&workspace.join("link")).unwrap();
-        assert_eq!(bytes.len(), WINDOWS_COOKIE_SYMLINK_READ_BYTES);
-        let decoded = decode_windows_cookie_symlink_target(&bytes).unwrap();
-        let WindowsCookieSymlinkTarget::Text(target) = &decoded else {
-            panic!("non-BOM ASCII target must decode as text");
-        };
-        assert_eq!(
-            target.len(),
-            WINDOWS_COOKIE_SYMLINK_READ_BYTES - WINDOWS_COOKIE_SYMLINK_PREFIX.len()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn large_non_cookie_regular_file_is_not_treated_as_cookie_symlink() {
-        let tmp = unique_temp_dir("windows_cookie_non_cookie");
-        let workspace = tmp.join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(
-            workspace.join("plain"),
-            vec![b'x'; WINDOWS_COOKIE_SYMLINK_READ_BYTES + 128],
-        )
-        .unwrap();
-
-        assert_eq!(
-            resolve_windows_cookie_symlink_path(&workspace.join("plain/secret.txt")),
-            None
-        );
     }
 
     #[cfg(unix)]

@@ -5677,3 +5677,254 @@ mod memdir_index_cap_tests {
         );
     }
 }
+
+// ============================================================================
+// SC-04 (claude-code 2.1.238 `Fol`, cc-238.js @228433532): when the rescue
+// compaction for THIS call failed, the prompt-too-long surface carries the
+// composed copy `Prompt is too long · automatic compaction failed: <detail>`
+// (`ep({content:Fol(qn)??_V,error:"invalid_request",…})` @228721216) instead of
+// the bare `Prompt is too long`. The detail is one-shot.
+// ============================================================================
+#[cfg(test)]
+mod compaction_failure_hint_tests {
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::turn_loop::surface_prompt_too_long;
+    use crate::OrchestratorConfig;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    fn orch_with_output(output: Arc<MockOutputStream>) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output,
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// No recorded compaction failure → the bare, byte-exact message, exactly as
+    /// before this finding (`Fol(undefined) ?? _V`).
+    #[tokio::test]
+    async fn without_a_compact_failure_the_bare_message_is_surfaced() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_with_output(output.clone());
+        surface_prompt_too_long(&orch).await;
+        assert_eq!(output.text_events().await, vec!["Prompt is too long"]);
+    }
+
+    /// A recorded failure upgrades the copy — and is CONSUMED, so the next
+    /// surface falls back to the bare message.
+    #[tokio::test]
+    async fn a_recorded_compact_failure_is_rendered_once() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_with_output(output.clone());
+        orch.compaction_tracking
+            .lock()
+            .await
+            .last_compact_failure_detail = Some("summarizer 500\nstack frame".to_string());
+
+        surface_prompt_too_long(&orch).await;
+        surface_prompt_too_long(&orch).await;
+
+        assert_eq!(
+            output.text_events().await,
+            vec![
+                // First line only, ellipsised because a newline was cut.
+                "Prompt is too long \u{b7} automatic compaction failed: summarizer 500\u{2026}"
+                    .to_string(),
+                "Prompt is too long".to_string(),
+            ]
+        );
+        // The composed message is also what lands in history.
+        let session = orch.session();
+        let history = session.lock().await.history.clone();
+        let first = history
+            .iter()
+            .find_map(|m| match m {
+                protocol::ConversationMessage::Assistant { content, .. } => {
+                    content.iter().find_map(|b| match b {
+                        protocol::ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("an assistant message was pushed");
+        assert_eq!(
+            first,
+            "Prompt is too long \u{b7} automatic compaction failed: summarizer 500\u{2026}"
+        );
+    }
+}
+
+// ============================================================================
+// SLASH-04 (NEW in 2.1.238): `/goal` auto-clears on an unrecoverable turn
+// error. These pin the two pure halves — `w4v`'s bucket map and `Yl`'s
+// condition truncation — plus the warning's byte shape.
+// ============================================================================
+#[cfg(test)]
+mod goal_auto_clear_tests {
+    use crate::turn_loop::{
+        goal_clear_bucket, goal_cleared_after_error_message, GoalClearBucket, GoalClearReason,
+        GOAL_CLEAR_CONDITION_WIDTH,
+    };
+
+    /// Both bucket tests mutate `CLAUDE_CODE_REMOTE`, and cargo runs the tests
+    /// in one binary concurrently — serialize them.
+    static REMOTE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn api(kind: Option<&str>) -> GoalClearReason<'_> {
+        GoalClearReason::ApiError {
+            error_kind: kind,
+            is_transient: false,
+        }
+    }
+
+    /// `w4v`'s three context-limit reasons and the api-error errorKind switch,
+    /// read verbatim from the oracle @292182951.
+    #[test]
+    fn w4v_bucket_map_matches_the_oracle_switch() {
+        // `blocking_limit | prompt_too_long | rapid_refill_breaker` → context_limit.
+        assert_eq!(
+            goal_clear_bucket(GoalClearReason::ContextLimit),
+            Some(GoalClearBucket::ContextLimit)
+        );
+
+        // The clearing errorKinds.
+        let _g = REMOTE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_REMOTE");
+        assert_eq!(
+            goal_clear_bucket(api(Some("authentication_failed"))),
+            Some(GoalClearBucket::Auth)
+        );
+        assert_eq!(
+            goal_clear_bucket(api(Some("oauth_org_not_allowed"))),
+            Some(GoalClearBucket::Auth)
+        );
+        assert_eq!(
+            goal_clear_bucket(api(Some("account_on_hold"))),
+            Some(GoalClearBucket::Auth)
+        );
+        assert_eq!(
+            goal_clear_bucket(api(Some("billing_error"))),
+            Some(GoalClearBucket::Billing)
+        );
+        assert_eq!(
+            goal_clear_bucket(api(Some("model_not_found"))),
+            Some(GoalClearBucket::ModelUnavailable)
+        );
+
+        // The explicit `return null` errorKinds + `case void 0`.
+        for kind in [
+            "overloaded",
+            "server_error",
+            "max_output_tokens",
+            "rate_limit",
+            "invalid_request",
+            "unknown",
+        ] {
+            assert_eq!(
+                goal_clear_bucket(api(Some(kind))),
+                None,
+                "errorKind {kind} must NOT clear the goal"
+            );
+        }
+        assert_eq!(goal_clear_bucket(api(None)), None, "case void 0 → null");
+
+        // `if(e.isTransient)return null` short-circuits BEFORE the errorKind
+        // switch — a transient auth failure does not tear the goal down.
+        assert_eq!(
+            goal_clear_bucket(GoalClearReason::ApiError {
+                error_kind: Some("authentication_failed"),
+                is_transient: true,
+            }),
+            None
+        );
+    }
+
+    /// `authentication_failed | oauth_org_not_allowed` clear ONLY when the
+    /// session is not remote (`V.CLAUDE_CODE_REMOTE||j2()||BYt()!==null`);
+    /// `account_on_hold` clears unconditionally.
+    #[test]
+    fn auth_bucket_is_suppressed_on_a_remote_session() {
+        let _g = REMOTE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_REMOTE", "1");
+        assert_eq!(goal_clear_bucket(api(Some("authentication_failed"))), None);
+        assert_eq!(goal_clear_bucket(api(Some("oauth_org_not_allowed"))), None);
+        // `case"account_on_hold":return"auth"` sits OUTSIDE the remote guard.
+        assert_eq!(
+            goal_clear_bucket(api(Some("account_on_hold"))),
+            Some(GoalClearBucket::Auth)
+        );
+        std::env::remove_var("CLAUDE_CODE_REMOTE");
+    }
+
+    /// `v4v` (@292183854): label + telemetry errorCode per bucket.
+    #[test]
+    fn v4v_labels_and_error_codes_are_byte_exact() {
+        for (bucket, label, code) in [
+            (GoalClearBucket::Auth, "authentication failed", "cleared_auth"),
+            (
+                GoalClearBucket::Billing,
+                "credit balance too low",
+                "cleared_billing",
+            ),
+            (
+                GoalClearBucket::ContextLimit,
+                "context limit reached",
+                "cleared_context_limit",
+            ),
+            (
+                GoalClearBucket::ModelUnavailable,
+                "model unavailable",
+                "cleared_model_unavailable",
+            ),
+        ] {
+            assert_eq!(bucket.label(), label);
+            assert_eq!(bucket.error_code(), code);
+        }
+    }
+
+    /// The warning's byte shape, and `Yl(condition, 80, true)`.
+    #[test]
+    fn warning_text_and_yl_truncation_match_the_oracle() {
+        assert_eq!(GOAL_CLEAR_CONDITION_WIDTH, 80);
+
+        // Short, single-line: verbatim.
+        assert_eq!(
+            goal_cleared_after_error_message("credit balance too low", "all tests pass"),
+            "Goal cleared after an unrecoverable error (credit balance too low): \
+             \"all tests pass\". Run /goal again to continue."
+        );
+
+        // Over 80 columns: `is(n,80)` keeps 79 columns and appends U+2026.
+        let long = "x".repeat(200);
+        let msg = goal_cleared_after_error_message("model unavailable", &long);
+        let quoted = msg
+            .split_once("): \"")
+            .and_then(|(_, r)| r.split_once("\". Run"))
+            .expect("quoted condition")
+            .0;
+        assert_eq!(quoted.chars().count(), 80, "79 kept + the ellipsis");
+        assert!(quoted.ends_with('\u{2026}'));
+        assert_eq!(&quoted[..79], &"x".repeat(79));
+
+        // MULTI-LINE, and SHORT: `Yl`'s `r=true` branch cuts to the first line
+        // and appends the ellipsis even though nothing exceeded the width. A
+        // plain width-truncation would have returned the string unchanged.
+        assert_eq!(
+            goal_cleared_after_error_message("context limit reached", "ship it\nthen rest"),
+            "Goal cleared after an unrecoverable error (context limit reached): \
+             \"ship it\u{2026}\". Run /goal again to continue."
+        );
+    }
+}

@@ -5,25 +5,33 @@
 #![forbid(unsafe_code)]
 
 pub mod async_hook_response;
+pub mod bash_output_note;
 pub mod bg_session;
 pub mod body_sections;
+pub mod changed_files;
 pub mod conditional_rules;
 pub mod end_conversation;
 pub mod env_block;
 pub mod env_meta;
 pub mod file_tree;
 pub mod git_status;
+pub mod goal_checkin;
 pub mod locked_templates;
 pub mod memory_block;
 pub mod memory_section;
+pub mod memory_update;
 pub mod mid_turn_input;
 pub mod nested_memory;
 pub mod plan_reminder;
+pub mod sanitize;
+pub mod silent_turn;
 pub mod skill_listing;
 pub mod subagent_env;
 pub mod task_notification;
 pub mod todo_reminder;
+pub mod tool_search_reminder;
 pub mod tools_block;
+pub mod total_tokens;
 
 pub mod large_memory;
 pub use large_memory::{large_memory_warning_rows, shorten_memory_path};

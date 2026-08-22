@@ -11,6 +11,7 @@
 //! - `recover` — pre-existing crash-recovery reader (M1/M3 surface, unchanged).
 //! - `loader` — M5-08 resume enumeration + chain validation + interactive picker.
 //! - `title` — M5-08 first-user-message title extraction.
+//! - `transcript_compact` — SC-08 transcript-file rewrite (`performCompactTranscript`).
 
 pub mod djb2;
 pub mod loader;
@@ -20,6 +21,7 @@ pub mod reader;
 pub mod recover;
 pub mod schema;
 pub mod title;
+pub mod transcript_compact;
 pub mod uuid;
 pub mod writer;
 
@@ -44,7 +46,15 @@ pub use re_append::{
 // Tolerant-reader surface (real-transcript gap fix): the two-phase routed
 // loader output + its line-router + the transcript-message type predicate.
 pub use reader::{is_transcript_message_type, parse_pr_number, route_lines, LoadedTranscript};
-pub use schema::JsonlMessage;
+pub use schema::{session_kind, JsonlMessage, SESSION_KIND_ENV, SESSION_KIND_KEY};
+// SC-08 — the reclamation half of the metadata backstop.
+pub use transcript_compact::{
+    build_compact_plan, compact_persistence, local_gc_enabled, next_backstop,
+    perform_compact_transcript, strip_leading_nuls, CompactFailure, CompactOutcome,
+    CompactPersistence, CompactPlan, CompactStats, PlanAbort, PlanOutcome, COMPACT_BACKSTOP_BYTES,
+    MAX_COMPACT_BACKSTOP_BYTES, MIN_COMPACT_FILE_BYTES, MIN_RECLAIM_FRACTION,
+    TRANSCRIPT_LOCAL_GC_ENV,
+};
 pub use uuid::validate_uuid;
 pub use writer::JsonlWriter;
 

@@ -6,8 +6,9 @@ Commands:
   /branch               Create a branch of the current conversation at this point
   /bridge               Connect this terminal for remote-control sessions
   /btw                  Ask a quick side question without interrupting the main conversation
+  /bug                  Report a bug or share your conversation
   /cd                   Move this session to a new working directory
-  /chrome               Claude in Chrome (Beta) settings
+  /chrome               Open Claude in Chrome settings
   /clear                Start a new session with empty context; previous session stays on disk (resumable with /resume)
   /color                Set the prompt bar color for this session
   /commit               Create a git commit
@@ -26,10 +27,10 @@ Commands:
   /feedback             Submit feedback about LingXi
   /files                List all files currently in context
   /focus                Toggle focus view: just your prompt, summary, and response
-  /fork                 Spawn a background agent that inherits the full conversation
+  /fork                 Copy this conversation into a new background session and keep working here
   /goal                 Set a goal — keep working until the condition is met
   /help                 Show help and available commands
-  /hooks                Manage hooks
+  /hooks                View hook configurations for tool events
   /ide                  Manage IDE integrations and show status
   /init                 Initialize a new LINGXI.md file with codebase documentation
   /init-verifiers       Create verifier skill(s) for automated verification of code changes
@@ -37,17 +38,18 @@ Commands:
   /install              Install LingXi native build
   /install-github-app   Set up Claude GitHub Actions for a repository
   /install-slack-app    Install the Claude Slack app
-  /keybindings          Open or create your keybindings configuration file
+  /keybindings          Open your keyboard shortcuts file
   /login                Sign in with your Anthropic account
   /logout               Sign out from your Anthropic account
   /mcp                  Manage MCP servers
-  /memory               Open a memory file in your editor
+  /memory               Edit LINGXI.md files and memory settings
   /mobile               Show QR code to download the Claude mobile app
   /model                Set the AI model for LingXi
   /passes               Share a free week of LingXi with friends and earn extra usage
   /permissions          Manage allow and deny tool permission rules
   /plan                 Enable plan mode or view the current session plan
   /plugin               Manage LingXi plugins
+  /powerup              Discover LingXi features through quick interactive lessons
   /privacy-settings     View and update your privacy settings
   /recap                Generate a one-line session recap now
   /release-notes        View release notes
@@ -57,7 +59,6 @@ Commands:
   /remote-setup         Setup LingXi on the web (requires connecting your GitHub account)
   /rename               Rename the current conversation
   /resume               Resume a previous conversation
-  /review               Review a pull request
   /rewind               Restore the code and/or conversation to a previous point
   /sandbox-toggle       Toggle sandbox mode for bash commands
   /security-review      Complete a security review of the pending changes on the current branch
@@ -68,13 +69,13 @@ Commands:
   /statusline           Set up LingXi's status line UI
   /stickers             Order LingXi stickers
   /stop                 Stop this background session; transcript and worktree are kept
-  /tasks                List and manage background tasks
+  /subtask              Send a subagent off with your full context; its result comes back here
+  /tasks                View and manage everything running in the background
   /terminal-setup       Install Shift+Enter key binding for newlines
   /theme                Change the theme
   /tui                  Set the terminal UI renderer (default | fullscreen)
   /ultraplan            LingXi on the web drafts an advanced plan you can edit and approve
   /upgrade              Upgrade to Max for higher rate limits and more Opus
   /usage                Show session cost, plan usage, and what's contributing to your limits
-  /version              Print version information
   /voice                Toggle voice mode
   /workflows            Browse running and completed workflows

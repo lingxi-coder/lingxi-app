@@ -62,9 +62,13 @@ async fn help_dispatch() {
             assert!(display.contains(
                 "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/"
             ));
-            // 80 newlines (header + 79 visible command lines); hidden and
-            // disabled commands remain filtered out.
-            assert_eq!(display.matches('\n').count(), 80);
+            // 81 newlines (header + 80 visible command lines); hidden and
+            // disabled commands remain filtered out. SLASH-06 made `bug`
+            // visible and stopped counting `share` (it is `bug`'s alias);
+            // SLASH-14 then filtered `/version` out — both of its oracle
+            // objects @2.1.238 296268759 are `isEnabled:()=>!1` — and SLASH-13
+            // added the ungated `/powerup` object.
+            assert_eq!(display.matches('\n').count(), 81);
         }
         other => panic!("{other:?}"),
     }

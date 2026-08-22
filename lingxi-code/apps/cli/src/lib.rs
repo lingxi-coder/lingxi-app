@@ -77,10 +77,12 @@ pub mod logging;
 pub mod mode;
 pub mod output;
 pub mod output_adapter;
+pub mod permission_prompt_notify;
 pub(crate) mod process_wrapper;
 pub mod queued_commands;
 pub mod repl;
 pub mod repl_loop;
+pub mod resume_truncation;
 pub mod run;
 pub mod session_cost;
 pub mod sigint;
@@ -588,6 +590,53 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         std::env::set_var("LINGXI_BRIEF", "1");
     }
 
+    // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` (@307414302) pins
+    // the cross-session messaging socket instead of the auto-generated path.
+    // Recorded here, before ANY code path can bind the inbox
+    // (`mode::ensure_live_messaging` is the only binder and runs far later, in
+    // the TUI/session mounts).
+    if let Some(path) = parsed.messaging_socket_path.as_deref() {
+        crate::mode::set_messaging_socket_override(path);
+    }
+
+    // (CLI-15) `--append-subagent-system-prompt` carries the oracle's implication
+    // `wby(e,t=process.env){if(e)t.CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT="1"}`
+    // (@306637528) — the flag turns its own gate on.
+    //
+    // The SPLICE half is now wired too: the value rides
+    // `LINGXI_APPEND_SUBAGENT_SYSTEM_PROMPT` and
+    // `agent::handle::append_subagent_system_prompt_suffix` folds it onto every
+    // subagent's rendered system prompt as the final section, gated on the env
+    // flag above (oracle @292360822:
+    // `Zt=!C&&!d?.isolatedContext&&Un(process.env.CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT)
+    //     &&r.options.appendSubagentSystemPrompt?Rm([...Xt,r.options.appendSubagentSystemPrompt]):Xt`).
+    //
+    // The env pair is the transport because the subagent spawner is reached
+    // through `engine-desktop`'s runtime build, which carries no per-spawn CLI
+    // options channel; it is also what gives the oracle's "propagated to nested
+    // subagents" for free — a nested spawn is a child of the same process and
+    // reads the same variables. Both are set BEFORE any runtime is constructed.
+    if let Some(text) = parsed.append_subagent_system_prompt.as_deref() {
+        std::env::set_var("LINGXI_ENABLE_APPEND_SUBAGENT_PROMPT", "1");
+        std::env::set_var("LINGXI_APPEND_SUBAGENT_SYSTEM_PROMPT", text);
+    }
+
+    // (CLI-01, cc2.1.238) `--autocompact <auto|tokens>` projects onto
+    // `LINGXI_AUTO_COMPACT_WINDOW`, the port's only auto-compact-window pin
+    // (`compaction::thresholds::effective_context_window_size` clamps the model
+    // context window with it, and `/autocompact` reports it as
+    // `WindowSource::Env`). The oracle resolves the flag with
+    // `lvp(t.autocompact, Vo().autoCompactWindow)`: `auto` yields `undefined`
+    // and therefore DROPS the configured window, so an explicit `auto` clears a
+    // pre-set env pin here rather than merely leaving it alone.
+    match parsed.autocompact {
+        Some(argv::AutocompactWindow::Auto) => std::env::remove_var("LINGXI_AUTO_COMPACT_WINDOW"),
+        Some(argv::AutocompactWindow::Tokens(tokens)) => {
+            std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", tokens.to_string());
+        }
+        None => {}
+    }
+
     // Custom beta headers are an API-key-only Anthropic surface. Validate at
     // startup so OAuth/non-key sessions do not appear to accept an inert flag.
     if let Some(raw_betas) = parsed.betas.as_mut() {
@@ -816,6 +865,35 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return crate::background_dispatch::dispatch_background(&parsed, permission_mode).await;
     }
 
+    // (CLI-13/16 + SC-09, cc2.1.238) The truncating-resume / rewind cross-flag
+    // gates. In the oracle these are the FIRST four statements of `runHeadless`
+    // after `after_grove_check` (@307217538), ahead of every other headless
+    // gate, and each writes its line to stderr and exits 1:
+    //
+    // ```js
+    // if(c.resumeSessionAt&&!c.resume){…"Error: --resume-session-at requires --resume"}
+    // if(c.resumeDropsTurn!==void 0&&!c.resumeSessionAt){…"Error: --resume-drops-turn requires --resume-session-at"}
+    // if(c.rewindFiles&&!c.resume){…"Error: --rewind-files requires --resume"}
+    // if(c.rewindFiles&&t){…"Error: --rewind-files is a standalone operation and cannot be used with a prompt"}
+    // ```
+    //
+    // They are therefore print-mode-only, exactly as both flags' help text says
+    // ("Ignored outside print mode"); `validate_truncating_resume_args` carries
+    // that condition.
+    if let Err(msg) = parsed.validate_truncating_resume_args() {
+        eprintln!("Error: {msg}");
+        return exit_codes::ARGV_ERROR;
+    }
+
+    // (CLI-13) The truncating resume itself lives in
+    // `crate::resume_truncation::apply_truncating_resume`, applied by
+    // `run::resume_resolved_session` immediately after the transcript load —
+    // the oracle's own position (@307370121). It stops the chain at the named
+    // entry and, when `--resume-drops-turn` is supplied, REFUSES when the
+    // discarded range holds anything not attributable to the declared turn
+    // (the `AEy` classifier, @306799802). This module used to refuse the flag
+    // outright; that refusal is gone now that the behaviour exists.
+
     // P3 cross-flag validation for --input-format=stream-json and
     // --replay-user-messages (§4.1 SPEC-inferred.md, exact error strings).
     if let Err(msg) = parsed.validate_stream_json_input_args() {
@@ -871,6 +949,24 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     if let Err(msg) = parsed.validate_plan_mode_instructions_args() {
         eprintln!("Error: {msg}");
         return exit_codes::ARGV_ERROR;
+    }
+
+    // (CLI-16, cc2.1.238) `--rewind-files <user-message-id>` — "Restore files to
+    // state at the specified user message and exit (requires --resume)". In the
+    // oracle this branch sits inside `runHeadless` right after the transcript
+    // loads (@307222364) and ALWAYS exits, so it never reaches the prompt gate
+    // or the `--output-format=stream-json requires --verbose` gate below it —
+    // hence its position HERE, ahead of both output-format branches, rather
+    // than down with the `--continue`/`--resume` dispatch. Its two argv gates
+    // fired above; the sink is built inline because `make_sink` is defined
+    // after the `&mut parsed` startup-resource pass.
+    if parsed.print && parsed.rewind_files.is_some() {
+        let sink: Arc<dyn output::OutputSink> = if parsed.is_json_output() {
+            Arc::new(output::JsonSink::new(protocol::SessionId::new()))
+        } else {
+            Arc::new(output::PlainSink::new())
+        };
+        return run::run_rewind_files(&parsed, sink.as_ref()).await;
     }
 
     // stream-json: `--output-format stream-json --verbose` (print-only, no
@@ -936,14 +1032,26 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
                     },
                 ),
             );
+            // SH-02: keep a typed handle so the `permission_prompt` notifier
+            // can be attached once the orchestrator exists (the gate itself has
+            // to be built FIRST — it is injected into the runtime config).
+            let gate_handle = gate.clone();
             cfg.injected_permission_gate = Some(gate as Arc<dyn permission::gate::PermissionGate>);
-            match init::build_runtime_from_config(cfg, adapter).await {
+            let rt = match init::build_runtime_from_config(cfg, adapter).await {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("lingxi-cli: {e}");
                     return exit_codes::RUNTIME_ERROR;
                 }
-            }
+            };
+            // SH-02 — this is what makes `Cou` reachable: without it the gate's
+            // `OnceLock` stays empty and every armed guard is inert.
+            gate_handle.set_prompt_notifier(Arc::new(
+                permission_prompt_notify::OrchestratorPermissionPromptNotifier::new(
+                    rt.orchestrator.clone(),
+                ),
+            ));
+            rt
         } else {
             match init::build_runtime(&parsed, adapter, permission_mode).await {
                 Ok(r) => r,

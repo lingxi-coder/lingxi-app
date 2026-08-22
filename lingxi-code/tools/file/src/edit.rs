@@ -624,10 +624,15 @@ impl Tool for FileEditTool {
             None => {
                 if !old_string.is_empty() {
                     self.emit_failed(&invocation_id, "file_not_found").await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "File does not exist: {}",
-                        canon.display()
-                    )));
+                    // Byte-locked `FileEditTool.validateInput` errorCode-4 arm
+                    // (claude-code 2.1.238): the SAME message Read's ENOENT arm
+                    // builds — `File does not exist. Note: your current working
+                    // directory is {cwd}.` plus the optional
+                    // `" Did you mean {x}?"` suffix (corrected-path suggestion
+                    // preferred over the same-stem sibling).
+                    return Err(ToolError::InvalidInput(
+                        crate::read::file_not_found_message(&canon, &self.ctx.cwd()),
+                    ));
                 }
                 // Empty `old_string` on a nonexistent file → create it.
                 (String::new(), new_string.to_string(), 1)
@@ -658,10 +663,14 @@ impl Tool for FileEditTool {
                     // recoverable CONTENT-CHANGED error. When the edit still
                     // applies cleanly to the CURRENT content, proceed and mark
                     // the result `staleRecovered`.
+                    // FT-07: the guard now reports the oracle's validateInput
+                    // staleness literal (errorCode 7), so the recoverable-error
+                    // discriminator keys on THAT constant. A never-read failure
+                    // still carries FILE_NOT_READ_ERROR and stays unrecoverable.
                     let is_stale_error = matches!(
                         &e,
                         tool_api::tool_trait::ToolError::InvalidInput(m)
-                            if m == crate::FILE_CONTENT_CHANGED_LINTER_MESSAGE
+                            if m == crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR
                     );
                     if is_stale_error && stale_edit_applies(&before, old_string, replace_all) {
                         stale_recovered = true;

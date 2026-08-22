@@ -19,8 +19,11 @@
 //! 4. BOTH counters reaching their thresholds:
 //!    `turnsSinceLastTodoWrite >= 10 && turnsSinceLastReminder >= 10`.
 //!
-//! When it fires, the rendered body is emitted RAW (no `<system-reminder>`
-//! wrapper — `Ln({content:r,isMeta:!0})`) as a meta user message appended to
+//! When it fires, the rendered body is wrapped in a `<system-reminder>`
+//! envelope — the oracle's `Zy([kn({content:o,isMeta:!0})])` (2.1.238
+//! @296690005 / @296690634; `Zy` @296675470 maps `NT` @296673554 =
+//! `` `<system-reminder>\n${e}\n</system-reminder>` `` over every message) — as
+//! a meta user message appended to
 //! the per-turn OUTGOING snapshot only (never `session.history` / JSONL), and
 //! `turns_since_last_reminder` is reset to `0`. The counters themselves are
 //! tracked as explicit [`engine::SessionState`] fields

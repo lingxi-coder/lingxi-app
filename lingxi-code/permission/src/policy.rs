@@ -151,6 +151,17 @@ pub struct PermissionPolicy {
     /// to the session-wide mode and is checked only after explicit deny/ask
     /// rules and shell safety guards have run.
     pub workspace_leases: Option<Arc<crate::WorkspacePermissionLeaseRegistry>>,
+    /// PER-SPAWN `bashCommandClamp` GROUPS folded out of this call's
+    /// `bash_command_clamp` permission layers
+    /// ([`crate::layers::FoldedPermissionContext::bash_command_clamps`]).
+    ///
+    /// 1:1 with `toolPermissionContext.bashCommandClamps` (claude-code 2.1.238
+    /// `gn` @287028951). While NON-EMPTY, shell execution is clamped to command
+    /// forms every group admits and every non-Bash shell surface is denied — see
+    /// [`crate::bash_command_clamp`]. EMPTY in every session that attaches no
+    /// clamp layer (which is every session today), so `authorize` is
+    /// byte-identical to its pre-clamp behavior by default.
+    pub bash_command_clamps: Vec<Vec<String>>,
 }
 
 impl PermissionPolicy {
@@ -175,7 +186,18 @@ impl PermissionPolicy {
             allow_managed_permission_rules_only: false,
             classify_all_shell: false,
             workspace_leases: None,
+            bash_command_clamps: Vec::new(),
         }
+    }
+
+    /// Attach the per-spawn `bashCommandClamp` GROUPS for THIS call
+    /// ([`Self::bash_command_clamps`]). Used by
+    /// [`crate::PolicyPermissionGate`]'s per-call layer fold; an empty slice
+    /// leaves the policy unclamped.
+    #[must_use]
+    pub fn with_bash_command_clamps(mut self, clamps: Vec<Vec<String>>) -> Self {
+        self.bash_command_clamps = clamps;
+        self
     }
 
     /// Apply the enterprise managed-rules-only persistence gate.
@@ -614,6 +636,7 @@ impl PermissionPolicy {
             allow_managed_permission_rules_only: self.allow_managed_permission_rules_only,
             classify_all_shell: self.classify_all_shell,
             workspace_leases: self.workspace_leases.clone(),
+            bash_command_clamps: self.bash_command_clamps.clone(),
         }
     }
 
@@ -690,6 +713,19 @@ impl PermissionPolicy {
             if !self.shell_sandbox_auto_allows(tool_name, input) {
                 return ask_with_rule(rule, tool_name);
             }
+        }
+        // 1c'. `bashCommandClamp` (NEW in 2.1.238). The clamp denials are the
+        //     Bash / PowerShell / Monitor-websocket tools' OWN `checkPermissions`
+        //     verdicts (`M8n` / `Wfm` / `Jkf`), so they sit at the
+        //     `e.checkPermissions(...)` slot of the `mSm` walk: AFTER the
+        //     tool-wide deny, content deny and tool-wide ask walks, and BEFORE
+        //     the content-ask walk (mSm step 5) — `if(l?.behavior==="deny")
+        //     return l` short-circuits there. A clamp therefore cannot be
+        //     defeated by an ask rule, and an explicit deny rule still wins.
+        //     INERT unless a `bash_command_clamp` layer was folded in for this
+        //     call ([`Self::bash_command_clamps`] is empty otherwise).
+        if let Some(denied) = self.bash_command_clamp_deny(tool_name, input) {
+            return denied;
         }
         // 1d. Content ask (`K5t(...,"ask")`, mSm step 5) — a matching content ask
         //     rule prompts. Placed AFTER the deny phase but BEFORE the per-tool
@@ -2732,6 +2768,75 @@ fn allow_compound() -> PermissionResult {
     }
 }
 
+impl PermissionPolicy {
+    /// `bashCommandClamp` deny for THIS call, or `None` when no clamp is attached
+    /// (the default) or the call satisfies every clamp group.
+    ///
+    /// Reproduces the three oracle `checkPermissions` clamp arms:
+    ///
+    /// * `M8n` (@290160634) — the Bash arm: `hSv` decomposes the command and
+    ///   every clamp group must admit every span; a miss denies with the
+    ///   byte-locked span/allowed-forms message.
+    /// * `Wfm` (@294394648) — PowerShell: denied outright, no command inspection.
+    /// * `Jkf` (@292829969) — the `Monitor{ws}` arm: a WebSocket is not a Bash
+    ///   command form, so it is denied outright too. (A COMMAND-monitor never
+    ///   reaches this arm: `authorize_with_mode_and_workspace_lease` already
+    ///   rewrites its effective tool name to `Bash`, matching the oracle's
+    ///   `return Lon({...e,command:e.command},t)`.)
+    ///
+    /// The mobile `Shell` tool is treated as Bash: it is a Bash-command surface
+    /// ([`crate::shell_command::is_shell_tool`]) and carries the same
+    /// `Bash(...)`-shaped content rules the clamp groups are written in.
+    fn bash_command_clamp_deny(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> Option<PermissionResult> {
+        if self.bash_command_clamps.is_empty() {
+            return None;
+        }
+        let no_match = || PermissionDecisionReason::Other {
+            reason: crate::bash_command_clamp::CLAMP_NO_MATCH_REASON.to_string(),
+        };
+        // `Wfm` — PowerShell can never match a Bash command form.
+        if tool_name == "PowerShell" {
+            return Some(PermissionResult::Deny {
+                reason: no_match(),
+                explanation: Some(
+                    crate::bash_command_clamp::POWERSHELL_CLAMP_DENY_MESSAGE.to_string(),
+                ),
+                metadata: PermissionMetadata::default(),
+            });
+        }
+        // `Jkf("Monitor websocket", …)` — the ws arm of Monitor.
+        if tool_name == "Monitor" && input.get("ws").is_some() {
+            return Some(PermissionResult::Deny {
+                reason: no_match(),
+                explanation: Some(crate::bash_command_clamp::clamp_surface_deny_message(
+                    crate::bash_command_clamp::MONITOR_WEBSOCKET_SURFACE,
+                )),
+                metadata: PermissionMetadata::default(),
+            });
+        }
+        // `M8n` — the Bash-family arm.
+        if shell_command::is_shell_tool(tool_name) {
+            let command = shell_command::command_from_input(input)?;
+            let miss =
+                crate::bash_command_clamp::find_clamp_miss(command, &self.bash_command_clamps)?;
+            return Some(PermissionResult::Deny {
+                reason: no_match(),
+                explanation: Some(crate::bash_command_clamp::clamp_bash_deny_message(
+                    tool_name, command, &miss,
+                )),
+                metadata: PermissionMetadata::default(),
+            });
+        }
+        // Every other tool is untouched: only the three surfaces above declare a
+        // clamp-aware `checkPermissions` upstream.
+        None
+    }
+}
+
 fn deny_with_mode(mode: PermissionMode) -> PermissionResult {
     PermissionResult::Deny {
         reason: PermissionDecisionReason::PermissionMode { mode },
@@ -2965,9 +3070,23 @@ fn ps_element_is_cd_like(name: &str) -> bool {
 /// (claude-code `CZn` → validateInput `{result:!1,behavior:"ask",message:eLi,
 /// errorCode:13}`). Tagged [`PermissionDecisionReason::Other`] carrying the
 /// byte-locked `eLi` message.
+///
+/// PERM-01 (claude-code 2.1.238): the message is now split by tool. 2.1.238
+/// defines the pair side by side (cc-238.js @283747794)
+/// `ssa="File is covered by a Read deny rule in your permission settings and
+/// cannot be edited.",asa="…and cannot be written."`; `Write` is the ONLY
+/// consumer of `asa` (validateInput `{result:!1,message:asa,errorCode:13}` and
+/// the `call`-phase `throw new Q4e(asa)`), while Edit/MultiEdit/NotebookEdit
+/// keep `ssa`. The `asa` spelling has 0 hits in 2.1.220, so this is new drift.
+/// (The oracle's Write arm carries no `behavior:"ask"` — that hard-validation
+/// shape lives in the Write TOOL's `validateInput`, not in the permission
+/// engine, so this gate keeps its Ask shape for both spellings.)
 fn ask_edit_read_deny_covered(tool_name: &str) -> PermissionResult {
-    let message =
-        "File is covered by a Read deny rule in your permission settings and cannot be edited.";
+    let message = if tool_name == "Write" {
+        "File is covered by a Read deny rule in your permission settings and cannot be written."
+    } else {
+        "File is covered by a Read deny rule in your permission settings and cannot be edited."
+    };
     PermissionResult::Ask {
         reason: PermissionDecisionReason::Other {
             reason: message.to_string(),

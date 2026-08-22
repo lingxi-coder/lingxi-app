@@ -1099,6 +1099,7 @@ fn apply_user_config_to_hooks(
             args,
             env,
             cwd,
+            shell,
         } = &hook.executor
         else {
             out.push(hook.clone());
@@ -1132,6 +1133,9 @@ fn apply_user_config_to_hooks(
             args: new_args,
             env: new_env,
             cwd: cwd.clone(),
+            // The `shell` selector is config metadata, not a substitution
+            // target — carry it through the user-config rewrite unchanged.
+            shell: *shell,
         };
         out.push(hook);
     }
@@ -1273,6 +1277,7 @@ mod user_config_tests {
                 args: args.iter().map(|s| s.to_string()).collect(),
                 env: HashMap::new(),
                 cwd: None,
+                shell: None,
             },
             source: HookSource::Plugin,
             blocking: true,

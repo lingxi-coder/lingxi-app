@@ -35,6 +35,7 @@ use permission::{
     PermissionRuleSource, PermissionRuleValue, PermissionUpdate, PermissionUpdateDestination,
 };
 
+use crate::permission_prompt_notify::{PermissionPromptNotifier, PermissionPromptNotifyGuard};
 use crate::stream_json::{serialize_ndjson_line, OutboundMsg, OutboundTx};
 
 /// Cap on the resolved-tool-use dedup ring (claude-code
@@ -439,6 +440,12 @@ pub struct StdioControlPermissionGate {
     /// unit tests with no real settings tree). Wired via [`Self::with_persist`]
     /// from the CLI config (`cfg.lingxi_home` / `cfg.cwd`).
     persist_paths: Option<PermissionPaths>,
+    /// SH-02: the seam that fires the delayed `permission_prompt` `Notification`
+    /// hook (claude-code `Cou`, oracle 2.1.238 @ 307013328). Set ONCE by the
+    /// composition root after the orchestrator exists — the gate itself is built
+    /// before it, because the gate is injected INTO the runtime config. Unset ⇒
+    /// [`PermissionPromptNotifyGuard::arm`] is inert and no timer is armed.
+    prompt_notifier: std::sync::OnceLock<Arc<dyn PermissionPromptNotifier>>,
 }
 
 impl StdioControlPermissionGate {
@@ -449,7 +456,20 @@ impl StdioControlPermissionGate {
             plane,
             persistence_enabled: std::sync::atomic::AtomicBool::new(true),
             persist_paths: None,
+            prompt_notifier: std::sync::OnceLock::new(),
         }
+    }
+
+    /// SH-02 — attach the `permission_prompt` notifier once the orchestrator
+    /// exists. Takes `&self` (not `self`) because the gate has already been
+    /// moved into the runtime config as an `Arc<dyn PermissionGate>` by the time
+    /// the orchestrator is available; the composition root keeps a typed clone
+    /// of the same `Arc` and calls this on it.
+    ///
+    /// Idempotent: a second call is ignored, so the notifier can never be
+    /// swapped mid-session.
+    pub fn set_prompt_notifier(&self, notifier: Arc<dyn PermissionPromptNotifier>) {
+        let _ = self.prompt_notifier.set(notifier);
     }
 
     /// Attach the settings-file roots so an ALLOW response's `updatedPermissions`
@@ -494,6 +514,9 @@ impl StdioControlPermissionGate {
             .tool_use_id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        // claude-code `KNe(t.name)` — the SAME display name feeds both the
+        // request's `display_name` field and the SH-02 notification message.
+        let display_name = permission_display_name(name);
         let mut request = json!({
             "subtype": "can_use_tool",
             "tool_name": name,
@@ -501,7 +524,7 @@ impl StdioControlPermissionGate {
             // UNCONDITIONALLY (a human-readable label the SDK host renders):
             // strip any MCP `__`-namespaced prefix segments, `_`→space, and
             // title-case each word initial (see `permission_display_name`).
-            "display_name": permission_display_name(name),
+            "display_name": display_name.clone(),
             "input": input,
             "tool_use_id": tool_use_id,
         });
@@ -546,6 +569,13 @@ impl StdioControlPermissionGate {
         if let Some(path) = &ctx.blocked_path {
             request["blocked_path"] = json!(path);
         }
+        // SH-02 — `A=Cou(KNe(t.name))` (oracle @ 307031502): arm the 6 s timer
+        // AROUND the round trip. Every exit from here — response, host error,
+        // turn abort, dropped channel — drops `_notify_guard`, which is
+        // upstream's `finally { A() }` / `clearTimeout`. A prompt answered
+        // inside 6 s therefore fires no `Notification` hook at all.
+        let _notify_guard =
+            PermissionPromptNotifyGuard::arm(self.prompt_notifier.get(), &display_name);
         let (request_id, rx) = self.plane.send_request(request, Some(tool_use_id)).await;
 
         // There is NO timeout on the can_use_tool request (§3.1): block until a

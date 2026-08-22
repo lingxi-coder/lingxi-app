@@ -24,6 +24,7 @@ use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
+use permission::result::{PermissionPrompt, SandboxOverrideReason};
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -652,11 +653,17 @@ const ABORT_MARKER: &str = "<error>Command was aborted before completion</error>
 /// - `d` = an optional background-run note,
 ///
 /// then the non-empty parts are joined by `\n`.
+/// `trailing_note` is the mapper's tail slot. The oracle joins
+/// `[stdout, stderr, backgroundNote, staleReadFileStateHint, ghRateLimitHint]`
+/// with `\n`; the background note and the stale-read hint are MUTUALLY
+/// EXCLUSIVE (the hint is only computed when `!backgroundTaskId`), so one slot
+/// reproduces both positions byte-for-byte. `ghRateLimitHint` has no port
+/// surface yet.
 fn bash_model_content(
     stdout: &str,
     stderr: &str,
     interrupted: bool,
-    background_note: Option<&str>,
+    trailing_note: Option<&str>,
 ) -> String {
     let c = crate::shared::normalize_stdout(stdout);
     let mut u = stderr.trim().to_string();
@@ -673,7 +680,7 @@ fn bash_model_content(
     if !u.is_empty() {
         parts.push(u);
     }
-    if let Some(d) = background_note {
+    if let Some(d) = trailing_note {
         if !d.is_empty() {
             parts.push(d.to_string());
         }
@@ -707,6 +714,7 @@ fn bash_result_data(
     no_output_expected: bool,
     background_task_id: Option<&str>,
     timed_out_after_ms: Option<u64>,
+    background_ends_with_final_response: bool,
 ) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     m.insert(
@@ -741,7 +749,83 @@ fn bash_result_data(
             serde_json::Value::Number(ms.into()),
         );
     }
+    // claude-code 2.1.238 `backgroundEndsWithFinalResponse` — schema
+    // `At(!0).optional()`, i.e. a LITERAL-`true` optional: the oracle sets it to
+    // `!0` or leaves it `undefined` (`let Z=_.backgroundTaskId!==void 0 &&
+    // wKo(t.agentContext)?!0:void 0`), so `false` is never serialised. It sits
+    // directly after `timedOutAfterMs`/`backgroundCwdHint` in the output schema.
+    if background_ends_with_final_response {
+        m.insert(
+            "backgroundEndsWithFinalResponse".into(),
+            serde_json::Value::Bool(true),
+        );
+    }
     serde_json::Value::Object(m)
+}
+
+/// Port of claude-code 2.1.238 `L0i` — the model-facing note attached to a
+/// backgrounded command (`mapToolResultToToolResultBlockParam`'s `y`).
+///
+/// ```js
+/// function L0i({backgroundTaskId:e,outputPath:t,backgroundedByUser:r,timedOutAfterMs:n,
+///               reapedAtFinalResponse:o,readToolName:i}){
+///  let s=r?`Command was manually backgrounded by user with ID: ${e}. Output is being written to: ${t}.`
+///       :n!==void 0?`Command did not complete within its ${Math.max(1,Math.round(n/1000))}s timeout and was moved to the background (ID: ${e}). Output is being written to: ${t}.`
+///       :`Command running in background with ID: ${e}. Output is being written to: ${t}.`,
+///   a=o?"If it exits while you are still working…":r?void 0:"You will be notified when it completes.",
+///   l=r?void 0:`To check interim output, use ${i} on that file path.`;
+///  return[s,a,l].filter(Boolean).join(" ")}
+/// ```
+///
+/// RESIDUAL (unchanged by this port): LingXi has no Ctrl+B manual-background
+/// path, so the `backgroundedByUser` arm has no call site and is not modelled.
+fn background_note(
+    background_task_id: &str,
+    output_path: &str,
+    timed_out_after_ms: Option<u64>,
+    reaped_at_final_response: bool,
+) -> String {
+    let head = match timed_out_after_ms {
+        // Seconds shown = `Math.max(1, Math.round(timeoutMs / 1000))`.
+        Some(ms) => {
+            let secs = (((ms as f64) / 1000.0).round() as i64).max(1);
+            format!(
+                "Command did not complete within its {secs}s timeout and was moved to the background (ID: {background_task_id}). Output is being written to: {output_path}."
+            )
+        }
+        None => format!(
+            "Command running in background with ID: {background_task_id}. Output is being written to: {output_path}."
+        ),
+    };
+    // NOTE the U+2014 EM DASH in the reaped sentence (oracle stores it as the
+    // JS escape `—`).
+    let lifetime = if reaped_at_final_response {
+        "If it exits while you are still working you will be notified, but it is terminated when you give your final response and no notification can follow that — so do not end your turn to wait for it; if you need its result, wait for it before giving your final response."
+    } else {
+        "You will be notified when it completes."
+    };
+    format!("{head} {lifetime} To check interim output, use Read on that file path.")
+}
+
+/// Port of claude-code 2.1.238 `wKo(agentContext)`:
+/// `e!==void 0 && e.agentType==="subagent" && e.isAsync===!1` — TRUE only for a
+/// SYNCHRONOUS subagent, whose backgrounded commands are reaped when it gives
+/// its final response.
+///
+/// LingXi mapping, and its one documented residual:
+/// - `agentType==="subagent"` → `ctx.agent_id.is_some()`. This is the SAME
+///   discriminator the port already uses for the oracle's `v=!t.agentId`
+///   (`prevent_cwd_changes` below), so the two stay consistent.
+/// - `isAsync===false` → `!ctx.options.is_non_interactive_session`. The dispatch
+///   invoker sets `is_non_interactive_session = is_async ||
+///   effective_non_interactive_session()` (`agent/src/runner.rs`), so this is
+///   exact in an interactive session and CONSERVATIVE in a headless one: a
+///   synchronous subagent inside `-p`/scheduled work is classified as
+///   "survives", i.e. it keeps the pre-2.1.238 wording rather than gaining a
+///   false reaped warning. Making it exact needs `is_async` threaded onto
+///   `ToolUseContext` (tool-api), which is outside this crate.
+fn background_ends_with_final_response(ctx: &ToolUseContext) -> bool {
+    ctx.agent_id.is_some() && !ctx.options.is_non_interactive_session
 }
 
 /// Build the SUCCESSFUL `tool_result` for a timed-out / interrupted Bash run,
@@ -848,6 +932,7 @@ fn build_interrupted_result(
             crate::silent::is_silent_bash_command(cmd_str),
             None,
             None,
+            false,
         ),
         model_content: Some(model_content),
         new_messages: vec![],
@@ -855,6 +940,227 @@ fn build_interrupted_result(
         is_error: false,
         mcp_meta: None,
     }
+}
+
+// ===== `staleReadFileStateHint` (claude-code 2.1.238 `OcT` + the `te` note) ==
+
+/// Port of claude-code's `WRITE_COMMAND_MARKERS` regex `PcT`:
+///
+/// ```js
+/// PcT=new RegExp(["--write","--fix","--in-place","--auto-correct",
+///  "\\brun\\s+format\\b","\\brun\\s+fix\\b","\\b(yarn|pnpm)\\s+format\\b",
+///  "\\blint:file\\b","\\blint:fix\\b","\\bblack\\b","\\bisort\\b",
+///  "\\bruff\\s+format\\b","\\bcargo\\s+(fmt|fix)\\b","\\brustfmt\\b",
+///  "\\bgo\\s+fmt\\b","\\bterraform\\s+fmt\\b","\\bdprint\\s+fmt\\b",
+///  "\\bswiftformat\\b","\\bphpcbf\\b"].join("|"));
+/// ```
+///
+/// No `i` flag ⇒ case-SENSITIVE. Hand-rolled rather than pulled through a regex
+/// crate: `tool-shell` has no `regex` dependency and this alternation is only
+/// bare substrings, `\b`-anchored words, and `word \s+ word` pairs.
+fn command_looks_like_a_writer(command: &str) -> bool {
+    const BARE: [&str; 4] = ["--write", "--fix", "--in-place", "--auto-correct"];
+    const WORDS: [&str; 7] = [
+        "lint:file",
+        "lint:fix",
+        "black",
+        "isort",
+        "rustfmt",
+        "swiftformat",
+        "phpcbf",
+    ];
+    // `\bA\s+B\b` pairs, in the oracle's alternation order.
+    const PAIRS: [(&str, &str); 10] = [
+        ("run", "format"),
+        ("run", "fix"),
+        ("yarn", "format"),
+        ("pnpm", "format"),
+        ("ruff", "format"),
+        ("cargo", "fmt"),
+        ("cargo", "fix"),
+        ("go", "fmt"),
+        ("terraform", "fmt"),
+        ("dprint", "fmt"),
+    ];
+    BARE.iter().any(|m| command.contains(m))
+        || WORDS.iter().any(|w| contains_word(command, w))
+        || PAIRS
+            .iter()
+            .any(|(a, b)| contains_word_pair(command, a, b))
+}
+
+/// ASCII `\w` — the character class JS `\b` is defined against.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// True when `needle` occurs in `haystack` with a JS `\b` on BOTH sides.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    word_match_end(haystack, needle, 0).is_some()
+}
+
+/// Index just past the first `\b`-anchored occurrence of `needle` at or after
+/// `from`, or `None`.
+fn word_match_end(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let hb = haystack.as_bytes();
+    let nb = needle.as_bytes();
+    if nb.is_empty() || nb.len() > hb.len() {
+        return None;
+    }
+    // Byte-wise scan: every needle here is pure ASCII, and an ASCII byte never
+    // occurs inside a multi-byte UTF-8 sequence, so a byte match is always on a
+    // char boundary.
+    let mut start = from;
+    while start + nb.len() <= hb.len() {
+        if &hb[start..start + nb.len()] == nb {
+            let end = start + nb.len();
+            let left_ok = start == 0 || !(is_word_byte(hb[start - 1]) && is_word_byte(nb[0]));
+            let right_ok =
+                end == hb.len() || !(is_word_byte(hb[end]) && is_word_byte(nb[nb.len() - 1]));
+            if left_ok && right_ok {
+                return Some(end);
+            }
+        }
+        start += 1;
+    }
+    None
+}
+
+/// True when `haystack` matches `\b<first>\s+<second>\b`.
+fn contains_word_pair(haystack: &str, first: &str, second: &str) -> bool {
+    let mut from = 0usize;
+    while let Some(end) = word_match_end(haystack, first, from) {
+        let rest = &haystack[end..];
+        let ws = rest.len() - rest.trim_start().len();
+        if ws > 0 {
+            let after = &haystack[end + ws..];
+            if after.starts_with(second) {
+                let tail = end + ws + second.len();
+                let hb = haystack.as_bytes();
+                let sb = second.as_bytes();
+                if tail == hb.len()
+                    || !(is_word_byte(hb[tail]) && is_word_byte(sb[sb.len() - 1]))
+                {
+                    return true;
+                }
+            }
+        }
+        from = end;
+    }
+    false
+}
+
+/// Port of Node's `path.relative(from, to)` for the two ABSOLUTE paths this
+/// call site always has. Returns `""` when the paths are equal (the oracle
+/// relies on that falsiness: `path.relative(cwd,X) || X`).
+fn path_relative(from: &std::path::Path, to: &std::path::Path) -> String {
+    let f: Vec<_> = from.components().collect();
+    let t: Vec<_> = to.components().collect();
+    let common = f.iter().zip(t.iter()).take_while(|(a, b)| a == b).count();
+    // Different roots (e.g. another Windows drive): Node returns `to` verbatim.
+    if common == 0 && !f.is_empty() && !t.is_empty() {
+        return to.to_string_lossy().into_owned();
+    }
+    let mut parts: Vec<String> = std::iter::repeat("..".to_string())
+        .take(f.len() - common)
+        .collect();
+    parts.extend(
+        t[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    parts.join(std::path::MAIN_SEPARATOR_STR)
+}
+
+/// Port of claude-code 2.1.238 `OcT` + the `te` note it feeds
+/// (`staleReadFileStateHint`):
+///
+/// ```js
+/// async function OcT(e,t,r){if(!PcT.test(e))return[];let n=[];
+///  return await Promise.all(Array.from(t.entries(),([o,i])=>f4e(o).then((s)=>{
+///    if(s>r&&s>i.timestamp)n.push(o)}).catch(()=>{}))),n}
+/// …
+/// let re=await OcT(e.command,t.readFileState,i);
+/// if(re.length>0){let oe=er(),fe=re.slice(0,5).map(X=>path.relative(oe,X)||X).join(", "),
+///   ne=re.length>5?` and ${re.length-5} more`:"";
+///   te=`[This command modified ${re.length} ${Et(re.length,"file")} you've previously read: ${fe}${ne}. Call Read before editing.]`}
+/// ```
+///
+/// `since_ms` is the oracle's `i = Math.floor(Date.now()/1000)*1000`, sampled at
+/// the top of `call`.
+///
+/// RESIDUAL: the registry exposes no non-promoting `(path, entry)` iterator, so
+/// the LRU recency read is deferred to the CANDIDATES only — paths whose on-disk
+/// mtime already bumped past `since_ms`. lru-cache's `entries()` promotes
+/// nothing; here a file the command actually rewrote is promoted. Untouched
+/// files (the overwhelming majority) are never `get`-ed, so eviction order is
+/// unchanged in the common case.
+fn stale_read_file_state_hint(
+    ctx: &BuiltinToolContext,
+    command: &str,
+    cwd: &std::path::Path,
+    since_ms: i64,
+) -> Option<String> {
+    if !command_looks_like_a_writer(command) {
+        return None;
+    }
+    // `Array.from(readFileState.entries())` — lru-cache yields MRU first, which
+    // is exactly `keys()`'s order here.
+    let paths = {
+        let state = ctx.read_file_state.lock().ok()?;
+        state.keys()
+    };
+    let mut modified: Vec<std::path::PathBuf> = Vec::new();
+    for path in paths {
+        // `f4e(o)` = `Math.floor((await stat(o)).mtimeMs)`; a stat failure is
+        // swallowed by the oracle's `.catch(()=>{})`.
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let Ok(mtime) = meta.modified() else {
+            continue;
+        };
+        let mtime_ms = tool_api::read_file_state::mtime_ms_floor(mtime);
+        if mtime_ms <= since_ms {
+            continue;
+        }
+        let entry_mtime = {
+            let Ok(mut state) = ctx.read_file_state.lock() else {
+                continue;
+            };
+            state.get(&path).map(|e| e.mtime_ms)
+        };
+        if entry_mtime.is_some_and(|t| mtime_ms > t) {
+            modified.push(path);
+        }
+    }
+    if modified.is_empty() {
+        return None;
+    }
+    let n = modified.len();
+    let listed = modified
+        .iter()
+        .take(5)
+        .map(|p| {
+            let rel = path_relative(cwd, p);
+            if rel.is_empty() {
+                p.to_string_lossy().into_owned()
+            } else {
+                rel
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    // `Et(n,"file")` — the shared pluralizer.
+    let noun = if n == 1 { "file" } else { "files" };
+    let more = if n > 5 {
+        format!(" and {} more", n - 5)
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "[This command modified {n} {noun} you've previously read: {listed}{more}. Call Read before editing.]"
+    ))
 }
 
 fn invalidate_written_read_state(ctx: &BuiltinToolContext, cwd: &std::path::Path, command: &str) {
@@ -874,6 +1180,175 @@ fn invalidate_written_read_state(ctx: &BuiltinToolContext, cwd: &std::path::Path
         };
         state.remove(&absolute);
     }
+}
+
+// ===== BASH-07 — `ghRateLimitHint` (claude-code 2.1.238 `ikf`) ==============
+
+/// The system-reminder the oracle appends when a `gh` command reports a GitHub
+/// API rate-limit error — byte-locked to `ikf`'s return value (oracle 2.1.238
+/// @113553697; the same bytes in 2.1.220).
+const GH_RATE_LIMIT_REMINDER: &str = "<system-reminder>GitHub API rate limit exceeded (5,000/hr shared across all tools and agents). Run `gh api rate_limit --jq .resources` and sleep until reset before further gh calls. If polling in a loop, use ScheduleWakeup instead of retrying.</system-reminder>";
+
+/// Oracle `Y_v = 60000` — once emitted, the reminder is suppressed for a minute
+/// so a retry loop does not repeat it on every call.
+const GH_RATE_LIMIT_BACKOFF_MS: i64 = 60_000;
+
+/// The subcommands the oracle's `gh`-invocation regex excludes — `V_v`'s
+/// `(?!auth\b|help\b|version\b|alias\b|completion\b|config\b)`. None of them
+/// spends API quota, so a rate-limit string in their output is not a hint.
+const GH_RATE_LIMIT_EXCLUDED_SUBCOMMANDS: [&str; 6] =
+    ["auth", "help", "version", "alias", "completion", "config"];
+
+/// Port of the oracle's per-session `toolState.get(y7a)` (`class y7a {
+/// backoffUntil = 0 }`), keyed by session id.
+///
+/// RESIDUAL: `ToolUseContext` exposes no generic per-session tool-state bag, so
+/// the backoff lives in a process-global map keyed by
+/// `BuiltinToolContext::session_id` (empty key when a context carries none —
+/// tests and the session-less shims, which then share one entry exactly as they
+/// share every other process-global here).
+static GH_RATE_LIMIT_BACKOFF_UNTIL: Lazy<std::sync::Mutex<HashMap<String, i64>>> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// JS `\w` — `[A-Za-z0-9_]`.
+fn is_js_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Port of oracle `V_v`:
+/// `/(?:^|[;&|]|\b(?:then|do)\b)\s*gh\s+(?!auth\b|help\b|version\b|alias\b|completion\b|config\b)/`
+/// — i.e. `gh` used as a COMMAND word (at the start, after a `;`/`&`/`|`
+/// separator, or after a `then`/`do` keyword) with a quota-spending subcommand.
+///
+/// Hand-scanned rather than compiled: `tool-shell` pulls in no regex crate (the
+/// same reason [`is_image_output`] scans by hand), and Rust's `regex` has no
+/// lookahead anyway.
+///
+/// One JS artifact is reproduced deliberately: `\s+` is GREEDY with
+/// backtracking, so when two or more whitespace characters separate `gh` from
+/// its subcommand the engine can end `\s+` ON a whitespace character, where no
+/// excluded keyword can match and the negative lookahead therefore always
+/// succeeds. Only a SINGLE separator pins the lookahead to the subcommand.
+fn command_invokes_rate_limited_gh(command: &str) -> bool {
+    let chars: Vec<char> = command.chars().collect();
+    let n = chars.len();
+    let mut i = 0usize;
+    while i + 1 < n {
+        if chars[i] != 'g' || chars[i + 1] != 'h' {
+            i += 1;
+            continue;
+        }
+        // `gh\s+` — at least one whitespace character must follow.
+        let after = i + 2;
+        let mut ws_end = after;
+        while ws_end < n && chars[ws_end].is_whitespace() {
+            ws_end += 1;
+        }
+        if ws_end == after {
+            i += 1;
+            continue;
+        }
+        // `(?:^|[;&|]|\b(?:then|do)\b)\s*` — walk back over the `\s*`, then
+        // test the three prefix alternatives at that position.
+        let mut j = i;
+        while j > 0 && chars[j - 1].is_whitespace() {
+            j -= 1;
+        }
+        let prefix_ok = if j == 0 {
+            true
+        } else {
+            let prev = chars[j - 1];
+            if prev == ';' || prev == '&' || prev == '|' {
+                true
+            } else if is_js_word_char(prev) && !is_js_word_char(chars[j]) {
+                // The trailing `\b` of `\b(?:then|do)\b` needs a non-word
+                // character at `j`; a zero-width `\s*` leaves `chars[j] == 'g'`
+                // there, which correctly rejects `dogh …`.
+                ["then", "do"].iter().any(|kw| {
+                    let k: Vec<char> = kw.chars().collect();
+                    j >= k.len()
+                        && chars[j - k.len()..j] == k[..]
+                        && (j == k.len() || !is_js_word_char(chars[j - k.len() - 1]))
+                })
+            } else {
+                false
+            }
+        };
+        if prefix_ok {
+            if ws_end - after >= 2 {
+                // `\s+` can backtrack onto whitespace ⇒ lookahead always passes.
+                return true;
+            }
+            let mut k = ws_end;
+            while k < n && is_js_word_char(chars[k]) {
+                k += 1;
+            }
+            let subcommand: String = chars[ws_end..k].iter().collect();
+            if !GH_RATE_LIMIT_EXCLUDED_SUBCOMMANDS.contains(&subcommand.as_str()) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// `\bNEEDLE\b` over an already-lowercased haystack. Needle and JS word chars
+/// are both ASCII, so byte-indexed boundary probes are safe: any byte of a
+/// multi-byte UTF-8 character is `>= 0x80` and therefore a non-word byte.
+fn contains_lowercase_word(haystack_lower: &str, needle_lower: &str) -> bool {
+    let hb = haystack_lower.as_bytes();
+    let is_word_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    haystack_lower.match_indices(needle_lower).any(|(at, _)| {
+        let end = at + needle_lower.len();
+        (at == 0 || !is_word_byte(hb[at - 1])) && (end >= hb.len() || !is_word_byte(hb[end]))
+    })
+}
+
+/// Port of oracle `K_v`:
+/// `/API rate limit (?:already )?exceeded|exceeded a secondary rate limit|\bRATE_LIMITED\b/i`.
+fn output_reports_gh_rate_limit(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("api rate limit exceeded")
+        || lower.contains("api rate limit already exceeded")
+        || lower.contains("exceeded a secondary rate limit")
+        || contains_lowercase_word(&lower, "rate_limited")
+}
+
+/// Port of claude-code 2.1.238 `ikf` — the `ghRateLimitHint` result field:
+///
+/// ```js
+/// function ikf(e,t,r){if(!V_v.test(e)||!K_v.test(t)||Date.now()<r.backoffUntil)return;
+///  return r.backoffUntil=Date.now()+Y_v,"<system-reminder>GitHub API rate limit exceeded …</system-reminder>"}
+/// ```
+///
+/// Wired as `q=_.backgroundTaskId?void 0:ikf(e.command,S,t.toolState.get(y7a))`
+/// and appended LAST to the model-facing content
+/// (`[h,g,y,p,f].filter(Boolean).join("\n")`, `f` = this hint).
+///
+/// `S` is the oracle's FULL command output; claude-code's bash provider merges
+/// the child's stderr into stdout (its analytics always report
+/// `stderr_length: 0`), so the port passes both streams here.
+fn gh_rate_limit_hint(
+    session_key: &str,
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    now_ms: i64,
+) -> Option<&'static str> {
+    if !command_invokes_rate_limited_gh(command) {
+        return None;
+    }
+    if !output_reports_gh_rate_limit(stdout) && !output_reports_gh_rate_limit(stderr) {
+        return None;
+    }
+    let mut state = GH_RATE_LIMIT_BACKOFF_UNTIL.lock().ok()?;
+    let backoff_until = state.get(session_key).copied().unwrap_or(0);
+    if now_ms < backoff_until {
+        return None;
+    }
+    state.insert(session_key.to_string(), now_ms + GH_RATE_LIMIT_BACKOFF_MS);
+    Some(GH_RATE_LIMIT_REMINDER)
 }
 
 // ===== Image-output handling (claude-code `BashTool/utils.ts`) ==============
@@ -1265,6 +1740,67 @@ impl BashTool {
         self.shell_cwd = cell;
         self
     }
+
+    /// The oracle's `BY(input)` for THIS tool's live context — "will this call
+    /// actually be sandbox-wrapped?".
+    ///
+    /// Shares the exact inputs [`Tool::call`] feeds
+    /// [`sandbox::decision::should_use_sandbox`], so the permission decision and
+    /// the execution decision cannot drift: `ctx.sandbox_available`, the
+    /// `/sandbox`-aware [`BuiltinToolContext::effective_sandbox_runtime`], and
+    /// the session cwd.
+    ///
+    /// `override_flag` is the `dangerouslyDisableSandbox` value to evaluate,
+    /// letting BASH-10 run the oracle's two probes
+    /// (`BY(e)` and `BY({...e, dangerouslyDisableSandbox:!1})`) over one config
+    /// snapshot each.
+    fn sandbox_wraps(&self, input: &Value, override_flag: bool) -> bool {
+        let Some(command) = input.get("command").and_then(Value::as_str) else {
+            // `if(!e.command) return !1`.
+            return false;
+        };
+        let runtime = self.ctx.effective_sandbox_runtime();
+        matches!(
+            sandbox::decision::should_use_sandbox(
+                command,
+                self.ctx.sandbox_available,
+                override_flag,
+                runtime.are_unsandboxed_commands_allowed(),
+                &runtime,
+                self.ctx.cwd(),
+            ),
+            sandbox::decision::SandboxDecision::Sandbox { .. }
+        )
+    }
+
+    /// `BY(e)` — honours the input's own `dangerouslyDisableSandbox`.
+    fn will_sandbox(&self, input: &Value) -> bool {
+        self.sandbox_wraps(
+            input,
+            input
+                .get("dangerouslyDisableSandbox")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
+    }
+
+    /// `BY({...e, dangerouslyDisableSandbox:!1})` — the counterfactual probe.
+    fn will_sandbox_ignoring_override(&self, input: &Value) -> bool {
+        self.sandbox_wraps(input, false)
+    }
+}
+
+/// Byte-locked `message` of the oracle's sandbox-override ask
+/// (2.1.238 BIN off **114873408**, 4 hits; identical in 2.1.220).
+pub const SANDBOX_OVERRIDE_ASK_MESSAGE: &str = "Run outside of the sandbox";
+
+/// `V.CLAUDE_CODE_BASH_SANDBOX_SHOW_INDICATOR` (LingXi:
+/// `LINGXI_BASH_SANDBOX_SHOW_INDICATOR`) evaluated with the oracle's PLAIN JS
+/// truthiness — the `userFacingName` arm reads it as `V.X && BY(e)`, not through
+/// `isEnvTruthy`, so every non-empty value (including `"0"` and `"false"`)
+/// enables the `SandboxedBash` indicator. Unset in a stock install ⇒ inert.
+fn bash_sandbox_show_indicator() -> bool {
+    std::env::var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR").is_ok_and(|v| !v.is_empty())
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -1281,8 +1817,13 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "type": "number",
                 "description": format!("Optional timeout in milliseconds (max {})", bash_max_timeout_ms())
             },
-            "run_in_background": { "type": "boolean", "description": "Set to true to run this command in the background." },
+            // Property ORDER is byte-significant: `serde_json` is built with
+            // `preserve_order`, so this insertion order is what serialises into
+            // the tool definition. claude-code 2.1.238 `Qhm` orders
+            // `command, timeout, description, run_in_background,
+            // dangerouslyDisableSandbox`.
             "description":       { "type": "string", "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"" },
+            "run_in_background": { "type": "boolean", "description": "Set to true to run this command in the background." },
             // BASH.5: 1:1 with claude-code `BashTool.tsx` schema —
             // `dangerouslyDisableSandbox: z.boolean().optional().describe(...)`.
             "dangerouslyDisableSandbox": {
@@ -1297,6 +1838,31 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+/// The Bash input schema with `run_in_background` OMITTED — claude-code 2.1.238
+/// `egm`:
+///
+/// ```js
+/// egm=we(()=>(WA()?Qhm().omit({run_in_background:!0,_simulatedSedEdit:!0})
+///                 :Qhm().omit({_simulatedSedEdit:!0})).superRefine(…))
+/// ```
+///
+/// When background tasks are disabled the oracle strips the property from the
+/// tool definition entirely, so the model is never offered a parameter the
+/// prompt no longer explains (`getBackgroundUsageNote` already drops its bullet
+/// on the same switch). Derived from [`INPUT_SCHEMA`] so the two can never drift
+/// in contents or KEY ORDER (`serde_json` is built with `preserve_order`, and
+/// removing one key leaves the rest in their original insertion order).
+static INPUT_SCHEMA_NO_BACKGROUND: Lazy<Value> = Lazy::new(|| {
+    let mut schema = INPUT_SCHEMA.clone();
+    if let Some(props) = schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+    {
+        props.remove("run_in_background");
+    }
+    schema
+});
+
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
@@ -1307,8 +1873,17 @@ impl Tool for BashTool {
         Some("execute shell commands")
     }
 
+    /// claude-code 2.1.238 `egm` selects between the full schema and one with
+    /// `run_in_background` omitted, keyed on `WA()` (background tasks disabled).
+    /// Evaluated per call — like the oracle's `we(...)` memo, which re-reads the
+    /// same switch — so a session that flips the env var sees a consistent
+    /// prompt + schema pair.
     fn input_schema(&self) -> &Value {
-        &INPUT_SCHEMA
+        if crate::prompt::background_tasks_disabled() {
+            &INPUT_SCHEMA_NO_BACKGROUND
+        } else {
+            &INPUT_SCHEMA
+        }
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -1354,7 +1929,119 @@ impl Tool for BashTool {
         true
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    /// BASH-19 — port of the oracle's Bash `userFacingName(input)`
+    /// (2.1.238 BIN off **294576071**):
+    ///
+    /// ```js
+    /// userFacingName(e){if(!e)return"Bash";
+    ///  if(e.command){let t=Ffr(e.command);if(t)return f0i({file_path:t.filePath,old_string:"x"})}
+    ///  return V.CLAUDE_CODE_BASH_SANDBOX_SHOW_INDICATOR&&BY(e)?"SandboxedBash":"Bash"}
+    /// ```
+    ///
+    /// Two of the three arms are ported here:
+    /// * a MISSING / non-object input renders the bare tool name (`"Bash"`),
+    /// * an input that WILL be sandbox-wrapped renders `"SandboxedBash"` when
+    ///   the indicator env var is set.
+    ///
+    /// The middle arm — `Ffr` (`detectSimulatedSedEdit`) relabelling a
+    /// single-command `sed -i 's/…/…/' FILE` as the Edit tool's
+    /// `"Update"`/`"Updated plan"` — is NOT ported: it exists to name the
+    /// `_simulatedSedEdit` permission surface (BIN off 292490136 builds a
+    /// `title:"Edit file"` / `kind:"file-edit-diff"` prompt from `Ffr`'s
+    /// `{filePath, pattern, replacement, flags}`), and that prompt shape has no
+    /// LingXi counterpart. Emitting the label without the diff surface would
+    /// name a real shell execution as a file edit — strictly worse than the
+    /// truthful `"Bash"`.
+    ///
+    /// ENV NOTE: the oracle reads `V.CLAUDE_CODE_BASH_SANDBOX_SHOW_INDICATOR`
+    /// with plain JS truthiness (`V.X && BY(e)`), NOT its `isEnvTruthy`
+    /// allowlist — so any non-empty value enables it, `"0"` and `"false"`
+    /// included. Reproduced exactly here (a `traits::env::is_env_truthy` call
+    /// would be the wrong predicate). Under LingXi branding the name is
+    /// `LINGXI_BASH_SANDBOX_SHOW_INDICATOR`.
+    ///
+    /// CALL SITE: [`Self::check_permissions`] below titles the sandbox-override
+    /// prompt with it (the same role the oracle's prompt renderer gives
+    /// `userFacingName`), so it is reachable from the turn loop's permission
+    /// gate.
+    fn user_facing_name_for_input(&self, input: &Value) -> Option<String> {
+        // `if(!e) return "Bash"` — JS falsy input (undefined/null). A non-object
+        // is likewise nothing this tool can reason about.
+        if !input.is_object() {
+            return Some(TOOL_NAME.to_string());
+        }
+        if bash_sandbox_show_indicator() && self.will_sandbox(input) {
+            return Some("SandboxedBash".to_string());
+        }
+        Some(TOOL_NAME.to_string())
+    }
+
+    /// BASH-10 — port of the oracle's Bash `checkPermissions` sandbox-override
+    /// arm (2.1.238 BIN off **294577064**; the copy `Run outside of the sandbox`
+    /// sits at BIN off **114873408**):
+    ///
+    /// ```js
+    /// async checkPermissions(e,t){let r=await M8n(e,t);
+    ///  if(e.dangerouslyDisableSandbox&&r.behavior!=="deny"&&r.behavior!=="ask"
+    ///     &&!XXn(r.decisionReason)&&!BY(e)&&BY({...e,dangerouslyDisableSandbox:!1}))
+    ///    return{behavior:"ask",decisionReason:{type:"sandboxOverride",reason:"dangerouslyDisableSandbox"},
+    ///           message:"Run outside of the sandbox"};
+    ///  return r}
+    /// ```
+    ///
+    /// The predicate is SPLIT across the two layers that own its inputs, and the
+    /// two halves compose into exactly the oracle's conjunction:
+    ///
+    /// * `r.behavior!=="deny" && r.behavior!=="ask" && !XXn(r.decisionReason)` —
+    ///   a property of the BASE decision, which in LingXi is produced by the
+    ///   central gate, not by the tool. The turn loop applies it: it consults
+    ///   this hook only when its own resolution is a NON-RULE `Allow`
+    ///   (`PermissionResolution::Allow { rule_source: None }`).
+    /// * `e.dangerouslyDisableSandbox && !BY(e) && BY({...e, dangerouslyDisableSandbox:false})`
+    ///   — "the flag, and only the flag, is what takes this command out of the
+    ///   sandbox". That needs the live sandbox runtime config, which the tool
+    ///   owns; it is evaluated below.
+    ///
+    /// Every other arm returns the pre-existing allow-all stub, so a Bash call
+    /// without `dangerouslyDisableSandbox` (or with sandboxing off) is
+    /// byte-identical to before.
+    ///
+    /// INERT BY DEFAULT: `sandbox_available` is false and
+    /// `SandboxRuntimeConfig::enabled` defaults off in a stock install, so
+    /// `will_sandbox` is false for both probes and this never fires. It becomes
+    /// live the moment sandboxing is enabled AND unsandboxed commands are
+    /// allowed — which is precisely the configuration the oracle guards.
+    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        let dangerously_disable_sandbox = input
+            .get("dangerouslyDisableSandbox")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        // `!BY(e) && BY({...e, dangerouslyDisableSandbox:!1})`: with the flag the
+        // command escapes the sandbox, without it the command would have been
+        // wrapped. Both probes read ONE snapshot of the runtime config so a
+        // concurrent `/sandbox` toggle cannot split the comparison.
+        if dangerously_disable_sandbox
+            && !self.will_sandbox(input)
+            && self.will_sandbox_ignoring_override(input)
+        {
+            return PermissionResult::Ask {
+                reason: PermissionDecisionReason::SandboxOverride {
+                    reason: SandboxOverrideReason::DangerouslyDisableSandbox,
+                },
+                prompt: PermissionPrompt {
+                    // The oracle's prompt renderer titles the request with the
+                    // tool's `userFacingName` — BASH-19's hook, called here.
+                    title: self
+                        .user_facing_name_for_input(input)
+                        .unwrap_or_else(|| TOOL_NAME.to_string()),
+                    // Byte-locked `message:"Run outside of the sandbox"`.
+                    message: SANDBOX_OVERRIDE_ASK_MESSAGE.to_string(),
+                    options: Vec::new(),
+                },
+                pending_classifier_check: None,
+                metadata: PermissionMetadata::default(),
+            };
+        }
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-02 default)".into(),
@@ -1363,6 +2050,73 @@ impl Tool for BashTool {
             update_destination: None,
             metadata: PermissionMetadata::default(),
         }
+    }
+
+    /// BASH-18 — port of the oracle's Bash `coerceInput` (`Vmm`, 2.1.238 BIN off
+    /// **294485010**; identical in 2.1.220):
+    ///
+    /// ```js
+    /// function Vmm(e){if(!ni(e))return null;let t={...e},r=[];
+    ///  if("timeout_ms"in t&&!("timeout"in t)){let n=t.timeout_ms;
+    ///   if(typeof n==="number"||typeof n==="string"&&/^\d+$/.test(n))t.timeout=n,r.push("timeout_ms");
+    ///   delete t.timeout_ms}
+    ///  return r.length?{input:t,shapeClass:r.join(",")}:null}
+    /// ```
+    ///
+    /// Faithful details that are easy to get wrong:
+    /// * the rewrite is SKIPPED entirely when `timeout` is already present — the
+    ///   stray `timeout_ms` then survives into `safeParse` and (with the schema's
+    ///   `additionalProperties:false`) legitimately fails validation;
+    /// * a non-coercible `timeout_ms` (a float-shaped string, `true`, an object)
+    ///   deletes the key on the COPY but pushes nothing, so `r.length === 0` and
+    ///   the whole copy is DISCARDED (`null`) — the raw input, `timeout_ms` and
+    ///   all, is what reaches the schema. Returning the pruned copy here would be
+    ///   a silent divergence that turns a validation error into a success.
+    /// * the value is moved ACROSS AS-IS — a numeric STRING stays a string, which
+    ///   the Bash `timeout` schema then rejects/accepts exactly as the oracle's
+    ///   `VF(E.number())` coercion does.
+    ///
+    /// CALL SITE: `orchestrator::turn_loop::dispatch_tool_uses_tracked`, between
+    /// the unknown-tool arm and `validate_tool_input_schema` — the same slot the
+    /// oracle occupies in `checkPermissionsAndCallTool` (BIN off 294282716).
+    fn coerce_input(&self, input: &Value) -> Option<tool_api::tool_trait::CoercedInput> {
+        // `ni(e)` — plain-object guard.
+        let obj = input.as_object()?;
+        if !obj.contains_key("timeout_ms") {
+            return None;
+        }
+        if obj.contains_key("timeout") {
+            // The oracle never enters the branch, so `timeout_ms` is NOT deleted
+            // and no coercion is reported.
+            return None;
+        }
+        let raw = obj.get("timeout_ms").expect("checked above");
+        let coercible = match raw {
+            Value::Number(_) => true,
+            Value::String(s) => !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()),
+            _ => false,
+        };
+        if !coercible {
+            // `r.length === 0` ⇒ the oracle returns `null` and throws its pruned
+            // copy away.
+            return None;
+        }
+        // Rebuild in the oracle's key ORDER: `{...e}` keeps the original order,
+        // `t.timeout = n` APPENDS `timeout` at the end, `delete t.timeout_ms`
+        // drops that key in place. `serde_json` is built with `preserve_order`,
+        // so a `remove` + `insert` on a clone would be at the mercy of the map's
+        // removal strategy — rebuild explicitly instead.
+        let mut coerced = serde_json::Map::with_capacity(obj.len());
+        for (k, v) in obj {
+            if k != "timeout_ms" {
+                coerced.insert(k.clone(), v.clone());
+            }
+        }
+        coerced.insert("timeout".to_string(), raw.clone());
+        Some(tool_api::tool_trait::CoercedInput {
+            input: Value::Object(coerced),
+            shape_class: "timeout_ms".to_string(),
+        })
     }
 
     async fn description(&self, input: &Value, _opts: &DescriptionOptions) -> String {
@@ -1420,7 +2174,12 @@ impl Tool for BashTool {
             .get("run_in_background")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if sleep_block_enabled() && !run_bg {
+        // BASH-17 — the oracle's gate is `HSe() && !WA() && !e.run_in_background`
+        // (2.1.238 and 2.1.220 alike). The `!WA()` conjunct was missing here:
+        // with background tasks disabled the block's own remedy
+        // (`run_in_background: true`) does not exist, so the oracle stops
+        // blocking rather than dead-ending the model.
+        if sleep_block_enabled() && !crate::prompt::background_tasks_disabled() && !run_bg {
             if let Some(pattern) = detect_blocked_sleep_pattern(cmd) {
                 return Err(ValidationError(format!(
                     "Blocked: {pattern}. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block."
@@ -1474,6 +2233,13 @@ impl Tool for BashTool {
         }
 
         let started_at = SystemTime::now();
+        // claude-code 2.1.238 `call`'s `i = Math.floor(Date.now()/1000)*1000` —
+        // the second-truncated call-start stamp the `staleReadFileStateHint`
+        // compares on-disk mtimes against.
+        let call_start_ms: i64 = started_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_millis() as i64 / 1000) * 1000)
+            .unwrap_or(0);
         let request_id = ephemeral_id("bash");
         let hash = cmd_hash(&cmd_str);
 
@@ -1620,13 +2386,13 @@ impl Tool for BashTool {
             return match self.ctx.process.spawn_background(&sandboxed).await {
                 Ok(handle) => {
                     let out_path = task_output_path(&handle.task_id).display().to_string();
-                    // Model-facing background note (`d` in the binary's mapper):
-                    // `Command running in background with ID: … Output is being
-                    // written to: … use Read on that file path.` (offset 183106320).
-                    let mut note = format!(
-                        "Command running in background with ID: {}. Output is being written to: {}. You will be notified when it completes. To check interim output, use Read on that file path.",
-                        handle.task_id, out_path
-                    );
+                    // Model-facing background note (`y` in the binary's mapper,
+                    // built by `L0i`): `Command running in background with ID: …
+                    // Output is being written to: … use Read on that file path.`
+                    // (offset 183106320), with the 2.1.238 lifetime sentence
+                    // selected by `reapedAtFinalResponse`.
+                    let reaped = background_ends_with_final_response(&ctx);
+                    let mut note = background_note(&handle.task_id, &out_path, None, reaped);
                     // PARITY 2.1.210 (`backgroundCwdHint`): when the backgrounded
                     // command contains a statement-level `cd`/`pushd`/`popd`/`chdir`
                     // (`ror`), the binary appends this hint on a new line so the
@@ -1652,6 +2418,7 @@ impl Tool for BashTool {
                             crate::silent::is_silent_bash_command(&cmd_str),
                             Some(&handle.task_id),
                             None,
+                            reaped,
                         ),
                         model_content: Some(model_content),
                         new_messages: vec![],
@@ -1778,13 +2545,11 @@ impl Tool for BashTool {
                 meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
                 self.ctx.bus.log_event(BASH_TIMEOUT, meta).await;
                 let out_path = task_output_path(&handle.task_id).display().to_string();
-                // Seconds shown = `Math.max(1, Math.round(timeoutMs / 1000))`
-                // (the binary's `${Math.max(1,Math.round(l/1000))}s`).
-                let secs = (((timeout_ms as f64) / 1000.0).round() as i64).max(1);
-                let mut note = format!(
-                    "Command did not complete within its {secs}s timeout and was moved to the background (ID: {}). Output is being written to: {}. You will be notified when it completes. To check interim output, use Read on that file path.",
-                    handle.task_id, out_path
-                );
+                // `L0i`'s `timedOutAfterMs !== undefined` arm; the seconds shown
+                // are `Math.max(1, Math.round(timeoutMs / 1000))`.
+                let reaped = background_ends_with_final_response(&ctx);
+                let mut note =
+                    background_note(&handle.task_id, &out_path, Some(timeout_ms), reaped);
                 // PARITY 2.1.210 (`backgroundCwdHint`): same hint as an explicit
                 // background launch — a timed-out-and-backgrounded command whose
                 // text contains a statement-level `cd` never mutates the session
@@ -1809,6 +2574,7 @@ impl Tool for BashTool {
                         crate::silent::is_silent_bash_command(&cmd_str),
                         Some(&handle.task_id),
                         Some(timeout_ms),
+                        reaped,
                     ),
                     model_content: Some(model_content),
                     new_messages: vec![],
@@ -2045,6 +2811,7 @@ impl Tool for BashTool {
                                 crate::silent::is_silent_bash_command(&cmd_str),
                                 None,
                                 None,
+                                false,
                             ),
                             // Display-only (egress ignores it when content_blocks
                             // is Some); claude's wire form has no text.
@@ -2096,12 +2863,55 @@ impl Tool for BashTool {
                 );
                 meta.insert("truncated".into(), AnalyticsValue::Bool(truncated_out));
                 self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
+                // `staleReadFileStateHint` — computed BEFORE the read-state
+                // refresh (oracle order: `te = …OcT(…)` then `await Zmm(…)`),
+                // and only on the non-interrupted, non-image, non-background
+                // arm (`if(!g&&!J&&!_.backgroundTaskId)`). This arm is exactly
+                // that one.
+                let stale_hint =
+                    stale_read_file_state_hint(&self.ctx, &cmd_str, &cwd, call_start_ms);
                 invalidate_written_read_state(&self.ctx, &cwd, &cmd_str);
+
+                // BASH-07 `ghRateLimitHint` (`q` in the oracle's `call`): a
+                // non-background `gh` command whose output reports a GitHub API
+                // rate-limit error gets the system-reminder appended LAST,
+                // matching the mapper's `[h,g,y,p,f].filter(Boolean).join("\n")`
+                // order (`p` = staleReadFileStateHint, `f` = this).
+                let session_key = self
+                    .ctx
+                    .session_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let gh_hint = gh_rate_limit_hint(
+                    &session_key,
+                    &cmd_str,
+                    &stdout_final,
+                    &stderr_clean,
+                    SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                );
+                let trailing_notes = [stale_hint.as_deref(), gh_hint]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<&str>>()
+                    .join("\n");
 
                 // Model sees the plain-text `[stdout, stderr].join("\n")` render
                 // (`content` in the binary's tool_result mapper), NOT the JSON
                 // object — which stays for the TUI / PostToolUse hook.
-                let model_content = bash_model_content(&stdout_final, &stderr_clean, false, None);
+                let model_content = bash_model_content(
+                    &stdout_final,
+                    &stderr_clean,
+                    false,
+                    if trailing_notes.is_empty() {
+                        None
+                    } else {
+                        Some(trailing_notes.as_str())
+                    },
+                );
                 Ok(ToolCallResult {
                     // claude-code 2.1.191 `BashTool` outputSchema (pure metadata).
                     // A completed text command: `interrupted: false`, `isImage:
@@ -2116,6 +2926,7 @@ impl Tool for BashTool {
                         crate::silent::is_silent_bash_command(&cmd_str),
                         None,
                         None,
+                        false,
                     ),
                     model_content: Some(model_content),
                     new_messages: vec![],
@@ -3071,10 +3882,10 @@ mod tests {
         );
     }
 
-    /// Serializes every test that mutates the process-global
-    /// `tengu_amber_sentinel` gate env (the sleep-block opt-in). A tokio mutex
-    /// keeps the guard `Send` across the `.await` in these async tests.
-    static SLEEP_GATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // The sleep-gate tests used to have their own `SLEEP_GATE_LOCK`. They now
+    // share `crate::prompt::background_env_lock()` with every other test in the
+    // crate that touches these process-global gates — see that lock's doc for
+    // why three separate locks over one global was no exclusion at all.
 
     fn bash_tool_noop() -> BashTool {
         BashTool::new(shell_test_ctx(ProcessOutput {
@@ -3087,7 +3898,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_blocks_standalone_sleep_when_gate_on() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         // Gate ON + duration >= 25 (G2n) → blocked with the byte-exact message.
         std::env::set_var("tengu_amber_sentinel", "1");
@@ -3104,7 +3915,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_blocks_sleep_with_followup_when_gate_on() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         std::env::set_var("tengu_amber_sentinel", "1");
         let result = tool
@@ -3122,7 +3933,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_sleep_block_is_off_by_default() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         // No gate env set (default) → even a long sleep is allowed (1:1 with
         // stock claude-code, whose `sq()` defaults false).
@@ -3134,7 +3945,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_allows_sub_threshold_and_float_even_when_gate_on() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         std::env::set_var("tengu_amber_sentinel", "1");
         // < 25 (incl. fractional, and non-sleep commands) are never blocked.
@@ -3160,7 +3971,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_allows_sleep_when_backgrounded_even_with_gate_on() {
-        let _g = SLEEP_GATE_LOCK.lock().await;
+        let _g = crate::prompt::background_env_lock();
         let tool = bash_tool_noop();
         std::env::set_var("tengu_amber_sentinel", "1");
         let result = tool
@@ -3171,6 +3982,30 @@ mod tests {
             .await;
         std::env::remove_var("tengu_amber_sentinel");
         result.expect("sleep 30 backgrounded must be allowed even with the gate on");
+    }
+
+    /// BASH-17 — the oracle's gate is `HSe() && !WA() && !e.run_in_background`.
+    /// With background tasks disabled the block's own remedy
+    /// (`run_in_background: true`) is not even in the schema, so the oracle
+    /// stops blocking rather than dead-ending the model.
+    #[tokio::test]
+    async fn validate_input_does_not_block_sleep_when_background_tasks_are_disabled() {
+        let _g = crate::prompt::background_env_lock();
+        let tool = bash_tool_noop();
+        std::env::set_var("tengu_amber_sentinel", "1");
+        std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
+        let disabled = tool
+            .validate_input(&json!({"command": "sleep 30"}), &use_ctx())
+            .await;
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        // Same input, background tasks back on → still blocked, so the new
+        // conjunct is the only thing that changed the verdict.
+        let enabled = tool
+            .validate_input(&json!({"command": "sleep 30"}), &use_ctx())
+            .await;
+        std::env::remove_var("tengu_amber_sentinel");
+        disabled.expect("sleep 30 must be ALLOWED when background tasks are disabled");
+        enabled.expect_err("sleep 30 must still be blocked when background tasks are enabled");
     }
 
     #[test]
@@ -3330,8 +4165,17 @@ mod tests {
         assert_eq!(res.data["noOutputExpected"], false);
     }
 
+    // `BACKGROUND_TASKS_ENV_LOCK` lived here. `input_schema()` selects between
+    // the full schema and the `run_in_background`-omitted one on
+    // `LINGXI_DISABLE_BACKGROUND_TASKS` (claude-code `egm`/`WA()`), and the
+    // Bash PROMPT reads the same var for its detached-run bullet — so schema
+    // tests and prompt tests must serialize against each other, not merely
+    // within their own file. They all take
+    // `crate::prompt::background_env_lock()` now.
+
     #[test]
     fn input_schema_uses_timeout_not_timeout_ms() {
+        let _g = crate::prompt::background_env_lock();
         // claude-code `BashTool.tsx:229` names the param `timeout` (ms).
         let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
             stdout: String::new(),
@@ -3351,6 +4195,392 @@ mod tests {
         assert_eq!(
             props["timeout"]["description"],
             "Optional timeout in milliseconds (max 600000)"
+        );
+    }
+
+    /// claude-code 2.1.238 `Qhm` (and `sdk-tools-238.d.ts`) declare the Bash input
+    /// schema keys in this order; `serde_json` is built with `preserve_order`, so
+    /// insertion order is what the model actually sees in the tool definition.
+    #[test]
+    fn input_schema_property_order_matches_oracle() {
+        let _g = crate::prompt::background_env_lock();
+        let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        let props = tool.input_schema()["properties"]
+            .as_object()
+            .expect("properties object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            props,
+            vec![
+                "command".to_string(),
+                "timeout".to_string(),
+                "description".to_string(),
+                "run_in_background".to_string(),
+                "dangerouslyDisableSandbox".to_string(),
+            ]
+        );
+    }
+
+    /// BASH-09 / claude-code 2.1.238 `egm`:
+    /// `WA()?Qhm().omit({run_in_background:!0,_simulatedSedEdit:!0}):…`.
+    /// With background tasks disabled the property must vanish from the tool
+    /// definition entirely — the prompt already drops its bullet on the same
+    /// switch (`getBackgroundUsageNote`), so advertising the parameter would
+    /// offer the model something nothing explains.
+    #[test]
+    fn input_schema_omits_run_in_background_when_background_tasks_are_disabled() {
+        // ONE acquisition. This used to take two different locks — the schema
+        // one and the sleep-gate one — because `LINGXI_DISABLE_BACKGROUND_TASKS`
+        // is read by both families (BASH-17). Now that they are a single
+        // crate-wide lock, taking it twice here would SELF-DEADLOCK:
+        // `std::sync::Mutex` is not reentrant.
+        let _g = crate::prompt::background_env_lock();
+        let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
+        let keys = tool.input_schema()["properties"]
+            .as_object()
+            .expect("properties object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        // Every OTHER key keeps its oracle order and contents.
+        assert_eq!(
+            keys,
+            vec![
+                "command".to_string(),
+                "timeout".to_string(),
+                "description".to_string(),
+                "dangerouslyDisableSandbox".to_string(),
+            ]
+        );
+        // And it comes back when the gate is off.
+        assert!(tool.input_schema()["properties"]
+            .get("run_in_background")
+            .is_some());
+    }
+
+    // ===== BASH-03 — `backgroundEndsWithFinalResponse` (2.1.238) =============
+
+    /// `L0i` with `reapedAtFinalResponse` absent: byte-identical to the
+    /// pre-2.1.238 note (both the explicit-background and the
+    /// timeout-auto-background heads).
+    #[test]
+    fn background_note_default_keeps_the_notified_sentence() {
+        assert_eq!(
+            background_note("7", "/p", None, false),
+            "Command running in background with ID: 7. Output is being written to: /p. You will be notified when it completes. To check interim output, use Read on that file path."
+        );
+        assert_eq!(
+            background_note("7", "/p", Some(5000), false),
+            "Command did not complete within its 5s timeout and was moved to the background (ID: 7). Output is being written to: /p. You will be notified when it completes. To check interim output, use Read on that file path."
+        );
+    }
+
+    /// The 2.1.238 lifetime sentence, oracle binary @289989687. Note the U+2014
+    /// EM DASH and the semicolon before "if you need its result".
+    #[test]
+    fn background_note_for_a_synchronous_subagent_warns_about_the_final_response() {
+        assert_eq!(
+            background_note("7", "/p", None, true),
+            "Command running in background with ID: 7. Output is being written to: /p. If it exits while you are still working you will be notified, but it is terminated when you give your final response and no notification can follow that \u{2014} so do not end your turn to wait for it; if you need its result, wait for it before giving your final response. To check interim output, use Read on that file path."
+        );
+    }
+
+    /// `wKo(agentContext)` = subagent AND NOT async.
+    #[test]
+    fn background_ends_with_final_response_only_for_a_synchronous_subagent() {
+        let mut ctx = use_ctx();
+        // Main loop (no agent id) — the command survives the turn.
+        assert!(!background_ends_with_final_response(&ctx));
+        ctx.agent_id = Some(protocol::AgentId::new());
+        assert!(background_ends_with_final_response(&ctx));
+        // Async / headless subagent: `is_non_interactive_session` is set by the
+        // dispatch invoker from `is_async || effective_non_interactive_session()`.
+        ctx.options.is_non_interactive_session = true;
+        assert!(!background_ends_with_final_response(&ctx));
+    }
+
+    /// Output schema `At(!0).optional()` — the literal-`true` optional is
+    /// emitted only when set, never as `false`, and sits after `timedOutAfterMs`.
+    #[test]
+    fn bash_result_data_emits_background_ends_with_final_response_only_when_true() {
+        let reaped = bash_result_data("", "", false, false, None, false, Some("t1"), Some(5000), true);
+        assert_eq!(reaped["backgroundEndsWithFinalResponse"], true);
+        let keys = reaped
+            .as_object()
+            .expect("object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let idx = |k: &str| keys.iter().position(|x| x == k).expect(k);
+        assert!(idx("backgroundEndsWithFinalResponse") > idx("timedOutAfterMs"));
+        let survives = bash_result_data("", "", false, false, None, false, Some("t1"), None, false);
+        assert!(
+            survives.get("backgroundEndsWithFinalResponse").is_none(),
+            "`false` must be OMITTED, not serialised"
+        );
+    }
+
+    // ===== BASH-06 — `staleReadFileStateHint` (`OcT` + `PcT`) ================
+
+    #[test]
+    fn write_command_markers_match_the_oracle_alternation() {
+        for cmd in [
+            "prettier --write .",
+            "eslint --fix src",
+            "sed --in-place s/a/b/ f",
+            "rubocop --auto-correct",
+            "npm run format",
+            "npm run  fix",
+            "yarn format",
+            "pnpm format",
+            "npm run lint:file",
+            "npm run lint:fix",
+            "black .",
+            "isort .",
+            "ruff format .",
+            "cargo fmt",
+            "cargo fix --allow-dirty",
+            "rustfmt src/x.rs",
+            "go fmt ./...",
+            "terraform fmt",
+            "dprint fmt",
+            "swiftformat .",
+            "phpcbf",
+        ] {
+            assert!(command_looks_like_a_writer(cmd), "should match: {cmd}");
+        }
+        for cmd in [
+            "ls -la",
+            "git status",
+            "cargo build",
+            "cargo   test",
+            "blacklist-check",
+            "myisort",
+            "echo run",
+            "rungo format",
+            "go fmtx ./...",
+        ] {
+            assert!(!command_looks_like_a_writer(cmd), "must NOT match: {cmd}");
+        }
+    }
+
+    /// Node `path.relative` for the two absolute paths the hint always has.
+    #[test]
+    fn path_relative_matches_node_semantics() {
+        use std::path::Path;
+        assert_eq!(path_relative(Path::new("/a/b"), Path::new("/a/b/c.rs")), "c.rs");
+        assert_eq!(path_relative(Path::new("/a/b"), Path::new("/a/b")), "");
+        assert_eq!(
+            path_relative(Path::new("/a/b/c"), Path::new("/a/d/e.rs")),
+            format!("..{s}..{s}d{s}e.rs", s = std::path::MAIN_SEPARATOR)
+        );
+    }
+
+    fn seed_read_entry(ctx: &BuiltinToolContext, path: &std::path::Path, mtime_ms: i64) {
+        tool_api::read_file_state::set(
+            &ctx.read_file_state,
+            path.to_path_buf(),
+            tool_api::ReadFileEntry {
+                content: "old".into(),
+                mtime_ms,
+                offset: None,
+                limit: None,
+                from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
+            },
+        );
+    }
+
+    fn noop_ctx() -> BuiltinToolContext {
+        shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        })
+    }
+
+    #[test]
+    fn stale_read_file_state_hint_names_the_files_the_command_rewrote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, "new").expect("write");
+        let ctx = noop_ctx();
+        // The recorded read predates the on-disk mtime.
+        seed_read_entry(&ctx, &file, 0);
+        let hint = stale_read_file_state_hint(&ctx, "cargo fmt", dir.path(), 0)
+            .expect("hint for a rewritten, previously-read file");
+        assert_eq!(
+            hint,
+            "[This command modified 1 file you've previously read: a.rs. Call Read before editing.]"
+        );
+    }
+
+    #[test]
+    fn stale_read_file_state_hint_is_silent_without_a_write_marker_or_a_bump() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, "new").expect("write");
+        let ctx = noop_ctx();
+        seed_read_entry(&ctx, &file, 0);
+        // `PcT` does not match ⇒ the oracle returns [] before any stat.
+        assert!(stale_read_file_state_hint(&ctx, "ls -la", dir.path(), 0).is_none());
+        // Write marker, but the file's mtime predates the call start.
+        assert!(stale_read_file_state_hint(&ctx, "cargo fmt", dir.path(), i64::MAX).is_none());
+    }
+
+    #[test]
+    fn stale_read_file_state_hint_caps_the_list_at_five_and_pluralizes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = noop_ctx();
+        for i in 0..7 {
+            let file = dir.path().join(format!("f{i}.rs"));
+            std::fs::write(&file, "new").expect("write");
+            seed_read_entry(&ctx, &file, 0);
+        }
+        let hint = stale_read_file_state_hint(&ctx, "prettier --write .", dir.path(), 0)
+            .expect("hint");
+        // `keys()` is MRU-first, so the most recently seeded five are listed.
+        assert_eq!(
+            hint,
+            "[This command modified 7 files you've previously read: f6.rs, f5.rs, f4.rs, f3.rs, f2.rs and 2 more. Call Read before editing.]"
+        );
+    }
+
+    // ===== BASH-07 — `ghRateLimitHint` (oracle `ikf`/`V_v`/`K_v`) ===========
+
+    /// `V_v` matches `gh` only as a COMMAND word, and only for a
+    /// quota-spending subcommand.
+    #[test]
+    fn gh_invocation_predicate_matches_the_oracle_regex() {
+        for yes in [
+            "gh pr list",
+            "gh api rate_limit",
+            "git fetch && gh pr view 12",
+            "cat x | gh pr create",
+            "foo; gh issue list",
+            "if x; then gh pr list; fi",
+            "for f in *; do gh pr view; done",
+            // No subcommand word at all — the lookahead cannot match `-h`.
+            "gh -h",
+            // `auth` only excludes the EXACT word (`auth\b`).
+            "gh authorize",
+        ] {
+            assert!(
+                command_invokes_rate_limited_gh(yes),
+                "expected a gh invocation: {yes:?}"
+            );
+        }
+        for no in [
+            // `gh` is an argument, not a command word.
+            "echo gh pr list",
+            "grep gh file",
+            // No whitespace after `gh` (`gh\s+` needs at least one).
+            "gh",
+            "ghost pr list",
+            // `\b(?:then|do)\b` must be a whole word.
+            "dogh pr list",
+            // Excluded subcommands.
+            "gh auth status",
+            "gh help",
+            "gh version",
+            "gh alias list",
+            "gh completion -s zsh",
+            "gh config get editor",
+        ] {
+            assert!(
+                !command_invokes_rate_limited_gh(no),
+                "expected NO gh invocation: {no:?}"
+            );
+        }
+    }
+
+    /// Reproduced JS artifact: `gh\s+` is greedy WITH backtracking, so two or
+    /// more separators let `\s+` end on a whitespace character where no excluded
+    /// keyword can match — the negative lookahead then always succeeds.
+    #[test]
+    fn gh_invocation_predicate_reproduces_the_greedy_whitespace_backtrack() {
+        assert!(!command_invokes_rate_limited_gh("gh auth status"));
+        assert!(command_invokes_rate_limited_gh("gh  auth status"));
+    }
+
+    /// `K_v = /API rate limit (?:already )?exceeded|exceeded a secondary rate
+    /// limit|\bRATE_LIMITED\b/i`.
+    #[test]
+    fn gh_rate_limit_output_predicate_matches_the_oracle_regex() {
+        for yes in [
+            "API rate limit exceeded for user ID 1.",
+            "api rate limit already exceeded",
+            "You have exceeded a secondary rate limit",
+            "type: RATE_LIMITED",
+            "rate_limited",
+        ] {
+            assert!(output_reports_gh_rate_limit(yes), "expected a hit: {yes:?}");
+        }
+        for no in [
+            "",
+            "API rate limit remaining: 4999",
+            // `\b` before `RATE_LIMITED` fails — `_` is a word character.
+            "X_RATE_LIMITED",
+            "RATE_LIMITEDX",
+        ] {
+            assert!(!output_reports_gh_rate_limit(no), "expected a miss: {no:?}");
+        }
+    }
+
+    /// `ikf` emits once, then backs off for `Y_v` = 60 000 ms.
+    #[test]
+    fn gh_rate_limit_hint_emits_once_then_backs_off_for_a_minute() {
+        let key = "bash-07-backoff";
+        let out = "API rate limit exceeded for user ID 1.";
+        assert_eq!(
+            gh_rate_limit_hint(key, "gh pr list", out, "", 1_000),
+            Some(GH_RATE_LIMIT_REMINDER)
+        );
+        // Within the 60s window: suppressed.
+        assert_eq!(gh_rate_limit_hint(key, "gh pr list", out, "", 60_999), None);
+        // At the boundary (`Date.now() < backoffUntil` is false): emitted again.
+        assert_eq!(
+            gh_rate_limit_hint(key, "gh pr list", out, "", 61_000),
+            Some(GH_RATE_LIMIT_REMINDER)
+        );
+    }
+
+    /// Both predicates gate the hint, and the reminder text is byte-locked.
+    #[test]
+    fn gh_rate_limit_hint_requires_both_a_gh_command_and_a_rate_limit_output() {
+        let out = "API rate limit exceeded";
+        // Command matches but output does not.
+        assert_eq!(
+            gh_rate_limit_hint("bash-07-a", "gh pr list", "ok", "", 0),
+            None
+        );
+        // Output matches but the command is not a gh invocation.
+        assert_eq!(gh_rate_limit_hint("bash-07-b", "curl x", out, "", 0), None);
+        // The oracle reads the FULL command output; the port checks both
+        // streams because it does not merge stderr into stdout.
+        assert_eq!(
+            gh_rate_limit_hint("bash-07-c", "gh pr list", "", out, 0),
+            Some(GH_RATE_LIMIT_REMINDER)
+        );
+        assert_eq!(
+            GH_RATE_LIMIT_REMINDER,
+            "<system-reminder>GitHub API rate limit exceeded (5,000/hr shared across all tools and agents). Run `gh api rate_limit --jq .resources` and sleep until reset before further gh calls. If polling in a loop, use ScheduleWakeup instead of retrying.</system-reminder>"
         );
     }
 
@@ -3729,6 +4959,191 @@ mod tests {
         );
     }
 
+    // ===== BASH-18 `coerceInput` (oracle `Vmm`, 2.1.238 BIN off 294485010) =====
+
+    #[test]
+    fn coerce_input_moves_numeric_timeout_ms_into_timeout() {
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        let c = tool
+            .coerce_input(&json!({"command": "echo hi", "timeout_ms": 5000}))
+            .expect("timeout_ms is coercible");
+        assert_eq!(c.shape_class, "timeout_ms");
+        assert_eq!(c.input["timeout"], json!(5000));
+        assert!(
+            c.input.get("timeout_ms").is_none(),
+            "the alias key must be dropped"
+        );
+        // `{...e}` order, then `timeout` appended last (`t.timeout = n`).
+        let keys: Vec<&str> = c
+            .input
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, vec!["command", "timeout"]);
+    }
+
+    #[test]
+    fn coerce_input_accepts_a_digits_only_string_verbatim() {
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        let c = tool
+            .coerce_input(&json!({"command": "echo hi", "timeout_ms": "5000"}))
+            .expect("digit string is coercible");
+        // `t.timeout = n` moves the value ACROSS AS-IS — it stays a STRING.
+        assert_eq!(c.input["timeout"], json!("5000"));
+    }
+
+    #[test]
+    fn coerce_input_is_none_when_timeout_already_present() {
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        // The oracle never enters the branch, so `timeout_ms` SURVIVES into
+        // `safeParse` (and legitimately fails `additionalProperties:false`).
+        assert!(tool
+            .coerce_input(&json!({"command": "x", "timeout": 1, "timeout_ms": 2}))
+            .is_none());
+    }
+
+    #[test]
+    fn coerce_input_discards_the_copy_when_the_value_is_not_coercible() {
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        // `r.length === 0` ⇒ `null`: the pruned copy is thrown away, so the RAW
+        // input (with the stray key) is what the schema sees.
+        for bad in [json!("5s"), json!("5.5"), json!(true), json!({})] {
+            assert!(
+                tool.coerce_input(&json!({"command": "x", "timeout_ms": bad}))
+                    .is_none(),
+                "non-coercible timeout_ms must not produce a rewrite: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn coerce_input_is_none_without_the_alias_key() {
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        assert!(tool
+            .coerce_input(&json!({"command": "x", "timeout": 1}))
+            .is_none());
+        // `ni(e)` plain-object guard.
+        assert!(tool.coerce_input(&json!("not an object")).is_none());
+    }
+
+    // ===== BASH-10 sandbox-override ask (oracle BIN off 294577064) ==========
+
+    fn sandboxing_on_ctx() -> BuiltinToolContext {
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.sandbox_available = true;
+        ctx.sandbox_runtime.excluded_commands = vec![];
+        ctx.sandbox_runtime.allow_unsandboxed_commands = true;
+        ctx
+    }
+
+    #[tokio::test]
+    async fn check_permissions_asks_when_only_the_flag_escapes_the_sandbox() {
+        let tool = BashTool::new(sandboxing_on_ctx());
+        let result = tool
+            .check_permissions(
+                &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+                &use_ctx(),
+            )
+            .await;
+        match result {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(
+                        reason,
+                        PermissionDecisionReason::SandboxOverride {
+                            reason: SandboxOverrideReason::DangerouslyDisableSandbox
+                        }
+                    ),
+                    "decisionReason must be {{type:'sandboxOverride',reason:'dangerouslyDisableSandbox'}}"
+                );
+                // Byte-locked oracle copy.
+                assert_eq!(prompt.message, "Run outside of the sandbox");
+                // BASH-19's hook is what titles the prompt.
+                assert_eq!(prompt.title, "Bash");
+            }
+            other => panic!("expected an Ask, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_permissions_allows_without_the_flag() {
+        let tool = BashTool::new(sandboxing_on_ctx());
+        assert!(matches!(
+            tool.check_permissions(&json!({"command": "echo hi"}), &use_ctx())
+                .await,
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_permissions_allows_when_the_flag_changes_nothing() {
+        // Sandboxing unavailable ⇒ `BY(e)` is false with AND without the flag,
+        // so `BY({...e,dangerouslyDisableSandbox:!1})` fails and no ask is raised.
+        let tool = BashTool::new(shell_test_ctx(ok_output()));
+        assert!(matches!(
+            tool.check_permissions(
+                &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+                &use_ctx()
+            )
+            .await,
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_permissions_allows_when_the_policy_forbids_unsandboxed_commands() {
+        // `areUnsandboxedCommandsAllowed()` false ⇒ the flag is ignored, the
+        // command is still wrapped, so `!BY(e)` fails.
+        let mut ctx = sandboxing_on_ctx();
+        ctx.sandbox_runtime.allow_unsandboxed_commands = false;
+        let tool = BashTool::new(ctx);
+        assert!(matches!(
+            tool.check_permissions(
+                &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+                &use_ctx()
+            )
+            .await,
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ===== BASH-19 `userFacingName` (oracle BIN off 294576071) =============
+
+    #[test]
+    fn user_facing_name_is_bash_without_the_indicator_env() {
+        let tool = BashTool::new(sandboxing_on_ctx());
+        // `if(!e) return "Bash"`.
+        assert_eq!(
+            tool.user_facing_name_for_input(&Value::Null).as_deref(),
+            Some("Bash")
+        );
+        // Indicator unset ⇒ "Bash" even for a command that WILL be wrapped.
+        std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR");
+        assert_eq!(
+            tool.user_facing_name_for_input(&json!({"command": "echo hi"}))
+                .as_deref(),
+            Some("Bash")
+        );
+    }
+
+    #[test]
+    fn user_facing_name_is_sandboxed_bash_with_the_indicator_env() {
+        let tool = BashTool::new(sandboxing_on_ctx());
+        // JS truthiness, NOT `isEnvTruthy`: `"0"` is a non-empty string and so
+        // ENABLES the indicator.
+        std::env::set_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR", "0");
+        let sandboxed = tool.user_facing_name_for_input(&json!({"command": "echo hi"}));
+        // A `dangerouslyDisableSandbox` call is NOT wrapped ⇒ plain "Bash".
+        let unwrapped = tool.user_facing_name_for_input(
+            &json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+        );
+        std::env::remove_var("LINGXI_BASH_SANDBOX_SHOW_INDICATOR");
+        assert_eq!(sandboxed.as_deref(), Some("SandboxedBash"));
+        assert_eq!(unwrapped.as_deref(), Some("Bash"));
+    }
+
     /// A `SandboxRunner` that records every `wrap`/`cleanup_after_command` call
     /// and returns a sentinel-prefixed wrapped command, so a test can prove the
     /// Bash tool routes through `ctx.sandbox_runner` (not the sync free fn) with
@@ -4050,6 +5465,18 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_current_gen_model_returns_short_variant() {
+        // The SHORT prompt's `run_in_background` bullet is gated on
+        // `background_usage_note()`, which reads the process-global
+        // `LINGXI_DISABLE_BACKGROUND_TASKS`. A sibling test SETS that var, so
+        // without a shared guard this test intermittently rendered a prompt
+        // with the bullet missing — it failed roughly once per full-workspace
+        // run and passed every time in isolation.
+        //
+        // The underlying defect was THREE locks over one global — two in this
+        // file and one in `prompt.rs` — which is no mutual exclusion at all.
+        // They are a single crate-wide lock now, so a `prompt.rs` test setting
+        // the var can no longer race a `bash.rs` prompt assertion.
+        let _g = crate::prompt::background_env_lock();
         // `model: Some("claude-opus-4-8")` ⇒ `Dh` true ⇒ SHORT prompt — exactly
         // what claude-code serves opus-4-8. Default test sandbox is disabled, so
         // the sandbox section is absent and the git section is the CONCISE one.
@@ -4080,16 +5507,19 @@ mod tests {
             p.contains("- Working directory persists between calls, but prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile."),
             "SHORT working-directory bullet missing/incorrect; got:\n{p}"
         );
-        // IMPORTANT avoid-list bullet — the SHORT (Dh-true) branch DROPS
-        // `find`/`grep` vs the LONG prompt (starts at `cat`; verified vs the
-        // v2.1.183 binary + rendered opus-4-8 output).
+        // IMPORTANT avoid-list bullet — claude-code 2.1.238 `hcT` selects it with
+        // the SAME `VH()` predicate the LONG builder `Yhm` uses. LingXi ships
+        // Glob/Grep as real tools ⇒ the non-embedded (find/grep-INCLUSIVE) branch,
+        // identical to the LONG prompt's list.
         assert!(
-            p.contains("- IMPORTANT: Avoid using this tool to run `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed"),
+            p.contains("- IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed"),
             "SHORT avoid-list bullet missing/incorrect; got:\n{p}"
         );
+        // Output-visibility bullet — UNCONDITIONAL in 2.1.238 (the 2.1.220
+        // `CLAUDE_CODE_MARL_CORMORANT` gate was deleted), so opus-4-8 gets it too.
         assert!(
-            !p.contains("`find`, `grep`"),
-            "SHORT avoid-list must NOT include find/grep (those are LONG-only); got:\n{p}"
+            p.contains("- Command output is displayed to you, not reliably to the user."),
+            "SHORT output-visibility bullet missing; got:\n{p}"
         );
         // Raw timeout bullet (no `/ N minutes` conversion).
         assert!(
@@ -4116,9 +5546,22 @@ mod tests {
             !p.contains("# Committing changes with git"),
             "SHORT prompt must not carry the LONG git section"
         );
+        // BASH-14: the SHORT `# Git` section DOES carry the attribution
+        // bullets. The oracle builds them as
+        //   [r?`- End git commit messages with:\n${r}`:null,
+        //    o?`- End PR bodies with:\n${o}`:null].filter(Boolean).join("\n")
+        // so they appear whenever the attribution texts are non-empty — and
+        // `attribution_texts()` returns the DEFAULT pair, so they are.
+        //
+        // Confirmed against a live 2.1.238 session, whose concise `# Git`
+        // section is exactly the three bullets asserted above followed by
+        // "- End git commit messages with:" / "- End PR bodies with:".
+        // The old assertion asserted their ABSENCE on the premise that there is
+        // "no attribution source"; that premise stopped holding once the
+        // attribution slots were wired.
         assert!(
-            !p.contains("End git commit messages with:") && !p.contains("End PR bodies with:"),
-            "attribution bullets must be omitted (no attribution source, like the LONG prompt)"
+            p.contains("- End git commit messages with:") && p.contains("- End PR bodies with:"),
+            "SHORT prompt must carry both attribution bullets; got:\n{p}"
         );
         // Sandbox section absent (default test sandbox disabled).
         assert!(

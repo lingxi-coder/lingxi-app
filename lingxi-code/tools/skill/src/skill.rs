@@ -375,12 +375,25 @@ impl SkillTool {
             parent_model_override: None,
             resumed_history: None,
         };
+        let mut invoker_impl = tool_api::tool_invoker_impl::RegistryToolInvoker::new(
+            ctx.subagent_registry.clone().ok_or_else(|| {
+                ToolError::Internal("Skill: subagent tool registry is not configured".into())
+            })?,
+        );
+        // (3b) Gate the fork's tool dispatch with the same permission gate the
+        // main loop and the Agent tool use (`tools/agent/src/agent.rs`). Without
+        // it `RegistryToolInvoker::gate` is `None` and the ENTIRE permission
+        // block in `invoke_with_workspace_lease` is skipped — including the
+        // `disallowed_tools` layer built from the `frozen_command_denies` this
+        // very function just snapshotted, which is why the freeze appeared to
+        // work only after a cold restore (the restore inheritance is the one
+        // bundle that was already gated). `None` ⇒ unconditional dispatch, as
+        // before, for a host that wires no gate at all.
+        if let Some(gate) = self.ctx.permission_gate.clone() {
+            invoker_impl = invoker_impl.with_gate(gate);
+        }
         let inherit = traits::subagent_spawn::SubagentInheritance {
-            tool_invoker: Arc::new(tool_api::tool_invoker_impl::RegistryToolInvoker::new(
-                ctx.subagent_registry.clone().ok_or_else(|| {
-                    ToolError::Internal("Skill: subagent tool registry is not configured".into())
-                })?,
-            )),
+            tool_invoker: Arc::new(invoker_impl),
             budget: self.ctx.budget_enforcer.clone().ok_or_else(|| {
                 ToolError::Internal("Skill: budget enforcer is not configured".into())
             })?,
@@ -430,6 +443,13 @@ impl SkillTool {
             // exist to route to, and later resume, a LIVE background agent.
             sync_request.name = None;
             sync_request.forked_skill_name = None;
+            // Claude captures `freezeCommandDenies` only on the BACKGROUND
+            // branch (see the snapshot site above). The snapshot is inert
+            // without a resume to replay it against, and now that a consumer
+            // exists, leaving it set would clamp a synchronous fork to the
+            // launch-time deny set for its whole run — a divergence, and a full
+            // policy clone on every one of its tool calls.
+            sync_request.frozen_command_denies = Vec::new();
             let (agent_id, result) = match spawner.spawn(sync_request, inherit).await {
                 Ok(traits::subagent_spawn::SubagentResult::Completed {
                     agent_id, content, ..
@@ -543,19 +563,26 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
 ///
 /// Claude freezes these because its resume rebuilds the permission context from
 /// LIVE app state, so without a snapshot a settings edit made while the fork was
-/// parked could REMOVE a deny that was in force when it launched. The port's
-/// `PolicyPermissionGate` holds a boot-snapshot `Arc<PermissionPolicy>` (only
-/// the MODE is live), so within one process the two cannot drift — but the
-/// record outlives the process, and a cross-session resume reads it against a
-/// freshly-loaded policy. Persisting it is what makes that resume checkable.
+/// parked could REMOVE a deny that was in force when it launched. The same is
+/// true in-process here: `PolicyPermissionGate::apply_permission_update` mutates
+/// the live deny rules, so a host update CAN drop an in-force deny while a fork
+/// is parked. Persisting the snapshot is what makes the resume checkable.
 fn frozen_command_denies(policy: &permission::PermissionPolicy) -> Vec<String> {
+    // `alwaysDenyRules.command` is keyed by rule SOURCE, not by tool. The port's
+    // `PermissionRuleSource::Command` is the same bucket — "rules emitted by a
+    // command" — and it legitimately holds rules for tools other than `Bash`
+    // (skill frontmatter `disallowed-tools` lands here too).
+    //
+    // This used to filter `tool_name == "Bash"`, which read `command` as if it
+    // meant "the command tool" and under-froze every non-Bash deny. The matching
+    // filter in the consumer (`frozen_command_deny_layers`, tool-api) was dropped
+    // in the SAME change: the two halves are self-locking, and fixing only one
+    // makes the newly captured rules get discarded there as a corrupt record.
     let mut out: Vec<String> = policy
         .deny_rules
-        .values()
+        .get(&permission::PermissionRuleSource::Command)
+        .into_iter()
         .flatten()
-        // `Bash` is the command tool — claude's `alwaysDenyRules.command`
-        // bucket. Deny rules for other tools are not command rules.
-        .filter(|r| r.value.tool_name == "Bash")
         .map(|r| r.value.to_rule_string())
         .collect();
     // `deny_rules` is keyed by source, and a HashMap has no stable iteration

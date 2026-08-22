@@ -29,6 +29,27 @@ pub trait ProcessStreamSink: Send + Sync {
     async fn stderr_chunk(&self, chunk: Vec<u8>) -> Result<(), ProcessError>;
 }
 
+/// SH-07 — live-output observer for a HOOK child, so the hook layer can emit
+/// claude-code's `system/hook_progress` stream-json frames while the hook is
+/// still running.
+///
+/// Upstream (`tWi`, oracle 2.1.238 @ 296463298) polls a `getOutput()` closure
+/// every `intervalMs ?? 1000` and emits a frame whenever the ACCUMULATED
+/// `output` changed. The port inverts the plumbing: the platform runner PUSHES
+/// each raw chunk as it is read, and the hook layer keeps the accumulator +
+/// change detection + the 1 s cadence, so nothing about the polling contract
+/// leaks into the runner.
+///
+/// Deltas are raw BYTES, never pre-decoded strings: a chunk boundary can split
+/// a multi-byte UTF-8 sequence, and lossy-decoding per chunk would corrupt it.
+/// The accumulator decodes once, over the whole buffer.
+#[async_trait]
+pub trait HookOutputObserver: Send + Sync {
+    /// Consume one newly read chunk. Exactly one of the two slices is non-empty
+    /// per call (the runner reads the two pipes independently).
+    async fn on_chunk(&self, stdout_delta: &[u8], stderr_delta: &[u8]);
+}
+
 /// Runs sandbox-vetted commands on the host.
 ///
 /// Implementations live in platform crates. Every method consumes a
@@ -101,6 +122,29 @@ pub trait ProcessRunner: Send + Sync {
         _default_async_timeout: std::time::Duration,
     ) -> Result<HookRunOutcome, ProcessError> {
         Ok(HookRunOutcome::Completed(self.run(cmd).await?))
+    }
+
+    /// SH-07 — [`Self::run_hook_with_async_detection`] plus a live-output
+    /// observer that receives every chunk of the child's stdout/stderr as it is
+    /// read, so the hook layer can emit `system/hook_progress` frames while the
+    /// child is still running (claude-code `tWi`, oracle 2.1.238 @ 296463298).
+    ///
+    /// The default implementation DROPS the observer and delegates, so a runner
+    /// with no live pipes keeps its current buffered behavior and every existing
+    /// [`ProcessRunner`] impl compiles unchanged. `observer: None` is identical
+    /// to calling [`Self::run_hook_with_async_detection`] directly on every
+    /// implementation, so the hook layer can use this one entry point always.
+    ///
+    /// # Errors
+    /// Same as [`Self::run_hook_with_async_detection`].
+    async fn run_hook_with_async_detection_observed(
+        &self,
+        cmd: &SandboxedCommand,
+        default_async_timeout: std::time::Duration,
+        _observer: Option<std::sync::Arc<dyn HookOutputObserver>>,
+    ) -> Result<HookRunOutcome, ProcessError> {
+        self.run_hook_with_async_detection(cmd, default_async_timeout)
+            .await
     }
 
     /// Run a sandboxed FOREGROUND tool command, but — matching claude-code

@@ -329,10 +329,12 @@ impl BuiltinCommandHandler for KeybindingsHandler {
     }
 
     fn description(&self) -> &str {
-        // 1:1 with the TS `keybindings/index.ts` `description` field. Not routed
-        // through `core_description` (which returns the unimplemented fallback
-        // for this non-core name).
-        "Open or create your keybindings configuration file"
+        // 1:1 with the oracle command object
+        // (`c_T={name:"keybindings",description:"Open your keyboard shortcuts
+        // file",…}` @ cc2.1.238 295148735 — byte-identical in 2.1.220). Kept as
+        // a literal rather than routed through `core_description` so the
+        // handler stays self-describing for this non-core name.
+        "Open your keyboard shortcuts file"
     }
 }
 
@@ -562,9 +564,6 @@ mod tests {
     fn name_and_description() {
         let h = KeybindingsHandler::new();
         assert_eq!(h.name(), "keybindings");
-        assert_eq!(
-            h.description(),
-            "Open or create your keybindings configuration file"
-        );
+        assert_eq!(h.description(), "Open your keyboard shortcuts file");
     }
 }

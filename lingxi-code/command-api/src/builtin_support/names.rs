@@ -25,7 +25,9 @@
 //! from 100 to **101**. Its stub-bucket siblings from the same triage
 //! (`powerup`, `scroll-speed` = interactive-only net-new; `install`,
 //! `sandbox-toggle` = interactive/host-bound already-in-surface stubs) were
-//! kept as stubs / not added, so only the total moved. `/btw` is now wired
+//! kept as stubs / not added, so only the total moved. (SLASH-13 later
+//! reversed the `powerup` half of that call — see the 2026-08-20 note below.)
+//! `/btw` is now wired
 //! through batch 8 and the TUI retains its most recent side-question panel.
 //!
 //! The 2026-07-14 slash-parity pass (H-BIN-11 vs claude-code v2.1.207) added
@@ -37,7 +39,8 @@
 //! terminal`, `isEnabled:()=>!0`), `focus` (`Toggle focus view: just your
 //! prompt, summary, and response`, `requires:{ink}`), `tui` (`Set the terminal
 //! UI renderer (default | fullscreen)`, ungated), and `usage-credits`
-//! (`Configure usage credits to keep working when you hit a limit`, two objects
+//! (`Configure usage credits or request them from your admin when you hit a
+//! limit`, two objects
 //! gated by `bnr()` = `!DISABLE_EXTRA_USAGE_COMMAND && (rateLimitStatus!==null
 //! || isOverageProvisioningAllowed())`, split interactive/non-interactive on
 //! `isNonInteractiveSession()`). That oracle total was **106**: 105 after
@@ -49,15 +52,49 @@
 //! four are visible. The 2026-08-13 follow-up adds the pre-existing 2.1.205
 //! `local-jsx` `/workflows` command already implemented by the TUI, re-locking
 //! the shared registry surface at **107**.
+//!
+//! The 2026-08-20 byte-alignment pass vs claude-code **2.1.238** keeps the
+//! total at **107** through a one-in / one-out swap: `review` was DELETED
+//! upstream (`name:"review"` 2.1.220 = 1 hit, 2.1.238 = 0; the PR-review
+//! surface moved into the bundled `code-review` skill), and `subtask`
+//! (`{type:"local-jsx",name:"subtask",description:"Send a subagent off with
+//! your full context; its result comes back here",argumentHint:"<task>"}`
+//! @ 2.1.238 296247354) — long implemented by `command_core::subtask` but
+//! never listed here, so never advertised in `/help` or the palette — takes
+//! its slot.
+//!
+//! The same pass then re-locked 107 -> **108** for SLASH-13: `powerup`
+//! (`Rkl={type:"local-jsx",name:"powerup",description:"Discover Claude Code
+//! features through quick interactive lessons",requires:{ink:!0}}`
+//! @ 2.1.238 296124285) is an **ungated** member of the builtin command table
+//! `ijT()` — no `isEnabled`, no `isHidden` — so upstream lists it in `/help`
+//! and the palette for every interactive session. The 2026-07-04 triage above
+//! excluded it for having no LingXi body, but 39 of the port's other visible
+//! `/help` rows are likewise unimplemented (the registry mirrors the oracle's
+//! ADVERTISED surface; the body status is tracked separately in the parity
+//! fixture), so the exclusion was inconsistent. It registers through
+//! `register_all_builtin_commands`'s pass-1 stub loop like any other
+//! body-less name.
+//!
+//! Its two SLASH-13 siblings stay out, both verified at the oracle:
+//! * `scroll-speed` — `cFT={…name:"scroll-speed",…,isEnabled:()=>{if(!Ws())
+//!   return!1;…}}` @296167417. `Ws()` @285037919 is the FULLSCREEN-renderer
+//!   predicate; with no `tui` setting it falls through to the statsig gates
+//!   `QVb()` (`tengu_amber_creek`, default `!1`) and `gbGateCached`, so the
+//!   command is filtered out of a fresh default session — the port's omission
+//!   already matches the default advertised surface.
+//! * `daemon` — registered only via `daemon:{open:()=>nXe(),whenOpen:[mRl],
+//!   whenClosed:[]}` @296430738 and `function nXe(){return!1}` @284247792, so
+//!   it never reaches the command table at all.
 
 /// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **107** for the current oracle.
+/// ASCII-sorted. Locked at length **108** for the current oracle.
 ///
 /// Changing the count or membership requires bumping the parity fixture
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
 /// reflect the current membership lock).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 107] = &[
+pub const BUILTIN_COMMAND_NAMES: &[&str; 108] = &[
     "add-dir",
     "advisor",
     "agents",
@@ -72,6 +109,11 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 107] = &[
     "bridge",
     "brief",
     "btw",
+    // SLASH-06: `bug` is its OWN command upstream, not an alias of `feedback`.
+    // Oracle 2.1.238 @248164336: `{aliases:["share"],type:"local-jsx",
+    // name:"bug",description:"Report a bug or share your conversation",
+    // argumentHint:"[report]",immediate:!0,requires:{ink:!0}}`.
+    "bug",
     "bughunter",
     "cd",
     "chrome",
@@ -126,6 +168,11 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 107] = &[
     "permissions",
     "plan",
     "plugin",
+    // SLASH-13 (cc2.1.238 @296124285): ungated `local-jsx` member of the
+    // `ijT()` command table — upstream advertises it in every interactive
+    // session. No LingXi body yet; pass-1 of `register_all_builtin_commands`
+    // gives it the shared stub handler, like the other body-less names.
+    "powerup",
     "privacy-settings",
     "rate-limit-options",
     "recap",
@@ -137,18 +184,21 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 107] = &[
     "rename",
     "reset-limits",
     "resume",
-    "review",
     "rewind",
     "sandbox-toggle",
     "security-review",
     "session",
-    "share",
+    // SLASH-06: `share` is NOT a command — it is `bug`'s alias (oracle
+    // @248164336). `name:"share"` has ZERO hits in both the 2.1.220 and the
+    // 2.1.238 binary; the old "compiled stub" annotation came from the stale
+    // de-minified source, not from the shipped binary.
     "skill-doctor",
     "skills",
     "status",
     "statusline",
     "stickers",
     "stop",
+    "subtask",
     "summary",
     "tag",
     "tasks",
@@ -265,7 +315,10 @@ pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
         "break-cache",
         "compiled stub in claude-code (internal cache control)",
     ),
-    ("share", "compiled stub in claude-code"),
+    // SLASH-06: `share` was listed here as a compiled stub. It is not a command
+    // at all — it is the `bug` command's alias (oracle 2.1.238 @248164336), and
+    // `name:"share"` has zero hits in the 2.1.220 and 2.1.238 binaries. The
+    // entry came from the stale de-minified source tree.
 ];
 
 // ============================================================================
@@ -361,10 +414,7 @@ pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
         "reset-limits",
         "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
     ),
-    (
-        "share",
-        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
-    ),
+    // SLASH-06: `share` removed — it is `bug`'s alias, not a stub command.
     (
         "summary",
         "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
@@ -448,6 +498,99 @@ pub const HIDDEN_PALETTE_COMMANDS: &[&str] = &[
 /// only the default (off) state is modeled statically here.
 pub const USAGE_CREDITS_BNR_GATED: &[&str] = &["usage-credits"];
 
+/// **Statically DISABLED named commands** (SLASH-14) — real, implemented
+/// builtin command objects whose every upstream twin carries the literal
+/// `isEnabled:()=>!1`. They are *not* `name:'stub'` no-ops (so they do not
+/// belong in [`CORRECT_BY_DESIGN_STUBS`], which must stay disjoint from the
+/// implemented core set), and they are *not* `isHidden`-flagged (so they do not
+/// belong in [`HIDDEN_PALETTE_COMMANDS`]) — but claude-code's
+/// `commands.filter(c => !c.isHidden && !$te(c))` drops them all the same,
+/// because `$te(c)` (isEnabled() === off) is true. They remain dispatchable
+/// when typed in full, exactly like the other filtered buckets.
+///
+/// Verified byte-for-byte in the 2.1.238 oracle @296268759 — BOTH `/version`
+/// objects are disabled (identical in 2.1.220, so this is a long-standing port
+/// divergence rather than 2.1.238 drift):
+///
+/// ```text
+/// C$T={type:"local-jsx",name:"version",description:"Show this session's version (autoupdate may have a newer one)",isEnabled:()=>!1,immediate:!0,requires:{ink:!0}}
+/// gAl={type:"local",name:"version",description:"Print the version this session is running (not what autoupdate downloaded)",isEnabled:()=>!1,get isHidden(){return!Dn()},supportsNonInteractive:!0,…}
+/// ```
+///
+/// `tui/src/command.rs` already carries `/version` with `advertised: false`;
+/// this table makes the headless/bridge registry agree with it.
+pub const STATICALLY_DISABLED_COMMANDS: &[&str] = &["version"];
+
+/// **`terminalOriented:!0` commands** (SLASH-15) — the builtins claude-code
+/// 2.1.238 marks as belonging to the terminal host, so a thin/remote client
+/// knows to route them locally. NEW in 2.1.238: every 2.1.220 command object
+/// carries no `terminalOriented` key at all.
+///
+/// Verified per-object in the 2.1.238 oracle. `terminalOriented` occurs at
+/// **15** byte offsets there and at **0** in 2.1.220 (`grep -abo`; note
+/// `grep -c` on this binary counts LINES, not occurrences, so it under-reports
+/// — an earlier revision of this comment claimed "9 raw hits" on that basis):
+/// six are the command objects below, four are the two bundled-command
+/// normalizers (`terminalOriented:e.terminalOriented` @287816908 / @287821547,
+/// each written twice), three are the consumers quoted further down
+/// (@298685916, @307252016, @307252579), one is the bundled `doctor` SKILL
+/// (see the note at the end), and one is a snapshot copy (@102087824).
+///
+/// ```text
+/// @294987032 {type:"local-jsx",name:"color",…,terminalOriented:!0,…}
+/// @294987135 {type:"local",name:"color",terminalOriented:!0,supportsNonInteractive:!0,…}
+/// @296279356 {type:"local-jsx",name:"exit",aliases:["quit"],…,terminalOriented:!0,…}
+/// @296279442 {type:"local",name:"exit",terminalOriented:!0,supportsNonInteractive:!0,…}
+/// @296260416 {type:"local",name:"reload-plugins",…,terminalOriented:!0,thinClientDispatch:"control-request",…}
+/// @296309820 {type:"prompt",name:"statusline",…,terminalOriented:!0,disableNonInteractive:!0,…}
+/// ```
+///
+/// The flag is not purely internal: the stream-json `system`/`init` emitter
+/// (`Fin`, @298685916) derives a payload key from it —
+///
+/// ```text
+/// let n=e.commands.filter((i)=>i.userInvocable!==!1&&i.terminalOriented===!0).map((i)=>i.name);
+/// …slash_commands:…, ...n.length>0&&{terminal_slash_commands:n}, apiKeySource:…
+/// ```
+///
+/// — i.e. `terminal_slash_commands` is spread in directly AFTER `slash_commands`
+/// and only when the list is non-empty (`terminal_slash_commands` is absent
+/// from 2.1.220 entirely).
+///
+/// The bridge/SDK announcer is the mirror image — it SUBTRACTS the flagged
+/// entries from what it announces (@307252016 / @307252579):
+///
+/// ```text
+/// function _o(tt=l().mcp.commands){return Fi(tt).filter((wt)=>wt.terminalOriented!==!0)}
+/// …writeSdkMessages([LSs({…,commands:_o(Ho.mcp.commands),…,loadedSkills:Ct.filter((Ri)=>Ri.terminalOriented!==!0),…})])
+/// ```
+///
+/// NOTE 1 (CLOSED 2026-08-21): the emission half is wired. `apps/cli`'s
+/// `build_init_params` (`apps/cli/src/stream_json.rs`) derives
+/// `terminal_slash_commands` by running the advertised `slash_commands` list
+/// through [`is_terminal_oriented`], and `build_init_frame` spreads it into the
+/// `system`/`init` frame immediately after `slash_commands` and only when
+/// non-empty, matching `Fin` (@298685916). The mirror-image consumer — the
+/// bridge/SDK announcer's `_o()` SUBTRACTION (@307252579) — belongs to
+/// `apps/bridge-server`, whose announcer still does no filtering; that is the
+/// one remaining unconsumed use of this table.
+///
+/// NOTE 2 (open, for the skills owner): upstream also flags the BUNDLED SKILL
+/// `doctor` — `wd({name:"doctor",aliases:["checkup"],…,terminalOriented:!0,…})`
+/// @304067710 — and the emitter's `e.commands` includes bundled skills (they
+/// pass through the normalizers above). The port models `doctor` as a builtin
+/// COMMAND, not a bundled skill, so it is left out of this table: adding it
+/// would encode a skill's flag in the command registry. Whoever wires the
+/// emitter must decide which of the two models the payload should follow.
+pub const TERMINAL_ORIENTED_COMMANDS: &[&str] = &["color", "exit", "reload-plugins", "statusline"];
+
+/// Returns `true` when `name` carries claude-code 2.1.238's
+/// `terminalOriented:!0` flag — see [`TERMINAL_ORIENTED_COMMANDS`].
+#[must_use]
+pub fn is_terminal_oriented(name: &str) -> bool {
+    TERMINAL_ORIENTED_COMMANDS.contains(&name)
+}
+
 /// `(command, aliases)` for the builtins that ship an `aliases:` array in
 /// claude-code (cp-03). The slash palette folds these into the fuzzy candidate
 /// set (so typing `/cost` finds `/usage`) and, when a row matched via a typed
@@ -456,16 +599,20 @@ pub const USAGE_CREDITS_BNR_GATED: &[&str] = &["usage-credits"];
 pub const COMMAND_ALIASES: &[(&str, &[&str])] = &[
     // H-BIN-11 cc2.1.207: `name:"background",aliases:["bg"]`.
     ("background", &["bg"]),
+    // SLASH-06: upstream these are TWO commands, and the alias hangs off `bug`,
+    // not `feedback` (oracle 2.1.238 @294965131 / @248164336):
+    //   feedback: {type:"local-jsx",name:"feedback",…}          — no aliases
+    //   bug:      {aliases:["share"],type:"local-jsx",name:"bug",…}
+    ("bug", &["share"]),
     ("clear", &["reset", "new"]),
     ("config", &["settings"]),
     ("desktop", &["app"]),
     ("exit", &["quit"]),
-    ("feedback", &["bug"]),
     ("mobile", &["ios", "android"]),
     ("permissions", &["allowed-tools"]),
     ("plugin", &["plugins", "marketplace"]),
     ("resume", &["continue"]),
-    ("rewind", &["checkpoint"]),
+    ("rewind", &["checkpoint", "undo"]),
     ("session", &["remote"]),
     ("tasks", &["bashes"]),
     ("usage", &["cost", "stats"]),
@@ -495,9 +642,12 @@ pub fn command_aliases(name: &str) -> &'static [&'static str] {
 /// - [`HIDDEN_PALETTE_COMMANDS`] — the 4 enabled-but-hidden named commands
 ///   (`auto-mode-setup`, `extra-usage`, `heapdump`, `rate-limit-options`); and
 /// - [`USAGE_CREDITS_BNR_GATED`] — the 1 `bnr()`-gated command
-///   (`usage-credits`), off-by-default in a fresh no-subscription session.
+///   (`usage-credits`), off-by-default in a fresh no-subscription session; and
+/// - [`STATICALLY_DISABLED_COMMANDS`] — the 1 command (`version`) whose every
+///   upstream twin is `isEnabled:()=>!1` (SLASH-14).
 ///
-/// Total = 28 filtered names. The host-bound `btw` command and the implemented
+/// Total = 22 + 4 + 1 + 1 = **28** filtered names, leaving 108 − 28 = 80
+/// visible in `/help`. The host-bound `btw` command and the implemented
 /// `/reload-plugins` command remain visible. Likewise `install-slack-app`,
 /// `mobile`, and `desktop` carry no
 /// default-off hidden gate (`desktop`'s `Dsl()` returns `true`) and stay
@@ -507,6 +657,7 @@ pub fn command_aliases(name: &str) -> &'static [&'static str] {
 pub fn is_palette_hidden(name: &str) -> bool {
     HIDDEN_PALETTE_COMMANDS.contains(&name)
         || USAGE_CREDITS_BNR_GATED.contains(&name)
+        || STATICALLY_DISABLED_COMMANDS.contains(&name)
         || CORRECT_BY_DESIGN_STUBS.iter().any(|(n, _)| *n == name)
 }
 
@@ -574,33 +725,44 @@ pub fn core_description(name: &str) -> &'static str {
         // returns static guidance. Description verbatim from the 2.1.198
         // binary command object (`name:"agents"`, description `(removed) …`).
         "agents" => "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/",
-        // WIZARD-06 (2.1.220). Byte-exact from the `type:"local"` object
-        // (the non-interactive half; the `local-jsx` twin shares the name).
-        "auto-mode-setup" => {
-            "Set up and customise auto mode \u{2014} environment context, plus optional rule tweaks"
-        }
+        // WIZARD-06. SLASH-03: re-worded upstream between 2.1.220 and 2.1.238.
+        // Byte-exact from BOTH 2.1.238 twins (oracle @294963678):
+        //   mSl={type:"local",name:"auto-mode-setup",supportsNonInteractive:!0,
+        //        description:"Teach auto mode about your environment, plus optional rule tweaks",…}
+        //   hhT={type:"local-jsx",name:"auto-mode-setup",
+        //        description:"Teach auto mode about your environment, plus optional rule tweaks",…}
+        // `count` of the new string: 2.1.238 = 2, 2.1.220 = 0; the old
+        // "Set up and customise auto mode — environment context, …" has 0 hits
+        // in 2.1.238.
+        "auto-mode-setup" => "Teach auto mode about your environment, plus optional rule tweaks",
         "clear" => "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
         "compact" => "Free up context by summarizing the conversation so far",
         "config" => "Open settings",
         "doctor" => "Diagnose and verify your LingXi installation and settings",
         "exit" => "Exit the CLI",
         "help" => "Show help and available commands",
-        "hooks" => "Manage hooks",
+        "hooks" => "View hook configurations for tool events",
         "init" => "Initialize a new LINGXI.md file with codebase documentation",
         "login" => "Sign in with your Anthropic account",
         "logout" => "Sign out from your Anthropic account",
         "mcp" => "Manage MCP servers",
-        "memory" => "Open a memory file in your editor",
+        "memory" => "Edit LINGXI.md files and memory settings",
         "model" => "Set the AI model for LingXi",
         "permissions" => "Manage allow and deny tool permission rules",
         "status" => "Show LingXi status including version, model, account, API connectivity, and tool statuses",
         // claude-code v2.1.183 live `usage` command object
         // (`name:"usage",aliases:["cost","stats"],...`).
         "usage" => "Show session cost, plan usage, and what's contributing to your limits",
-        "version" => "Print version information",
+        // SLASH-14: `Print version information` matched NEITHER oracle object.
+        // Both 2.1.238 twins @296268759 are `isEnabled:()=>!1`, so `/version`
+        // is filtered out of `/help` and the palette entirely (see
+        // [`STATICALLY_DISABLED_COMMANDS`]); it stays dispatchable, and the
+        // interactive twin's string is what the TUI row already shows, so the
+        // two port registries now agree.
+        "version" => "Show this session's version (autoupdate may have a newer one)",
         // (cp-01) Remaining visible builtins — real claude-code descriptions.
         "add-dir" => "Add a new working directory",
-        "advisor" => "Configure the advisor model",
+        "advisor" => "Let Claude consult a stronger model at key moments",
         // Net-new headless auto-compact-window reporter (see
         // `command_core::autocompact`). Verbatim from the 2.1.198 binary's
         // headless `type:"local"` autocompact command object.
@@ -612,7 +774,10 @@ pub fn core_description(name: &str) -> &'static str {
         "bridge" => "Connect this terminal for remote-control sessions",
         "cd" => "Move this session to a new working directory",
         "btw" => "Ask a quick side question without interrupting the main conversation",
-        "chrome" => "Claude in Chrome (Beta) settings",
+        // SLASH-06: byte-exact from oracle 2.1.238 @248164336. No product name
+        // appears in this string, so there is nothing to rebrand.
+        "bug" => "Report a bug or share your conversation",
+        "chrome" => "Open Claude in Chrome settings",
         "color" => "Set the prompt bar color for this session",
         "commit" => "Create a git commit",
         "commit-push-pr" => "Commit, push, and open a PR",
@@ -632,11 +797,20 @@ pub fn core_description(name: &str) -> &'static str {
         "install" => "Install LingXi native build",
         "install-github-app" => "Set up Claude GitHub Actions for a repository",
         "install-slack-app" => "Install the Claude Slack app",
-        "keybindings" => "Open or create your keybindings configuration file",
+        "keybindings" => "Open your keyboard shortcuts file",
         "mobile" => "Show QR code to download the Claude mobile app",
         "passes" => "Share a free week of LingXi with friends and earn extra usage",
         "plan" => "Enable plan mode or view the current session plan",
         "plugin" => "Manage LingXi plugins",
+        // SLASH-13. Oracle 2.1.238 @296124285:
+        //   Rkl={type:"local-jsx",name:"powerup",description:"Discover Claude
+        //        Code features through quick interactive lessons",
+        //        requires:{ink:!0}}
+        // Product-name substitution only, matching the rest of this table
+        // ("Order Claude Code stickers" -> "Order LingXi stickers", "Generate a
+        // report analyzing your Claude Code sessions" -> "... your LingXi
+        // sessions"), both of which are 2 / 4 raw hits in the same binary.
+        "powerup" => "Discover LingXi features through quick interactive lessons",
         "privacy-settings" => "View and update your privacy settings",
         "release-notes" => "View release notes",
         "reload-plugins" => "Activate pending plugin changes in the current session",
@@ -644,7 +818,6 @@ pub fn core_description(name: &str) -> &'static str {
         "remote-setup" => "Setup LingXi on the web (requires connecting your GitHub account)",
         "rename" => "Rename the current conversation",
         "resume" => "Resume a previous conversation",
-        "review" => "Review a pull request",
         "rewind" => "Restore the code and/or conversation to a previous point",
         "sandbox-toggle" => "Toggle sandbox mode for bash commands",
         "security-review" => "Complete a security review of the pending changes on the current branch",
@@ -652,13 +825,15 @@ pub fn core_description(name: &str) -> &'static str {
         "skills" => "List available skills",
         "statusline" => "Set up LingXi's status line UI",
         "stickers" => "Order LingXi stickers",
-        "tasks" => "List and manage background tasks",
+        "tasks" => "View and manage everything running in the background",
         "terminal-setup" => "Install Shift+Enter key binding for newlines",
         "theme" => "Change the theme",
         "tui" => "Set the terminal UI renderer (default | fullscreen)",
         "ultraplan" => "LingXi on the web drafts an advanced plan you can edit and approve",
         "upgrade" => "Upgrade to Max for higher rate limits and more Opus",
-        "usage-credits" => "Configure usage credits to keep working when you hit a limit",
+        "usage-credits" => {
+            "Configure usage credits or request them from your admin when you hit a limit"
+        }
         // Deprecated hidden alias of `/usage-credits`
         // (`name:"extra-usage",description:"Renamed to /usage-credits",isHidden:!0`).
         "extra-usage" => "Renamed to /usage-credits",
@@ -667,12 +842,16 @@ pub fn core_description(name: &str) -> &'static str {
         // Batch-8 implemented commands (real handlers in `command-core`); their
         // `description()` bodies carry the verbatim oracle strings, mirrored here
         // so the palette / `/help` rows never show the placeholder fallback.
-        "fork" => "Spawn a background agent that inherits the full conversation",
+        "fork" => "Copy this conversation into a new background session and keep working here",
         "goal" => "Set a goal — keep working until the condition is met",
         "recap" => "Generate a one-line session recap now",
         "reload-skills" => "Pick up skills added or changed on disk during this session",
         "skill-doctor" => "Show which loaded skills are unused and costing context",
         "stop" => "Stop this background session; transcript and worktree are kept",
+        // cc2.1.238 `w$m` (`/subtask`, registered by `register_core_batch_8`
+        // whenever agent view is on — the default). Verbatim command-object
+        // description; without this row `/help` showed the placeholder.
+        "subtask" => "Send a subagent off with your full context; its result comes back here",
         _ => "(unimplemented in v0.6.0)",
     }
 }
@@ -692,8 +871,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_107() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 107);
+    fn total_count_locked_at_108() {
+        // 107 until SLASH-13 added the ungated `powerup` command object.
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 108);
     }
 
     #[test]
@@ -737,8 +917,134 @@ mod tests {
         );
         assert_eq!(
             core_description("usage-credits"),
-            "Configure usage credits to keep working when you hit a limit"
+            "Configure usage credits or request them from your admin when you hit a limit"
         );
+    }
+
+    /// cc2.1.238 byte-alignment: the one-in / one-out membership swap plus the
+    /// six `/help` one-liners and the two changed descriptions, each verbatim
+    /// from a 2.1.238 command object.
+    #[test]
+    fn cc_2_1_238_command_surface() {
+        // `/review` was DELETED upstream (`name:"review"`: 220 = 1, 238 = 0);
+        // `/subtask` took its slot in the then-107-name lock.
+        assert!(
+            !BUILTIN_COMMAND_NAMES.contains(&"review"),
+            "/review was removed in claude-code 2.1.238"
+        );
+        assert!(
+            BUILTIN_COMMAND_NAMES.contains(&"subtask"),
+            "/subtask is registered by batch 8 and must be advertised"
+        );
+        assert!(!is_palette_hidden("subtask"));
+        assert_eq!(
+            core_description("subtask"),
+            "Send a subagent off with your full context; its result comes back here"
+        );
+
+        // `/rewind` carries THREE names upstream:
+        // `aliases:["checkpoint","undo"]` (238 and 220 alike).
+        assert_eq!(command_aliases("rewind"), &["checkpoint", "undo"]);
+
+        // SLASH-14: both `/version` objects are `isEnabled:()=>!1`, so the
+        // command is filtered out of `/help` and the palette while staying
+        // dispatchable and a member of the locked name list.
+        assert!(BUILTIN_COMMAND_NAMES.contains(&"version"));
+        assert!(
+            is_palette_hidden("version"),
+            "/version is isEnabled:()=>!1 upstream and must not be advertised"
+        );
+        assert_eq!(
+            core_description("version"),
+            "Show this session's version (autoupdate may have a newer one)"
+        );
+
+        // SLASH-13: `/powerup` is an UNGATED `local-jsx` object in the oracle's
+        // `ijT()` table (no isEnabled, no isHidden), so upstream advertises it
+        // in every interactive session. Its two siblings stay out on oracle
+        // evidence: `scroll-speed` needs `Ws()` (the fullscreen renderer,
+        // statsig-off by default) and `daemon` hangs off `open:()=>nXe()` with
+        // `nXe(){return!1}`.
+        assert!(BUILTIN_COMMAND_NAMES.contains(&"powerup"));
+        assert!(!is_palette_hidden("powerup"));
+        assert_eq!(
+            core_description("powerup"),
+            "Discover LingXi features through quick interactive lessons"
+        );
+        assert!(!BUILTIN_COMMAND_NAMES.contains(&"scroll-speed"));
+        assert!(!BUILTIN_COMMAND_NAMES.contains(&"daemon"));
+
+        // SLASH-03: `/auto-mode-setup` was re-worded between 220 and 238
+        // (both twins). It stays palette-hidden, so this only shows up on the
+        // registry/bridge listing, not in `/help`.
+        assert_eq!(
+            core_description("auto-mode-setup"),
+            "Teach auto mode about your environment, plus optional rule tweaks"
+        );
+
+        // 220 -> 238 description changes (LingXi brands CLAUDE.md as LINGXI.md).
+        assert_eq!(
+            core_description("memory"),
+            "Edit LINGXI.md files and memory settings"
+        );
+        // Agent view is on by default, so `/fork` advertises `b$m`, the twin
+        // `register_core_batch_8` actually registers.
+        assert_eq!(
+            core_description("fork"),
+            "Copy this conversation into a new background session and keep working here"
+        );
+
+        // Six one-liners that matched NO oracle command object on any surface.
+        for (name, want) in [
+            ("hooks", "View hook configurations for tool events"),
+            ("keybindings", "Open your keyboard shortcuts file"),
+            ("tasks", "View and manage everything running in the background"),
+            ("chrome", "Open Claude in Chrome settings"),
+            ("advisor", "Let Claude consult a stronger model at key moments"),
+            (
+                "usage-credits",
+                "Configure usage credits or request them from your admin when you hit a limit",
+            ),
+        ] {
+            assert_eq!(core_description(name), want, "/{name} description drift");
+        }
+    }
+
+    #[test]
+    fn terminal_oriented_set_is_the_four_2_1_238_objects() {
+        // Byte-verified from the 2.1.238 command objects; 2.1.220 has the flag
+        // on NO object at all, so this whole table is 2.1.238 drift.
+        assert_eq!(
+            TERMINAL_ORIENTED_COMMANDS,
+            &["color", "exit", "reload-plugins", "statusline"]
+        );
+        let full: std::collections::HashSet<&str> = BUILTIN_COMMAND_NAMES.iter().copied().collect();
+        for name in TERMINAL_ORIENTED_COMMANDS {
+            assert!(full.contains(name), "'{name}' is not a real builtin");
+            assert!(is_terminal_oriented(name));
+            // The oracle's init filter is
+            // `userInvocable!==!1 && terminalOriented===!0`, so a hidden or
+            // disabled command could still qualify — but none of these four is
+            // filtered out of the palette, which is worth pinning.
+            assert!(!is_palette_hidden(name), "'{name}' unexpectedly hidden");
+        }
+        assert!(!is_terminal_oriented("help"));
+    }
+
+    #[test]
+    fn statically_disabled_names_are_real_builtins_and_unique_to_that_bucket() {
+        let full: std::collections::HashSet<&str> = BUILTIN_COMMAND_NAMES.iter().copied().collect();
+        for name in STATICALLY_DISABLED_COMMANDS {
+            assert!(full.contains(name), "'{name}' is not a real builtin");
+            // The four filter buckets must stay disjoint so the 28-name total
+            // (and therefore the /help line count) is unambiguous.
+            assert!(!HIDDEN_PALETTE_COMMANDS.contains(name), "'{name}' twice");
+            assert!(!USAGE_CREDITS_BNR_GATED.contains(name), "'{name}' twice");
+            assert!(
+                !CORRECT_BY_DESIGN_STUBS.iter().any(|(n, _)| n == name),
+                "'{name}' is not a compiled stub — it has a real implementation"
+            );
+        }
     }
 
     // ── #63 DISABLE_*_COMMAND env gates ──────────────────────────────────────
@@ -909,11 +1215,13 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn intentionally_disabled_count_is_23() {
+    fn intentionally_disabled_count_is_22() {
         assert_eq!(
             INTENTIONALLY_DISABLED_COMMANDS.len(),
-            23,
-            "disabled command classification is locked at 23 commands"
+            22,
+            "disabled command classification is locked at 22 commands \
+             (23 until SLASH-06 removed `share`, which is not a command at all \
+             but the `bug` command's alias)"
         );
     }
 
@@ -981,10 +1289,11 @@ mod tests {
         assert!(table.contains_key("thinkback-play"));
         // entitlement-gated.
         assert!(table.contains_key("brief"));
-        // compiled `name: 'stub'` files.
+        // compiled `name: 'stub'` files. `share` used to be listed here; it is
+        // not a command at all (SLASH-06 — it is `bug`'s alias), so it was
+        // removed rather than re-pointed.
         for n in [
             "env",
-            "share",
             "summary",
             "teleport",
             "autofix-pr",
@@ -1010,7 +1319,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 107);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 108);
     }
 
     // ========================================================================
@@ -1025,8 +1334,11 @@ mod tests {
     }
 
     #[test]
-    fn correct_by_design_count_is_23() {
-        assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 23);
+    fn correct_by_design_count_is_22() {
+        // 23 until SLASH-06: `share` was classified as a compiled stub on the
+        // strength of the stale de-minified source. The shipped binary has no
+        // `name:"share"` command — it is `bug`'s alias.
+        assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 22);
     }
 
     #[test]
@@ -1115,7 +1427,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "all disabled commands are correct-by-design"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 107);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 108);
     }
 
     #[test]

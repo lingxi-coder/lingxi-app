@@ -32,11 +32,12 @@
 //!   `"Edit"`, `"Write"`, `"Bash"`) matching the claude-code wire names, rather
 //!   than imported constants from other crates (avoids a cross-crate dep).
 //! - **Co-Authored-By attribution.** claude-code injects a dynamic
-//!   `getAttributionTexts()` commit/PR attribution. This crate has no
-//!   attribution source, so the optional attribution clauses are omitted (the
-//!   commit step reads "Create the commit with a message." and the example
-//!   HEREDOCs carry no trailing attribution) — matching the TS shape when
-//!   `commitAttribution`/`prAttribution` are empty.
+//!   `getAttributionTexts()` commit/PR attribution into FIVE slots across the
+//!   two git sections. Its DEFAULT (no settings) is NON-empty, so
+//!   [`attribution_texts`] reproduces the default pair and the five slots keep
+//!   the oracle's conditional shape. Only the settings half
+//!   (`includeCoAuthoredBy: false` / a custom `attribution` object) is
+//!   unmodelled here — see [`attribution_texts`] for the residual.
 //!
 //! ## BASH.4 note (cwd persistence)
 //!
@@ -102,10 +103,25 @@ fn is_env_truthy(name: &str) -> bool {
     traits::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
 
+/// Port of claude-code `areBackgroundTasksDisabled` (2.1.238 `WA()`:
+/// `getSettings().backgroundTasksDisabled || env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`).
+///
+/// LingXi has no `backgroundTasksDisabled` settings key in this crate, so only
+/// the env half is modelled (the settings half defaults to `false`, so the env
+/// check is the sole observable gate here).
+///
+/// Two call sites depend on it, exactly as the oracle does: the prompt's
+/// `run_in_background` bullet (`getBackgroundUsageNote`) and the Bash INPUT
+/// SCHEMA, which drops the `run_in_background` property entirely when background
+/// tasks are off (oracle `egm`: `WA() ? Qhm().omit({run_in_background:!0, …}) : …`).
+pub(crate) fn background_tasks_disabled() -> bool {
+    is_env_truthy("LINGXI_DISABLE_BACKGROUND_TASKS")
+}
+
 /// Port of `getBackgroundUsageNote` (`prompt.ts:35`). Returns `None` when
 /// `LINGXI_DISABLE_BACKGROUND_TASKS` is truthy.
 fn background_usage_note() -> Option<String> {
-    if is_env_truthy("LINGXI_DISABLE_BACKGROUND_TASKS") {
+    if background_tasks_disabled() {
         return None;
     }
     Some(
@@ -118,6 +134,26 @@ fn background_usage_note() -> Option<String> {
     )
 }
 
+/// Port of claude-code 2.1.238 `JQd()` — the gate on the CONCISE prompt's
+/// "Commands are cheap to run…" bullet:
+///
+/// ```js
+/// function Q$r(e,t,r){return e||sti(r)||VC()?.[t]===!0||it(t,!1)}
+/// function JQd(){return Q$r(V.CLAUDE_CODE_GORSE_PLOVER,DKb,void 0)}
+/// ```
+///
+/// Four sources OR'd together; three of them (the cohort helper, the flag
+/// override map, and the statsig gate `it(DKb,false)`) are host-runtime signals
+/// with no seam in this crate and all default FALSE, so only the env half is
+/// modelled — the same shape as [`background_tasks_disabled`].
+///
+/// NOTE the truthiness rule: `Q$r`'s first term is a BARE `e`, i.e. plain JS
+/// string truthiness (any non-empty value enables it), NOT the strict
+/// `isEnvTruthy` allowlist [`is_env_truthy`] implements.
+fn cheap_commands_bullet_enabled() -> bool {
+    std::env::var("LINGXI_GORSE_PLOVER").is_ok_and(|v| !v.is_empty())
+}
+
 /// Port of `shouldIncludeGitInstructions` (`aOt()`, `utils/gitSettings.ts`).
 ///
 /// R-MINOR: claude-code omits the git/PR section when
@@ -127,6 +163,54 @@ fn background_usage_note() -> Option<String> {
 /// toggle defaults to "on", so the env check is the only observable gate here).
 fn should_include_git_instructions() -> bool {
     !is_env_truthy("LINGXI_DISABLE_GIT_INSTRUCTIONS")
+}
+
+// ===== Commit / PR attribution ==============================================
+
+/// Commit trailer — the port's spelling of claude-code 2.1.238 `rcT`'s
+/// `Co-Authored-By: ${modelDisplayName} <noreply@anthropic.com>`.
+///
+/// The oracle resolves the display name as
+/// `FP(model) ? firstPartyName : Hhm(model) ? name(model) : "Claude"` — i.e.
+/// plain `"Claude"` for anything it cannot recognise as a first-party model.
+/// This crate is handle-free (no model catalog, and the VERBOSE builder gets no
+/// model at all), so it takes that fallback arm — the SAME literal the port's
+/// equally handle-free `/commit` handler already ships
+/// (`commands/core/src/commit.rs`).
+const COMMIT_ATTRIBUTION: &str = "Co-Authored-By: Claude <noreply@anthropic.com>";
+
+/// PR footer — claude-code 2.1.238 `Ohm()`:
+/// `` `🤖 Generated with [Claude Code](${CLAUDE_CODE_URL})` `` (the
+/// `tengu_pr_footer_surface_suffix` gate that appends `" via <surface>"` is
+/// default-false, so the bare footer is the shipped text).
+///
+/// Re-branded exactly as the port already re-brands it in
+/// `commands/core/src/commit_push_pr.rs` (product name swapped, URL kept).
+const PR_ATTRIBUTION: &str = "🤖 Generated with [LingXi](https://claude.com/claude-code)";
+
+/// Port of claude-code 2.1.238 `hvt()` → `rcT()` — the `{commit, pr}` pair the
+/// Bash git sections interpolate:
+///
+/// ```js
+/// function rcT(){…let n=`Co-Authored-By: ${t} <noreply@anthropic.com>`,r=Ohm(),o=Vo(),i=o.attribution;
+///  if(i!==void 0&&V8s(i))return{commit:i.commit??n,pr:i.pr??r};
+///  if(o.includeCoAuthoredBy===!1)return …{commit:"",pr:""};
+///  return{commit:n,pr:r}}
+/// ```
+///
+/// The DEFAULT (no settings) arm is `{commit: n, pr: r}` — NON-empty — which is
+/// what this returns.
+///
+/// RESIDUAL: the two settings-driven arms (`attribution.commit` /
+/// `attribution.pr` overrides, and `includeCoAuthoredBy: false` ⇒ both empty)
+/// have no settings reader in this crate, the same way
+/// [`should_include_git_instructions`] models only the env half of `aOt()`.
+/// Every consumer below keeps the oracle's `${x ? … : …}` conditional shape, so
+/// wiring a settings source later is a one-line change here and nothing else.
+/// `hvt()`'s outer session-URL decoration (`ecT(e, url, …)`, gated on
+/// `I_l()` — remote/teleport sessions only) is EXCLUDED surface.
+fn attribution_texts() -> (String, String) {
+    (COMMIT_ATTRIBUTION.to_string(), PR_ATTRIBUTION.to_string())
 }
 
 // ===== Sandbox section ======================================================
@@ -150,6 +234,36 @@ fn dedup(items: &[String]) -> Vec<String> {
     out
 }
 
+/// Maximum number of sandbox paths/hosts rendered into the prompt before the
+/// list is truncated — claude-code 2.1.238 `D_l = 50` (`prompt.ts`, oracle
+/// binary @132228439 for the marker string).
+const SANDBOX_PROMPT_LIST_MAX: usize = 50;
+
+/// Port of claude-code `Phr` (2.1.238):
+///
+/// ```js
+/// function Phr(e){if(!e||e.length<=D_l)return e;let t=e.length-D_l;
+///   return[...e.slice(0,D_l),`... and ${t} more (truncated for prompt size)`]}
+/// ```
+///
+/// Applied to EVERY list rendered into the `## Command sandbox` JSON —
+/// `read.denyOnly`, `read.allowWithinDeny`, `write.allowOnly`,
+/// `write.denyWithinAllow`, `allowedHosts`, `deniedHosts`, `allowUnixSockets` —
+/// AFTER dedup / `$TMPDIR` normalization, matching the oracle's
+/// `Phr(gXr(list))` / `Phr(l(t.allowOnly))` nesting.
+fn truncate_for_prompt(items: Vec<String>) -> Vec<String> {
+    if items.len() <= SANDBOX_PROMPT_LIST_MAX {
+        return items;
+    }
+    let extra = items.len() - SANDBOX_PROMPT_LIST_MAX;
+    let mut out: Vec<String> = items
+        .into_iter()
+        .take(SANDBOX_PROMPT_LIST_MAX)
+        .collect::<Vec<_>>();
+    out.push(format!("... and {extra} more (truncated for prompt size)"));
+    out
+}
+
 /// Port of claude-code `getClaudeTempDir` (`utils/permissions/filesystem.ts:331`)
 /// + `getClaudeTempDirName` (`:307`).
 ///
@@ -159,7 +273,12 @@ fn dedup(items: &[String]) -> Vec<String> {
 /// (tmpdir is already per-user) or `claude-{uid}` elsewhere. The result is
 /// `join(resolvedBase, name) + sep` (trailing separator included).
 fn lingxi_temp_dir() -> String {
-    let base: std::path::PathBuf = std::env::var_os("LINGXI_TMPDIR")
+    resolved_temp_dir(temp_dir_base())
+}
+
+/// The temp-dir BASE — `LINGXI_TMPDIR || (windows ? tmpdir() : "/tmp")`.
+fn temp_dir_base() -> std::path::PathBuf {
+    std::env::var_os("LINGXI_TMPDIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             if cfg!(target_os = "windows") {
@@ -167,21 +286,63 @@ fn lingxi_temp_dir() -> String {
             } else {
                 std::path::PathBuf::from("/tmp")
             }
-        });
-    // Resolve symlinks; fall back to the unresolved base on failure.
-    let resolved_base = std::fs::canonicalize(&base).unwrap_or(base);
+        })
+}
 
-    let name = if cfg!(target_os = "windows") {
+/// The per-user temp-dir NAME (TS `getClaudeTempDirName`).
+fn temp_dir_name() -> String {
+    if cfg!(target_os = "windows") {
         "claude".to_string()
     } else {
         format!("claude-{}", current_uid())
-    };
+    }
+}
 
-    let joined = resolved_base.join(name);
+/// `realpath(base) + name + sep` — the shared tail of `_8()` / `s2r()`.
+fn resolved_temp_dir(base: std::path::PathBuf) -> String {
+    // Resolve symlinks; fall back to the unresolved base on failure.
+    let resolved_base = std::fs::canonicalize(&base).unwrap_or(base);
+    let joined = resolved_base.join(temp_dir_name());
     let mut s = joined.to_string_lossy().into_owned();
     // Append the trailing platform separator (TS `+ sep`).
     s.push(std::path::MAIN_SEPARATOR);
     s
+}
+
+/// Byte-length ceiling above which claude-code refuses to host child-process
+/// sockets under the configured temp dir and falls back to `/tmp` — oracle
+/// 2.1.238 `O2b = 44` (cc-238.js @284355803, the `sun_path` headroom).
+const CHILD_PROCESS_TMPDIR_MAX_BYTES: usize = 44;
+
+/// Port of claude-code 2.1.238 `s2r()` — the CHILD-PROCESS temp dir, the SECOND
+/// member of the `$TMPDIR` normalization set (`new Set([_8(), s2r()])`).
+///
+/// ```js
+/// function n2r(){…let t=qzd(e);if(Buffer.byteLength(t)<=O2b)return t;
+///   let o=join("/tmp",`claude-${process.getuid?.()??0}`),i=o;
+///   try{mkdirSync(o,{recursive:!0,mode:448}),MDt(o)}catch{i=t}return i}
+/// function s2r(){…let t=n2r();…try{n=realpathSync(t)}catch{}return n+sep}
+/// ```
+///
+/// So this is the SAME path as [`lingxi_temp_dir`] whenever the configured temp
+/// dir fits in [`CHILD_PROCESS_TMPDIR_MAX_BYTES`] bytes (the default `/tmp` case
+/// always does), and `/tmp/claude-{uid}` only when a long `LINGXI_TMPDIR` pushes
+/// it over. Both then feed the same `Set`, so the two collapse to ONE `$TMPDIR`
+/// entry once the substitution runs — which is why the dedup must come AFTER the
+/// substitution (see [`normalize_allow_only_with`]).
+///
+/// RESIDUAL: the oracle CREATES the fallback directory (`mkdirSync` + an
+/// ownership check) and falls back to the configured dir when that fails.
+/// Building a prompt must not have filesystem side effects, so this resolves the
+/// path without creating it.
+fn child_process_temp_dir() -> String {
+    let base = temp_dir_base();
+    // `Buffer.byteLength(t)` over the UNRESOLVED `join(base, name)`.
+    let unresolved_len = base.join(temp_dir_name()).to_string_lossy().len();
+    if unresolved_len <= CHILD_PROCESS_TMPDIR_MAX_BYTES {
+        return lingxi_temp_dir();
+    }
+    resolved_temp_dir(std::path::PathBuf::from("/tmp"))
 }
 
 /// The real (not effective) UID, mirroring TS `process.getuid?.() ?? 0`. On
@@ -199,17 +360,79 @@ fn current_uid() -> u32 {
     0
 }
 
-/// Port of the TS `normalizeAllowOnly` (`prompt.ts:189`): dedup then map the
-/// per-UID Claude temp dir literal to `"$TMPDIR"` so the prompt is identical
-/// across users (avoids busting the cross-user global prompt cache; the sandbox
-/// already sets `$TMPDIR` at runtime). Applied ONLY to `write.allowOnly` — never
-/// to deny/read lists.
+/// Port of claude-code 2.1.238 `Ojr()`:
+/// `Wt()==="windows" || Bze()!=="relaxed"` — TRUE when the sandbox exports
+/// `$TMPDIR`, which is what selects BOTH the temp-file bullet wording and the
+/// substitute-vs-filter arm of [`normalize_allow_only_with`].
+///
+/// `Bze()` resolves the 2.1.238 `filesystemPolicy` setting
+/// (`strict` | `relaxed` | `relaxedIfForced`, default `strict`, forced `strict`
+/// on Windows), so the shipped default is TRUE.
+///
+/// RESIDUAL: this crate has no settings reader (same shape as
+/// [`should_include_git_instructions`]'s unmodelled settings half), and unlike
+/// `aOt()` the oracle exposes NO env override for `filesystemPolicy` — so
+/// inventing one here would invent surface the oracle does not have. The
+/// function therefore returns the shipped default and is the SINGLE place a
+/// settings source has to be wired; both arms of both consumers are implemented
+/// and unit-tested through [`normalize_allow_only_with`] / [`temp_file_bullet`].
+fn sandbox_exports_tmpdir() -> bool {
+    // `Wt()==="windows"` short-circuits to true; `Bze()` defaults to "strict".
+    true
+}
+
+/// Port of claude-code 2.1.238 `Khm`'s `l` (the `write.allowOnly` normalizer):
+///
+/// ```js
+/// let s=new Set([_8(),s2r()]),a=Ojr(),
+///     l=(m)=>to(a?m.map((h)=>s.has(h)?"$TMPDIR":h):m.filter((h)=>!s.has(h)));
+/// ```
+///
+/// Two things the port previously got wrong (BASH-12):
+/// 1. the set has TWO members — the claude temp dir AND the child-process temp
+///    dir ([`child_process_temp_dir`]) — not one;
+/// 2. `to()` (dedup) runs AFTER the map, so two DISTINCT temp dirs collapse to a
+///    single `"$TMPDIR"` entry. Dedup-then-map left the second one verbatim.
+///
+/// Applied ONLY to `write.allowOnly` — never to the deny/read lists, which take
+/// the plain `gXr()` dedup.
+fn normalize_allow_only_with(paths: &[String], exports_tmpdir: bool) -> Vec<String> {
+    let temp_dirs = [lingxi_temp_dir(), child_process_temp_dir()];
+    let is_temp_dir = |p: &String| temp_dirs.iter().any(|t| t == p);
+    let mapped: Vec<String> = if exports_tmpdir {
+        paths
+            .iter()
+            .map(|p| {
+                if is_temp_dir(p) {
+                    "$TMPDIR".to_string()
+                } else {
+                    p.clone()
+                }
+            })
+            .collect()
+    } else {
+        // `relaxed`: the sandbox does not export `$TMPDIR`, so the temp dirs are
+        // DROPPED from the rendered list rather than collapsed into a literal.
+        paths.iter().filter(|p| !is_temp_dir(p)).cloned().collect()
+    };
+    dedup(&mapped)
+}
+
+/// [`normalize_allow_only_with`] under the live [`sandbox_exports_tmpdir`].
 fn normalize_allow_only(paths: &[String]) -> Vec<String> {
-    let tmp = lingxi_temp_dir();
-    dedup(paths)
-        .into_iter()
-        .map(|p| if p == tmp { "$TMPDIR".to_string() } else { p })
-        .collect()
+    normalize_allow_only_with(paths, sandbox_exports_tmpdir())
+}
+
+/// The sandbox section's temp-file bullet — claude-code 2.1.238 `Khm`'s
+/// `Ojr()?"…$TMPDIR…":"…mktemp -d…"` ternary (both arms are plain string
+/// literals in the oracle, NOT interpolation slots). The `relaxed` arm is NEW in
+/// 2.1.238 (0 hits in 2.1.220). Em dash is U+2014.
+fn temp_file_bullet(exports_tmpdir: bool) -> &'static str {
+    if exports_tmpdir {
+        "For temporary files, always use the `$TMPDIR` environment variable. TMPDIR is automatically set to the correct sandbox-writable directory in sandbox mode. Do NOT use `/tmp` directly - use `$TMPDIR` instead."
+    } else {
+        "For temporary files, create a scratch directory with `mktemp -d` and reference it by absolute path. Do NOT assume `$TMPDIR` is set \u{2014} the sandbox does not export it in this configuration."
+    }
 }
 
 /// Port of `getSimpleSandboxSection` (`prompt.ts:172`), driven by the Rust
@@ -237,12 +460,12 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     let mut read = serde_json::Map::new();
     read.insert(
         "denyOnly".into(),
-        serde_json::json!(dedup(&cfg.filesystem.deny_read)),
+        serde_json::json!(truncate_for_prompt(dedup(&cfg.filesystem.deny_read))),
     );
     if !cfg.filesystem.allow_read.is_empty() {
         read.insert(
             "allowWithinDeny".into(),
-            serde_json::json!(dedup(&cfg.filesystem.allow_read)),
+            serde_json::json!(truncate_for_prompt(dedup(&cfg.filesystem.allow_read))),
         );
     }
 
@@ -252,8 +475,8 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     let filesystem = serde_json::json!({
         "read": serde_json::Value::Object(read),
         "write": {
-            "allowOnly": normalize_allow_only(&cfg.filesystem.allow_write),
-            "denyWithinAllow": dedup(&cfg.filesystem.deny_write),
+            "allowOnly": truncate_for_prompt(normalize_allow_only(&cfg.filesystem.allow_write)),
+            "denyWithinAllow": truncate_for_prompt(dedup(&cfg.filesystem.deny_write)),
         },
     });
 
@@ -264,19 +487,19 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     if !cfg.network.allowed_domains.is_empty() {
         network.insert(
             "allowedHosts".into(),
-            serde_json::json!(dedup(&cfg.network.allowed_domains)),
+            serde_json::json!(truncate_for_prompt(dedup(&cfg.network.allowed_domains))),
         );
     }
     if !cfg.network.denied_domains.is_empty() {
         network.insert(
             "deniedHosts".into(),
-            serde_json::json!(dedup(&cfg.network.denied_domains)),
+            serde_json::json!(truncate_for_prompt(dedup(&cfg.network.denied_domains))),
         );
     }
     if !cfg.network.allow_unix_sockets.is_empty() {
         network.insert(
             "allowUnixSockets".into(),
-            serde_json::json!(dedup(&cfg.network.allow_unix_sockets)),
+            serde_json::json!(truncate_for_prompt(dedup(&cfg.network.allow_unix_sockets))),
         );
     }
 
@@ -313,7 +536,7 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
             Bullet::Sub(vec![
                 "Immediately retry with `dangerouslyDisableSandbox: true` (don't ask, just do it)".into(),
                 "Briefly explain what sandbox restriction likely caused the failure. Be sure to mention that the user can use the `/sandbox` command to manage restrictions.".into(),
-                "This will prompt the user for permission".into(),
+                "This goes through the permission gate (a user prompt, or the auto-mode classifier when auto mode is active)".into(),
             ]),
             Bullet::Item("Treat each command you execute with `dangerouslyDisableSandbox: true` individually. Even if you have recently run a command with this setting, you should default to running future commands within the sandbox.".into()),
             Bullet::Item("Do not suggest adding sensitive paths like ~/.bashrc, ~/.zshrc, ~/.ssh/*, or credential files to the sandbox allowlist.".into()),
@@ -327,7 +550,9 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     };
 
     let mut items = sandbox_override_items;
-    items.push(Bullet::Item("For temporary files, always use the `$TMPDIR` environment variable. TMPDIR is automatically set to the correct sandbox-writable directory in sandbox mode. Do NOT use `/tmp` directly - use `$TMPDIR` instead.".into()));
+    items.push(Bullet::Item(
+        temp_file_bullet(sandbox_exports_tmpdir()).into(),
+    ));
 
     let mut lines: Vec<String> = vec![
         String::new(),
@@ -354,11 +579,31 @@ fn commit_and_pr_instructions() -> String {
         return String::new();
     }
 
-    // No attribution source in this crate → commitAttribution / prAttribution
-    // are empty, matching the TS shape with empty attribution (commit step says
-    // "Create the commit with a message." and example HEREDOCs carry no
-    // trailing attribution).
-    //
+    // Attribution (`{commit:o, pr:i}=hvt()`) feeds THREE slots in this section,
+    // each keeping the oracle's conditional shape (`fcT`, cc-238.js @231042884):
+    //   step 3   `- Create the commit with a message${o?` ending with:\n   ${o}`:"."}`
+    //   HEREDOC  `   Commit message here.${o?`\n\n   ${o}`:""}`
+    //   PR body  `${Ajt()}${i?`\n\n${i}`:""}`
+    // Note the THREE-space indent on both commit slots — the oracle indents them
+    // to match the surrounding numbered-step / HEREDOC body, and the PR footer is
+    // NOT indented.
+    let (commit_attribution, pr_attribution) = attribution_texts();
+    let commit_step_suffix = if commit_attribution.is_empty() {
+        ".".to_string()
+    } else {
+        format!(" ending with:\n   {commit_attribution}")
+    };
+    let commit_heredoc_suffix = if commit_attribution.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n   {commit_attribution}")
+    };
+    let pr_body_suffix = if pr_attribution.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{pr_attribution}")
+    };
+
     // `r=tH()?$F:_U`: the task-management tool name is `TaskCreate` when V2
     // task tools are enabled (default) and `TodoWrite` when
     // `LINGXI_ENABLE_TASKS` is a defined-falsy value — the same `tH()`/`TE()`
@@ -396,7 +641,7 @@ Git Safety Protocol:
   - Ensure it accurately reflects the changes and their purpose
 3. Run the following commands in parallel:
    - Add relevant untracked files to the staging area.
-   - Create the commit with a message.
+   - Create the commit with a message{COMMIT_STEP_SUFFIX}
    - Run git status after the commit completes to verify success.
    Note: git status depends on the commit completing, so run it sequentially after the commit.
 4. If the commit fails due to pre-commit hook: fix the issue and create a NEW commit
@@ -411,7 +656,7 @@ Important notes:
 - In order to ensure good formatting, ALWAYS pass the commit message via a HEREDOC, a la this example:
 <example>
 git commit -m \"$(cat <<'EOF'
-   Commit message here.
+   Commit message here.{COMMIT_HEREDOC_SUFFIX}
    EOF
    )\"
 </example>
@@ -439,7 +684,7 @@ gh pr create --title \"the pr title\" --body \"$(cat <<'EOF'
 <1-3 bullet points>
 
 ## Test plan
-[Bulleted markdown checklist of TODOs for testing the pull request...]
+[Bulleted markdown checklist of TODOs for testing the pull request...]{PR_BODY_SUFFIX}
 EOF
 )\"
 </example>
@@ -451,6 +696,9 @@ Important:
 # Other common operations
 - View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments"
         .replace("{TASK_TOOL}", task_tool)
+        .replace("{COMMIT_STEP_SUFFIX}", &commit_step_suffix)
+        .replace("{COMMIT_HEREDOC_SUFFIX}", &commit_heredoc_suffix)
+        .replace("{PR_BODY_SUFFIX}", &pr_body_suffix)
 }
 
 // ===== Public entry point ===================================================
@@ -486,12 +734,10 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
     // External (non-embedded) avoid-list includes find/grep.
     let avoid_commands = "`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
 
-    let multiple_commands_subitems = vec![
-        format!("If the commands are independent and can run in parallel, make multiple {BASH_TOOL_NAME} tool calls in a single message. Example: if you need to run \"git status\" and \"git diff\", send a single message with two {BASH_TOOL_NAME} tool calls in parallel."),
-        format!("If the commands depend on each other and must run sequentially, use a single {BASH_TOOL_NAME} call with '&&' to chain them together."),
-        "Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.".into(),
-        "DO NOT use newlines to separate commands (newlines are ok in quoted strings).".into(),
-    ];
+    // NOTE: claude-code's Bash `u` instruction list has NO "When issuing
+    // multiple commands:" item — in 2.1.238 or 2.1.220. The only oracle hit for
+    // that header belongs to the PowerShell tool prompt (cc-238.js @230911843),
+    // with different wording. Do not re-add a Bash-flavoured rewrite here.
 
     let git_subitems = vec![
         "Prefer to create a new commit rather than amending an existing commit.".to_string(),
@@ -524,8 +770,6 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
     if let Some(note) = background_note {
         instruction_items.push(Bullet::Item(note));
     }
-    instruction_items.push(Bullet::Item("When issuing multiple commands:".into()));
-    instruction_items.push(Bullet::Sub(multiple_commands_subitems));
     instruction_items.push(Bullet::Item("For git commands:".into()));
     instruction_items.push(Bullet::Sub(git_subitems));
     instruction_items.push(Bullet::Item("Avoid unnecessary `sleep` commands:".into()));
@@ -583,25 +827,42 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
 /// - `_Xa()`/`nqn(e)` BOTH return `""` in the binary (`a`/`c` empty), and `l`
 ///   is hard-`null`, so the trailing `${c}`/`${a}`/`${l}` interpolations vanish
 ///   and the "only after the pre-ship checks below" clause never appears;
-/// - `qdt()` is the commit/PR ATTRIBUTION (`Co-Authored-By: <model> …` +
-///   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`). This
-///   crate has NO attribution source — resolved the SAME way as the VERBOSE
-///   [`commit_and_pr_instructions`] (empty `commitAttribution`/`prAttribution`),
-///   so the `- End git commit messages with:` / `- End PR bodies with:` bullets
-///   are OMITTED (matching the binary's `includeCoAuthoredBy===false` shape,
-///   i.e. `qdt()` ⇒ `{commit:"",pr:""}` ⇒ `i==""`).
+/// - `qdt()` (2.1.238 `hvt()`) is the commit/PR ATTRIBUTION. Its DEFAULT is
+///   NON-empty, so the two `- End …` bullets ARE emitted — see
+///   [`attribution_texts`]. They form the oracle's `i`/`a` block:
+///   `[commit?`- End git commit messages with:\n${commit}`:null,
+///     pr?`- End PR bodies with:\n${pr}`:null].filter(Boolean).join("\n")`,
+///   appended to the `- Commit or push only when the user asks…` bullet as
+///   `${a?`\n${a}`:""}`. The attribution VALUE is NOT indented — it sits at
+///   column 0 on its own line under each bullet.
 fn concise_git_section() -> String {
     if !should_include_git_instructions() {
         return String::new();
     }
-    // No attribution source (see [`commit_and_pr_instructions`]) ⇒ commit/pr
-    // attribution empty ⇒ the `- End …` bullets are omitted. `c`/`a`/`l` are
-    // all empty, so the section is exactly these three fixed bullets.
-    "# Git\n\
+    // `c`/`a`/`l` (pre-ship gate, `bash_lean` extras) are all empty in the
+    // shipped build, so the section is the three fixed bullets plus the
+    // attribution block.
+    let mut section = "# Git\n\
      - Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n\
      - Use the `gh` CLI for GitHub operations (PRs, issues, API).\n\
      - Commit or push only when the user asks. If on the default branch, branch first."
-        .to_string()
+        .to_string();
+
+    let (commit_attribution, pr_attribution) = attribution_texts();
+    let mut attribution_lines: Vec<String> = Vec::new();
+    if !commit_attribution.is_empty() {
+        attribution_lines.push(format!(
+            "- End git commit messages with:\n{commit_attribution}"
+        ));
+    }
+    if !pr_attribution.is_empty() {
+        attribution_lines.push(format!("- End PR bodies with:\n{pr_attribution}"));
+    }
+    if !attribution_lines.is_empty() {
+        section.push('\n');
+        section.push_str(&attribution_lines.join("\n"));
+    }
+    section
 }
 
 /// Port of `getSimplePrompt`'s CONCISE branch `qUp(e)` (binary @202741xxx) —
@@ -641,6 +902,13 @@ fn concise_git_section() -> String {
 /// - `o` = avoid-list. `Zw()` (embedded-search-tools) is the gated ant-native
 ///   path; the external default takes the find/grep-INCLUSIVE list — IDENTICAL
 ///   to the VERBOSE prompt's hardcoded `avoid_commands`.
+/// - 2.1.238 `hcT` additionally emits
+///   `"- Command output is displayed to you, not reliably to the user."`
+///   UNCONDITIONALLY, right after the IMPORTANT avoid-list bullet and before the
+///   `timeout` bullet. 2.1.220's `$ry` gated it on `KFc(t)` /
+///   `CLAUDE_CODE_MARL_CORMORANT`; that env gate no longer exists in 2.1.238 and
+///   the builder lost its `model` parameter, so the `_model` argument here is
+///   vestigial (kept for call-site compatibility).
 /// - `t` (`gXa()!==null`) ⟺ [`background_usage_note`] is `Some` (gated by
 ///   `LINGXI_DISABLE_BACKGROUND_TASKS`). When present, the detached
 ///   `run_in_background` bullet is emitted; `sq()` (the `tengu_amber_sentinel`
@@ -653,11 +921,14 @@ fn concise_git_section() -> String {
 ///
 /// Em-dash is U+2014 (the binary stores it as the JS escape `—`).
 #[must_use]
-pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, model: Option<&str>) -> String {
-    // CONCISE avoid-list — the Dh-true (SHORT) branch DROPS `find`/`grep` vs the
-    // LONG prompt (verified against the v2.1.183 binary's qUp builder + the
-    // rendered opus-4-8 output: the SHORT list starts at `cat`). NOT config-gated.
-    let avoid_commands = "`cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
+pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, _model: Option<&str>) -> String {
+    // CONCISE avoid-list — claude-code 2.1.238 `hcT` picks it with the SAME
+    // `VH()` (embedded-search-tools) predicate the VERBOSE builder `Yhm` uses:
+    //   VH() ? "`cat`, …" : "`find`, `grep`, `cat`, …"
+    // LingXi ships Glob and Grep as real tools, i.e. the non-embedded branch —
+    // exactly what the VERBOSE prompt already hardcodes. Both prompts must agree
+    // on the one boolean, so the CONCISE list is the find/grep-INCLUSIVE one.
+    let avoid_commands = "`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
 
     let mut lines: Vec<String> = vec![
         "Executes a bash command and returns its output.".into(),
@@ -666,13 +937,16 @@ pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, model: Option<&str>
         "- Working directory persists between calls, but prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.".into(),
         format!("- IMPORTANT: Avoid using this tool to run {avoid_commands} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user."),
     ];
-    if model.is_some_and(|model| {
-        traits::model_capabilities::has_capability(
-            model,
-            traits::model_capabilities::ModelCapability::Opus5PromptBundle,
-        )
-    }) {
-        lines.push("- Command output is displayed to you, not reliably to the user.".into());
+    // UNCONDITIONAL in 2.1.238: `hcT` emits this as a bare array element and no
+    // longer receives a model argument at all. The 2.1.220 gate
+    // (`KFc(t)` / `CLAUDE_CODE_MARL_CORMORANT`) was deleted between the builds,
+    // so every lean-prompt model gets the bullet, not just opus-5.
+    lines.push("- Command output is displayed to you, not reliably to the user.".into());
+    // `c` — the gated "cheap to run" bullet, between the output-visibility
+    // bullet and the timeout bullet (`…,"- Command output …",...c,`- \`timeout\`
+    // …`,…`). `JQd()` is default-false, so this is inert in the stock config.
+    if cheap_commands_bullet_enabled() {
+        lines.push("- Commands are cheap to run and their errors are informative: run the straightforward command rather than perfecting it mentally first, and adjust from what it prints.".into());
     }
     lines.push(format!(
         "- `timeout` is in milliseconds: default {}, max {}.",
@@ -702,14 +976,38 @@ pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, model: Option<&str>
     lines.join("\n")
 }
 
+/// One lock for every test in this crate that reads or writes the
+/// process-global env vars the Bash prompt gates on
+/// (`LINGXI_DISABLE_BACKGROUND_TASKS` in particular).
+///
+/// This exists because the crate previously had THREE separate locks guarding
+/// that one global — `prompt::tests::ENV_LOCK`, `bash::tests::SLEEP_GATE_LOCK`
+/// and `bash::tests::BACKGROUND_TASKS_ENV_LOCK`. Three locks over one global is
+/// no mutual exclusion at all: a `prompt.rs` test setting the var could flip the
+/// `run_in_background` bullet out from under a `bash.rs` prompt assertion, which
+/// failed roughly once per full-workspace run and passed every time in
+/// isolation. Take THIS lock, not a new one.
+///
+/// It is a `std` mutex on purpose: the guard is held across `.await` in the
+/// `#[tokio::test]` cases, which is sound because those run on a current-thread
+/// runtime whose future is not required to be `Send`.
+#[cfg(test)]
+pub(crate) static BACKGROUND_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Poison-tolerant guard for [`BACKGROUND_ENV_LOCK`] (payload is `()`, so a
+/// panicking test never invalidates the lock for the rest of the run).
+#[cfg(test)]
+pub(crate) fn background_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    BACKGROUND_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Env vars are process-global; serialize the env-gating tests so they don't
-    // race the default-config golden test.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::background_env_lock as env_lock;
 
     fn disabled_sandbox() -> SandboxRuntimeConfig {
         SandboxRuntimeConfig::default()
@@ -717,7 +1015,7 @@ mod tests {
 
     #[test]
     fn prompt_contains_locked_anchors() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let p = simple_prompt(&disabled_sandbox());
 
@@ -772,7 +1070,7 @@ mod tests {
     /// `LINGXI_ENABLE_TASKS` is defined-falsy); `gi="Agent"` always.
     #[test]
     fn git_prompt_interpolates_task_and_agent_tool_names() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
 
         // Default (V2 tasks enabled) → "TaskCreate or Agent".
         std::env::remove_var("LINGXI_ENABLE_TASKS");
@@ -806,7 +1104,7 @@ mod tests {
 
     #[test]
     fn timeout_sentence_substitutes_locked_constants() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let p = simple_prompt(&disabled_sandbox());
         // 120000ms / 600000ms substituted from BASH_DEFAULT_TIMEOUT_MS /
@@ -823,7 +1121,7 @@ mod tests {
 
     #[test]
     fn tool_preference_bullets_steer_to_builtin_tools() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let p = simple_prompt(&disabled_sandbox());
         assert!(p.contains(" - File search: Use Glob (NOT find or ls)"));
         assert!(p.contains(" - Content search: Use Grep (NOT grep or rg)"));
@@ -834,7 +1132,7 @@ mod tests {
 
     #[test]
     fn background_note_absent_when_env_disabled() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
         let p = simple_prompt(&disabled_sandbox());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -848,7 +1146,7 @@ mod tests {
     fn git_section_absent_when_disabled_via_env() {
         // R-MINOR: LINGXI_DISABLE_GIT_INSTRUCTIONS (truthy) omits the git/PR
         // section (claude-code `aOt()`); default-unset keeps it.
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_GIT_INSTRUCTIONS");
         assert!(
             simple_prompt(&disabled_sandbox()).contains("# Committing changes with git"),
@@ -865,7 +1163,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_absent_when_disabled() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let p = simple_prompt(&disabled_sandbox());
         assert!(
             !p.contains("## Command sandbox"),
@@ -874,22 +1172,39 @@ mod tests {
     }
 
     #[test]
-    fn concise_prompt_adds_only_the_opus_5_output_visibility_bullet() {
-        let opus_5 = simple_prompt_concise(&disabled_sandbox(), Some("claude-opus-5[1m]"));
-        let opus_48 = simple_prompt_concise(&disabled_sandbox(), Some("claude-opus-4-8"));
-        let added = "- Command output is displayed to you, not reliably to the user.";
+    fn concise_prompt_output_visibility_bullet_is_unconditional() {
+        // 2.1.238 `hcT` emits this bullet as a bare array element — the 2.1.220
+        // `CLAUDE_CODE_MARL_CORMORANT` gate was deleted and the builder no
+        // longer takes a model at all, so EVERY lean-prompt model gets it.
+        let bullet = "- Command output is displayed to you, not reliably to the user.";
+        for model in [
+            None,
+            Some("claude-opus-5[1m]"),
+            Some("claude-opus-4-8"),
+            Some("claude-fable-5"),
+        ] {
+            let p = simple_prompt_concise(&disabled_sandbox(), model);
+            assert!(p.contains(bullet), "missing for model {model:?}");
+            assert!(
+                p.contains("IMPORTANT: Avoid using this tool"),
+                "the confirmed existing warning must not be deleted"
+            );
+        }
+    }
 
-        assert!(opus_5.contains(added));
-        assert!(!opus_48.contains(added));
-        assert!(
-            opus_5.contains("IMPORTANT: Avoid using this tool"),
-            "the confirmed existing warning must not be deleted"
-        );
+    #[test]
+    fn concise_prompt_avoid_list_matches_the_verbose_one() {
+        // Oracle `hcT` and `Yhm` read the SAME `VH()` predicate; LingXi is on
+        // the non-embedded branch (Glob/Grep are real tools), so both prompts
+        // must carry the find/grep-INCLUSIVE list.
+        let long = "`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
+        let p = simple_prompt_concise(&disabled_sandbox(), Some("claude-opus-5[1m]"));
+        assert!(p.contains(long), "concise avoid-list must include find/grep");
     }
 
     #[test]
     fn sandbox_section_present_when_enabled() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let cfg = SandboxRuntimeConfig {
             enabled: true,
             // Default is now `true` (allow unsandboxed) — set `false` explicitly so
@@ -932,7 +1247,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_unsandboxed_allowed_branch() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let cfg = SandboxRuntimeConfig {
             enabled: true,
             allow_unsandboxed_commands: true,
@@ -951,7 +1266,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_emits_allow_within_deny_when_allow_read_set() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         // allow_read non-empty ⇒ read object carries denyOnly THEN allowWithinDeny.
         let cfg = SandboxRuntimeConfig {
             enabled: true,
@@ -984,9 +1299,68 @@ mod tests {
         );
     }
 
+    // ===== BASH-11 — `Phr` truncation at D_l = 50 =========================
+
+    /// `function Phr(e){if(!e||e.length<=D_l)return e;let t=e.length-D_l;
+    ///  return[...e.slice(0,D_l),`... and ${t} more (truncated for prompt size)`]}`
+    #[test]
+    fn truncate_for_prompt_caps_at_fifty_with_the_oracle_marker() {
+        // At the cap: untouched, no marker.
+        let fifty: Vec<String> = (0..50).map(|i| format!("/p{i}")).collect();
+        assert_eq!(truncate_for_prompt(fifty.clone()), fifty);
+        // One over: 50 kept + the marker (51 entries), NOT 49 + marker.
+        let fifty_one: Vec<String> = (0..51).map(|i| format!("/p{i}")).collect();
+        let out = truncate_for_prompt(fifty_one);
+        assert_eq!(out.len(), 51);
+        assert_eq!(out[49], "/p49");
+        assert_eq!(out[50], "... and 1 more (truncated for prompt size)");
+        // Well over.
+        let many: Vec<String> = (0..73).map(|i| format!("/p{i}")).collect();
+        let out = truncate_for_prompt(many);
+        assert_eq!(out.last().unwrap(), "... and 23 more (truncated for prompt size)");
+    }
+
+    /// The cap must apply to EVERY list the sandbox section renders, AFTER the
+    /// dedup / `$TMPDIR` normalization (oracle `Phr(gXr(list))` /
+    /// `Phr(l(t.allowOnly))`).
+    #[test]
+    fn sandbox_section_truncates_every_oversized_list() {
+        let _g = env_lock();
+        let paths = |prefix: &str| -> Vec<String> {
+            (0..60).map(|i| format!("{prefix}{i}")).collect()
+        };
+        let cfg = SandboxRuntimeConfig {
+            enabled: true,
+            filesystem: sandbox::runtime_config::FilesystemRestrictionConfig {
+                deny_read: paths("/dr"),
+                allow_read: paths("/ar"),
+                allow_write: paths("/aw"),
+                deny_write: paths("/dw"),
+                ..Default::default()
+            },
+            network: sandbox::runtime_config::NetworkRestrictionConfig {
+                allowed_domains: (0..60).map(|i| format!("a{i}.com")).collect(),
+                denied_domains: (0..60).map(|i| format!("d{i}.com")).collect(),
+                allow_unix_sockets: paths("/sock"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p = simple_prompt(&cfg);
+        // Seven lists × one marker each.
+        assert_eq!(
+            p.matches("... and 10 more (truncated for prompt size)").count(),
+            7,
+            "every sandbox list must be capped at 50; got:\n{p}"
+        );
+        // The 50th entry survives, the 51st does not.
+        assert!(p.contains("\"/dr49\""), "entry 50 must survive; got:\n{p}");
+        assert!(!p.contains("\"/dr50\""), "entry 51 must be dropped; got:\n{p}");
+    }
+
     #[test]
     fn sandbox_section_emits_denied_hosts_in_order() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         // allowedHosts THEN deniedHosts THEN allowUnixSockets.
         let cfg = SandboxRuntimeConfig {
             enabled: true,
@@ -1022,7 +1396,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_normalizes_lingxi_temp_dir_to_tmpdir_literal() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         // Pin the temp-dir base via LINGXI_TMPDIR so lingxi_temp_dir() is
         // deterministic across hosts/users.
         let tmp_base = tempfile::tempdir().unwrap();
@@ -1059,7 +1433,7 @@ mod tests {
 
     #[test]
     fn sandbox_section_policy_disabled_branch_when_bool_false() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         // false ⇒ the policy-disabled override branch.
         let disabled = SandboxRuntimeConfig {
             enabled: true,

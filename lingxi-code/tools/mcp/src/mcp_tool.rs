@@ -1836,6 +1836,24 @@ impl Tool for ReadMcpResourceTool {
 /// rather than in the `mcp` crate, to keep `mcp` free of a `tool-api`
 /// dependency. Reads the registry's `pub connections` state-map directly (the
 /// same accessor the existing `snapshot` walks).
+///
+/// ## The MCP-resource trio
+///
+/// `ListMcpResourcesTool`, `ReadMcpResourceTool` and `ReadMcpResourceDirTool`
+/// are NOT base-list tools. 2.1.238's `getTools` (`iJ`) strips all three out by
+/// name (`let r=new Set([K8.name,Z8.name,Yme.name,Ky])`, `cc-238.js @230759264`)
+/// and the discovery round pushes them into this MCP partition only when a
+/// CONNECTED server declares `capabilities.resources`:
+///
+/// ```text
+/// if(n.some((l)=>l.type==="connected"&&!!l.capabilities?.resources)){
+///   if(![K8,Z8].some((c)=>o.some((u)=>il(u,c.name))))o.push(K8,Z8,Yme)}
+/// ```
+///
+/// (`cc-238.js @225994181`; the dial-round site at `@243875044` carries the same
+/// once-only `k` latch this function's `resource_tools_pushed` reproduces). A
+/// session with zero resource-capable MCP servers therefore no longer ships
+/// three unusable tool schemas in every request's `tools` array.
 pub async fn build_registered_mcp_tools(
     registry: &McpRegistry,
     ctx: tool_api::BuiltinToolContext,
@@ -1844,14 +1862,20 @@ pub async fn build_registered_mcp_tools(
 
     let conns = registry.connections.read().await;
     let mut out: Vec<(protocol::McpConnectionId, Vec<Arc<dyn Tool>>)> = Vec::new();
+    // Oracle `k` in the dial round at `cc-238.js @243875044`
+    // (`if(fe.capabilities?.resources&&!k)k=!0,ne=[...ne,K8,Z8,Yme]`): the three
+    // resource tools are pushed ONCE, onto the first connected server that
+    // declares `capabilities.resources`.
+    let mut resource_tools_pushed = false;
     for state in conns.values() {
         if let McpConnectionState::Connected {
             connection_id,
+            capabilities,
             tools,
             ..
         } = state
         {
-            let handles: Vec<Arc<dyn Tool>> = tools
+            let mut handles: Vec<Arc<dyn Tool>> = tools
                 .iter()
                 .map(|dto| {
                     Arc::new(MCPTool::new_for_tool(
@@ -1864,6 +1888,14 @@ pub async fn build_registered_mcp_tools(
                     )) as Arc<dyn Tool>
                 })
                 .collect();
+            if capabilities.resources && !resource_tools_pushed {
+                resource_tools_pushed = true;
+                handles.push(Arc::new(ListMcpResourcesTool::new(ctx.clone())));
+                handles.push(Arc::new(ReadMcpResourceTool::new(ctx.clone())));
+                handles.push(Arc::new(
+                    crate::read_mcp_resource_dir::ReadMcpResourceDirTool::new(ctx.clone()),
+                ));
+            }
             out.push((*connection_id, handles));
         }
     }
@@ -2959,6 +2991,237 @@ mod auto_background_race_tests {
                 .iter()
                 .any(|e| e.name == TENGU_FEATURE_OK || e.name == TENGU_FEATURE_BAD),
             "tool_error path emits ONLY feature_sad: {events:?}"
+        );
+    }
+}
+
+// ===== TR-02: MCP-resource-tool gating ======================================
+
+/// 2.1.238 `getTools` (`iJ`) strips `ListMcpResourcesTool` /
+/// `ReadMcpResourceTool` / `ReadMcpResourceDirTool` out of the base tool list by
+/// name and MCP discovery pushes them back only when a CONNECTED server declares
+/// `capabilities.resources`. These tests seed the registry's `pub connections`
+/// state map directly — the transport is never dialled — so the assertion is on
+/// the push DECISION, which is the ported logic.
+#[cfg(test)]
+mod resource_tool_gating_tests {
+    use super::*;
+    use mcp::{ConfigScope, McpConnectionState, McpServerConfig};
+    use traits::{
+        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport,
+        McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    };
+
+    struct NeverDialled;
+
+    #[async_trait]
+    impl McpTransport for NeverDialled {
+        async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            unreachable!()
+        }
+        async fn initialize(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            unreachable!()
+        }
+        async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            unreachable!()
+        }
+        async fn list_resources(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            unreachable!()
+        }
+        async fn list_prompts(&self, _c: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
+            unreachable!()
+        }
+        async fn call_tool(
+            &self,
+            _c: &McpRawConnection,
+            _t: &str,
+            _i: Value,
+        ) -> Result<traits::McpToolResultDto, McpError> {
+            unreachable!()
+        }
+        async fn read_resource(
+            &self,
+            _c: &McpRawConnection,
+            _u: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            unreachable!()
+        }
+        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+            unreachable!()
+        }
+        async fn notifications(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            unreachable!()
+        }
+        async fn handle_elicitation(
+            &self,
+            _c: &McpRawConnection,
+            _r: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            unreachable!()
+        }
+        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+            unreachable!()
+        }
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::Stdio]
+        }
+    }
+
+    fn config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            spec: McpTransportSpec::InProcess {
+                registry_key: name.into(),
+            },
+            scope: ConfigScope::User,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            config_error: None,
+        }
+    }
+
+    fn caps(resources: bool) -> ServerCapabilitiesDto {
+        ServerCapabilitiesDto {
+            tools: true,
+            resources,
+            prompts: false,
+            logging: false,
+            experimental: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Seed one `Connected` server whose `capabilities.resources` is `resources`
+    /// and return every tool name `build_registered_mcp_tools` produced.
+    async fn names_for(resources: bool) -> Vec<String> {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: config("srv"),
+                connection_id: protocol::McpConnectionId::new(),
+                capabilities: caps(resources),
+                tools: vec![],
+                resources: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+        build_registered_mcp_tools(&registry, ctx)
+            .await
+            .into_iter()
+            .flat_map(|(_, ts)| ts.into_iter().map(|t| t.name().to_string()))
+            .collect()
+    }
+
+    /// `if(n.some((l)=>l.type==="connected"&&!!l.capabilities?.resources))` —
+    /// a server WITHOUT the resources capability contributes none of the three.
+    #[tokio::test]
+    async fn no_resource_capability_pushes_no_resource_tools() {
+        let names = names_for(false).await;
+        assert!(
+            names.is_empty(),
+            "a resource-less server must not add resource tools; got {names:?}"
+        );
+    }
+
+    /// `o.push(K8,Z8,Yme)` — all THREE, including `ReadMcpResourceDirTool`.
+    #[tokio::test]
+    async fn resource_capability_pushes_all_three() {
+        let names = names_for(true).await;
+        assert_eq!(
+            names,
+            vec![
+                "ListMcpResourcesTool".to_string(),
+                "ReadMcpResourceTool".to_string(),
+                "ReadMcpResourceDirTool".to_string(),
+            ],
+            "oracle pushes K8, Z8 and Yme in that order"
+        );
+    }
+
+    /// The oracle's once-only latch (`if(fe.capabilities?.resources&&!k)k=!0`):
+    /// two resource-capable servers still yield exactly one copy of each tool.
+    #[tokio::test]
+    async fn two_capable_servers_push_the_trio_once() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        for name in ["a", "b"] {
+            registry.connections.write().await.insert(
+                name.into(),
+                McpConnectionState::Connected {
+                    config: config(name),
+                    connection_id: protocol::McpConnectionId::new(),
+                    capabilities: caps(true),
+                    tools: vec![],
+                    resources: vec![],
+                    prompts: vec![],
+                    connected_at: std::time::SystemTime::now(),
+                },
+            );
+        }
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+        let names: Vec<String> = build_registered_mcp_tools(&registry, ctx)
+            .await
+            .into_iter()
+            .flat_map(|(_, ts)| ts.into_iter().map(|t| t.name().to_string()))
+            .collect();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| *n == "ListMcpResourcesTool")
+                .count(),
+            1,
+            "the trio is pushed once, not once per capable server; got {names:?}"
+        );
+        assert_eq!(names.len(), 3, "exactly the trio; got {names:?}");
+    }
+
+    /// `register_all` must NOT register the trio as builtins — that is the whole
+    /// point of `iJ`'s `r`-set name filter.
+    #[test]
+    fn register_all_omits_the_resource_trio() {
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        let mut reg = tool_api::ToolRegistry::new();
+        crate::register_all(&mut reg, ctx);
+        let names = reg.all_names();
+        for banned in [
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+            "ReadMcpResourceDirTool",
+        ] {
+            assert!(
+                !names.iter().any(|n| n == banned),
+                "{banned} must not be a base-list builtin; got {names:?}"
+            );
+        }
+        assert!(
+            names.iter().any(|n| n == "WaitForMcpServers"),
+            "WaitForMcpServers IS a base-list tool in both 2.1.220 and 2.1.238; got {names:?}"
         );
     }
 }

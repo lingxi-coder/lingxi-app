@@ -193,6 +193,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         depth: 0,
         observer: None,
         permission_mode_override: None,
+        frozen_command_denies: Vec::new(),
     }
 }
 

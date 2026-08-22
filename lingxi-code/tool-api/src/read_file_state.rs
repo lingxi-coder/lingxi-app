@@ -178,6 +178,19 @@ impl ReadFileStateLru {
         Some(node.entry.clone())
     }
 
+    /// Fetch a clone of the entry for `path` WITHOUT promoting it to
+    /// most-recently-used — the read-only counterpart of [`Self::get`].
+    ///
+    /// The Rust equal of iterating `readFileState.entries()`, which lru-cache
+    /// performs with `updateRecency:false`. The changed-files (`edited_text_file`)
+    /// producer scans EVERY entry once per turn (`Izm` @296537358); doing that
+    /// through [`Self::get`] would rewrite the whole recency order behind the
+    /// model's back and silently change which entry the LRU evicts next.
+    #[must_use]
+    pub fn peek(&self, path: &Path) -> Option<ReadFileEntry> {
+        self.map.get(path).map(|n| n.entry.clone())
+    }
+
     /// Whether `path` has an entry, WITHOUT promoting it to most-recently-used.
     ///
     /// The Rust equal of TS `readFileState.has(path)` — the guard on the

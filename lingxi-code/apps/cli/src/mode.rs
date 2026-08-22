@@ -186,6 +186,25 @@ async fn run_tui(argv: &Argv) -> i32 {
     code
 }
 
+/// Process-wide `--messaging-socket-path <path>` override (cc 2.1.238
+/// @307414302 — "Cross-session messaging server path: a Unix domain socket on
+/// Mac/Linux, a \\.\pipe\ name on Windows (defaults to an auto-generated
+/// path)"). Set once from argv in `run_cli`, before any inbox bind.
+static MESSAGING_SOCKET_OVERRIDE: std::sync::OnceLock<std::path::PathBuf> =
+    std::sync::OnceLock::new();
+
+/// Record the `--messaging-socket-path` value. Idempotent: the first call wins,
+/// matching the single top-level option the oracle carries.
+pub(crate) fn set_messaging_socket_override(path: &str) {
+    let _ = MESSAGING_SOCKET_OVERRIDE.set(std::path::PathBuf::from(path));
+}
+
+/// The `--messaging-socket-path` override, if one was given.
+#[must_use]
+pub(crate) fn messaging_socket_override() -> Option<std::path::PathBuf> {
+    MESSAGING_SOCKET_OVERRIDE.get().cloned()
+}
+
 /// Bind the process UDS inbox and advertise it on the live session record.
 pub(crate) fn ensure_live_messaging(
     session_id: &str,
@@ -239,7 +258,11 @@ pub(crate) fn ensure_live_messaging(
     let path = match traits::uds_inbox::process_socket_path() {
         Some(existing) => existing,
         None => {
-            let sock = traits::uds_inbox::default_socket_path(std::process::id());
+            // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` overrides the
+            // auto-generated `mum()` path; absent, the oracle's own default
+            // applies (`traits::uds_inbox::default_socket_path`).
+            let sock = messaging_socket_override()
+                .unwrap_or_else(|| traits::uds_inbox::default_socket_path(std::process::id()));
             match traits::uds_inbox::start_process_inbox(sock) {
                 Ok(path) => path,
                 Err(error) => {

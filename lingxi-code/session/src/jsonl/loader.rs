@@ -26,7 +26,7 @@
 
 use crate::jsonl::path::{project_dir_name, session_path};
 use crate::jsonl::reader::{JsonlReader, LoadedTranscript};
-use crate::jsonl::schema::JsonlMessage;
+use crate::jsonl::schema::{JsonlMessage, SESSION_KIND_KEY};
 use crate::jsonl::title::{extract_title, truncate_title};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -453,10 +453,14 @@ async fn collect_dir(
             // Binary `vkm` (@ 206492423):
             //   `if(i.sessionKind==="daemon"||i.sessionKind==="daemon-worker") return C(...),null`
             // Binary log: `"$ filtered from /resume: sessionKind="` @ 113414433.
-            // `sessionKind` is carried in `extra` (outer field, not a named struct field).
+            // `sessionKind` is carried in `extra` (outer field, not a named
+            // struct field). SC-07: the writer half now stamps it
+            // (`jsonl::writer::stamp_session_kind`), so this filter can
+            // actually fire on a LingXi-written transcript; both halves share
+            // `SESSION_KIND_KEY` so the spelling cannot drift apart again.
             let session_kind = first
                 .extra
-                .get("sessionKind")
+                .get(SESSION_KIND_KEY)
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if session_kind == "daemon" || session_kind == "daemon-worker" {

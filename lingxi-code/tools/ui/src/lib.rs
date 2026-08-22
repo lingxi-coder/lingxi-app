@@ -1,5 +1,5 @@
-//! UI / interaction tools: AskUserQuestion, Brief, SendMessage, Sleep,
-//! StructuredOutput (the `SyntheticOutputTool` struct, wire name
+//! UI / interaction tools: AskUserQuestion, Brief, ReportFindings, SendMessage,
+//! Sleep, StructuredOutput (the `SyntheticOutputTool` struct, wire name
 //! `StructuredOutput`). Extracted in M8-P7. Cross-platform.
 #![forbid(unsafe_code)]
 #![allow(
@@ -21,6 +21,7 @@ pub mod ask_user_question;
 pub mod brief;
 pub mod list_agents;
 pub mod push_notification;
+pub mod report_findings;
 pub mod send_message;
 pub mod sleep;
 pub mod synthetic_output;
@@ -29,6 +30,7 @@ pub use ask_user_question::AskUserQuestionTool;
 pub use brief::BriefTool;
 pub use list_agents::ListAgentsTool;
 pub use push_notification::PushNotificationTool;
+pub use report_findings::ReportFindingsTool;
 pub use send_message::SendMessageTool;
 pub use sleep::SleepTool;
 pub use synthetic_output::SyntheticOutputTool;
@@ -142,6 +144,10 @@ fn register_with_options(
     // exposure — so by default it is invisible to the model, exactly like the
     // shipped binary.
     reg.register_builtin(Arc::new(PushNotificationTool::new(ctx.clone())));
+    // PARITY (2.1.238 `pJf`): `ReportFindings`. The oracle tool object defines
+    // NO `isEnabled`, so `es()`'s default `isEnabled:()=>!0` applies and the
+    // schema is advertised in every session — registered unconditionally here.
+    reg.register_builtin(Arc::new(ReportFindingsTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(SyntheticOutputTool::new(ctx)));
     // NOTE: `ArtifactTool` lives in this crate but is registered by the DESKTOP
     // composition root (`engine_desktop::register_desktop_tools`), not here — it

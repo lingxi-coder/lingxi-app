@@ -176,6 +176,37 @@ pub struct PermissionCheckContext {
     /// authorization to the workflow that owns the call. `None` for ordinary
     /// session and main-loop dispatches.
     pub workspace_lease_token: Option<u64>,
+    /// This call's ORDERED permission-LAYER stack — 1:1 with claude-code
+    /// `toolUseContext.permissionLayers`, folded onto the session's base
+    /// permission context by `gn(toolUseContext)` (2.1.238 binary @287028951)
+    /// on EVERY permission check.
+    ///
+    /// Carried as the RAW wire array so this crate need not name
+    /// `lingxi-permission`'s `PermissionLayer` (dep direction — same precedent
+    /// as [`Self::permission_suggestions`]). Each element is the upstream
+    /// discriminated union, keyed by `kind`:
+    ///
+    /// | `kind` | payload | effect |
+    /// |---|---|---|
+    /// | `allowed_tools` | `allowedTools: string[]` | extra `command`-source ALLOW rules |
+    /// | `disallowed_tools` | `disallowedTools: string[]` | extra `command`-source DENY rules |
+    /// | `bash_command_clamp` | `rules: string[]` | one clamp GROUP; shell use is restricted to forms EVERY group admits |
+    /// | `avoid_prompts` | — | `shouldAvoidPermissionPrompts = true` |
+    /// | `permission_mode` | `mode: string` | per-call mode (bypass is refused when unavailable/killswitched) |
+    /// | `working_directory` | `directory: string` | one extra working dir (LAST such layer wins) |
+    /// | `effort` / `model` / `max_thinking_tokens` / `flag_settings` | — | inert for permissions |
+    ///
+    /// EMPTY for every dispatch that attaches no layers, in which case the fold
+    /// is a no-op and the gate behaves exactly as it did before layers existed.
+    /// Only the rule-evaluating `PolicyPermissionGate` consults it (it folds the
+    /// stack in `check_with_context_or_abort` / `resolve_detailed_or_abort`);
+    /// other transports ignore it.
+    ///
+    /// [`Self::mode_override`] and [`Self::is_non_interactive_session`] are the
+    /// pre-existing FLAT spellings of the `permission_mode` and `avoid_prompts`
+    /// layers; the gate hoists both to the head of this stack before folding, so
+    /// a layer here can still override them.
+    pub permission_layers: Vec<Value>,
 }
 
 /// Wire-neutral description of a matched permission Ask rule.
@@ -409,6 +440,39 @@ pub trait PermissionGate: Send + Sync {
     ) -> PermissionDecision {
         let _ = worker;
         self.check(name, input).await
+    }
+
+    /// Resolve an ASK the CALLER already decided on — the tool's own
+    /// `Tool::check_permissions` — WITHOUT re-deriving a verdict from the rule /
+    /// mode layer.
+    ///
+    /// claude-code composes the two the other way round: `a6e`
+    /// (`permissions.ts`, 2.1.238 BIN off **290296046**) calls
+    /// `l = await e.checkPermissions(input, ctx)` INSIDE the policy evaluation
+    /// and then lets `l.behavior === "ask"` survive the allow-rule /
+    /// bypassPermissions arms when its `decisionReason` is one of the protected
+    /// kinds (`sandboxOverride` among them:
+    /// `if(l?.behavior==="ask"&&(f||!p&&(J$(l.decisionReason)||
+    ///  l.decisionReason?.type==="sandboxOverride"||Cxf(l.decisionReason))))return l`).
+    ///
+    /// LingXi's policy layer is a separate crate that cannot call back into a
+    /// `Tool`, so the turn loop performs that composition instead: it resolves
+    /// the policy verdict first and, when the tool's own hook escalates an
+    /// otherwise-permitted call to `ask`, hands the escalation here so it
+    /// reaches the PROMPT rather than being re-authorized (and re-allowed) by
+    /// [`Self::check_with_context`].
+    ///
+    /// DEFAULT: delegate to [`Self::check_with_context`]. For a leaf transport
+    /// (`TuiPermissionGate`, the stdio gate, `DenyOnAskGate`) that IS the prompt,
+    /// so the default is already correct; only a POLICY-evaluating wrapper needs
+    /// to override it, and `PolicyPermissionGate` does. Frozen-trait safe.
+    async fn ask_via_transport(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        self.check_with_context(name, input, ctx).await
     }
 
     /// Like [`Self::check_with_worker`], but carrying a [`PermissionCheckContext`]

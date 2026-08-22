@@ -2620,6 +2620,102 @@ pub async fn run_resume(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -
     }
 }
 
+/// (CLI-16, cc 2.1.238) `--rewind-files <user-message-id>` — "Restore files to
+/// state at the specified user message and exit (requires --resume)"
+/// (oracle @307409495; hidden, present in 2.1.220 too). The port had the whole
+/// machinery — [`session::file_history::rewind_from_disk`] rebuilds a
+/// `FileHistory` from the persisted transcript and restores the tracked
+/// backups — but no argv seam ever reached it.
+///
+/// Oracle order (@307222470, inside `runHeadless` after the transcript loads):
+///
+/// ```js
+/// if(c.rewindFiles){
+///   let ze=L.find((Ze)=>Ze.uuid===c.rewindFiles);
+///   if(!ze||ze.type!=="user"){…`Error: --rewind-files requires a user message UUID, but ${c.rewindFiles} is not a user message in this session`; exit(1)}
+///   let Te=await ZRy(c.rewindFiles,r(),!1);
+///   if(!Te.canRewind){…`Error: ${Te.error||"Unexpected error"}`; exit(1)}
+///   …
+///   bl(`Files rewound to state at message ${c.rewindFiles}\n`), exit(0)}
+/// ```
+///
+/// The two argv gates that precede it (`requires --resume`, `cannot be used
+/// with a prompt`) live in [`Argv::validate_truncating_resume_args`] so they
+/// fire in the oracle's position, before any session load.
+///
+/// NOT ported: the `skippedLinks` warning line, which counts symlinked tracked
+/// paths the oracle's checkpoint layer refuses — the port's `FileHistory` has
+/// no such skip list, so emitting the sentence would report a filter that never
+/// ran.
+pub(crate) async fn run_rewind_files(argv: &Argv, sink: &dyn OutputSink) -> i32 {
+    let Some(target) = argv.rewind_files.as_deref() else {
+        return exit_codes::SUCCESS;
+    };
+    // `--rewind-files` is `requires --resume`-gated, so the session is whatever
+    // `--resume` names. A bare `--resume` (picker) has no id to rewind against.
+    let raw = argv.resume.as_deref().unwrap_or("").trim();
+    let session_id = match resolve_session_id(raw) {
+        Ok(id) => id,
+        Err(error) => {
+            sink.error("runtime", &error.to_string()).await;
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+    let messages = match load_resume_session(session_id).await {
+        Ok(m) => m,
+        Err(error) => {
+            sink.error("runtime", &error.to_string()).await;
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+    // `L.find(e=>e.uuid===c.rewindFiles)` then `!ze || ze.type!=="user"` — one
+    // message, byte-exact, for both the missing and the wrong-kind case.
+    let names_user_entry = messages
+        .iter()
+        .any(|m| m.uuid == target && m.message_type == "user");
+    if !names_user_entry {
+        eprintln!(
+            "Error: --rewind-files requires a user message UUID, but {target} is not a user message in this session"
+        );
+        return exit_codes::ARGV_ERROR;
+    }
+    let message_id = match uuid::Uuid::parse_str(target) {
+        Ok(id) => id,
+        Err(_) => {
+            eprintln!(
+                "Error: --rewind-files requires a user message UUID, but {target} is not a user message in this session"
+            );
+            return exit_codes::ARGV_ERROR;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match session::file_history::rewind_from_disk(
+        &lingxi_home_dir(),
+        &cwd.to_string_lossy(),
+        session_id,
+        message_id,
+    )
+    .await
+    {
+        Ok(_) => {
+            // `bl(...)` is the stdout writer; the oracle's literal already ends
+            // in `\n`, which `println!` supplies.
+            println!("Files rewound to state at message {target}");
+            exit_codes::SUCCESS
+        }
+        // `if(!Te.canRewind){process.stderr.write(`Error: ${Te.error||"Unexpected error"}`)}`
+        Err(error) => {
+            let detail = if error.is_empty() {
+                "Unexpected error".to_string()
+            } else {
+                error
+            };
+            eprintln!("Error: {detail}");
+            exit_codes::RUNTIME_ERROR
+        }
+    }
+}
+
 /// Resolve the saved effort for resume paths that know their target before the
 /// runtime is constructed (`--resume <uuid>` and `--continue`). An explicit
 /// `--effort` always wins. Picker paths resolve after selection in
@@ -2899,6 +2995,31 @@ async fn resume_resolved_session(
     // both the orchestrator's `SessionState.history` (engine side) and the TUI
     // scrollback (render side).
     let messages = loaded.unwrap_or_default();
+
+    // (CLI-13, cc 2.1.238) The truncating resume. The oracle runs this block
+    // IMMEDIATELY after the transcript load and before anything consumes
+    // `u.messages` (@307370121), so it sits here — ahead of the prompt/TUI
+    // split below, which is where the history is first seeded.
+    //
+    // Both flags are print-mode-only ("Ignored outside print mode" in their own
+    // help text), and `validate_truncating_resume_args` has already enforced
+    // `--resume-session-at requires --resume` and `--resume-drops-turn requires
+    // --resume-session-at`.
+    let messages = if argv.print {
+        match crate::resume_truncation::apply_truncating_resume(
+            messages,
+            argv.resume_session_at.as_deref(),
+            argv.resume_drops_turn.as_deref(),
+        ) {
+            Ok(m) => m,
+            Err(message) => {
+                sink.error("runtime", &message).await;
+                return exit_codes::RUNTIME_ERROR;
+            }
+        }
+    } else {
+        messages
+    };
 
     // A follow-up prompt keeps the one-shot path (matches the fresh
     // `Mode::Print` arm): print the resume line then run the turn. The prompt

@@ -188,7 +188,47 @@ const RECOGNIZED_EXTRA: &[&str] = &[
     "isApiErrorMessage",
     "apiErrorStatus",
     "effort",
+    // SC-07: emitted by the common trailer (arm h), immediately before
+    // `userType`, so it must not also fall out of the unrecognized-key tail.
+    SESSION_KIND_KEY,
 ];
+
+/// The outer chain-entry key for [`session_kind`].
+///
+/// Deliberately a constant: the loader's `/resume` daemon filter
+/// (`crate::jsonl::loader`) looks the same key up out of
+/// [`JsonlMessage::extra`], and the two spellings used to be independent
+/// literals with only the reader half present.
+pub const SESSION_KIND_KEY: &str = "sessionKind";
+
+/// Env var carrying the session kind — `CLAUDE_CODE_SESSION_KIND` upstream,
+/// `LINGXI_SESSION_KIND` here (the spelling `tool-api::defer`,
+/// `commands/core/src/stop.rs` and `apps/cli` already read).
+pub const SESSION_KIND_ENV: &str = "LINGXI_SESSION_KIND";
+
+/// `a3e()` (cc-238.js @283798463), verbatim:
+///
+/// ```js
+/// function a3e(){ let e=V.CLAUDE_CODE_SESSION_KIND;
+///   if(e==="bg"||e==="daemon"||e==="daemon-worker") return e; return }
+/// ```
+///
+/// Note the WHITELIST: any other value (including the port's own
+/// `LINGXI_SESSION_KIND=interactive`, which `commands/core/src/stop.rs` tests
+/// set) yields `undefined`, i.e. the key is omitted — it is not passed through.
+///
+/// Upstream this is stamped on EVERY chain entry
+/// (`insertMessageChain` @296794533: `…, sessionKind:a3e(), userType, …`).
+/// The port's reader half — the `/resume` picker's `daemon` / `daemon-worker`
+/// filter — has existed since the SESSION.2 gap fix with no writer behind it;
+/// [`crate::jsonl::writer::JsonlWriter::append`] is the writer.
+#[must_use]
+pub fn session_kind() -> Option<String> {
+    match std::env::var(SESSION_KIND_ENV).ok()?.as_str() {
+        kind @ ("bg" | "daemon" | "daemon-worker") => Some(kind.to_string()),
+        _ => None,
+    }
+}
 
 /// `extra` keys the USER head consumes (between `message` and `uuid`): the
 /// compact-summary envelope flags, emitted in claude's on-disk order
@@ -420,6 +460,15 @@ impl Serialize for JsonlMessage {
 
         // (h) Common trailer — same emit/skip predicates as the derived impl,
         //     only the POSITION moves (it now follows the per-kind envelope).
+        //
+        //     `sessionKind` leads it: the oracle's chain-entry literal
+        //     (@296794533) is `…, agentId, ...g, sessionKind:a3e(), userType,
+        //     entrypoint, cwd, …`. Carried in `extra` (not a named field)
+        //     because that is the channel the `/resume` daemon filter in
+        //     `loader.rs` already reads it back through.
+        if let Some(v) = self.extra.get(SESSION_KIND_KEY) {
+            map.serialize_entry(SESSION_KIND_KEY, v)?;
+        }
         if let Some(v) = &self.user_type {
             map.serialize_entry("userType", v)?;
         }
@@ -538,6 +587,71 @@ mod attachment_envelope_tests {
             1,
             "payload emitted once, not tail-appended a second time: {s}"
         );
+    }
+
+    /// SC-07. `sessionKind` sits between the per-kind envelope and `userType`
+    /// — the oracle's chain-entry literal is
+    /// `…, sessionKind:a3e(), userType, entrypoint, cwd, sessionId, …`.
+    /// It must NOT fall out of the unrecognized-key tail after `gitBranch`.
+    #[test]
+    fn session_kind_leads_the_common_trailer() {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            super::SESSION_KIND_KEY.to_string(),
+            serde_json::json!("daemon-worker"),
+        );
+        let msg = JsonlMessage {
+            message_type: "user".to_string(),
+            uuid: "u".to_string(),
+            parent_uuid: None,
+            session_id: "s".to_string(),
+            timestamp: "t".to_string(),
+            cwd: "/c".to_string(),
+            version: "v".to_string(),
+            message: serde_json::json!({"role": "user", "content": "hi"}),
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch: Some("main".to_string()),
+            entrypoint: Some("cli".to_string()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        assert!(
+            s.contains(
+                r#""sessionKind":"daemon-worker","userType":"external","entrypoint":"cli","cwd":"/c""#
+            ),
+            "sessionKind must lead the trailer: {s}"
+        );
+        assert_eq!(s.matches("\"sessionKind\"").count(), 1, "emitted once: {s}");
+    }
+
+    /// A line with no session kind is byte-unchanged — the key is dropped, not
+    /// emitted as `null` (`a3e()` returns `undefined`, which `JSON.stringify`
+    /// omits).
+    #[test]
+    fn absent_session_kind_emits_no_key() {
+        let msg = JsonlMessage {
+            message_type: "user".to_string(),
+            uuid: "u".to_string(),
+            parent_uuid: None,
+            session_id: "s".to_string(),
+            timestamp: "t".to_string(),
+            cwd: "/c".to_string(),
+            version: "v".to_string(),
+            message: serde_json::json!({"role": "user"}),
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra: serde_json::Map::new(),
+        };
+        assert!(!serde_json::to_string(&msg).unwrap().contains("sessionKind"));
     }
 }
 

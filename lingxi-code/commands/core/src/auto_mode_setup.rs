@@ -1,11 +1,12 @@
 //! `/auto-mode-setup` — the WIZARD-06 permission-hardening command.
 //!
-//! Ported from the 2.1.220 binary's NON-INTERACTIVE command object:
+//! Ported from the binary's NON-INTERACTIVE command object (description
+//! re-verified against 2.1.238 @294963678 — SLASH-03 re-worded it):
 //!
 //! ```text
-//! f$s={type:"local",name:"auto-mode-setup",supportsNonInteractive:!0,
-//!   description:"Set up and customise auto mode — environment context, plus
-//!     optional rule tweaks",
+//! mSl={type:"local",name:"auto-mode-setup",supportsNonInteractive:!0,
+//!   description:"Teach auto mode about your environment, plus optional rule
+//!     tweaks",
 //!   argumentHint:"[--request-id <uuid>] (--wizard posture=… scope=… depth=…
 //!     --propose | --expect-sha256 <64-hex> --apply-file <path>)",
 //!   isEnabled:()=>hPo()&&_n(), get isHidden(){return!_n()}, load:...}
@@ -377,7 +378,7 @@ mod tests {
     fn the_description_is_the_oracles() {
         assert_eq!(
             AutoModeSetupHandler::new().description(),
-            "Set up and customise auto mode \u{2014} environment context, plus optional rule tweaks"
+            "Teach auto mode about your environment, plus optional rule tweaks"
         );
     }
 

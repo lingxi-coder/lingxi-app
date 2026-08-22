@@ -41,7 +41,7 @@ pub enum Sub {
 
     /// Run eval cases against a plugin and report scored results
     #[command(
-        long_about = "Run eval cases (evals/**/case.yaml or evals/**/prompt.md + graders/*.md) against a plugin and report scored results. Target is a path, a plugin name, or a `plugin@marketplace` id — installed and skills-dir plugins both resolve (and add a no-plugin baseline arm)"
+        long_about = "Run eval cases (<eval dir>/**/case.yaml or prompt.md + graders/*.md; the eval dir is evals/ unless --eval-dir or the manifest says otherwise) against a plugin and report scored results. Target is a path, a plugin name, or a `plugin@marketplace` id — installed and skills-dir plugins both resolve (and add a no-plugin baseline arm)"
     )]
     Eval(crate::commands::plugin_eval::Cli),
 
@@ -70,13 +70,14 @@ pub enum Sub {
     Tag(TagArgs),
 
     /// Uninstall an installed plugin
-    #[command(name = "uninstall", visible_alias = "remove")]
+    #[command(name = "uninstall", visible_aliases = ["remove", "rm"])]
     Uninstall(UninstallArgs),
 
     /// Update a plugin to the latest version (restart required to apply)
     Update(UpdateArgs),
 
-    /// Validate a plugin or marketplace manifest
+    /// Validate a plugin or marketplace manifest, or the skills, agents, and
+    /// commands in a directory
     Validate(ValidateArgs),
 }
 
@@ -156,6 +157,25 @@ pub struct InstallArgs {
     /// Installation scope: user, project, or local (default: "user")
     #[arg(short = 's', long, value_name = "scope", default_value = "user")]
     pub scope: String,
+
+    /// Accept the displayed marketplace-declared command without the
+    /// confirmation prompt — a plugin installed by running a command, or one
+    /// whose archive is fetched through a headersHelper command (required when
+    /// stdin or stdout is not a TTY)
+    //
+    // CLI-07 (cc 2.1.238, cc-238.js @235156585): NEW in 2.1.238 — 2.1.220's
+    // `plugin install` carried only `-s, --scope` and `--config`.
+    //
+    // PARSED, NOT CONSUMED — deliberately. The prompt this flag waives guards
+    // the two marketplace source kinds LingXi's schema does not have: a
+    // `command`-declared install and a `headersHelper`-fetched archive
+    // (`plugin::marketplace::MarketplaceExternalSource` is github | git | url |
+    // npm | file | directory, and `plugin_install` never shells out to a
+    // marketplace-declared command). With no such source there is no
+    // confirmation to skip, so accepting the flag is a faithful no-op rather
+    // than a fake grant; wiring appears with the source kind, not before it.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 
     /// Plugin to install (use plugin@marketplace for a specific marketplace).
     #[arg(value_name = "plugin")]
@@ -252,6 +272,19 @@ pub struct UpdateArgs {
     /// Installation scope: user, project, local, managed (default: user)
     #[arg(short = 's', long, value_name = "scope", default_value = "user")]
     pub scope: String,
+
+    /// Accept the displayed marketplace-declared command without the
+    /// confirmation prompt — a changed install command, or the headersHelper
+    /// command that fetches its archive (required when stdin or stdout is not a
+    /// TTY)
+    //
+    // CLI-08 (cc 2.1.238, cc-238.js @235159327): NEW in 2.1.238 — 2.1.220's
+    // `plugin update` carried only `-s, --scope`. PARSED, NOT CONSUMED for the
+    // same reason as the `install` twin above: LingXi has no command-declared
+    // install and no headersHelper archive fetch, so there is no prompt to
+    // waive. See `InstallArgs::yes`.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 
     /// Plugin to update.
     #[arg(value_name = "plugin")]
@@ -1194,6 +1227,80 @@ async fn resolve_manifest(path: &std::path::Path) -> Option<(std::path::PathBuf,
         }
     }
     None
+}
+
+/// CLI-07 / CLI-08 / CLI-09 (cc 2.1.238): the argv-surface deltas 2.1.238 added
+/// to the `plugin` family, each verified absent from the 2.1.220 baseline.
+#[cfg(test)]
+mod surface_2_1_238_tests {
+    use crate::argv::Argv;
+
+    fn plugin_sub(argv: &[&str]) -> super::Sub {
+        Argv::from_iter(argv.iter().copied())
+            .unwrap()
+            .command
+            .and_then(|command| match command {
+                crate::commands::Commands::Plugin(plugin) => plugin.command,
+                _ => None,
+            })
+            .expect("expected a plugin subcommand")
+    }
+
+    /// CLI-07 (cc-238.js @235156585): `-y, --yes` is NEW on `plugin install`
+    /// (2.1.220's install carried only `-s, --scope` and `--config`).
+    #[test]
+    fn install_accepts_the_new_yes_flag() {
+        let super::Sub::Install(args) = plugin_sub(&["lingxi-cli", "plugin", "install", "-y", "p@m"])
+        else {
+            panic!("expected plugin install");
+        };
+        assert!(args.yes);
+        assert_eq!(args.plugin, "p@m");
+
+        let super::Sub::Install(args) =
+            plugin_sub(&["lingxi-cli", "plugin", "install", "--yes", "p@m"])
+        else {
+            panic!("expected plugin install");
+        };
+        assert!(args.yes);
+
+        // Absent ⇒ false (the flag is opt-in, never implied by --scope).
+        let super::Sub::Install(args) = plugin_sub(&["lingxi-cli", "plugin", "install", "p@m"])
+        else {
+            panic!("expected plugin install");
+        };
+        assert!(!args.yes);
+    }
+
+    /// CLI-08 (cc-238.js @235159327): `-y, --yes` is NEW on `plugin update`
+    /// (2.1.220's update carried only `-s, --scope`).
+    #[test]
+    fn update_accepts_the_new_yes_flag() {
+        let super::Sub::Update(args) = plugin_sub(&["lingxi-cli", "plugin", "update", "-y", "p"])
+        else {
+            panic!("expected plugin update");
+        };
+        assert!(args.yes);
+
+        let super::Sub::Update(args) = plugin_sub(&["lingxi-cli", "plugin", "update", "p"]) else {
+            panic!("expected plugin update");
+        };
+        assert!(!args.yes);
+    }
+
+    /// CLI-09 (binary @261478912): `uninstall` gained the `rm` alias in 2.1.238
+    /// — 2.1.220's alias slot held only `remove`. All three spellings must
+    /// reach the same variant.
+    #[test]
+    fn uninstall_answers_to_remove_and_the_new_rm_alias() {
+        for spelling in ["uninstall", "remove", "rm"] {
+            let super::Sub::Uninstall(args) = plugin_sub(&["lingxi-cli", "plugin", spelling, "p"])
+            else {
+                panic!("expected plugin uninstall for `{spelling}`");
+            };
+            assert_eq!(args.plugin, "p");
+        }
+    }
 }
 
 #[cfg(test)]

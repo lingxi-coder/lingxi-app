@@ -548,6 +548,8 @@
     <string name="local_apps_error_ui_closed">アプリページは閉じられました。</string>
     <string name="local_apps_error_ui_encode_failed">UI 操作のパラメーターをエンコードできませんでした。</string>
     <string name="local_apps_error_ui_invalid_result">UI 操作から有効な結果が返されませんでした。</string>
+    <string name="local_apps_error_ui_capture_too_large">キャプチャした画面が大きすぎるため、品質を下げても返せません。</string>
+    <string name="local_apps_error_ui_capture_unavailable">アプリの画面をキャプチャできませんでした。画面外にある可能性があります。</string>
     <string name="local_apps_error_ui_no_history">アプリページには戻れる履歴がありません。</string>
     <string name="local_apps_error_ui_not_open">アプリページが開かれていないため、UI 操作を実行できません。</string>
     <string name="local_apps_error_ui_rejected">ユーザーが UI 操作を拒否しました。</string>
@@ -630,6 +632,9 @@
     <string name="local_apps_ui_action_inspect">UI を検査</string>
     <string name="local_apps_ui_action_navigate">ナビゲート</string>
     <string name="local_apps_ui_action_reload">再読み込み</string>
+    <string name="local_apps_ui_action_capture_view">アプリ画面をキャプチャ</string>
+    <string name="local_apps_ui_action_pointer">アプリ画面をタップ</string>
+    <string name="local_apps_ui_action_key">キー入力を送信</string>
     <string name="local_apps_ui_action_scroll">スクロール</string>
     <string name="local_apps_ui_action_select">選択</string>
     <string name="local_apps_ui_action_toggle">切り替え</string>

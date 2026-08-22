@@ -22,3 +22,24 @@ and touch targets. Load detailed checks from
 [references/a11y-checklist.md](references/a11y-checklist.md) when the surface
 is complex. This skill may edit generated source, but it does not manage npm
 dependencies or redesign platform navigation.
+
+## Drawn surfaces (canvas / WebGL)
+
+The checks above are DOM checks. A canvas has no landmarks, no headings, no tab
+order and no measurable control rectangles, so running them against one produces
+findings the app cannot act on — and an unresolved finding fails the whole
+build, spending a repair round a real defect then cannot use. Do not raise
+DOM-shaped findings against a drawn surface.
+
+It still has an accessibility contract, just a different one:
+
+- the canvas element carries a real label and a text description of what it
+  shows, so a screen reader announces something other than "canvas";
+- state that only exists as pixels — score, lives, level, game over — is also
+  published in a live region, because a screen reader cannot read a drawing;
+- every action is reachable without a pointer, since a pointer-only game is
+  unplayable for anyone using switch control or a keyboard;
+- state is never communicated by color alone (this one carries over unchanged,
+  and matters more here: color is often all a drawn surface has);
+- `prefers-reduced-motion` reduces or stops non-essential animation rather than
+  being ignored because "it's a game".

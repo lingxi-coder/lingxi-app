@@ -21518,6 +21518,74 @@
         }
       }
     },
+    "local_apps_error_ui_capture_too_large": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "截取的画面过大，即使降低质量也无法返回。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "擷取的畫面過大，即使降低品質也無法返回。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The captured frame is too large to return, even at reduced quality."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "キャプチャした画面が大きすぎるため、品質を下げても返せません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "캡처한 화면이 너무 커서 품질을 낮춰도 반환할 수 없습니다."
+          }
+        }
+      }
+    },
+    "local_apps_error_ui_capture_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法截取应用画面，它可能不在屏幕上。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法擷取應用畫面，它可能不在螢幕上。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The app view could not be captured; it may be offscreen."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリの画面をキャプチャできませんでした。画面外にある可能性があります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 화면을 캡처할 수 없습니다. 화면 밖에 있을 수 있습니다."
+          }
+        }
+      }
+    },
     "local_apps_error_ui_closed": {
       "localizations": {
         "zh-Hans": {
@@ -26652,6 +26720,40 @@
         }
       }
     },
+    "local_apps_ui_action_capture_view": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "截取应用画面"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "擷取應用畫面"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Capture app view"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリ画面をキャプチャ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 화면 캡처"
+          }
+        }
+      }
+    },
     "local_apps_ui_action_click": {
       "localizations": {
         "zh-Hans": {
@@ -26754,6 +26856,40 @@
         }
       }
     },
+    "local_apps_ui_action_key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "发送按键"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "傳送按鍵"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send a key press"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "キー入力を送信"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "키 입력 보내기"
+          }
+        }
+      }
+    },
     "local_apps_ui_action_missing_target": {
       "localizations": {
         "zh-Hans": {
@@ -26818,6 +26954,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "이동"
+          }
+        }
+      }
+    },
+    "local_apps_ui_action_pointer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在应用画面中点按"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在應用畫面中點按"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap in the app view"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリ画面をタップ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 화면 탭"
           }
         }
       }

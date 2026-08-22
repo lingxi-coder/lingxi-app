@@ -159,11 +159,45 @@ mod tests {
             "LocalAppBuild",
             "LocalAppRuntime",
             "host may prepare the workspace dependencies when needed",
+            // A dependency the generator is never told about is the same as one
+            // that was never added: the contract only says "stay within the
+            // locked set" and never enumerates it, so `three` has to be named
+            // here or every 3D request falls back to hand-rolled 2D.
+            "three@0.185.1 is in the locked set",
+            "own the frame loop yourself with requestAnimationFrame",
             "maxRepairRounds",
             "conditionally detect ImageGen",
             "A narrow viewport alone does not prove a platform",
             "Cover the full confirmed matrix: iPhone, Android phone, iPad portrait+landscape, Android tablet portrait+landscape, and desktop",
             "LocalAppInspectUi/LocalAppActOnUi/LocalAppLogs",
+            // A canvas app is invisible to the DOM path: an empty element list
+            // means nothing, so the verifier must be told to reach for the
+            // frame and the pointer/key vocabulary instead. Without these the
+            // capability exists and the agent never learns it can use it.
+            "LocalAppCaptureUi",
+            "A canvas app verified only through inspect_ui has not been verified",
+            // The gate keys on the PRESENCE of a canvas, not on an empty
+            // element list — a real generated game ships a score bar and a
+            // restart button, so the empty-DOM version never fired for it.
+            "canvas_surfaces is the canvasCount field",
+            // The generate stage burned all 100 turns re-verifying its own
+            // output on device, so Verify never ran once. Losing this line
+            // reopens that: the stage looks productive while starving the
+            // one that actually gates.
+            "STOP once the build succeeds and the runtime is started",
+            // WebAssembly and workers are DEFAULTS, not a capability. Losing
+            // this line puts the generator back to designing around a
+            // restriction that no longer exists.
+            "WebAssembly and Web Workers are available to every local app",
+            "you may not answer not_applicable",
+            // `findings` is blocking, so an agent that fills it with what it
+            // checked fails a build that passed. Observed: a verify pass came
+            // back `ok:true` with every gate green and ten sentences of praise
+            // in `findings`, and a repair agent was dispatched to "repair" them.
+            // The fixtures below all write `[]`, so only this anchor keeps the
+            // field's meaning in front of the agent that has to fill it.
+            "findings is the list of UNRESOLVED DEFECTS",
+            "returns findings as an empty array no matter how much it verified",
             "degraded_verification",
             "records[].document",
             "LocalAppQueryData",
@@ -247,7 +281,7 @@ mod tests {
                         r#"{"ok":true,"preview_url":"http://preview/first","summary":"built"}"#
                             .to_string()
                     } else if prompt.contains("Invoke $frontend-qa") {
-                        r#"{"ok":true,"findings":[],"checked_matrix":["android-phone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string()
+                        r#"{"ok":true,"findings":[],"checked_matrix":["android-phone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"render_check":{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"},"summary":"verified"}"#.to_string()
                     } else {
                         panic!("{name} must not repair on the happy path: {prompt}");
                     }
@@ -335,9 +369,9 @@ mod tests {
                             let round = next_verification_round.get();
                             next_verification_round.set(round + 1);
                             if round == 0 {
-                                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"needs repair"}"#.to_string()
+                                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"render_check":{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"},"summary":"needs repair"}"#.to_string()
                             } else {
-                                r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string()
+                                r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"render_check":{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"},"summary":"verified"}"#.to_string()
                             }
                         } else if prompt.contains("Repair the findings") {
                             r#"{"ok":true,"preview_url":"http://preview/repaired","summary":"rebuilt and restarted"}"#.to_string()
@@ -475,7 +509,7 @@ mod tests {
                             r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
                                 .to_string()
                         } else if prompt.contains("Invoke $frontend-qa") {
-                            r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"failed","collections":["items"],"evidence":"query_data did not contain the written record"},"summary":"verifier incorrectly reported success"}"#
+                            r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"failed","collections":["items"],"evidence":"query_data did not contain the written record"},"render_check":{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"},"summary":"verifier incorrectly reported success"}"#
                                 .to_string()
                         } else {
                             panic!("unexpected prompt: {prompt}");
@@ -492,6 +526,181 @@ mod tests {
             "unexpected workflow error: {error}"
         );
         assert_eq!(run.prompts.len(), 4, "fast gets one repair before failing");
+    }
+
+    /// The render gate must FIRE, not merely exist.
+    ///
+    /// `data_roundtrip` is the only other gate with teeth and it answers
+    /// `not_applicable` for an app with no writable collection — so before this
+    /// gate, an app that draws its interface could complete verification having
+    /// observed nothing at all: an empty DOM snapshot, no frame, and a green
+    /// result. Each case below is one distinct way to reach "nothing was
+    /// verified", and each must be rejected on its own.
+    #[test]
+    fn local_app_build_rejects_a_verification_that_observed_nothing() {
+        // (render_check body, the fragment the failure must name)
+        let cases = [
+            (
+                // The vacuous-canvas shape: inspect_ui saw nothing, no frame was
+                // taken, and the agent shrugged it off as not applicable.
+                r#"{"status":"not_applicable","canvas_surfaces":1,"frames_captured":0,"interactions_driven":[],"evidence":"the score bar and restart button both inspected fine"}"#,
+                "a canvas surface was present but never verified",
+            ),
+            (
+                // Claimed the frame was checked without ever obtaining one. The
+                // claim and the count come from different places, so they can
+                // disagree — and this disagreement is the whole point.
+                r#"{"status":"passed","canvas_surfaces":1,"frames_captured":0,"interactions_driven":["pointer 10,10 tap"],"evidence":"looks fine"}"#,
+                "captured no frame",
+            ),
+            (
+                // An honest failure still has to fail the build.
+                r#"{"status":"failed","canvas_surfaces":1,"frames_captured":2,"interactions_driven":[],"evidence":"frame is blank"}"#,
+                "render check failed",
+            ),
+        ];
+        for (render_check, expected) in cases {
+            let verification = format!(
+                r#"{{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{{"status":"not_applicable","collections":[],"evidence":"no writable collections"}},"render_check":{render_check},"summary":"verified"}}"#
+            );
+            let run = drive_local_app_build(
+                local_app_args(Some("fast"), None, None, None),
+                move |prompts, _options| {
+                    prompts
+                        .iter()
+                        .map(|prompt| {
+                            if prompt.contains("Generate the complete React implementation")
+                                || prompt.contains("Repair the findings")
+                            {
+                                r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                    .to_string()
+                            } else if prompt.contains("Invoke $frontend-qa") {
+                                verification.clone()
+                            } else {
+                                panic!("unexpected prompt: {prompt}");
+                            }
+                        })
+                        .collect()
+                },
+            );
+            let error = run
+                .outcome
+                .expect_err("a verification that observed nothing must not return success");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} in: {error}"
+            );
+            // The count, not just the message. A render finding is a source
+            // defect a repair round can fix, and it has to BUY one exactly like
+            // a non-empty `findings` does — otherwise `fast`'s single allowed
+            // round is silently forfeited and the whole run is lost on a defect
+            // the loop was budgeted to repair. Asserting only the error text is
+            // what let that asymmetry through. `fast` skips design, so the
+            // sequence is generate-build, verify, repair-build, verify = 4.
+            assert_eq!(
+                run.prompts.len(),
+                4,
+                "a render finding must reach a repair round before the build fails; \
+                 prompts={:#?}",
+                run.prompts
+            );
+            // Derived findings are absent from the verifier's own JSON, so the
+            // repair agent has to be told what it is repairing.
+            assert!(
+                run.prompts.iter().any(|prompt| {
+                    prompt.contains("Repair the findings") && prompt.contains(expected)
+                }),
+                "the repair round must receive the render finding: {:#?}",
+                run.prompts
+            );
+        }
+    }
+
+    /// The gate must NOT fire for an ordinary DOM app.
+    ///
+    /// A form-shaped app legitimately has no frame to capture, because the
+    /// element snapshot already carried the evidence. If the gate rejected that
+    /// it would just be a tax on every non-game app, and would be silenced.
+    #[test]
+    fn local_app_build_accepts_a_dom_app_that_captured_no_frame() {
+        let run = drive_local_app_build(
+            local_app_args(Some("fast"), None, None, None),
+            |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Generate the complete React implementation") {
+                            r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                .to_string()
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"render_check":{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"},"summary":"verified"}"#
+                                .to_string()
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        );
+        run.outcome
+            .expect("a DOM app with a non-empty snapshot needs no frame");
+    }
+
+    /// A non-empty `findings` blocks even when everything else is green, and
+    /// that is deliberate.
+    ///
+    /// This shape is not hypothetical: a real verify pass against a generated
+    /// snake game returned `ok:true` with `data_roundtrip` and `render_check`
+    /// both satisfied and ten sentences of praise in `findings`, which spent a
+    /// repair round asking an agent to "repair" the fact that the app worked.
+    /// The defect is that the field was never DEFINED for the agent filling it,
+    /// so the fix belongs in the verify prompt — this test exists so nobody
+    /// "fixes" it here instead, by letting `ok:true` override the findings. That
+    /// would silently un-gate every real defect an honest verifier reports.
+    #[test]
+    fn local_app_build_lets_no_finding_through_on_a_self_declared_pass() {
+        let run = drive_local_app_build(
+            local_app_args(Some("fast"), None, None, None),
+            |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Generate the complete React implementation")
+                            || prompt.contains("Repair the findings")
+                        {
+                            r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                .to_string()
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            r#"{"ok":true,"findings":["the pause button does nothing on the second press"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"render_check":{"status":"passed","canvas_surfaces":1,"frames_captured":4,"interactions_driven":["pointer 207,320 down"],"evidence":"frames show the board animating"},"summary":"verified"}"#
+                                .to_string()
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        );
+        let error = run
+            .outcome
+            .expect_err("a reported defect must not be overridden by ok:true");
+        assert!(
+            error.to_string().contains("the pause button does nothing"),
+            "the failure must quote the finding, not paraphrase it: {error}"
+        );
+        assert_eq!(
+            run.prompts.len(),
+            4,
+            "the finding must reach a repair round before the build fails"
+        );
+        // The repair agent is handed the verification verbatim, so whatever the
+        // verifier wrote in `findings` becomes its instructions.
+        assert!(
+            run.prompts
+                .iter()
+                .any(|prompt| prompt.contains("Repair the findings")
+                    && prompt.contains("the pause button does nothing")),
+            "the repair round must receive the finding it is repairing"
+        );
     }
 
     #[test]
@@ -532,7 +741,7 @@ mod tests {
                             {
                                 r#"{"ok":true,"preview_url":"http://preview/repaired","summary":"built"}"#.to_string()
                             } else if prompt.contains("Invoke $frontend-qa") {
-                                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"needs repair"}"#.to_string()
+                                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"render_check":{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"},"summary":"needs repair"}"#.to_string()
                             } else {
                                 panic!("unexpected prompt for {strategy}: {prompt}");
                             }
@@ -589,9 +798,9 @@ mod tests {
                             let round = next_verification_round.get();
                             next_verification_round.set(round + 1);
                             if round < 2 {
-                                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"needs repair"}"#.to_string()
+                                r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"render_check":{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"},"summary":"needs repair"}"#.to_string()
                             } else {
-                                r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string()
+                                r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"render_check":{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"},"summary":"verified"}"#.to_string()
                             }
                         } else {
                             panic!("unexpected prompt: {prompt}");
@@ -688,7 +897,7 @@ mod tests {
                     .to_string()
             }
             "generate-build" | "repair-build" => r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#.to_string(),
-            "verify" => r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#.to_string(),
+            "verify" => r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"render_check":{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"},"summary":"verified"}"#.to_string(),
             other => other.to_string(),
         }
     }
@@ -723,7 +932,7 @@ mod tests {
             {
                 r#"{"ok":false,"preview_url":"","summary":"vite build exited 1"}"#.to_string()
             } else if prompt.contains("Invoke $frontend-qa") {
-                r#"{"ok":false,"findings":["no preview to check"],"checked_matrix":[],"browser_available":false,"webview_checked":false,"degraded_verification":true,"data_roundtrip":{"status":"failed","collections":[],"evidence":"preview unavailable"},"summary":"cannot verify"}"#.to_string()
+                r#"{"ok":false,"findings":["no preview to check"],"checked_matrix":[],"browser_available":false,"webview_checked":false,"degraded_verification":true,"data_roundtrip":{"status":"failed","collections":[],"evidence":"preview unavailable"},"render_check":{"status":"failed","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"preview unavailable"},"summary":"cannot verify"}"#.to_string()
             } else {
                 local_app_reply(prompt, "")
             }
@@ -746,7 +955,7 @@ mod tests {
                     .iter()
                     .map(|prompt| {
                         if prompt.contains("Invoke $frontend-qa") {
-                            r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"needs repair"}"#.to_string()
+                            r#"{"ok":false,"findings":["button is clipped"],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"render_check":{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"},"summary":"needs repair"}"#.to_string()
                         } else {
                             local_app_reply(prompt, "")
                         }

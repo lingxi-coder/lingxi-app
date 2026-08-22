@@ -809,7 +809,15 @@ final class LocalAppsStore {
                 runtimeLastUsedAt[request.appId] = .now
                 pendingUIRequestAppIDs[request.requestId] = request.appId
                 requestedPresentationAppID = request.appId
-                if request.action == .inspect {
+                // `.captureView` rides with `.inspect` because it is read-only in
+                // the same sense — the engine does not gate it on `ui_control`
+                // at all (`capture_ui` never calls `authorize_capability`), and
+                // the agent already had to clear the `LocalAppCaptureUi` prompt,
+                // which is DenyByDefault. Falling through to the automation
+                // prompt was worse than redundant: a `.session`/`.always` answer
+                // is stored in `approvedUIAutomation`, so approving a screenshot
+                // silently authorized click/fill/navigate for the whole session.
+                if request.action == .inspect || request.action == .captureView {
                     executeUIRequest(request, decision: .allowOnce)
                 } else if let decision = approvedUIAutomation[request.appId] {
                     if decision == .once { approvedUIAutomation[request.appId] = nil }

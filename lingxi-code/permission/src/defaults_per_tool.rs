@@ -5,15 +5,16 @@
 //! to [`PromptDefault::DenyByDefault`] (fail-closed).
 //!
 //! Aggregate, oracle-parity set: 23 `DenyByDefault` (destructive / external
-//! side-effects), 20 `AllowByDefault` (read-only or agent-local) = 43 tools,
+//! side-effects), 21 `AllowByDefault` (read-only or agent-local) = 44 tools,
 //! plus one synthetic `<unknown>` fallback.
 //!
-//! MOBILE DIVERGENCE: 21 further `LocalApp*` rows for the first-party
+//! MOBILE DIVERGENCE: 22 further `LocalApp*` rows for the first-party
 //! local-app host operations (`engine_mobile::local_apps_tools`). They have no
 //! oracle counterpart — claude-code has no host-owned local-app surface — and
 //! are split by REVERSIBILITY: 11 `AllowByDefault` (read-only, plus the
 //! network-disabled build and the restartable local preview runtime),
-//! 10 `DenyByDefault` (user data, UI actuation, checkpoint restore, network).
+//! 11 `DenyByDefault` (user data, UI actuation, view capture, checkpoint
+//! restore, network).
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -27,7 +28,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     use PromptDefault::{AllowByDefault, DenyByDefault};
     let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(41);
 
-    // Allow-by-default tools ([Y/n]) — 19 entries.
+    // Allow-by-default tools ([Y/n]) — 20 entries.
     m.insert("Agent", AllowByDefault);
     m.insert("AskUserQuestion", AllowByDefault);
     m.insert("Config", AllowByDefault);
@@ -37,6 +38,14 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("Glob", AllowByDefault);
     m.insert("Grep", AllowByDefault);
     m.insert("LSP", AllowByDefault);
+    // 2.1.232 `zy`. Read-only discovery, and its own `check_permissions`
+    // answers Allow — but a tool ABSENT from this table falls to the
+    // fail-closed `DenyByDefault`, which makes `read_only_default_auto_allows`
+    // false and raises a prompt on every call. It was missed when the registry
+    // count went 42 -> 43: the oracle side of that count still balanced only
+    // because the legacy `Task` alias below occupies a slot the registry does
+    // not have.
+    m.insert("ListAgents", AllowByDefault);
     m.insert("Read", AllowByDefault);
     m.insert("SendUserMessage", AllowByDefault); // wire name of BriefTool (Brief alias)
     m.insert("Skill", AllowByDefault);
@@ -103,6 +112,10 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // conversation has no binding and can name any app, so they ask.
     m.insert("LocalAppQueryData", DenyByDefault);
     m.insert("LocalAppInspectUi", DenyByDefault);
+    // Strictly more revealing than `LocalAppInspectUi`, which is already
+    // DenyByDefault: the DOM snapshot nulls out `password`/`hidden` input
+    // values and a pixel capture cannot redact anything it renders.
+    m.insert("LocalAppCaptureUi", DenyByDefault);
     m.insert("LocalAppCreate", DenyByDefault);
     m.insert("LocalAppManifest", DenyByDefault);
     m.insert("LocalAppMutateData", DenyByDefault);
@@ -114,8 +127,8 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppBackgroundCancel", DenyByDefault);
     m.insert("LocalAppBackgroundRetry", DenyByDefault);
 
-    // 43 oracle-parity tools + 21 mobile local-app builtins.
-    debug_assert_eq!(m.len(), 64, "tool defaults table must list all 64 tools");
+    // 44 oracle-parity tools + 22 mobile local-app builtins.
+    debug_assert_eq!(m.len(), 66, "tool defaults table must list all 66 tools");
     m
 }
 
@@ -170,6 +183,8 @@ mod tests {
             // Expose app CONTENT; a global chat can name any app.
             "LocalAppQueryData",
             "LocalAppInspectUi",
+            // Renders what inspect_ui redacts.
+            "LocalAppCaptureUi",
             // Drains the unread queue and advances a persisted cursor.
             "LocalAppEvents",
             // Mutates the user's own records.
@@ -257,8 +272,8 @@ mod tests {
         // without being recorded as a divergence, which a single total hides.
         let oracle = m.keys().filter(|k| !k.starts_with("LocalApp")).count();
         let mobile = m.keys().filter(|k| k.starts_with("LocalApp")).count();
-        assert_eq!(oracle, 43, "oracle-parity tool count changed");
-        assert_eq!(mobile, 21, "local-app builtin count changed");
+        assert_eq!(oracle, 44, "oracle-parity tool count changed");
+        assert_eq!(mobile, 22, "local-app builtin count changed");
         assert_eq!(m.len(), oracle + mobile);
     }
 }

@@ -120,7 +120,7 @@ class LocalAppWebViewTest {
             "Content-Security-Policy", "XMLHttpRequest", "WebSocket", "EventSource", "sendBeacon",
             "External resources are blocked", "error.code = envelope.code",
             "const normalAnchor = attribute === 'href' && this.tagName === 'A'",
-            "request_too_large", "worker-src 'none'", "deviceContext", "os: 'android'",
+            "request_too_large", "worker-src 'self' blob:", "deviceContext", "os: 'android'",
             "formFactor: 'tablet'", "get viewport()", "get safeArea()", "get colorScheme()",
             "get reducedMotion()", "get inputMode()",
             "const channel = pending.get(frame.requestId)?.channel",
@@ -129,6 +129,36 @@ class LocalAppWebViewTest {
         assertFalse(bootstrap.contains("window.screen"))
         assertFalse(bootstrap.contains("addJavascriptInterface"))
         assertFalse(bootstrap.contains("navigator.userAgent"))
+    }
+
+    /**
+     * Asserted as one whole string, not by `contains` on the directives that
+     * happen to be interesting: a CSP is only as strong as its most permissive
+     * directive, and this injected meta INTERSECTS with the host's header, so a
+     * drift here silently overrides the engine.
+     *
+     * What this CANNOT do is compare against the engine: `LOCAL_APP_CONTENT_
+     * SECURITY_POLICY` lives in Rust and never reaches this target, so the
+     * literal below is a hand-kept copy — and it is deliberately not
+     * byte-identical (the engine orders `img-src; font-src; connect-src;
+     * media-src`, this orders `img-src; media-src; font-src; connect-src`;
+     * directive ORDER is not meaningful to a CSP parser). Locking the two
+     * together needs the policy to travel over the protocol.
+     */
+    @Test
+    fun `injected CSP pins the whole policy`() {
+        val bootstrap = buildLingxiV1Bootstrap(formFactor = "phone")
+        assertTrue(
+            bootstrap.contains(
+                "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+            ),
+        )
+        // The one placeholder this template really has. Asserting a
+        // `__LINGXI_CSP__` token that exists nowhere in the repo could never
+        // fail; this one goes red if the substitution is dropped, which would
+        // boot every app with the literal string as its `formFactor`.
+        assertFalse(bootstrap.contains("__LINGXI_NATIVE_FORM_FACTOR__"))
+        assertTrue(bootstrap.contains("formFactor: 'phone'"))
     }
 
     @Test

@@ -1945,7 +1945,11 @@ mod tests {
 
         // …and calling one by its MCP spelling must be refused outright.
         let refused = transport
-            .call_tool(&connection, "build", serde_json::json!({"app_id": "abcd1234"}))
+            .call_tool(
+                &connection,
+                "build",
+                serde_json::json!({"app_id": "abcd1234"}),
+            )
             .await;
         assert!(
             matches!(refused, Err(McpError::ToolNotFound(_))),
@@ -1983,7 +1987,10 @@ mod tests {
             .filter_map(|value| value.as_str())
             .collect::<Vec<_>>();
         for action in ["pointer", "key"] {
-            assert!(actions.contains(&action), "{action} missing from {actions:?}");
+            assert!(
+                actions.contains(&action),
+                "{action} missing from {actions:?}"
+            );
         }
 
         let description = &act.description;

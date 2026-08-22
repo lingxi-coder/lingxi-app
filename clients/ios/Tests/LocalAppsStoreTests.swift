@@ -273,10 +273,31 @@ final class LocalAppsStoreTests: XCTestCase {
         ))
     }
 
-    func testInjectedCSPDisablesWorkersWithoutBlockingLocalMedia() {
-        let source = LocalAppWebViewRepresentable.bridgeSource
-        XCTAssertTrue(source.contains("worker-src 'none'"))
-        XCTAssertTrue(source.contains("media-src 'self' data: blob:"))
+    /// Asserted as one whole string, not by `contains` on the directives that
+    /// happen to be interesting: a CSP is only as strong as its most permissive
+    /// directive, and this injected meta INTERSECTS with the host's header, so
+    /// a drift here silently overrides the engine.
+    ///
+    /// What this CANNOT do is compare against the engine: `LOCAL_APP_CONTENT_
+    /// SECURITY_POLICY` lives in Rust and is not shipped to this target, so the
+    /// literal below is a hand-kept copy — and it is deliberately not
+    /// byte-identical (the engine orders `img-src; font-src; connect-src;
+    /// media-src`, this orders `img-src; media-src; font-src; connect-src`;
+    /// directive ORDER is not meaningful to a CSP parser). Locking the two
+    /// together needs the policy to travel over the protocol; until then, an
+    /// engine-only edit is caught by review, not by this test.
+    func testInjectedCSPPinsTheWholePolicy() {
+        let source = LocalAppWebViewRepresentable.bridgeSource(formFactor: "iphone")
+        XCTAssertTrue(source.contains(
+            "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        ))
+        // The one placeholder this template really has. Asserting a
+        // `__LINGXI_CSP__` token that exists nowhere in the repo could never
+        // fail; this one goes red if the substitution is dropped or the no-arg
+        // accessor is used, which would boot every app with the literal string
+        // as its `formFactor`.
+        XCTAssertFalse(source.contains("__LINGXI_NATIVE_FORM_FACTOR__"))
+        XCTAssertTrue(source.contains("formFactor: 'iphone'"))
     }
 
     /// The conversation-scope cwd (`RootView.makeSource(scope: .localApp(id))`)

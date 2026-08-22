@@ -53,6 +53,16 @@ and 6+ suggest `thorough`. Multi-OS, background scheduling, or two or more
 sensitive capability groups should recommend `thorough`; confidence below 0.75
 should recommend `balanced`.
 
+The screen axis measures the wrong thing for an app whose interface is a single
+drawn surface — a game or any canvas/WebGL app scores 0 on screens and usually
+0-1 on data, so the rubric lands on `fast`, which is the ONE strategy that skips
+the design stage. That is backwards: such an app has almost no navigation and
+almost all of its difficulty in mechanics, state machine and frame loop, which
+is exactly what the design stage exists to settle. Score a drawn-surface app on
+its simulation instead: +1 for real-time animation or a frame loop, +1 for
+collision, physics or pathfinding, +1 for persistent progression, +1 for input
+beyond a single tap (drag, hold, multi-key). Never recommend `fast` for one.
+
 Include the score, reasons, confidence, estimated agent stages, and the
 recommended strategy in the same confirmation round. Let the user select
 `fast`, `balanced`, or `thorough`; put the recommendation first and describe
@@ -96,7 +106,9 @@ Capabilities are a closed enum. Use only `data_mutation`, `ui_control`,
 `clipboard`, `share`, `text_to_speech`, `files_read`, `files_write`, `device_status`, `haptics`, `deep_link`, `calendar`, `contacts`, `media`, `llm`, `agent_notify`, or
 `background_schedule`; there is no `data` capability.
 `background_schedule` is required when the app registers a system background
-flow. `data_mutation` authorizes
+flow. WebAssembly and Web Workers need no capability at all — the served policy
+already allows wasm compilation and `blob:` workers for every local app — so
+never invent one to ask for them. `data_mutation` authorizes
 the conversation agent to call `LocalAppMutateData`. Do not declare
 it solely because the page writes its own collection through
 `window.lingxi.v2.data.mutate`; that foreground page path is already scoped to
@@ -223,7 +235,11 @@ staging paths, or copy generated output back into editable source.
    `deleteRecord` from the locked bridge for declared collection data; read
    fields from `records[].document` and do not swallow rejected native writes.
    Stay within the shipped dependency set; if an idea would require package or
-   root-infra changes, redesign it as a source-only implementation.
+   root-infra changes, redesign it as a source-only implementation. A drawn
+   surface — a game, a 3D scene, a custom visualization — renders into a
+   `<canvas>` with a `requestAnimationFrame` loop you own and cancel on unmount;
+   2D needs no dependency and 3D uses `three@0.185.1`, which is in the locked
+   set. No other engine, physics or WebGL wrapper can be installed.
 3. **Build** — call `LocalAppBuild`; the host runs the production
    `vite build --outDir dist --emptyOutDir` equivalent offline from the
    workspace-backed writable mount with the fixed runtime and the app's

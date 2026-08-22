@@ -1,8 +1,17 @@
 # Local app platform matrix
 
-Use `window.lingxi.v1.deviceContext` when available. The host context is more
-authoritative than user-agent parsing and may include `os`, `formFactor`,
-`viewport`, `safeArea`, `colorScheme`, `reducedMotion`, and `inputMode`.
+Read the device context through the checked-in `lib/lingxi-bridge.js`
+(`getDeviceContext`), which resolves `window.lingxi.v2.deviceContext`. It is
+more authoritative than user-agent parsing and carries `os`, `formFactor`,
+`viewport`, `safeArea`, `colorScheme`, `reducedMotion` and `inputMode`.
+
+Not `window.lingxi.v1`: the v2 runtime is a direct cutover and deliberately
+installs no v1 object, so that path is `undefined` on every current app rather
+than merely older.
+
+`viewport`, `safeArea`, `colorScheme`, `reducedMotion` and `inputMode` are LIVE
+— they change on rotation, on iPad multitasking resize, and on an appearance
+switch. Read them from the provider rather than caching one value at mount.
 
 | Target | Required native cues | Explicitly avoid |
 | --- | --- | --- |

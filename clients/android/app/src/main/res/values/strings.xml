@@ -548,6 +548,8 @@
     <string name="local_apps_error_ui_closed">应用页面已关闭。</string>
     <string name="local_apps_error_ui_encode_failed">界面操作参数无法编码。</string>
     <string name="local_apps_error_ui_invalid_result">界面操作未返回有效结果。</string>
+    <string name="local_apps_error_ui_capture_too_large">截取的画面过大，即使降低质量也无法返回。</string>
+    <string name="local_apps_error_ui_capture_unavailable">无法截取应用画面，它可能不在屏幕上。</string>
     <string name="local_apps_error_ui_no_history">应用页面没有可返回的历史记录。</string>
     <string name="local_apps_error_ui_not_open">应用页面尚未打开，无法执行界面操作。</string>
     <string name="local_apps_error_ui_rejected">用户拒绝了界面操作。</string>
@@ -630,6 +632,9 @@
     <string name="local_apps_ui_action_inspect">检查界面</string>
     <string name="local_apps_ui_action_navigate">导航</string>
     <string name="local_apps_ui_action_reload">重新加载</string>
+    <string name="local_apps_ui_action_capture_view">截取应用画面</string>
+    <string name="local_apps_ui_action_pointer">在应用画面中点按</string>
+    <string name="local_apps_ui_action_key">发送按键</string>
     <string name="local_apps_ui_action_scroll">滚动</string>
     <string name="local_apps_ui_action_select">选择</string>
     <string name="local_apps_ui_action_toggle">切换</string>

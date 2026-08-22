@@ -59,6 +59,17 @@ sealed interface LocalAppUiAutomationAction {
     data class Navigate(val path: String) : LocalAppUiAutomationAction
     data object Back : LocalAppUiAutomationAction
     data object Reload : LocalAppUiAutomationAction
+
+    /// Capture the WebView as an image. Read-only like [Inspect], but it renders
+    /// what the DOM snapshot redacts, so the host prompts for it.
+    data object CaptureView : LocalAppUiAutomationAction
+
+    /// Pointer event at viewport coordinates. `Click` resolves an element and
+    /// fires at (0,0); a canvas has no element and needs real coordinates.
+    data class Pointer(val x: Int, val y: Int, val phase: String) : LocalAppUiAutomationAction
+
+    /// Keyboard event. There was no key action at all before this.
+    data class Key(val key: String, val phase: String) : LocalAppUiAutomationAction
 }
 
 data class LocalAppUiExecutionResult(
@@ -93,7 +104,9 @@ class LocalAppWebViewController internal constructor(
             is LocalAppUiAutomationAction.Fill,
             is LocalAppUiAutomationAction.Select,
             is LocalAppUiAutomationAction.Toggle,
-            is LocalAppUiAutomationAction.Scroll -> executeStructuredAction(action, onResult)
+            is LocalAppUiAutomationAction.Scroll,
+            is LocalAppUiAutomationAction.Pointer,
+            is LocalAppUiAutomationAction.Key -> executeStructuredAction(action, onResult)
             is LocalAppUiAutomationAction.Navigate -> {
                 val current = Uri.parse(webView.url.orEmpty())
                 val requested = Uri.parse(action.path)
@@ -138,7 +151,224 @@ class LocalAppWebViewController internal constructor(
                     ),
                 )
             }
+            LocalAppUiAutomationAction.CaptureView -> captureFrame(webView, onResult)
         }
+    }
+
+    /**
+     * Capture the app view as a JPEG small enough to survive the result channel.
+     *
+     * Read off the window's composited surface with `PixelCopy`, not off a
+     * canvas element and not with `View.draw(Canvas)`.
+     *
+     * Not a canvas read-back, because a WebGL app would need
+     * `preserveDrawingBuffer`, which a generated app has to opt into and which
+     * costs a frame copy on every frame it draws.
+     *
+     * Not `View.draw(Canvas)` either, and that distinction is the whole point of
+     * this tool on Android: a `WebView` is hardware-accelerated, and drawing it
+     * into a software `Canvas` takes Chromium's software path, which does not
+     * rasterize hardware-composited layers — WebGL and video among them. The
+     * capture came back showing the DOM chrome around a blank rectangle exactly
+     * where the game is. `PixelCopy` copies the real surface, so what lands in
+     * the frame is what is on the screen.
+     *
+     * Asynchronous because `PixelCopy` is; the dispatcher was already
+     * callback-shaped, so nothing blocks a thread waiting for it.
+     *
+     * iOS caps `result_json` at 256 KiB and Android historically did not; the
+     * budget here is the same either way, because the string still has to cross
+     * the same bridge and land in the model's context. Base64 inflates by 4/3, so
+     * the JPEG is stepped down until it fits rather than encoded once and hoped
+     * for.
+     */
+    private fun captureFrame(webView: WebView, onResult: (LocalAppUiExecutionResult) -> Unit) {
+        val width = webView.width
+        val height = webView.height
+        if (width <= 0 || height <= 0) {
+            onResult(
+                LocalAppUiExecutionResult(
+                    resultJson = null,
+                    error = "The app view could not be captured; it may be offscreen.",
+                ),
+            )
+            return
+        }
+        // Cap the long edge before encoding: a 3x tablet view is several
+        // megabytes of bitmap before the quality ladder ever runs.
+        val maxEdge = 1_024
+        val scale = if (maxOf(width, height) > maxEdge) {
+            maxEdge.toFloat() / maxOf(width, height).toFloat()
+        } else {
+            1f
+        }
+        val targetWidth = maxOf(1, (width * scale).toInt())
+        val targetHeight = maxOf(1, (height * scale).toInt())
+
+        val bitmap = try {
+            android.graphics.Bitmap.createBitmap(
+                targetWidth,
+                targetHeight,
+                android.graphics.Bitmap.Config.ARGB_8888,
+            )
+        } catch (error: OutOfMemoryError) {
+            onResult(
+                LocalAppUiExecutionResult(resultJson = null, error = "Not enough memory to capture the app view"),
+            )
+            return
+        }
+
+        // `PixelCopy` scales the source rect into whatever bitmap it is handed,
+        // so the long-edge cap above is applied by the copy itself rather than
+        // by allocating a full-resolution frame first and shrinking it after.
+        val window = webView.hostActivityWindow()
+        if (window == null) {
+            // No Activity window to copy from — a detached or test host. The
+            // software draw still captures DOM chrome, which is worth more than
+            // an error, and `render_check` has the canvas count to tell the
+            // agent the drawn surface is the part it cannot trust.
+            finishCapture(webView, bitmap, scale, softwareDraw = true, width, height, targetWidth, targetHeight, onResult)
+            return
+        }
+        val location = IntArray(2)
+        webView.getLocationInWindow(location)
+        val source = android.graphics.Rect(
+            location[0],
+            location[1],
+            location[0] + width,
+            location[1] + height,
+        )
+        try {
+            android.view.PixelCopy.request(
+                window,
+                source,
+                bitmap,
+                { status ->
+                    if (status == android.view.PixelCopy.SUCCESS) {
+                        finishCapture(webView, bitmap, scale, false, width, height, targetWidth, targetHeight, onResult)
+                    } else {
+                        finishCapture(webView, bitmap, scale, true, width, height, targetWidth, targetHeight, onResult)
+                    }
+                },
+                android.os.Handler(android.os.Looper.getMainLooper()),
+            )
+        } catch (error: IllegalArgumentException) {
+            // The rect can leave the window between measuring and requesting —
+            // a scroll or a rotation is enough. Fall back rather than fail.
+            finishCapture(webView, bitmap, scale, true, width, height, targetWidth, targetHeight, onResult)
+        }
+    }
+
+    /** Unwrap the view's context to the hosting Activity's window, if there is one. */
+    private fun WebView.hostActivityWindow(): android.view.Window? {
+        var candidate: android.content.Context? = context
+        while (candidate is android.content.ContextWrapper) {
+            if (candidate is android.app.Activity) return candidate.window
+            candidate = candidate.baseContext
+        }
+        return null
+    }
+
+    /**
+     * Encode an already-populated (or still-empty) frame and answer the caller.
+     *
+     * [softwareDraw] paints the view into the bitmap first — the fallback path
+     * for when `PixelCopy` could not run. It captures the DOM but not WebGL.
+     */
+    @Suppress("LongParameterList")
+    private fun finishCapture(
+        webView: WebView,
+        bitmap: android.graphics.Bitmap,
+        scale: Float,
+        softwareDraw: Boolean,
+        width: Int,
+        height: Int,
+        targetWidth: Int,
+        targetHeight: Int,
+        onResult: (LocalAppUiExecutionResult) -> Unit,
+    ) {
+        val budget = 170 * 1_024
+        var encoded: ByteArray? = null
+        var usedQuality = 0
+        // try/finally, and the OutOfMemoryError catch widened past
+        // `createBitmap`: the ladder allocates a second full-frame copy per
+        // quality step (the compress buffer plus `toByteArray`), so the OOM is
+        // far likelier to land HERE than on the initial allocation — and on the
+        // straight-line `recycle()` this method left the bitmap alive and let
+        // the error escape the caller's coroutine, so the app-ui request was
+        // never resolved and the tool call died on FLOW_STEP_TIMEOUT with no
+        // message at all.
+        try {
+            if (softwareDraw) {
+                val canvas = android.graphics.Canvas(bitmap)
+                if (scale != 1f) canvas.scale(scale, scale)
+                webView.draw(canvas)
+            }
+            for (quality in intArrayOf(70, 50, 30)) {
+                val stream = java.io.ByteArrayOutputStream()
+                if (!bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, stream)) continue
+                usedQuality = quality
+                encoded = stream.toByteArray()
+                if (encoded.size <= budget) break
+            }
+        } catch (error: OutOfMemoryError) {
+            onResult(
+                LocalAppUiExecutionResult(resultJson = null, error = "Not enough memory to capture the app view"),
+            )
+            return
+        } finally {
+            bitmap.recycle()
+        }
+        val bytes = encoded
+        if (bytes == null || bytes.size > budget) {
+            onResult(
+                LocalAppUiExecutionResult(
+                    resultJson = null,
+                    error = "The captured frame is too large to return, even at reduced quality.",
+                ),
+            )
+            return
+        }
+
+        val image = org.json.JSONObject()
+            .put("data", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
+            .put("mime_type", "image/jpeg")
+            // The frame's OWN pixel size. Without it the agent cannot turn a
+            // feature it sees in the image into a `pointer` coordinate, because
+            // `pointer` is in CSS pixels and the frame was downscaled by an
+            // amount nothing reported — so it guesses, the tap lands elsewhere,
+            // and the call still answers ok:true.
+            .put("width", targetWidth)
+            .put("height", targetHeight)
+        // Viewport + density travel with the frame: the same app is a different
+        // layout on a tablet in landscape, and the pixels alone do not say which.
+        //
+        // Reported in CSS PIXELS, not `View` pixels. This number is the only
+        // size the agent has when it computes a `pointer` coordinate, and that
+        // action is documented — and implemented, via `elementFromPoint` — in
+        // CSS pixels. `View.getWidth()` is physical pixels, so reporting it raw
+        // handed the agent a viewport `density`x too large on every Android
+        // device: a centre tap landed off-screen, `elementFromPoint` returned
+        // null, the event went to `document.body`, and the call still answered
+        // ok:true. iOS reports `bounds` in points, which already IS CSS pixels.
+        val density = webView.resources.displayMetrics.density
+        val viewport = org.json.JSONObject()
+            .put("width", Math.round(width / density))
+            .put("height", Math.round(height / density))
+        val payload = org.json.JSONObject()
+            .put("ok", true)
+            .put("action", "capture_view")
+            .put("image", image)
+            .put("viewport", viewport)
+            .put("device_pixel_ratio", density.toDouble())
+            .put("jpeg_quality", usedQuality / 100.0)
+            // Says which path produced these pixels. A software-draw frame is
+            // blind to WebGL, so an agent looking at a blank game board needs to
+            // be able to tell "the app is broken" from "this capture cannot see
+            // it" — otherwise it reports render_check failed and burns a repair
+            // round on an app that renders correctly.
+            .put("capture_path", if (softwareDraw) "software_draw" else "pixel_copy")
+        onResult(LocalAppUiExecutionResult(resultJson = payload.toString(), error = null))
     }
 
     fun resolveBridgeRequest(
@@ -250,9 +480,28 @@ internal fun buildLocalAppUiExecutionRequest(action: LocalAppUiAutomationAction)
                 "y" to action.y,
             )
         }
+        is LocalAppUiAutomationAction.Pointer -> {
+            jsonObjectString(
+                "action" to "pointer",
+                "x" to action.x,
+                "y" to action.y,
+                "phase" to action.phase,
+            )
+        }
+        is LocalAppUiAutomationAction.Key -> {
+            jsonObjectString(
+                "action" to "key",
+                "key" to action.key,
+                "phase" to action.phase,
+            )
+        }
         is LocalAppUiAutomationAction.Navigate,
         LocalAppUiAutomationAction.Back,
-        LocalAppUiAutomationAction.Reload -> error("Structured script is not used for $action")
+        LocalAppUiAutomationAction.Reload,
+        // Handled natively (`captureFrame`) — a screenshot cannot be produced by
+        // injected script, which is the whole reason it captures the composited
+        // view rather than reading back a canvas.
+        LocalAppUiAutomationAction.CaptureView -> error("Structured script is not used for $action")
     }
 }
 
@@ -325,6 +574,14 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
       const snapshot = () => ({
         title: clean(document.title),
         url: location.href,
+        // A `<canvas>` matches NONE of the selectors `candidates()` uses, so a
+        // drawn interface is invisible in `elements` — an empty list means
+        // the same thing whether the app renders correctly, renders nothing,
+        // or crashed. Reporting the count separately is what lets the
+        // verifier tell "no controls" apart from "cannot be seen this way",
+        // and it does not depend on the DOM being empty: a canvas game with
+        // a score bar and a restart button still needs its frame looked at.
+        canvasCount: document.querySelectorAll('canvas').length,
         elements: candidates().slice(0, 200).map(element => {
           const rect = element.getBoundingClientRect();
           const sensitive = element instanceof HTMLInputElement && ['hidden', 'password'].includes(element.type);
@@ -344,6 +601,82 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
         if (request.action === 'scroll') {
           window.scrollBy({ left: Number(request.x || 0), top: Number(request.y || 0), behavior: 'auto' });
           return encode({ ok: true, action: 'scroll', x: Number(request.x || 0), y: Number(request.y || 0) });
+        }
+        // `pointer` and `key` resolve NO element, so they return before the
+        // findTarget block — a canvas app has nothing for it to find, which is
+        // exactly why these two actions exist.
+        if (request.action === 'pointer') {
+          const x = Number(request.x);
+          const y = Number(request.y);
+          const phase = String(request.phase || 'tap');
+          if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('pointer needs x and y in CSS pixels');
+          // Validated HERE, not swallowed in Kotlin: the two ports mirror one
+          // wire contract, and a phase the agent got wrong must fail the same
+          // way on both. Coercing it to 'tap' turned an intended hold into a
+          // tap-and-release that still reported ok:true.
+          if (!['tap', 'down', 'move', 'up'].includes(phase)) throw new Error('pointer phase must be tap, down, move or up');
+          // A null hit means the point is OUTSIDE the viewport — say so instead
+          // of quietly retargeting to body, which dispatched a tap that reached
+          // nothing and still answered ok:true, so the agent recorded an
+          // interaction that never happened.
+          const receiver = document.elementFromPoint(x, y);
+          if (!receiver) throw new Error('pointer ' + x + ',' + y + ' is outside the ' + Math.round(window.innerWidth) + 'x' + Math.round(window.innerHeight) + ' CSS-pixel viewport');
+          const base = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, buttons: 1 };
+          const fire = (type, overrides) => {
+            const init = Object.assign({}, base, overrides || {});
+            receiver.dispatchEvent(new PointerEvent(type, init));
+            const mouseType = type === 'pointerdown' ? 'mousedown' : type === 'pointerup' ? 'mouseup' : 'mousemove';
+            receiver.dispatchEvent(new MouseEvent(mouseType, init));
+          };
+          // `buttons` on a move must say whether a button is HELD. A drag is
+          // driven as down -> move -> up, and canvas/slider handlers almost
+          // universally open with `if (!e.buttons) return;` — a move that always
+          // reports 0 is a hover, so every drag registered as a click at the
+          // start point with no travel.
+          if (phase === 'down') window.__lingxiPointerHeld = true;
+          const held = window.__lingxiPointerHeld ? 1 : 0;
+          if (phase === 'move') fire('pointermove', { buttons: held });
+          else if (phase === 'down') fire('pointerdown');
+          else if (phase === 'up') { fire('pointerup', { buttons: 0 }); window.__lingxiPointerHeld = false; }
+          else {
+            fire('pointerdown');
+            fire('pointerup', { buttons: 0 });
+            receiver.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { buttons: 0 })));
+            window.__lingxiPointerHeld = false;
+          }
+          return encode({ ok: true, action: 'pointer', phase: phase, x: x, y: y, receiver: receiver.tagName || null });
+        }
+        if (request.action === 'key') {
+          const named = String(request.key || '');
+          const phase = String(request.phase || 'press');
+          if (!named) throw new Error('key needs a DOM key name, e.g. ArrowLeft');
+          // SPACE: the DOM key name is a single space, which cannot survive the
+          // wire — the value is trimmed on the way in, so " " arrives empty and
+          // used to be rejected. `Space` (the code name) is the only spelling
+          // that gets here; translate it back to the real key.
+          const key = named === 'Space' ? ' ' : named;
+          // Falling back to `document.body` reached NOTHING for the case this
+          // action exists for: a synthetic pointer does not move focus, so after
+          // tapping a canvas `activeElement` is still body — and an event
+          // dispatched ON body propagates UP, never down into the canvas, so a
+          // canvas-scoped keydown listener never fired while the call still
+          // answered ok:true. Dispatching on the canvas instead reaches
+          // listeners at every level (canvas -> body -> document -> window).
+          const receiver = document.activeElement && document.activeElement !== document.body
+            ? document.activeElement
+            : (document.querySelector('canvas') || document.body);
+          // Ordered so the space case is reached: a space HAS length 1, so
+          // testing it after the length check made that arm dead code and
+          // emitted `code: ''`, which `e.code === 'Space'` never matches.
+          const code = key === ' '
+            ? 'Space'
+            : key.length === 1
+            ? (/[a-z]/i.test(key) ? 'Key' + key.toUpperCase() : /[0-9]/.test(key) ? 'Digit' + key : '')
+            : key;
+          const init = { key: key, code: code, bubbles: true, cancelable: true, composed: true };
+          if (phase === 'down' || phase === 'press') receiver.dispatchEvent(new KeyboardEvent('keydown', init));
+          if (phase === 'up' || phase === 'press') receiver.dispatchEvent(new KeyboardEvent('keyup', init));
+          return encode({ ok: true, action: 'key', key: key, phase: phase });
         }
         const element = findTarget(request.target);
         if (!element) throw new Error('UI target was not found');
@@ -1036,7 +1369,7 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
     const meta = document.createElement('meta');
     meta.httpEquiv = 'Content-Security-Policy';
     meta.dataset.lingxiCsp = 'v2';
-    meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+    meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
     document.head.prepend(meta);
     return true;
   };

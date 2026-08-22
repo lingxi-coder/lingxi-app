@@ -64,6 +64,11 @@ pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
     ("LocalAppBackgroundList", "background_list", true),
     ("LocalAppBackgroundStatus", "background_status", true),
     ("LocalAppInspectUi", "inspect_ui", true),
+    // Read-only in the same sense as `inspect_ui`: it observes the view and
+    // changes nothing. It is NOT equally cheap for privacy — a pixel capture
+    // shows what `inspect_ui` redacts — but that is a PROMPT question, and the
+    // prompt default lives in `permission::defaults_per_tool`, not here.
+    ("LocalAppCaptureUi", "capture_ui", true),
     // Mutating.
     ("LocalAppBuild", "build", false),
     ("LocalAppInstallDeps", "install_dependencies", false),
@@ -244,10 +249,7 @@ impl Tool for LocalAppTool {
     /// caller passes `peek=true`.
     fn is_read_only(&self, input: &Value) -> bool {
         if self.operation == "read_app_events" {
-            return input
-                .get("peek")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            return input.get("peek").and_then(Value::as_bool).unwrap_or(false);
         }
         self.read_only
     }
@@ -338,46 +340,217 @@ impl Tool for LocalAppTool {
             .call_host_operation(self.operation, input)
             .await
             .map_err(|error| ToolError::Internal(error.to_string()))?;
-        // The provider builds an MCP ENVELOPE: `content` is
-        // `[{"type":"text","text":"<json>"}]` and `structured_content` carries
-        // the real payload. Handing the envelope to `from_data` would make the
-        // dispatch JSON-dump the array, so the model would receive
-        // `[{"type":"text","text":"{\"records\":…}"}]` — a doubly-escaped
-        // string — instead of `{"records":…}`. Every prompt that says "the
-        // returned `records[].document` must contain the value" would then be
-        // asking the model to read through two layers of escaping.
-        //
-        // Unwrap it: the structured payload is the data, and the envelope's
-        // text is the model-facing rendering.
-        let text = result
-            .content
-            .as_array()
-            .and_then(|blocks| {
-                let joined: Vec<&str> = blocks
-                    .iter()
-                    .filter_map(|block| block.get("text").and_then(Value::as_str))
-                    .collect();
-                (!joined.is_empty()).then(|| joined.join("\n"))
-            })
-            .or_else(|| result.content.as_str().map(str::to_owned));
-        let data = result
-            .structured_content
-            .clone()
-            .or_else(|| text.clone().map(Value::String))
-            .unwrap_or(Value::Null);
-        let mut out = ToolCallResult::from_data(data);
-        out.model_content = text;
-        // Mirror the MCP contract: a logical failure is a flagged RESULT, not a
-        // transport error, so the model sees it 1:1 with the former spelling.
-        out.is_error = result.is_error;
-        Ok(out)
+        Ok(envelope_to_tool_result(result))
     }
 }
 
+/// Turn the provider's MCP envelope into a builtin tool result.
+///
+/// Extracted so it can be tested WITHOUT a live transport and host. It was
+/// inline and therefore untestable, which is how it came to silently discard
+/// image content: the unit test that existed covered the MCP transport (the
+/// layer that BUILDS the image block) and not this one (the layer the agent
+/// actually goes through, which threw it away).
+fn envelope_to_tool_result(result: traits::McpToolResultDto) -> ToolCallResult {
+    // The provider builds an MCP ENVELOPE: `content` is
+    // `[{"type":"text","text":"<json>"}]` and `structured_content` carries
+    // the real payload. Handing the envelope to `from_data` would make the
+    // dispatch JSON-dump the array, so the model would receive
+    // `[{"type":"text","text":"{\"records\":…}"}]` — a doubly-escaped
+    // string — instead of `{"records":…}`. Every prompt that says "the
+    // returned `records[].document` must contain the value" would then be
+    // asking the model to read through two layers of escaping.
+    //
+    // Unwrap it: the structured payload is the data, and the envelope's
+    // text is the model-facing rendering.
+    let text = result
+        .content
+        .as_array()
+        .and_then(|blocks| {
+            let joined: Vec<&str> = blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect();
+            (!joined.is_empty()).then(|| joined.join("\n"))
+        })
+        .or_else(|| result.content.as_str().map(str::to_owned));
+    let data = result
+        .structured_content
+        .clone()
+        .or_else(|| text.clone().map(Value::String))
+        .unwrap_or(Value::Null);
+    // A capture carries an IMAGE content block, and the unwrap above keeps
+    // only `text` blocks — so handing `from_data` the structured metadata
+    // alone gives the model the viewport and SILENTLY DROPS THE FRAME. That
+    // is the exact failure `capture_ui` exists to prevent, and it hides
+    // well: the metadata still reads as a successful result. Observed on
+    // device before this branch existed — the agent got
+    // `{"viewport":{...},"ok":true,"action":"capture_view"}` and no picture,
+    // three times, and reported the capture as having worked.
+    //
+    // Shape follows `android_use`'s screenshot result rather than inventing
+    // one. `_lingxi_ephemeral` is load-bearing: `conversation.rs` uses it to
+    // keep the pixels out of session persistence, and a QA loop that
+    // captures every round would otherwise grow the transcript by a JPEG a
+    // turn, forever.
+    //
+    // Keyed on a NON-EMPTY `data` string, not merely on `type == "image"`: an
+    // empty payload would still satisfy `image_tool_result_blocks` and go out
+    // as `source.data: ""`, which the provider rejects with a 400 for the WHOLE
+    // request rather than for this one tool call. The producer already decided
+    // that case is an error (`local_apps_mcp.rs` answers `tool_error` for an
+    // empty frame); falling through to the text path here agrees with it
+    // instead of manufacturing a success.
+    if let Some((base64, media_type)) = result.content.as_array().and_then(|blocks| {
+        blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
+            .find_map(|block| {
+                let data = block.get("data").and_then(Value::as_str)?;
+                if data.is_empty() {
+                    return None;
+                }
+                let media_type = block
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/jpeg");
+                Some((data, media_type))
+            })
+    }) {
+        let mut out = ToolCallResult::from_data(serde_json::json!({
+            "type": "image",
+            "file": { "base64": base64, "type": media_type },
+            "metadata": result.structured_content.clone().unwrap_or(Value::Null),
+            "_lingxi_ephemeral": true,
+            "summary": "Temporary local-app view capture; pixels are excluded from session persistence."
+        }));
+        // NOT `text`: for a capture envelope `content` is image-only, so `text`
+        // is None and `tool_result_to_model_text` would fall through to a JSON
+        // dump of `data` — putting the ~230 KB of base64 into the tool_result
+        // STRING that lives in session history and rides the client event sink
+        // for the rest of the session. The pixels already travel as a real
+        // image block (`image_tool_result_blocks`), so the string only needs
+        // the marker the session sanitizer reads plus the replacement copy.
+        // `android_use::screenshot_result` sets exactly this, for exactly this
+        // reason; keeping it JSON is load-bearing, because
+        // `redact_ephemeral_tool_result_images` finds `_lingxi_ephemeral` by
+        // PARSING this string.
+        out.model_content = Some(
+            serde_json::json!({
+                "_lingxi_ephemeral": true,
+                "summary": "Temporary local-app view capture attached; pixels are not persisted."
+            })
+            .to_string(),
+        );
+        out.is_error = result.is_error;
+        return out;
+    }
+    let mut out = ToolCallResult::from_data(data);
+    out.model_content = text;
+    // Mirror the MCP contract: a logical failure is a flagged RESULT, not a
+    // transport error, so the model sees it 1:1 with the former spelling.
+    out.is_error = result.is_error;
+    out
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A captured frame must survive the envelope unwrap.
+    ///
+    /// REGRESSION: it did not. The unwrap kept only `text` blocks, so the model
+    /// received `{"viewport":{...},"ok":true,"action":"capture_view"}` and no
+    /// picture — and reported the capture as successful, because the metadata
+    /// alone still looks like one. Observed three times on device before this
+    /// was found.
+    ///
+    /// The MCP transport's own test covered the layer that BUILDS the image
+    /// block and passed throughout; this is the layer the agent actually goes
+    /// through, and it had no test at all.
+    #[test]
+    fn a_captured_frame_survives_the_envelope_unwrap() {
+        const DATA: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
+        let out = envelope_to_tool_result(traits::McpToolResultDto {
+            content: serde_json::json!([
+                { "type": "image", "data": DATA, "mimeType": "image/jpeg" }
+            ]),
+            is_error: false,
+            structured_content: Some(serde_json::json!({
+                "ok": true,
+                "action": "capture_view",
+                "viewport": { "width": 414, "height": 804 },
+            })),
+            ..Default::default()
+        });
+
+        assert_eq!(out.data["type"], "image", "the frame must ride as an image");
+        assert_eq!(out.data["file"]["base64"], DATA);
+        assert_eq!(out.data["file"]["type"], "image/jpeg");
+        assert_eq!(
+            out.data["_lingxi_ephemeral"], true,
+            "pixels must stay out of session persistence, or a QA loop that \
+             captures every round grows the transcript by a JPEG a turn"
+        );
+        // The viewport is what makes the frame readable as evidence — the same
+        // app is a different layout on a tablet, and pixels do not say which.
+        assert_eq!(out.data["metadata"]["viewport"]["width"], 414);
+        // The model-facing STRING must not be the base64. It is what lands in
+        // session history and in the client's tool-result event, and the
+        // sanitizer reads `_lingxi_ephemeral` out of it by parsing it as JSON —
+        // so it has to stay JSON AND stay small.
+        let model_content = out
+            .model_content
+            .as_deref()
+            .expect("an image result must carry a model-facing marker string");
+        assert!(
+            !model_content.contains(DATA),
+            "the base64 must not ride in the tool_result text: {model_content}"
+        );
+        let parsed: Value =
+            serde_json::from_str(model_content).expect("the sanitizer parses this as JSON");
+        assert_eq!(parsed["_lingxi_ephemeral"], true);
+    }
+
+    /// An image block with no payload must NOT be dressed up as a success.
+    ///
+    /// `image_tool_result_blocks` only checks that `base64` is a string, so an
+    /// empty one goes out as `source.data: ""` and the provider rejects the
+    /// WHOLE request with a 400 — not just this tool call. The producer already
+    /// answers `tool_error` for an empty frame; this layer has to agree.
+    #[test]
+    fn an_empty_frame_falls_through_to_the_text_path() {
+        let out = envelope_to_tool_result(traits::McpToolResultDto {
+            content: serde_json::json!([{ "type": "image", "data": "", "mimeType": "image/jpeg" }]),
+            is_error: true,
+            structured_content: Some(serde_json::json!({ "ok": false })),
+            ..Default::default()
+        });
+        assert!(
+            out.data.get("file").is_none(),
+            "an empty payload must not become an image block: {:?}",
+            out.data
+        );
+        assert!(out.is_error, "the producer's error flag must survive");
+    }
+
+    /// The image branch must not disturb an ordinary result.
+    ///
+    /// Every other local-app tool returns a text envelope, and they are the
+    /// overwhelming majority of calls; a capture-shaped change that altered
+    /// them would be a far larger regression than the one it fixes.
+    #[test]
+    fn a_text_envelope_is_unwrapped_unchanged() {
+        let out = envelope_to_tool_result(traits::McpToolResultDto {
+            content: serde_json::json!([{ "type": "text", "text": "{\"records\":[]}" }]),
+            is_error: false,
+            structured_content: Some(serde_json::json!({ "records": [] })),
+            ..Default::default()
+        });
+        assert!(out.data.get("type").is_none(), "not an image result");
+        assert_eq!(out.data["records"], serde_json::json!([]));
+        assert_eq!(out.model_content.as_deref(), Some("{\"records\":[]}"));
+    }
 
     /// Every entry in the rename table must resolve to a real provider
     /// operation. A typo here would silently drop a tool: `local_app_builtin_tools`
@@ -409,8 +582,7 @@ mod tests {
             LOCAL_APP_TOOLS.len(),
             "a declared tool was dropped by the catalog lookup"
         );
-        let names: std::collections::BTreeSet<&str> =
-            built.iter().map(|t| t.name()).collect();
+        let names: std::collections::BTreeSet<&str> = built.iter().map(|t| t.name()).collect();
         for &(name, _, _) in LOCAL_APP_TOOLS {
             assert!(names.contains(name), "{name} was not built");
         }
@@ -479,7 +651,10 @@ mod tests {
             "LocalAppManifest",
             "LocalAppQueryData",
         ] {
-            assert!(known.contains(name), "lease allow-list names unknown tool {name}");
+            assert!(
+                known.contains(name),
+                "lease allow-list names unknown tool {name}"
+            );
         }
     }
 

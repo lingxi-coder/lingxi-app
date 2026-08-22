@@ -18,6 +18,17 @@ struct LocalAppUIExecutionResult: Sendable {
     }
 }
 
+/// `takeSnapshot` can call back with neither an image nor an error (an offscreen
+/// or not-yet-composited view). Continuations must be resumed exactly once, so
+/// that case needs something concrete to throw rather than a silent hang.
+enum LocalAppSnapshotError: Error, LocalizedError {
+    case unavailable
+
+    var errorDescription: String? {
+        String(localized: "local_apps_error_ui_capture_unavailable")
+    }
+}
+
 @MainActor
 final class LocalAppWebViewRegistry {
     static let shared = LocalAppWebViewRegistry()
@@ -375,6 +386,9 @@ final class LocalAppWebViewController {
                 webView.reload()
                 return encodedResult(["ok": true, "action": "reload"])
             }
+            if request.action == .captureView {
+                return await captureFrame(in: webView)
+            }
 
             let payload: [String: Any] = [
                 "action": actionName(request.action),
@@ -417,6 +431,9 @@ final class LocalAppWebViewController {
             case .navigate: "navigate"
             case .back: "back"
             case .reload: "reload"
+            case .captureView: "capture_view"
+            case .pointer: "pointer"
+            case .key: "key"
             }
         }
 
@@ -427,6 +444,109 @@ final class LocalAppWebViewController {
                 "role": target.role ?? NSNull(),
                 "name": target.name ?? NSNull(),
             ] as [String: Any]
+        }
+
+        /// Capture the app view as a JPEG small enough to survive the result
+        /// channel.
+        ///
+        /// `takeSnapshot` and not `canvas.toDataURL`: the snapshot comes off the
+        /// native compositor, so a WebGL app is captured without needing
+        /// `preserveDrawingBuffer` (which a generated app would have to opt into,
+        /// and which costs a frame copy for every frame it draws). It also
+        /// captures the page as composited rather than one canvas element.
+        ///
+        /// The result rides the same `result_json` String channel as every other
+        /// UI action, which this file caps at 256 KiB. Base64 inflates by 4/3, so
+        /// the JPEG itself has to land well under that — hence the downscale and
+        /// the quality ladder rather than a single fixed quality.
+        private func captureFrame(in webView: WKWebView) async -> LocalAppUIExecutionResult {
+            let bounds = webView.bounds
+            guard bounds.width > 0, bounds.height > 0 else {
+                // The page IS open — it just has no laid-out geometry to draw,
+                // which is what the offscreen copy says and what Android
+                // already returns for the same condition. `ui_not_open` sends
+                // the agent off to restart a runtime that is running fine.
+                return .failure(String(localized: "local_apps_error_ui_capture_unavailable"))
+            }
+
+            let configuration = WKSnapshotConfiguration()
+            configuration.rect = bounds
+            // Cap the long edge in PIXELS, which is what the encoder below
+            // actually sees. `snapshotWidth` is in POINTS and `takeSnapshot`
+            // hands back a UIImage at the screen scale, so asking for 1024
+            // points yields 3072 pixels on a 3x device — 9x the area the
+            // quality ladder is sized for, and 9x what Android produces from
+            // the same nominal cap (`View.getWidth()` is already pixels there).
+            // Dividing by the scale first is what makes the two platforms
+            // return comparable evidence.
+            let longEdge = max(bounds.width, bounds.height)
+            let displayScale = max(webView.traitCollection.displayScale, 1)
+            let maxPixels: CGFloat = 1_024
+            let targetPointEdge = min(longEdge, maxPixels / displayScale)
+            configuration.snapshotWidth = NSNumber(
+                value: Double(bounds.width * (targetPointEdge / longEdge))
+            )
+
+            let image: UIImage
+            do {
+                image = try await withCheckedThrowingContinuation { continuation in
+                    webView.takeSnapshot(with: configuration) { snapshot, error in
+                        if let snapshot {
+                            continuation.resume(returning: snapshot)
+                        } else {
+                            continuation.resume(
+                                throwing: error ?? LocalAppSnapshotError.unavailable
+                            )
+                        }
+                    }
+                }
+            } catch {
+                return .failure(error.localizedDescription)
+            }
+
+            // Step down until the base64 fits with room for the JSON envelope.
+            // Reported rather than silently truncated: a frame that had to drop
+            // to 0.3 is a signal about the app, not just about the transport.
+            let budget = 170 * 1_024
+            var encoded: Data?
+            var usedQuality: CGFloat = 0
+            for quality in [CGFloat(0.7), 0.5, 0.3] {
+                guard let data = image.jpegData(compressionQuality: quality) else { continue }
+                usedQuality = quality
+                encoded = data
+                if data.count <= budget { break }
+            }
+            guard let data = encoded, data.count <= budget else {
+                return .failure(String(localized: "local_apps_error_ui_capture_too_large"))
+            }
+
+            return encodedResult([
+                "ok": true,
+                "action": "capture_view",
+                "image": [
+                    "data": data.base64EncodedString(),
+                    "mime_type": "image/jpeg",
+                    // The frame's OWN pixel size. Without it the agent cannot
+                    // turn a feature it sees in the image into a `pointer`
+                    // coordinate, because `pointer` is in CSS pixels and the
+                    // frame was downscaled by an amount nothing reported —
+                    // so it guesses, the tap lands elsewhere, and the call
+                    // still answers ok:true.
+                    "width": Int(image.size.width * image.scale),
+                    "height": Int(image.size.height * image.scale),
+                ],
+                // Without these the frame is unreadable as evidence: the same app
+                // is a different layout on an iPad in landscape and an iPhone in
+                // portrait, and the pixels alone do not say which one this is.
+                // In CSS pixels, which is the unit `pointer` takes: divide an
+                // image coordinate by `image.width / viewport.width`.
+                "viewport": [
+                    "width": Int(bounds.width.rounded()),
+                    "height": Int(bounds.height.rounded()),
+                ],
+                "device_pixel_ratio": Double(webView.traitCollection.displayScale),
+                "jpeg_quality": Double(usedQuality),
+            ])
         }
 
         private func evaluate(_ source: String, in webView: WKWebView) async throws -> Any? {
@@ -489,6 +609,14 @@ final class LocalAppWebViewController {
           const snapshot = () => ({
             title: clean(document.title),
             url: location.href,
+            // A `<canvas>` matches NONE of the selectors `candidates()` uses, so a
+            // drawn interface is invisible in `elements` — an empty list means
+            // the same thing whether the app renders correctly, renders nothing,
+            // or crashed. Reporting the count separately is what lets the
+            // verifier tell "no controls" apart from "cannot be seen this way",
+            // and it does not depend on the DOM being empty: a canvas game with
+            // a score bar and a restart button still needs its frame looked at.
+            canvasCount: document.querySelectorAll('canvas').length,
             elements: candidates().slice(0, 200).map(element => {
               const rect = element.getBoundingClientRect();
               const sensitive = element instanceof HTMLInputElement && ['hidden', 'password'].includes(element.type);
@@ -522,6 +650,99 @@ final class LocalAppWebViewController {
                 window.scrollBy({ top: delta, behavior: 'smooth' });
               }
               return JSON.stringify({ ok: true, action: 'scroll' });
+            }
+            // `pointer` and `key` resolve NO element, so they must return before
+            // the findTarget block below — a canvas app has nothing for it to
+            // find, which is the entire reason these two actions exist.
+            if (request.action === 'pointer') {
+              const parts = clean(request.value).split(',').map(part => part.trim());
+              // `Number('')` is 0, not NaN, so a missing field would pass the
+              // finiteness check below and silently place the tap on the top
+              // edge: "10," would become (10, 0) — the very coordinate `click`
+              // gets wrong and `pointer` exists to avoid.
+              const coord = part => (part === undefined || part === '' ? NaN : Number(part));
+              const x = coord(parts[0]);
+              const y = coord(parts[1]);
+              const phase = (parts[2] || 'tap').toLowerCase();
+              if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('pointer needs value "x,y" in CSS pixels');
+              if (!['tap', 'down', 'move', 'up'].includes(phase)) throw new Error('pointer phase must be tap, down, move or up');
+              // Dispatch on the element under the point so the event BUBBLES the
+              // way a real one would; a canvas listener on window still sees it.
+              // A null hit means the point is OUTSIDE the viewport — say so
+              // instead of quietly retargeting to body, which dispatched a tap
+              // that reached nothing and still answered ok:true, so the agent
+              // recorded an interaction that never happened.
+              const receiver = document.elementFromPoint(x, y);
+              if (!receiver) throw new Error('pointer ' + x + ',' + y + ' is outside the ' + Math.round(window.innerWidth) + 'x' + Math.round(window.innerHeight) + ' CSS-pixel viewport');
+              const base = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, buttons: 1 };
+              const fire = (type, overrides) => {
+                const init = Object.assign({}, base, overrides || {});
+                receiver.dispatchEvent(new PointerEvent(type, init));
+                // Many canvas engines bind mouse events only; a PointerEvent
+                // alone would silently do nothing for them.
+                const mouseType = type === 'pointerdown' ? 'mousedown' : type === 'pointerup' ? 'mouseup' : 'mousemove';
+                receiver.dispatchEvent(new MouseEvent(mouseType, init));
+              };
+              // `buttons` on a move must say whether a button is HELD. A drag is
+              // driven as down -> move -> up, and canvas/slider handlers almost
+              // universally start with `if (!e.buttons) return;` — a move that
+              // always reports 0 is a hover, so every drag registered as a click
+              // at the start point with no travel. The held state is remembered
+              // across calls because each action arrives as its own script.
+              if (phase === 'down') window.__lingxiPointerHeld = true;
+              const held = window.__lingxiPointerHeld ? 1 : 0;
+              if (phase === 'move') fire('pointermove', { buttons: held });
+              else if (phase === 'down') fire('pointerdown');
+              else if (phase === 'up') { fire('pointerup', { buttons: 0 }); window.__lingxiPointerHeld = false; }
+              else {
+                fire('pointerdown');
+                fire('pointerup', { buttons: 0 });
+                receiver.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { buttons: 0 })));
+                window.__lingxiPointerHeld = false;
+              }
+              return JSON.stringify({ ok: true, action: 'pointer', phase, x, y, receiver: receiver.tagName || null });
+            }
+            if (request.action === 'key') {
+              const raw = clean(request.value);
+              const comma = raw.lastIndexOf(',');
+              const maybePhase = comma >= 0 ? raw.slice(comma + 1).trim().toLowerCase() : '';
+              const hasPhase = ['press', 'down', 'up'].includes(maybePhase);
+              // Split from the RIGHT and only when the tail is a known phase, so
+              // the key `,` itself still works.
+              const named = hasPhase ? raw.slice(0, comma).trim() : raw;
+              const phase = hasPhase ? maybePhase : 'press';
+              if (!named) throw new Error('key needs a DOM key name, e.g. ArrowLeft');
+              // SPACE: the DOM key name is a single space, which cannot survive
+              // the wire — `clean()` trims, so " " arrives as "" and used to be
+              // rejected outright. The code name `Space` is the only spelling
+              // that gets here, so translate it back to the real key. Without
+              // this the most common game key (jump/fire/pause) was unreachable:
+              // " " threw, and "Space" produced `e.key === 'Space'`, which
+              // matches nothing.
+              const key = named === 'Space' ? ' ' : named;
+              // Falling back to `document.body` reached NOTHING for the case
+              // this action exists for: a synthetic pointer does not move focus,
+              // so after tapping a canvas `activeElement` is still body — and an
+              // event dispatched ON body propagates UP, never down into the
+              // canvas, so a canvas-scoped keydown listener never fired while
+              // the call still answered ok:true. Dispatching on the canvas
+              // instead reaches listeners at every level, because the event
+              // bubbles canvas -> body -> document -> window.
+              const receiver = document.activeElement && document.activeElement !== document.body
+                ? document.activeElement
+                : (document.querySelector('canvas') || document.body);
+              // Ordered so the space case is reached: a space HAS length 1, so
+              // testing it after the length check made that arm dead code and
+              // emitted `code: ''`, which `e.code === 'Space'` never matches.
+              const code = key === ' '
+                ? 'Space'
+                : key.length === 1
+                ? (/[a-z]/i.test(key) ? 'Key' + key.toUpperCase() : /[0-9]/.test(key) ? 'Digit' + key : '')
+                : key;
+              const init = { key, code, bubbles: true, cancelable: true, composed: true };
+              if (phase === 'down' || phase === 'press') receiver.dispatchEvent(new KeyboardEvent('keydown', init));
+              if (phase === 'up' || phase === 'press') receiver.dispatchEvent(new KeyboardEvent('keyup', init));
+              return JSON.stringify({ ok: true, action: 'key', key, phase });
             }
             const element = findTarget(request.target);
             if (!element) throw new Error('UI target was not found');
@@ -790,7 +1011,7 @@ struct LocalAppWebViewRepresentable: UIViewRepresentable {
         const meta = document.createElement('meta');
         meta.httpEquiv = 'Content-Security-Policy';
         meta.dataset.lingxiCsp = 'v2';
-        meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+        meta.content = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
         document.head.prepend(meta);
         return true;
       };

@@ -76,7 +76,28 @@ const FLOW_STEP_TIMEOUT: Duration = Duration::from_secs(60);
 static LOCAL_APP_BUILD_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
 static DEPENDENCY_SNAPSHOT_DIGESTS: OnceLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
     OnceLock::new();
-const LOCAL_APP_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+/// The policy every local app is served.
+///
+/// `worker-src 'self' blob:` and `script-src … 'wasm-unsafe-eval'` are DEFAULTS,
+/// not a grant, because gating them would have been incoherent: this policy
+/// already carries `'unsafe-inline'`, so the page can run any JavaScript it
+/// shipped. WebAssembly is strictly WEAKER than that — no DOM, no network, no
+/// files, only arithmetic and the imports the page hands it — and a `blob:`
+/// worker runs the same same-origin JavaScript the page could have run on the
+/// main thread. Charging a permission prompt for a capability the page already
+/// exceeds buys nothing, and the failure mode when the generator forgets to ask
+/// for it is bad: the app builds, then fails at runtime with a CSP refusal that
+/// `inspect_ui` cannot see because the surface is a canvas.
+///
+/// The real boundary is elsewhere and unchanged: `default-src 'self'` plus
+/// `connect-src 'self'` keep the page from loading or exfiltrating anything,
+/// and every device/host power is gated per capability at the bridge.
+///
+/// Measured on device 2026-08-21: under the previous `worker-src 'none'` WebKit
+/// rejected a worker with "The operation is insecure.", and without
+/// `'wasm-unsafe-eval'` it rejected WebAssembly with "Refused to create a
+/// WebAssembly object…" — both blocks were real, not theoretical.
+const LOCAL_APP_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 #[derive(Debug)]
 struct UiResolution {
@@ -1352,18 +1373,20 @@ impl LocalAppsHostBroker {
                 return;
             }
         };
-        let mut snapshot_ready =
-            match Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest) {
-                Ok(ready) => ready,
-                Err(error) => {
-                    let _ = Self::remove_owned_path(&dependency_staging);
-                    let _ = service
-                        .fail_dependency_install(&app_id, error.clone())
-                        .await;
-                    tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot validation failed");
-                    return;
-                }
-            };
+        let mut snapshot_ready = match Self::dependency_snapshot_is_ready(
+            &snapshot_root,
+            &lock_digest,
+        ) {
+            Ok(ready) => ready,
+            Err(error) => {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                let _ = service
+                    .fail_dependency_install(&app_id, error.clone())
+                    .await;
+                tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot validation failed");
+                return;
+            }
+        };
         if !snapshot_ready {
             // First install on this device: the app bundle already carries a
             // tree resolved from the pinned template lockfile, so adopt it
@@ -4628,6 +4651,11 @@ fn content_type(path: &Path) -> &'static str {
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("webp") => "image/webp",
         Some("woff2") => "font/woff2",
+        // `instantiateStreaming` REQUIRES this exact type and this server sends
+        // `X-Content-Type-Options: nosniff`, so serving a .wasm as
+        // application/octet-stream fails the streaming path outright — with a
+        // MIME complaint that reads nothing like the CSP refusal it is not.
+        Some("wasm") => "application/wasm",
         _ => "application/octet-stream",
     }
 }
@@ -4707,9 +4735,8 @@ fn dependency_tree_digest(root: &Path) -> Result<String, String> {
     digest.update((files.len() as u64).to_le_bytes());
     for (relative, path) in files {
         let relative = relative.as_bytes();
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-            format!("inspect dependency tree file {}: {error}", path.display())
-        })?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect dependency tree file {}: {error}", path.display()))?;
         // A shim is digested by its TARGET, tagged so it can never collide with
         // a regular file whose contents happen to be that same path text --
         // otherwise swapping `.bin/vite` between a link and a file would leave
@@ -5624,11 +5651,8 @@ mod tests {
                 let rest = &lingxi[start + 1..];
                 let end = rest.find('}')?;
                 let inner = &rest[..end];
-                (!inner.is_empty()
-                    && inner
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b == b'_'))
-                .then_some(&lingxi[start..start + end + 2])
+                (!inner.is_empty() && inner.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+                    .then_some(&lingxi[start..start + end + 2])
             })
             .collect();
         assert!(
@@ -6059,8 +6083,11 @@ mod tests {
         let seed = root.join("bundle/local-app-runtime");
         let node_modules = seed.join("node_modules");
         fs::create_dir_all(node_modules.join("vite/bin")).expect("seed tree");
-        fs::write(node_modules.join("vite/bin/vite.js"), b"#!/usr/bin/env node\n")
-            .expect("seed vite");
+        fs::write(
+            node_modules.join("vite/bin/vite.js"),
+            b"#!/usr/bin/env node\n",
+        )
+        .expect("seed vite");
         fs::create_dir_all(node_modules.join(".bin")).expect("seed bin dir");
         std::os::unix::fs::symlink("../vite/bin/vite.js", node_modules.join(".bin/vite"))
             .expect("seed shim");
@@ -6094,10 +6121,12 @@ mod tests {
                 .expect("validate adopted snapshot"),
             "the adopted snapshot must satisfy the same readiness check a real install produces"
         );
-        assert!(fs::symlink_metadata(snapshot.join("node_modules/.bin/vite"))
-            .expect("adopted bin shim")
-            .file_type()
-            .is_symlink());
+        assert!(
+            fs::symlink_metadata(snapshot.join("node_modules/.bin/vite"))
+                .expect("adopted bin shim")
+                .file_type()
+                .is_symlink()
+        );
     }
 
     /// Editing `package.json` re-resolves the lockfile, and the bundled tree no
@@ -6138,10 +6167,29 @@ mod tests {
         assert!(!adopted);
     }
 
+    /// Asserted as one whole string, not by `contains` on the directives that
+    /// are interesting today: a CSP is only as strong as its most permissive
+    /// directive, so the thing worth locking is the WHOLE policy — a widened
+    /// `connect-src` or a dropped `object-src` is exactly what a substring
+    /// check cannot see.
     #[test]
-    fn static_csp_allows_native_media_payloads_but_disables_workers() {
-        assert!(LOCAL_APP_CONTENT_SECURITY_POLICY.contains("media-src 'self' data: blob:"));
-        assert!(LOCAL_APP_CONTENT_SECURITY_POLICY.contains("worker-src 'none'"));
+    fn the_served_policy_allows_wasm_and_workers_and_nothing_else_new() {
+        assert_eq!(
+            LOCAL_APP_CONTENT_SECURITY_POLICY,
+            "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        );
+    }
+
+    /// `instantiateStreaming` rejects anything but `application/wasm`, and this
+    /// server sends `nosniff`, so the default `application/octet-stream` would
+    /// fail the streaming path with a MIME error that reads nothing like the
+    /// CSP refusal it is not.
+    #[test]
+    fn wasm_is_served_with_the_type_streaming_instantiation_requires() {
+        assert_eq!(
+            content_type(Path::new("assets/physics-a1b2c3d4.wasm")),
+            "application/wasm"
+        );
     }
 
     #[test]

@@ -590,8 +590,19 @@ class LocalAppsViewModel(
                 if (capabilityDecision == LocalAppAuthorizationDecision.AllowOnce) {
                     uiControlGrants.remove(request.appId)
                 }
+                // CAPTURE_VIEW rides with INSPECT because it is read-only in the
+                // same sense — the engine does not gate it on `ui_control` at
+                // all (`capture_ui` never calls `authorize_capability`), and the
+                // agent already had to clear the `LocalAppCaptureUi` prompt,
+                // which is DenyByDefault. Routing it to the `ui_control` prompt
+                // instead was worse than redundant: the title asks to CONTROL
+                // the interface, and an AllowSession/AllowAlways answer is
+                // recorded in `uiControlGrants` — so approving a screenshot
+                // silently authorized click/fill/navigate for the whole session.
+                val readOnlyAction = request.action == AppUiActionKindDto.INSPECT ||
+                    request.action == AppUiActionKindDto.CAPTURE_VIEW
                 val executionDecision = capabilityDecision
-                    ?: LocalAppAuthorizationDecision.AllowOnce.takeIf { request.action == AppUiActionKindDto.INSPECT }
+                    ?: LocalAppAuthorizationDecision.AllowOnce.takeIf { readOnlyAction }
                 if (executionDecision != null && action != null) {
                     _uiState.update {
                         it.copy(
@@ -1136,6 +1147,36 @@ private fun AppUiRequestDto.toUiAutomationAction(): LocalAppUiAutomationAction? 
                 ?.let(LocalAppUiAutomationAction::Navigate)
         AppUiActionKindDto.BACK -> LocalAppUiAutomationAction.Back
         AppUiActionKindDto.RELOAD -> LocalAppUiAutomationAction.Reload
+        AppUiActionKindDto.CAPTURE_VIEW -> LocalAppUiAutomationAction.CaptureView
+        // `"x,y"` / `"x,y,phase"`, the same comma-packed `value` convention
+        // SCROLL already uses. The wire variant is fieldless on purpose: a
+        // data-carrying uniffi variant renders this enum as a Kotlin sealed
+        // class and renames every existing constant.
+        AppUiActionKindDto.POINTER -> value.orEmpty().split(',').map { it.trim() }.let { parts ->
+            // `toDoubleOrNull`, not `toIntOrNull`: the documented unit is CSS
+            // pixels and an agent reading a centre off `getBoundingClientRect()`
+            // sends "207.5,320". `toIntOrNull` rejected that outright and the
+            // whole action was dropped with a generic "missing target" error,
+            // while iOS (which parses with `Number`) accepted it — one wire
+            // contract, two answers.
+            val x = parts.getOrNull(0)?.toDoubleOrNull()?.let { Math.round(it).toInt() }
+            val y = parts.getOrNull(1)?.toDoubleOrNull()?.let { Math.round(it).toInt() }
+            // The phase is passed through UNVALIDATED on purpose; the injected
+            // script rejects an unknown one, so both platforms answer the same
+            // way. Coercing it to "tap" here turned an intended hold into a
+            // tap-and-release that still reported success.
+            val phase = parts.getOrNull(2)?.lowercase().orEmpty().ifEmpty { "tap" }
+            if (x == null || y == null) null else LocalAppUiAutomationAction.Pointer(x, y, phase)
+        }
+        // Split from the RIGHT and only when the tail is a known phase, so the
+        // key `,` itself still works.
+        AppUiActionKindDto.KEY -> value.orEmpty().trim().let { raw ->
+            val comma = raw.lastIndexOf(',')
+            val tail = if (comma >= 0) raw.substring(comma + 1).trim().lowercase() else ""
+            val hasPhase = tail in setOf("press", "down", "up")
+            val key = if (hasPhase) raw.substring(0, comma).trim() else raw
+            if (key.isEmpty()) null else LocalAppUiAutomationAction.Key(key, if (hasPhase) tail else "press")
+        }
     }
 }
 

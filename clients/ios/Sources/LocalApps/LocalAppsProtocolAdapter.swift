@@ -134,6 +134,9 @@ enum LocalAppsProtocolAdapter {
         case .navigate: String(localized: "local_apps_ui_action_navigate")
         case .back: String(localized: "local_apps_ui_action_back")
         case .reload: String(localized: "local_apps_ui_action_reload")
+        case .captureView: String(localized: "local_apps_ui_action_capture_view")
+        case .pointer: String(localized: "local_apps_ui_action_pointer")
+        case .key: String(localized: "local_apps_ui_action_key")
         }
     }
 

@@ -1372,6 +1372,9 @@ fn current_contract_index() -> ContractIndex {
     put("AppUiActionKindDto::Navigate", "navigate");
     put("AppUiActionKindDto::Back", "back");
     put("AppUiActionKindDto::Reload", "reload");
+    put("AppUiActionKindDto::CaptureView", "capture_view");
+    put("AppUiActionKindDto::Pointer", "pointer");
+    put("AppUiActionKindDto::Key", "key");
 
     put("AppUiTargetDto.element_id", "Option<String>");
     put("AppUiTargetDto.role", "Option<String>");

@@ -26,7 +26,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.82.0
       - name: cargo test
         working-directory: lingxi-code
-        run: cargo test --workspace --all-features
+        # `--no-fail-fast` is load-bearing, not tidiness. Without it cargo stops
+        # at the first failing test BINARY and never runs the rest, so one red
+        # test hides every other one and the reported pass count is a truncated
+        # prefix. `mid_stream_err_ends_turn_gracefully_as_model_error` broke in
+        # d7215d659 (2026-07-13) and stayed invisible for over a month behind an
+        # earlier failure for exactly this reason.
+        run: cargo test --workspace --all-features --no-fail-fast
 
   pty-runtime-linux:
     name: PTY runtime (Linux)

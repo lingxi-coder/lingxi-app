@@ -586,6 +586,40 @@ fn classify_api_termination(e: &llm_client::LlmError) -> Option<(&'static str, &
             "server_error",
             "API Error: Connection closed mid-response. The response above may be incomplete.",
         )),
+        // A stall is NOT in `CTy`. Claude Code 2.1.238 classifies it through
+        // `xtt`:
+        //
+        //     e.message.startsWith("Stream idle timeout") ||
+        //     e.name === "StreamIdleTimeoutError"   ->  "api_timeout"
+        //
+        // and `api_timeout` is absent from
+        // `CTy = new Set(["rate_limit","overloaded","server_error"])`, so the
+        // oracle RETHROWS a stalled stream instead of recovering it as
+        // `api_error_partial`. The suspend variant says the same thing in its
+        // own message -- "aborting to retry on a fresh connection" -- which is
+        // a retry on a fresh connection, not a partial answer.
+        //
+        // The difference is one bit and it decides whether a caller learns
+        // anything. Recovered-as-partial hands a workflow stage a `completed`
+        // result whose content is "I was cut off and did nothing"; the stage
+        // records it as output and moves on. Observed: three consecutive
+        // generate attempts stalled, each "succeeded" with an empty recovery,
+        // and the failure only surfaced at the verify stage as "the app is
+        // still the unmodified template".
+        //
+        // Every OTHER `StreamInterrupted` -- a protocol violation, a stream
+        // that ended before `message_stop` -- keeps the recovering
+        // classification it was ported with. There is no oracle evidence to
+        // move those, and moving them on the strength of this one would be
+        // guessing.
+        LlmError::StreamInterrupted { message }
+            if message.starts_with(llm_client::model::stream_watchdog::STREAM_IDLE_TIMEOUT_PREFIX)
+                || message.starts_with(
+                    llm_client::model::stream_watchdog::STREAM_SUSPENDED_PREFIX,
+                ) =>
+        {
+            None
+        }
         LlmError::StreamInterrupted { .. } => Some((
             "server_error",
             "API Error: Response stalled mid-stream. The response above may be incomplete.",

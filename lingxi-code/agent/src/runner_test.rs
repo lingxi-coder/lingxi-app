@@ -3583,3 +3583,47 @@ async fn a_restored_run_appends_only_new_messages_to_its_transcript() {
         "new turns are appended: {body}"
     );
 }
+
+/// A stalled stream must NOT be recovered as `api_error_partial`.
+///
+/// Claude Code 2.1.238 classifies it through `xtt` as `"api_timeout"`, and
+/// `CTy = {"rate_limit","overloaded","server_error"}` does not contain that, so
+/// the oracle rethrows. Recovering it instead is a one-bit difference with a
+/// large blast radius: the caller receives a `completed` result whose content
+/// says the agent was cut off and did nothing, which a workflow stage records
+/// as output and moves past. Three stalled generate attempts each "succeeded"
+/// that way before the verify stage noticed the app was still the template.
+#[test]
+fn a_stalled_stream_is_terminal_and_an_ordinary_interruption_still_recovers() {
+    use llm_client::model::stream_watchdog::{
+        STREAM_IDLE_TIMEOUT_PREFIX, STREAM_SUSPENDED_PREFIX,
+    };
+
+    for message in [
+        format!("{STREAM_IDLE_TIMEOUT_PREFIX}: no bytes for 300000ms"),
+        format!("{STREAM_SUSPENDED_PREFIX}; aborting to retry on a fresh connection"),
+    ] {
+        assert!(
+            super::classify_api_termination(&llm_client::LlmError::StreamInterrupted {
+                message: message.clone(),
+            })
+            .is_none(),
+            "a stall must rethrow, not recover: {message}"
+        );
+    }
+
+    // The kinds CTy DOES contain keep recovering, so this change cannot be
+    // mistaken for "stop recovering api errors".
+    for error in [
+        llm_client::LlmError::Overloaded { repeated: false },
+        llm_client::LlmError::ProviderInternal,
+        llm_client::LlmError::StreamInterrupted {
+            message: "stream ended before message_stop".to_string(),
+        },
+    ] {
+        assert!(
+            super::classify_api_termination(&error).is_some(),
+            "{error:?} is in CTy and must still recover as api_error_partial"
+        );
+    }
+}

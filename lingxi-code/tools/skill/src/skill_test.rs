@@ -1574,21 +1574,39 @@ mod fork_dispatch_tests {
         let spawner: Arc<RecordingSpawner> = Arc::default();
         let mut ctx = shell_test_ctx(out());
         let mut policy = permission::PermissionPolicy::new(permission::PermissionMode::Default);
+        // `alwaysDenyRules.command` is keyed by rule SOURCE, not by tool. The
+        // `Command` bucket is frozen WHATEVER tool its rules name — it is the
+        // volatile one (`/permissions add`, skill frontmatter), which a resume
+        // would otherwise lose. Settings-file buckets are NOT frozen: a resume
+        // re-reads them from disk, so freezing them would pin stale copies.
+        //
+        // This test used to put both rules in `ProjectSettings` and assert that
+        // only the `Bash` one was frozen — encoding the very misreading (that
+        // `command` names the Bash tool) that this fixture now guards against.
         policy.deny_rules.insert(
-            PermissionRuleSource::ProjectSettings,
+            PermissionRuleSource::Command,
             vec![
                 PermissionRule {
                     value: PermissionRuleValue::from_rule_string("Bash(rm:*)"),
                     behavior: PermissionBehavior::Deny,
-                    source: PermissionRuleSource::ProjectSettings,
+                    source: PermissionRuleSource::Command,
                 },
-                // A non-command deny must NOT be frozen as a command rule.
+                // A non-Bash rule in the command bucket IS frozen.
                 PermissionRule {
                     value: PermissionRuleValue::from_rule_string("Write"),
                     behavior: PermissionBehavior::Deny,
-                    source: PermissionRuleSource::ProjectSettings,
+                    source: PermissionRuleSource::Command,
                 },
             ],
+        );
+        // A different SOURCE is not frozen, even for the same tool.
+        policy.deny_rules.insert(
+            PermissionRuleSource::ProjectSettings,
+            vec![PermissionRule {
+                value: PermissionRuleValue::from_rule_string("Bash(curl:*)"),
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::ProjectSettings,
+            }],
         );
         ctx.permission_policy = Arc::new(policy);
         ctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
@@ -1603,8 +1621,9 @@ mod fork_dispatch_tests {
         let req = spawner.seen.lock().unwrap().clone().expect("spawned");
         assert_eq!(
             req.frozen_command_denies,
-            vec!["Bash(rm:*)".to_string()],
-            "only command (Bash) denies are frozen"
+            vec!["Bash(rm:*)".to_string(), "Write".to_string()],
+            "the whole command SOURCE bucket is frozen, regardless of tool, and \
+             nothing from another source is"
         );
     }
 

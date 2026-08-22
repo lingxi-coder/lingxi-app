@@ -568,18 +568,21 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
 /// the live deny rules, so a host update CAN drop an in-force deny while a fork
 /// is parked. Persisting the snapshot is what makes the resume checkable.
 fn frozen_command_denies(policy: &permission::PermissionPolicy) -> Vec<String> {
+    // `alwaysDenyRules.command` is keyed by rule SOURCE, not by tool. The port's
+    // `PermissionRuleSource::Command` is the same bucket — "rules emitted by a
+    // command" — and it legitimately holds rules for tools other than `Bash`
+    // (skill frontmatter `disallowed-tools` lands here too).
+    //
+    // This used to filter `tool_name == "Bash"`, which read `command` as if it
+    // meant "the command tool" and under-froze every non-Bash deny. The matching
+    // filter in the consumer (`frozen_command_deny_layers`, tool-api) was dropped
+    // in the SAME change: the two halves are self-locking, and fixing only one
+    // makes the newly captured rules get discarded there as a corrupt record.
     let mut out: Vec<String> = policy
         .deny_rules
-        .values()
+        .get(&permission::PermissionRuleSource::Command)
+        .into_iter()
         .flatten()
-        // KNOWN DIVERGENCE (see `frozen_command_deny_layers` in tool-api).
-        // Claude reads `alwaysDenyRules.command`, keyed by rule SOURCE — i.e.
-        // `deny_rules[PermissionRuleSource::Command]`, which legitimately holds
-        // non-`Bash` rules. Filtering by TOOL here under-freezes. Changing this
-        // to the Command source bucket REQUIRES dropping the matching
-        // `tool_name != "Bash"` filter in the consumer, or the newly-captured
-        // rules are discarded there and logged as a corrupt record.
-        .filter(|r| r.value.tool_name == "Bash")
         .map(|r| r.value.to_rule_string())
         .collect();
     // `deny_rules` is keyed by source, and a HashMap has no stable iteration

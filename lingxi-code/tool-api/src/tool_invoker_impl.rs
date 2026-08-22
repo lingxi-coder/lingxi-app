@@ -69,15 +69,22 @@ fn frozen_command_deny_layers(frozen: &[String]) -> Vec<Value> {
                 return None;
             }
             // `from_rule_string` is INFALLIBLE — a mangled string degrades to a
-            // bare tool name rather than erroring — so the tool-name check is
-            // also what catches malformed input: `"Bash(unbalanced"` has no
-            // closing paren, so it parses as a tool NAMED `"Bash(unbalanced"`.
+            // bare tool name rather than erroring — so malformed input has to be
+            // caught by inspecting what it parsed INTO.
+            //
+            // The check is no longer "is this Bash?": the frozen set is the
+            // `command` SOURCE bucket, which legitimately holds rules for any
+            // tool. What a real tool name can never contain is a paren, so an
+            // unbalanced rule like `"Bash(unbalanced"` — which parses as a tool
+            // NAMED `"Bash(unbalanced"` — is still rejected here, while
+            // `"Read(/etc/passwd)"` and the tool-wide `"Bash(*)"` both survive.
             let parsed = permission::PermissionRuleValue::from_rule_string(rule);
-            if parsed.tool_name != "Bash" {
+            if parsed.tool_name.contains('(') || parsed.tool_name.contains(')') {
                 tracing::warn!(
                     target: "permission",
-                    "frozen_command_denies: dropping {rule:?} — expected a Bash command rule, \
-                     got tool {:?} (scoping record corrupt or written by another producer)",
+                    "frozen_command_denies: dropping {rule:?} — parsed tool name {:?} contains a \
+                     paren, so the rule was malformed (scoping record corrupt or written by \
+                     another producer)",
                     parsed.tool_name
                 );
                 return None;
@@ -1267,24 +1274,33 @@ mod tests {
     #[test]
     fn frozen_command_deny_layers_drops_entries_it_cannot_honour() {
         // `from_rule_string` is INFALLIBLE — a mangled rule degrades to a bare
-        // tool name instead of erroring — so a rule that is not a `Bash` command
-        // rule after parsing is the signal that the record is corrupt or
-        // foreign. Those entries are skipped and logged rather than failing the
-        // resume, and the good ones survive.
+        // tool name instead of erroring — so malformed input is caught by what
+        // it parsed INTO: a real tool name can never contain a paren.
+        //
+        // The frozen set is the `command` SOURCE bucket, which legitimately
+        // holds rules for ANY tool, so `Read(...)` is kept — it used to be
+        // dropped by a `tool_name == "Bash"` filter that read the bucket as if
+        // `command` named the Bash tool.
         let layers = frozen_command_deny_layers(&[
             "Bash(rm:*)".to_string(),
-            "   ".to_string(),               // empty after trim
-            "Bash(unbalanced".to_string(),   // no closing paren → parses as that tool NAME
-            "Read(/etc/passwd)".to_string(), // not a command rule
+            "   ".to_string(),               // empty after trim → dropped
+            "Bash(unbalanced".to_string(),   // unbalanced → tool name holds a paren → dropped
+            "Read(/etc/passwd)".to_string(), // a non-Bash command-source rule → KEPT
+            "Bash(*)".to_string(),           // tool-wide; canonicalizes to "Bash"
             "Bash(git push:*)".to_string(),
         ]);
         assert_eq!(
             layers,
             vec![json!({
                 "kind": "disallowed_tools",
-                "disallowedTools": ["Bash(rm:*)", "Bash(git push:*)"],
+                "disallowedTools": [
+                    "Bash(rm:*)",
+                    "Read(/etc/passwd)",
+                    "Bash",
+                    "Bash(git push:*)",
+                ],
             })],
-            "only well-formed Bash command rules survive"
+            "every well-formed rule survives regardless of tool; only malformed ones drop"
         );
     }
 
@@ -1338,7 +1354,11 @@ mod tests {
         // No layer at all — NOT an empty layer — so the fold is byte-identical
         // to a spawn that froze nothing.
         assert!(frozen_command_deny_layers(&[]).is_empty());
-        assert!(frozen_command_deny_layers(&["Read(x)".to_string()]).is_empty());
+        // Only MALFORMED entries drop now. `Read(x)` would be kept (the frozen
+        // set is the command SOURCE bucket, not a Bash-only one), so this uses
+        // an unbalanced rule instead.
+        assert!(frozen_command_deny_layers(&["Bash(oops".to_string()]).is_empty());
+        assert!(frozen_command_deny_layers(&["  ".to_string()]).is_empty());
     }
 
     #[tokio::test]

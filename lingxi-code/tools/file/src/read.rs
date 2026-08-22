@@ -3049,6 +3049,9 @@ mod tests {
 
     #[tokio::test]
     async fn no_limit_read_returns_all_lines_within_budget_no_note() {
+        // Depends on the DEFAULT token budget; a sibling test mutates the env
+        // override, so take the same lock it does.
+        let _env = READ_LIMIT_ENV_MUTEX.lock().await;
         // There is NO 2000-line cap. A no-`limit` read of a file with > 2000
         // (but small / within-token-budget) lines returns ALL lines, with NO
         // truncation note (claude-code passes `maxLines = limit` verbatim, and
@@ -4060,6 +4063,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_read_over_token_budget_gracefully_truncates() {
+        let _env = READ_LIMIT_ENV_MUTEX.lock().await;
         // A FULL read (no offset, no limit) whose estimated tokens exceed
         // DEFAULT_MAX_OUTPUT_TOKENS (25000) but stay under the 256KB byte cap is
         // GRACEFULLY token-truncated (claude-code's `if(L instanceof Fae && k)`
@@ -4161,6 +4165,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_range_over_token_budget_errors() {
+        let _env = READ_LIMIT_ENV_MUTEX.lock().await;
         // An EXPLICIT-range read (limit set, or offset > 1) over the token
         // budget RE-THROWS as a hard error (`else throw L`) — it is NOT a full
         // read, so the graceful path does not apply.

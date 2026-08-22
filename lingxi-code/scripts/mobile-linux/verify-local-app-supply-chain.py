@@ -49,6 +49,12 @@ EXPECTED_DEPENDENCIES = {
     "sonner": "2.0.8",
     "tailwind-merge": "3.6.0",
     "tailwindcss": "4.3.3",
+    # Pure-JS WebGL renderer. It is in the pinned set because a generated game
+    # cannot install it: the workspace contract forbids the agent from touching
+    # package.json or running a package manager, so anything not pinned here is
+    # unreachable to every app this host will ever build. No native binding, so
+    # it does not enter EXPECTED_NATIVE_PACKAGE_BINARIES.
+    "three": "0.185.1",
     "tw-animate-css": "1.4.0",
     "vite": "8.2.1",
     "zod": "4.4.3",

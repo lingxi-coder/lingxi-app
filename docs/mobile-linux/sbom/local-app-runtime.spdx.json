@@ -3,7 +3,7 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "lingxi-local-app-runtime",
-  "documentNamespace": "https://lingxi.app/spdx/local-app-runtime/b2295df75b1432a578f6dbc326420993b50d09b3aaa7e1e658d8cc2cd2842b51",
+  "documentNamespace": "https://lingxi.app/spdx/local-app-runtime/6b2ad11c0c7b8eb8fbd7c9b30d80c7f19421a14eab17b6d09bf01e598c2236cc",
   "creationInfo": {
     "created": "1970-01-01T00:00:00Z",
     "creators": [
@@ -23,10 +23,10 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "b2295df75b1432a578f6dbc326420993b50d09b3aaa7e1e658d8cc2cd2842b51"
+          "checksumValue": "6b2ad11c0c7b8eb8fbd7c9b30d80c7f19421a14eab17b6d09bf01e598c2236cc"
         }
       ],
-      "sourceInfo": "pnpm lockfile sha256: b2295df75b1432a578f6dbc326420993b50d09b3aaa7e1e658d8cc2cd2842b51"
+      "sourceInfo": "pnpm lockfile sha256: 6b2ad11c0c7b8eb8fbd7c9b30d80c7f19421a14eab17b6d09bf01e598c2236cc"
     }
   ],
   "relationships": [

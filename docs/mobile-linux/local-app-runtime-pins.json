@@ -1242,7 +1242,7 @@
   ],
   "local_app_runtime": {
     "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/pnpm-lock.yaml",
-    "lockfile_sha256": "b2295df75b1432a578f6dbc326420993b50d09b3aaa7e1e658d8cc2cd2842b51",
+    "lockfile_sha256": "6b2ad11c0c7b8eb8fbd7c9b30d80c7f19421a14eab17b6d09bf01e598c2236cc",
     "lightningcss": "1.33.0",
     "lightningcss_bindings": {
       "lightningcss-linux-arm64-musl": "1.33.0",

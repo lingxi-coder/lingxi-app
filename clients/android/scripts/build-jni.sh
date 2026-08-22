@@ -89,14 +89,25 @@ for tool in cargo rustc cargo-ndk node shasum; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "ERROR: required tool not found: ${tool}" >&2; exit 1; }
 done
 
-IFS=$'\t' read -r SHERPA_AAR_VER SHERPA_AAR_NAME SHERPA_AAR_URL SHERPA_AAR_SHA256 < <(
+# Read via a herestring, NOT `< <(...)`. The node program ends its output with
+# `process.stdout.write`, so there is no trailing newline; `read` then hits EOF
+# without a delimiter and returns 1 even though it assigned every variable. Under
+# this script's `set -e` that killed the build right here, silently — no message,
+# no partial output, just exit 1, which reads like the toolchain is missing. A
+# herestring appends the newline, and keeping the command substitution in its own
+# assignment means a genuine node failure still trips `set -e` instead of being
+# swallowed the way `|| true` would swallow it.
+SHERPA_AAR_META="$(
   node -e '
     const fs = require("fs");
     const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
     const artifact = manifest.runtime.android;
     process.stdout.write([manifest.runtime.version, artifact.name, artifact.url, artifact.sha256].join("\t"));
   ' "${VOICE_MANIFEST}"
-)
+)"
+IFS=$'\t' read -r SHERPA_AAR_VER SHERPA_AAR_NAME SHERPA_AAR_URL SHERPA_AAR_SHA256 <<<"${SHERPA_AAR_META}"
+[[ -n "${SHERPA_AAR_VER}" && -n "${SHERPA_AAR_NAME}" && -n "${SHERPA_AAR_URL}" && -n "${SHERPA_AAR_SHA256}" ]] \
+  || { echo "ERROR: ${VOICE_MANIFEST} did not yield a complete runtime.android artifact" >&2; exit 1; }
 
 # Resolve ANDROID_NDK_HOME: honor an existing env, else pick the newest NDK under
 # the SDK's ndk/ dir (highest version-sorted directory name).

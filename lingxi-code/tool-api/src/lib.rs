@@ -29,6 +29,7 @@ pub mod registry;
 pub mod sandbox_runner;
 pub mod session_cwd;
 pub mod tool_invoker_impl;
+pub mod tool_result_media;
 pub mod tool_search_view;
 pub mod tool_trait;
 pub mod util;

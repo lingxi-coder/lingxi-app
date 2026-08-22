@@ -1697,16 +1697,37 @@ async fn run_subagent_loop(
                     };
                     match invoker.invoke(name, input.clone(), inv_ctx).await {
                         Ok(value) => {
-                            let content = match &value {
-                                serde_json::Value::String(s) => s.clone(),
-                                other => other.to_string(),
+                            // A subagent reads tool results through the same
+                            // eyes the main loop does. Deriving the media blocks
+                            // here — from the SHARED rule, not a copy of it — is
+                            // what makes an image-returning tool usable at all
+                            // from a Task or a workflow stage: without it the
+                            // payload arrives as base64 TEXT, which the model
+                            // cannot look at and which then sits in history for
+                            // the rest of the run. `LocalAppCaptureUi` exists
+                            // almost entirely for the `frontend-qa` verify
+                            // stage, and that stage is a subagent.
+                            let content_blocks =
+                                tool_api::tool_result_media::media_content_blocks(&value);
+                            let content = match (
+                                content_blocks.as_ref().and_then(|_| {
+                                    tool_api::tool_result_media::ephemeral_summary(&value)
+                                }),
+                                &value,
+                            ) {
+                                // The blocks carry the payload; the text says so
+                                // in one line instead of repeating a megabyte of
+                                // base64 beside them.
+                                (Some(summary), _) => summary,
+                                (None, serde_json::Value::String(s)) => s.clone(),
+                                (None, other) => other.to_string(),
                             };
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
                                 content,
                                 is_error: false,
                                 provider_tool_use_id: provider_id.clone(),
-                                content_blocks: None,
+                                content_blocks,
                             });
                         }
                         Err(traits::tool_invoker::ToolInvokerError::Abort(error)) => {

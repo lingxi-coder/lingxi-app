@@ -34,7 +34,9 @@
 use crate::computer_access::ComputerAccessResponseDto;
 use crate::controls::ReasoningSelectionDto;
 use crate::listings::TaskStatusDto;
-use crate::local_apps::{AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto};
+use crate::local_apps::{
+    AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppSurfaceDto,
+};
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -384,6 +386,16 @@ pub enum ClientCommand {
         /// from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         conversation_id: Option<String>,
+        /// Which scaffold to lay down. `None` means the caller expressed no
+        /// preference and the host picks the routed default — the surface is
+        /// immutable once scaffolded, so a client that shows the user a choice
+        /// must send what the user actually saw rather than relying on that
+        /// default. Appended LAST: the generated mobile bindings encode struct
+        /// variants positionally, so inserting a field above `conversation_id`
+        /// would silently reinterpret it on a client built against the previous
+        /// bindings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface: Option<AppSurfaceDto>,
     },
 
     /// Start the app's dev-server runtime. Phase 1 validates the app exists,
@@ -508,6 +520,32 @@ pub enum ClientCommand {
     SetReasoningSelection {
         /// Provider-neutral reasoning selection.
         selection: ReasoningSelectionDto,
+    },
+
+    /// Ask the host to propose a display name and a surface for a one-line
+    /// brief, WITHOUT creating anything. Answered by exactly one
+    /// [`AppIdentityProposed`](crate::events::ClientEvent::AppIdentityProposed)
+    /// carrying the same `request_id`.
+    ///
+    /// This exists because both values are fixed at creation — a surface is
+    /// immutable once scaffolded and apps cannot be renamed — so the user has
+    /// to see and be able to correct them BEFORE the create commits. The host
+    /// asks the model once, headlessly; it never opens a conversation, and a
+    /// model that is unreachable or answers badly still yields a usable
+    /// proposal rather than an error, because the sheet's fields are editable
+    /// anyway.
+    ///
+    /// Appended to preserve existing UniFFI enum ordinals — this enum is
+    /// encoded positionally by the generated mobile bindings, so inserting a
+    /// variant anywhere above would silently renumber every command after it on
+    /// a client built against the previous bindings.
+    ProposeAppIdentity {
+        /// Correlates the reply. Echoed verbatim on the answering event so a
+        /// sheet that was retyped and re-submitted cannot adopt a stale
+        /// proposal for an older brief.
+        request_id: String,
+        /// The one-line brief the user typed.
+        brief: String,
     },
 }
 

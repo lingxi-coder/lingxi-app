@@ -50,19 +50,86 @@ struct BuildProvenance {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalAppBuildTarget {
+    /// Routed, multi-screen Ionic interface.
     ViteReactStaticV1,
+    /// One drawn surface owning its own frame loop.
+    ViteReactCanvasV1,
 }
 
-macro_rules! embedded_template_file {
-    ($path:literal) => {
+impl LocalAppBuildTarget {
+    pub(crate) fn from_surface(surface: local_apps::AppSurface) -> Self {
+        match surface {
+            local_apps::AppSurface::Dom => Self::ViteReactStaticV1,
+            local_apps::AppSurface::Canvas => Self::ViteReactCanvasV1,
+        }
+    }
+
+    /// The manifest value this target is recorded as.
+    fn surface(self) -> local_apps::AppSurface {
+        match self {
+            Self::ViteReactStaticV1 => local_apps::AppSurface::Dom,
+            Self::ViteReactCanvasV1 => local_apps::AppSurface::Canvas,
+        }
+    }
+
+    /// The scaffold id reported back to the model. Derived, never spelled at
+    /// the emission site: a hardcoded `"vite-react-static-v1"` told a canvas
+    /// app it was the routed scaffold, and a model that believes it goes
+    /// looking for screens and a router that workspace does not contain.
+    pub(crate) fn template_id(self) -> &'static str {
+        match self {
+            Self::ViteReactStaticV1 => "vite-react-static-v1",
+            Self::ViteReactCanvasV1 => "vite-react-canvas-v1",
+        }
+    }
+
+    /// Discriminates the build cache. Two scaffolds can produce the same file
+    /// set for a trivial app, and without this the second one would be served
+    /// the first one's cached output.
+    fn cache_tag(self) -> &'static [u8] {
+        match self {
+            Self::ViteReactStaticV1 => b"template=vite-react-static-v1\0",
+            Self::ViteReactCanvasV1 => b"template=vite-react-canvas-v1\0",
+        }
+    }
+}
+
+macro_rules! template_file {
+    ($dir:literal, $path:literal) => {
         (
             $path,
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../local-apps/templates/vite-react-static-v1/",
+                "/../../local-apps/templates/",
+                $dir,
+                "/",
                 $path
             )) as &[u8],
         )
+    };
+}
+
+macro_rules! embedded_template_file {
+    ($path:literal) => {
+        template_file!("vite-react-static-v1", $path)
+    };
+}
+
+macro_rules! canvas_template_file {
+    ($path:literal) => {
+        template_file!("vite-react-canvas-v1", $path)
+    };
+}
+
+/// A seed file the canvas scaffold takes VERBATIM from the DOM scaffold.
+///
+/// Spelled differently from [`canvas_template_file`] on purpose. These bytes
+/// have exactly one derivation on disk, so the two scaffolds cannot drift apart
+/// on the entry point, the stylesheet import or the error boundary — the failure
+/// mode a second full copy of the tree would guarantee within a few months.
+macro_rules! shared_source_file {
+    ($path:literal) => {
+        template_file!("vite-react-static-v1", $path)
     };
 }
 
@@ -82,7 +149,8 @@ pub(crate) const VITE_LOCKED_FILES: &[(&str, &[u8])] = &[
     embedded_template_file!("styles/foundation.css"),
 ];
 
-const SOURCE_FILES: &[(&str, &[u8])] = &[
+/// The editable seed for a routed, multi-screen app.
+const DOM_SOURCE_FILES: &[(&str, &[u8])] = &[
     embedded_template_file!("app/main.jsx"),
     embedded_template_file!("app/app.jsx"),
     embedded_template_file!("app/providers.jsx"),
@@ -94,6 +162,38 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
     embedded_template_file!("public/.gitkeep"),
 ];
 
+/// The editable seed for a drawn surface.
+///
+/// It is not a subset of the DOM seed and it is not a copy of it: the provider
+/// mounts no router, the screen owns a frame loop, and the store holds a phase
+/// machine instead of form state. Only the four files that carry no scaffold
+/// opinion are shared.
+const CANVAS_SOURCE_FILES: &[(&str, &[u8])] = &[
+    shared_source_file!("app/main.jsx"),
+    shared_source_file!("app/error-boundary.jsx"),
+    shared_source_file!("app/globals.css"),
+    shared_source_file!("public/.gitkeep"),
+    canvas_template_file!("app/app.jsx"),
+    canvas_template_file!("app/providers.jsx"),
+    canvas_template_file!("app/screens/game-screen.jsx"),
+    canvas_template_file!("src/game/frame-loop.js"),
+    canvas_template_file!("src/stores/game-store.js"),
+];
+
+fn source_files(target: LocalAppBuildTarget) -> &'static [(&'static str, &'static [u8])] {
+    match target {
+        LocalAppBuildTarget::ViteReactStaticV1 => DOM_SOURCE_FILES,
+        LocalAppBuildTarget::ViteReactCanvasV1 => CANVAS_SOURCE_FILES,
+    }
+}
+
+/// Which scaffold this workspace was built from.
+///
+/// The MANIFEST is the authority, not the files on disk. Sniffing the workspace
+/// would be circular: `package.json` and `vite.config.mjs` are exactly the files
+/// `restore_host_managed_files` rewrites from the compiled-in template before
+/// every build, so a mis-detection would repin the wrong scaffold and then read
+/// its own output back as confirmation.
 pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTarget, AppError> {
     let workspace = layout.root().join(layout.workspace_rel());
     if workspace.join("next.config.mjs").is_file() {
@@ -102,7 +202,22 @@ pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTar
                 .into(),
         ));
     }
-    Ok(LocalAppBuildTarget::ViteReactStaticV1)
+
+    let manifest = local_apps::load_manifest(layout)?;
+    // An app created before the scaffold split has no recorded surface, and its
+    // source imports a component set that no longer exists. Rebuilding it would
+    // fail deep in Vite with a module-resolution error naming a file nobody
+    // recognises, so say the real thing here instead.
+    manifest
+        .surface
+        .map(LocalAppBuildTarget::from_surface)
+        .ok_or_else(|| {
+            AppError::InvalidRequest(
+            "this app was created with a scaffold that has been removed, so it can no longer be \
+             rebuilt. Its existing build keeps running; create a new app to continue development."
+                .into(),
+        )
+        })
 }
 
 /// The subset of [`VITE_LOCKED_FILES`] the host re-pins from its compiled-in
@@ -111,39 +226,64 @@ pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTar
 /// The repository-verified Vite scaffold is the single source of truth for the
 /// build infrastructure. Editable application code lives in `app/`, `src/`,
 /// `styles/`, and non-host-managed files under `lib/`.
-fn repinned_host_managed_files(_target: LocalAppBuildTarget) -> &'static [&'static str] {
-    &[
-        ".gitignore",
-        "package.json",
-        "pnpm-lock.yaml",
-        "pnpm-workspace.yaml",
-        "jsconfig.json",
-        "index.html",
-        "vite.config.mjs",
-        ".lingxi/source-policy.json",
-        "lib/lingxi-bridge.js",
-        "lib/device-context.js",
-        "lib/platform-adapter.js",
-        "lib/lingxi-provider.jsx",
-        "styles/foundation.css",
-    ]
+/// The host-managed set, IDENTICAL for every scaffold — and it has to stay that
+/// way.
+///
+/// `permission::workspace_lease::host_owned_relative` answers "is this file
+/// host-owned?" from the relative path ALONE; its signature carries no app id,
+/// so it cannot know which scaffold it is looking at. If the two scaffolds
+/// disagreed about this set, the lease would guard the wrong one for half the
+/// apps: the agent's `Edit` would be accepted, the next build would silently
+/// revert it via `restore_host_managed_files`, and the only trace would be a
+/// `tracing::warn!` while the model looped against a file it could not change.
+const HOST_MANAGED_FILES: &[&str] = &[
+    ".gitignore",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "jsconfig.json",
+    "index.html",
+    "vite.config.mjs",
+    ".lingxi/source-policy.json",
+    "lib/lingxi-bridge.js",
+    "lib/device-context.js",
+    "lib/platform-adapter.js",
+    "lib/lingxi-provider.jsx",
+    "styles/foundation.css",
+];
+
+/// Written as an exhaustive match rather than an ignored `_target` so that
+/// giving a scaffold its own host-managed set is a deliberate edit here, next to
+/// the comment explaining what else must move with it. The previous signature
+/// took the target and discarded it, which meant a second scaffold would have
+/// silently inherited this list with nothing failing.
+fn repinned_host_managed_files(target: LocalAppBuildTarget) -> &'static [&'static str] {
+    match target {
+        LocalAppBuildTarget::ViteReactStaticV1 | LocalAppBuildTarget::ViteReactCanvasV1 => {
+            HOST_MANAGED_FILES
+        }
+    }
 }
 
-fn build_locked_files(_target: LocalAppBuildTarget) -> &'static [&'static str] {
-    &[
-        ".gitignore",
-        "package.json",
-        "pnpm-lock.yaml",
-        "pnpm-workspace.yaml",
-        "jsconfig.json",
-        "index.html",
-        "vite.config.mjs",
-        "lib/lingxi-bridge.js",
-        "lib/device-context.js",
-        "lib/platform-adapter.js",
-        "lib/lingxi-provider.jsx",
-        "styles/foundation.css",
-    ]
+/// [`HOST_MANAGED_FILES`] minus `.lingxi/source-policy.json`: the build root is
+/// a copy of the workspace and does not carry host metadata.
+fn build_locked_files(target: LocalAppBuildTarget) -> &'static [&'static str] {
+    match target {
+        LocalAppBuildTarget::ViteReactStaticV1 | LocalAppBuildTarget::ViteReactCanvasV1 => &[
+            ".gitignore",
+            "package.json",
+            "pnpm-lock.yaml",
+            "pnpm-workspace.yaml",
+            "jsconfig.json",
+            "index.html",
+            "vite.config.mjs",
+            "lib/lingxi-bridge.js",
+            "lib/device-context.js",
+            "lib/platform-adapter.js",
+            "lib/lingxi-provider.jsx",
+            "styles/foundation.css",
+        ],
+    }
 }
 
 /// Rewrite every host-managed file from its compiled-in template unless it
@@ -241,20 +381,40 @@ pub(crate) struct LocalAppBuilder<'a> {
 
 /// Materialize the repository-verified Vite scaffold directly into a fresh
 /// workspace so app creation does not depend on `npm create`.
-pub(crate) fn scaffold_workspace(layout: &AppLayout) -> Result<(), AppError> {
+pub(crate) fn scaffold_workspace(
+    layout: &AppLayout,
+    target: LocalAppBuildTarget,
+) -> Result<(), AppError> {
     layout.initialize()?;
-    scaffold_workspace_initialized(layout)
+    // Stamp the surface the way creation does. In production the manifest is
+    // already on disk by the time the scaffold runs (the service writes it
+    // pre-commit), so a workspace materialized WITHOUT one is a shape that only
+    // exists in tests — and it is unbuildable, because `detect_build_target`
+    // reads exactly this field. Writing it here keeps "scaffolded" meaning the
+    // same thing on both sides.
+    let mut manifest = local_apps::AppManifest::for_new_app(layout.app_id(), layout.app_id());
+    manifest.surface = Some(target.surface());
+    local_apps::save_manifest(layout, &manifest)?;
+    scaffold_workspace_initialized(layout, target)
 }
 
 /// Materialize the pinned template after the enclosing create transaction has
 /// already initialized the app layout. Keeping the initialized variant
 /// private to the host path avoids a second full directory validation pass.
-pub(crate) fn scaffold_workspace_initialized(layout: &AppLayout) -> Result<(), AppError> {
+///
+/// `target` is passed in rather than detected: this runs at creation, before
+/// the workspace exists, so there is nothing on disk to detect from. The caller
+/// has already recorded the choice on the manifest, which is what every later
+/// build reads back.
+pub(crate) fn scaffold_workspace_initialized(
+    layout: &AppLayout,
+    target: LocalAppBuildTarget,
+) -> Result<(), AppError> {
     let workspace = layout.root().join(layout.workspace_rel());
     for (relative, bytes) in VITE_LOCKED_FILES {
         write_file(&workspace, relative, bytes, true)?;
     }
-    for (relative, bytes) in SOURCE_FILES {
+    for (relative, bytes) in source_files(target) {
         write_file(&workspace, relative, bytes, false)?;
     }
     Ok(())
@@ -383,18 +543,31 @@ impl LocalAppBuilder<'_> {
             .run_isolated(request)
             .await
             .map_err(|error| AppError::Io(format!("fixed {tool_name} build failed: {error}")))?;
+        // Record BEFORE judging. The enforcement receipt and the exit check both
+        // return early, and a build that fails either one is exactly the build
+        // whose output someone needs to read — discarding it there is why a
+        // device failure could leave no trace at all. Best-effort on purpose:
+        // a diagnostics write must never mask an enforcement failure.
+        let outcome = format!(
+            "exit={} timed_out={} cancelled={}",
+            result.exit_code, result.timed_out, result.cancelled
+        );
+        if let Err(error) =
+            append_build_log(layout, false, &outcome, &result.stdout, &result.stderr).await
+        {
+            tracing::warn!(%error, "failed to append build log");
+        }
         result
             .enforcement
             .ensure_for(NetworkPolicy::Disabled, resource_limits)
             .map_err(|error| AppError::Io(error.to_string()))?;
-        append_build_log(layout, false, &result.stdout, &result.stderr).await?;
         if result.timed_out || result.cancelled || result.exit_code != 0 {
             return Err(AppError::Io(format!(
                 "fixed {tool_name} build exited {} (timed_out={}, cancelled={}): {}",
                 result.exit_code,
                 result.timed_out,
                 result.cancelled,
-                bounded_log(&result.stderr)
+                bounded_message(&result.stderr)
             )));
         }
         Ok(())
@@ -466,7 +639,7 @@ impl LocalAppBuilder<'_> {
         restore_host_managed_files(&workspace, target)?;
         let build_root = layout.root().join(layout.build_rel(false));
         recover_build_promotion(&build_root)?;
-        let build_key = workspace_build_key(&workspace, &dependency)?;
+        let build_key = workspace_build_key(&workspace, &dependency, target)?;
         if build_cache_hit(&build_root, &build_key)? {
             return Ok(());
         }
@@ -516,6 +689,7 @@ fn workspace_build_output_rel() -> String {
 fn workspace_build_key(
     workspace: &Path,
     dependency: &local_apps::AppDependencyRecord,
+    target: LocalAppBuildTarget,
 ) -> Result<String, AppError> {
     let previous = load_build_input_manifest(workspace);
     let mut inputs = Vec::new();
@@ -556,7 +730,7 @@ fn workspace_build_key(
         hasher.update(file.content_sha256.as_bytes());
         hasher.update([0]);
     }
-    hasher.update(b"template=vite-react-static-v1\0");
+    hasher.update(target.cache_tag());
     hasher.update(
         dependency
             .lockfile_sha256
@@ -1039,6 +1213,7 @@ async fn apply_manifest_migration(
 async fn append_build_log(
     layout: &AppLayout,
     full: bool,
+    outcome: &str,
     stdout: &str,
     stderr: &str,
 ) -> Result<(), AppError> {
@@ -1048,8 +1223,12 @@ async fn append_build_log(
         .map_err(|error| AppError::Io(format!("create build log directory: {error}")))?;
     let log_path = log_dir.join("build.log");
     let channel = if full { "full" } else { "store" };
+    // The outcome rides the banner. Without it the file records what the build
+    // PRINTED but never whether it succeeded — and the two device builds that
+    // prompted this differed only in that stdout stopped early, which is not
+    // something a reader can tell apart from a quiet success.
     let body = format!(
-        "\n=== {channel} build ===\nstdout:\n{}\nstderr:\n{}\n",
+        "\n=== {channel} build ({outcome}) ===\nstdout:\n{}\nstderr:\n{}\n",
         bounded_log(stdout),
         bounded_log(stderr)
     );
@@ -1332,13 +1511,136 @@ fn now_ms() -> u64 {
         })
 }
 
+/// Keep both ends of a captured build stream, dropping the middle.
+///
+/// The tail is the bigger half because a build tool states its DIAGNOSIS last —
+/// the failing rule, the stack, the reason it stopped — while the head is a
+/// banner followed by, for this scaffold, hundreds of non-fatal
+/// `[lightningcss minify] 'host-context'` notes from Ionic's shipped CSS and
+/// `[EMPTY_IMPORT_META]` notes caused by the locked `format: "iife"`.
+///
+/// This used to be `value.chars().take(4_000)`, which kept exactly the useless
+/// end. Observed on device: a build died with
+/// `[MISSING_EXPORT] "useIonRouter" is not exported by "@ionic/react-router"`
+/// and that line was never written ANYWHERE — `build.log` held 4 000 characters
+/// of `:host-context` notes, the agent read them, and reported a CSS error that
+/// did not exist. Truncating a diagnostic stream from the front discards the
+/// diagnosis.
+fn bounded(value: &str, head_chars: usize, tail_chars: usize) -> String {
+    let total = value.chars().count();
+    if total <= head_chars + tail_chars {
+        return value.to_string();
+    }
+    // Char offsets, never byte offsets: this stream carries CJK from the
+    // agent's own source, and a byte cut would split a codepoint.
+    let head_end = value
+        .char_indices()
+        .nth(head_chars)
+        .map_or(value.len(), |(index, _)| index);
+    let tail_start = value
+        .char_indices()
+        .nth(total - tail_chars)
+        .map_or(value.len(), |(index, _)| index);
+    let elided = total - head_chars - tail_chars;
+    format!(
+        "{}\n… [{elided} characters elided from the middle] …\n{}",
+        &value[..head_end],
+        &value[tail_start..]
+    )
+}
+
+/// Bound for `build.log`. Generous: this is a FILE, rotated whole at
+/// [`MAX_BUILD_LOG_BYTES`], and `LocalAppLogs` serves its tail on demand. A
+/// warning the app author caused on an otherwise-green build is only
+/// recoverable if it was written down in the first place, and Ionic's own notes
+/// alone run past 20 kB.
 fn bounded_log(value: &str) -> String {
-    value.chars().take(4_000).collect()
+    bounded(value, 2_000, 40_000)
+}
+
+/// Bound for the failure message handed to the model. Tight on purpose: this
+/// text enters the agent's context on EVERY failed build, and the reason is
+/// always at the tail.
+fn bounded_message(value: &str) -> String {
+    bounded(value, 1_000, 8_000)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A build tool's DIAGNOSIS is the last thing it prints. Keeping the head
+    /// threw it away.
+    ///
+    /// Shaped like the real device failure: Ionic's CSS emits hundreds of
+    /// non-fatal `:host-context` notes, then the build states why it stopped.
+    /// The old `chars().take(4_000)` kept only the notes, so `build.log` and the
+    /// failure message both described a CSS problem that did not exist while the
+    /// actual reason was never recorded anywhere.
+    #[test]
+    fn bounded_log_keeps_the_reason_a_build_prints_last() {
+        let noise = "[lightningcss minify] 'host-context' is not recognized\n".repeat(400);
+        let reason = "ERROR: the real reason the build stopped";
+        let bounded = bounded_message(&format!("{noise}{reason}"));
+
+        assert!(
+            bounded.ends_with(reason),
+            "the tail carries the diagnosis; got: {:?}",
+            &bounded[bounded.len().saturating_sub(120)..]
+        );
+        assert!(
+            bounded.starts_with("[lightningcss minify]"),
+            "the head is still kept for context"
+        );
+        assert!(
+            bounded.contains("characters elided from the middle"),
+            "an elision has to be visible, not silent"
+        );
+    }
+
+    /// Short streams are passed through untouched — no marker, no loss.
+    #[test]
+    fn bounded_log_leaves_a_short_stream_alone() {
+        let short = "vite v8.2.1 building...\n\u{2713} built in 521ms";
+        assert_eq!(bounded_log(short), short);
+        assert_eq!(bounded_message(short), short);
+    }
+
+    /// The FILE keeps far more than the model-facing message.
+    ///
+    /// A stock build of an Ionic app emits >20 kB of stderr that no author can
+    /// act on, and an author's OWN warning can sit anywhere inside it. The file
+    /// is rotated whole and read on demand, so it can afford to keep that; the
+    /// message rides the agent's context on every failure, so it cannot.
+    #[test]
+    fn the_log_file_keeps_more_than_the_model_facing_message() {
+        let stream = "x".repeat(30_000);
+        assert_eq!(
+            bounded_log(&stream).chars().count(),
+            stream.chars().count(),
+            "30k characters is well inside the file budget"
+        );
+        assert!(
+            bounded_message(&stream).chars().count() < 10_000,
+            "the message stays tight"
+        );
+    }
+
+    /// CJK reaches this stream from the agent's own source. Cutting on a byte
+    /// boundary would split a codepoint and produce invalid UTF-8.
+    #[test]
+    fn bounded_log_cuts_on_character_boundaries() {
+        let wide = "构建失败".repeat(4_000);
+        let bounded = bounded_message(&wide);
+        assert!(
+            bounded.ends_with("构建失败"),
+            "tail must land on a boundary"
+        );
+        assert!(
+            bounded.starts_with("构建失败"),
+            "head must land on a boundary"
+        );
+    }
     use async_trait::async_trait;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1544,17 +1846,52 @@ mod tests {
         }
     }
 
+    /// The MANIFEST decides the scaffold, and the files on disk do not get a
+    /// vote.
+    ///
+    /// Sniffing `vite.config.mjs` is what this used to do, and it was circular:
+    /// that file is re-pinned from the compiled-in scaffold before every build,
+    /// so a mis-detection would write one scaffold's infrastructure and then
+    /// read its own output back as proof it guessed right.
     #[test]
-    fn empty_workspaces_use_vite_and_reject_legacy_next_markers() {
+    fn the_manifest_decides_the_scaffold_and_a_pre_split_app_is_rejected() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
         layout.initialize().expect("initialize");
+
+        let mut manifest = local_apps::AppManifest::for_new_app("aaaa1111", "Fixture");
+        local_apps::save_manifest(&layout, &manifest).expect("manifest without a surface");
+        let error = detect_build_target(&layout)
+            .expect_err("an app created before the scaffold split cannot be rebuilt");
+        assert!(
+            error.to_string().contains("create a new app"),
+            "the refusal must tell the user what to do instead: {error:?}"
+        );
+
+        manifest.surface = Some(local_apps::AppSurface::Dom);
+        local_apps::save_manifest(&layout, &manifest).expect("dom manifest");
         assert_eq!(
-            detect_build_target(&layout).expect("empty workspace defaults to Vite"),
+            detect_build_target(&layout).expect("dom surface"),
             LocalAppBuildTarget::ViteReactStaticV1
         );
 
+        manifest.surface = Some(local_apps::AppSurface::Canvas);
+        local_apps::save_manifest(&layout, &manifest).expect("canvas manifest");
+        assert_eq!(
+            detect_build_target(&layout).expect("canvas surface"),
+            LocalAppBuildTarget::ViteReactCanvasV1
+        );
+
+        // A stray Vite config must NOT be able to talk the builder out of the
+        // recorded surface — that is the circularity above.
         let workspace = layout.root().join(layout.workspace_rel());
+        fs::write(workspace.join("vite.config.mjs"), "export default {};").expect("Vite marker");
+        assert_eq!(
+            detect_build_target(&layout).expect("canvas surface survives a Vite marker"),
+            LocalAppBuildTarget::ViteReactCanvasV1
+        );
+
+        // The legacy Next rejection still precedes everything.
         fs::write(workspace.join("next.config.mjs"), "export default {};").expect("Next marker");
         let error = detect_build_target(&layout).expect_err("legacy Next marker must be rejected");
         assert!(
@@ -1562,18 +1899,6 @@ mod tests {
                 .to_string()
                 .contains("local apps now support Vite only"),
             "{error:?}"
-        );
-        fs::remove_file(workspace.join("next.config.mjs")).expect("remove Next marker");
-        fs::write(workspace.join("vite.config.mjs"), "export default {};").expect("Vite marker");
-        assert_eq!(
-            detect_build_target(&layout).expect("Vite marker selects Vite"),
-            LocalAppBuildTarget::ViteReactStaticV1
-        );
-        fs::remove_file(workspace.join("vite.config.mjs")).expect("remove Vite marker");
-        fs::write(workspace.join("vite.config.js"), "export default {};").expect("Vite JS marker");
-        assert_eq!(
-            detect_build_target(&layout).expect("Vite JS marker selects Vite"),
-            LocalAppBuildTarget::ViteReactStaticV1
         );
     }
 
@@ -1692,7 +2017,12 @@ mod tests {
         fs::write(workspace.join("app/main.jsx"), "export default 'one';").expect("source");
         let dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
 
-        let first = workspace_build_key(&workspace, &dependency).expect("first key");
+        let first = workspace_build_key(
+            &workspace,
+            &dependency,
+            LocalAppBuildTarget::ViteReactStaticV1,
+        )
+        .expect("first key");
         let manifest_path = workspace
             .join(".lingxi-build-state")
             .join(BUILD_INPUT_MANIFEST_FILE);
@@ -1700,12 +2030,22 @@ mod tests {
             manifest_path.is_file(),
             "build key should persist its manifest"
         );
-        let second = workspace_build_key(&workspace, &dependency).expect("reused key");
+        let second = workspace_build_key(
+            &workspace,
+            &dependency,
+            LocalAppBuildTarget::ViteReactStaticV1,
+        )
+        .expect("reused key");
         assert_eq!(first, second, "unchanged inputs should keep the same key");
 
         fs::write(workspace.join("app/main.jsx"), "export default 'changed';")
             .expect("changed source");
-        let third = workspace_build_key(&workspace, &dependency).expect("changed key");
+        let third = workspace_build_key(
+            &workspace,
+            &dependency,
+            LocalAppBuildTarget::ViteReactStaticV1,
+        )
+        .expect("changed key");
         assert_ne!(first, third, "changed source must invalidate the key");
     }
 
@@ -1821,7 +2161,8 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
 
-        scaffold_workspace(&layout).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
+            .expect("scaffold workspace");
 
         let workspace = layout.root().join(layout.workspace_rel());
         assert!(workspace.join(".gitignore").is_file());
@@ -1856,7 +2197,8 @@ mod tests {
         fs::write(&outside, "{\"outside\":true}").expect("outside file");
         std::os::unix::fs::symlink(&outside, workspace.join("package.json"))
             .expect("symlink package.json");
-        scaffold_workspace(&layout).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
+            .expect("scaffold workspace");
 
         let metadata = fs::symlink_metadata(workspace.join("package.json")).expect("metadata");
         assert!(metadata.is_file());
@@ -1978,7 +2320,8 @@ mod tests {
     async fn the_build_re_pins_host_managed_infrastructure_without_touching_app_owned_files() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
+            .expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         let pinned_bridge = VITE_LOCKED_FILES
             .iter()
@@ -2091,7 +2434,8 @@ mod tests {
     async fn a_failed_build_cleans_up_its_staging_directory() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
+            .expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(
@@ -2135,7 +2479,8 @@ mod tests {
     async fn build_runs_from_the_workspace_mount_and_promotes_private_output() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
+            .expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(

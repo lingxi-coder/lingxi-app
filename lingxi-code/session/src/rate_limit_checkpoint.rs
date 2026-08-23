@@ -1458,7 +1458,11 @@ mod tests {
     #[test]
     fn sanitiser_truncates_at_500_utf16_units_with_an_ellipsis() {
         let exactly = "a".repeat(TODO_LINE_MAX_UTF16);
-        assert_eq!(sanitize_todo_line(&exactly), exactly, "the cap is exclusive");
+        assert_eq!(
+            sanitize_todo_line(&exactly),
+            exactly,
+            "the cap is exclusive"
+        );
 
         let over = "a".repeat(TODO_LINE_MAX_UTF16 + 1);
         let cut = sanitize_todo_line(&over);
@@ -1562,14 +1566,23 @@ mod executor_tests {
         std::fs::write(&path, b"x").expect("write");
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        assert_eq!(file_mode(&std::fs::metadata(&path).expect("stat")), "100644");
+        assert_eq!(
+            file_mode(&std::fs::metadata(&path).expect("stat")),
+            "100644"
+        );
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        assert_eq!(file_mode(&std::fs::metadata(&path).expect("stat")), "100755");
+        assert_eq!(
+            file_mode(&std::fs::metadata(&path).expect("stat")),
+            "100755"
+        );
 
         // Group-execute only: still 100644.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o654)).expect("chmod");
-        assert_eq!(file_mode(&std::fs::metadata(&path).expect("stat")), "100644");
+        assert_eq!(
+            file_mode(&std::fs::metadata(&path).expect("stat")),
+            "100644"
+        );
     }
 
     /// The latch is what makes `performRateLimitCheckpoint` once-per-session.

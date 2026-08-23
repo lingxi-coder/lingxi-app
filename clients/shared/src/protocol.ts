@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '6.0.0';
+export const CLIENT_PROTOCOL_VERSION = '7.0.0';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // commands.rs
@@ -165,7 +165,16 @@ export type ClientCommand =
       /** Provider-qualified model used by the app creation workflow. */
       workflow_model?: string;
       conversation_id?: string;
+      /**
+       * Which scaffold to lay down. Omitted means the caller expressed no
+       * preference and the host applies the routed default; a client that
+       * shows the user a choice must send what the user actually saw, because
+       * the surface is immutable once scaffolded.
+       */
+      surface?: AppSurfaceDto;
     }
+  /** Ask the host to propose a display name and a surface for a one-line brief. */
+  | { type: 'propose_app_identity'; request_id: string; brief: string }
   | { type: 'start_app'; app_id: string }
   | { type: 'stop_app'; app_id: string }
   | { type: 'restart_app'; app_id: string }
@@ -763,6 +772,13 @@ export type AppRuntimeStateDto = 'stopped' | 'starting' | 'running' | 'stopping'
 /** Where a `create_app` originated (local_apps.rs `AppCreateOriginDto`). */
 export type AppCreateOriginDto = 'chat' | 'library';
 
+/**
+ * Which scaffold a `create_app` lays down (local_apps.rs `AppSurfaceDto`).
+ * `dom` is a routed, multi-screen interface; `canvas` is a single drawn
+ * surface owning its own frame loop. Fixed at creation.
+ */
+export type AppSurfaceDto = 'dom' | 'canvas';
+
 /** Typed local-app failure code carried by `app_operation_failed` (local_apps.rs `AppErrorCodeDto`). */
 export type AppErrorCodeDto =
   | 'not_found'
@@ -1194,6 +1210,7 @@ export type AppAuthorizationDecisionDto =
  */
 export type AppEventDto =
   | { type: 'app_details_changed'; details: AppDetailsDto }
+  | { type: 'app_created'; record: AppRecordDto }
   | { type: 'app_record_changed'; record: AppRecordDto }
   | { type: 'app_profile_proposal'; proposal: AppAgentProfileProposalDto }
   | { type: 'app_bridge_response'; response: AppBridgeResponseDto }
@@ -1332,6 +1349,8 @@ export type ClientEvent =
   | { type: 'model_changed'; model: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
   | { type: 'conversation_controls_changed'; controls: ConversationControlsDto }
+  /** Answers exactly one `propose_app_identity`, echoing its `request_id`. */
+  | { type: 'app_identity_proposed'; request_id: string; name: string; surface: AppSurfaceDto }
   | {
       type: 'provider_credential_status';
       operation_id: number;

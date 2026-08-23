@@ -984,9 +984,7 @@ fn command_looks_like_a_writer(command: &str) -> bool {
     ];
     BARE.iter().any(|m| command.contains(m))
         || WORDS.iter().any(|w| contains_word(command, w))
-        || PAIRS
-            .iter()
-            .any(|(a, b)| contains_word_pair(command, a, b))
+        || PAIRS.iter().any(|(a, b)| contains_word_pair(command, a, b))
 }
 
 /// ASCII `\w` — the character class JS `\b` is defined against.
@@ -1038,9 +1036,7 @@ fn contains_word_pair(haystack: &str, first: &str, second: &str) -> bool {
                 let tail = end + ws + second.len();
                 let hb = haystack.as_bytes();
                 let sb = second.as_bytes();
-                if tail == hb.len()
-                    || !(is_word_byte(hb[tail]) && is_word_byte(sb[sb.len() - 1]))
-                {
+                if tail == hb.len() || !(is_word_byte(hb[tail]) && is_word_byte(sb[sb.len() - 1])) {
                     return true;
                 }
             }
@@ -1854,10 +1850,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 /// removing one key leaves the rest in their original insertion order).
 static INPUT_SCHEMA_NO_BACKGROUND: Lazy<Value> = Lazy::new(|| {
     let mut schema = INPUT_SCHEMA.clone();
-    if let Some(props) = schema
-        .get_mut("properties")
-        .and_then(Value::as_object_mut)
-    {
+    if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
         props.remove("run_in_background");
     }
     schema
@@ -4317,7 +4310,17 @@ mod tests {
     /// emitted only when set, never as `false`, and sits after `timedOutAfterMs`.
     #[test]
     fn bash_result_data_emits_background_ends_with_final_response_only_when_true() {
-        let reaped = bash_result_data("", "", false, false, None, false, Some("t1"), Some(5000), true);
+        let reaped = bash_result_data(
+            "",
+            "",
+            false,
+            false,
+            None,
+            false,
+            Some("t1"),
+            Some(5000),
+            true,
+        );
         assert_eq!(reaped["backgroundEndsWithFinalResponse"], true);
         let keys = reaped
             .as_object()
@@ -4382,7 +4385,10 @@ mod tests {
     #[test]
     fn path_relative_matches_node_semantics() {
         use std::path::Path;
-        assert_eq!(path_relative(Path::new("/a/b"), Path::new("/a/b/c.rs")), "c.rs");
+        assert_eq!(
+            path_relative(Path::new("/a/b"), Path::new("/a/b/c.rs")),
+            "c.rs"
+        );
         assert_eq!(path_relative(Path::new("/a/b"), Path::new("/a/b")), "");
         assert_eq!(
             path_relative(Path::new("/a/b/c"), Path::new("/a/d/e.rs")),
@@ -4453,8 +4459,8 @@ mod tests {
             std::fs::write(&file, "new").expect("write");
             seed_read_entry(&ctx, &file, 0);
         }
-        let hint = stale_read_file_state_hint(&ctx, "prettier --write .", dir.path(), 0)
-            .expect("hint");
+        let hint =
+            stale_read_file_state_hint(&ctx, "prettier --write .", dir.path(), 0).expect("hint");
         // `keys()` is MRU-first, so the most recently seeded five are listed.
         assert_eq!(
             hint,

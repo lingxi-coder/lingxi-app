@@ -32,15 +32,15 @@ fn version_is_semver() {
     }
 }
 
-/// Shrinking `DeviceContextDto` to the stable `os`/`form_factor` target pair
-/// — the host writes it from its own device facts, and the removed
-/// viewport/safe-area/color-scheme/reduced-motion/input-mode fields are live
-/// values the page reads at runtime — pins the contract at `6.0.0` (a further
-/// MAJOR bump past the designer-removal `5.0.0` — see
+/// The create-flow reshape — a local app is now CREATED by the library's
+/// create sheet rather than deferred to an intake conversation — pins the
+/// contract at `7.0.0` (a further MAJOR bump past the `DeviceContextDto` shrink
+/// at `6.0.0`; the index diff is additive, so the bump is deliberate rather
+/// than forced by the F1-09 guard — see
 /// `client_protocol::version::CLIENT_PROTOCOL_VERSION`'s doc comment). A
 /// change here is a deliberate, reviewed bump — this test makes an accidental
 /// edit visible.
 #[test]
-fn version_is_six_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "6.0.0");
+fn version_is_seven_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "7.0.0");
 }

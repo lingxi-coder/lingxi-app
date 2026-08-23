@@ -11,12 +11,32 @@ delegate specialist work to `$frontend-design`, `$accessibility`,
 
 ## Entry and confirmation
 
-When `LINGXI.md` identifies a local app and its ID, the library has already
-created that app record and its app-scoped init session. Treat that ID as
-authoritative. Do not call `LocalAppList` or `LocalAppGet` to
-rediscover or confirm the current app, and do not call `LocalAppCreate` again.
-Use `LocalAppList` only from a global conversation when no app ID is already
-known.
+When `LINGXI.md` identifies a local app and its ID, that app record and its
+app-scoped session already exist. Treat that ID as authoritative.
+Do not call `LocalAppList` or `LocalAppGet` to rediscover or confirm the current
+app, and do not call `LocalAppCreate` again. Use `LocalAppList` only from a
+global conversation when no app ID is already known.
+
+The library's create sheet does NOT come through you. It resolves the name and
+the shape up front and creates the app outright, so the conversation it opens is
+already the app's own — `LINGXI.md` names the app id, the working directory is
+the app workspace, and the app is EMPTY and waiting for its requirements. In
+that conversation: confirm the requirements, then design and implement. Do not
+call `LocalAppCreate`, and do not lay down a scaffold — the host already did,
+and the name and shape are fixed and cannot be changed.
+
+`LocalAppCreate` is for a conversation that is NOT an app's: a global or project
+chat where the user asks for an app. There it ENDS the work. After it returns,
+do not write source, do not call `LocalAppBuild`, and do not start a build
+workflow from that conversation. It is not rooted in the new app: its working
+directory belongs to the project, so everything written there lands outside the
+app, and a build launched from it edits whatever happens to sit in that
+directory. Report that the app is ready and stop. The app has its own workspace
+and its own session, and the build runs there — with `LINGXI.md` auto-loaded and
+the pinned foundation already in place.
+
+The build orchestration below therefore applies only inside an app's OWN
+conversation, the one whose `LINGXI.md` names the app id you are building.
 
 Inside an app's own workspace, read `LINGXI.md` and sharpen its brief. In a
 global chat, gather the product, screens, data, capabilities, and visual intent
@@ -78,13 +98,35 @@ platform adapter/tokens layer rather than a width-only conditional.
 Create a new app with:
 
 ```json
-{"brief":"<confirmed one-line brief>","name":"<display name>"}
+{"brief":"<confirmed one-line brief>","name":"<display name>","surface":"dom"}
 ```
 
 using `LocalAppCreate`. Declare collections, domains, capabilities,
 and the confirmed `device_context` with `LocalAppManifest`
 before generated source relies on them. Inside an existing app, do not call
 `LocalAppCreate` again.
+
+`surface` picks which scaffold is materialized and CANNOT be changed afterwards
+— the workspace on disk is the scaffold, so an app that needs the other shape
+has to be created again. Decide it from the confirmed specification:
+
+- `canvas` when the whole interface is one drawn surface that owns a frame
+  loop: a game, a simulation, a 3D scene, a live visualization. The workspace
+  comes with a canvas screen, a frame-loop helper and a phase machine, and no
+  router.
+- `dom` for everything assembled from screens, lists and forms. This is the
+  default and the common case.
+
+A drawn surface with a settings page is still `canvas`; a dashboard that embeds
+one chart is still `dom`. Ask which one the user means only when the brief is
+genuinely ambiguous between them — "make me something fun with physics" is
+ambiguous, "a brick-breaker game" is not. When you do ask, ask it in the same
+`AskUserQuestion` round as everything else you need.
+
+`name` is yours to write, not the user's brief truncated. Take the brief's
+subject and give it a short, specific display name — two to four words, no
+trailing punctuation, in the language the user wrote their brief in. Reserve
+`AskUserQuestion` for a name only when the brief names no subject at all.
 
 Every collection requires `id`, `name`, and `fields`; every field requires
 `id`, `label`, and `kind`. Collection and field IDs use lower snake_case and
@@ -191,13 +233,30 @@ and enable immediately if ready. Use inline SVG or CSS for ordinary icons.
 
 ## Build orchestration
 
-Call the `local-app-build` workflow once with the confirmed spec. When the
-create-flow kickoff includes a provider-qualified workflow model override,
-pass it byte-for-byte as `args.model`; otherwise omit `model` so every phase
-inherits the current session's live provider/model selection:
+Call the build workflow once with the confirmed spec. Which workflow follows
+the app's `surface`, and the two are not interchangeable:
+
+- `surface: "dom"` → **`local-app-build`**
+- `surface: "canvas"` → **`local-canvas-build`**
+
+They differ in what they ask of you and in what they accept as proof. The DOM
+workflow designs a screen hierarchy and gates on a native data round-trip; the
+canvas workflow designs a simulation — loop, phases, inputs, end conditions —
+and gates on captured frames that show the surface rendering AND moving, because
+a drawn app usually declares no collection and would pass the data gate
+unobserved. `local-canvas-build` also refuses `fast`, which is the one strategy
+that skips Design.
+
+When the create-flow kickoff includes a provider-qualified workflow model
+override, pass it byte-for-byte as `args.model`; otherwise omit `model` so every
+phase inherits the current session's live provider/model selection:
 
 ```json
 {"name":"local-app-build","args":{"app_id":"<id>","spec":"<confirmed spec>","strategy":"balanced","complexity":{"score":4,"band":"medium","confidence":0.9,"reasons":["three screens","one writable collection"]},"model":"<optional provider/model>"}}
+```
+
+```json
+{"name":"local-canvas-build","args":{"app_id":"<id>","spec":"<confirmed spec>","strategy":"balanced","complexity":{"score":5,"band":"medium","confidence":0.9,"reasons":["real-time frame loop","collision"]},"model":"<optional provider/model>"}}
 ```
 
 The workflow is deterministic and adapts its phases from the confirmed

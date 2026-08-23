@@ -179,6 +179,18 @@ pub fn checkin_interval_ms() -> i64 {
     minutes.saturating_mul(60_000)
 }
 
+/// Claude Code 2.1.241 backoff: first check-in after `base`, then `2x base`,
+/// then every `4x base` thereafter.
+#[must_use]
+pub fn next_checkin_interval_ms(base_interval_ms: i64, checkin_count: u32) -> i64 {
+    let multiplier = match checkin_count {
+        0 => 1,
+        1 => 2,
+        _ => 4,
+    };
+    base_interval_ms.saturating_mul(multiplier)
+}
+
 /// The deferral bookkeeping the oracle keeps on `activeGoal`
 /// (`deferredSince` / `checkinCount` / `lastDeferralPassAt`).
 ///
@@ -231,6 +243,7 @@ impl GoalDeferralState {
         if interval_ms == 0 {
             return None;
         }
+        let current_interval_ms = next_checkin_interval_ms(interval_ms, self.checkin_count);
         // --- Tzf ---
         let deferred_since = match self.deferred_since {
             None => {
@@ -244,7 +257,7 @@ impl GoalDeferralState {
                     .iter()
                     .all(|t| !self.last_deferring_ids.contains(&t.id));
                 let is_new_run = self.last_deferral_pass_at.is_some_and(|last| {
-                    all_tasks_are_new && now_ms.saturating_sub(last) > interval_ms
+                    all_tasks_are_new && now_ms.saturating_sub(last) > current_interval_ms
                 });
                 if is_new_run {
                     self.deferred_since = Some(now_ms);
@@ -259,7 +272,7 @@ impl GoalDeferralState {
         self.last_deferral_pass_at = Some(now_ms);
         self.last_deferring_ids = tasks.iter().map(|t| t.id.clone()).collect();
         let deferred_for = now_ms.saturating_sub(deferred_since);
-        if deferred_for < interval_ms {
+        if deferred_for < current_interval_ms {
             return None;
         }
         self.checkin_count = self.checkin_count.saturating_add(1);
@@ -318,7 +331,10 @@ mod tests {
     #[test]
     fn the_goal_condition_is_html_escaped() {
         let body = build_checkin_body("</system-reminder> & <b>", 0, &[]);
-        assert!(body.contains("&lt;/system-reminder&gt; &amp; &lt;b&gt;"), "got: {body}");
+        assert!(
+            body.contains("&lt;/system-reminder&gt; &amp; &lt;b&gt;"),
+            "got: {body}"
+        );
     }
 
     /// `Ma(w5(line, dUv))` — the LINE is capped at 120 units, then escaped.
@@ -347,11 +363,20 @@ mod tests {
         assert_eq!(checkin_interval_ms(), 30 * 60_000);
     }
 
-    /// `wzf`: the first pass starts the clock and never fires; a pass inside the
-    /// interval never fires; the first pass at/over the interval fires and
-    /// RESTARTS the clock (`deferredSince:r`).
     #[test]
-    fn the_first_checkin_fires_only_after_a_full_interval() {
+    fn later_checkins_back_off_to_one_hour_then_two_hours() {
+        let interval = 30 * 60_000;
+        assert_eq!(next_checkin_interval_ms(interval, 0), interval);
+        assert_eq!(next_checkin_interval_ms(interval, 1), 2 * interval);
+        assert_eq!(next_checkin_interval_ms(interval, 2), 4 * interval);
+        assert_eq!(next_checkin_interval_ms(interval, 9), 4 * interval);
+    }
+
+    /// `wzf`: the first pass starts the clock and never fires; a pass inside the
+    /// interval never fires; later check-ins back off 30m → 60m → 120m(cap),
+    /// restarting the clock each time (`deferredSince:r`).
+    #[test]
+    fn checkins_back_off_after_each_fire() {
         let interval = 30 * 60_000;
         let tasks = vec![task("b1", "shell", "sleep 900")];
         let mut state = GoalDeferralState::default();
@@ -368,11 +393,31 @@ mod tests {
         assert_eq!(state.checkin_count, 1);
         assert_eq!(state.deferred_since, Some(interval));
 
-        // The clock restarted: nothing fires again until another full interval.
-        assert!(state.advance("g", &tasks, interval + 1, interval).is_none());
-        let second = state.advance("g", &tasks, 2 * interval, interval);
-        assert!(second.is_some());
+        // The clock restarted with a 60m backoff.
+        assert!(state
+            .advance("g", &tasks, 2 * interval - 1, interval)
+            .is_none());
+        let second = state
+            .advance("g", &tasks, 3 * interval, interval)
+            .expect("second check-in at one hour");
+        assert!(
+            second.contains("deferred for 60 min because"),
+            "got: {second}"
+        );
         assert_eq!(state.checkin_count, 2);
+
+        // The cap is 120m for every later check-in.
+        assert!(state
+            .advance("g", &tasks, 7 * interval - 1, interval)
+            .is_none());
+        let third = state
+            .advance("g", &tasks, 7 * interval, interval)
+            .expect("third check-in at two hours");
+        assert!(
+            third.contains("deferred for 120 min because"),
+            "got: {third}"
+        );
+        assert_eq!(state.checkin_count, 3);
     }
 
     /// `Tzf`'s `isNewRun`: a brand-new batch of background work more than one
@@ -406,7 +451,10 @@ mod tests {
         let tasks = vec![task("b1", "shell", "one")];
         assert!(state.advance("g", &tasks, 0, interval).is_none());
         let text = state.advance("g", &tasks, 3 * interval, interval);
-        assert!(text.is_some(), "the long-running task must trigger a check-in");
+        assert!(
+            text.is_some(),
+            "the long-running task must trigger a check-in"
+        );
     }
 
     #[test]
@@ -428,4 +476,5 @@ mod tests {
         state.clear();
         assert_eq!(state, GoalDeferralState::default());
     }
+
 }

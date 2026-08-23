@@ -50,9 +50,10 @@ fn stamp_session_kind(msg: &JsonlMessage) -> Option<JsonlMessage> {
         return None;
     }
     let mut stamped = msg.clone();
-    stamped
-        .extra
-        .insert(SESSION_KIND_KEY.to_string(), serde_json::Value::String(kind));
+    stamped.extra.insert(
+        SESSION_KIND_KEY.to_string(),
+        serde_json::Value::String(kind),
+    );
     Some(stamped)
 }
 

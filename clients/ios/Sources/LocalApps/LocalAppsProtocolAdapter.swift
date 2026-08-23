@@ -54,6 +54,28 @@ enum LocalAppsProtocolAdapter {
         }
     }
 
+    /// The create sheet's surface choice lowered to the wire enum.
+    static func surfaceDto(_ surface: LocalAppSurface) -> AppSurfaceDto {
+        switch surface {
+        case .dom: .dom
+        case .canvas: .canvas
+        }
+    }
+
+    /// The host's proposed surface raised to the UI model.
+    ///
+    /// `AppSurfaceDto` is `#[non_exhaustive]`, so an engine newer than this
+    /// build can name a surface this client cannot render a picker row for.
+    /// Falling back to `.dom` keeps the sheet usable — and the user can still
+    /// change it — where a crash or an empty picker could not.
+    static func surface(_ dto: AppSurfaceDto) -> LocalAppSurface {
+        switch dto {
+        case .dom: .dom
+        case .canvas: .canvas
+        @unknown default: .dom
+        }
+    }
+
     /// One catalog row (`AppSessionRowDto`) lowered to the UI model. The wire
     /// marks the pinned init session via `kind`; clients list it first.
     static func sessionRow(_ dto: AppSessionRowDto) -> LocalAppSessionRow {

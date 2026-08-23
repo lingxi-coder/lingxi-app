@@ -15,7 +15,10 @@ import { useLingXi } from "@/lib/lingxi-provider";
 ///     canvas, so they carry the platform look and get focus handling for free
 export function GameScreen() {
   const canvasRef = useRef(null);
-  const worldRef = useRef({ x: 0, y: 0, targetX: 0, targetY: 0, pointer: null });
+  // `placed` is an explicit flag, not a 0/0 sentinel: (0, 0) is a legitimate
+  // position, so testing coordinates cannot tell "not initialized yet" from
+  // "sitting in the corner".
+  const worldRef = useRef({ placed: false, x: 0, y: 0, targetX: 0, targetY: 0, pointer: null });
   const { adapter } = useLingXi();
 
   const phase = useGameStore((state) => state.phase);
@@ -37,9 +40,28 @@ export function GameScreen() {
       onResize: ({ width, height, dpr }) => {
         // Draw in CSS pixels: one transform here beats scaling every coordinate.
         context.setTransform(dpr, 0, 0, dpr, 0, 0);
-        if (world.x === 0 && world.y === 0) {
+        if (!world.placed) {
+          world.placed = true;
           world.x = width / 2;
           world.y = height / 2;
+          place(width, height);
+          return;
+        }
+        // A rotation or an iPad multitasking drag SHRINKS the box. Everything
+        // positioned for the old size has to be brought back inside it — a
+        // target left outside can never be reached, because the pointer cannot
+        // leave the canvas, and the app becomes permanently unscoreable.
+        world.x = Math.min(world.x, width);
+        world.y = Math.min(world.y, height);
+        // The pointer has to be clamped with them. `onFrame` eases `world.x`
+        // toward `world.pointer.x` every tick, so a stale pointer left outside
+        // the new box drags the ball straight back out on the very next frame —
+        // and no pointer event fires during a rotation to refresh it.
+        if (world.pointer) {
+          world.pointer.x = Math.min(world.pointer.x, width);
+          world.pointer.y = Math.min(world.pointer.y, height);
+        }
+        if (world.targetX > width - 40 || world.targetY > height - 40) {
           place(width, height);
         }
       },

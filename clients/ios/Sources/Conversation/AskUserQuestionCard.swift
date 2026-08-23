@@ -74,98 +74,134 @@ struct AskUserQuestionCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("chat_ask_user_question_title", systemImage: "questionmark.bubble")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(t.accent)
-                Spacer()
-                if questions.count > 1 {
-                    Text("chat_ask_progress \(step + 1) \(questions.count)")
-                        .font(.caption)
-                        .foregroundColor(t.text4)
+        // The presenting sheet IS the container: the questionnaire draws no
+        // card of its own. It used to carry the surface/stroke/rounded-corner
+        // chrome it needed when it lived at the tail of the transcript, which
+        // read as a card nested inside the sheet once it moved into one.
+        //
+        // Header and actions are pinned outside the scroll area so a
+        // wire-maximum request (4 questions x 4 described options) can never
+        // push 取消/下一题/提交 below the sheet's visible height.
+        VStack(alignment: .leading, spacing: 0) {
+            header
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
+
+            ScrollView {
+                if let current = currentQuestion {
+                    questionBody(current)
+                        .padding(.horizontal, 18)
+                        .padding(.bottom, 16)
                 }
             }
+            .scrollBounceBehavior(.basedOnSize)
 
-            if let current = currentQuestion {
-                VStack(alignment: .leading, spacing: 8) {
-                    if !current.header.isEmpty {
-                        Text(current.header)
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(t.text3)
-                            .textCase(.uppercase)
-                    }
-                    Text(current.question)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(t.text)
-                        .fixedSize(horizontal: false, vertical: true)
+            Divider().overlay(t.border)
 
-                    optionChips(for: current)
-
-                    // The automatic 「其他」 free-text row — every question
-                    // offers it, mirroring the oracle client's synthesized
-                    // Other row.
-                    HStack(spacing: 8) {
-                        Text("chat_ask_other_option")
-                            .font(.system(size: 12.5))
-                            .foregroundColor(t.text3)
-                        TextField(
-                            String(localized: "chat_ask_other_placeholder"),
-                            text: Binding(
-                                get: { custom[step] ?? "" },
-                                set: { custom[step] = $0 }
-                            ),
-                            axis: .vertical
-                        )
-                        .font(.system(size: 13))
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(1 ... 3)
-                        .disabled(submitting)
-                        .accessibilityIdentifier("chat.ask.other.\(step)")
-                    }
-                }
-            }
-
-            HStack(spacing: 8) {
-                Button("common_cancel") {
-                    resolve { await onCancel() }
-                }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("chat.ask.cancel")
-                Spacer()
-                if step > 0 {
-                    Button("chat_ask_prev") { step -= 1 }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("chat.ask.prev")
-                }
-                if step < questions.count - 1 {
-                    Button("chat_ask_next") { step += 1 }
-                        .buttonStyle(.borderedProminent)
-                        .accessibilityIdentifier("chat.ask.next")
-                } else {
-                    Button {
-                        let answers = Self.answers(questions: questions, selected: selected, custom: custom)
-                        resolve { await onSubmit(answers) }
-                    } label: {
-                        if submitting {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Text("local_apps_submit")
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canSubmit || submitting)
-                    .accessibilityIdentifier("chat.ask.submit")
-                }
-            }
-            .disabled(submitting)
+            actions
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
         }
-        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(t.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(t.accent.opacity(0.35), lineWidth: 0.8))
-        .padding(.bottom, 18)
+        // `.accessibilityIdentifier` on a container REPLACES every descendant's
+        // identifier unless the container is declared a containing element, so
+        // without `children: .contain` the card id swallowed
+        // `chat.ask.cancel` / `chat.ask.submit` / `chat.ask.other.N` and
+        // nothing inside the questionnaire was addressable.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat.ask.card.\(question.requestId)")
+    }
+
+    private var header: some View {
+        HStack {
+            Label("chat_ask_user_question_title", systemImage: "questionmark.bubble")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(t.accent)
+            Spacer()
+            if questions.count > 1 {
+                Text("chat_ask_progress \(step + 1) \(questions.count)")
+                    .font(.caption)
+                    .foregroundColor(t.text4)
+            }
+        }
+    }
+
+    private func questionBody(_ current: ConversationAskQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !current.header.isEmpty {
+                Text(current.header)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(t.text3)
+                    .textCase(.uppercase)
+            }
+            Text(current.question)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(t.text)
+                .fixedSize(horizontal: false, vertical: true)
+
+            optionChips(for: current)
+
+            // The automatic 「其他」 free-text row — every question
+            // offers it, mirroring the oracle client's synthesized
+            // Other row.
+            HStack(spacing: 8) {
+                Text("chat_ask_other_option")
+                    .font(.system(size: 12.5))
+                    .foregroundColor(t.text3)
+                TextField(
+                    String(localized: "chat_ask_other_placeholder"),
+                    text: Binding(
+                        get: { custom[step] ?? "" },
+                        set: { custom[step] = $0 }
+                    ),
+                    axis: .vertical
+                )
+                .font(.system(size: 13))
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1 ... 3)
+                .disabled(submitting)
+                .accessibilityIdentifier("chat.ask.other.\(step)")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var actions: some View {
+        HStack(spacing: 8) {
+            Button("common_cancel") {
+                resolve { await onCancel() }
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("chat.ask.cancel")
+            Spacer()
+            if step > 0 {
+                Button("chat_ask_prev") { step -= 1 }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("chat.ask.prev")
+            }
+            if step < questions.count - 1 {
+                Button("chat_ask_next") { step += 1 }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("chat.ask.next")
+            } else {
+                Button {
+                    let answers = Self.answers(questions: questions, selected: selected, custom: custom)
+                    resolve { await onSubmit(answers) }
+                } label: {
+                    if submitting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("local_apps_submit")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSubmit || submitting)
+                .accessibilityIdentifier("chat.ask.submit")
+            }
+        }
+        .disabled(submitting)
     }
 
     @ViewBuilder

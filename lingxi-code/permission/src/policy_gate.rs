@@ -38,7 +38,7 @@
 //! is built at boot only behind an OPT-IN toggle; the default remains the
 //! always-allow `NoOpPermissionGate`.
 
-use crate::classifier::{AutoModeClassifierVerdict, reason_allows_classifier};
+use crate::classifier::{reason_allows_classifier, AutoModeClassifierVerdict};
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{
     MatchedAskRule, PermissionAbort, PermissionCheckContext, PermissionDecision,
@@ -46,8 +46,8 @@ use crate::gate::{
     PromptDefault,
 };
 use crate::layers::{
-    FoldedPermissionContext, LayerFoldInputs, PermissionLayer, apply_context_layers,
-    fold_permission_layers, parse_permission_layers,
+    apply_context_layers, fold_permission_layers, parse_permission_layers, FoldedPermissionContext,
+    LayerFoldInputs, PermissionLayer,
 };
 use crate::mode::PermissionMode;
 use crate::policy::PermissionPolicy;

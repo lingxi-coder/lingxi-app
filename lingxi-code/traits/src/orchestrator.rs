@@ -332,10 +332,25 @@ pub struct GoalStatusAttachment {
     pub goal_state: Option<ActiveGoalSnapshot>,
 }
 
+/// One deferred hook tool that must be replayed after a session is resumed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredToolReplay {
+    /// Original tool-use id from the persisted hook attachment.
+    pub tool_use_id: String,
+    /// Tool registry name to dispatch after resume.
+    pub tool_name: String,
+    /// Hook-updated tool input to replay.
+    pub tool_input: serde_json::Value,
+    /// Permission mode recorded when the hook deferred the tool.
+    pub permission_mode: Option<String>,
+    /// W3C traceparent captured at deferral time.
+    pub traceparent: Option<String>,
+}
+
 /// Transcript-adjacent runtime state needed by an in-place session resume.
 ///
 /// This leaf-friendly mirror deliberately uses primitive fields instead of
-/// depending on `session` or `compaction` (both depend on this crate).  Without
+/// depending on `session` or `compaction` (both depend on this crate). Without
 /// it, bridge/mobile hot-resume adopted the messages but silently reset compact
 /// bookkeeping and lost transcript-visibility flags already reconstructed by
 /// the JSONL loader.
@@ -385,6 +400,8 @@ pub struct ResumeRuntimeSnapshot {
     pub consecutive_failures: u32,
     /// Consecutive rapid-refill compactions.
     pub consecutive_rapid_refills: u32,
+    /// Deferred hook tools persisted without a corresponding tool result.
+    pub deferred_tools: Vec<DeferredToolReplay>,
 }
 
 /// One model's cumulative usage for the `/usage` "Usage by model" block

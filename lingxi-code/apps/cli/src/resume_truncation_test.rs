@@ -21,7 +21,11 @@ fn entry(kind: &str, uuid: &str, extra: serde_json::Value) -> JsonlMessage {
 }
 
 fn user_prompt(uuid: &str, text: &str) -> JsonlMessage {
-    entry("user", uuid, json!({"message": {"role":"user","content": text}}))
+    entry(
+        "user",
+        uuid,
+        json!({"message": {"role":"user","content": text}}),
+    )
 }
 
 fn assistant(uuid: &str) -> JsonlMessage {
@@ -68,7 +72,10 @@ fn truncates_at_the_named_entry_and_accepts_a_clean_turn() {
 fn unknown_resume_point_reports_the_oracle_line() {
     let err = apply_truncating_resume(vec![user_prompt(KEEP, "x")], Some(OTHER), None)
         .expect_err("unknown uuid must fail");
-    assert_eq!(err, format!("No message found with message.uuid of: {OTHER}"));
+    assert_eq!(
+        err,
+        format!("No message found with message.uuid of: {OTHER}")
+    );
 }
 
 /// With no `--resume-drops-turn`, the guard never runs — the resume truncates
@@ -147,7 +154,10 @@ fn refuses_a_compaction_summary_but_allows_furniture() {
         ),
     ];
     let err = apply_truncating_resume(summary, Some(KEEP), Some(TURN)).expect_err("refused");
-    assert!(err.contains("range contains a compaction summary;"), "got {err}");
+    assert!(
+        err.contains("range contains a compaction summary;"),
+        "got {err}"
+    );
 }
 
 /// `pnu` — an entry with a non-human, non-auto-continuation `origin` is
@@ -184,7 +194,10 @@ fn refuses_an_externally_sourced_entry() {
 fn refuses_a_non_uuid_turn_id() {
     let err = verify_dropped_turn(&[], "not-a-uuid").expect_err("refused");
     assert_eq!(err, "declared turn id is not a UUID: not-a-uuid");
-    assert!(verify_dropped_turn(&[], TURN).is_ok(), "an empty range is ok");
+    assert!(
+        verify_dropped_turn(&[], TURN).is_ok(),
+        "an empty range is ok"
+    );
 }
 
 /// `WI0` — trailing furniture of the PREVIOUS turn may lead the range: an

@@ -6,6 +6,42 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TOOL="${SCRIPT_DIR}/verify-local-app-supply-chain.py"
 TEMPLATE="${REPO_ROOT}/lingxi-code/local-apps/templates/vite-react-static-v1"
 TEMP_ROOT="$(mktemp -d)"
+
+# A negative test must fail for the reason it names, not merely fail.
+#
+# `if cmd; then echo "expected ..."; exit 1; fi` cannot tell "rejected the bad
+# input" from "crashed before it ever looked at the input": `fail()` raises
+# SystemExit(1) and an uncaught Python exception also exits 1, while `if`
+# suspends `set -e` around both. That is not hypothetical -- a NameError
+# introduced while editing the verifier made every one of these cases report
+# success, and this suite printed "tests passed".
+#
+# Exit code 1 AND no traceback is the discriminator: a usage error exits 2, a
+# crash prints a traceback, and only a real rejection is a silent exit 1.
+expect_rejection() {
+  local label="$1"
+  shift
+  local output status
+  set +e
+  output="$("$@" 2>&1)"
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 ]]; then
+    echo "expected ${label}, but the command succeeded" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+  if printf '%s' "${output}" | grep -q "Traceback (most recent call last)"; then
+    echo "expected ${label}, but the command CRASHED instead of rejecting" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+  if [[ "${status}" -ne 1 ]]; then
+    echo "expected ${label} to exit 1, got ${status}" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+}
 STAGED_OUTPUT="${REPO_ROOT}/clients/android/app/build/local-app-supply-chain-test-${RANDOM}"
 IOS_STAGED_OUTPUT="${REPO_ROOT}/clients/ios/build/local-app-supply-chain-test-${RANDOM}"
 trap 'chmod -R u+w "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}" 2>/dev/null || true; rm -rf "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}"' EXIT
@@ -111,11 +147,9 @@ path.write_text(
     encoding="utf-8",
 )
 PY
-if python3 "${TOOL}" --repo-root "${REPO_ROOT}" \
-  --vite-template "${TEMP_ROOT}/vite-compressed-size"; then
-  echo "expected Vite compressed-size reporting to fail validation" >&2
-  exit 1
-fi
+expect_rejection "Vite compressed-size reporting to fail validation" \
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" \
+  --vite-template "${TEMP_ROOT}/vite-compressed-size"
 
 python3 "${SCRIPT_DIR}/generate-local-app-sbom.py" \
   --lock "${TEMPLATE}/pnpm-lock.yaml" \
@@ -123,10 +157,8 @@ python3 "${SCRIPT_DIR}/generate-local-app-sbom.py" \
 cmp "${TEMP_ROOT}/local-app-runtime.spdx.json" \
   "${REPO_ROOT}/docs/mobile-linux/sbom/local-app-runtime.spdx.json"
 
-if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --release; then
-  echo "expected release validation to remain fail-closed" >&2
-  exit 1
-fi
+expect_rejection "release validation to remain fail-closed" \
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --release
 
 cp -R "${TEMPLATE}" "${TEMP_ROOT}/dependency-drift"
 python3 - "${TEMP_ROOT}/dependency-drift/package.json" <<'PY'
@@ -139,38 +171,28 @@ value = json.loads(path.read_text(encoding="utf-8"))
 value["dependencies"]["vite"] = "8.2.2"
 path.write_text(json.dumps(value), encoding="utf-8")
 PY
-if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/dependency-drift"; then
-  echo "expected dependency drift to fail validation" >&2
-  exit 1
-fi
+expect_rejection "dependency drift to fail validation" \
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/dependency-drift"
 
 cp -R "${TEMPLATE}" "${TEMP_ROOT}/network-bypass"
 printf '\nfetch("https://example.com");\n' >> "${TEMP_ROOT}/network-bypass/app/main.jsx"
-if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/network-bypass"; then
-  echo "expected direct network access to fail validation" >&2
-  exit 1
-fi
+expect_rejection "direct network access to fail validation" \
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/network-bypass"
 
 cp -R "${TEMPLATE}" "${TEMP_ROOT}/symlink"
 ln -s /tmp "${TEMP_ROOT}/symlink/public/escape"
-if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/symlink"; then
-  echo "expected a template symlink to fail validation" >&2
-  exit 1
-fi
+expect_rejection "a template symlink to fail validation" \
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/symlink"
 
 cp -R "${TEMPLATE}" "${TEMP_ROOT}/path-escape"
 printf 'console.log("outside policy");\n' > "${TEMP_ROOT}/path-escape/server.js"
-if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/path-escape"; then
-  echo "expected a source file outside writable roots to fail validation" >&2
-  exit 1
-fi
+expect_rejection "a source file outside writable roots to fail validation" \
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/path-escape"
 
 cp -R "${TEMPLATE}" "${TEMP_ROOT}/lock-drift"
 printf '\n' >> "${TEMP_ROOT}/lock-drift/pnpm-lock.yaml"
-if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/lock-drift"; then
-  echo "expected pnpm-lock byte drift to fail validation" >&2
-  exit 1
-fi
+expect_rejection "pnpm-lock byte drift to fail validation" \
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/lock-drift"
 
 cp -R "${TEMPLATE}" "${TEMP_ROOT}/external-script"
 python3 - "${TEMP_ROOT}/external-script/index.html" <<'PY'
@@ -186,10 +208,8 @@ path.write_text(
     encoding="utf-8",
 )
 PY
-if python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/external-script"; then
-  echo "expected an external script tag to fail validation" >&2
-  exit 1
-fi
+expect_rejection "an external script tag to fail validation" \
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/external-script"
 
 NODE_MODULES="${TEMP_ROOT}/node_modules"
 mkdir -p "${NODE_MODULES}"
@@ -210,13 +230,10 @@ packages = dict(verify.EXPECTED_DEPENDENCIES)
 packages.update({
     "rolldown": "1.2.4",
     "lightningcss": "1.33.0",
-    "@tailwindcss/oxide": "4.3.3",
     "@rolldown/binding-linux-arm64-musl": "1.2.4",
     "@rolldown/binding-linux-x64-musl": "1.2.4",
     "lightningcss-linux-arm64-musl": "1.33.0",
     "lightningcss-linux-x64-musl": "1.33.0",
-    "@tailwindcss/oxide-linux-arm64-musl": "4.3.3",
-    "@tailwindcss/oxide-linux-x64-musl": "4.3.3",
 })
 for name, version in packages.items():
     package = root.joinpath(*name.split("/"))
@@ -231,8 +248,6 @@ for name, version in packages.items():
 (root / "@rolldown/binding-linux-x64-musl/rolldown-binding.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "lightningcss-linux-arm64-musl/lightningcss.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "lightningcss-linux-x64-musl/lightningcss.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
-(root / "@tailwindcss/oxide-linux-arm64-musl/tailwindcss-oxide.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
-(root / "@tailwindcss/oxide-linux-x64-musl/tailwindcss-oxide.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 PY
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \
@@ -243,6 +258,25 @@ python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
 test -f "${STAGED_OUTPUT}/runtime-manifest.json"
 test ! -w "${STAGED_OUTPUT}/node_modules/vite/package.json"
 test ! -e "${STAGED_OUTPUT}/node_modules/@next"
+test ! -e "${STAGED_OUTPUT}/node_modules/@tailwindcss"
+
+# Tailwind left the pinned set with the move to Ionic, taking the Oxide-binding
+# validation with it -- and nothing replaced it, so a stale seed still carrying
+# `@tailwindcss/oxide-*/*.node` staged clean and `copytree` shipped unpinned
+# native code to every device. Asserting the manifest KEY is gone (below) only
+# asserts itself; this drives a tree that actually has the packages.
+TAILWIND_NODE_MODULES="${TEMP_ROOT}/node_modules-tailwind"
+cp -R "${NODE_MODULES}" "${TAILWIND_NODE_MODULES}"
+mkdir -p "${TAILWIND_NODE_MODULES}/@tailwindcss/oxide-linux-arm64-musl"
+printf '{"name":"@tailwindcss/oxide-linux-arm64-musl","version":"4.3.3"}\n' \
+  > "${TAILWIND_NODE_MODULES}/@tailwindcss/oxide-linux-arm64-musl/package.json"
+expect_rejection "a stale Tailwind Oxide binding to fail staging" \
+  python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+  --repo-root "${REPO_ROOT}" \
+  --node-modules "${TAILWIND_NODE_MODULES}" \
+  --output "${TEMP_ROOT}/staged-tailwind" \
+  --platform android \
+  --variant play
 python3 - "${STAGED_OUTPUT}/runtime-manifest.json" <<'PY'
 import json
 import pathlib
@@ -257,10 +291,10 @@ assert manifest["resolved_lightningcss_bindings"] == [
     "lightningcss-linux-arm64-musl",
     "lightningcss-linux-x64-musl",
 ], manifest
-assert manifest["resolved_oxide_bindings"] == [
-    "@tailwindcss/oxide-linux-arm64-musl",
-    "@tailwindcss/oxide-linux-x64-musl",
-], manifest
+# Tailwind left the pinned set with the move to Ionic. Asserted absent rather
+# than simply unchecked: a stale seed that still carried the Oxide bindings
+# would otherwise stage clean and ship dead native code to every device.
+assert "resolved_oxide_bindings" not in manifest, manifest
 PY
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \
@@ -290,22 +324,19 @@ root = pathlib.Path(sys.argv[1])
     bytes.fromhex("7f454c46") + b"fixture"
 )
 PY
-if python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+expect_rejection "staged runtime to reject Next/SWC drift" \
+  python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${NEXT_DRIFT_NODE_MODULES}" \
   --output "${TEMP_ROOT}/next-drift-output" \
   --platform android \
-  --variant play; then
-  echo "expected staged runtime to reject Next/SWC drift" >&2
-  exit 1
-fi
+  --variant play
 
 IOS_NODE_MODULES="${TEMP_ROOT}/node_modules-ios"
 cp -R "${NODE_MODULES}" "${IOS_NODE_MODULES}"
 rm -rf \
   "${IOS_NODE_MODULES}/@rolldown/binding-linux-x64-musl" \
-  "${IOS_NODE_MODULES}/lightningcss-linux-x64-musl" \
-  "${IOS_NODE_MODULES}/@tailwindcss/oxide-linux-x64-musl"
+  "${IOS_NODE_MODULES}/lightningcss-linux-x64-musl"
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${IOS_NODE_MODULES}" \
@@ -320,7 +351,7 @@ import sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert manifest["resolved_rolldown_bindings"] == ["@rolldown/binding-linux-arm64-musl"], manifest
 assert manifest["resolved_lightningcss_bindings"] == ["lightningcss-linux-arm64-musl"], manifest
-assert manifest["resolved_oxide_bindings"] == ["@tailwindcss/oxide-linux-arm64-musl"], manifest
+assert "resolved_oxide_bindings" not in manifest, manifest
 PY
 
 # The iOS bundle install step. The staged tree is 0555/0444, so a second build
@@ -345,30 +376,28 @@ for _ in 1 2; do
     --staged "${INSTALL_STAGED}" \
     --destination "${INSTALL_DEST}"
 done
-if [ -e "${INSTALL_DEST}/store" ] || [ -e "${INSTALL_DEST}/local-app-runtime" ]; then
-  echo "second install nested the staged runtime inside the previous copy" >&2
-  exit 1
-fi
+# NOT `expect_rejection … [ -e A ] || [ -e B ]`: the `||` would bind at the
+# AND-OR list level, so the second probe would be passed to the SHELL rather
+# than to `expect_rejection`, and short-circuited away on every passing run.
+# One command, so both nesting modes are actually checked.
+expect_rejection "second install nested the staged runtime inside the previous copy" \
+  bash -c '[ -e "$1/store" ] || [ -e "$1/local-app-runtime" ]' _ "${INSTALL_DEST}"
 test -f "${INSTALL_DEST}/runtime-manifest.json"
 test -f "${INSTALL_DEST}/node_modules/vite/bin/vite.js"
-if "${REPO_ROOT}/clients/ios/scripts/install-staged-local-app-runtime.sh" \
+expect_rejection "a missing staged runtime to fail the install" \
+  "${REPO_ROOT}/clients/ios/scripts/install-staged-local-app-runtime.sh" \
   --staged "${TEMP_ROOT}/install-src/absent" \
-  --destination "${INSTALL_DEST}" 2>/dev/null; then
-  echo "expected a missing staged runtime to fail the install" >&2
-  exit 1
-fi
+  --destination "${INSTALL_DEST}" 2>/dev/null
 
 RUNTIME_ASSET_VALIDATOR="${REPO_ROOT}/clients/ios/scripts/validate-local-app-build-assets.sh"
 ROOTFS_MANIFEST="${TEMP_ROOT}/ios-rootfs-manifest.json"
 printf '{"local_app_runtime":false}\n' > "${ROOTFS_MANIFEST}"
-if "${RUNTIME_ASSET_VALIDATOR}" \
+expect_rejection "FullDebug iphoneos to reject a bare rootfs" \
+  "${RUNTIME_ASSET_VALIDATOR}" \
   --configuration FullDebug \
   --platform iphoneos \
   --staged "${INSTALL_STAGED}" \
-  --rootfs-manifest "${ROOTFS_MANIFEST}"; then
-  echo "expected FullDebug iphoneos to reject a bare rootfs" >&2
-  exit 1
-fi
+  --rootfs-manifest "${ROOTFS_MANIFEST}"
 printf '{"local_app_runtime":true}\n' > "${ROOTFS_MANIFEST}"
 "${RUNTIME_ASSET_VALIDATOR}" \
   --configuration FullDebug \
@@ -396,10 +425,8 @@ set +e
   --rootfs-manifest "${ROOTFS_MANIFEST}"
 rootfs_only_rc=$?
 set -e
-if [ "${rootfs_only_rc}" -ne 1 ]; then
-  echo "expected --rootfs-only to REJECT a bare rootfs with exit 1, got ${rootfs_only_rc}" >&2
-  exit 1
-fi
+expect_rejection "--rootfs-only to REJECT a bare rootfs with exit 1, got ${rootfs_only_rc}" \
+  [ "${rootfs_only_rc}" -ne 1 ]
 
 printf '{"local_app_runtime":true}\n' > "${ROOTFS_MANIFEST}"
 "${RUNTIME_ASSET_VALIDATOR}" \
@@ -439,18 +466,14 @@ digest = hashlib.sha256((root / "rootfs.tar.gz").read_bytes()).hexdigest()
     encoding="utf-8",
 )
 PY
-if python3 "${SCRIPT_DIR}/rootfs_tool.py" verify-release-archive \
+expect_rejection "an uncommitted release rootfs digest to fail validation" \
+  python3 "${SCRIPT_DIR}/rootfs_tool.py" verify-release-archive \
   --pins "${ROOTFS_PINS}/source-only-pins.json" --abi arm64-v8a \
-  --archive "${ROOTFS_PINS}/rootfs.tar.gz"; then
-  echo "expected an uncommitted release rootfs digest to fail validation" >&2
-  exit 1
-fi
-if python3 "${SCRIPT_DIR}/rootfs_tool.py" verify-release-archive \
+  --archive "${ROOTFS_PINS}/rootfs.tar.gz"
+expect_rejection "a release rootfs digest mismatch to fail validation" \
+  python3 "${SCRIPT_DIR}/rootfs_tool.py" verify-release-archive \
   --pins "${ROOTFS_PINS}/wrong-pins.json" --abi arm64-v8a \
-  --archive "${ROOTFS_PINS}/rootfs.tar.gz"; then
-  echo "expected a release rootfs digest mismatch to fail validation" >&2
-  exit 1
-fi
+  --archive "${ROOTFS_PINS}/rootfs.tar.gz"
 python3 "${SCRIPT_DIR}/rootfs_tool.py" verify-release-archive \
   --pins "${ROOTFS_PINS}/pins.json" --abi arm64-v8a \
   --archive "${ROOTFS_PINS}/rootfs.tar.gz"

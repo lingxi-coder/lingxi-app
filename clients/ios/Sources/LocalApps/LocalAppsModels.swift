@@ -57,6 +57,32 @@ enum LocalAppWorkflow: String, CaseIterable, Hashable, Sendable {
     }
 }
 
+/// Which shape an app draws — the UI mirror of protocol 7.0.0's
+/// `AppSurfaceDto`. Chosen in the create sheet and IMMUTABLE afterwards: the
+/// scaffold is laid down at creation, so this is the one field the sheet must
+/// get in front of the user rather than infer silently.
+enum LocalAppSurface: String, CaseIterable, Hashable, Sendable {
+    case dom
+    case canvas
+
+    var label: String {
+        switch self {
+        case .dom: String(localized: "local_apps_surface_dom")
+        case .canvas: String(localized: "local_apps_surface_canvas")
+        }
+    }
+
+    /// One line under the picker saying what the choice actually decides —
+    /// "canvas" is a build detail, "一块自己绘制的画面" is something a user can
+    /// tell is right or wrong.
+    var detail: String {
+        switch self {
+        case .dom: String(localized: "local_apps_surface_dom_detail")
+        case .canvas: String(localized: "local_apps_surface_canvas_detail")
+        }
+    }
+}
+
 /// One row of an app's workspace-scoped session catalog — the UI projection of
 /// the wire `AppSessionRowDto`. `isInit` marks the pinned init session
 /// (`AppSessionKindDto.init`), listed first regardless of modified order.

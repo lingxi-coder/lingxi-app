@@ -19,10 +19,6 @@ struct LocalAppsRootView: View {
     /// app's session catalog. RootView dismisses this cover and switches the
     /// conversation scope to the app, resuming that session.
     var onOpenAppSession: (String, String) -> Void = { _, _ in }
-    /// The create-flow landing: like `onOpenAppSession`, but RootView also
-    /// queues the kickoff message that starts the create-local-app flow in
-    /// the (empty) init session.
-    var onOpenCreatedAppSession: (String, String, String, String?) -> Void = { _, _, _, _ in }
     /// Called with `appID` for「新会话」. RootView dismisses this cover and
     /// starts a fresh conversation in the app's scope.
     var onNewAppSession: (String) -> Void = { _ in }
@@ -37,8 +33,7 @@ struct LocalAppsRootView: View {
                 availableModels: availableModels,
                 availableModelDetails: availableModelDetails,
                 activeModelID: activeModelID,
-                onDismiss: onDismiss,
-                onOpenAppSession: onOpenCreatedAppSession
+                onDismiss: onDismiss
             )
             .navigationDestination(for: LocalAppsRoute.self) { route in
                 destination(route)
@@ -210,11 +205,6 @@ private struct LocalAppsLibraryScreen: View {
     let availableModelDetails: [String: ModelRuntimeDetails]
     let activeModelID: String
     let onDismiss: () -> Void
-    /// Threaded from the root cover: `(appID, sessionUUID, brief)` →
-    /// dismiss + switch into the app scope (the create flow's init-chat
-    /// landing, kickoff seeded with the brief).
-    var onOpenAppSession: (String, String, String, String?) -> Void = { _, _, _, _ in }
-
     @State private var pendingDelete: LocalAppSummary?
 
     var body: some View {
@@ -265,8 +255,6 @@ private struct LocalAppsLibraryScreen: View {
         }
         .onAppear(perform: openCreatedAppIfNeeded)
         .onChange(of: store.createdAppID) { _, _ in openCreatedAppIfNeeded() }
-        .onChange(of: store.createdAppSession) { _, _ in openCreatedInitChatIfNeeded() }
-        .onAppear { openCreatedInitChatIfNeeded() }
         .sheet(
             item: Binding(
                 get: { store.pendingWidgetSetup },
@@ -274,8 +262,16 @@ private struct LocalAppsLibraryScreen: View {
             )
         ) { setup in
             LocalAppWidgetSetupSheet(appName: setup.appName) {
+                // Clearing this un-gates `RootView.landCreatedAppIfReady`,
+                // which takes the user into the new app's conversation.
                 store.completeWidgetSetup()
-                openCreatedInitChatIfNeeded()
+                // …and drains the library's own fallback landing. Without this
+                // `createdAppID` stays armed for the process lifetime: the
+                // `onChange` above ran while `pendingWidgetSetup` was still
+                // set, so it returned at the guard WITHOUT consuming, and
+                // nothing re-invokes it once the sheet closes. The next plain
+                // visit to the library would then hit `onAppear`, drain the
+                // stale id, and drop the user on that old app's details page.
                 openCreatedAppIfNeeded()
             }
         }
@@ -314,25 +310,12 @@ private struct LocalAppsLibraryScreen: View {
     }
 
     private func openCreatedAppIfNeeded() {
-        // Fallback landing only (init-session pin never arrived): show the
-        // app's details/sessions page instead of the init chat.
+        // The library's own landing: show the new app's details page. It only
+        // ever wins if the cover is still up, which means `RootView` has not
+        // taken the user into the app's conversation — the primary landing.
         guard store.pendingWidgetSetup == nil else { return }
         guard let appID = store.consumeCreatedAppID() else { return }
         path = [.details(appID)]
-    }
-
-    private func openCreatedInitChatIfNeeded() {
-        // v3 target behavior: a fresh create lands DIRECTLY in the app's
-        // init conversation — dismiss the cover and switch into the app
-        // scope resuming the pinned init session.
-        guard store.pendingWidgetSetup == nil else { return }
-        guard let created = store.consumeCreatedAppSession() else { return }
-        onOpenAppSession(
-            created.appID,
-            created.initSessionID,
-            created.brief,
-            created.modelOverride
-        )
     }
 }
 
@@ -435,14 +418,18 @@ private struct LocalAppLibraryRow: View {
     }
 }
 
-/// Collects the one-line brief `createApp(brief:)` needs and nothing else —
-/// no display name, no template. Replaces the deleted static template
-/// picker + its create sheet (local-apps#questionnaire, Task 2/5/13): there
-/// is no more catalog to choose from, only a brief for the LLM to author a
-/// questionnaire from. Task 16 ("iOS 创建入口与常驻迭代输入") owns the real,
-/// polished create entry point; this is the minimal working replacement that
-/// keeps the create flow honest (it sends a REAL brief, not the app name
-/// relabeled — see `LocalAppsStore.createApp(brief:)`) until then.
+/// The create sheet: a one-line brief, then a name and a surface to confirm.
+///
+/// Two steps, in ONE sheet, because both of the second step's fields are fixed
+/// at creation — a surface is immutable once scaffolded and apps have no rename
+/// — so neither may be decided by something the user never saw. The host
+/// proposes both from the brief (`ProposeAppIdentity`, one headless model call,
+/// no conversation); this screen shows the proposal and gives the user the last
+/// word.
+///
+/// The app is then created OUTRIGHT. There is no intake conversation: the app's
+/// first conversation opens in the app's own scope, so its cwd is the app
+/// workspace from the first message.
 struct LocalAppCreateView: View {
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
@@ -450,7 +437,19 @@ struct LocalAppCreateView: View {
     let availableModelDetails: [String: ModelRuntimeDetails]
     let activeModelID: String
 
+    /// Which half of the sheet is on screen.
+    enum Step: Equatable {
+        /// Typing the brief.
+        case brief
+        /// Confirming the proposed name and surface.
+        case identity
+    }
+
     @State var brief = ""
+    @State private var step: Step = .brief
+    @State private var name = ""
+    @State private var surface: LocalAppSurface = .dom
+    @State private var proposing = false
     @State private var gitEnabled = true
     @State private var addWidget = false
     @State private var creating = false
@@ -493,49 +492,14 @@ struct LocalAppCreateView: View {
 
     var body: some View {
         Form {
-            Section("local_apps_create_brief_section") {
-                TextEditor(text: $brief)
-                    .frame(minHeight: 120)
-                Text("local_apps_create_brief_detail")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Toggle("local_apps_create_git_version_control", isOn: $gitEnabled)
-                Toggle("local_apps_create_add_widget", isOn: $addWidget)
-                Text("local_apps_create_add_widget_detail")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            Section("local_apps_create_model_section") {
-                Button {
-                    showingModelPicker = true
-                } label: {
-                    LabeledContent("local_apps_create_model_label") {
-                        Text(modelSelectionLabel)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .disabled(availableModels.isEmpty)
-                if modelOverride != nil {
-                    Button("local_apps_create_model_follow_current") {
-                        modelOverride = nil
-                    }
-                }
-                Text("local_apps_create_model_detail")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            switch step {
+            case .brief: briefStep
+            case .identity: identityStep
             }
         }
         .navigationTitle("local_apps_create")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button(creating ? "local_apps_creating" : "local_apps_create") {
-                    Task { await create() }
-                }
-                .disabled(creating || !canSubmit)
-                .accessibilityIdentifier("local-apps.create.submit")
-            }
-        }
+        .toolbar { toolbarContent }
         .sheet(isPresented: $showingModelPicker) {
             ModelPickerSheet(
                 availableModels: availableModels,
@@ -551,6 +515,98 @@ struct LocalAppCreateView: View {
         }
     }
 
+    @ViewBuilder
+    private var briefStep: some View {
+        Section("local_apps_create_brief_section") {
+            TextEditor(text: $brief)
+                .frame(minHeight: 120)
+            Text("local_apps_create_brief_detail")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Toggle("local_apps_create_git_version_control", isOn: $gitEnabled)
+            Toggle("local_apps_create_add_widget", isOn: $addWidget)
+            Text("local_apps_create_add_widget_detail")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        Section("local_apps_create_model_section") {
+            Button {
+                showingModelPicker = true
+            } label: {
+                LabeledContent("local_apps_create_model_label") {
+                    Text(modelSelectionLabel)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(availableModels.isEmpty)
+            if modelOverride != nil {
+                Button("local_apps_create_model_follow_current") {
+                    modelOverride = nil
+                }
+            }
+            Text("local_apps_create_model_detail")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var identityStep: some View {
+        Section("local_apps_create_name_label") {
+            TextField("local_apps_create_name_label", text: $name)
+                .accessibilityIdentifier("local-apps.create.name")
+            Text("local_apps_create_name_hint")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        Section("local_apps_create_surface_section") {
+            Picker("local_apps_create_surface_section", selection: $surface) {
+                ForEach(LocalAppSurface.allCases, id: \.self) { option in
+                    Text(option.label).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("local-apps.create.surface")
+            Text(surface.detail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text("local_apps_create_surface_immutable")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        Section("local_apps_create_brief_section") {
+            Text(brief)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .confirmationAction) {
+            switch step {
+            case .brief:
+                Button(proposing ? "local_apps_create_naming" : "local_apps_create_next") {
+                    Task { await advanceToIdentity() }
+                }
+                .disabled(proposing || !canSubmit)
+                .accessibilityIdentifier("local-apps.create.next")
+            case .identity:
+                Button(creating ? "local_apps_creating" : "local_apps_create") {
+                    Task { await create() }
+                }
+                .disabled(creating || !canSubmit)
+                .accessibilityIdentifier("local-apps.create.submit")
+            }
+        }
+        ToolbarItem(placement: .cancellationAction) {
+            if step == .identity {
+                Button("local_apps_create_back") { step = .brief }
+                    .disabled(creating)
+            }
+        }
+    }
+
     private var modelSelectionLabel: String {
         guard let modelOverride else {
             if activeModelID.isEmpty {
@@ -562,10 +618,26 @@ struct LocalAppCreateView: View {
         return "\((item.details?.preferredProviderLabel ?? ModelDisplay.providerName(for: item.providerId))) · \(item.shortName)"
     }
 
+    /// Ask the host to name and shape the app, then show what it said.
+    ///
+    /// Advances even when the proposal is the derived fallback: the fields are
+    /// editable, so a model that is unreachable costs the user a moment of
+    /// typing rather than blocking the create outright.
+    private func advanceToIdentity() async {
+        proposing = true
+        let proposal = await store.proposeIdentity(brief: brief)
+        proposing = false
+        name = proposal.name
+        surface = proposal.surface
+        step = .identity
+    }
+
     private func create() async {
         creating = true
         let succeeded = await store.createApp(
             brief: brief,
+            name: name,
+            surface: surface,
             gitEnabled: gitEnabled,
             modelOverride: modelOverride,
             addWidget: addWidget

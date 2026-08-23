@@ -55,6 +55,16 @@ mod tests {
         let mut r = SkillRegistry::new();
         register_desktop(&mut r);
         assert_eq!(r.names().len(), BUILTIN_DESKTOP.len());
+        let mut names = r.names();
+        names.sort_unstable();
+        assert_eq!(names, vec!["claude-api"]);
+        let skill = r.get("claude-api").expect("registered bundled skill");
+        assert_eq!(skill.source, SkillSource::Bundled);
+        assert_eq!(skill.loaded_from, LoadedFrom::Bundled);
+        assert_eq!(skill.frontmatter.name, "claude-api");
+        assert!(skill.description.contains("Anthropic SDKs"));
+        assert!(skill.content.contains("/claude-api upgrade python"));
+        assert!(skill.content.contains("anthropic.Timeout"));
     }
 
     #[test]
@@ -101,5 +111,17 @@ mod tests {
                 "{expected} should be independently discoverable from {query:?}"
             );
         }
+    }
+
+    #[test]
+    fn claude_api_desktop_skill_is_discoverable_for_python_upgrade() {
+        let mut r = SkillRegistry::new();
+        register_desktop(&mut r);
+        assert!(
+            r.discover("/claude-api upgrade python")
+                .iter()
+                .any(|skill| skill.name == "claude-api"),
+            "claude-api should be discoverable from its builtin command surface"
+        );
     }
 }

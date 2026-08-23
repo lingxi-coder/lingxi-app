@@ -355,6 +355,7 @@ mod command_arm_tests {
         recorded_env: Mutex<Option<HashMap<String, String>>>,
         /// #43: the resolved command + args (after `${LINGXI_PROJECT_DIR}`
         /// substitution), captured so tests can assert the token replacement.
+        recorded_cwd: Mutex<Option<Option<PathBuf>>>,
         recorded_command: Mutex<Option<String>>,
         recorded_args: Mutex<Option<Vec<String>>>,
     }
@@ -365,6 +366,7 @@ mod command_arm_tests {
                 result: Mutex::new(Some(Ok(output))),
                 recorded_stdin: Mutex::new(None),
                 recorded_env: Mutex::new(None),
+                recorded_cwd: Mutex::new(None),
                 recorded_command: Mutex::new(None),
                 recorded_args: Mutex::new(None),
             })
@@ -374,6 +376,7 @@ mod command_arm_tests {
                 result: Mutex::new(Some(Err(e))),
                 recorded_stdin: Mutex::new(None),
                 recorded_env: Mutex::new(None),
+                recorded_cwd: Mutex::new(None),
                 recorded_command: Mutex::new(None),
                 recorded_args: Mutex::new(None),
             })
@@ -385,6 +388,7 @@ mod command_arm_tests {
         async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
             *self.recorded_stdin.lock().unwrap() = cmd.inner().stdin.clone();
             *self.recorded_env.lock().unwrap() = Some(cmd.inner().env.clone());
+            *self.recorded_cwd.lock().unwrap() = Some(cmd.inner().cwd.clone());
             *self.recorded_command.lock().unwrap() = Some(cmd.inner().command.clone());
             *self.recorded_args.lock().unwrap() = Some(cmd.inner().args.clone());
             self.result
@@ -794,6 +798,71 @@ mod command_arm_tests {
         );
     }
 
+    #[tokio::test]
+    async fn command_cwd_invalid_explicit_path_falls_back_to_project_dir() {
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with_hook(
+            command_hook_with_cwd("/definitely/not/a/dir"),
+            runner.clone(),
+        );
+        let ctx = HookContext {
+            cwd: PathBuf::from("/also/not/a/dir"),
+            project_dir: Some(PathBuf::from("/tmp")),
+            ..Default::default()
+        };
+
+        let _ = exec.execute(pre_event(), ctx).await;
+
+        assert_eq!(
+            runner.recorded_cwd.lock().unwrap().clone().unwrap(),
+            Some(PathBuf::from("/tmp"))
+        );
+    }
+
+    #[tokio::test]
+    async fn command_cwd_invalid_session_cwd_falls_back_to_home() {
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with(runner.clone());
+        let home_dir = super::hook_home_dir().expect("a platform home directory must be set");
+        let ctx = HookContext {
+            cwd: PathBuf::from("/definitely/not/a/dir"),
+            project_dir: Some(PathBuf::from("/also/not/a/dir")),
+            ..Default::default()
+        };
+
+        let _ = exec.execute(pre_event(), ctx).await;
+
+        assert_eq!(
+            runner.recorded_cwd.lock().unwrap().clone().unwrap(),
+            Some(home_dir)
+        );
+    }
+
+    #[tokio::test]
+    async fn command_env_forwards_traceparent_from_ctx() {
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with(runner.clone());
+        let ctx = HookContext {
+            trace_context: Some(telemetry::otel::SerializedTraceContext {
+                traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+                tracestate: Some("foo=bar".into()),
+            }),
+            ..Default::default()
+        };
+
+        let _ = exec.execute(pre_event(), ctx).await;
+
+        let env = runner.recorded_env.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            env.get("TRACEPARENT").map(String::as_str),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        );
+        assert!(
+            !env.contains_key("TRACESTATE"),
+            "command env stays byte-faithful to TRACEPARENT-only upstream output"
+        );
+    }
+
     // ---- #43: COLUMNS/LINES env + ${LINGXI_PROJECT_DIR} substitution -------
 
     /// A Command hook with a custom `command` + `args`, so #43 substitution can
@@ -808,6 +877,14 @@ mod command_arm_tests {
         {
             *c = command.to_string();
             *a = args.iter().map(|s| (*s).to_string()).collect();
+        }
+        h
+    }
+
+    fn command_hook_with_cwd(cwd: &str) -> HookDefinition {
+        let mut h = command_hook();
+        if let DefHookExecutor::Command { cwd: slot, .. } = &mut h.executor {
+            *slot = Some(PathBuf::from(cwd));
         }
         h
     }
@@ -2188,19 +2265,25 @@ mod async_path_tests {
     struct CountingRunner {
         output: StdMutex<ProcessOutput>,
         runs: AtomicU64,
+        recorded_env: StdMutex<Vec<HashMap<String, String>>>,
     }
     impl CountingRunner {
         fn new(output: ProcessOutput) -> Arc<Self> {
             Arc::new(Self {
                 output: StdMutex::new(output),
                 runs: AtomicU64::new(0),
+                recorded_env: StdMutex::new(Vec::new()),
             })
         }
     }
     #[async_trait]
     impl ProcessRunner for CountingRunner {
-        async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+        async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
             self.runs.fetch_add(1, Ordering::SeqCst);
+            self.recorded_env
+                .lock()
+                .unwrap()
+                .push(cmd.inner().env.clone());
             Ok(self.output.lock().unwrap().clone())
         }
         async fn spawn_background(
@@ -2314,6 +2397,53 @@ mod async_path_tests {
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0]["type"], "hook_success");
         assert_eq!(seen[0]["content"], "async complete");
+    }
+
+    #[tokio::test]
+    async fn non_blocking_hook_preserves_traceparent_for_deferred_command_run() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let async_reg = Arc::new(AsyncHookRegistry::new(runtime, tx));
+        let runner = CountingRunner::new(out("async complete\n", "", 0));
+
+        let hook = command_hook(false);
+        let hook_id = hook.id;
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox))
+        .with_async_registry(async_reg);
+
+        let agg = exec
+            .execute(
+                pre_event(),
+                HookContext {
+                    trace_context: Some(telemetry::otel::SerializedTraceContext {
+                        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                            .into(),
+                        tracestate: Some("foo=bar".into()),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(agg.hook_attachments.is_empty());
+
+        let (got_id, _got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("completion must publish before timeout")
+            .expect("completion channel stays open");
+        assert_eq!(got_id, hook_id);
+        let envs = runner.recorded_env.lock().unwrap().clone();
+        assert_eq!(envs.len(), 1);
+        assert_eq!(
+            envs[0].get("TRACEPARENT").map(String::as_str),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        );
     }
 
     /// A registry timeout cancels the work future, so attachment persistence
@@ -4318,7 +4448,9 @@ mod sh06_shell_selector_tests {
     fn bare_project_dir_probe_respects_the_word_boundary() {
         assert!(references_bare_project_dir_var("echo $LINGXI_PROJECT_DIR"));
         assert!(references_bare_project_dir_var("$LINGXI_PROJECT_DIR/x"));
-        assert!(!references_bare_project_dir_var("$LINGXI_PROJECT_DIRECTORY"));
+        assert!(!references_bare_project_dir_var(
+            "$LINGXI_PROJECT_DIRECTORY"
+        ));
         assert!(!references_bare_project_dir_var("$LINGXI_PROJECT_DIR_2"));
         assert!(!references_bare_project_dir_var("echo hello"));
         // `${…}` is not a bare reference — `powershell_env_token_rewrite` fixes it.
@@ -4348,7 +4480,7 @@ mod sh06_shell_selector_tests {
 /// SH-01 — `wo(e, t)` / `Pfr` (oracle 2.1.238 @ 281366731 / 292378095).
 #[cfg(test)]
 mod sh01_classifier_context_tests {
-    use crate::response::{truncate_utf16, CLASSIFIER_CONTEXT_CAP_UTF16, PairedRewrite};
+    use crate::response::{truncate_utf16, PairedRewrite, CLASSIFIER_CONTEXT_CAP_UTF16};
 
     /// `Pfr = 2000`.
     #[test]

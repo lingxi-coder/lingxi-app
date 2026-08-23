@@ -1250,7 +1250,8 @@ mod surface_2_1_238_tests {
     /// (2.1.220's install carried only `-s, --scope` and `--config`).
     #[test]
     fn install_accepts_the_new_yes_flag() {
-        let super::Sub::Install(args) = plugin_sub(&["lingxi-cli", "plugin", "install", "-y", "p@m"])
+        let super::Sub::Install(args) =
+            plugin_sub(&["lingxi-cli", "plugin", "install", "-y", "p@m"])
         else {
             panic!("expected plugin install");
         };

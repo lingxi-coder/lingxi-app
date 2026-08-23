@@ -38,6 +38,12 @@ pub trait AgentNameRegistry: Send + Sync {
     /// Remove a name's mapping (used on agent teardown so the name can be
     /// reused; claude rebuilds the Map without the entry).
     async fn unregister(&self, name: &str);
+
+    /// Enumerate the current `name -> agent_id` mappings. Default empty so
+    /// older hosts remain source-compatible until they opt into listing.
+    async fn list(&self) -> Vec<(String, AgentId)> {
+        Vec::new()
+    }
 }
 
 /// In-memory [`AgentNameRegistry`] backed by an `RwLock<HashMap>`. The faithful
@@ -79,6 +85,15 @@ impl AgentNameRegistry for InMemoryAgentNameRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(name);
     }
+
+    async fn list(&self) -> Vec<(String, AgentId)> {
+        self.map
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(name, id)| (name.clone(), *id))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -107,5 +122,20 @@ mod tests {
 
         reg.unregister("worker-a").await;
         assert_eq!(reg.resolve("worker-a").await, None);
+    }
+
+    #[tokio::test]
+    async fn list_returns_registered_names() {
+        let reg = InMemoryAgentNameRegistry::new();
+        let a = AgentId::new();
+        let b = AgentId::new();
+        reg.register("worker-a", a).await;
+        reg.register("worker-b", b).await;
+        let mut entries = reg.list().await;
+        entries.sort_by(|l, r| l.0.cmp(&r.0));
+        assert_eq!(
+            entries,
+            vec![("worker-a".to_string(), a), ("worker-b".to_string(), b)]
+        );
     }
 }

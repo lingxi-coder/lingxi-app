@@ -444,7 +444,7 @@ pub fn system_message_attachment(id: &HookAttachmentIdentity, content: &str) -> 
 /// Build a `hook_deferred_tool` attachment payload.
 ///
 /// Key order `type, toolUseID, toolName, toolInput, hookName, hookEvent,
-/// permissionMode` — NO identity block at all (`toolUseID` leads and
+/// permissionMode[, traceparent]` — NO identity block at all (`toolUseID` leads and
 /// `hookName` sits sixth), hence the plain parameters rather than a
 /// [`HookAttachmentIdentity`].
 ///
@@ -469,6 +469,9 @@ pub fn system_message_attachment(id: &HookAttachmentIdentity, content: &str) -> 
 ///
 /// `tool_input` is the HOOK-UPDATED input (after `hookUpdatedInput` and
 /// `backfillObservableInput`), not the raw model input.
+///
+/// When OpenTelemetry is active claude appends the current `traceparent` as
+/// the final key via `...re&&{traceparent:re}` at the sole producer site.
 #[must_use]
 pub fn deferred_tool_attachment(
     tool_use_id: &str,
@@ -476,6 +479,7 @@ pub fn deferred_tool_attachment(
     tool_input: &Value,
     hook_name: &str,
     permission_mode: &str,
+    traceparent: Option<&str>,
 ) -> Value {
     let mut m = Map::new();
     m.insert("type".into(), Value::String("hook_deferred_tool".into()));
@@ -488,6 +492,9 @@ pub fn deferred_tool_attachment(
         "permissionMode".into(),
         Value::String(permission_mode.into()),
     );
+    if let Some(traceparent) = traceparent {
+        m.insert("traceparent".into(), Value::String(traceparent.into()));
+    }
     Value::Object(m)
 }
 
@@ -644,10 +651,27 @@ mod tests {
             &serde_json::json!({ "command": "ls" }),
             "PreToolUse:Bash",
             "acceptEdits",
+            None,
         );
         assert_eq!(
             serde_json::to_string(&v).unwrap(),
             r#"{"type":"hook_deferred_tool","toolUseID":"toolu_01ApkBwAZMCAza47B5nAWiGS","toolName":"Bash","toolInput":{"command":"ls"},"hookName":"PreToolUse:Bash","hookEvent":"PreToolUse","permissionMode":"acceptEdits"}"#
+        );
+    }
+
+    #[test]
+    fn deferred_tool_appends_traceparent_last_when_present() {
+        let v = deferred_tool_attachment(
+            "toolu_01ApkBwAZMCAza47B5nAWiGS",
+            "Bash",
+            &serde_json::json!({ "command": "ls" }),
+            "PreToolUse:Bash",
+            "acceptEdits",
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        );
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#"{"type":"hook_deferred_tool","toolUseID":"toolu_01ApkBwAZMCAza47B5nAWiGS","toolName":"Bash","toolInput":{"command":"ls"},"hookName":"PreToolUse:Bash","hookEvent":"PreToolUse","permissionMode":"acceptEdits","traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}"#
         );
     }
 

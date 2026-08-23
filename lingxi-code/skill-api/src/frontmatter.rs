@@ -7,6 +7,8 @@ use crate::model::{LoadedFrom, Skill, SkillFrontmatter, SkillSource};
 use std::path::PathBuf;
 use thiserror::Error;
 
+const UTF8_BOM: char = '\u{feff}';
+
 /// Errors produced while loading a skill from disk.
 #[derive(Debug, Clone, Error)]
 pub enum SkillLoadError {
@@ -27,6 +29,7 @@ pub fn parse_skill_markdown(
     source: SkillSource,
     loaded_from: LoadedFrom,
 ) -> Result<Skill, SkillLoadError> {
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
     let (fm, body): (SkillFrontmatter, String) = if let Some(rest) = raw.strip_prefix("---") {
         let end = rest
             .find("\n---\n")
@@ -287,6 +290,21 @@ mod tests {
     fn body_trim_start() {
         let s = parse("name: x", "\n\nhello world");
         assert_eq!(s.content, "hello world");
+    }
+
+    #[test]
+    fn utf8_bom_before_frontmatter_is_ignored() {
+        let raw = "\u{feff}---\nname: x\ndescription: demo\n---\nbody";
+        let s = parse_skill_markdown(
+            raw,
+            "/tmp/x.md".into(),
+            SkillSource::User,
+            LoadedFrom::Skills,
+        )
+        .expect("ok");
+        assert_eq!(s.frontmatter.name, "x");
+        assert_eq!(s.frontmatter.description, "demo");
+        assert_eq!(s.content, "body");
     }
 
     // ---- no frontmatter fallback ---------------------------------------------

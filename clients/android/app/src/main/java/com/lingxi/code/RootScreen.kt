@@ -121,8 +121,20 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * How long the created-app hand-off retries a refused scope switch, and how
+ * long it then waits for the app's session to come up. Both are BOUNDED: the
+ * landing is a one-shot Channel element, so an unbounded wait strands it and
+ * every later landing behind it.
+ */
+private const val LANDING_SWITCH_ATTEMPTS = 40
+private const val LANDING_SWITCH_RETRY_MS = 250L
+private const val SESSION_READY_TIMEOUT_MS = 20_000L
 
 /**
  * Root composable for the app shell.
@@ -641,6 +653,61 @@ fun RootScreen(
         replacePendingTransition = replacePendingTransition,
     )
 
+    // A freshly created app hands the conversation off into its OWN scope.
+    //
+    // The app is created by the sheet, BEFORE any conversation exists, so this
+    // switch is the first thing that happens rather than the tail of an intake
+    // turn. That is what makes the app's first message already rooted in the
+    // app workspace: the SCOPE is what sets the session cwd, and an agent that
+    // starts anywhere else writes its source into the wrong directory (observed
+    // on device — it hand-rolled a package.json/vite.config.js by copying
+    // another app, and every build after that failed on the workspace).
+    //
+    // `initSessionId` is null only when the engine's best-effort init-session
+    // mint failed; a fresh conversation in the same scope is still correct.
+    LaunchedEffect(localAppsViewModel, chatViewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            localAppsViewModel.createdAppLandings.collect { landing ->
+                showingApps = false
+                // The result is load-bearing, not decoration: `switchWorkspaceSource`
+                // REFUSES while a turn is streaming (or another switch is pending)
+                // and returns false after only raising a banner — it does not begin
+                // a transition. Ignoring that left the wait below satisfied by the
+                // CURRENT project conversation, and the kickoff was then sent into
+                // it: the app's agent rooted in the wrong directory, which is the
+                // exact failure the comment above says was observed on device.
+                // Retry, the way iOS's `openCreatedAppSession` does.
+                var switched = false
+                var attempt = 0
+                while (!switched && attempt < LANDING_SWITCH_ATTEMPTS) {
+                    if (attempt > 0) delay(LANDING_SWITCH_RETRY_MS)
+                    attempt += 1
+                    switched = switchEngineScope(
+                        engineScope = ConversationScope.LocalApp(landing.appId),
+                        project = null,
+                        target = landing.initSessionId?.let { SessionRef(it, "") },
+                        newSession = landing.initSessionId == null,
+                        resumeEmpty = true,
+                    )
+                }
+                if (switched) {
+                    // Bounded: a failed transition clears `sessionTransitioning`
+                    // WITHOUT setting `sessionReady`, so an unbounded wait would
+                    // suspend forever inside `collect` and strand every later
+                    // landing too.
+                    withTimeoutOrNull(SESSION_READY_TIMEOUT_MS) {
+                        chatViewModel.state.first {
+                            it.sessionReady && !it.sessionTransitioning && it.session.id.isNotBlank()
+                        }
+                    }?.let {
+                        chatViewModel.send(
+                            context.getString(R.string.local_apps_init_kickoff, landing.brief),
+                        )
+                    }
+                }
+            }
+        }
+    }
     // Recover the last active Project after process start. The Activity-scoped
     // ChatViewModel survives rotation, so sourceProjectId prevents a needless
     // rebuild on configuration changes. A process-restored global Resume is

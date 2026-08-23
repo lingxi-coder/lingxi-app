@@ -63,6 +63,14 @@ enum class LocalAppRuntimeState { Stopped, Starting, Running, Stopping, Failed }
 
 enum class LocalAppRuntimeMode { StaticExport, ViteStatic }
 
+/**
+ * Which shape an app draws — the UI mirror of protocol 7.0.0's `AppSurfaceDto`.
+ * Chosen in the create sheet and IMMUTABLE afterwards: the scaffold is laid down
+ * at creation, so this is the one field the sheet must get in front of the user
+ * rather than infer silently.
+ */
+enum class LocalAppSurface { DOM, CANVAS }
+
 @Immutable
 data class LocalAppRuntime(
     val state: LocalAppRuntimeState = LocalAppRuntimeState.Stopped,
@@ -248,9 +256,12 @@ sealed interface LocalAppsAction {
     data object Create : LocalAppsAction
     data class Search(val query: String) : LocalAppsAction
     data class ChangeCreateName(val name: String) : LocalAppsAction
-    /** Creates a new app from a one-line brief. */
+    /** Creates a new app from a one-line brief, with a confirmed name and shape. */
     data class CreateFromBrief(
         val brief: String,
+        /** Empty lets `AppService::create_app` derive one from the brief. */
+        val name: String = "",
+        val surface: LocalAppSurface = LocalAppSurface.DOM,
         val gitEnabled: Boolean = true,
         /** Null follows the current conversation; otherwise a provider-qualified catalog id. */
         val workflowModel: String? = null,

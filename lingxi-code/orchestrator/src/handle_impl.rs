@@ -270,6 +270,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
         self.refusal_tried_models.lock().await.clear();
         self.hooks.clear_session_hooks(old_session_id).await;
         self.sync_active_goal_stop_hook_for_current_state().await;
+        if !runtime.deferred_tools.is_empty() {
+            crate::resume::replay_deferred_tools_after_resume(self, runtime.deferred_tools)
+                .await
+                .map_err(|error| HandleError::ActionFailed(format!("deferred replay: {error}")))?;
+        }
         Ok(())
     }
 
@@ -1748,6 +1753,7 @@ mod tests {
                 turn_id: "turn-after-compact".to_string(),
                 consecutive_failures: 2,
                 consecutive_rapid_refills: 1,
+                deferred_tools: Vec::new(),
             },
         )
         .await

@@ -43,6 +43,8 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
+const UTF8_BOM: char = '\u{feff}';
+
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
@@ -728,6 +730,7 @@ pub fn parse_skill_command_markdown(
 /// shape the spec asks to reuse without depending on `skill-api`). Malformed or
 /// absent frontmatter yields default frontmatter and the raw body.
 fn parse_frontmatter(raw: &str) -> (CommandFrontmatter, String) {
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
     if let Some(rest) = raw.strip_prefix("---") {
         if let Some(end) = rest.find("\n---\n") {
             let yaml = &rest[..end];
@@ -1173,6 +1176,15 @@ mod tests {
     fn frontmatter_shell_parses() {
         let (fm, _) = parse_frontmatter("---\nshell: powershell\n---\nx");
         assert_eq!(fm.shell, Some(crate::model::FrontmatterShell::PowerShell));
+    }
+
+    #[test]
+    fn frontmatter_with_utf8_bom_parses() {
+        let raw = "\u{feff}---\ndescription: demo\nallowed-tools: Bash\n---\nbody";
+        let (fm, body) = parse_frontmatter(raw);
+        assert_eq!(fm.description, "demo");
+        assert_eq!(fm.allowed_tools, Some(vec!["Bash".to_string()]));
+        assert_eq!(body, "body");
     }
 
     // ---------- build_markdown_command ----------

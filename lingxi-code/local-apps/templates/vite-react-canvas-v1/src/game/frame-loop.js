@@ -62,8 +62,14 @@ export function createFrameLoop(canvas, options = {}) {
     lastTimestamp = timestamp;
     const dt = Math.min(Math.max(seconds, 0), MAX_FRAME_SECONDS);
     elapsed += dt;
-    onFrame?.({ dt, elapsed, width, height });
+    // Queue the NEXT frame BEFORE running app code. A single throw out of
+    // `onFrame` would otherwise skip this line and end the loop for good:
+    // `running` stays true, so `start()` returns at its own guard and nothing
+    // can revive the surface. The app then shows a still picture, and the
+    // build's motion check fails on "the two captures are identical" — sending
+    // the agent after a simulation bug that is really one uncaught throw.
     frame = window.requestAnimationFrame(tick);
+    onFrame?.({ dt, elapsed, width, height });
   };
 
   // A resumed tab reports a timestamp far in the future relative to the last

@@ -141,10 +141,12 @@ VITE="${WORK}/project/node_modules/vite/bin/vite.js"
 # Guard the reason this runs in a container at all. `stage-local-app-runtime.py`
 # checks the same thing, but it reports "one real native binding" without saying
 # the tree was built on the wrong operating system.
+# Two families, not three: Tailwind left the pinned set with the move to Ionic,
+# and `@tailwindcss/oxide` went with it. Both survivors are Vite 8's own native
+# toolchain, so they stay as long as the build does.
 MUSL_BINDINGS=(
   "node_modules/@rolldown/binding-linux-${IMAGE_ARCH/amd64/x64}-musl"
   "node_modules/lightningcss-linux-${IMAGE_ARCH/amd64/x64}-musl"
-  "node_modules/@tailwindcss/oxide-linux-${IMAGE_ARCH/amd64/x64}-musl"
 )
 for binding in "${MUSL_BINDINGS[@]}"; do
   if [[ ! -d "${WORK}/project/${binding}" ]]; then

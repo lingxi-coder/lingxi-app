@@ -613,10 +613,10 @@ fn classify_api_termination(e: &llm_client::LlmError) -> Option<(&'static str, &
         // move those, and moving them on the strength of this one would be
         // guessing.
         LlmError::StreamInterrupted { message }
-            if message.starts_with(llm_client::model::stream_watchdog::STREAM_IDLE_TIMEOUT_PREFIX)
-                || message.starts_with(
-                    llm_client::model::stream_watchdog::STREAM_SUSPENDED_PREFIX,
-                ) =>
+            if message
+                .starts_with(llm_client::model::stream_watchdog::STREAM_IDLE_TIMEOUT_PREFIX)
+                || message
+                    .starts_with(llm_client::model::stream_watchdog::STREAM_SUSPENDED_PREFIX) =>
         {
             None
         }

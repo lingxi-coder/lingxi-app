@@ -1129,7 +1129,7 @@
     <string name="local_apps_card_menu_a11y">應用操作</string>
     <string name="local_apps_checkpoint_restore_action">恢復</string>
     <string name="local_apps_create_and_design">建立並開始設計</string>
-    <string name="local_apps_create_name_hint">稍後可在設計器中繼續完善用途和目標使用者。</string>
+    <string name="local_apps_create_name_hint">建立後不能改名，現在改好。</string>
     <string name="local_apps_data_field_name">欄位名稱</string>
     <string name="local_apps_data_field_type_boolean">布林</string>
     <string name="local_apps_data_field_type_datetime">日期時間</string>
@@ -1626,6 +1626,17 @@
     <string name="local_apps_error_bridge_detached">應用檢視已關閉，這次請求不會有結果了。</string>
     <string name="local_apps_error_bridge_payload_invalid">請求內容無法序列化。</string>
     <string name="local_apps_error_brief_required">請用一句話描述這個應用。</string>
+    <string name="local_apps_init_kickoff">這個應用剛剛建立好，是空的；目前對話就在它自己的工作區裡——應用 id 與工作區約定見 LINGXI.md。\n\n應用簡介：%1$s\n\n不要再建立應用，也不要重新搭建鷹架：型態與名稱已經定好且不可更改。請用 create-local-app 技能，先與我確認需求，再設計與實作。</string>
+    <string name="local_apps_create_name_label">應用名稱</string>
+    <string name="local_apps_create_surface_section">型態</string>
+    <string name="local_apps_create_surface_immutable">型態在建立時定下，之後不能更改。選錯了就刪掉重建。</string>
+    <string name="local_apps_surface_dom">介面</string>
+    <string name="local_apps_surface_canvas">畫布</string>
+    <string name="local_apps_surface_dom_detail">由頁面、清單、表單和按鈕組成，可以有多個介面來回切換。</string>
+    <string name="local_apps_surface_canvas_detail">一整塊自己繪製的畫面，逐格動起來——遊戲、模擬、3D 場景。</string>
+    <string name="local_apps_create_next">下一步</string>
+    <string name="local_apps_create_naming">命名中…</string>
+    <string name="local_apps_create_back">上一步</string>
     <string name="local_apps_permission_agent_notify">允許應用向對話助手發送事件？</string>
     <string name="local_apps_permission_camera">允許應用使用相機拍照？</string>
     <string name="local_apps_permission_llm">允許應用呼叫 AI 模型？（會消耗你的模型用量）</string>

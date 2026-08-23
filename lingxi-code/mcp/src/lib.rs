@@ -34,8 +34,8 @@ pub mod xaa;
 pub mod xaa_idp;
 
 pub use client::{
-    truncate_description, McpClient, McpClientError, McpDirectoryEntry,
-    MAX_MCP_DESCRIPTION_LENGTH, MAX_MCP_DIRECTORY_PAGES,
+    truncate_description, McpClient, McpClientError, McpDirectoryEntry, MAX_MCP_DESCRIPTION_LENGTH,
+    MAX_MCP_DIRECTORY_PAGES,
 };
 pub use connection::{ConfigScope, McpConnectionState, McpServerConfig};
 pub use env_expansion::{

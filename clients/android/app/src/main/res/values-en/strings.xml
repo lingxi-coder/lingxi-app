@@ -1129,7 +1129,7 @@
     <string name="local_apps_card_menu_a11y">App actions</string>
     <string name="local_apps_checkpoint_restore_action">Restore</string>
     <string name="local_apps_create_and_design">Create and start designing</string>
-    <string name="local_apps_create_name_hint">You can keep refining the purpose and target users later in the designer.</string>
+    <string name="local_apps_create_name_hint">An app cannot be renamed after it is created.</string>
     <string name="local_apps_data_field_name">Field name</string>
     <string name="local_apps_data_field_type_boolean">Boolean</string>
     <string name="local_apps_data_field_type_datetime">Date &amp; time</string>
@@ -1626,6 +1626,17 @@
     <string name="local_apps_error_bridge_detached">The app view closed; this request will not be answered.</string>
     <string name="local_apps_error_bridge_payload_invalid">The request payload could not be serialized.</string>
     <string name="local_apps_error_brief_required">Please describe your app in one line.</string>
+    <string name="local_apps_init_kickoff">This app was just created and is EMPTY; this conversation is rooted in its own workspace — LINGXI.md names the app id and the workspace contract.\n\nBrief: %1$s\n\nDo not create an app and do not re-scaffold one: the shape and the name are already fixed and cannot be changed. Use the create-local-app skill — confirm the requirements with me first, then design and implement.</string>
+    <string name="local_apps_create_name_label">App name</string>
+    <string name="local_apps_create_surface_section">Shape</string>
+    <string name="local_apps_create_surface_immutable">The shape is fixed at creation and cannot be changed later. If it is wrong, delete the app and create it again.</string>
+    <string name="local_apps_surface_dom">Screens</string>
+    <string name="local_apps_surface_canvas">Canvas</string>
+    <string name="local_apps_surface_dom_detail">Built from screens, lists, forms and buttons, with navigation between them.</string>
+    <string name="local_apps_surface_canvas_detail">One drawn surface that animates frame by frame — a game, a simulation, a 3D scene.</string>
+    <string name="local_apps_create_next">Next</string>
+    <string name="local_apps_create_naming">Naming…</string>
+    <string name="local_apps_create_back">Back</string>
     <string name="local_apps_permission_agent_notify">Allow the app to send events to your assistant?</string>
     <string name="local_apps_permission_camera">Allow the app to take a photo?</string>
     <string name="local_apps_permission_llm">Allow the app to call the AI model? (uses your model quota)</string>

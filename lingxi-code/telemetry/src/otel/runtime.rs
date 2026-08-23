@@ -9,7 +9,11 @@ use std::time::{Duration, Instant};
 
 use opentelemetry::logs::{AnyValue, LogRecord as _, Logger as _, LoggerProvider as _};
 use opentelemetry::metrics::MeterProvider as _;
-use opentelemetry::trace::{Span as _, Tracer as _, TracerProvider as _};
+use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
+use opentelemetry::trace::{
+    FutureExt as _, Span as _, TraceContextExt, Tracer as _, TracerProvider as _,
+};
+use opentelemetry::Context;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{
     Compression, Protocol as OtlpWireProtocol, WithExportConfig, WithHttpConfig,
@@ -19,6 +23,7 @@ use opentelemetry_sdk::logs::{
     BatchConfigBuilder as LogBatchConfigBuilder, BatchLogProcessor, SdkLoggerProvider,
 };
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{
     BatchConfigBuilder as TraceBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
 };
@@ -118,6 +123,16 @@ struct MetricUpdate {
     value: f64,
     attributes: Attributes,
     kind: MetricUpdateKind,
+}
+
+/// W3C trace headers captured from the active OpenTelemetry parent context.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SerializedTraceContext {
+    /// Canonical `traceparent` header value.
+    pub traceparent: String,
+    /// Optional `tracestate` header value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracestate: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -775,6 +790,82 @@ pub fn prometheus_text() -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// Serialize the currently-attached OpenTelemetry span context, if any.
+pub fn capture_current_trace_context() -> Option<SerializedTraceContext> {
+    let propagator = TraceContextPropagator::new();
+    Context::map_current(|cx| {
+        if !cx.span().span_context().is_valid() {
+            return None;
+        }
+        let mut carrier = TraceCarrier::default();
+        propagator.inject_context(cx, &mut carrier);
+        carrier.into_serialized()
+    })
+}
+
+/// Run `f` with `trace_context` temporarily attached as the current parent.
+pub fn with_trace_context<T>(
+    trace_context: Option<&SerializedTraceContext>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let Some(trace_context) = trace_context else {
+        return f();
+    };
+    let propagator = TraceContextPropagator::new();
+    let carrier = TraceCarrier::from_serialized(trace_context);
+    let cx = propagator.extract(&carrier);
+    if !cx.span().span_context().is_valid() {
+        return f();
+    }
+    let _guard = cx.attach();
+    f()
+}
+
+/// Run `future` with `trace_context` attached while it is being polled.
+pub async fn with_trace_context_future<T>(
+    trace_context: Option<&SerializedTraceContext>,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    let Some(trace_context) = trace_context else {
+        return future.await;
+    };
+    let propagator = TraceContextPropagator::new();
+    let carrier = TraceCarrier::from_serialized(trace_context);
+    let cx = propagator.extract(&carrier);
+    if !cx.span().span_context().is_valid() {
+        return future.await;
+    }
+    future.with_context(cx).await
+}
+
+/// Run one async turn future inside a fresh OTEL span when tracing is enabled.
+pub async fn with_turn_span<T>(
+    span_name: &'static str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    let Some(cx) = current_turn_span_context(span_name) else {
+        return future.await;
+    };
+    let result = future.with_context(cx.clone()).await;
+    cx.span().end();
+    result
+}
+
+fn current_turn_span_context(span_name: &'static str) -> Option<Context> {
+    let slot = runtime_slot().read().ok()?;
+    let runtime = slot.as_ref()?;
+    if runtime.shutdown.load(Ordering::Relaxed) {
+        return None;
+    }
+    let provider = runtime.traces.as_ref()?;
+    let tracer = provider.tracer(super::logs::TRACING_SIGNAL);
+    let span = tracer
+        .span_builder(span_name)
+        .with_attributes(runtime.process_attributes())
+        .start(&tracer);
+    Some(Context::current_with_span(span))
+}
+
 fn with_runtime(f: impl FnOnce(&OtelRuntime)) {
     if let Ok(slot) = runtime_slot().read() {
         if let Some(runtime) = slot.as_ref() {
@@ -782,6 +873,63 @@ fn with_runtime(f: impl FnOnce(&OtelRuntime)) {
                 f(runtime);
             }
         }
+    }
+}
+
+#[derive(Default)]
+struct TraceCarrier {
+    traceparent: Option<String>,
+    tracestate: Option<String>,
+}
+
+impl TraceCarrier {
+    fn from_serialized(serialized: &SerializedTraceContext) -> Self {
+        Self {
+            traceparent: Some(serialized.traceparent.clone()),
+            tracestate: serialized.tracestate.clone(),
+        }
+    }
+
+    fn into_serialized(self) -> Option<SerializedTraceContext> {
+        self.traceparent.map(|traceparent| SerializedTraceContext {
+            traceparent,
+            tracestate: self
+                .tracestate
+                .filter(|tracestate| !tracestate.is_empty()),
+        })
+    }
+}
+
+impl Injector for TraceCarrier {
+    fn set(&mut self, key: &str, value: String) {
+        if key.eq_ignore_ascii_case("traceparent") {
+            self.traceparent = Some(value);
+        } else if key.eq_ignore_ascii_case("tracestate") {
+            self.tracestate = Some(value);
+        }
+    }
+}
+
+impl Extractor for TraceCarrier {
+    fn get(&self, key: &str) -> Option<&str> {
+        if key.eq_ignore_ascii_case("traceparent") {
+            self.traceparent.as_deref()
+        } else if key.eq_ignore_ascii_case("tracestate") {
+            self.tracestate.as_deref()
+        } else {
+            None
+        }
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        let mut keys = Vec::new();
+        if self.traceparent.is_some() {
+            keys.push("traceparent");
+        }
+        if self.tracestate.is_some() {
+            keys.push("tracestate");
+        }
+        keys
     }
 }
 
@@ -1890,13 +2038,60 @@ fn emit_diag(error: bool, message: &str, stderr_gate: bool) {
 mod tests {
     use super::*;
     use crate::bus::AnalyticsBus;
+    use opentelemetry::trace::{
+        Span, SpanContext, SpanId, Status, TraceContextExt, TraceFlags, TraceId, TraceState,
+    };
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::str::FromStr;
     use std::sync::{Arc, Mutex};
     use tokio::runtime::Runtime;
 
     static RUNTIME_SLOT_LOCK: Mutex<()> = Mutex::new(());
 
+    struct TestSpan(SpanContext);
+
+    impl Span for TestSpan {
+        fn add_event<T>(&mut self, _name: T, _attributes: Vec<KeyValue>)
+        where
+            T: Into<std::borrow::Cow<'static, str>>,
+        {
+        }
+
+        fn add_event_with_timestamp<T>(
+            &mut self,
+            _name: T,
+            _timestamp: std::time::SystemTime,
+            _attributes: Vec<KeyValue>,
+        ) where
+            T: Into<std::borrow::Cow<'static, str>>,
+        {
+        }
+
+        fn add_link(&mut self, _span_context: SpanContext, _attributes: Vec<KeyValue>) {}
+
+        fn span_context(&self) -> &SpanContext {
+            &self.0
+        }
+
+        fn is_recording(&self) -> bool {
+            false
+        }
+
+        fn set_attribute(&mut self, _attribute: KeyValue) {}
+
+        fn set_status(&mut self, _status: Status) {}
+
+        fn update_name<T>(&mut self, _new_name: T)
+        where
+            T: Into<std::borrow::Cow<'static, str>>,
+        {
+        }
+
+        fn end(&mut self) {}
+
+        fn end_with_timestamp(&mut self, _timestamp: std::time::SystemTime) {}
+    }
     #[derive(Debug, Clone)]
     struct CapturedRequest {
         path: String,
@@ -1969,6 +2164,87 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    #[test]
+    fn capture_current_trace_context_serializes_w3c_headers() {
+        let span_context = SpanContext::new(
+            TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").expect("trace id"),
+            SpanId::from_hex("00f067aa0ba902b7").expect("span id"),
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::from_str("foo=bar").expect("tracestate"),
+        );
+        let _guard = Context::current_with_span(TestSpan(span_context)).attach();
+
+        let serialized = capture_current_trace_context().expect("serialized current context");
+        assert_eq!(
+            serialized.traceparent,
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        );
+        assert_eq!(serialized.tracestate.as_deref(), Some("foo=bar"));
+    }
+
+    #[test]
+    fn with_trace_context_restores_the_serialized_parent() {
+        let restored = SerializedTraceContext {
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+            tracestate: Some("foo=bar".into()),
+        };
+
+        let inside = with_trace_context(Some(&restored), capture_current_trace_context)
+            .expect("restored current context");
+        assert_eq!(inside, restored);
+        assert!(capture_current_trace_context().is_none());
+    }
+
+    #[tokio::test]
+    async fn with_trace_context_future_restores_the_serialized_parent() {
+        let restored = SerializedTraceContext {
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+            tracestate: Some("foo=bar".into()),
+        };
+
+        let inside = with_trace_context_future(Some(&restored), async {
+            tokio::task::yield_now().await;
+            capture_current_trace_context()
+        })
+        .await
+        .expect("restored current context");
+        assert_eq!(inside, restored);
+        assert!(capture_current_trace_context().is_none());
+    }
+
+    fn trace_console_runtime_config() -> OtelConfig {
+        OtelConfig::from_lookup(|key| match key {
+            super::super::config::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
+            super::super::config::ENV_ENHANCED_TELEMETRY_BETA => Some("1".to_string()),
+            "OTEL_METRICS_EXPORTER" => Some("none".to_string()),
+            "OTEL_LOGS_EXPORTER" => Some("none".to_string()),
+            "OTEL_TRACES_EXPORTER" => Some("console".to_string()),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn with_turn_span_keeps_trace_context_across_await() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        let _guard = install_process_with_config("turn-test", false, trace_console_runtime_config());
+
+        let inside = with_turn_span("lingxi.turn.test", async {
+            tokio::task::yield_now().await;
+            capture_current_trace_context()
+        })
+        .await
+        .expect("turn span context");
+
+        assert!(
+            inside.traceparent.starts_with("00-"),
+            "expected a W3C traceparent, got {}",
+            inside.traceparent
+        );
+        assert_eq!(inside.traceparent.len(), 55, "traceparent width");
+        assert!(capture_current_trace_context().is_none());
     }
 
     fn spawn_http_collector() -> (

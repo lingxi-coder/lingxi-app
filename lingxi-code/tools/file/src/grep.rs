@@ -394,7 +394,8 @@ fn validate_whole_number(name: &str, value: Option<&Value>) -> Result<(), Valida
                 };
                 !int_part.is_empty()
                     && int_part.bytes().all(|b| b.is_ascii_digit())
-                    && frac_part.is_none_or(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
+                    && frac_part
+                        .is_none_or(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
             };
             if numeric {
                 t.parse::<f64>().ok().filter(|f| f.is_finite())
@@ -2089,9 +2090,12 @@ mod tests {
         std::fs::write(&file, b"needle\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GrepTool::new(ctx);
-        tool.validate_input(&json!({ "pattern": "needle", "path": file.to_str().unwrap() }), &fresh_ctx())
-            .await
-            .expect("a file path must validate for Grep");
+        tool.validate_input(
+            &json!({ "pattern": "needle", "path": file.to_str().unwrap() }),
+            &fresh_ctx(),
+        )
+        .await
+        .expect("a file path must validate for Grep");
     }
 
     #[tokio::test]

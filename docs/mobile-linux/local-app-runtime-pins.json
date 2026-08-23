@@ -1242,7 +1242,7 @@
   ],
   "local_app_runtime": {
     "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/pnpm-lock.yaml",
-    "lockfile_sha256": "6b2ad11c0c7b8eb8fbd7c9b30d80c7f19421a14eab17b6d09bf01e598c2236cc",
+    "lockfile_sha256": "e82b19b0b466009b878c532a9d97511d0545c6cff6dc0aff3d5e5534a0dd7757",
     "lightningcss": "1.33.0",
     "lightningcss_bindings": {
       "lightningcss-linux-arm64-musl": "1.33.0",
@@ -1255,11 +1255,6 @@
     "rolldown_bindings": {
       "@rolldown/binding-linux-arm64-musl": "1.2.4",
       "@rolldown/binding-linux-x64-musl": "1.2.4"
-    },
-    "tailwindcss_oxide": "4.3.3",
-    "tailwindcss_oxide_bindings": {
-      "@tailwindcss/oxide-linux-arm64-musl": "4.3.3",
-      "@tailwindcss/oxide-linux-x64-musl": "4.3.3"
     },
     "template": "lingxi-code/local-apps/templates/vite-react-static-v1",
     "vite": "8.2.1"

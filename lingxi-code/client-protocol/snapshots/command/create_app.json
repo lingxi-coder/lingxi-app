@@ -4,5 +4,6 @@
   "origin": "chat",
   "brief": "Track daily habits with streaks",
   "workflow_model": "deepseek/deepseek-v4-flash",
-  "conversation_id": "55555555-5555-4555-8555-555555555555"
+  "conversation_id": "55555555-5555-4555-8555-555555555555",
+  "surface": "canvas"
 }

@@ -688,15 +688,16 @@ mod tests {
         // JS leg `typeof r.source!=="string" && !(Array.isArray(...))` with
         // `r.source === undefined`. Before FT-02 the port accepted this and
         // rendered `source: null`.
-        let err = read_notebook(&nb(json!([{ "cell_type": "code", "id": "c1" }]), None)).unwrap_err();
+        let err =
+            read_notebook(&nb(json!([{ "cell_type": "code", "id": "c1" }]), None)).unwrap_err();
         assert_eq!(err, INVALID_NOTEBOOK_SHAPE);
     }
 
     #[test]
     fn cell_with_non_string_source_is_refused() {
         for src in [json!(42), json!(null), json!({ "a": 1 })] {
-            let err =
-                read_notebook(&nb(json!([{ "cell_type": "code", "source": src }]), None)).unwrap_err();
+            let err = read_notebook(&nb(json!([{ "cell_type": "code", "source": src }]), None))
+                .unwrap_err();
             assert_eq!(err, INVALID_NOTEBOOK_SHAPE);
         }
     }

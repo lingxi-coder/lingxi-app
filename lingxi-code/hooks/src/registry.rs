@@ -7,6 +7,7 @@ use crate::matcher::{is_bare_mcp_server_matcher, matches_if_condition, matches_p
 use protocol::{AgentId, HookId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use telemetry::otel::SerializedTraceContext;
 use traits::SubagentInheritance;
 
 /// Per-call context handed to hooks alongside the event payload.
@@ -97,6 +98,13 @@ pub struct HookContext {
     /// Controlling-terminal height — see [`Self::terminal_columns`]. Injected as
     /// the `LINES` env var (#43). Additive default `None`.
     pub terminal_rows: Option<u16>,
+    /// Serialized OpenTelemetry parent trace context for this dispatch. The
+    /// orchestrator captures it at the synchronous turn seam; deferred/background
+    /// hook re-entry restores the same parent before re-running side effects, and
+    /// Command hooks can forward the matching `TRACEPARENT` env var to children.
+    /// `None` omits trace propagation entirely, matching the current gate-off
+    /// behavior.
+    pub trace_context: Option<SerializedTraceContext>,
     /// Current session title at the moment of dispatch, threaded into
     /// `UserPromptSubmit` and `SessionStart` payloads as `session_title`
     /// (binary-confirmed at BIN off 201745825). `None` when no title is

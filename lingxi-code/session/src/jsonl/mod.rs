@@ -62,7 +62,8 @@ pub use writer::JsonlWriter;
 pub use loader::{
     build_conversation_chain, discovered_tool_names, find_tip, list_recent_sessions,
     list_recent_sessions_with_diagnostics, load_session, load_session_across_worktrees,
-    pre_compact_discovered_tools, read_agent_resume_state, read_agent_snapshot,
+    load_session_entries, load_session_entries_across_worktrees, pre_compact_discovered_tools,
+    read_agent_resume_state, read_agent_snapshot, resolve_session_path_across_worktrees,
     search_sessions_by_custom_title, select_session_interactive, LoaderError, SessionCatalog,
     SessionMetadata,
 };

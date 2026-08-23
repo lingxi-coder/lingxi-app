@@ -550,7 +550,9 @@ mod tests {
             ConversationMessage::user(MessageId::new(), "ordinary user message".into()),
         ]);
         assert_eq!(preserved.len(), 1);
-        let ConversationMessage::User { content, is_meta, .. } = &preserved[0]
+        let ConversationMessage::User {
+            content, is_meta, ..
+        } = &preserved[0]
         else {
             panic!("expected preserved user sidecar");
         };

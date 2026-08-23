@@ -108,6 +108,17 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // preview server. These two are the hot loop of the create flow.
     m.insert("LocalAppBuild", AllowByDefault);
     m.insert("LocalAppRuntime", AllowByDefault);
+    // The library's create sheet does NOT come through this gate: it sends
+    // `ClientCommand::CreateApp` and creates the app outright, before any
+    // conversation exists (see `client_protocol::version`). So the ONLY caller
+    // this row governs is an agent reaching `LocalAppCreate` from a global or
+    // project chat — which is exactly the case the deny exists for, and the
+    // user is right there in that chat to answer.
+    //
+    // This was briefly `AllowByDefault` while the create sheet ran an intake
+    // conversation and needed the agent to commit the create without a prompt.
+    // That flow is gone; the exemption went with it.
+    m.insert("LocalAppCreate", DenyByDefault);
     // Effects the user cannot trivially undo, or that reach the network.
     // These two expose an app's CONTENT — user records and the live WebView
     // DOM. Binding scopes them inside an app workspace, but a GLOBAL
@@ -118,7 +129,6 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // DenyByDefault: the DOM snapshot nulls out `password`/`hidden` input
     // values and a pixel capture cannot redact anything it renders.
     m.insert("LocalAppCaptureUi", DenyByDefault);
-    m.insert("LocalAppCreate", DenyByDefault);
     m.insert("LocalAppManifest", DenyByDefault);
     m.insert("LocalAppMutateData", DenyByDefault);
     m.insert("LocalAppActOnUi", DenyByDefault);
@@ -172,6 +182,9 @@ mod tests {
         }
 
         for name in [
+            // The library's create sheet bypasses tools entirely; the only
+            // caller here is an agent creating an app from a global or project
+            // chat, with the user present to answer.
             "LocalAppCreate",
             // Expose app CONTENT; a global chat can name any app.
             "LocalAppQueryData",

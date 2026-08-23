@@ -288,7 +288,10 @@ mod tests {
             WindowSource::Env(1_000_000).window_line(),
             "Auto-compact window: 1m tokens (from LINGXI_AUTO_COMPACT_WINDOW)"
         );
-        assert_eq!(WindowSource::Auto.window_line(), "Auto-compact window: auto");
+        assert_eq!(
+            WindowSource::Auto.window_line(),
+            "Auto-compact window: auto"
+        );
 
         for source in [
             WindowSource::Auto,

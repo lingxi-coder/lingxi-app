@@ -85,17 +85,17 @@ mod local_apps_mcp;
 mod local_apps_profile;
 
 #[cfg(feature = "uniffi")]
+pub use client_protocol::listings::{
+    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
+    ModelPricingTierDto,
+};
+#[cfg(feature = "uniffi")]
 pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
     parse_mobile_provider_config_json, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
     FiredCronJobDto, LocalAppBackgroundRunDto, MobileBuildError, MobileConfig,
     MobileCronStoreHandle, MobileEngineError, MobileEngineHandle, MobileOAuthSessionDto,
     MobileOAuthStateDto, MobileRuntime, ProviderCatalogEntryDto, ProviderConnectionTestDto,
-};
-#[cfg(feature = "uniffi")]
-pub use client_protocol::listings::{
-    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
-    ModelPricingTierDto,
 };
 
 // F3-06: the host-only walking-skeleton support — a portable fake `Platform`
@@ -142,8 +142,7 @@ impl Default for MobileEngineConfig {
             // provider-qualified so the shared Claude model ids exposed by
             // Copilot cannot make the fresh-session default ambiguous.
             default_model: traits::qualified_model_ref(
-                traits::provider_default_model("anthropic")
-                    .unwrap_or("claude-sonnet-5"),
+                traits::provider_default_model("anthropic").unwrap_or("claude-sonnet-5"),
                 Some("anthropic"),
             ),
         }

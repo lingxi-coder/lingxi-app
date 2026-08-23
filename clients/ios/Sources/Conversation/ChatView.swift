@@ -41,6 +41,9 @@ struct ChatView: View {
     // moment a pick lands instead of only after the next engine `ModelList`.
     private let modelRecents = ModelRecents()
     @State private var recentModels: [String] = []
+    /// The questionnaire sheet's detent. Starts (and re-starts for each new
+    /// request) at `.large` so a full-size question is readable without a drag.
+    @State private var askQuestionDetent: PresentationDetent = .large
 
     /// Root-owned state machine shared by ordinary dictation and Flow Mode.
     let voiceInteraction: VoiceInteractionController
@@ -223,19 +226,25 @@ struct ChatView: View {
             guard let completion else { return }
             voiceInteraction.handleTurnCompletion(completion)
         }
+        .onChange(of: ConversationRenderLayout.sheetQuestion(convo.pendingQuestions)?.requestId) { _, requestId in
+            // A new request re-opens expanded even if the user shrank the
+            // previous one.
+            if requestId != nil { askQuestionDetent = .large }
+        }
         .sheet(item: pendingQuestionBinding) { question in
-            NavigationStack {
-                ScrollView {
-                    AskUserQuestionCard(
-                        question: question,
-                        onSubmit: { answers in await answerQuestion(question.requestId, answers: answers) },
-                        onCancel: { await cancelQuestion(question.requestId) }
-                    )
-                    .padding(16)
-                }
-                .background(t.windowBg)
-            }
-            .presentationDetents([.medium, .large])
+            // The card paints the sheet surface itself and pins its own
+            // actions, so no navigation/scroll wrapper here — a second
+            // container would nest a card inside the sheet.
+            AskUserQuestionCard(
+                question: question,
+                onSubmit: { answers in await answerQuestion(question.requestId, answers: answers) },
+                onCancel: { await cancelQuestion(question.requestId) }
+            )
+            // Opens at `.large`: a wire-maximum request does not fit the
+            // medium detent, and `presentationDetents` always starts at the
+            // SMALLEST detent given, so the set alone cannot express this.
+            // `.medium` stays selectable for short questions.
+            .presentationDetents([.medium, .large], selection: $askQuestionDetent)
             .presentationDragIndicator(.visible)
             // The engine owns the pending request. Require the explicit cancel
             // action so a swipe cannot leave the turn parked with no UI.

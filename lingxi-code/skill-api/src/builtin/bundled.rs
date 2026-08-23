@@ -13,7 +13,17 @@ pub(crate) struct BundledSkill {
 }
 
 /// Desktop builtin skill templates.
-pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[];
+pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[BundledSkill {
+    name: "claude-api",
+    raw: include_str!("claude-api.md"),
+    triggers: &[
+        "claude-api",
+        "/claude-api",
+        "/claude-api upgrade python",
+        "claude api upgrade python",
+        "anthropic sdk migration",
+    ],
+}];
 
 /// Mobile builtin skill templates.
 pub(crate) const BUILTIN_MOBILE: &[BundledSkill] = &[

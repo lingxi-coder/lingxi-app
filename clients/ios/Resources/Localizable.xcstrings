@@ -19172,6 +19172,40 @@
         }
       }
     },
+    "local_apps_create_back": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一步"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一步"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Back"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "戻る"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "뒤로"
+          }
+        }
+      }
+    },
     "local_apps_create_brief_detail": {
       "localizations": {
         "zh-Hans": {
@@ -19449,31 +19483,201 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "稍后可在设计器中继续完善用途和目标用户。"
+            "value": "创建后不能改名，现在改好。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "稍後可在設計器中繼續完善用途和目標使用者。"
+            "value": "建立後不能改名，現在改好。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "You can keep refining the purpose and target users later in the designer."
+            "value": "An app cannot be renamed after it is created."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "用途や対象ユーザーは、後でデザイナー内に引き続き詳しく設定できます。"
+            "value": "作成後に名前は変更できません。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "용도와 대상 사용자는 나중에 디자이너에서 계속 다듬을 수 있습니다."
+            "value": "생성한 뒤에는 이름을 바꿀 수 없습니다."
+          }
+        }
+      }
+    },
+    "local_apps_create_name_label": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用名称"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "應用名稱"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App name"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリ名"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 이름"
+          }
+        }
+      }
+    },
+    "local_apps_create_naming": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "命名中…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "命名中…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Naming…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "命名中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이름 짓는 중…"
+          }
+        }
+      }
+    },
+    "local_apps_create_next": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一步"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一步"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次へ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다음"
+          }
+        }
+      }
+    },
+    "local_apps_create_surface_immutable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "形态在创建时定下，之后不能更改。选错了就删掉重建。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "型態在建立時定下，之後不能更改。選錯了就刪掉重建。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The shape is fixed at creation and cannot be changed later. If it is wrong, delete the app and create it again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "形態は作成時に確定し、後から変更できません。間違えた場合は削除して作り直してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "형태는 생성 시 확정되며 나중에 바꿀 수 없습니다. 잘못 골랐다면 삭제하고 다시 만드세요."
+          }
+        }
+      }
+    },
+    "local_apps_create_surface_section": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "形态"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "型態"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shape"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "形態"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "형태"
           }
         }
       }
@@ -22266,36 +22470,70 @@
         }
       }
     },
-    "local_apps_init_kickoff %@": {
+    "local_apps_init_kickoff": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请使用 create-local-app 技能开始创建这个应用。\n\n应用简介：%@\n\n先用问卷向我确认需求。"
+            "value": "这个应用刚刚创建好，是空的；当前会话就在它自己的工作区里——应用 id 与工作区约定见 LINGXI.md。\n\n应用简介：%1$s\n\n不要再创建应用，也不要重新搭建脚手架：形态与名称已经定好且不可更改。请用 create-local-app 技能，先与我确认需求，再设计与实现。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "請使用 create-local-app 技能開始建立這個應用。\n\n應用簡介：%@\n\n先用問卷向我確認需求。"
+            "value": "這個應用剛剛建立好，是空的；目前對話就在它自己的工作區裡——應用 id 與工作區約定見 LINGXI.md。\n\n應用簡介：%1$s\n\n不要再建立應用，也不要重新搭建鷹架：型態與名稱已經定好且不可更改。請用 create-local-app 技能，先與我確認需求，再設計與實作。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use the create-local-app skill to start building this app.\n\nBrief: %@\n\nBegin by confirming requirements with me via questions."
+            "value": "This app was just created and is EMPTY; this conversation is rooted in its own workspace — LINGXI.md names the app id and the workspace contract.\n\nBrief: %1$s\n\nDo not create an app and do not re-scaffold one: the shape and the name are already fixed and cannot be changed. Use the create-local-app skill — confirm the requirements with me first, then design and implement."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "create-local-app スキルでこのアプリの作成を開始してください。\n\n概要：%@\n\nまず質問で要件を確認してください。"
+            "value": "このアプリは作成されたばかりで空です。この会話はアプリ自身のワークスペースにあります。アプリ id とワークスペースの規約は LINGXI.md にあります。\n\n概要：%1$s\n\nアプリを作り直したり、足場を作り直したりしないでください。形態と名前はすでに確定していて変更できません。create-local-app スキルで、まず要件を確認してから設計と実装に進んでください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "create-local-app 스킬로 이 앱 생성을 시작하세요.\n\n소개: %@\n\n먼저 질문으로 요구 사항을 확인해 주세요."
+            "value": "이 앱은 방금 생성되었고 비어 있습니다. 이 대화는 앱 자체 워크스페이스에 있습니다. 앱 id와 워크스페이스 규약은 LINGXI.md에 있습니다.\n\n소개: %1$s\n\n앱을 다시 만들거나 스캐폴드를 다시 세우지 마세요. 형태와 이름은 이미 확정되어 변경할 수 없습니다. create-local-app 스킬로 먼저 요구 사항을 확인한 뒤 설계와 구현을 진행하세요."
+          }
+        }
+      }
+    },
+    "local_apps_init_kickoff %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个应用刚刚创建好，是空的；当前会话就在它自己的工作区里——应用 id 与工作区约定见 LINGXI.md。\n\n应用简介：%@\n\n不要再创建应用，也不要重新搭建脚手架：形态与名称已经定好且不可更改。请用 create-local-app 技能，先与我确认需求，再设计与实现。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這個應用剛剛建立好，是空的；目前對話就在它自己的工作區裡——應用 id 與工作區約定見 LINGXI.md。\n\n應用簡介：%@\n\n不要再建立應用，也不要重新搭建鷹架：型態與名稱已經定好且不可更改。請用 create-local-app 技能，先與我確認需求，再設計與實作。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This app was just created and is EMPTY; this conversation is rooted in its own workspace — LINGXI.md names the app id and the workspace contract.\n\nBrief: %@\n\nDo not create an app and do not re-scaffold one: the shape and the name are already fixed and cannot be changed. Use the create-local-app skill — confirm the requirements with me first, then design and implement."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このアプリは作成されたばかりで空です。この会話はアプリ自身のワークスペースにあります。アプリ id とワークスペースの規約は LINGXI.md にあります。\n\n概要：%@\n\nアプリを作り直したり、足場を作り直したりしないでください。形態と名前はすでに確定していて変更できません。create-local-app スキルで、まず要件を確認してから設計と実装に進んでください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 앱은 방금 생성되었고 비어 있습니다. 이 대화는 앱 자체 워크스페이스에 있습니다. 앱 id와 워크스페이스 규약은 LINGXI.md에 있습니다.\n\n소개: %@\n\n앱을 다시 만들거나 스캐폴드를 다시 세우지 마세요. 형태와 이름은 이미 확정되어 변경할 수 없습니다. create-local-app 스킬로 먼저 요구 사항을 확인한 뒤 설계와 구현을 진행하세요."
           }
         }
       }
@@ -26512,6 +26750,142 @@
           "stringUnit": {
             "state": "translated",
             "value": "에이전트가 다음 디자인 필드 수정을 제안합니다"
+          }
+        }
+      }
+    },
+    "local_apps_surface_canvas": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "画布"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "畫布"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Canvas"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "キャンバス"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "캔버스"
+          }
+        }
+      }
+    },
+    "local_apps_surface_canvas_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一整块自己绘制的画面，逐帧动起来——游戏、模拟、3D 场景。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一整塊自己繪製的畫面，逐格動起來——遊戲、模擬、3D 場景。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One drawn surface that animates frame by frame — a game, a simulation, a 3D scene."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自分で描画する 1 枚の画面がフレームごとに動きます — ゲーム、シミュレーション、3D シーン。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "직접 그리는 한 장의 화면이 프레임마다 움직입니다 — 게임, 시뮬레이션, 3D 장면."
+          }
+        }
+      }
+    },
+    "local_apps_surface_dom": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "界面"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "介面"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Screens"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "画面"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "화면"
+          }
+        }
+      }
+    },
+    "local_apps_surface_dom_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "由页面、列表、表单和按钮组成，可以有多个界面来回切换。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "由頁面、清單、表單和按鈕組成，可以有多個介面來回切換。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Built from screens, lists, forms and buttons, with navigation between them."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "画面・リスト・フォーム・ボタンで構成され、画面間を行き来できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "화면, 목록, 양식, 버튼으로 구성되며 화면 사이를 오갈 수 있습니다."
           }
         }
       }
@@ -62038,1434 +62412,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "권한 대기 중"
-          }
-        }
-      }
-    },
-    "settings_voice_all_clear": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "全部正常"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "全部正常"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "All clear"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "すべて正常"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "모두 정상"
-          }
-        }
-      }
-    },
-    "settings_voice_backend_sherpa": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sherpa 离线"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sherpa 離線"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sherpa Offline"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sherpa オフライン"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sherpa 오프라인"
-          }
-        }
-      }
-    },
-    "settings_voice_backend_system": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "系统"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "系統"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "System"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "システム"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "시스템"
-          }
-        }
-      }
-    },
-    "settings_voice_blocking_issues": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "阻塞问题"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "阻塞問題"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Blocking Issues"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ブロック中の問題"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "차단 문제"
-          }
-        }
-      }
-    },
-    "settings_voice_effective_backend": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "当前识别后端"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "目前辨識後端"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Active Recognition Backend"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "現在の認識バックエンド"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "현재 인식 백엔드"
-          }
-        }
-      }
-    },
-    "settings_voice_effective_voice": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "当前声音"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "目前聲音"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Active Voice"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "現在の音声"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "현재 음성"
-          }
-        }
-      }
-    },
-    "settings_voice_issue_offline_language_unsupported": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "所选语言没有可用的 Sherpa 离线包。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "所選語言沒有可用的 Sherpa 離線包。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The selected language has no offline Sherpa pack."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "選択した言語には Sherpa オフラインパックがありません。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "선택한 언어에 사용할 수 있는 Sherpa 오프라인 팩이 없습니다."
-          }
-        }
-      }
-    },
-    "settings_voice_issue_offline_pack_required": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请下载并校验匹配的离线识别包。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "請下載並驗證相符的離線辨識包。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Download and verify the matching offline recognition pack."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "対応するオフライン認識パックをダウンロードして検証してください。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "일치하는 오프라인 인식 팩을 다운로드하고 검증하세요."
-          }
-        }
-      }
-    },
-    "settings_voice_mode_automatic": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "自动"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "自動"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Automatic"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "自動"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "자동"
-          }
-        }
-      }
-    },
-    "settings_voice_mode_automatic_sub": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "优先使用系统识别；音频可能由网络服务处理。仅在系统识别不可用时回退到已校验的 Sherpa 模型。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "優先使用系統辨識；音訊可能由網路服務處理。僅在系統辨識不可用時回退到已驗證的 Sherpa 模型。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Uses the system recognizer first; audio may be processed by a network service. Falls back to a verified Sherpa model only when the system recognizer is unavailable."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "システム認識を優先します。音声がネットワークサービスで処理される場合があります。システム認識が利用できない場合のみ、検証済み Sherpa モデルへ切り替えます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "시스템 인식을 우선 사용하며 오디오가 네트워크 서비스에서 처리될 수 있습니다. 시스템 인식을 사용할 수 없을 때만 검증된 Sherpa 모델로 전환합니다."
-          }
-        }
-      }
-    },
-    "settings_voice_mode_local_only": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "仅本地"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "僅限本機"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Local Only"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ローカルのみ"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "로컬 전용"
-          }
-        }
-      }
-    },
-    "settings_voice_mode_local_only_sub": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "始终使用本机已校验的 Sherpa 模型。缺少模型时会阻止录音，不会回退到系统服务。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "一律使用本機已驗證的 Sherpa 模型。缺少模型時會阻止錄音，不會回退到系統服務。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Always uses a verified Sherpa model on this device. Missing models block recording; there is no system fallback."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "この端末の検証済み Sherpa モデルを常に使用します。モデルがない場合は録音を開始せず、システムへフォールバックしません。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이 기기의 검증된 Sherpa 모델을 항상 사용합니다. 모델이 없으면 녹음을 차단하며 시스템으로 대체하지 않습니다."
-          }
-        }
-      }
-    },
-    "settings_voice_model_footer": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "下载内容会校验 SHA-256，并且只保存在本机。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "下載內容會驗證 SHA-256，並且只保存在本機。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Downloads are SHA-256 verified and stored only on this device."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ダウンロードは SHA-256 で検証され、この端末にのみ保存されます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "다운로드는 SHA-256으로 검증되며 이 기기에만 저장됩니다."
-          }
-        }
-      }
-    },
-    "settings_voice_model_section": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "离线语言包"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "離線語言包"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Offline Language Pack"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "オフライン言語パック"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "오프라인 언어 팩"
-          }
-        }
-      }
-    },
-    "settings_voice_offline_group": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "离线声音 · Sherpa"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "離線聲音 · Sherpa"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Offline Voices · Sherpa"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "オフライン音声 · Sherpa"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "오프라인 음성 · Sherpa"
-          }
-        }
-      }
-    },
-    "settings_voice_pack_downloading": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在下载"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在下載"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Downloading"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ダウンロード中"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "다운로드 중"
-          }
-        }
-      }
-    },
-    "settings_voice_pack_extracting": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在安装"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在安裝"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Installing"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "インストール中"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "설치 중"
-          }
-        }
-      }
-    },
-    "settings_voice_pack_not_installed": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未安装"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未安裝"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Not Installed"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未インストール"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "설치되지 않음"
-          }
-        }
-      }
-    },
-    "settings_voice_pack_partial": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "部分安装"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "部分安裝"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Partially Installed"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "一部インストール済み"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "일부 설치됨"
-          }
-        }
-      }
-    },
-    "settings_voice_pack_queued": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "等待下载"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "等待下載"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Queued"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "待機中"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "대기 중"
-          }
-        }
-      }
-    },
-    "settings_voice_pack_ready": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已就绪"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已就緒"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ready"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "準備完了"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "준비됨"
-          }
-        }
-      }
-    },
-    "settings_voice_pack_verifying": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在校验"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在驗證"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Verifying"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "検証中"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "검증 중"
-          }
-        }
-      }
-    },
-    "settings_voice_permissions_footer": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "麦克风权限只限制录音；播报和文字聊天仍可使用。权限被拒绝后可前往系统设置修改。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "麥克風權限只限制錄音；播報和文字聊天仍可使用。權限遭拒後可前往系統設定修改。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Microphone access gates capture only. Playback and text chat remain available. Open system settings to change a denied permission."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "マイク権限は録音のみを制限します。読み上げとテキストチャットは引き続き利用できます。拒否した権限はシステム設定で変更できます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "마이크 권한은 녹음만 제한합니다. 음성 재생과 텍스트 채팅은 계속 사용할 수 있습니다. 거부한 권한은 시스템 설정에서 변경할 수 있습니다."
-          }
-        }
-      }
-    },
-    "settings_voice_permissions_section": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "访问与可用性"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "存取與可用性"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Access & Availability"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "アクセスと利用状況"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "접근 및 사용 가능 여부"
-          }
-        }
-      }
-    },
-    "settings_voice_requested_backend": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "所选识别模式"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "所選辨識模式"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Requested Recognition Mode"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "選択した認識モード"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "선택한 인식 모드"
-          }
-        }
-      }
-    },
-    "settings_voice_requested_voice": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "所选声音"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "所選聲音"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Requested Voice"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "選択した音声"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "선택한 음성"
-          }
-        }
-      }
-    },
-    "settings_voice_system_default": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "系统默认"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "系統預設"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "System Default"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "システム既定"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "시스템 기본값"
-          }
-        }
-      }
-    },
-    "settings_voice_system_recognizer": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "系统识别服务"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "系統辨識服務"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "System Recognizer"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "システム認識"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "시스템 인식"
-          }
-        }
-      }
-    },
-    "settings_voice_unavailable_short": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "不可用"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "不可用"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Unavailable"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "利用不可"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "사용 불가"
-          }
-        }
-      }
-    },
-    "voice_model_state_downloading": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在下载"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在下載"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Downloading"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ダウンロード中"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "다운로드 중"
-          }
-        }
-      }
-    },
-    "voice_model_state_failed": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "失败"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "失敗"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Failed"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "失敗"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "실패"
-          }
-        }
-      }
-    },
-    "voice_model_state_installing": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在安装"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在安裝"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Installing"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "インストール中"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "설치 중"
-          }
-        }
-      }
-    },
-    "voice_model_state_not_installed": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未安装"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未安裝"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Not Installed"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未インストール"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "설치되지 않음"
-          }
-        }
-      }
-    },
-    "voice_model_state_queued": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "等待下载"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "等待下載"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Queued"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "待機中"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "대기 중"
-          }
-        }
-      }
-    },
-    "voice_model_state_ready": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已就绪"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已就緒"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ready"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "準備完了"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "준비됨"
-          }
-        }
-      }
-    },
-    "voice_model_state_verifying": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在校验"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在驗證"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Verifying"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "検証中"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "검증 중"
-          }
-        }
-      }
-    },
-    "voice_offline_download": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "下载"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "下載"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Download"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ダウンロード"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "다운로드"
-          }
-        }
-      }
-    },
-    "voice_offline_models": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "离线语音模型"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "離線語音模型"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Offline Voice Models"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "オフライン音声モデル"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "오프라인 음성 모델"
-          }
-        }
-      }
-    },
-    "voice_offline_models_action": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "当前语言包"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "目前語言包"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Current Language Pack"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "現在の言語パック"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "현재 언어 팩"
-          }
-        }
-      }
-    },
-    "voice_offline_models_footer": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模型下载后会校验 SHA-256 并仅保存在本机。仅本地识别绝不会回退到系统服务。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模型下載後會驗證 SHA-256 並只保存在本機。僅限本機辨識絕不會回退到系統服務。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Models are SHA-256 verified and stored only on this device. Local-only recognition never falls back to a system service."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "モデルは SHA-256 で検証され、この端末にのみ保存されます。ローカルのみの認識はシステムサービスへフォールバックしません。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "모델은 SHA-256으로 검증되어 이 기기에만 저장됩니다. 로컬 전용 인식은 시스템 서비스로 대체되지 않습니다."
-          }
-        }
-      }
-    },
-    "voice_permission_not_required": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "不需要"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "不需要"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Not Required"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "不要"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "필요 없음"
-          }
-        }
-      }
-    },
-    "voice_speech_permission_not_required_detail": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "仅本地使用 Sherpa，不调用 Apple 语音识别服务"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "僅限本機使用 Sherpa，不呼叫 Apple 語音辨識服務"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Local-only uses Sherpa and does not call Apple Speech recognition"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ローカルのみでは Sherpa を使用し、Apple の音声認識を呼び出しません"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "로컬 전용은 Sherpa를 사용하며 Apple 음성 인식을 호출하지 않습니다"
           }
         }
       }

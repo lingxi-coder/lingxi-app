@@ -349,7 +349,9 @@ pub const APPEND_SUBAGENT_PROMPT_VALUE_ENV: &str = "LINGXI_APPEND_SUBAGENT_SYSTE
 #[must_use]
 pub fn append_subagent_system_prompt_suffix() -> Option<String> {
     if !traits::env::is_env_truthy(
-        std::env::var(APPEND_SUBAGENT_PROMPT_GATE_ENV).ok().as_deref(),
+        std::env::var(APPEND_SUBAGENT_PROMPT_GATE_ENV)
+            .ok()
+            .as_deref(),
     ) {
         return None;
     }
@@ -4302,7 +4304,14 @@ mod tests {
         );
 
         let defs = vec![
-            all_denied, one_survives, wildcard, empty, excepting, all, user, rule_form,
+            all_denied,
+            one_survives,
+            wildcard,
+            empty,
+            excepting,
+            all,
+            user,
+            rule_form,
         ];
         assert_eq!(
             crate::tools_denied_agent_types(&defs, &deny),
@@ -4325,10 +4334,7 @@ mod tests {
         assert!(crate::builtins::web_fetch_policy_allowed());
         assert!(crate::tools_denied_agent_types(std::slice::from_ref(&wf), &[]).is_empty());
         assert_eq!(
-            crate::tools_denied_agent_types(
-                std::slice::from_ref(&wf),
-                &["WebFetch".to_string()]
-            ),
+            crate::tools_denied_agent_types(std::slice::from_ref(&wf), &["WebFetch".to_string()]),
             vec!["web-fetch".to_string()]
         );
     }

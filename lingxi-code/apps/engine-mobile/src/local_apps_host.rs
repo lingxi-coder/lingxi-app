@@ -403,8 +403,26 @@ pub(crate) fn remove_app_session_file(
     std::fs::remove_file(path).is_ok()
 }
 
+/// What to tell the agent immediately after an app is created.
+///
+/// It must NOT say "build it now". A create happens in a conversation that is
+/// rooted somewhere ELSE — the library's intake chat sits in the project scope,
+/// and an agent-driven create can happen in any chat at all. The new app's
+/// workspace is a different directory, and the build workflow's agents inherit
+/// the CALLING session's cwd, not the app's.
+///
+/// Observed on device: this used to read "the workspace already contains the
+/// repository-verified foundation … then call LocalAppBuild", the agent obeyed
+/// literally, and the whole build ran against the project workspace. It found a
+/// previous run's leftover `apps/<other-id>/workspace` directory there and
+/// edited that instead — every build failed on a workspace that was never the
+/// app's, and nothing in the error said which directory was wrong.
+///
+/// The app already has its own session (`init_session_id` in this same
+/// response). Handing off to it is what puts the agent in the right cwd with the
+/// right `LINGXI.md` auto-loaded.
 pub(crate) fn create_next_step_guidance() -> String {
-    "Run local-app-build: the workspace already contains the repository-verified Vite + Ionic foundation. Edit app screens, app/globals.css, src/, public/, and non-host-managed lib/style files. A host-owned `pnpm install` prepares workspace-local dependencies in the background; check `LocalAppInstallDeps` or `LocalAppGet` if you need its status. Do not recreate the app scaffold or run a package-manager scaffold command. Then call LocalAppBuild and preview via LocalAppRuntime.".into()
+    "The app now exists and is EMPTY, and this conversation is not rooted in it. Stop here: do not write source, do not call LocalAppBuild, and do not start a build workflow from this conversation — its working directory is not the app's workspace, so anything written here lands outside the app. The app has its own workspace and its own session (init_session_id in this result); building happens there, where the workspace contract and the pinned Vite + Ionic foundation are already in place. Tell the user the app is ready and let them open it. Do not recreate the app scaffold or run a package-manager scaffold command; a host-owned `pnpm install` prepares workspace-local dependencies in the background.".into()
 }
 
 struct LocalAppsRuntimeConfiguration {
@@ -638,6 +656,17 @@ impl LocalAppsHostBroker {
         llm: Arc<crate::local_apps_profile::SharedLlm>,
     ) -> Result<(), Arc<crate::local_apps_profile::SharedLlm>> {
         self.llm.set(llm)
+    }
+
+    /// The profile's CURRENT model, read fresh through the swap cell.
+    ///
+    /// Never cache the returned `Arc`: `profile_apps` replaces the cell's
+    /// contents on every reconnect, so a holder would keep authenticating as a
+    /// credential that may since have rotated out — with no error and no log
+    /// (see [`crate::local_apps_profile::SharedLlm`]). `None` before the
+    /// profile has loaded.
+    pub(crate) fn current_llm(&self) -> Option<Arc<crate::local_apps_llm::LocalAppsLlm>> {
+        self.llm.get().map(|cell| cell.current())
     }
 
     /// Bind the native host facts. Set once, at the same composition-root
@@ -3054,13 +3083,51 @@ impl LocalAppsHostBroker {
         }))
     }
 
+    /// Tell the CLIENT that an agent-driven create failed.
+    ///
+    /// The tool result already tells the model, and that used to be the only
+    /// notification: `emit_app_failure` is reachable exclusively from the
+    /// command handlers, so a create started by the agent produced no client
+    /// event on either outcome. A client that armed a "creating…" state when
+    /// the user submitted a brief therefore had nothing to disarm it with — the
+    /// spinner and the disabled create button stayed that way until the app was
+    /// killed.
+    ///
+    /// `app_id` is `None` because there is no app: the failure is precisely
+    /// that one never came into being.
+    pub(crate) async fn emit_create_failure(&self, error: &local_apps::AppError) {
+        self.event_sink
+            .emit(ClientEvent::AppOperationFailed {
+                app_id: None,
+                code: crate::local_apps_bridge::lower_error_code(error.code()),
+                message: error.to_string(),
+            })
+            .await;
+    }
+
     /// Initialize the host-owned metadata and repository-verified Vite
     /// scaffold for a freshly created app.
     pub(crate) async fn scaffold_app_value(
         &self,
         record: &local_apps::AppRecord,
+        surface: local_apps::AppSurface,
     ) -> Result<(), String> {
         let layout = self.layout(&record.id)?;
+        let target = crate::local_apps_build::LocalAppBuildTarget::from_surface(surface);
+        // Record the scaffold BEFORE writing a single file.
+        //
+        // `create_app_with_initializer` has already saved the manifest, so it
+        // exists to be amended. The ordering matters: `detect_build_target`
+        // reads this field on every later build, and a workspace that was
+        // materialized but never stamped would be indistinguishable from an app
+        // created by the removed scaffold — unbuildable, with its source
+        // already on disk. Stamping first means a crash between the two steps
+        // leaves an app that can be scaffolded again, not one that cannot.
+        {
+            let mut manifest = local_apps::load_manifest(&layout).map_err(|e| e.to_string())?;
+            manifest.surface = Some(surface);
+            local_apps::save_manifest(&layout, &manifest).map_err(|e| e.to_string())?;
+        }
         // Write the per-app LINGXI.md context file at the workspace root:
         // every session rooted in this workspace auto-loads it into the
         // system context (`orchestrator::prompt::real_provider`), so the
@@ -3068,10 +3135,30 @@ impl LocalAppsHostBroker {
         // prompt plumbing. It sits OUTSIDE the writable roots, so the agent
         // cannot edit its own contract.
         let workspace = layout.root().join(layout.workspace_rel());
-        let setup_path = "- This workspace already contains the repository-verified Vite + Tailwind + shadcn/ui foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
+        // Two scaffolds, two contracts. The shared clauses are repeated rather
+        // than composed: this text is the agent's whole picture of the
+        // workspace, and a reader that has to assemble it from fragments is how
+        // "edit home-screen.jsx" survived into a workspace that has no such
+        // file.
+        let setup_path = match surface {
+            local_apps::AppSurface::Dom => "- This app's surface is `dom`, so its build workflow is `local-app-build`. The surface is fixed at creation and is NOT readable from any tool result — this line is where you learn it, so do not infer it from the source and do not launch the other workflow.\n\
+             - This workspace already contains the repository-verified Vite + Ionic foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
              - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
              - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
-             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n";
+             - The UI kit is Ionic. Import components from `@ionic/react`; never from `@ionic/core/components`, which cannot be bundled here. There is no Tailwind: use Ionic's CSS variables and its utility classes (`ion-padding`, `ion-margin`, `ion-text-center`, `ion-justify-content-*`, `ion-hide-*`), and put anything else in `app/globals.css`.\n\
+             - Routing is `IonRouterOutlet` with react-router 6 `Routes`/`Route`. Every routed screen must render `IonPage` as its ROOT element, or the outlet has nothing to animate and the platform back gesture does not attach. Navigate with `routerLink`, not an onClick handler.\n\
+             - The platform look is chosen for you: the checked-in provider calls `setupIonicReact` with the host's OS, so components already render iOS or Material chrome. Do not branch on the user agent and do not hard-code one platform's metrics.\n\
+             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n",
+            local_apps::AppSurface::Canvas => "- This app's surface is `canvas`, so its build workflow is `local-canvas-build` — NOT `local-app-build`. The surface is fixed at creation and is NOT readable from any tool result, so this line is where you learn it. `local-app-build` designs a screen hierarchy this workspace does not have and gates on a data round-trip a drawn app answers `not_applicable`, so it would verify nothing.\n\
+             - This workspace already contains the repository-verified Vite + Ionic foundation, scaffolded for a single DRAWN SURFACE rather than a set of screens. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
+             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
+             - Default editable entry points are `app/screens/game-screen.jsx`, `src/game/frame-loop.js`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
+             - There is NO router: this app is one surface plus overlays. Menus, pause and game-over are Ionic components layered on top of the canvas, not separate pages.\n\
+             - Own the frame loop through the checked-in `createFrameLoop` helper: it sizes the drawing buffer to the device pixel ratio, resizes on rotation and iPad multitasking, clamps the first frame after a resume, and cancels itself on unmount. Start it in an effect and stop it in that effect's cleanup.\n\
+             - Keep per-frame simulation state in a ref, NOT in the store. Pushing positions through React re-renders the tree every frame and turns the app into a slideshow; the store is for the phase machine, the score and settings.\n\
+             - 2D needs no dependency. For 3D, `three` is in the locked set: import it directly and drive the renderer from your own loop. Nothing outside the locked set can be installed, so do not design around a game engine, a physics library, or a WebGL wrapper that is not there.\n\
+             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n",
+        };
         // `format!`, not a bare `&str`: this string is interpolated into the
         // enclosing `format!` as a VALUE, so its own `{{` and `{id}` would be
         // copied through verbatim and the agent would read a malformed example
@@ -3136,7 +3223,7 @@ impl LocalAppsHostBroker {
             build_preview = build_preview,
         );
         tokio::task::spawn_blocking(move || {
-            crate::local_apps_build::scaffold_workspace_initialized(&layout)?;
+            crate::local_apps_build::scaffold_workspace_initialized(&layout, target)?;
             std::fs::write(workspace.join("LINGXI.md"), context).map_err(|error| {
                 local_apps::AppError::Io(format!("write workspace LINGXI.md: {error}"))
             })
@@ -3408,10 +3495,12 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .dependency_record(&app_id)
             .await
             .map_err(|e| e.to_string())?;
+        let target =
+            crate::local_apps_build::detect_build_target(&layout).map_err(|e| e.to_string())?;
         Ok(serde_json::json!({
             "ok": true,
             "app_id": app_id,
-            "target": "vite-react-static-v1",
+            "target": target.template_id(),
             "dependencies": dependencies,
             "hint": "start or restart the runtime with manage_runtime to serve the new build",
         }))
@@ -3441,6 +3530,23 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         if let Some(capabilities) = input.get("capabilities") {
             manifest.capabilities = serde_json::from_value(capabilities.clone())
                 .map_err(|e| format!("invalid capabilities: {e}"))?;
+        }
+        // The scaffold is fixed at creation. The workspace on disk IS the
+        // scaffold, so accepting a change here would leave the generated source
+        // and the re-pinned infrastructure describing two different
+        // applications, and the next build would write the other scaffold's
+        // files over working code. Rejected loudly rather than ignored: an
+        // agent that believes it just converted the app has to find out now,
+        // not after a build silently reverts half its work.
+        //
+        // `manifest.surface` is otherwise carried through untouched by the
+        // load-modify-save above, which is what keeps it stable.
+        if input.get("surface").is_some() {
+            return Err(
+                "an app's surface is fixed when the app is created and cannot be changed; \
+                 create a new app to build the other shape"
+                    .into(),
+            );
         }
         // The device context is host-derived, never taken from `input`: the
         // agent only ever sees the mobile runtime reminder, and that
@@ -3841,8 +3947,16 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.background_retry_value(input).await
     }
 
-    async fn scaffold_app(&self, record: local_apps::AppRecord) -> Result<(), String> {
-        self.scaffold_app_value(&record).await
+    async fn scaffold_app(
+        &self,
+        record: local_apps::AppRecord,
+        surface: local_apps::AppSurface,
+    ) -> Result<(), String> {
+        self.scaffold_app_value(&record, surface).await
+    }
+
+    async fn emit_create_failure(&self, error: &local_apps::AppError) {
+        LocalAppsHostBroker::emit_create_failure(self, error).await;
     }
 }
 
@@ -5591,7 +5705,7 @@ mod tests {
             .await
             .expect("create app");
         broker
-            .scaffold_app_value(&record)
+            .scaffold_app_value(&record, local_apps::AppSurface::Dom)
             .await
             .expect("scaffold app");
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
@@ -5617,7 +5731,7 @@ mod tests {
             .await
             .expect("create app");
         broker
-            .scaffold_app_value(&record)
+            .scaffold_app_value(&record, local_apps::AppSurface::Dom)
             .await
             .expect("scaffold app");
 
@@ -5708,7 +5822,7 @@ mod tests {
     async fn scaffold_writes_capability_neutral_lingxi_when_shell_is_missing() {
         let (_app_id, lingxi) = scaffolded_lingxi(true, None).await;
         assert!(
-            lingxi.contains("repository-verified Vite + Tailwind + shadcn/ui foundation"),
+            lingxi.contains("repository-verified Vite + Ionic foundation"),
             "{lingxi}"
         );
         assert!(lingxi.contains("Do not run `npm create vite`"), "{lingxi}");
@@ -5725,7 +5839,7 @@ mod tests {
             .await
             .expect("create app");
         broker
-            .scaffold_app_value(&record)
+            .scaffold_app_value(&record, local_apps::AppSurface::Dom)
             .await
             .expect("scaffold app");
         let layout = AppLayout::new(root.path().to_path_buf(), record.id).expect("layout");

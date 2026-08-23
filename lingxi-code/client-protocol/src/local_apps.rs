@@ -10,7 +10,8 @@
 //! the [`crate::computer_access::AccessTierDto`] precedent of staying
 //! byte-identical to the source contract: the fieldless enums
 //! ([`AppWorkflowStateDto`], [`AppRuntimeStateDto`], [`AppCreateOriginDto`],
-//! [`AppErrorCodeDto`], [`AppCheckpointKindDto`]) ride as bare wire STRINGS
+//! [`AppSurfaceDto`], [`AppErrorCodeDto`], [`AppCheckpointKindDto`]) ride as
+//! bare wire STRINGS
 //! (`"draft"`, `"stopped"`, `"not_found"`, …) — a plain
 //! `#[serde(rename_all = "snake_case")]` fieldless enum, byte-identical to
 //! the core enums' canonical `as_str()` values.
@@ -76,6 +77,26 @@ pub enum AppCreateOriginDto {
     Chat,
     /// Created from the apps library screen.
     Library,
+}
+
+/// Which scaffold a [`CreateApp`](crate::commands::ClientCommand::CreateApp)
+/// lays down — mirrors the core `AppSurface`. A bare wire STRING
+/// (`"dom"` / `"canvas"`). `#[non_exhaustive]` so a future surface is additive.
+///
+/// Deliberately NOT called a template: the fixed template catalog was removed
+/// from the protocol on purpose and a regression guard keeps those symbols out.
+/// This names the SHAPE the app draws, which the create sheet must show and let
+/// the user correct — a surface is immutable once scaffolded, so it cannot be
+/// left to a value the user never saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AppSurfaceDto {
+    /// A routed, multi-screen interface built from Ionic components.
+    Dom,
+    /// A single drawn surface owning its own frame loop, rendering to `<canvas>`.
+    Canvas,
 }
 
 /// Stable machine-readable failure code carried on
@@ -882,6 +903,19 @@ pub enum AppEventDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         retryable: bool,
+    },
+    /// A new app record committed. `AppsChanged` carries the whole list; this
+    /// names the one that is new, which a client that started the creation
+    /// needs in order to land the user on it.
+    ///
+    /// Appended at the END, and that is load-bearing rather than tidy: UniFFI
+    /// encodes this enum POSITIONALLY, so a variant inserted anywhere above
+    /// renumbers every variant after it. A client still running the previous
+    /// bindings would then decode one event as another — silently, because
+    /// mobile has no protocol handshake to catch it. Verified after
+    /// regeneration by reading the ordinals out of the generated Kotlin.
+    AppCreated {
+        record: AppRecordDto,
     },
 }
 

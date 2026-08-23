@@ -1329,6 +1329,7 @@ mod tests {
             allowed_domains: vec![],
             capabilities: vec![],
             device_context: None,
+            surface: None,
         }
     }
 

@@ -693,7 +693,6 @@ fn host_owned_relative(relative: &Path) -> bool {
                     // a `tracing::warn!` — the model loops against a file it
                     // cannot change and is never told why.
                     | ".gitignore"
-                    | "components.json"
                     | "jsconfig.json"
                     | "lib/lingxi-provider.jsx"
                     | "styles/foundation.css"
@@ -1258,7 +1257,6 @@ mod tests {
         // the edit — the model loops against a file it cannot change.
         for name in [
             ".gitignore",
-            "components.json",
             "jsconfig.json",
             "lib/lingxi-provider.jsx",
             "styles/foundation.css",

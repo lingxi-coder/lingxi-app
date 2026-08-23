@@ -215,7 +215,10 @@ mod tests {
         );
         assert_eq!(sniff_image_media_type(b"GIF87a"), Some("image/gif"));
         assert_eq!(sniff_image_media_type(b"GIF89a"), Some("image/gif"));
-        assert_eq!(sniff_image_media_type(b"RIFF\0\0\0\0WEBP"), Some("image/webp"));
+        assert_eq!(
+            sniff_image_media_type(b"RIFF\0\0\0\0WEBP"),
+            Some("image/webp")
+        );
         // Rejections: too short, a truncated RIFF, an HTML login page.
         assert_eq!(sniff_image_media_type(b"GIF"), None);
         assert_eq!(sniff_image_media_type(b"RIFF\0\0\0\0WEB"), None);

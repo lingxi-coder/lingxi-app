@@ -508,8 +508,7 @@ mod tests {
     fn host_context_reaches_the_classifier_without_changing_the_base_verdict() {
         let input = json!({ "command": "cargo test -p permission" });
         let base = classify_tool_call("Bash", &input);
-        let with_ctx =
-            classify_tool_call_with_host_context("Bash", &input, &[host_ctx(true)]);
+        let with_ctx = classify_tool_call_with_host_context("Bash", &input, &[host_ctx(true)]);
         assert_eq!(with_ctx.verdict, base);
         assert_eq!(with_ctx.eligible_live_contexts, 1);
     }

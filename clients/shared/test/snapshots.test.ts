@@ -385,6 +385,10 @@ function validateAppCreateOrigin(v: unknown): void {
   assert.ok(['chat', 'library'].includes(v as string));
 }
 
+function validateAppSurface(v: unknown): void {
+  assert.ok(['dom', 'canvas'].includes(v as string));
+}
+
 function validateAppErrorCode(v: unknown): void {
   assert.ok(
     [
@@ -641,6 +645,7 @@ function validateAppEvent(v: unknown): void {
     case 'app_details_changed':
       validateAppDetails(o['details']);
       break;
+    case 'app_created':
     case 'app_record_changed':
       validateAppRecord(o['record']);
       break;
@@ -858,6 +863,10 @@ function validateCommand(name: string, v: unknown): void {
       if ('git_enabled' in o) assert.ok(isBool(o['git_enabled']));
       if ('workflow_model' in o) assert.ok(isString(o['workflow_model']));
       if ('conversation_id' in o) assert.ok(isString(o['conversation_id']));
+      if ('surface' in o) validateAppSurface(o['surface']);
+      break;
+    case 'propose_app_identity':
+      assert.ok(isString(o['request_id']) && isString(o['brief']));
       break;
     case 'start_app':
     case 'stop_app':
@@ -1049,6 +1058,10 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'conversation_controls_changed':
       validateConversationControls(o['controls']);
+      break;
+    case 'app_identity_proposed':
+      assert.ok(isString(o['request_id']) && isString(o['name']));
+      validateAppSurface(o['surface']);
       break;
     case 'provider_credential_status':
       assert.ok(
@@ -1309,7 +1322,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 47, `expected 47 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 48, `expected 48 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1336,7 +1349,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 62, `expected 62 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 63, `expected 63 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

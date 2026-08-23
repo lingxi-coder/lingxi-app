@@ -1043,10 +1043,24 @@ impl AppService {
                 storage::default_dependency_record(&record.id, now),
             );
             drop(apps);
+            // Ordered, not incidental: the list has to be current before the
+            // event that points into it, or a client that navigates on
+            // `AppCreated` looks up an id its catalog does not have yet.
+            //
+            // Emitted from the SERVICE rather than a handler so both creation
+            // paths carry it — the client command and the agent's
+            // `LocalAppCreate` tool. The tool path emits no client event of its
+            // own today, which is precisely why a client could not tell a
+            // finished agent-driven create from one still in progress.
             Self::spawn_emission(
                 observer,
                 order,
-                vec![AppEvent::AppsChanged { apps: records }],
+                vec![
+                    AppEvent::AppsChanged { apps: records },
+                    AppEvent::AppCreated {
+                        record: record.clone(),
+                    },
+                ],
             );
             Ok(record)
         });
@@ -1354,7 +1368,19 @@ mod tests {
         assert!(ids::is_valid_app_id(&record.id));
         assert_eq!(h.service.list_apps().await, vec![record.clone()]);
         let events = h.take_events().await;
-        assert!(matches!(&events[..], [AppEvent::AppsChanged { apps }] if apps.len() == 1));
+        // The ORDER is the contract, not an artefact: a client that navigates
+        // on `AppCreated` looks the id up in the catalog `AppsChanged` just
+        // delivered, so the list must already contain it.
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    AppEvent::AppsChanged { apps },
+                    AppEvent::AppCreated { record: created }
+                ] if apps.len() == 1 && created.id == apps[0].id
+            ),
+            "create emits the catalog, then names the new record: {events:?}"
+        );
 
         // Rebuild from disk alone: everything survives byte-identically.
         drop(h);
@@ -2320,7 +2346,12 @@ mod tests {
         assert_eq!(apps[0].id, committed_id);
         assert_eq!(
             observer.take(),
-            vec![AppEvent::AppsChanged { apps: apps.clone() }]
+            vec![
+                AppEvent::AppsChanged { apps: apps.clone() },
+                AppEvent::AppCreated {
+                    record: apps[0].clone()
+                }
+            ]
         );
 
         let reloaded = reload_service(service.as_ref()).await;

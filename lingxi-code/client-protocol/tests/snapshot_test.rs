@@ -66,7 +66,8 @@ use client_protocol::local_apps::{
     AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto, AppEventDto,
     AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
     AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
-    AppSessionKindDto, AppSessionRowDto, AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto,
+    AppSessionKindDto, AppSessionRowDto, AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto,
+    AppWorkflowStateDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::{
@@ -432,6 +433,17 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/conversation_controls_changed.json",
             ClientEvent::ConversationControlsChanged {
                 controls: canonical_conversation_controls(),
+            },
+        ),
+        (
+            "event/app_identity_proposed.json",
+            ClientEvent::AppIdentityProposed {
+                request_id: "2f1e0d9c-8b7a-4655-9443-2211ffee0099".to_string(),
+                name: "打砖块".to_string(),
+                // Non-default on purpose: `Dom` is the fallback the host emits
+                // when the model is unreachable, so a golden using it could not
+                // tell a real answer from a give-up.
+                surface: AppSurfaceDto::Canvas,
             },
         ),
         (
@@ -904,6 +916,13 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             },
         ),
         (
+            "command/propose_app_identity.json",
+            ClientCommand::ProposeAppIdentity {
+                request_id: "2f1e0d9c-8b7a-4655-9443-2211ffee0099".to_string(),
+                brief: "一个打砖块游戏".to_string(),
+            },
+        ),
+        (
             "command/run_slash_command.json",
             ClientCommand::RunSlashCommand {
                 raw: "/model opus".to_string(),
@@ -989,6 +1008,10 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 git_enabled: true,
                 workflow_model: Some("deepseek/deepseek-v4-flash".to_string()),
                 conversation_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
+                // Non-default on purpose: `Dom` is what an absent surface means,
+                // so a golden using it would freeze a payload in which the field
+                // never appears and could not catch a rename of it.
+                surface: Some(AppSurfaceDto::Canvas),
             },
         ),
         (

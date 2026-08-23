@@ -3497,6 +3497,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             transcript_path,
             prompt_id,
             permission_mode,
+            trace_context: telemetry::otel::capture_current_trace_context(),
             ..Default::default()
         };
         let pre_event = HookEvent::PreToolUse {
@@ -3717,6 +3718,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     &deferred_input,
                     &hook_name,
                     permission_mode,
+                    hook_ctx
+                        .trace_context
+                        .as_ref()
+                        .map(|context| context.traceparent.as_str()),
                 ))
                 .await;
                 // HOOK.1: any PreToolUse additionalContext, ordered AFTER the
@@ -7244,6 +7249,46 @@ mod hook_context_attachment_tests {
             serde_json::to_string(&v["attachment"]).unwrap(),
             format!(
                 r#"{{"type":"hook_deferred_tool","toolUseID":"{id}","toolName":"Echo","toolInput":{{}},"hookName":"session","hookEvent":"PreToolUse","permissionMode":"default"}}"#
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deferred_tool_persists_traceparent_when_current_trace_is_attached() {
+        let trace_context = telemetry::otel::SerializedTraceContext {
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+            tracestate: Some("foo=bar".into()),
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let orch = orch_with_pre_hook(
+            HookResponse {
+                decision: Some(hooks::response::HookDecision::Defer),
+                ..HookResponse::default()
+            },
+            Some(&path),
+        );
+        let uses = uses();
+        let id = uses[0].0.clone();
+        let (_results, _prevent, _injected, _mods) =
+            telemetry::otel::with_trace_context_future(
+                Some(&trace_context),
+                dispatch_tool_uses_tracked(&orch, &uses, None),
+            )
+            .await
+            .expect("dispatch");
+
+        let raw = std::fs::read_to_string(&path).expect("read jsonl");
+        let line = raw
+            .lines()
+            .find(|l| l.contains("hook_deferred_tool"))
+            .unwrap_or_else(|| panic!("no hook_deferred_tool attachment line in: {raw}"));
+        let v: serde_json::Value = serde_json::from_str(line).expect("json line");
+        assert_eq!(
+            serde_json::to_string(&v["attachment"]).unwrap(),
+            format!(
+                r#"{{"type":"hook_deferred_tool","toolUseID":"{id}","toolName":"Echo","toolInput":{{}},"hookName":"session","hookEvent":"PreToolUse","permissionMode":"default","traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}}"#
             )
         );
     }

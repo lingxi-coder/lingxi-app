@@ -200,7 +200,9 @@ fn is_interrupt_sentinel(m: &JsonlMessage) -> bool {
     if let Some(text) = c.as_str() {
         return text == INTERRUPTED_BY_USER || text == INTERRUPTED_FOR_TOOL_USE;
     }
-    let Some(arr) = c.as_array() else { return false };
+    let Some(arr) = c.as_array() else {
+        return false;
+    };
     if arr.len() != 1 {
         return false;
     }
@@ -248,7 +250,10 @@ fn is_all_tool_results(m: &JsonlMessage) -> bool {
     let Some(arr) = content(m).and_then(Value::as_array) else {
         return false;
     };
-    !arr.is_empty() && arr.iter().all(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+    !arr.is_empty()
+        && arr
+            .iter()
+            .all(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
 }
 
 /// Oracle `g8(e)` — an interrupt/abort user entry (string content starting with
@@ -261,7 +266,9 @@ fn is_interrupt_entry(m: &JsonlMessage) -> bool {
     if let Some(text) = c.as_str() {
         return INTERRUPT_PREFIXES.iter().any(|p| text.starts_with(p));
     }
-    let Some(arr) = c.as_array() else { return false };
+    let Some(arr) = c.as_array() else {
+        return false;
+    };
     !arr.is_empty()
         && arr.iter().all(|b| {
             let ty = b.get("type").and_then(Value::as_str);

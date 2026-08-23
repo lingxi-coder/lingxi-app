@@ -37,11 +37,38 @@ const DEEP_RESEARCH: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
 const LOCAL_APP_BUILD: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
     name: "local-app-build",
     description: "Adaptively design, generate, build, and verify a confirmed local app.",
-    script: include_str!("local_app_build_workflow.js"),
+    // Concatenated, not imported: the runtime evaluates one classic script and
+    // requires `export const meta` to be its FIRST statement, so the shape file
+    // has to come first and the shared driver after it.
+    script: concat!(
+        include_str!("local_app_build_workflow.js"),
+        include_str!("local_app_workflow_core.js"),
+    ),
     manual_only: false,
 };
 
-const BUILTINS: &[BuiltinWorkflowDescriptor] = &[DEEP_RESEARCH, LOCAL_APP_BUILD];
+/// The drawn-surface sibling of [`LOCAL_APP_BUILD`].
+///
+/// A separate workflow rather than a flag, because almost everything the model
+/// is told differs: a drawn app has no screen hierarchy to design, its evidence
+/// is a captured frame rather than a DOM snapshot, and `data_roundtrip` — the
+/// DOM workflow's only hard gate — answers `not_applicable` for the entire class
+/// and therefore passes it unobserved.
+///
+/// The two share `local_app_workflow_core.js` verbatim, so the repair loop and
+/// the terminal throws have one derivation, not two that drift.
+const LOCAL_CANVAS_BUILD: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
+    name: "local-canvas-build",
+    description: "Adaptively design, generate, build, and verify a confirmed local app whose interface is a drawn surface.",
+    script: concat!(
+        include_str!("local_app_canvas_workflow.js"),
+        include_str!("local_app_workflow_core.js"),
+    ),
+    manual_only: false,
+};
+
+const BUILTINS: &[BuiltinWorkflowDescriptor] =
+    &[DEEP_RESEARCH, LOCAL_APP_BUILD, LOCAL_CANVAS_BUILD];
 
 impl BuiltinWorkflowRegistry {
     /// Return an immutable built-in by exact name.
@@ -164,6 +191,20 @@ mod tests {
             // locked set" and never enumerates it, so `three` has to be named
             // here or every 3D request falls back to hand-rolled 2D.
             "three@0.185.1 is in the locked set",
+        // The UI kit, and the one import style that survives the pinned iife
+        // build. A generated app that reaches for `@ionic/core/components`
+        // fails at BUNDLE time with a code-splitting error that names neither
+        // Ionic nor this contract.
+        "@ionic/react barrel",
+        "NEVER from @ionic/core/components",
+        // Without this the outlet has nothing to animate and the platform back
+        // gesture never attaches -- a silent loss of the thing Ionic was chosen
+        // for.
+        "IonPage as its ROOT element",
+        // Two scaffolds, two entry points. The old contract named only
+        // home-screen.jsx, which does not exist in a canvas workspace.
+        "app/screens/game-screen.jsx for a drawn surface",
+        "src/game/frame-loop.js",
             "own the frame loop yourself with requestAnimationFrame",
             "maxRepairRounds",
             "conditionally detect ImageGen",
@@ -1040,11 +1081,208 @@ mod tests {
         args.to_string()
     }
 
+    /// A canvas verification that is CLEAN by the DOM workflow's rules.
+    ///
+    /// `data_roundtrip: not_applicable` is the normal answer for a drawn app —
+    /// which is exactly why it cannot be the gate.
+    fn canvas_verification(render_check: &str, motion_check: &str) -> String {
+        format!(
+            r#"{{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":false,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{{"status":"not_applicable","collections":[],"evidence":"no writable collections"}},"render_check":{render_check},"motion_check":{motion_check},"summary":"verified"}}"#
+        )
+    }
+
+    const CANVAS_RENDER_OK: &str = r#"{"status":"passed","canvas_surfaces":1,"frames_captured":3,"interactions_driven":["key ArrowLeft","pointer 120,300"],"evidence":"a magenta paddle on a dark field with seven rows of bricks above it"}"#;
+    const CANVAS_MOTION_OK: &str = r#"{"status":"passed","frames_compared":2,"difference":"the ball moved from the upper left toward the paddle between the two captures"}"#;
+
+    /// The canvas workflow must be reachable by name and pin the contract that
+    /// makes a drawn surface buildable at all.
+    #[test]
+    fn local_canvas_build_is_model_invocable_and_pins_its_contract() {
+        let descriptor = BUILTIN_WORKFLOWS
+            .get("local-canvas-build")
+            .expect("the drawn-surface workflow is a built-in");
+        assert!(
+            !descriptor.manual_only,
+            "the skill invokes it by name, so it cannot be manual-only"
+        );
+        for anchor in [
+            // The scaffold's entry point and the three things the frame-loop
+            // helper already solves. A generated app that re-derives them looks
+            // right in a desktop preview and fails on a device.
+            "app/screens/game-screen.jsx",
+            "createFrameLoop in src/game/frame-loop.js",
+            "device pixel ratio",
+            "clamps the first frame after a resume",
+            // Per-frame state in the store is the difference between a game and
+            // a slideshow.
+            "Keep per-frame simulation state in a ref",
+            // The gate that replaces `data_roundtrip` for this shape.
+            "There is no not_applicable: this app draws its whole interface",
+            "only a difference proves the loop is running",
+            // Automation drives discrete keys; a drag-only app cannot be
+            // verified through the host path at all.
+            "cannot be driven by the host automation path",
+            // Shared with the DOM shape, and equally load-bearing here.
+            "NEVER from @ionic/core/components",
+            "three@0.185.1 is in the locked set",
+        ] {
+            assert!(
+                descriptor.script.contains(anchor),
+                "missing canvas contract anchor: {anchor}"
+            );
+        }
+        // The shared core really is shared, not copied.
+        assert!(descriptor
+            .script
+            .contains("Shared driver for every local-app build workflow"));
+        assert_eq!(
+            descriptor.script.matches("await runAgent(").count(),
+            descriptor.script.matches("throwOnError: true").count(),
+            "every agent stage must fail loudly rather than return null"
+        );
+    }
+
+    /// `fast` is the one strategy that skips Design, and a drawn surface keeps
+    /// almost all of its difficulty there. The skill advises against it; this
+    /// refuses it, because the complexity rubric scores a single-surface app at
+    /// zero and lands on `fast` by arithmetic.
+    #[test]
+    fn the_canvas_workflow_refuses_the_strategy_that_skips_design() {
+        let run = drive_local_workflow(
+            "local-canvas-build",
+            local_app_args(Some("fast"), None, None, None),
+            |prompts, _options| {
+                panic!("no agent may run before the strategy is rejected: {prompts:?}")
+            },
+        );
+        let error = run.outcome.expect_err("fast must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("does not accept the fast strategy"),
+            "the refusal must name the strategy: {error}"
+        );
+        assert!(run.prompts.is_empty());
+    }
+
+    /// A frozen surface renders a perfectly good first frame. Without the motion
+    /// gate a game whose loop never started passes verification on a still
+    /// image — the exact failure `render_check` alone cannot see.
+    #[test]
+    fn a_missing_or_failed_motion_check_blocks_and_buys_a_repair_round() {
+        let cases = [
+            (
+                canvas_verification(
+                    CANVAS_RENDER_OK,
+                    r#"{"status":"failed","frames_compared":2,"difference":"the two captures are identical"}"#,
+                ),
+                "motion check failed",
+            ),
+            (
+                canvas_verification(
+                    CANVAS_RENDER_OK,
+                    r#"{"status":"passed","frames_compared":1,"difference":"looked fine"}"#,
+                ),
+                "compared fewer than two frames",
+            ),
+        ];
+        for (verification, expected) in cases {
+            let run = drive_local_workflow(
+                "local-canvas-build",
+                local_app_args(Some("balanced"), None, None, None),
+                move |prompts, _options| {
+                    prompts
+                        .iter()
+                        .map(|prompt| {
+                            if prompt.contains("Act as the local app design lead") {
+                                r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"loop":"ball and paddle","phases":["menu","playing","over"],"inputs":["left: pointer drag / ArrowLeft"],"end_conditions":"ball is lost","summary":"brick breaker"}"#.to_string()
+                            } else if prompt.contains("Generate the complete drawn-surface implementation")
+                                || prompt.contains("Repair the findings")
+                            {
+                                r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#.to_string()
+                            } else if prompt.contains("Invoke $frontend-qa") {
+                                verification.clone()
+                            } else {
+                                panic!("unexpected prompt: {prompt}");
+                            }
+                        })
+                        .collect()
+                },
+            );
+            let error = run
+                .outcome
+                .expect_err("a surface that never moved must not pass");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} in: {error}"
+            );
+            // The COUNT, not just the message: a motion finding is a source
+            // defect a repair round can fix, so it has to buy one exactly like a
+            // render finding does. `balanced` runs design, so the sequence is
+            // design, generate-build, verify, repair-build, verify = 5.
+            assert_eq!(
+                run.prompts.len(),
+                5,
+                "a motion finding must reach a repair round before the build fails; prompts={:#?}",
+                run.prompts
+            );
+        }
+    }
+
+    /// The happy path, so the gates above are shown to be refusable rather than
+    /// unconditional.
+    #[test]
+    fn a_canvas_app_that_rendered_and_moved_completes() {
+        let run = drive_local_workflow(
+            "local-canvas-build",
+            local_app_args(Some("balanced"), None, None, None),
+            |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Act as the local app design lead") {
+                            r#"{"targets":[{"os":"ios","form_factor":"iphone"}],"loop":"ball and paddle","phases":["menu","playing","over"],"inputs":["left: pointer drag / ArrowLeft"],"end_conditions":"ball is lost","summary":"brick breaker"}"#.to_string()
+                        } else if prompt.contains("Generate the complete drawn-surface implementation") {
+                            r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#.to_string()
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            canvas_verification(CANVAS_RENDER_OK, CANVAS_MOTION_OK)
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        );
+        let outcome = run.outcome.expect("a rendered, moving app completes");
+        let value: Value =
+            serde_json::from_str(outcome.result.as_deref().expect("workflow result"))
+                .expect("json");
+        assert_eq!(value["ok"], serde_json::json!(true));
+        assert_eq!(value["preview_url"], serde_json::json!("http://preview/ok"));
+        assert_eq!(value["repair_rounds"], serde_json::json!(0));
+        // design, generate-build, verify.
+        assert_eq!(run.prompts.len(), 3, "prompts={:#?}", run.prompts);
+    }
+
     fn drive_local_app_build(
         args: String,
         reply: impl Fn(&[String], &[String]) -> Vec<String> + 'static,
     ) -> LocalAppHarness {
-        let descriptor = BUILTIN_WORKFLOWS.get("local-app-build").expect("built-in");
+        drive_local_workflow("local-app-build", args, reply)
+    }
+
+    /// Same harness, parameterized by workflow name.
+    ///
+    /// The two local-app workflows share `local_app_workflow_core.js` verbatim,
+    /// so a driver that can only reach one of them would leave the shared repair
+    /// loop exercised through a single shape — and the canvas gates,
+    /// which live in that same loop, untested.
+    fn drive_local_workflow(
+        name: &str,
+        args: String,
+        reply: impl Fn(&[String], &[String]) -> Vec<String> + 'static,
+    ) -> LocalAppHarness {
+        let descriptor = BUILTIN_WORKFLOWS.get(name).expect("built-in");
         let prompts_seen = Rc::new(RefCell::new(Vec::<String>::new()));
         let captured_prompts = prompts_seen.clone();
         let phases_seen = Rc::new(RefCell::new(Vec::<String>::new()));

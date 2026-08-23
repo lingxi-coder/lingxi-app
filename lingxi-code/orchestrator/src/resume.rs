@@ -15,8 +15,13 @@ use crate::conversation::{ConversationOrchestrator, NoStreamingApiClient, Orches
 use crate::test_support::{HookExecutor, PermissionGate};
 use engine::session::ActiveGoalState;
 use engine::SessionState;
-use protocol::{ContentBlock, ConversationMessage, MessageId, SessionId};
-use session::jsonl::{load_session, JsonlMessage, JsonlWriter, LoaderError};
+use protocol::{ContentBlock, ConversationMessage, MessageId, SessionId, ToolUseId};
+use serde_json::Value;
+use session::jsonl::{
+    load_session_across_worktrees, load_session_entries_across_worktrees, JsonlMessage,
+    JsonlWriter, LoaderError,
+};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use telemetry::tengu::session::RESUMED;
@@ -31,6 +36,9 @@ pub enum ResumeError {
     /// Bubbled up from [`load_session`].
     #[error(transparent)]
     Loader(#[from] LoaderError),
+    /// Deferred-tool replay failed after the transcript loaded.
+    #[error("deferred replay: {0}")]
+    DeferredReplay(String),
 }
 
 /// Result of [`replay_session_state`]: the rebuilt session, the UUID of the
@@ -111,6 +119,7 @@ impl ReplayedSession {
             turn_id: tracking.turn_id.clone(),
             consecutive_failures: tracking.consecutive_failures,
             consecutive_rapid_refills: tracking.consecutive_rapid_refills,
+            deferred_tools: self.runtime_metadata.deferred_tools.clone(),
         }
     }
 }
@@ -130,6 +139,8 @@ pub struct ResumeRuntimeMetadata {
     pub cumulative_dropped_tokens: u64,
     /// Reconstructed rapid-refill/autocompact tracking state.
     pub compaction_tracking: compaction::AutoCompactTrackingState,
+    /// Deferred hook tools that were persisted but never produced a result.
+    pub deferred_tools: Vec<traits::DeferredToolReplay>,
 }
 
 /// Load + replay a session by UUID. Emits a single [`RESUMED`]
@@ -145,13 +156,17 @@ pub async fn replay_session_state(
     fs: Arc<dyn FileSystem>,
 ) -> Result<ReplayedSession, ResumeError> {
     let sid_str = session_id.to_string();
-    let transcript_path = session::jsonl::session_path(lingxi_home, cwd, &sid_str);
-    let messages = load_session(lingxi_home, cwd, session_id, fs.clone()).await?;
+    let transcript_path =
+        session::jsonl::resolve_session_path_across_worktrees(lingxi_home, cwd, session_id).await?;
+    let messages = load_session_across_worktrees(lingxi_home, cwd, session_id, fs.clone()).await?;
+    let transcript_entries =
+        load_session_entries_across_worktrees(lingxi_home, cwd, session_id, fs.clone()).await?;
     let (state, last_uuid, mut runtime_metadata) = build_state_from_jsonl(session_id, &messages);
     let (agent_type, agent_definition) =
         session::jsonl::read_agent_resume_state(&transcript_path, fs, &sid_str).await;
     runtime_metadata.main_thread_agent_type = agent_type;
     runtime_metadata.main_thread_agent_definition = agent_definition;
+    runtime_metadata.deferred_tools = deferred_tool_replays_from_messages(&transcript_entries);
     // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
     // completed pair — those names have 0 hits in the 2.1.195 binary).
     tracing::info!(
@@ -475,6 +490,200 @@ fn hook_attachment_message_for_api(
     ))
 }
 
+fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
+    message
+        .message
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|blocks| blocks.iter())
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .filter_map(|block| block.get("tool_use_id").and_then(Value::as_str))
+}
+
+/// Extract all persisted deferred hook tools that have no later tool result.
+#[must_use]
+pub fn deferred_tool_replays_from_messages(
+    messages: &[JsonlMessage],
+) -> Vec<traits::DeferredToolReplay> {
+    let mut resolved: HashSet<&str> = HashSet::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut deferred = Vec::new();
+    for message in messages.iter().rev() {
+        resolved.extend(tool_result_ids(message));
+        if message.message_type != "attachment" {
+            continue;
+        }
+        let Some(attachment) = message.extra.get("attachment") else {
+            continue;
+        };
+        if attachment.get("type").and_then(Value::as_str) != Some("hook_deferred_tool") {
+            continue;
+        }
+        let Some(tool_use_id) = attachment.get("toolUseID").and_then(Value::as_str) else {
+            continue;
+        };
+        if resolved.contains(tool_use_id) {
+            continue;
+        }
+        // One replay per tool_use_id, not one per attachment. A replay whose
+        // hook defers the tool AGAIN writes a fresh `hook_deferred_tool`
+        // attachment while nothing resolving is persisted, so a transcript can
+        // hold several unresolved attachments for the same id. Without this the
+        // next resume dispatches that tool once per attachment — the side
+        // effects (a Bash command, a Write) run twice, and the duplicate
+        // `tool_result` is then silently discarded downstream, hiding it. The
+        // walk is newest-first, so the first attachment seen is the live one.
+        if !seen.insert(tool_use_id) {
+            continue;
+        }
+        let Some(tool_name) = attachment.get("toolName").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(tool_input) = attachment.get("toolInput") else {
+            continue;
+        };
+        deferred.push(traits::DeferredToolReplay {
+            tool_use_id: tool_use_id.to_string(),
+            tool_name: tool_name.to_string(),
+            tool_input: tool_input.clone(),
+            permission_mode: attachment
+                .get("permissionMode")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            traceparent: attachment
+                .get("traceparent")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    }
+    deferred.reverse();
+    deferred
+}
+
+/// What one replayed tool contributes to the single batched result message.
+struct DeferredReplayOutcome {
+    tool_use_id: ToolUseId,
+    tool_results: Vec<ContentBlock>,
+    injected_messages: Vec<(ConversationMessage, ToolUseId)>,
+}
+
+async fn replay_deferred_tool_after_resume(
+    orch: &ConversationOrchestrator,
+    deferred: traits::DeferredToolReplay,
+) -> Result<DeferredReplayOutcome, crate::OrchestratorError> {
+    let tool_use_id = ToolUseId::from(deferred.tool_use_id);
+    let trace_context = deferred.traceparent.as_deref().map(|traceparent| {
+        telemetry::otel::SerializedTraceContext {
+            traceparent: traceparent.to_string(),
+            tracestate: None,
+        }
+    });
+    let live_permission_mode = {
+        let plan_mode = orch.session.lock().await.plan_mode;
+        if plan_mode {
+            "plan".to_string()
+        } else {
+            orch.permission_mode()
+                .unwrap_or_else(|| "default".to_string())
+        }
+    };
+    if deferred
+        .permission_mode
+        .as_deref()
+        .is_some_and(|stored| stored != live_permission_mode.as_str())
+    {
+        tracing::warn!(
+            tool_use_id = %tool_use_id,
+            stored_permission_mode = deferred.permission_mode.as_deref().unwrap_or("default"),
+            live_permission_mode = %live_permission_mode,
+            "resuming deferred tool under a different permission mode; replaying with the live mode"
+        );
+    }
+
+    let tool_uses = vec![(
+        tool_use_id.clone(),
+        deferred.tool_name,
+        deferred.tool_input,
+        None,
+    )];
+    let (tool_results, _prevent, injected_messages, context_modifiers) =
+        telemetry::otel::with_trace_context_future(
+            trace_context.as_ref(),
+            crate::turn_loop::dispatch_tool_uses_tracked(orch, &tool_uses, None),
+        )
+        .await?;
+
+    // Applied per tool, before the next one is dispatched: a context modifier
+    // is about the model's context, not about message shape, and the following
+    // replay has to see it.
+    crate::turn_loop::apply_model_context_modifiers(orch, context_modifiers).await;
+    Ok(DeferredReplayOutcome {
+        tool_use_id,
+        tool_results,
+        injected_messages,
+    })
+}
+
+/// Replay all persisted deferred hook tools after a cold or in-place resume.
+pub async fn replay_deferred_tools_after_resume(
+    orch: &ConversationOrchestrator,
+    deferred_tools: Vec<traits::DeferredToolReplay>,
+) -> Result<(), crate::OrchestratorError> {
+    // ONE user message carrying EVERY replayed result, exactly as the normal
+    // dispatch path batches a turn's results. Emitting one message per tool
+    // would be a wire-shape bug, not a cosmetic one: `ensure_tool_result_pairing`
+    // only inspects the single message that FOLLOWS an assistant turn, so with
+    // two deferred tools in one assistant message it sees only the first
+    // result, synthesizes `[Tool result missing due to internal error]` for the
+    // second, and then strips the trailing user message as an orphan — the
+    // second tool's real output never reaches the model.
+    let mut tool_use_ids: Vec<ToolUseId> = Vec::new();
+    let mut tool_results: Vec<ContentBlock> = Vec::new();
+    let mut injected_messages: Vec<(ConversationMessage, ToolUseId)> = Vec::new();
+    for deferred in deferred_tools {
+        let outcome = replay_deferred_tool_after_resume(orch, deferred).await?;
+        if outcome.tool_results.is_empty() {
+            continue;
+        }
+        tool_use_ids.push(outcome.tool_use_id);
+        tool_results.extend(outcome.tool_results);
+        injected_messages.extend(outcome.injected_messages);
+    }
+    if tool_results.is_empty() {
+        return Ok(());
+    }
+
+    let tool_results_msg = ConversationMessage::User {
+        id: MessageId::new(),
+        content: tool_results,
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+    };
+    {
+        let mut session = orch.session.lock().await;
+        session.history.push(tool_results_msg.clone());
+        for (message, source_id) in &injected_messages {
+            session.history.push(message.clone());
+            session
+                .injected_message_sources
+                .insert(message.id(), source_id.clone());
+        }
+    }
+    orch.persist_message_to_jsonl(&tool_results_msg).await;
+    for tool_use_id in &tool_use_ids {
+        orch.flush_hook_attachments(tool_use_id).await;
+    }
+    for (message, _source_id) in &injected_messages {
+        if message.is_meta() {
+            continue;
+        }
+        orch.persist_message_to_jsonl(message).await;
+    }
+    Ok(())
+}
+
 fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalState>> {
     if message.message_type == "attachment" {
         let attachment = message.extra.get("attachment")?;
@@ -619,6 +828,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
         main_thread_agent_definition: None,
         cumulative_dropped_tokens,
         compaction_tracking: tracking,
+        deferred_tools: Vec::new(),
     }
 }
 
@@ -695,7 +905,7 @@ impl ConversationOrchestrator {
         jsonl_writer: Option<Arc<JsonlWriter>>,
     ) -> Result<Self, ResumeError> {
         config.resume_session_id = Some(session_id);
-        let replayed = replay_session_state(&lingxi_home, &cwd_str, session_id, fs).await?;
+        let replayed = replay_session_state(&lingxi_home, &cwd_str, session_id, fs.clone()).await?;
         let effort_was_explicit = config.effort.is_some();
         if config.effort.is_none() {
             config.effort.clone_from(&replayed.runtime_metadata.effort);
@@ -727,7 +937,9 @@ impl ConversationOrchestrator {
         // replayed values. Both fields are `pub(crate)` so this is allowed
         // from a sibling module in the same crate.
         orch.session = Arc::new(Mutex::new(replayed.state));
-        orch.last_jsonl_uuid = Mutex::new(replayed.last_message_uuid.map(|u| u.to_string()));
+        orch.last_jsonl_uuid = Arc::new(Mutex::new(
+            replayed.last_message_uuid.map(|u| u.to_string()),
+        ));
         orch.compaction_cumulative_dropped_tokens.store(
             replayed.runtime_metadata.cumulative_dropped_tokens,
             std::sync::atomic::Ordering::Relaxed,
@@ -742,6 +954,14 @@ impl ConversationOrchestrator {
             orch.jsonl_writer = Some(writer);
         }
         orch.sync_active_goal_stop_hook_for_current_state().await;
+        if !replayed.runtime_metadata.deferred_tools.is_empty() {
+            replay_deferred_tools_after_resume(
+                &orch,
+                replayed.runtime_metadata.deferred_tools.clone(),
+            )
+            .await
+            .map_err(|error| ResumeError::DeferredReplay(error.to_string()))?;
+        }
         Ok(orch)
     }
 }

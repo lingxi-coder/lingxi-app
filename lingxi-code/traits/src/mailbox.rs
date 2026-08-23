@@ -82,6 +82,12 @@ pub trait MailboxRouterHandle: Send + Sync {
             "broadcast routing is not available on this host".to_string(),
         ))
     }
+
+    /// Snapshot the currently named recipients addressable through this router.
+    /// Default empty so non-coordinator hosts do not need to implement it.
+    async fn named_recipients(&self) -> Vec<(String, protocol::AgentId)> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

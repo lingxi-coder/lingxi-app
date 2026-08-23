@@ -300,6 +300,37 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertTrue(source.contains("formFactor: 'iphone'"))
     }
 
+    /// Ionic keeps a component's interactive internals in a SHADOW ROOT, which
+    /// `document.querySelectorAll` does not cross. Before this walk an app built
+    /// from `ion-*` components reported `elements: []` — indistinguishable from
+    /// a blank screen and from a crash, which is the very ambiguity
+    /// `canvasCount` exists to resolve for a drawn surface.
+    ///
+    /// The Android twin is `LocalAppWebViewTest.ui inspection crosses shadow
+    /// roots and resolves the native control`; the two scripts are near-copies,
+    /// so both are pinned or neither is.
+    func testUIInspectionCrossesShadowRootsAndResolvesTheNativeControl() {
+        let source = LocalAppWebViewController.executionSource(requestJSON: "{}")
+        for token in [
+            "const deepQuery = (selector, limit)",
+            "if (host.shadowRoot) visit(host.shadowRoot, depth + 1)",
+            // Both bounds, or a nested/looping page hangs the tool call.
+            "depth > 8 || found.length >= limit",
+            "const candidates = () => deepQuery(SELECTOR, 400)",
+            // A shadow root is its own id scope; `getElementById` cannot see in.
+            "|| deepQuery('[id=\"' +",
+            // `ion-input` holds the real <input> inside its shadow root.
+            "const nativeControl = element =>",
+            "element.shadowRoot.querySelector('input,textarea,select')",
+        ] {
+            XCTAssertTrue(source.contains(token), "missing shadow-DOM contract: \(token)")
+        }
+        XCTAssertFalse(
+            source.contains("Array.from(document.querySelectorAll('button,a[href]"),
+            "the light-DOM-only walk must be gone, not merely supplemented"
+        )
+    }
+
     /// The conversation-scope cwd (`RootView.makeSource(scope: .localApp(id))`)
     /// and the code browser resolve the SAME validated workspace directory —
     /// one derivation, `LocalAppWorkspacePath`, no second copy to diverge.
@@ -1314,84 +1345,329 @@ final class LocalAppsStoreTests: XCTestCase {
     }
 
     #if canImport(engine_mobileFFI)
-        func testCreateAppSubmitsSelectedWorkflowModelAsStructuredData() async throws {
+        /// The create sheet creates the app OUTRIGHT, carrying the name and the
+        /// surface the user confirmed.
+        ///
+        /// Both are fixed at creation — a surface is immutable once scaffolded
+        /// and apps have no rename — so neither may be left to a value the user
+        /// never saw, and neither may travel through the model.
+        func testCreateSendsCreateAppWithTheConfirmedNameAndSurface() async throws {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            let didSubmit = await store.createApp(
-                brief: "一个记事本",
-                modelOverride: "  deepseek/deepseek-v4-flash  "
-            )
-            XCTAssertTrue(didSubmit)
+            let created = await store.createApp(
+                brief: "一个打砖块游戏",
+                name: "打砖块",
+                surface: .canvas,
+                gitEnabled: false,
+                modelOverride: "anthropic/claude-sonnet-4-5")
 
-            let command = try XCTUnwrap(submitted.last)
-            guard case let .createApp(
-                name,
-                origin,
-                brief,
-                gitEnabled,
-                workflowModel,
-                conversationId
-            ) = command else {
-                return XCTFail("expected CreateApp, got \(command)")
-            }
-            XCTAssertEqual(name, "")
+            XCTAssertTrue(created)
+            guard case let .createApp(name, origin, brief, gitEnabled, workflowModel,
+                                      conversationId, surface) =
+                try XCTUnwrap(submitted.first)
+            else { return XCTFail("expected CreateApp, got \(submitted)") }
+            XCTAssertEqual(name, "打砖块")
             XCTAssertEqual(origin, .library)
-            XCTAssertEqual(brief, "一个记事本")
-            XCTAssertTrue(gitEnabled)
-            XCTAssertEqual(workflowModel, "deepseek/deepseek-v4-flash")
-            XCTAssertNil(conversationId)
+            XCTAssertEqual(brief, "一个打砖块游戏")
+            XCTAssertFalse(gitEnabled)
+            XCTAssertEqual(workflowModel, "anthropic/claude-sonnet-4-5")
+            XCTAssertNil(
+                conversationId,
+                "a library create binds no conversation — none exists yet")
+            XCTAssertEqual(
+                surface, .canvas,
+                "the user's confirmed surface, not the routed default")
         }
 
-        func testCreateAppWithWidgetArmsThePostCreationSetupGuide() async throws {
+        /// `ProposeAppIdentity` is a REAL command, and its answer is routed back
+        /// to the ONE sheet that asked.
+        func testProposeIdentityAsksTheHostAndAdoptsTheAnswer() async throws {
             let store = LocalAppsStore()
-            store.configure { _ in }
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
 
-            let submitted = await store.createApp(brief: "一个记事本", addWidget: true)
-            XCTAssertTrue(submitted)
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
-            ]))
-
-            let setup = try XCTUnwrap(store.pendingWidgetSetup)
-            XCTAssertEqual(setup.appID, "notes")
-            XCTAssertEqual(setup.appName, "记事本")
-
-            store.completeWidgetSetup()
-            XCTAssertNil(store.pendingWidgetSetup)
-        }
-
-        func testCreateAppWithoutWidgetDoesNotArmSetupGuide() async throws {
-            let store = LocalAppsStore()
-            store.configure { _ in }
-
-            let submitted = await store.createApp(brief: "一个记事本")
-            XCTAssertTrue(submitted)
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
-            ]))
-
-            XCTAssertNil(store.pendingWidgetSetup)
-        }
-
-        func testCreateDoesNotSurfaceAMissingAppGroupAsAnError() async throws {
-            let store = LocalAppsStore()
-            store.configure { _ in }
-            store.widgetSnapshotPublisher = { _ in
-                LocalAppWidgetSnapshotStore.SnapshotError.containerUnavailable
+            async let proposal = store.proposeIdentity(brief: "一个打砖块游戏")
+            // Reply on the request id the store actually sent. Echoing a
+            // fabricated one would let this pass against a store that never
+            // correlates at all.
+            var requestID: String?
+            for _ in 0..<200 where requestID == nil {
+                if case let .proposeAppIdentity(id, _) = submitted.first { requestID = id }
+                try await Task.sleep(for: .milliseconds(5))
             }
+            let id = try XCTUnwrap(requestID, "the store must send ProposeAppIdentity")
+            guard case let .proposeAppIdentity(_, brief) = try XCTUnwrap(submitted.first)
+            else { return XCTFail("expected ProposeAppIdentity, got \(submitted)") }
+            XCTAssertEqual(brief, "一个打砖块游戏")
+            store.handle(event: .appIdentityProposed(
+                requestId: id, name: "打砖块", surface: .canvas))
 
-            let submitted = await store.createApp(brief: "一个记事本")
-            XCTAssertTrue(submitted)
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
-            ]))
-
-            XCTAssertNil(store.errorMessage)
-            XCTAssertEqual(store.createdAppSession?.appID, "notes")
+            let answer = await proposal
+            XCTAssertEqual(answer.name, "打砖块")
+            XCTAssertEqual(answer.surface, .canvas)
         }
 
+        /// An answer for a DIFFERENT request must not resolve this one.
+        ///
+        /// A sheet that was retyped and re-submitted has a stale proposal in
+        /// flight; adopting it would name the app after the abandoned brief.
+        /// Written so a store that ignored `request_id` entirely FAILS: the
+        /// wrong-id answer is delivered first, and only the matching one may
+        /// resolve the call.
+        func testProposeIdentityIgnoresAnAnswerForAnotherRequest() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            let resolved = Resolved()
+            async let proposal: LocalAppsStore.AppIdentityProposal = {
+                let answer = await store.proposeIdentity(brief: "一个记事本")
+                await resolved.mark()
+                return answer
+            }()
+
+            var requestID: String?
+            for _ in 0..<200 where requestID == nil {
+                if case let .proposeAppIdentity(id, _) = submitted.first { requestID = id }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let id = try XCTUnwrap(requestID)
+
+            store.handle(event: .appIdentityProposed(
+                requestId: "somebody-elses", name: "别的应用", surface: .canvas))
+            try await Task.sleep(for: .milliseconds(50))
+            let resolvedEarly = await resolved.value
+            XCTAssertFalse(
+                resolvedEarly,
+                "an answer for another request must not resolve this call")
+
+            store.handle(event: .appIdentityProposed(
+                requestId: id, name: "记事本", surface: .dom))
+            let answer = await proposal
+            XCTAssertEqual(answer.name, "记事本")
+            XCTAssertEqual(answer.surface, .dom)
+        }
+
+        /// Tiny actor so the test can observe "has it resolved yet" without a
+        /// data race on a plain `var`.
+        private actor Resolved {
+            private(set) var value = false
+            func mark() { value = true }
+        }
+
+        /// An engine that never answers must not wedge the sheet: the fields
+        /// are editable, so the derived default is a usable starting point.
+        func testProposeIdentityFallsBackWhenTheEngineIsNotConnected() async throws {
+            let store = LocalAppsStore()
+            // Deliberately NOT configured: `send` fails closed.
+
+            let answer = await store.proposeIdentity(brief: "  一个记事本  ")
+
+            XCTAssertEqual(
+                answer.name, "一个记事本",
+                "the same first-24-characters derivation AppService applies")
+            XCTAssertEqual(answer.surface, .dom)
+        }
+
+        /// The fallback truncates by CHARACTERS. A byte cut would split a CJK
+        /// codepoint and produce invalid UTF-8.
+        func testFallbackNameTruncatesByCharacters() {
+            let long = String(repeating: "记", count: 40)
+            XCTAssertEqual(
+                LocalAppsStore.fallbackName(brief: long).count, 24)
+        }
+
+        /// `AppCreated` names the record the engine just committed.
+        ///
+        /// The previous version inferred it by diffing the catalog against a
+        /// pre-create snapshot — an inference the deferred flow invalidates,
+        /// because minutes pass and the user can create something else.
+        func testAppCreatedLandsTheNewAppAndArmsTheWidget() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            _ = await store.createApp(brief: "一个带桌面入口的记事本", name: "", surface: .dom, addWidget: true)
+            let record = app(id: "notes", name: "记事本", brief: "一个带桌面入口的记事本")
+            store.handle(event: .appsChanged(apps: [record]))
+            store.handle(event: .appEvent(event: .appCreated(record: record)))
+
+            XCTAssertEqual(store.consumeCreatedAppID(), "notes")
+            XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
+        }
+
+        /// The hand-off into the app's own conversation arms on `AppCreated`
+        /// and is completed by the pin that arrives afterwards.
+        ///
+        /// `AppCreated` is emitted inside the create transaction and the init
+        /// session is minted AFTER it, so the record on the create event never
+        /// carries one. Gating the landing on it made the hand-off unreachable
+        /// — the agent stayed in a conversation rooted outside the app and
+        /// every build failed on the workspace.
+        func testTheLandingArmsOnAppCreatedAndTakesThePinFromTheRecordUpdate()
+            async throws
+        {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            _ = await store.createApp(
+                brief: "一个记事本", name: "记事本", surface: .dom,
+                modelOverride: "anthropic/claude-sonnet-4-5")
+            let created = app(id: "notes", name: "记事本", brief: "一个记事本")
+            store.handle(event: .appsChanged(apps: [created]))
+            store.handle(event: .appEvent(event: .appCreated(record: created)))
+
+            XCTAssertNil(
+                store.createdAppLanding,
+                "`AppCreated` never carries the pin, so publishing the landing "
+                    + "here would make RootView start a FRESH conversation and "
+                    + "orphan the session the engine is about to mint")
+
+            store.handle(event: .appEvent(event: .appRecordChanged(
+                record: appRecord(
+                    id: "notes", name: "记事本", brief: "简介",
+                    initSessionId: "session-9"))))
+
+            let landing = try XCTUnwrap(store.createdAppLanding)
+            XCTAssertEqual(landing.appID, "notes")
+            XCTAssertEqual(landing.initSessionID, "session-9")
+            XCTAssertEqual(
+                landing.modelOverride, "anthropic/claude-sonnet-4-5",
+                "the sheet's model choice rides the landing — the record does "
+                    + "not echo it back")
+            XCTAssertEqual(store.consumeCreatedAppLanding()?.appID, "notes")
+            XCTAssertNil(store.consumeCreatedAppLanding(), "the landing is one-shot")
+        }
+
+        /// A create whose best-effort init-session mint FAILED must still land.
+        ///
+        /// The engine announces the record either way. Landing on a fresh
+        /// conversation is still correct: the SCOPE, not the session, is what
+        /// roots the agent in the app workspace.
+        func testTheLandingStillFiresWhenNoInitSessionWasPinned() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            _ = await store.createApp(brief: "一个记事本", name: "记事本", surface: .dom)
+            let created = app(id: "notes", name: "记事本", brief: "一个记事本")
+            store.handle(event: .appsChanged(apps: [created]))
+            store.handle(event: .appEvent(event: .appCreated(record: created)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: created)))
+
+            let landing = try XCTUnwrap(
+                store.createdAppLanding,
+                "a failed pin must not strand the hand-off")
+            XCTAssertEqual(landing.appID, "notes")
+            XCTAssertNil(landing.initSessionID)
+        }
+
+        /// A create committed by an AGENT in another conversation must not be
+        /// claimed by this sheet.
+        ///
+        /// `AppCreated` carries no correlator back to the client that asked, so
+        /// an unkeyed claim opens whichever app committed first — the user
+        /// lands in someone else's app and their own create never lands at all.
+        func testAnotherConversationsCreateIsNotClaimedBySheet() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            _ = await store.createApp(
+                brief: "我的记事本", name: "记事本", surface: .dom, addWidget: true)
+
+            // The agent's app commits first.
+            let theirs = app(id: "theirs", name: "别人的", brief: "代理自己的应用")
+            store.handle(event: .appsChanged(apps: [theirs]))
+            store.handle(event: .appEvent(event: .appCreated(record: theirs)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: theirs)))
+
+            XCTAssertNil(store.createdAppLanding, "not this sheet's app")
+            XCTAssertNil(store.consumeCreatedAppID())
+            XCTAssertNil(store.pendingWidgetSetup, "the widget belongs to MY create")
+
+            // Mine commits afterwards and is still claimable.
+            let mine = app(id: "mine", name: "记事本", brief: "我的记事本")
+            store.handle(event: .appsChanged(apps: [theirs, mine]))
+            store.handle(event: .appEvent(event: .appCreated(record: mine)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: mine)))
+
+            XCTAssertEqual(store.createdAppLanding?.appID, "mine")
+            XCTAssertEqual(store.pendingWidgetSetup?.appID, "mine")
+        }
+
+        /// An app that simply APPEARS is not the one this session asked for.
+        func testANewAppWithoutAppCreatedIsNotClaimed() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            _ = await store.createApp(brief: "一个记事本", name: "", surface: .dom, addWidget: true)
+            store.handle(event: .appsChanged(apps: [app(id: "someone-elses", name: "别人的")]))
+
+            XCTAssertNil(
+                store.consumeCreatedAppID(),
+                "a catalog row alone must not be claimed")
+            XCTAssertNil(store.pendingWidgetSetup)
+        }
+
+        /// A second create is refused while one is in flight, so a double tap
+        /// cannot create two apps.
+        func testASecondCreateWhileOneIsInFlightIsRefused() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            let first = await store.createApp(brief: "第一个", name: "", surface: .dom)
+            let second = await store.createApp(brief: "第二个", name: "", surface: .dom)
+
+            XCTAssertTrue(first)
+            XCTAssertFalse(second, "only one create may be in flight at a time")
+            XCTAssertEqual(
+                submitted.count, 1,
+                "the refused create must not reach the engine")
+        }
+
+        /// A GLOBAL failure disarms the claim; a per-app failure belongs to some
+        /// other app and must leave it alone.
+        func testOnlyAGlobalFailureDisarmsTheArmedCreate() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            _ = await store.createApp(brief: "一个记事本", name: "", surface: .dom, addWidget: true)
+            store.handle(event: .appOperationFailed(
+                appId: "another-app", code: .workflowStateInvalid, message: "别的应用失败了"))
+            let mine = app(id: "mine", name: "我的", brief: "一个记事本")
+            store.handle(event: .appsChanged(apps: [mine]))
+            store.handle(event: .appEvent(event: .appCreated(record: mine)))
+            XCTAssertEqual(store.consumeCreatedAppID(), "mine")
+
+            _ = await store.createApp(brief: "第二个", name: "", surface: .dom, addWidget: true)
+            store.handle(event: .appOperationFailed(
+                appId: nil, code: .workflowStateInvalid, message: "创建失败"))
+            let later = app(id: "later", name: "后来的", brief: "第二个")
+            store.handle(event: .appsChanged(apps: [later]))
+            store.handle(event: .appEvent(event: .appCreated(record: later)))
+            XCTAssertNil(
+                store.consumeCreatedAppID(),
+                "a disarmed create must not claim a later app")
+        }
+
+        /// Restored with the new trigger: the widget must not arm for a create
+        /// that never asked for one.
+        func testCreateWithoutWidgetDoesNotArmSetupGuide() async throws {
+            let store = LocalAppsStore()
+            store.configure { _ in }
+
+            let armed = await store.createApp(brief: "一个记事本", name: "", surface: .dom)
+            XCTAssertTrue(armed)
+            let record = app(id: "notes", name: "记事本", brief: "一个记事本")
+            store.handle(event: .appsChanged(apps: [record]))
+            store.handle(event: .appEvent(event: .appCreated(record: record)))
+
+            XCTAssertNil(store.pendingWidgetSetup)
+        }
+
+        /// A missing App Group is a CONFIGURATION fact, not a create failure:
+        /// the setup guide still arms so the user can be walked through it.
         func testAddWidgetStillArmsSetupWhenTheAppGroupIsMissing() async throws {
             let store = LocalAppsStore()
             store.configure { _ in }
@@ -1399,27 +1675,29 @@ final class LocalAppsStoreTests: XCTestCase {
                 LocalAppWidgetSnapshotStore.SnapshotError.containerUnavailable
             }
 
-            let submitted = await store.createApp(brief: "一个记事本", addWidget: true)
-            XCTAssertTrue(submitted)
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
-            ]))
+            let armed = await store.createApp(brief: "一个记事本", name: "", surface: .dom, addWidget: true)
+            XCTAssertTrue(armed)
+            let record = app(id: "notes", name: "记事本", brief: "一个记事本")
+            store.handle(event: .appsChanged(apps: [record]))
+            store.handle(event: .appEvent(event: .appCreated(record: record)))
 
             XCTAssertNil(store.errorMessage)
             XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
         }
 
+        /// A REAL write failure is different from a missing container and must
+        /// still reach the user.
         func testAddWidgetSurfacesARealSnapshotWriteFailure() async throws {
             struct DiskFull: Error {}
             let store = LocalAppsStore()
             store.configure { _ in }
             store.widgetSnapshotPublisher = { _ in DiskFull() }
 
-            let submitted = await store.createApp(brief: "一个记事本", addWidget: true)
-            XCTAssertTrue(submitted)
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
-            ]))
+            let armed = await store.createApp(brief: "一个记事本", name: "", surface: .dom, addWidget: true)
+            XCTAssertTrue(armed)
+            let record = app(id: "notes", name: "记事本", brief: "一个记事本")
+            store.handle(event: .appsChanged(apps: [record]))
+            store.handle(event: .appEvent(event: .appCreated(record: record)))
 
             XCTAssertEqual(
                 store.errorMessage,
@@ -1428,158 +1706,22 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
         }
 
-        /// v3: creation should land in the INIT CHAT, and the engine
-        /// announces twice — first the bare record, then the
-        /// `init_session_id` pin. The claim must wait for the pin (second
-        /// announce) and fire `createdAppSession` exactly once; the details
-        /// fallback (`createdAppID`) must stay quiet on this path.
-        func testCreateClaimWaitsForTheInitSessionPin() async throws {
+        /// A missing App Group must not be reported as a create error.
+        func testCreateDoesNotSurfaceAMissingAppGroupAsAnError() async throws {
             let store = LocalAppsStore()
             store.configure { _ in }
-            _ = await store.createApp(brief: "一个记事本")
-            // Announce #1: record only, no pin yet.
-            store.handle(event: .appsChanged(apps: [app(id: "notes", name: "记事本")]))
-            XCTAssertNil(store.createdAppSession, "must wait for the pin")
-            XCTAssertNil(store.createdAppID)
-            // Announce #2: the pin arrives.
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
-            ]))
-            let created = try XCTUnwrap(store.consumeCreatedAppSession())
-            XCTAssertEqual(created.appID, "notes")
-            XCTAssertEqual(created.initSessionID, "init-uuid-1")
-            XCTAssertEqual(created.brief, "简介", "the kickoff carries the user's brief")
-            XCTAssertNil(store.consumeCreatedAppSession(), "consume-once")
-            XCTAssertNil(store.consumeCreatedAppID(), "no details fallback when the pin arrived")
-        }
+            store.widgetSnapshotPublisher = { _ in
+                LocalAppWidgetSnapshotStore.SnapshotError.containerUnavailable
+            }
 
-        /// The fast path: a single announce already carrying the pin fires
-        /// the init-chat signal immediately.
-        func testCreateClaimFiresImmediatelyWhenThePinIsInTheFirstAnnounce() async throws {
-            let store = LocalAppsStore()
-            store.configure { _ in }
-            _ = await store.createApp(brief: "一个记事本")
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
-            ]))
-            let created = try XCTUnwrap(store.consumeCreatedAppSession())
-            XCTAssertEqual(created.initSessionID, "init-uuid-1")
-        }
+            let armed = await store.createApp(brief: "一个记事本", name: "", surface: .dom)
+            XCTAssertTrue(armed)
+            let record = app(id: "notes", name: "记事本", brief: "一个记事本")
+            store.handle(event: .appsChanged(apps: [record]))
+            store.handle(event: .appEvent(event: .appCreated(record: record)))
 
-        /// A create that fails ENGINE-SIDE must disarm the claim.
-        ///
-        /// `createApp`'s own `if !succeeded { pendingCreation = nil }` cannot
-        /// cover this: `send(_:)` reports success the moment the FFI submit does
-        /// not throw, so an engine-side rejection arrives later and
-        /// asynchronously, as `AppOperationFailed`. The claim matches "an app id
-        /// absent from the pre-create snapshot", so leaving it armed makes the
-        /// NEXT app to appear — including one the assistant creates through the
-        /// MCP tool minutes later — look like the user's pending creation and
-        /// yank them out of their conversation into its init chat.
-        func testAnEngineSideCreateFailureDisarmsTheCreateClaim() async throws {
-            let store = LocalAppsStore()
-            store.configure { _ in }
-
-            // The submit itself succeeds — the engine rejects afterwards.
-            do { let submitted = await store.createApp(brief: "一个记事本"); XCTAssertTrue(submitted) }
-            store.handle(event: .appOperationFailed(
-                appId: nil, code: .workflowStateInvalid, message: "创建失败"))
-            XCTAssertEqual(store.errorMessage, "创建失败")
-
-            // Minutes later the assistant creates an unrelated app through MCP.
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "assistant-app", name: "助手的应用", initSessionId: "init-uuid-9")
-            ]))
-
-            XCTAssertNil(
-                store.consumeCreatedAppSession(),
-                "a failed create must not claim the next app that appears")
-            XCTAssertNil(
-                store.consumeCreatedAppID(),
-                "nor may the details-page fallback claim it")
-        }
-
-        func testAnEngineSideCreateFailureDoesNotArmWidgetSetup() async throws {
-            let store = LocalAppsStore()
-            store.configure { _ in }
-
-            let submitted = await store.createApp(brief: "一个记事本", addWidget: true)
-            XCTAssertTrue(submitted)
-            store.handle(event: .appOperationFailed(
-                appId: nil, code: .workflowStateInvalid, message: "创建失败"))
-
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "assistant-app", name: "助手的应用", initSessionId: "init-uuid-9")
-            ]))
-
-            XCTAssertNil(store.pendingWidgetSetup)
-            XCTAssertNil(store.consumeCreatedAppSession())
-            XCTAssertNil(store.consumeCreatedAppID())
-        }
-
-        func testAPerAppOperationFailureDoesNotDropTheInitPinWait() async throws {
-            let store = LocalAppsStore()
-            store.configure { _ in }
-
-            let submitted = await store.createApp(brief: "一个记事本")
-            XCTAssertTrue(submitted)
-            store.handle(event: .appsChanged(apps: [appRecord(id: "notes", name: "记事本")]))
-            XCTAssertNil(store.createdAppSession)
-
-            store.handle(event: .appOperationFailed(
-                appId: "notes", code: .notFound, message: "详情加载失败"))
-
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本", initSessionId: "init-uuid-1")
-            ]))
-
-            let created = try XCTUnwrap(
-                store.consumeCreatedAppSession(),
-                "a later per-app failure must not cancel an already-announced create")
-            XCTAssertEqual(created.appID, "notes")
-            XCTAssertEqual(created.initSessionID, "init-uuid-1")
-        }
-
-        /// The pin wait is a SET, not one slot. Two creates inside the 3s
-        /// fallback window each arm their own landing; a single slot would let
-        /// the second overwrite the first, stranding it with no landing at all
-        /// — neither the init chat nor the details fallback.
-        func testTwoCreatesInsideTheFallbackWindowBothLand() async throws {
-            let store = LocalAppsStore()
-            store.configure { _ in }
-
-            // Create #1 announces its record with no pin yet → armed.
-            do { let submitted = await store.createApp(brief: "记事本"); XCTAssertTrue(submitted) }
-            store.handle(event: .appsChanged(apps: [appRecord(id: "notes", name: "记事本")]))
-            XCTAssertNil(store.createdAppSession)
-
-            // Create #2 lands inside #1's window and announces its own record.
-            do { let submitted = await store.createApp(brief: "清单"); XCTAssertTrue(submitted) }
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本"),
-                appRecord(id: "list", name: "清单"),
-            ]))
-            XCTAssertNil(store.createdAppSession)
-
-            // #1's pin arrives first — it must still be armed.
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本", initSessionId: "init-notes"),
-                appRecord(id: "list", name: "清单"),
-            ]))
-            let first = try XCTUnwrap(
-                store.consumeCreatedAppSession(),
-                "the FIRST create must not be stranded by the second")
-            XCTAssertEqual(first.appID, "notes")
-            XCTAssertEqual(first.initSessionID, "init-notes")
-
-            // …and #2 still lands on its own announce.
-            store.handle(event: .appsChanged(apps: [
-                appRecord(id: "notes", name: "记事本", initSessionId: "init-notes"),
-                appRecord(id: "list", name: "清单", initSessionId: "init-list"),
-            ]))
-            let second = try XCTUnwrap(store.consumeCreatedAppSession())
-            XCTAssertEqual(second.appID, "list")
-            XCTAssertEqual(second.initSessionID, "init-list")
+            XCTAssertNil(store.errorMessage)
+            XCTAssertEqual(store.consumeCreatedAppID(), "notes")
         }
 
         private func app(

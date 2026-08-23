@@ -8,54 +8,33 @@ import sys
 
 
 EXPECTED_DEPENDENCIES = {
-    "@hookform/resolvers": "5.9.0",
-    "@radix-ui/react-accordion": "1.2.20",
-    "@radix-ui/react-alert-dialog": "1.1.23",
-    "@radix-ui/react-aspect-ratio": "1.1.15",
-    "@radix-ui/react-avatar": "1.2.6",
-    "@radix-ui/react-checkbox": "1.3.11",
-    "@radix-ui/react-collapsible": "1.1.20",
-    "@radix-ui/react-context-menu": "2.3.7",
-    "@radix-ui/react-dialog": "1.1.23",
-    "@radix-ui/react-dropdown-menu": "2.1.24",
-    "@radix-ui/react-hover-card": "1.1.23",
-    "@radix-ui/react-label": "2.1.15",
-    "@radix-ui/react-popover": "1.1.23",
-    "@radix-ui/react-progress": "1.1.16",
-    "@radix-ui/react-radio-group": "1.4.7",
-    "@radix-ui/react-scroll-area": "1.2.18",
-    "@radix-ui/react-select": "2.3.7",
-    "@radix-ui/react-separator": "1.1.15",
-    "@radix-ui/react-slider": "1.4.7",
-    "@radix-ui/react-slot": "1.3.3",
-    "@radix-ui/react-switch": "1.3.7",
-    "@radix-ui/react-tabs": "1.1.21",
-    "@radix-ui/react-toggle": "1.1.18",
-    "@radix-ui/react-toggle-group": "1.1.19",
-    "@radix-ui/react-tooltip": "1.2.16",
-    "@tailwindcss/vite": "4.3.3",
-    "@tanstack/react-query": "5.101.4",
-    "@tanstack/react-virtual": "3.14.9",
+    # The UI kit. Ionic is what makes a generated app look native on BOTH
+    # platforms from one source: `setupIonicReact({ mode })` selects the iOS or
+    # the Material design language at runtime from the host's OS, which is a
+    # thing the previous shadcn/Radix set could not do at all -- it is a web
+    # design language, and the platform "adapter" that was supposed to bridge it
+    # published fields (`stateLayer: "ripple"`) that had zero consumers.
+    #
+    # It must be imported from the `@ionic/react` barrel. The per-component
+    # entry points under `@ionic/core/components` are the only tree-shakeable
+    # path, but they dynamically import one another and rolldown rejects that
+    # under the `iife` output format this build is pinned to.
+    "@ionic/react": "9.0.0",
+    # Native page transitions and the platform back gesture, via IonRouterOutlet.
+    # It peers on react-router 6.x, which is why react-router is pinned to 6
+    # rather than 7.
+    "@ionic/react-router": "9.0.0",
     "@vitejs/plugin-react": "6.0.4",
-    "class-variance-authority": "0.7.1",
-    "clsx": "2.1.1",
-    "lucide-react": "1.31.0",
-    "motion": "13.1.0",
-    "next-themes": "0.4.6",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "react-hook-form": "7.85.0",
-    "react-router-dom": "7.18.2",
-    "sonner": "2.0.8",
-    "tailwind-merge": "3.6.0",
-    "tailwindcss": "4.3.3",
+    "react-router": "6.30.6",
+    "react-router-dom": "6.30.6",
     # Pure-JS WebGL renderer. It is in the pinned set because a generated game
     # cannot install it: the workspace contract forbids the agent from touching
     # package.json or running a package manager, so anything not pinned here is
     # unreachable to every app this host will ever build. No native binding, so
     # it does not enter EXPECTED_NATIVE_PACKAGE_BINARIES.
     "three": "0.185.1",
-    "tw-animate-css": "1.4.0",
     "vite": "8.2.1",
     "zod": "4.4.3",
     "zustand": "5.0.15",
@@ -74,10 +53,6 @@ EXPECTED_LIGHTNINGCSS_BINDINGS = {
     "lightningcss-linux-arm64-musl": "1.33.0",
     "lightningcss-linux-x64-musl": "1.33.0",
 }
-EXPECTED_OXIDE_BINDINGS = {
-    "@tailwindcss/oxide-linux-arm64-musl": "4.3.3",
-    "@tailwindcss/oxide-linux-x64-musl": "4.3.3",
-}
 EXPECTED_NATIVE_PACKAGE_BINARIES = {
     "@rolldown/binding-linux-arm64-musl": "rolldown-binding.linux-arm64-musl.node",
     "@rolldown/binding-linux-x64-musl": "rolldown-binding.linux-x64-musl.node",
@@ -87,14 +62,9 @@ EXPECTED_NATIVE_PACKAGE_BINARIES = {
     "lightningcss-linux-x64-musl": "lightningcss.linux-x64-musl.node",
     "lightningcss-linux-arm64-gnu": "lightningcss.linux-arm64-gnu.node",
     "lightningcss-linux-x64-gnu": "lightningcss.linux-x64-gnu.node",
-    "@tailwindcss/oxide-linux-arm64-musl": "tailwindcss-oxide.linux-arm64-musl.node",
-    "@tailwindcss/oxide-linux-x64-musl": "tailwindcss-oxide.linux-x64-musl.node",
-    "@tailwindcss/oxide-linux-arm64-gnu": "tailwindcss-oxide.linux-arm64-gnu.node",
-    "@tailwindcss/oxide-linux-x64-gnu": "tailwindcss-oxide.linux-x64-gnu.node",
 }
 EXPECTED_ROLLDOWN_VERSION = "1.2.4"
 EXPECTED_LIGHTNINGCSS_VERSION = "1.33.0"
-EXPECTED_OXIDE_VERSION = "4.3.3"
 EXPECTED_WRITABLE_ROOTS = ["app", "components", "lib", "styles", "public"]
 VITE_EXPECTED_WRITABLE_ROOTS = EXPECTED_WRITABLE_ROOTS + ["src"]
 FORBIDDEN_ROUTE_FILES = {"route.js", "route.jsx", "route.ts", "route.tsx"}
@@ -147,9 +117,6 @@ def expected_native_packages_for(platform: str, family: str) -> dict[str, str]:
     elif family == "lightningcss":
         bindings = EXPECTED_LIGHTNINGCSS_BINDINGS
         arm64 = "lightningcss-linux-arm64-musl"
-    elif family == "oxide":
-        bindings = EXPECTED_OXIDE_BINDINGS
-        arm64 = "@tailwindcss/oxide-linux-arm64-musl"
     else:
         fail(f"unknown native package family: {family}")
     if platform == "ios":
@@ -449,10 +416,8 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
     for name, version in {
         "rolldown": EXPECTED_ROLLDOWN_VERSION,
         "lightningcss": EXPECTED_LIGHTNINGCSS_VERSION,
-        "@tailwindcss/oxide": EXPECTED_OXIDE_VERSION,
         **EXPECTED_ROLLDOWN_BINDINGS,
         **EXPECTED_LIGHTNINGCSS_BINDINGS,
-        **EXPECTED_OXIDE_BINDINGS,
     }.items():
         if not re.search(rf"^\s*['\"]?{re.escape(name)}@{re.escape(version)}['\"]?:\s*$", lock_text, re.MULTILINE):
             fail(f"pnpm-lock packages did not pin {name}@{version}")
@@ -468,8 +433,6 @@ def validate_lock(template: pathlib.Path, pins: dict) -> None:
         "rolldown_bindings": EXPECTED_ROLLDOWN_BINDINGS,
         "lightningcss": EXPECTED_LIGHTNINGCSS_VERSION,
         "lightningcss_bindings": EXPECTED_LIGHTNINGCSS_BINDINGS,
-        "tailwindcss_oxide": EXPECTED_OXIDE_VERSION,
-        "tailwindcss_oxide_bindings": EXPECTED_OXIDE_BINDINGS,
         "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/pnpm-lock.yaml",
         # Checked against the file on disk rather than a literal, so a lockfile
         # edit that forgets to refresh the pin is caught as drift instead of
@@ -504,6 +467,22 @@ def validate_workspace_sources(
     policy = load_json(template / ".lingxi" / "source-policy.json")
     if policy.get("agent_writable_roots") != writable_roots:
         fail(f"{description} agent writable roots must match the fixed source policy")
+    scan_workspace_sources(template, writable_roots, top_level_files, description)
+
+
+def scan_workspace_sources(
+    template: pathlib.Path,
+    writable_roots: list[str],
+    top_level_files: set[str],
+    description: str,
+) -> None:
+    """The symlink / stray-path / forbidden-pattern walk, without reading a policy.
+
+    Split out so a SCAFFOLD SEED can be scanned too. A seed directory holds only
+    editable source; its `.lingxi/source-policy.json` is host-managed and shipped
+    once from the DOM template, and giving each seed its own copy is exactly the
+    duplicate-derivation this split exists to avoid.
+    """
     allowed_top_level = (
         set(writable_roots)
         | top_level_files
@@ -536,12 +515,57 @@ def validate_workspace_sources(
                 fail(f"forbidden {label} in {relative}")
 
 
+def validate_scaffold_metadata(template: pathlib.Path, pins: dict) -> None:
+    manifest = load_json(template / ".lingxi" / "app.manifest.json")
+    if manifest != {
+        "schema_version": 1,
+        "template_id": template.name,
+        "template_version": 3,
+        "runtime_compatibility": ["store-static"],
+        "dependencies": {
+            "node": expected_node(pins),
+            "react": EXPECTED_DEPENDENCIES["react"],
+            "react-dom": EXPECTED_DEPENDENCIES["react-dom"],
+            "vite": EXPECTED_DEPENDENCIES["vite"],
+            "@ionic/react": EXPECTED_DEPENDENCIES["@ionic/react"],
+        },
+        "capabilities": {"collections": [], "network_domains": []},
+    }:
+        fail(f"canonical {template.name} app manifest diverged")
+    design_spec = load_json(template / ".lingxi" / "design-spec.json")
+    if design_spec != {
+        "schema_version": 1,
+        "template_id": template.name,
+        "template_version": 3,
+        "answers": {},
+        "legacy_fields": {},
+    }:
+        fail(f"canonical {template.name} design spec stub diverged")
+
+
+def validate_scaffold_seed(template: pathlib.Path, pins: dict) -> None:
+    """Validate an additional scaffold seed (e.g. the canvas surface).
+
+    A seed ships only editable source plus its own `.lingxi` stubs: the locked
+    manifests, the Vite config, the entry HTML, the bridge and the source policy
+    all come from the DOM template and are re-pinned into every workspace
+    regardless of which seed was used. Without this call a seed would be the one
+    place in the repository whose source is never pattern-scanned.
+    """
+    scan_workspace_sources(
+        template,
+        writable_roots=["app", "src"],
+        top_level_files=set(),
+        description=f"{template.name} scaffold seed",
+    )
+    validate_scaffold_metadata(template, pins)
+
+
 def validate_source_policy(template: pathlib.Path, pins: dict) -> None:
     validate_workspace_sources(
         template,
         writable_roots=VITE_EXPECTED_WRITABLE_ROOTS,
         top_level_files={
-            "components.json",
             "index.html",
             "jsconfig.json",
             "vite.config.mjs",
@@ -553,7 +577,6 @@ def validate_source_policy(template: pathlib.Path, pins: dict) -> None:
         ".lingxi",
         ".gitignore",
         "LINGXI.md",
-        "components.json",
         "index.html",
         "jsconfig.json",
         "vite.config.mjs",
@@ -576,7 +599,17 @@ def validate_source_policy(template: pathlib.Path, pins: dict) -> None:
     workspace_permissions = load_json(template / ".lingxi" / "settings.local.json")
     if workspace_permissions != {
         "permissions": {
-            "allow": ["Read(./**)", "Edit(./**)"],
+            # The three LocalApp* grants mirror the app-scoped workspace lease
+            # (`permission::workspace_lease`): inside an app workspace the agent
+            # builds, reads logs and restarts the preview constantly, and a
+            # prompt on each one made the create flow unusable.
+            "allow": [
+                "Read(./**)",
+                "Edit(./**)",
+                "LocalAppLogs",
+                "LocalAppBuild",
+                "LocalAppRuntime",
+            ],
             "deny": [
                 "Edit(./.lingxi/**)",
                 "Edit(./.gitignore)",
@@ -606,31 +639,7 @@ def validate_source_policy(template: pathlib.Path, pins: dict) -> None:
     package_json = load_json(template / "package.json")
     if package_json.get("scripts") != EXPECTED_SCRIPTS:
         fail("canonical Vite template must expose the standard dev/build/preview scripts")
-    manifest = load_json(template / ".lingxi" / "app.manifest.json")
-    if manifest != {
-        "schema_version": 1,
-        "template_id": "vite-react-static-v1",
-        "template_version": 2,
-        "runtime_compatibility": ["store-static"],
-        "dependencies": {
-            "node": expected_node(pins),
-            "react": EXPECTED_DEPENDENCIES["react"],
-            "react-dom": EXPECTED_DEPENDENCIES["react-dom"],
-            "vite": EXPECTED_DEPENDENCIES["vite"],
-            "tailwindcss": EXPECTED_DEPENDENCIES["tailwindcss"],
-        },
-        "capabilities": {"collections": [], "network_domains": []},
-    }:
-        fail("canonical Vite app manifest diverged")
-    design_spec = load_json(template / ".lingxi" / "design-spec.json")
-    if design_spec != {
-        "schema_version": 1,
-        "template_id": "vite-react-static-v1",
-        "template_version": 2,
-        "answers": {},
-        "legacy_fields": {},
-    }:
-        fail("canonical Vite design spec stub diverged")
+    validate_scaffold_metadata(template, pins)
 
 
 def validate_sbom(repo: pathlib.Path, template: pathlib.Path) -> None:
@@ -928,6 +937,16 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "recommended strategy",
         "task-local workflow",
         "rescore the revised",
+        # The scaffold choice. A skill that never names `surface` leaves the
+        # canvas scaffold unreachable: the engine can materialize it, the tool
+        # accepts it, and nothing would ever ask for it.
+        '"surface":"dom"',
+        "`canvas` when the whole interface is one drawn surface",
+        "CANNOT be changed afterwards",
+        # The display name is the model's to write. Without this the engine
+        # falls back to the brief's first 24 characters, which is what the
+        # deferred create flow exists to stop.
+        "`name` is yours to write",
         "streamLlmChat",
         "onLlmStreamFrame",
         "getClipboardText",
@@ -956,11 +975,20 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         fail(f"missing local-apps host: {exc}")
     if "already bound to local app `{id}`" not in local_apps_host:
         fail("app-scoped LINGXI.md does not make its current app id authoritative")
-    workflow_path = repo / "lingxi-code" / "tools" / "workflow" / "src" / "local_app_build_workflow.js"
+    # Read the workflows the way the BINARY assembles them: `builtins.rs`
+    # concatenates a shape file with the shared driver, so a token that moved
+    # into the driver is still present in the shipped script even though it left
+    # the shape file. Checking the shape file alone would have reported the
+    # shared strategy vocabulary as missing.
+    workflow_dir = repo / "lingxi-code" / "tools" / "workflow" / "src"
     try:
-        workflow = workflow_path.read_text(encoding="utf-8")
+        workflow_core = (workflow_dir / "local_app_workflow_core.js").read_text(encoding="utf-8")
+        workflow_dom = (workflow_dir / "local_app_build_workflow.js").read_text(encoding="utf-8")
+        workflow_canvas = (workflow_dir / "local_app_canvas_workflow.js").read_text(encoding="utf-8")
     except OSError as exc:
-        fail(f"missing local-app-build workflow: {exc}")
+        fail(f"missing local-app build workflow: {exc}")
+    workflow = workflow_dom + workflow_core
+    canvas_workflow = workflow_canvas + workflow_core
     workflow_tokens = {
         "LocalAppBuild",
         "--outDir dist --emptyOutDir",
@@ -990,6 +1018,24 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     missing_workflow = sorted(token for token in workflow_tokens if token not in workflow)
     if missing_workflow:
         fail(f"local-app-build workflow is missing Vite CLI contract tokens: {missing_workflow}")
+    # The drawn-surface sibling shares the driver, so it inherits the tokens
+    # above; what it must additionally carry is the evidence contract that
+    # replaces `data_roundtrip` for an app that declares no collection.
+    canvas_tokens = {
+        "app/screens/game-screen.jsx",
+        "createFrameLoop in src/game/frame-loop.js",
+        "Keep per-frame simulation state in a ref",
+        "There is no not_applicable: this app draws its whole interface",
+        "only a difference proves the loop is running",
+        "cannot be driven by the host automation path",
+        "NEVER from @ionic/core/components",
+        "three@0.185.1 is in the locked set",
+    }
+    missing_canvas = sorted(
+        token for token in workflow_tokens | canvas_tokens if token not in canvas_workflow
+    )
+    if missing_canvas:
+        fail(f"local-canvas-build workflow is missing contract tokens: {missing_canvas}")
 
 
 def validate_product_model_name_absence(repo: pathlib.Path) -> None:
@@ -1047,6 +1093,14 @@ def main() -> None:
     validate_source_policy(template, pins)
     if vite_template != template:
         validate_source_policy(vite_template, pins)
+    # Unconditional, like every other check here: gating on `is_dir()` made the
+    # one directory this verifier calls "never pattern-scanned elsewhere" fail
+    # OPEN the moment it is renamed, moved, or missing from a filtered checkout
+    # — while `local_apps_build.rs` still embeds those exact paths.
+    canvas_seed = template.parent / "vite-react-canvas-v1"
+    if not canvas_seed.is_dir():
+        fail(f"canvas scaffold seed is missing: {canvas_seed}")
+    validate_scaffold_seed(canvas_seed, pins)
     validate_sbom(repo, template)
     validate_runtime_policy(repo)
     validate_create_skill(repo)

@@ -54,6 +54,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -96,6 +99,10 @@ fun LocalAppsRoute(
         onOpenDrawer = onOpenDrawer,
         onExternalNavigation = onExternalNavigation,
         onOpenAppSession = onOpenAppSession,
+        onProposeIdentity = { brief ->
+            val proposal = viewModel.proposeIdentity(brief)
+            proposal.name to proposal.surface
+        },
         modifier = modifier,
     )
 }
@@ -108,12 +115,21 @@ fun LocalAppsScreen(
     onExternalNavigation: (String) -> Unit,
     modifier: Modifier = Modifier,
     onOpenAppSession: (appId: String, session: LocalAppSessionRow?) -> Unit = { _, _ -> },
+    /**
+     * Asks the host to name and shape an app from a brief. Defaulted to the
+     * same derivation the host falls back to, so a preview or a test that does
+     * not wire it still renders a usable sheet.
+     */
+    onProposeIdentity: suspend (String) -> Pair<String, LocalAppSurface> = { brief ->
+        brief.trim().take(24) to LocalAppSurface.DOM
+    },
 ) {
     Box(modifier.fillMaxSize()) {
         when (val destination = state.destination) {
             LocalAppsDestination.Library -> LocalAppsLibraryScreen(
                 state = state,
                 onAction = onAction,
+                onProposeIdentity = onProposeIdentity,
                 onOpenDrawer = onOpenDrawer,
             )
 
@@ -188,6 +204,7 @@ private fun LocalAppsLibraryScreen(
     state: LocalAppsUiState,
     onAction: (LocalAppsAction) -> Unit,
     onOpenDrawer: () -> Unit,
+    onProposeIdentity: suspend (String) -> Pair<String, LocalAppSurface>,
 ) {
     // Pure Compose-local UI state — there is no dedicated create destination;
     // the dialog collects only a one-line brief (mirrors iOS's LocalAppCreateView).
@@ -253,9 +270,19 @@ private fun LocalAppsLibraryScreen(
         CreateAppDialog(
             models = state.workflowModels,
             currentModelId = state.currentWorkflowModelId,
+            proposeIdentity = onProposeIdentity,
             onDismiss = { showCreateDialog = false },
-            onCreate = { brief, gitEnabled, workflowModel, addWidget ->
-                onAction(LocalAppsAction.CreateFromBrief(brief, gitEnabled, workflowModel, addWidget))
+            onCreate = { brief, name, surface, gitEnabled, workflowModel, addWidget ->
+                onAction(
+                    LocalAppsAction.CreateFromBrief(
+                        brief = brief,
+                        name = name,
+                        surface = surface,
+                        gitEnabled = gitEnabled,
+                        workflowModel = workflowModel,
+                        addWidget = addWidget,
+                    ),
+                )
                 showCreateDialog = false
             },
         )
@@ -263,26 +290,105 @@ private fun LocalAppsLibraryScreen(
 }
 
 /**
- * Collects the one-line brief `CreateFromBrief` needs and nothing else — no
- * display name. `LocalAppsViewModel.createFromBrief` sends `name` empty on the
- * wire and `AppService::create_app` derives one from the brief itself, so
- * nothing on the client ever relabels the brief as a name or vice versa.
+ * The create sheet: a one-line brief, then a name and a surface to confirm.
+ *
+ * Two steps, in ONE dialog, because both of the second step's fields are fixed
+ * at creation — a surface is immutable once scaffolded and apps have no rename —
+ * so neither may be decided by something the user never saw. The host proposes
+ * both from the brief (`ProposeAppIdentity`, one headless model call, no
+ * conversation); this dialog shows the proposal and gives the user the last
+ * word.
  */
 @Composable
 private fun CreateAppDialog(
     models: List<ModelOption>,
     currentModelId: String?,
+    proposeIdentity: suspend (String) -> Pair<String, LocalAppSurface>,
     onDismiss: () -> Unit,
-    onCreate: (String, Boolean, String?, Boolean) -> Unit,
+    onCreate: (String, String, LocalAppSurface, Boolean, String?, Boolean) -> Unit,
 ) {
     var brief by remember { mutableStateOf("") }
+    var confirmingIdentity by remember { mutableStateOf(false) }
+    var proposing by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    var surface by remember { mutableStateOf(LocalAppSurface.DOM) }
     var gitEnabled by remember { mutableStateOf(true) }
     var workflowModel by remember { mutableStateOf<String?>(null) }
     var addWidget by remember { mutableStateOf(false) }
+    val dialogScope = rememberCoroutineScope()
     LaunchedEffect(models, workflowModel) {
         if (workflowModel != null && models.none { it.id == workflowModel }) {
             workflowModel = null
         }
+    }
+    if (confirmingIdentity) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text(stringResource(R.string.local_apps_create)) },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text(stringResource(R.string.local_apps_create_name_label)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        stringResource(R.string.local_apps_create_name_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                    Text(
+                        stringResource(R.string.local_apps_create_surface_section),
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
+                    )
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        LocalAppSurface.entries.forEachIndexed { index, option ->
+                            SegmentedButton(
+                                selected = surface == option,
+                                onClick = { surface = option },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index,
+                                    count = LocalAppSurface.entries.size,
+                                ),
+                            ) {
+                                Text(stringResource(option.labelRes()))
+                            }
+                        }
+                    }
+                    Text(
+                        stringResource(surface.detailRes()),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                    Text(
+                        stringResource(R.string.local_apps_create_surface_immutable),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onCreate(brief, name, surface, gitEnabled, workflowModel, addWidget)
+                    },
+                ) {
+                    Text(stringResource(R.string.local_apps_create_and_design))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingIdentity = false }) {
+                    Text(stringResource(R.string.local_apps_create_back))
+                }
+            },
+        )
+        return
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -350,14 +456,41 @@ private fun CreateAppDialog(
         },
         confirmButton = {
             Button(
-                enabled = canSubmitBrief(brief),
-                onClick = { onCreate(brief, gitEnabled, workflowModel, addWidget) },
+                enabled = canSubmitBrief(brief) && !proposing,
+                onClick = {
+                    proposing = true
+                    dialogScope.launch {
+                        // Advances even when the proposal is the derived
+                        // fallback: the fields are editable, so an unreachable
+                        // model costs a moment of typing rather than blocking
+                        // the create outright.
+                        val (proposedName, proposedSurface) = proposeIdentity(brief)
+                        name = proposedName
+                        surface = proposedSurface
+                        proposing = false
+                        confirmingIdentity = true
+                    }
+                },
             ) {
-                Text(stringResource(R.string.local_apps_create_and_design))
+                Text(
+                    stringResource(
+                        if (proposing) R.string.local_apps_create_naming else R.string.local_apps_create_next,
+                    ),
+                )
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
+}
+
+private fun LocalAppSurface.labelRes(): Int = when (this) {
+    LocalAppSurface.DOM -> R.string.local_apps_surface_dom
+    LocalAppSurface.CANVAS -> R.string.local_apps_surface_canvas
+}
+
+private fun LocalAppSurface.detailRes(): Int = when (this) {
+    LocalAppSurface.DOM -> R.string.local_apps_surface_dom_detail
+    LocalAppSurface.CANVAS -> R.string.local_apps_surface_canvas_detail
 }
 
 @Composable

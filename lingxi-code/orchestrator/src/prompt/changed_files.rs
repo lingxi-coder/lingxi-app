@@ -152,12 +152,12 @@ pub fn number_lines(content: &str, start_line: u64, tab_aware_separator: bool) -
     if content.is_empty() {
         return String::new();
     }
-    let separator = if tab_aware_separator && (content.starts_with('\t') || content.contains("\n\t"))
-    {
-        ':'
-    } else {
-        '\t'
-    };
+    let separator =
+        if tab_aware_separator && (content.starts_with('\t') || content.contains("\n\t")) {
+            ':'
+        } else {
+            '\t'
+        };
     content
         .split('\n')
         .enumerate()

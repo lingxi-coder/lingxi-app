@@ -320,3 +320,188 @@ async fn branched_fixture_surfaces_ai_title() {
         "ai-title wins over the summary"
     );
 }
+
+#[tokio::test]
+async fn sanitized_dir_collision_filters_rows_by_transcript_cwd() {
+    let temp = TempDir::new().expect("tempdir");
+    let lingxi_home = temp.path().join("home");
+    let cwd_a = "/tmp/collision-a_b".to_string();
+    let cwd_b = "/tmp/collision-a-b".to_string();
+    assert_eq!(
+        project_dir_name(&cwd_a),
+        project_dir_name(&cwd_b),
+        "fixture must collide in the sanitized project dir"
+    );
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd_a));
+    tokio::fs::create_dir_all(&subdir).await.unwrap();
+
+    let sid_a = Uuid::new_v4();
+    tokio::fs::write(
+        subdir.join(format!("{sid_a}.jsonl")),
+        format!(
+            "{}\n",
+            serde_json::to_string(&serde_json::json!({
+                "type": "user",
+                "uuid": sid_a.to_string(),
+                "parentUuid": null,
+                "sessionId": sid_a.to_string(),
+                "timestamp": "2026-05-25T12:00:00.000Z",
+                "cwd": cwd_a,
+                "version": "0.12.0",
+                "isSidechain": false,
+                "userType": "external",
+                "message": {"role": "user", "content": "from a_b"},
+            }))
+            .unwrap()
+        ),
+    )
+    .await
+    .unwrap();
+
+    let sid_b = Uuid::new_v4();
+    tokio::fs::write(
+        subdir.join(format!("{sid_b}.jsonl")),
+        format!(
+            "{}\n",
+            serde_json::to_string(&serde_json::json!({
+                "type": "user",
+                "uuid": sid_b.to_string(),
+                "parentUuid": null,
+                "sessionId": sid_b.to_string(),
+                "timestamp": "2026-05-25T12:00:00.000Z",
+                "cwd": cwd_b,
+                "version": "0.12.0",
+                "isSidechain": false,
+                "userType": "external",
+                "message": {"role": "user", "content": "from a-b"},
+            }))
+            .unwrap()
+        ),
+    )
+    .await
+    .unwrap();
+
+    let fs = make_fs(temp.path());
+
+    let rows_a = list_recent_sessions(&lingxi_home, &cwd_a, 5, fs.clone())
+        .await
+        .expect("list a");
+    assert_eq!(rows_a.len(), 1);
+    assert_eq!(rows_a[0].uuid, sid_a);
+    assert_eq!(rows_a[0].title, "from a_b");
+
+    let rows_b = list_recent_sessions(&lingxi_home, &cwd_b, 5, fs)
+        .await
+        .expect("list b");
+    assert_eq!(rows_b.len(), 1);
+    assert_eq!(rows_b[0].uuid, sid_b);
+    assert_eq!(rows_b[0].title, "from a-b");
+}
+
+#[tokio::test]
+async fn sorts_by_transcript_activity_not_file_mtime() {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd_path = temp.path().join("workproj");
+    tokio::fs::create_dir(&cwd_path).await.unwrap();
+    let cwd = cwd_path.to_string_lossy().into_owned();
+    let lingxi_home = temp.path().join("home");
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
+    tokio::fs::create_dir_all(&subdir).await.unwrap();
+
+    let old_sid = Uuid::new_v4();
+    let old_user = Uuid::new_v4();
+    let old_assistant = Uuid::new_v4();
+    tokio::fs::write(
+        subdir.join(format!("{old_sid}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&serde_json::json!({
+                "type": "user",
+                "uuid": old_user.to_string(),
+                "parentUuid": null,
+                "sessionId": old_sid.to_string(),
+                "timestamp": "2026-05-25T12:00:00.000Z",
+                "cwd": cwd,
+                "version": "0.12.0",
+                "isSidechain": false,
+                "userType": "external",
+                "message": {"role": "user", "content": "older logical activity"},
+            }))
+            .unwrap(),
+            serde_json::to_string(&serde_json::json!({
+                "type": "assistant",
+                "uuid": old_assistant.to_string(),
+                "parentUuid": old_user.to_string(),
+                "sessionId": old_sid.to_string(),
+                "timestamp": "2026-05-25T12:05:00.000Z",
+                "cwd": cwd,
+                "version": "0.12.0",
+                "isSidechain": false,
+                "userType": "external",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            }))
+            .unwrap()
+        ),
+    )
+    .await
+    .unwrap();
+
+    let new_sid = Uuid::new_v4();
+    let new_user = Uuid::new_v4();
+    let new_assistant = Uuid::new_v4();
+    tokio::fs::write(
+        subdir.join(format!("{new_sid}.jsonl")),
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&serde_json::json!({
+                "type": "user",
+                "uuid": new_user.to_string(),
+                "parentUuid": null,
+                "sessionId": new_sid.to_string(),
+                "timestamp": "2026-05-25T12:01:00.000Z",
+                "cwd": cwd,
+                "version": "0.12.0",
+                "isSidechain": false,
+                "userType": "external",
+                "message": {"role": "user", "content": "newer logical activity"},
+            }))
+            .unwrap(),
+            serde_json::to_string(&serde_json::json!({
+                "type": "assistant",
+                "uuid": new_assistant.to_string(),
+                "parentUuid": new_user.to_string(),
+                "sessionId": new_sid.to_string(),
+                "timestamp": "2026-05-25T12:10:00.000Z",
+                "cwd": cwd,
+                "version": "0.12.0",
+                "isSidechain": false,
+                "userType": "external",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            }))
+            .unwrap()
+        ),
+    )
+    .await
+    .unwrap();
+
+    let old_path = subdir.join(format!("{old_sid}.jsonl"));
+    let new_path = subdir.join(format!("{new_sid}.jsonl"));
+    let base = SystemTime::now();
+    filetime::set_file_mtime(&old_path, filetime::FileTime::from_system_time(base)).unwrap();
+    filetime::set_file_mtime(
+        &new_path,
+        filetime::FileTime::from_system_time(base - Duration::from_secs(300)),
+    )
+    .unwrap();
+
+    let fs = make_fs(temp.path());
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
+        .await
+        .expect("list");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].uuid, new_sid,
+        "newer transcript activity must win even when its file mtime is older"
+    );
+    assert_eq!(rows[1].uuid, old_sid);
+}

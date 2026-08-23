@@ -3595,9 +3595,7 @@ async fn a_restored_run_appends_only_new_messages_to_its_transcript() {
 /// that way before the verify stage noticed the app was still the template.
 #[test]
 fn a_stalled_stream_is_terminal_and_an_ordinary_interruption_still_recovers() {
-    use llm_client::model::stream_watchdog::{
-        STREAM_IDLE_TIMEOUT_PREFIX, STREAM_SUSPENDED_PREFIX,
-    };
+    use llm_client::model::stream_watchdog::{STREAM_IDLE_TIMEOUT_PREFIX, STREAM_SUSPENDED_PREFIX};
 
     for message in [
         format!("{STREAM_IDLE_TIMEOUT_PREFIX}: no bytes for 300000ms"),

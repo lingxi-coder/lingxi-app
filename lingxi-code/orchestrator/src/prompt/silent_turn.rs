@@ -376,7 +376,10 @@ mod tests {
             tool_result_user(),
         ];
         // Only the trailing silent turn counts; the speaking turn stops the walk.
-        assert_eq!(scan_silent_stretch(&history, &[]).turns_since_last_reminder, 1);
+        assert_eq!(
+            scan_silent_stretch(&history, &[]).turns_since_last_reminder,
+            1
+        );
     }
 
     #[test]
@@ -392,7 +395,10 @@ mod tests {
             stop_reason: None,
         };
         let history = vec![real_user(), asked, tool_result_user(), silent_assistant()];
-        assert_eq!(scan_silent_stretch(&history, &[]).turns_since_last_reminder, 1);
+        assert_eq!(
+            scan_silent_stretch(&history, &[]).turns_since_last_reminder,
+            1
+        );
     }
 
     #[test]
@@ -423,7 +429,10 @@ mod tests {
             silent_assistant(),
             tool_result_user(),
         ];
-        assert_eq!(scan_silent_stretch(&history, &[]).turns_since_last_reminder, 1);
+        assert_eq!(
+            scan_silent_stretch(&history, &[]).turns_since_last_reminder,
+            1
+        );
     }
 
     /// `if(r===0)t++` — once the walk passes a reminder mark, later (older)

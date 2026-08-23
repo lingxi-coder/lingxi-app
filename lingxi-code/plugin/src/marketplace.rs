@@ -22,9 +22,20 @@ pub struct MarketplaceIndex {
     /// Installable plugins.
     #[serde(default)]
     pub plugins: Vec<MarketplacePluginEntry>,
+    /// Optional marketplace-wide metadata bag.
+    #[serde(default)]
+    pub metadata: Option<MarketplaceIndexMetadata>,
     /// Marketplaces that dependency declarations may explicitly cross into.
     #[serde(rename = "allowCrossMarketplaceDependenciesOn", default)]
     pub allow_cross_marketplace_dependencies_on: Vec<String>,
+}
+
+/// Optional marketplace-wide metadata accepted by marketplace catalogs.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct MarketplaceIndexMetadata {
+    /// Plugin root prepended to safe bare-string entry sources.
+    #[serde(default, alias = "pluginRoot")]
+    pub plugin_root: Option<String>,
 }
 
 /// Typed source of one plugin catalog entry.
@@ -155,9 +166,33 @@ impl MarketplaceManager {
         let raw = tokio::fs::read_to_string(&index_path)
             .await
             .map_err(|_| format!("Marketplace file not found at {}", index_path.display()))?;
-        let index: MarketplaceIndex =
-            serde_json::from_str(&raw).map_err(|e| format!("Invalid marketplace schema: {e}"))?;
+        let index: MarketplaceIndex = serde_json::from_str(&raw)
+            .map(Self::normalize_index_plugin_root)
+            .map_err(|e| format!("Invalid marketplace schema: {e}"))?;
         Ok((index, clone_dir))
+    }
+
+    fn normalize_index_plugin_root(mut index: MarketplaceIndex) -> MarketplaceIndex {
+        let Some(plugin_root) = index
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.plugin_root.as_deref())
+            .map(str::trim)
+            .filter(|root| !root.is_empty())
+        else {
+            return index;
+        };
+
+        for entry in &mut index.plugins {
+            let Some(MarketplacePluginSource::Relative(source)) = entry.source.as_mut() else {
+                continue;
+            };
+            if !is_safe_bare_relative_source(source) {
+                continue;
+            }
+            *source = normalized_source_with_root(plugin_root, source);
+        }
+        index
     }
 
     /// Resolve a catalog entry's plugin directory WITHIN the marketplace clone,
@@ -187,12 +222,14 @@ impl MarketplaceManager {
             }
             None => None,
         };
-        let rel = source_path
-            .or(entry.path.as_deref())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(".");
+        let rel = PathBuf::from(
+            source_path
+                .or(entry.path.as_deref())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("."),
+        );
         // A catalog must point only inside its own repo — reject traversal / root.
-        if Path::new(rel).components().any(|c| {
+        if rel.components().any(|c| {
             matches!(
                 c,
                 Component::ParentDir | Component::RootDir | Component::Prefix(_)
@@ -204,5 +241,92 @@ impl MarketplaceManager {
             ));
         }
         Ok(clone_dir.join(rel))
+    }
+}
+
+fn is_safe_bare_relative_source(source: &str) -> bool {
+    if source.is_empty() || source.starts_with('.') {
+        return false;
+    }
+    !Path::new(source).components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
+}
+
+fn normalized_source_with_root(plugin_root: &str, source: &str) -> String {
+    let mut rel = PathBuf::from(".");
+    if plugin_root != "." {
+        rel.push(plugin_root);
+    }
+    rel.push(source);
+    rel.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_metadata_plugin_root_rewrites_safe_bare_source() {
+        let index: MarketplaceIndex = serde_json::from_value(serde_json::json!({
+            "name": "demo-market",
+            "metadata": { "pluginRoot": "plugins/demo" },
+            "plugins": [{ "name": "demo", "source": "bundle" }]
+        }))
+        .map(MarketplaceManager::normalize_index_plugin_root)
+        .expect("parse index");
+
+        let dir =
+            MarketplaceManager::plugin_dir_in_clone(Path::new("/tmp/clone"), &index.plugins[0])
+                .expect("resolve inside clone");
+        assert_eq!(dir, Path::new("/tmp/clone/./plugins/demo/bundle"));
+    }
+
+    #[test]
+    fn top_level_plugin_root_stays_compatible() {
+        let entry: MarketplacePluginEntry = serde_json::from_value(serde_json::json!({
+            "name": "demo",
+            "pluginRoot": "plugins/demo"
+        }))
+        .expect("parse entry");
+
+        let dir = MarketplaceManager::plugin_dir_in_clone(Path::new("/tmp/clone"), &entry)
+            .expect("resolve legacy plugin root");
+        assert_eq!(dir, Path::new("/tmp/clone/plugins/demo"));
+    }
+
+    #[test]
+    fn index_metadata_plugin_root_does_not_rewrite_explicit_dot_path() {
+        let index: MarketplaceIndex = serde_json::from_value(serde_json::json!({
+            "name": "demo-market",
+            "metadata": { "pluginRoot": "plugins/demo" },
+            "plugins": [{ "name": "demo", "source": "./bundle" }]
+        }))
+        .map(MarketplaceManager::normalize_index_plugin_root)
+        .expect("parse index");
+
+        match index.plugins[0].source.as_ref() {
+            Some(MarketplacePluginSource::Relative(source)) => assert_eq!(source, "./bundle"),
+            other => panic!("expected relative source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn index_metadata_plugin_root_does_not_mask_escape() {
+        let index: MarketplaceIndex = serde_json::from_value(serde_json::json!({
+            "name": "demo-market",
+            "metadata": { "pluginRoot": "plugins/demo" },
+            "plugins": [{ "name": "demo", "source": "../secret" }]
+        }))
+        .map(MarketplaceManager::normalize_index_plugin_root)
+        .expect("parse index");
+
+        let err =
+            MarketplaceManager::plugin_dir_in_clone(Path::new("/tmp/clone"), &index.plugins[0])
+                .expect_err("unsafe source must still be rejected");
+        assert!(err.contains("outside the cache directory"), "got: {err}");
     }
 }

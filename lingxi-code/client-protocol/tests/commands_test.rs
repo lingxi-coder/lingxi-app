@@ -23,6 +23,7 @@ use client_protocol::controls::ReasoningSelectionDto;
 use client_protocol::listings::TaskStatusDto;
 use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppCreateOriginDto,
+    AppSurfaceDto,
 };
 use client_protocol::permission::PermissionResponseDto;
 
@@ -582,6 +583,7 @@ fn create_app_round_trips() {
         git_enabled: true,
         workflow_model: Some("deepseek/deepseek-v4-flash".to_string()),
         conversation_id: Some("conv-42".to_string()),
+        surface: Some(AppSurfaceDto::Canvas),
     };
     let json = serde_json::to_value(&cmd).expect("serialize CreateApp");
     assert_eq!(json["type"], "create_app");
@@ -590,6 +592,10 @@ fn create_app_round_trips() {
     assert_eq!(json["brief"], "Track daily habits with streaks");
     assert_eq!(json["workflow_model"], "deepseek/deepseek-v4-flash");
     assert_eq!(json["conversation_id"], "conv-42");
+    assert_eq!(
+        json["surface"], "canvas",
+        "the surface rides as a bare wire string, like origin"
+    );
     assert!(
         json.get("git_enabled").is_none(),
         "default Git choice is compact on the wire"
@@ -605,12 +611,17 @@ fn create_app_round_trips() {
         git_enabled: true,
         workflow_model: None,
         conversation_id: None,
+        surface: None,
     };
     let json_l = serde_json::to_value(&from_library).expect("serialize library CreateApp");
     assert_eq!(json_l["origin"], "library");
     assert!(
         json_l.get("conversation_id").is_none(),
         "None conversation_id must be skipped"
+    );
+    assert!(
+        json_l.get("surface").is_none(),
+        "None surface must be skipped — the host applies the routed default"
     );
     let back_l: ClientCommand =
         serde_json::from_value(json_l).expect("deserialize library CreateApp");
@@ -623,6 +634,7 @@ fn create_app_round_trips() {
         git_enabled: false,
         workflow_model: None,
         conversation_id: None,
+        surface: Some(AppSurfaceDto::Dom),
     };
     let json_without_git = serde_json::to_value(&without_git).expect("serialize no-Git CreateApp");
     assert_eq!(json_without_git["git_enabled"], false);
@@ -779,6 +791,7 @@ fn no_live_command_carries_session_id() {
             git_enabled: true,
             workflow_model: None,
             conversation_id: Some("conv-42".to_string()),
+            surface: Some(AppSurfaceDto::Dom),
         },
         ClientCommand::StartApp {
             app_id: "habits-1a2b".to_string(),

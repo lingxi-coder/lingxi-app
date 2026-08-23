@@ -2330,7 +2330,15 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame("pong", "end_turn", &cost, "claude-opus-4-8", "off", None, &[])
+            .build_result_success_frame(
+                "pong",
+                "end_turn",
+                &cost,
+                "claude-opus-4-8",
+                "off",
+                None,
+                &[],
+            )
             .await;
         let usage = frame["usage"].as_object().unwrap();
         let keys: Vec<&str> = usage.keys().map(String::as_str).collect();

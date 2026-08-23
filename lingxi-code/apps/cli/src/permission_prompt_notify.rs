@@ -121,10 +121,7 @@ impl PermissionPromptNotifyGuard {
     /// the process alive; the guard's `Drop` aborts it, which is the disposer
     /// upstream runs in its `finally`.
     #[must_use]
-    pub fn arm(
-        notifier: Option<&Arc<dyn PermissionPromptNotifier>>,
-        display_name: &str,
-    ) -> Self {
+    pub fn arm(notifier: Option<&Arc<dyn PermissionPromptNotifier>>, display_name: &str) -> Self {
         if notifications_disabled_by_env() {
             return Self { handle: None };
         }

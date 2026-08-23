@@ -15,8 +15,8 @@ use local_apps::AppError;
 use protocol::{ConversationMessage, MediaAnalysis, MessageId, MessageRole};
 use sha2::{Digest, Sha256};
 use sidequery::{
-    ProviderSideQueryClient, VisionDelegationService, VisionPacket,
-    filter_messages_to_fingerprints, prepare_media_for_nonvision,
+    filter_messages_to_fingerprints, prepare_media_for_nonvision, ProviderSideQueryClient,
+    VisionDelegationService, VisionPacket,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;

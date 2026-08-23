@@ -1105,7 +1105,7 @@ pub struct ConversationOrchestrator {
     /// Serializes user, queued, and async-hook re-wake turns. A background hook
     /// may finish while a user turn is still streaming; waiting here makes its
     /// re-wake the next turn instead of racing two model loops over one history.
-    turn_gate: Mutex<()>,
+    turn_gate: Arc<Mutex<()>>,
     /// Live main-loop effort. Unlike `config.effort`, this can change through
     /// stream-json control requests and in-place resume.
     pub(crate) current_effort: std::sync::RwLock<Option<String>>,
@@ -1197,7 +1197,7 @@ pub struct ConversationOrchestrator {
     pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
     /// Cached UUID of the last persisted JSONL entry — used to populate
     /// `parentUuid` on the next append. Reset to `None` for fresh sessions.
-    pub(crate) last_jsonl_uuid: Mutex<Option<String>>,
+    pub(crate) last_jsonl_uuid: Arc<Mutex<Option<String>>>,
     /// `tool_use_id` → claude's message-level `toolDenialKind`, recorded when a
     /// tool is denied and consumed when its `tool_result` user line is
     /// persisted.
@@ -1482,7 +1482,16 @@ pub struct ConversationOrchestrator {
     /// fields before persisting the goal, so keeping them here leaves the
     /// compaction/JSONL goal shape untouched. See
     /// [`crate::prompt::goal_checkin::GoalDeferralState`].
-    pub(crate) goal_checkin: std::sync::Mutex<crate::prompt::goal_checkin::GoalDeferralState>,
+    pub(crate) goal_checkin: Arc<std::sync::Mutex<crate::prompt::goal_checkin::GoalDeferralState>>,
+    /// Idle background timer for `/goal` check-ins. Armed only while a goal is
+    /// actively deferred by background work and canceled as soon as that
+    /// stretch ends.
+    pub(crate) goal_checkin_idle_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Whether the idle goal-checkin loop is currently live.
+    pub(crate) goal_checkin_idle_running: Arc<std::sync::atomic::AtomicBool>,
+    /// Monotonic generation for idle-loop ownership; prevents a canceled/exiting
+    /// older loop from clearing the running bit for a newer loop.
+    pub(crate) goal_checkin_idle_generation: Arc<std::sync::atomic::AtomicU64>,
     /// REM-10: `history.len()` captured at each `tool_search_usage_reminder`
     /// emission. The oracle finds the previous reminder as an ATTACHMENT row in
     /// the message list (`R3T` @296552671); LingXi's per-turn reminders never
@@ -2001,7 +2010,7 @@ impl ConversationOrchestrator {
             perms,
             output,
             session: Arc::new(Mutex::new(session)),
-            turn_gate: Mutex::new(()),
+            turn_gate: Arc::new(Mutex::new(())),
             current_effort: std::sync::RwLock::new(current_effort),
             current_reasoning_selection: std::sync::RwLock::new(current_reasoning_selection),
             current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),
@@ -2017,7 +2026,7 @@ impl ConversationOrchestrator {
             workspace_trusted: true,
             hooks_restricted: false,
             jsonl_writer: None,
-            last_jsonl_uuid: Mutex::new(None),
+            last_jsonl_uuid: Arc::new(Mutex::new(None)),
             tool_denial_kinds: Mutex::new(std::collections::HashMap::new()),
             tool_frames: Mutex::new(None),
             tool_use_results: Mutex::new(std::collections::HashMap::new()),
@@ -2055,9 +2064,12 @@ impl ConversationOrchestrator {
             ),
             silent_turn_reminder_marks: std::sync::Mutex::new(Vec::new()),
             pending_memory_updates: std::sync::Mutex::new(Vec::new()),
-            goal_checkin: std::sync::Mutex::new(
+            goal_checkin: Arc::new(std::sync::Mutex::new(
                 crate::prompt::goal_checkin::GoalDeferralState::default(),
-            ),
+            )),
+            goal_checkin_idle_task: std::sync::Mutex::new(None),
+            goal_checkin_idle_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            goal_checkin_idle_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_search_reminder_marks: std::sync::Mutex::new(Vec::new()),
             last_memory_scan_ms: std::sync::atomic::AtomicI64::new(
                 tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now()),
@@ -6532,6 +6544,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     .await;
             }
         }
+        self.sync_goal_checkin_idle_task().await;
     }
 
     pub(crate) async fn clear_active_goal_state_and_hook(
@@ -7231,10 +7244,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
-        let result = traits::session_flags::scope_non_interactive_session(
-            !self.prompt_is_interactive(),
-            self.try_run_turn(prompt),
-        )
+        let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
+            traits::session_flags::scope_non_interactive_session(
+                !self.prompt_is_interactive(),
+                self.try_run_turn(prompt),
+            )
+            .await
+        })
         .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
@@ -7718,19 +7734,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// the port has no GrowthBook, so only `CLAUDE_CODE_GOAL_CHECKIN_MINUTES=0`
     /// turns it off. It is still a strict no-op in any session with no active
     /// goal, which is the overwhelmingly common case.
-    async fn goal_checkin_pass(&self, background_tasks: &[hooks::HookBackgroundTask]) -> bool {
-        let Some(condition) = ({
-            let session = self.session.lock().await;
-            session.active_goal.as_ref().map(|g| g.condition.clone())
-        }) else {
-            self.goal_checkin
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clear();
-            return false;
-        };
-
-        let deferring: Vec<crate::prompt::goal_checkin::DeferringTask> = background_tasks
+    fn build_deferring_goal_checkin_tasks(
+        background_tasks: &[hooks::HookBackgroundTask],
+    ) -> Vec<crate::prompt::goal_checkin::DeferringTask> {
+        background_tasks
             .iter()
             .filter(|t| {
                 crate::prompt::goal_checkin::DEFERRING_TASK_LABELS.contains(&t.r#type.as_str())
@@ -7739,36 +7746,46 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .map(|t| crate::prompt::goal_checkin::DeferringTask {
                 id: t.id.clone(),
                 label: t.r#type.clone(),
-                // `s.type==="local_bash"&&!isMonitor?s.command:s.description`.
                 detail: t
                     .command
                     .clone()
                     .filter(|c| !c.is_empty())
                     .unwrap_or_else(|| t.description.clone()),
             })
-            .collect();
+            .collect()
+    }
+
+    async fn goal_checkin_pass(&self, background_tasks: &[hooks::HookBackgroundTask]) -> bool {
+        let Some(goal) = ({
+            let session = self.session.lock().await;
+            session.active_goal.clone()
+        }) else {
+            self.goal_checkin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+            self.sync_goal_checkin_idle_task().await;
+            return false;
+        };
+
+        let deferring = Self::build_deferring_goal_checkin_tasks(background_tasks);
 
         if deferring.is_empty() {
             self.goal_checkin
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clear();
+            self.sync_goal_checkin_idle_task().await;
             return false;
         }
 
-        let now_ms = tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
-        let checkin = {
-            let mut state = self
-                .goal_checkin
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.advance(
-                &condition,
-                &deferring,
-                now_ms,
-                crate::prompt::goal_checkin::checkin_interval_ms(),
-            )
-        };
+        let checkin = Self::advance_goal_checkin_state(
+            &self.goal_checkin,
+            &goal.condition,
+            &deferring,
+            crate::prompt::goal_checkin::checkin_interval_ms(),
+        );
+        self.sync_goal_checkin_idle_task().await;
         if let Some(body) = checkin {
             let msg = ConversationMessage::user_meta(MessageId::new(), body);
             {
@@ -7778,6 +7795,257 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             self.persist_message_to_jsonl(&msg).await;
         }
         true
+    }
+
+    fn advance_goal_checkin_state(
+        goal_checkin: &Arc<std::sync::Mutex<crate::prompt::goal_checkin::GoalDeferralState>>,
+        condition: &str,
+        deferring: &[crate::prompt::goal_checkin::DeferringTask],
+        interval_ms: i64,
+    ) -> Option<String> {
+        let now_ms = tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
+        goal_checkin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .advance(condition, deferring, now_ms, interval_ms)
+    }
+
+    async fn sync_goal_checkin_idle_task(&self) {
+        let should_run = self.stop_hook_snapshot.is_some()
+            && crate::prompt::goal_checkin::checkin_interval_ms() > 0
+            && self.session.lock().await.active_goal.is_some()
+            && self
+                .goal_checkin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .deferred_since
+                .is_some();
+
+        if should_run {
+            if self
+                .goal_checkin_idle_running
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            let Some(provider) = self.stop_hook_snapshot.clone() else {
+                return;
+            };
+            let generation = self
+                .goal_checkin_idle_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                .saturating_add(1);
+            self.goal_checkin_idle_running
+                .store(true, std::sync::atomic::Ordering::Release);
+            let writer = self.jsonl_writer.clone();
+            let session = Arc::clone(&self.session);
+            let turn_gate = Arc::clone(&self.turn_gate);
+            let goal_checkin = Arc::clone(&self.goal_checkin);
+            let last_jsonl_uuid = Arc::clone(&self.last_jsonl_uuid);
+            let current_cwd = Arc::clone(&self.current_cwd);
+            let fallback_cwd = self.cwd.clone();
+            let running = Arc::clone(&self.goal_checkin_idle_running);
+            let generation_counter = Arc::clone(&self.goal_checkin_idle_generation);
+            let handle = tokio::spawn(async move {
+                ConversationOrchestrator::run_goal_checkin_idle_loop(
+                    provider,
+                    writer,
+                    session,
+                    turn_gate,
+                    goal_checkin,
+                    last_jsonl_uuid,
+                    current_cwd,
+                    fallback_cwd,
+                    running,
+                    generation_counter,
+                    generation,
+                )
+                .await;
+            });
+            *self
+                .goal_checkin_idle_task
+                .lock()
+                .expect("goal checkin idle task") = Some(handle);
+            return;
+        }
+
+        self.goal_checkin_idle_running
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.goal_checkin_idle_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Some(handle) = self
+            .goal_checkin_idle_task
+            .lock()
+            .expect("goal checkin idle task")
+            .take()
+        {
+            handle.abort();
+        }
+    }
+
+    async fn run_goal_checkin_idle_loop(
+        provider: Arc<dyn crate::stop_hook_snapshot::StopHookSnapshotProvider>,
+        writer: Option<Arc<JsonlWriter>>,
+        session: Arc<Mutex<SessionState>>,
+        turn_gate: Arc<Mutex<()>>,
+        goal_checkin: Arc<std::sync::Mutex<crate::prompt::goal_checkin::GoalDeferralState>>,
+        last_jsonl_uuid: Arc<Mutex<Option<String>>>,
+        current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
+        fallback_cwd: std::path::PathBuf,
+        running: Arc<std::sync::atomic::AtomicBool>,
+        generation_counter: Arc<std::sync::atomic::AtomicU64>,
+        generation: u64,
+    ) {
+        struct RunningGuard {
+            running: Arc<std::sync::atomic::AtomicBool>,
+            generation_counter: Arc<std::sync::atomic::AtomicU64>,
+            generation: u64,
+        }
+
+        impl Drop for RunningGuard {
+            fn drop(&mut self) {
+                if self
+                    .generation_counter
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == self.generation
+                {
+                    self.running
+                        .store(false, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+
+        let _guard = RunningGuard {
+            running,
+            generation_counter,
+            generation,
+        };
+
+        loop {
+            let base_interval_ms = crate::prompt::goal_checkin::checkin_interval_ms();
+            if base_interval_ms <= 0 {
+                return;
+            }
+            let sleep_ms = {
+                let state = goal_checkin
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(deferred_since) = state.deferred_since else {
+                    return;
+                };
+                let interval = crate::prompt::goal_checkin::next_checkin_interval_ms(
+                    base_interval_ms,
+                    state.checkin_count,
+                );
+                let now_ms =
+                    tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now());
+                deferred_since
+                    .saturating_add(interval)
+                    .saturating_sub(now_ms)
+                    .max(1)
+            };
+            tokio::time::sleep(Duration::from_millis(sleep_ms as u64)).await;
+
+            // Serialize idle emission with every public turn. Besides keeping
+            // the history order deterministic, this prevents the background
+            // append and a foreground append from reading the same JSONL parent
+            // and creating a split chain.
+            let _turn_guard = turn_gate.lock().await;
+
+            let Some(goal) = ({
+                let locked = session.lock().await;
+                locked.active_goal.clone()
+            }) else {
+                goal_checkin
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
+                return;
+            };
+            let deferring =
+                Self::build_deferring_goal_checkin_tasks(&provider.background_tasks().await);
+            if deferring.is_empty() {
+                goal_checkin
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
+                return;
+            }
+
+            let body = Self::advance_goal_checkin_state(
+                &goal_checkin,
+                &goal.condition,
+                &deferring,
+                base_interval_ms,
+            );
+            if let Some(body) = body {
+                let msg = ConversationMessage::user_meta(MessageId::new(), body);
+                {
+                    session.lock().await.history.push(msg.clone());
+                }
+                Self::persist_idle_goal_checkin_message(
+                    writer.clone(),
+                    Arc::clone(&last_jsonl_uuid),
+                    Arc::clone(&current_cwd),
+                    fallback_cwd.clone(),
+                    &session,
+                    &msg,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn persist_idle_goal_checkin_message(
+        writer: Option<Arc<JsonlWriter>>,
+        last_jsonl_uuid: Arc<Mutex<Option<String>>>,
+        current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
+        fallback_cwd: std::path::PathBuf,
+        session: &Arc<Mutex<SessionState>>,
+        msg: &ConversationMessage,
+    ) {
+        let Some(writer) = writer else {
+            return;
+        };
+        let (session_id, content) = {
+            let locked = session.lock().await;
+            let content = match msg {
+                ConversationMessage::User { content, .. } => content.clone(),
+                _ => Vec::new(),
+            };
+            (locked.session_id.to_string(), content)
+        };
+        let cwd = current_cwd
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| fallback_cwd.clone());
+        let parent_uuid = last_jsonl_uuid.lock().await.clone();
+        let mut extra = serde_json::Map::new();
+        extra.insert("isMeta".to_string(), serde_json::Value::Bool(true));
+        let jmsg = session::JsonlMessage {
+            message_type: "user".to_string(),
+            uuid: msg.id().as_uuid().to_string(),
+            parent_uuid,
+            session_id,
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            message: serde_json::json!({ "role": "user", "content": content }),
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch: git_branch_for_cwd(&cwd),
+            entrypoint: Some(entrypoint_value()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        };
+        let line_uuid = jmsg.uuid.clone();
+        if writer.append(&jmsg).await.is_ok() {
+            *last_jsonl_uuid.lock().await = Some(line_uuid);
+        }
     }
 
     async fn goal_stop_hook_disposition(
@@ -8894,11 +9162,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         );
         // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
         // user-interrupt token → `None` (behaviour byte-identical to before).
-        let result = traits::session_flags::scope_non_interactive_session(
-            !self.prompt_is_interactive(),
-            self.try_run_turn_streaming(prompt, Vec::new(), None, None, false),
-        )
-        .await;
+        let result =
+            telemetry::otel::with_turn_span("lingxi.orchestrator.turn.streaming", async {
+                traits::session_flags::scope_non_interactive_session(
+                    !self.prompt_is_interactive(),
+                    self.try_run_turn_streaming(prompt, Vec::new(), None, None, false),
+                )
+                .await
+            })
+            .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
         match &result {
@@ -10993,11 +11265,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
-        let result = traits::session_flags::scope_non_interactive_session(
-            !self.prompt_is_interactive(),
-            self.try_run_turn_cancelable(prompt, cancel),
-        )
-        .await;
+        let result =
+            telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
+                traits::session_flags::scope_non_interactive_session(
+                    !self.prompt_is_interactive(),
+                    self.try_run_turn_cancelable(prompt, cancel),
+                )
+                .await
+            })
+            .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         result.map_err(|e| self.enrich_api_error(e))
     }
@@ -11306,9 +11582,21 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // running only Block-behavior tools (or no tools) runs to its natural end
         // and is still reported `Cancelled` here — faithful: claude-code only
         // aborts Cancel-behavior tools; Block tools / the stream finish.
-        let r = traits::session_flags::scope_non_interactive_session(
-            !self.prompt_is_interactive(),
-            self.try_run_turn_streaming(prompt, images, Some(cancel.clone()), message_id, false),
+        let r = telemetry::otel::with_turn_span(
+            "lingxi.orchestrator.turn.streaming.cancelable",
+            async {
+                traits::session_flags::scope_non_interactive_session(
+                    !self.prompt_is_interactive(),
+                    self.try_run_turn_streaming(
+                        prompt,
+                        images,
+                        Some(cancel.clone()),
+                        message_id,
+                        false,
+                    ),
+                )
+                .await
+            },
         )
         .await;
         match r {

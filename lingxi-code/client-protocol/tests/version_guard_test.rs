@@ -334,6 +334,10 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::ConversationControlsChanged.controls",
         "ConversationControlsDto",
     );
+    put("ClientEvent::AppIdentityProposed", "app_identity_proposed");
+    put("ClientEvent::AppIdentityProposed.request_id", "String");
+    put("ClientEvent::AppIdentityProposed.name", "String");
+    put("ClientEvent::AppIdentityProposed.surface", "AppSurfaceDto");
 
     put(
         "ClientEvent::ProviderCredentialStatus",
@@ -592,6 +596,9 @@ fn current_contract_index() -> ContractIndex {
         "ClientCommand::SetReasoningSelection.selection",
         "ReasoningSelectionDto",
     );
+    put("ClientCommand::ProposeAppIdentity", "propose_app_identity");
+    put("ClientCommand::ProposeAppIdentity.request_id", "String");
+    put("ClientCommand::ProposeAppIdentity.brief", "String");
 
     put("ClientCommand::RunSlashCommand", "run_slash_command");
     put("ClientCommand::RunSlashCommand.raw", "String");
@@ -654,6 +661,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::CreateApp.git_enabled", "bool");
     put("ClientCommand::CreateApp.workflow_model", "Option<String>");
     put("ClientCommand::CreateApp.conversation_id", "Option<String>");
+    put("ClientCommand::CreateApp.surface", "Option<AppSurfaceDto>");
 
     put("ClientCommand::StartApp", "start_app");
     put("ClientCommand::StartApp.app_id", "String");
@@ -1227,6 +1235,8 @@ fn current_contract_index() -> ContractIndex {
 
     put("AppCreateOriginDto::Chat", "chat");
     put("AppCreateOriginDto::Library", "library");
+    put("AppSurfaceDto::Dom", "dom");
+    put("AppSurfaceDto::Canvas", "canvas");
 
     put("AppErrorCodeDto::NotFound", "not_found");
     put("AppErrorCodeDto::RevisionConflict", "revision_conflict");
@@ -1484,6 +1494,8 @@ fn current_contract_index() -> ContractIndex {
         "AppBridgeStreamFrameDto",
     );
     put("AppEventDto::AppBridgeStreamFrame.frame_json", "String");
+    put("AppEventDto::AppCreated", "app_created");
+    put("AppEventDto::AppCreated.record", "AppRecordDto");
     put("AppEventDto::AppRecordChanged", "app_record_changed");
     put("AppEventDto::AppRecordChanged.record", "AppRecordDto");
     put("AppEventDto::AppProfileProposal", "app_profile_proposal");

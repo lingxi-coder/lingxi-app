@@ -875,7 +875,10 @@ mod tests {
         );
         // No newline and within budget → verbatim, no ellipsis.
         let short = "a".repeat(COMPACT_FAILURE_DETAIL_WIDTH);
-        assert_eq!(truncate_first_line(&short, COMPACT_FAILURE_DETAIL_WIDTH), short);
+        assert_eq!(
+            truncate_first_line(&short, COMPACT_FAILURE_DETAIL_WIDTH),
+            short
+        );
         // No newline, over budget → clamped to exactly 300 columns, no ellipsis
         // (`is(n,t)`, not `is(n+"…",t)`).
         let long = "a".repeat(COMPACT_FAILURE_DETAIL_WIDTH + 50);
@@ -891,7 +894,9 @@ mod tests {
         // clusters are never split.
         let wide = "宽".repeat(200);
         assert_eq!(
-            truncate_first_line(&wide, COMPACT_FAILURE_DETAIL_WIDTH).chars().count(),
+            truncate_first_line(&wide, COMPACT_FAILURE_DETAIL_WIDTH)
+                .chars()
+                .count(),
             COMPACT_FAILURE_DETAIL_WIDTH / 2
         );
     }

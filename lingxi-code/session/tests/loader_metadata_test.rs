@@ -1,6 +1,5 @@
-//! T3 tests — confirm `SessionMetadata` `Ord` is mtime-desc with a
-//! created/birthtime-desc tie-break (SESSION.6, 1:1 with claude-code `sortLogs`,
-//! `types/logs.ts:319-330`).
+//! T3 tests — confirm `SessionMetadata` `Ord` is newest-first by the logical
+//! transcript timestamps carried in `modified`/`created`.
 
 use session::jsonl::SessionMetadata;
 use std::path::PathBuf;
@@ -31,6 +30,16 @@ fn ord_sorts_newest_first() {
     assert_eq!(v[0].modified, UNIX_EPOCH + Duration::from_secs(300));
     assert_eq!(v[1].modified, UNIX_EPOCH + Duration::from_secs(200));
     assert_eq!(v[2].modified, UNIX_EPOCH + Duration::from_secs(100));
+}
+
+#[test]
+fn ord_prefers_newer_transcript_activity_over_filesystem_mtime() {
+    let older_file_newer_conversation = meta(1, 5, 1, "a.jsonl");
+    let newer_file_older_conversation = meta(2, 4, 1, "b.jsonl");
+    let mut v = vec![newer_file_older_conversation, older_file_newer_conversation];
+    v.sort();
+    assert_eq!(v[0].uuid, Uuid::from_bytes([1; 16]));
+    assert_eq!(v[1].uuid, Uuid::from_bytes([2; 16]));
 }
 
 #[test]

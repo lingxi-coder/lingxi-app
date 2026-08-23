@@ -413,12 +413,10 @@ mod tests {
                 .with_path_translator(Arc::new(FakeGuestTranslator));
 
         // A translatable base still yields the rebased excludes.
-        assert!(
-            !gate
-                .read_deny_exclude_globs(std::path::Path::new("/workspace/ws"))
-                .unwrap_or_default()
-                .is_empty()
-        );
+        assert!(!gate
+            .read_deny_exclude_globs(std::path::Path::new("/workspace/ws"))
+            .unwrap_or_default()
+            .is_empty());
 
         // A fenced one yields NO list at all — not an empty list.
         assert_eq!(
@@ -3345,11 +3343,10 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
             gate.agent_type_deny("reviewer").await.as_deref(),
             Some("session")
         );
-        assert!(
-            gate.agent_deny_content_types()
-                .await
-                .contains(&"reviewer".into())
-        );
+        assert!(gate
+            .agent_deny_content_types()
+            .await
+            .contains(&"reviewer".into()));
     }
 
     #[tokio::test]

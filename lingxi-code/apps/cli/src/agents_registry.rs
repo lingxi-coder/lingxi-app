@@ -971,6 +971,7 @@ impl SessionRegistration {
         else {
             return;
         };
+        let was_idle = record.status.as_deref() == Some("idle");
         if record.status.as_deref() == Some(status) && record.waiting_for.as_deref() == waiting_for
         {
             return;
@@ -981,6 +982,9 @@ impl SessionRegistration {
         record.updated_at = Some(now_ms);
         record.status_updated_at = Some(now_ms);
         persist_live_record(path, record);
+        if !was_idle && status == "idle" {
+            deliver_idle_notifications(path, record, false);
+        }
     }
 
     /// Update the advertised name after a uniqueness claim or `/rename`.
@@ -1072,11 +1076,57 @@ impl SessionRegistration {
     /// `Arc` clone. Subsequent [`Self::update_status`] calls are no-ops.
     pub fn deregister(&self) {
         if let Ok(mut inner) = self.inner.lock() {
-            if let Some(path) = inner.path.take() {
+            if let (Some(path), Some(record)) = (inner.path.take(), inner.record.as_ref()) {
+                deliver_idle_notifications(&path, record, true);
                 let _ = std::fs::remove_file(path);
             }
             inner.record = None;
         }
+    }
+}
+
+fn deliver_idle_notifications(path: &Path, record: &LiveSessionRecord, exited: bool) {
+    let Some(root) = path.parent() else {
+        return;
+    };
+    let Some(session_id) = record.session_id.as_deref() else {
+        return;
+    };
+    let dir = traits::live_sessions::LiveSessionDir::at(root);
+    let Ok(subscriptions) = dir.drain_idle_subscriptions(session_id) else {
+        return;
+    };
+    if subscriptions.is_empty() {
+        return;
+    }
+    let from = record.name.clone().unwrap_or_else(|| "session".to_string());
+    let from_session_id = session_id.to_string();
+    for sub in subscriptions {
+        let summary = Some(match sub.summary {
+            Some(summary) if !summary.trim().is_empty() => {
+                if exited {
+                    format!("{from} exited: {summary}")
+                } else {
+                    format!("{from} is idle: {summary}")
+                }
+            }
+            _ if exited => format!("{from} exited"),
+            _ => format!("{from} is idle"),
+        });
+        let msg = traits::live_sessions::PeerMessage {
+            from: from.clone(),
+            from_session_id: from_session_id.clone(),
+            content: if exited {
+                format!("{from} has exited.")
+            } else {
+                format!("{from} is now idle.")
+            },
+            summary,
+            msg_id: None,
+            from_addr: None,
+            from_mode: None,
+        };
+        let _ = dir.send_inbox(&sub.from_session_id, &msg);
     }
 }
 
@@ -1375,6 +1425,49 @@ mod tests {
         assert_eq!(unchanged.updated_at, stamped.updated_at);
         drop(reg);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn idle_notification_fires_once_on_busy_to_idle_edge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = SessionRegistration::register(tmp.path(), Some("target-session"), Some("peer"));
+        let dir = traits::live_sessions::LiveSessionDir::at(sessions_dir(tmp.path()));
+        dir.append_idle_subscription(
+            "target-session",
+            &traits::live_sessions::IdleNotificationRequest {
+                from: "lead".to_string(),
+                from_session_id: "subscriber-session".to_string(),
+                summary: Some("review finished".to_string()),
+            },
+        )
+        .unwrap();
+
+        reg.update_status("busy", None);
+        reg.update_status("idle", None);
+        let first = dir.drain_inbox("subscriber-session").unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].from, "peer");
+        assert_eq!(first[0].content, "peer is now idle.");
+        assert_eq!(first[0].summary.as_deref(), Some("peer is idle: review finished"));
+
+        reg.update_status("busy", None);
+        reg.update_status("idle", None);
+        assert!(dir.drain_inbox("subscriber-session").unwrap().is_empty());
+
+        dir.append_idle_subscription(
+            "target-session",
+            &traits::live_sessions::IdleNotificationRequest {
+                from: "lead".to_string(),
+                from_session_id: "subscriber-session".to_string(),
+                summary: None,
+            },
+        )
+        .unwrap();
+        drop(reg);
+        let exit = dir.drain_inbox("subscriber-session").unwrap();
+        assert_eq!(exit.len(), 1);
+        assert_eq!(exit[0].content, "peer has exited.");
+        assert_eq!(exit[0].summary.as_deref(), Some("peer exited"));
     }
 
     #[test]

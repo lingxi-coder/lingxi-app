@@ -106,11 +106,15 @@ static SEND_MESSAGE_SCHEMA: Lazy<Value> = Lazy::new(build_input_schema);
 fn build_input_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["to", "message"],
+        "required": ["to"],
         "properties": {
             "to": {
                 "type": "string",
                 "description": "Recipient: teammate name"
+            },
+            "notify_when_idle": {
+                "type": "boolean",
+                "description": "For local live sessions, send the message now and send one notice here when they next become idle or exit."
             },
             "summary": {
                 "type": "string",
@@ -256,6 +260,51 @@ impl SendMessageTool {
         })
     }
 
+    fn idle_subscription_success(target: &str) -> String {
+        format!(
+            "Subscribed — you will get one notice here when \"{target}\" is next idle (or exits). Do not poll or wait for it; carry on."
+        )
+    }
+
+    fn self_target_error(
+        recipient: &Recipient,
+        to_display: &str,
+        ctx: &ToolUseContext,
+    ) -> Option<String> {
+        match recipient {
+            Recipient::Agent(id) => ctx.agent_id.and_then(|self_id| {
+                (self_id.to_string() == *id).then(|| {
+                    format!(
+                        "'{to_display}' is this session's own address — a message or file sent there would only come back to this conversation; there is no one else at that address to send to."
+                    )
+                })
+            }),
+            Recipient::Teammate(_) => {
+                let trimmed = to_display.trim();
+                if ctx.agent_name.as_deref().is_some_and(|name| name == trimmed) {
+                    return Some(format!("Not sent — '{trimmed}' is this session's own name."));
+                }
+                if traits::live_sessions::process_name()
+                    .as_deref()
+                    .is_some_and(|name| name == trimmed)
+                {
+                    return Some(format!("Not sent — '{trimmed}' is this session's own name."));
+                }
+                traits::live_sessions::process_dir()
+                    .and_then(|dir| dir.find_exact(trimmed, None))
+                    .zip(traits::live_sessions::process_session_id())
+                    .and_then(|(rec, self_id)| {
+                        (rec.sid() == self_id).then(|| {
+                            format!(
+                                "'{trimmed}' is this session's own address — a message or file sent there would only come back to this conversation; there is no one else at that address to send to."
+                            )
+                        })
+                    })
+            }
+            Recipient::Broadcast => None,
+        }
+    }
+
     /// `generateRequestId('{request_type}', '{agent_id}')` from the TS —
     /// `"{request_type}-{millis}@{agent_id}"`.
     fn generate_request_id(request_type: &str, agent_id: &str) -> String {
@@ -373,38 +422,76 @@ impl SendMessageTool {
         content: &str,
         summary: Option<&str>,
         sender: &str,
+        notify_when_idle: bool,
     ) -> Result<Value, ToolError> {
-        if let Some(peer) = traits::live_sessions::process_dir().and_then(|d| {
+        if let Some((dir, peer)) = traits::live_sessions::process_dir().and_then(|d| {
             d.find_exact(
                 to_display,
                 traits::live_sessions::process_session_id().as_deref(),
             )
+            .map(|peer| (d, peer))
         }) {
             let from_name =
                 traits::live_sessions::process_name().unwrap_or_else(|| from.to_string());
             let from_sid = traits::live_sessions::process_session_id().unwrap_or_default();
+            let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
             let sock = peer
                 .messaging_socket_path
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(std::path::PathBuf::from)
                 .filter(|p| traits::uds_inbox::is_canonical_inbox_sock(p));
-            let Some(sock) = sock else {
-                return Err(ToolError::Internal(format!(
-                    "No running session has registered an inbox at {to_display} (ENOINBOX: no-key) — refusing to send to an unvouched pipe"
-                )));
-            };
-            traits::uds_inbox::send_to_live_peer(&sock, &from_name, &from_sid, content).map_err(
-                |e| {
+            if let Some(sock) = sock {
+                traits::uds_inbox::send_to_live_peer(&sock, &from_name, &from_sid, content)
+                    .map_err(|e| {
+                        ToolError::Internal(format!(
+                            "SendMessage: failed to deliver to live session: {e}"
+                        ))
+                    })?;
+            } else {
+                dir.send_inbox(
+                    peer.sid(),
+                    &traits::live_sessions::PeerMessage {
+                        from: from_name.clone(),
+                        from_session_id: from_sid.clone(),
+                        content: content.to_string(),
+                        summary: summary.map(str::to_string),
+                        msg_id: None,
+                        from_addr: None,
+                        from_mode: None,
+                    },
+                )
+                .map_err(|e| {
                     ToolError::Internal(format!(
-                        "SendMessage: failed to deliver to live session: {e}"
+                        "SendMessage: failed to deliver to live session inbox: {e}"
                     ))
-                },
-            )?;
-            let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
+                })?;
+            }
+            let subscribed = if notify_when_idle {
+                dir.append_idle_subscription(
+                    peer.sid(),
+                    &traits::live_sessions::IdleNotificationRequest {
+                        from: from_name.clone(),
+                        from_session_id: from_sid.clone(),
+                        summary: summary.map(str::to_string),
+                    },
+                )
+                .map_err(|e| {
+                    ToolError::Internal(format!(
+                        "SendMessage: failed to register idle notification for live session: {e}"
+                    ))
+                })?;
+                true
+            } else {
+                false
+            };
             return Ok(json!({
                 "success": true,
-                "message": format!("Message sent to {to_display}'s inbox"),
+                "message": if subscribed {
+                    Self::idle_subscription_success(to_display)
+                } else {
+                    format!("Message sent to {to_display}'s inbox")
+                },
                 "routing": Self::routing(
                     sender,
                     &format!("@{to_display}"),
@@ -412,6 +499,11 @@ impl SendMessageTool {
                     Some(&preview),
                 ),
             }));
+        }
+        if notify_when_idle {
+            return Err(ToolError::InvalidInput(
+                "notify_when_idle is only supported for local live sessions".into(),
+            ));
         }
         Self::deliver(router, from, recipient.route_target(), content.to_string()).await?;
         let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
@@ -424,6 +516,44 @@ impl SendMessageTool {
                 summary,
                 Some(&preview),
             ),
+        }))
+    }
+
+    async fn handle_idle_subscription_only(
+        to_display: &str,
+        summary: Option<&str>,
+        sender: &str,
+    ) -> Result<Value, ToolError> {
+        let Some((dir, peer)) = traits::live_sessions::process_dir().and_then(|d| {
+            d.find_exact(
+                to_display,
+                traits::live_sessions::process_session_id().as_deref(),
+            )
+            .map(|peer| (d, peer))
+        }) else {
+            return Err(ToolError::InvalidInput(
+                "notify_when_idle is only supported for local live sessions".into(),
+            ));
+        };
+        let from_name = traits::live_sessions::process_name().unwrap_or_else(|| sender.to_string());
+        let from_sid = traits::live_sessions::process_session_id().unwrap_or_default();
+        dir.append_idle_subscription(
+            peer.sid(),
+            &traits::live_sessions::IdleNotificationRequest {
+                from: from_name,
+                from_session_id: from_sid,
+                summary: summary.map(str::to_string),
+            },
+        )
+        .map_err(|e| {
+            ToolError::Internal(format!(
+                "SendMessage: failed to register idle notification for live session: {e}"
+            ))
+        })?;
+        Ok(json!({
+            "success": true,
+            "message": Self::idle_subscription_success(to_display),
+            "routing": Self::routing(sender, &format!("@{to_display}"), summary, None),
         }))
     }
 
@@ -760,6 +890,10 @@ impl Tool for SendMessageTool {
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         let to = input.get("to").and_then(Value::as_str).unwrap_or("");
+        let notify_when_idle = input
+            .get("notify_when_idle")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         // The 2.1.218 oracle's SendMessage validateInput STILL hard-rejects a
         // broadcast unconditionally (`if(e.to==="*")return{result:!1,message:'…',
         // errorCode:9}`). The internal fan-out plumbing (handle_broadcast /
@@ -778,6 +912,14 @@ impl Tool for SendMessageTool {
         if to.contains('@') {
             return Err(ValidationError(
                 "to must be a bare teammate name — there is only one team per session".into(),
+            ));
+        }
+        if input.get("message").is_none() {
+            if notify_when_idle {
+                return Ok(());
+            }
+            return Err(ValidationError(
+                "message is required unless notify_when_idle is true".into(),
             ));
         }
 
@@ -967,39 +1109,57 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
         };
 
         // --- Parse `message` (plain string or structured object) -------------
-        let message = match input.get("message") {
-            Some(m) => m,
-            None => {
-                Self::emit_failed(
-                    &bus,
-                    &invocation_id,
-                    "missing_message",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
-                return Err(ToolError::InvalidInput(
-                    "SendMessage: missing 'message'".into(),
-                ));
-            }
-        };
+        let message = input.get("message");
 
         let summary = input
             .get("summary")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let notify_when_idle = input
+            .get("notify_when_idle")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let from = Self::route_from(&ctx);
         let sender = Self::sender_name(&ctx);
 
+        if let Some(message) = Self::self_target_error(&recipient, &to, &ctx) {
+            Self::emit_failed(
+                &bus,
+                &invocation_id,
+                "self_target",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::InvalidInput(message));
+        }
+
         let message_chars = match message {
-            Value::String(s) => s.chars().count(),
-            other => serde_json::to_string(other)
+            None => 0,
+            Some(Value::String(s)) => s.chars().count(),
+            Some(other) => serde_json::to_string(other)
                 .map(|s| s.chars().count())
                 .unwrap_or(0),
         } as i64;
         Self::emit_started(&bus, &invocation_id, message_chars).await;
 
         let data_result: Result<Value, ToolError> = match message {
-            Value::String(content) => match recipient {
+            None => {
+                if notify_when_idle {
+                    Self::handle_idle_subscription_only(&to, summary.as_deref(), &sender).await
+                } else {
+                    Self::emit_failed(
+                        &bus,
+                        &invocation_id,
+                        "missing_message",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    Err(ToolError::InvalidInput(
+                        "SendMessage: missing 'message'".into(),
+                    ))
+                }
+            }
+            Some(Value::String(content)) => match recipient {
                 Recipient::Broadcast => Self::handle_broadcast(&router, &from, content).await,
                 _ => {
                     Self::handle_message(
@@ -1010,11 +1170,12 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
                         content,
                         summary.as_deref(),
                         &sender,
+                        notify_when_idle,
                     )
                     .await
                 }
             },
-            Value::Object(obj) => {
+            Some(Value::Object(obj)) => {
                 if matches!(recipient, Recipient::Broadcast) {
                     Self::emit_failed(
                         &bus,
@@ -1207,6 +1368,11 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn process_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     /// Records every `(from, to, content)` it is asked to route and always acks
     /// (so name-keyed routes — which the production seam can't resolve — are
     /// observable in tests).
@@ -1357,8 +1523,9 @@ mod tests {
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
         let schema = tool.input_schema();
         assert_eq!(schema["type"], "object");
-        assert_eq!(schema["required"], json!(["to", "message"]));
+        assert_eq!(schema["required"], json!(["to"]));
         assert!(schema["properties"]["to"].is_object());
+        assert_eq!(schema["properties"]["notify_when_idle"]["type"], "boolean");
         assert!(schema["properties"]["summary"].is_object());
         assert!(schema["properties"]["message"]["oneOf"].is_array());
         let variants = schema["properties"]["message"]["oneOf"].as_array().unwrap();
@@ -1438,6 +1605,151 @@ mod tests {
             .await
             .expect_err("string message without summary must reject");
         assert_eq!(err.0, "summary is required when message is a string");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_sending_to_self() {
+        let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        traits::live_sessions::set_process_dir(dir.clone());
+        traits::live_sessions::set_process_session_id("self-session");
+        traits::live_sessions::set_process_name("lead");
+        std::fs::create_dir_all(dir.root()).unwrap();
+        std::fs::write(
+            dir.root().join("111.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "pid": 111u32,
+                "sessionId": "self-session",
+                "name": "lead",
+                "kind": "interactive",
+                "startedAt": 0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let tool = SendMessageTool::new(ctx_with(Arc::new(RecordingRouter::new())));
+        let err = tool
+            .call(
+                json!({ "to": "lead", "summary": "self", "message": "hi" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("self-target must reject");
+        assert!(
+            err.model_facing_message()
+                .contains("Not sent — 'lead' is this session's own name."),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_when_idle_sends_immediately_and_subscribes_once() {
+        let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        traits::live_sessions::set_process_dir(dir.clone());
+        traits::live_sessions::set_process_session_id("self-session");
+        traits::live_sessions::set_process_name("lead");
+        std::fs::create_dir_all(dir.root()).unwrap();
+        std::fs::write(
+            dir.root().join("222.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "pid": 222u32,
+                "sessionId": "peer-session",
+                "name": "peer",
+                "kind": "interactive",
+                "startedAt": 0,
+                "status": "busy"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let result = tool
+            .call(
+                json!({
+                    "to": "peer",
+                    "notify_when_idle": true,
+                    "summary": "later",
+                    "message": "check this when free"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("send succeeds");
+
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some(
+                "Subscribed — you will get one notice here when \"peer\" is next idle (or exits). Do not poll or wait for it; carry on."
+            )
+        );
+        assert!(router.routed.lock().unwrap().is_empty());
+        let delivered = dir.drain_inbox("peer-session").unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].content, "check this when free");
+        assert_eq!(delivered[0].summary.as_deref(), Some("later"));
+        let queued = dir.drain_idle_subscriptions("peer-session").unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].from, "lead");
+        assert_eq!(queued[0].from_session_id, "self-session");
+        assert_eq!(queued[0].summary.as_deref(), Some("later"));
+    }
+
+    #[tokio::test]
+    async fn notify_when_idle_without_message_registers_subscription_only() {
+        let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        traits::live_sessions::set_process_dir(dir.clone());
+        traits::live_sessions::set_process_session_id("self-session");
+        traits::live_sessions::set_process_name("lead");
+        std::fs::create_dir_all(dir.root()).unwrap();
+        std::fs::write(
+            dir.root().join("222.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "pid": 222u32,
+                "sessionId": "peer-session",
+                "name": "peer",
+                "kind": "interactive",
+                "startedAt": 0,
+                "status": "busy"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let result = tool
+            .call(
+                json!({
+                    "to": "peer",
+                    "notify_when_idle": true,
+                    "summary": "ping me"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("subscription succeeds");
+
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some(
+                "Subscribed — you will get one notice here when \"peer\" is next idle (or exits). Do not poll or wait for it; carry on."
+            )
+        );
+        assert!(router.routed.lock().unwrap().is_empty());
+        let queued = dir.drain_idle_subscriptions("peer-session").unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].summary.as_deref(), Some("ping me"));
     }
 
     #[tokio::test]

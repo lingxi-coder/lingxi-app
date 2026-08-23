@@ -618,7 +618,10 @@ mod tests {
     fn agent_bullet_is_gated_on_the_subagent_steer() {
         let with_bullet = glob_description(true);
         let without = glob_description(false);
-        assert_eq!(with_bullet, format!("{without}{GLOB_DESCRIPTION_AGENT_BULLET}"));
+        assert_eq!(
+            with_bullet,
+            format!("{without}{GLOB_DESCRIPTION_AGENT_BULLET}")
+        );
         assert!(with_bullet.ends_with(
             "- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead (if available)"
         ));
@@ -645,7 +648,10 @@ mod tests {
         // `path` is checked second — and wins over the (nonexistent) directory
         // error that would otherwise fire.
         let err = tool
-            .validate_input(&json!({ "pattern": "*.rs", "path": "no_such\0dir" }), &fresh_ctx())
+            .validate_input(
+                &json!({ "pattern": "*.rs", "path": "no_such\0dir" }),
+                &fresh_ctx(),
+            )
             .await
             .unwrap_err();
         assert_eq!(

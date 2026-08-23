@@ -222,6 +222,54 @@ final class LingxiCodeUITests: XCTestCase {
         add(screenshot)
     }
 
+    /// A wire-maximum questionnaire (4 questions x 4 described options) must
+    /// still present its actions. The sheet opened at the `.medium` detent with
+    /// 取消/下一题/提交 inside the scrolling content, so a full-size request
+    /// showed only options and nothing the user could act on.
+    func testAskUserQuestionSheetKeepsActionsReachableWithMaximumOptions() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_ASK_QUESTION"] = "1"
+        app.launch()
+
+        let cancel = app.buttons["chat.ask.cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 10), app.debugDescription)
+        let next = app.buttons["chat.ask.next"]
+        XCTAssertTrue(next.waitForExistence(timeout: 5), app.debugDescription)
+        // `isHittable` is what fails when a control is laid out below the
+        // sheet's visible height: it exists in the hierarchy but no tap can
+        // reach it.
+        XCTAssertTrue(cancel.isHittable, app.debugDescription)
+        XCTAssertTrue(next.isHittable, app.debugDescription)
+        // The free-text row is part of every question and must be reachable
+        // without first scrolling past four described options.
+        XCTAssertTrue(app.textFields["chat.ask.other.0"].exists, app.debugDescription)
+
+        // Walk the whole stepper: every step must keep its actions on screen,
+        // and the last one must offer an enabled 提交 once each question is
+        // answered.
+        for step in 0 ..< 4 {
+            let option = app.buttons.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "Option \(step + 1).1")
+            ).firstMatch
+            XCTAssertTrue(option.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(option.isHittable, app.debugDescription)
+            option.tap()
+            guard step < 3 else { break }
+            XCTAssertTrue(next.isHittable, app.debugDescription)
+            next.tap()
+        }
+        let submit = app.buttons["chat.ask.submit"]
+        XCTAssertTrue(submit.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(submit.isHittable, app.debugDescription)
+        XCTAssertTrue(submit.isEnabled, app.debugDescription)
+        XCTAssertTrue(app.buttons["chat.ask.prev"].isHittable, app.debugDescription)
+
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "提问表单-满配选项"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
     /// A subagent's dispatch prompt is the first USER bubble of its child
     /// transcript and runs to thousands of characters. The user branch of
     /// `MessageBubble` had no fold at all — only the assistant branch did — so

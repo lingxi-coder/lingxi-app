@@ -503,8 +503,14 @@ mod tests {
             auto_default_from_trusted: false,
             ..no_settings()
         };
-        let (mode, _) =
-            initial_permission_mode_from_cli_with_ide(None, false, None, false, &untrusted_auto, ide());
+        let (mode, _) = initial_permission_mode_from_cli_with_ide(
+            None,
+            false,
+            None,
+            false,
+            &untrusted_auto,
+            ide(),
+        );
         assert_eq!(mode, PermissionMode::Auto);
         // Non-IDE: the same settings are IGNORED (MODE-SETTINGS-AUTO-TRUST-01).
         let (mode, _) = initial_permission_mode_from_cli_with_ide(

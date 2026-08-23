@@ -65,7 +65,9 @@ fn escape_control_chars(s: &str) -> String {
 /// `&amp;lt;` rather than being double-decoded.
 #[must_use]
 pub fn escape_reminder_html(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// `pze(e)` @285128585 — full HTML-entity escape (`&`, `<`, `>`) plus
@@ -144,7 +146,10 @@ mod tests {
 
     #[test]
     fn text_escape_replaces_ampersand_first() {
-        assert_eq!(escape_reminder_text("a & <b> \u{2028}"), "a &amp; &lt;b&gt; &#8232;");
+        assert_eq!(
+            escape_reminder_text("a & <b> \u{2028}"),
+            "a &amp; &lt;b&gt; &#8232;"
+        );
         // `&` first ⇒ an already-escaped entity is escaped again, like JS.
         assert_eq!(escape_reminder_text("&lt;"), "&amp;lt;");
     }
@@ -167,7 +172,10 @@ mod tests {
 
     #[test]
     fn control_characters_become_numeric_entities() {
-        assert_eq!(escape_reminder_path("a\nb\tc\u{7f}d\u{9f}e"), "a&#10;b&#9;c&#127;d&#159;e");
+        assert_eq!(
+            escape_reminder_path("a\nb\tc\u{7f}d\u{9f}e"),
+            "a&#10;b&#9;c&#127;d&#159;e"
+        );
     }
 
     #[test]
@@ -201,7 +209,10 @@ mod tests {
             escape_closing_system_reminder("</system-reminders>"),
             "</system-reminders>"
         );
-        assert_eq!(escape_closing_system_reminder("</system-reminder"), "</system-reminder");
+        assert_eq!(
+            escape_closing_system_reminder("</system-reminder"),
+            "</system-reminder"
+        );
         assert_eq!(escape_closing_system_reminder("a < b / c"), "a < b / c");
     }
 

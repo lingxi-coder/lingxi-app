@@ -3029,6 +3029,24 @@ async fn resume_resolved_session(
     if let Some(p) = &argv.prompt {
         if !p.trim().is_empty() {
             seed_orchestrator_session(&runtime.orchestrator, session_id, &messages).await;
+            let entries = match load_resume_entries(session_id).await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    sink.error("runtime", &format!("resume deferred tools: {error}"))
+                        .await;
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            };
+            if let Err(error) = orchestrator::replay_deferred_tools_after_resume(
+                &runtime.orchestrator,
+                orchestrator::deferred_tool_replays_from_messages(&entries),
+            )
+            .await
+            {
+                sink.error("runtime", &format!("resume deferred tools: {error}"))
+                    .await;
+                return exit_codes::RUNTIME_ERROR;
+            }
             sink.text(&format!("Resumed session {session_id}\n")).await;
             return run_oneshot(argv, runtime, sink).await;
         }
@@ -3145,6 +3163,22 @@ async fn mount_resumed_tui_inner(
     // ENGINE seed: replay the transcript into the orchestrator's session so a
     // live turn continues the prior conversation.
     seed_orchestrator_session(&tui_build.runtime.orchestrator, session_id, &messages).await;
+    let entries = match load_resume_entries(session_id).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("lingxi-cli: resume deferred tools failed: {error}");
+            return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+        }
+    };
+    if let Err(error) = orchestrator::replay_deferred_tools_after_resume(
+        &tui_build.runtime.orchestrator,
+        orchestrator::deferred_tool_replays_from_messages(&entries),
+    )
+    .await
+    {
+        eprintln!("lingxi-cli: resume deferred tools failed: {error}");
+        return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+    }
     // COST seed (resume parity, claude-code `restoreCostStateForSession`): the
     // freshly-built cost tracker starts at zero, so without this the footer
     // would show `$0.0000` after resume until the first new turn. Restore the
@@ -3807,6 +3841,15 @@ async fn load_resume_session(session_id: uuid::Uuid) -> Result<Vec<JsonlMessage>
     let lingxi_home = lingxi_home_dir();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     load_resume_session_from(&lingxi_home, &cwd, session_id).await
+}
+
+async fn load_resume_entries(session_id: uuid::Uuid) -> Result<Vec<JsonlMessage>, LoaderError> {
+    let lingxi_home = lingxi_home_dir();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd));
+    session::jsonl::load_session_entries_across_worktrees(&lingxi_home, &cwd_str, session_id, fs)
+        .await
 }
 
 /// Production disk→`Vec<JsonlMessage>` load with the inputs passed in (no env /

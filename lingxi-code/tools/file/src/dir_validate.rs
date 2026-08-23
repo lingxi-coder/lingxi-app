@@ -110,9 +110,12 @@ pub(crate) fn validate_glob_directory(path: &str, cwd: &Path) -> Result<(), Vali
             }
             Ok(())
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(
-            enoent_message("Directory does not exist", path, &resolved, &cwd),
-        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(enoent_message(
+            "Directory does not exist",
+            path,
+            &resolved,
+            &cwd,
+        ))),
         // claude-code `throw o`; here we defer to the tool's own path guard.
         Err(_) => Ok(()),
     }
@@ -130,9 +133,12 @@ pub(crate) fn validate_grep_path(path: &str, cwd: &Path) -> Result<(), Validatio
         // No `isDirectory()` check upstream: a file path is accepted and
         // searched directly.
         Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(
-            enoent_message("Path does not exist", path, &resolved, &cwd),
-        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ValidationError(enoent_message(
+            "Path does not exist",
+            path,
+            &resolved,
+            &cwd,
+        ))),
         Err(_) => Ok(()),
     }
 }

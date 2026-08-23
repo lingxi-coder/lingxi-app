@@ -62,13 +62,8 @@ pub const FIXED_TOTAL_TOKENS: u64 = 5_000_000;
 pub const DEFAULT_TOTAL_TOKENS_BUDGET: u64 = 15_000_000;
 
 /// `jBv` @292022017 — the accepted mode strings, in the oracle's order.
-pub const TOTAL_TOKENS_MODES: &[&str] = &[
-    "off",
-    "infinite",
-    "fixed",
-    "countdown",
-    "padded-countdown",
-];
+pub const TOTAL_TOKENS_MODES: &[&str] =
+    &["off", "infinite", "fixed", "countdown", "padded-countdown"];
 
 /// The oracle's GrowthBook literal fallback for `tengu_lapis_anchor`.
 pub const ORACLE_DEFAULT_MODE: TotalTokensMode = TotalTokensMode::PaddedCountdown;

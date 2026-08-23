@@ -25,6 +25,7 @@
 //! right after their on-chain anchor, never reordering the main chain.
 
 use crate::jsonl::path::{project_dir_name, session_path};
+use crate::jsonl::re_append::{find_last_typed_field, read_tail};
 use crate::jsonl::reader::{JsonlReader, LoadedTranscript};
 use crate::jsonl::schema::{JsonlMessage, SESSION_KIND_KEY};
 use crate::jsonl::title::{extract_title, truncate_title};
@@ -51,15 +52,17 @@ pub struct SessionMetadata {
     /// [`collect_dir`]) and normalized to [`crate::jsonl::title::TITLE_MAX_CHARS`]
     /// chars + ellipsis; the display surfaces re-truncate by terminal width.
     pub title: String,
-    /// File mtime (UTC `SystemTime`).
+    /// Transcript logical last-activity time (UTC `SystemTime`).
+    ///
+    /// Mirrors claude-code's resume/log catalog, which sorts by the chain tip's
+    /// timestamp rather than the transcript file's raw mtime, so touching or
+    /// reopening a file does not reorder sessions.
     pub modified: SystemTime,
-    /// File birthtime / creation time (UTC `SystemTime`) — the parity analog of
-    /// claude-code's `st.birthtime` (`sessionStorage.ts:4559`), used as the
-    /// equal-`modified` tie-break. Captured from [`std::fs::Metadata::created`]
-    /// at load; on platforms where `created()` is unavailable (it returns an
-    /// `Err`) we fall back to [`Self::modified`], so the field is always
-    /// populated and the tie-break degrades to a stable no-op rather than
-    /// panicking.
+    /// Transcript logical creation time (UTC `SystemTime`) from the first
+    /// message in the reconstructed main chain.
+    ///
+    /// Used as the equal-`modified` tie-break, matching claude-code
+    /// `sortLogs`/`loadSameRepoMessageLogs`.
     pub created: SystemTime,
     /// Number of JSONL lines in the file.
     pub message_count: usize,
@@ -95,9 +98,7 @@ pub struct SessionCatalog {
 
 impl Ord for SessionMetadata {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Newest-first (mtime desc), tie-break by `created` (birthtime) desc.
-        // 1:1 with claude-code `sortLogs` (`types/logs.ts:319-330`): primary
-        // `modified` DESC, then `created` DESC on equal `modified`.
+        // Newest-first by transcript activity, then creation time desc.
         other
             .modified
             .cmp(&self.modified)
@@ -167,6 +168,66 @@ pub enum LoaderError {
 /// Resolve `<lingxi_home>/projects/<sanitize(cwd)>[-djb2]` for a given cwd.
 fn project_dir_for_cwd(lingxi_home: &Path, cwd: &str) -> PathBuf {
     lingxi_home.join("projects").join(project_dir_name(cwd))
+}
+
+fn canonicalized_path_string(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn transcript_cwd_from_path(path: &Path, loaded: &LoadedTranscript) -> Option<String> {
+    let tail = read_tail(path);
+    if let Some(relocated) = find_last_typed_field(&tail, "relocated", "relocatedCwd") {
+        if !relocated.is_empty() {
+            return Some(relocated);
+        }
+    }
+    loaded
+        .messages_in_order
+        .first()
+        .map(|message| message.cwd.clone())
+        .filter(|cwd| !cwd.is_empty())
+}
+
+fn transcript_matches_target_dirs(transcript_cwd: Option<&str>, target_cwds: &[String]) -> bool {
+    let Some(transcript_cwd) = transcript_cwd else {
+        return true;
+    };
+    let transcript_canonical = canonicalized_path_string(transcript_cwd);
+    if target_cwds
+        .iter()
+        .any(|target| canonicalized_path_string(target) == transcript_canonical)
+    {
+        return true;
+    }
+
+    let transcript_dir = project_dir_name(transcript_cwd);
+    !target_cwds
+        .iter()
+        .any(|target| project_dir_name(target) == transcript_dir)
+}
+
+fn transcript_logical_times(
+    loaded: &LoadedTranscript,
+    arg: &str,
+) -> Option<(SystemTime, SystemTime)> {
+    let (chain, _) = build_conversation_chain(loaded, arg);
+    let first = chain.first()?;
+    let last = chain.last()?;
+    let created_ms = timestamp_millis(&first.timestamp);
+    let modified_ms = timestamp_millis(&last.timestamp);
+    if created_ms == i64::MIN || modified_ms == i64::MIN {
+        return None;
+    }
+    let created = SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(
+        u64::try_from(created_ms).ok()?,
+    ))?;
+    let modified = SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(
+        u64::try_from(modified_ms).ok()?,
+    ))?;
+    Some((created, modified))
 }
 
 /// Parse the `worktree ` lines of `git worktree list --porcelain` into absolute
@@ -333,6 +394,7 @@ fn is_loop_session(messages: &[JsonlMessage]) -> bool {
 /// counted in `skipped_files` so readable siblings can still be listed.
 async fn collect_dir(
     dir: &Path,
+    target_cwds: &[String],
     fs: &Arc<dyn FileSystem>,
     rows: &mut Vec<SessionMetadata>,
     skipped_files: &mut usize,
@@ -367,7 +429,7 @@ async fn collect_dir(
                 continue;
             }
         };
-        let modified = match metadata.modified() {
+        let file_modified = match metadata.modified() {
             Ok(modified) => modified,
             Err(_) => {
                 *skipped_files += 1;
@@ -380,7 +442,7 @@ async fn collect_dir(
         // `modified` there (the equal-mtime tie-break then degrades to a stable
         // no-op rather than failing the whole scan). No new dependency: this is
         // std-only `std::fs::Metadata::created`.
-        let created = metadata.created().unwrap_or(modified);
+        let file_created = metadata.created().unwrap_or(file_modified);
 
         // Parse uuid from filename stem; silently skip non-UUID files.
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -413,6 +475,14 @@ async fn collect_dir(
             *skipped_files += 1;
             continue;
         }
+
+        let transcript_cwd = transcript_cwd_from_path(&path, &loaded);
+        if !transcript_matches_target_dirs(transcript_cwd.as_deref(), target_cwds) {
+            continue;
+        }
+
+        let (created, modified) =
+            transcript_logical_times(&loaded, stem).unwrap_or((file_created, file_modified));
 
         // SESSION.1 — claude-code HIDES sub-agent / sidechain transcripts from
         // the /resume picker. The decision is made from the FIRST line only:
@@ -524,12 +594,13 @@ async fn collect_dir(
         // strip — is deferred; it is niche to the picker and the firstPrompt
         // sub-logic is intricate. The port keeps `extract_title`'s first-message
         // path + `(session)` empty marker for those.)
+        let tip = find_tip(&loaded, sid);
         let title = loaded
             .agent_names
             .get(sid)
             .or_else(|| loaded.custom_titles.get(sid))
             .or_else(|| loaded.ai_titles.get(sid))
-            .or_else(|| find_tip(&loaded, sid).and_then(|tip| loaded.summaries.get(&tip.uuid)))
+            .or_else(|| tip.and_then(|tip| loaded.summaries.get(&tip.uuid)))
             .map_or_else(
                 || extract_title(&loaded.messages_in_order),
                 |t| truncate_title(t),
@@ -796,6 +867,7 @@ async fn list_recent_sessions_inner_with_diagnostics(
         // original `EmptyDirectory`, while other I/O errors propagate as `Io`.
         collect_dir(
             &project_dir_for_cwd(lingxi_home, cwd),
+            &[cwd.to_string()],
             fs,
             &mut rows,
             &mut skipped_files,
@@ -829,7 +901,14 @@ async fn list_recent_sessions_inner_with_diagnostics(
                     let name = entry.file_name();
                     let Some(name) = name.to_str() else { continue };
                     if prefixes.iter().any(|p| worktree_dir_matches(name, p)) {
-                        collect_dir(&entry.path(), fs, &mut rows, &mut skipped_files).await?;
+                        collect_dir(
+                            &entry.path(),
+                            worktree_paths,
+                            fs,
+                            &mut rows,
+                            &mut skipped_files,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -838,6 +917,7 @@ async fn list_recent_sessions_inner_with_diagnostics(
             Err(_) => {
                 collect_dir(
                     &project_dir_for_cwd(lingxi_home, cwd),
+                    &[cwd.to_string()],
                     fs,
                     &mut rows,
                     &mut skipped_files,
@@ -914,6 +994,50 @@ pub async fn load_session(
     load_session_from_path(path, arg, fs).await
 }
 
+/// Load every transcript entry in file order, including attachment records
+/// that are intentionally omitted from the resumable main-message chain.
+/// Consumers that implement persistence protocols (for example deferred-hook
+/// replay) need these records even when the current conversation tip is an
+/// assistant line whose child attachment is not itself a leaf.
+pub async fn load_session_entries(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<Vec<JsonlMessage>, LoaderError> {
+    let arg = session_id.to_string();
+    let path = session_path(lingxi_home, cwd, &arg);
+    load_session_entries_from_path(path, arg, fs).await
+}
+
+async fn load_session_entries_from_path(
+    path: PathBuf,
+    arg: String,
+    fs: Arc<dyn FileSystem>,
+) -> Result<Vec<JsonlMessage>, LoaderError> {
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LoaderError::SessionNotFound { arg });
+        }
+        Err(source) => {
+            return Err(LoaderError::Io {
+                arg: path.display().to_string(),
+                source,
+            });
+        }
+    }
+    let reader = JsonlReader::new(path, fs);
+    let loaded = reader.read_routed().await.map_err(|e| LoaderError::Io {
+        arg: arg.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+    })?;
+    if loaded.messages_in_order.is_empty() {
+        return Err(LoaderError::EmptyDirectory);
+    }
+    Ok(loaded.messages_in_order)
+}
+
 /// Load a session by UUID from the same worktree-aware corpus used by
 /// [`list_recent_sessions`].
 ///
@@ -933,6 +1057,36 @@ pub async fn load_session_across_worktrees(
     load_session_across_worktrees_inner(lingxi_home, cwd, session_id, fs, &worktree_paths).await
 }
 
+/// Load every routed transcript entry for a session selected from the same
+/// worktree-aware corpus as [`load_session_across_worktrees`]. Unlike the
+/// resumable chain, this includes attachment records used by resume protocols
+/// such as deferred-hook replay.
+pub async fn load_session_entries_across_worktrees(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<Vec<JsonlMessage>, LoaderError> {
+    let worktree_paths = git_worktree_paths(cwd);
+    load_session_entries_across_worktrees_inner(lingxi_home, cwd, session_id, fs, &worktree_paths)
+        .await
+}
+
+/// Resolve the transcript path selected by the worktree-aware resume loader.
+/// The path is exposed so callers that read adjacent resume metadata do not
+/// accidentally fall back to the process cwd after selecting a sibling file.
+pub async fn resolve_session_path_across_worktrees(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+) -> Result<PathBuf, LoaderError> {
+    let worktree_paths = git_worktree_paths(cwd);
+    if worktree_paths.len() <= 1 {
+        return Ok(session_path(lingxi_home, cwd, &session_id.to_string()));
+    }
+    select_session_path_across_worktrees(lingxi_home, cwd, session_id, &worktree_paths).await
+}
+
 async fn load_session_across_worktrees_inner(
     lingxi_home: &Path,
     cwd: &str,
@@ -944,6 +1098,33 @@ async fn load_session_across_worktrees_inner(
         return load_session(lingxi_home, cwd, session_id, fs).await;
     }
 
+    let path =
+        select_session_path_across_worktrees(lingxi_home, cwd, session_id, worktree_paths).await?;
+    load_session_from_path(path, session_id.to_string(), fs).await
+}
+
+async fn load_session_entries_across_worktrees_inner(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+    worktree_paths: &[String],
+) -> Result<Vec<JsonlMessage>, LoaderError> {
+    if worktree_paths.len() <= 1 {
+        return load_session_entries(lingxi_home, cwd, session_id, fs).await;
+    }
+
+    let path =
+        select_session_path_across_worktrees(lingxi_home, cwd, session_id, worktree_paths).await?;
+    load_session_entries_from_path(path, session_id.to_string(), fs).await
+}
+
+async fn select_session_path_across_worktrees(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    worktree_paths: &[String],
+) -> Result<PathBuf, LoaderError> {
     let arg = session_id.to_string();
     let projects_root = lingxi_home.join("projects");
     let prefixes: Vec<String> = worktree_paths
@@ -951,10 +1132,24 @@ async fn load_session_across_worktrees_inner(
         .map(|worktree| project_dir_name(worktree))
         .collect();
     let mut entries = match tokio::fs::read_dir(&projects_root).await {
-        Ok(entries) => entries,
         // Keep the catalog's fallback semantics: when the projects root cannot
-        // be enumerated, try the exact cwd project directory before failing.
-        Err(_) => return load_session(lingxi_home, cwd, session_id, fs).await,
+        // be enumerated, use the exact cwd project directory before failing.
+        Err(_) => {
+            let path = session_path(lingxi_home, cwd, &arg);
+            match tokio::fs::metadata(&path).await {
+                Ok(_) => return Ok(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(LoaderError::SessionNotFound { arg });
+                }
+                Err(source) => {
+                    return Err(LoaderError::Io {
+                        arg: path.display().to_string(),
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(entries) => entries,
     };
     let mut selected: Option<(PathBuf, SystemTime)> = None;
 
@@ -1012,10 +1207,9 @@ async fn load_session_across_worktrees_inner(
         }
     }
 
-    let Some((path, _)) = selected else {
-        return Err(LoaderError::SessionNotFound { arg });
-    };
-    load_session_from_path(path, arg, fs).await
+    selected
+        .map(|(path, _)| path)
+        .ok_or(LoaderError::SessionNotFound { arg })
 }
 
 async fn load_session_from_path(
@@ -2492,6 +2686,21 @@ mod tests {
         assert_eq!(
             messages[0].message["content"],
             serde_json::Value::String("sibling transcript".to_string())
+        );
+
+        let entries = load_session_entries_across_worktrees_inner(
+            &lingxi_home,
+            wt_a,
+            id,
+            make_fs(temp.path()),
+            &worktrees,
+        )
+        .await
+        .expect("raw sibling transcript must use the same selected path");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].message["content"],
+            messages[0].message["content"]
         );
     }
 

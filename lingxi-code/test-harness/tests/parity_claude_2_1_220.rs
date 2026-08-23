@@ -33,39 +33,39 @@ fn gap_oracle() -> Value {
 
 /// The current parity target is exposed from one source of truth.
 ///
-/// Raised to 2.1.238 on 2026-08-21 with the alignment register. The three pins
+/// Raised to 2.1.241 on 2026-08-23 with the latest alignment fixes. The three pins
 /// below are what the port ANNOUNCES; the `gap_oracle` fixture further down
 /// still pins **2.1.220**, and deliberately so — that field records which binary
 /// the fixture was CAPTURED from, which does not change when the target does.
 #[test]
-fn version_const_is_2_1_238() {
-    assert_eq!(traits::CLAUDE_CODE_VERSION, "2.1.238");
+fn version_const_is_2_1_241() {
+    assert_eq!(traits::CLAUDE_CODE_VERSION, "2.1.241");
 }
 
-/// Child processes receive the 2.1.238 `AI_AGENT` identifier.
+/// Child processes receive the 2.1.241 `AI_AGENT` identifier.
 #[test]
-fn ai_agent_env_value_is_2_1_238() {
+fn ai_agent_env_value_is_2_1_241() {
     let derived = format!(
         "claude-code_{}_agent",
         traits::CLAUDE_CODE_VERSION.replace('.', "-")
     );
-    assert_eq!(derived, "claude-code_2-1-238_agent");
+    assert_eq!(derived, "claude-code_2-1-241_agent");
 }
 
-/// WebFetch presents the 2.1.238 Claude-compatible user agent.
+/// WebFetch presents the 2.1.241 Claude-compatible user agent.
 ///
 /// Note the oracle stores this as interpolated FRAGMENTS, not one literal — a
 /// fixed-string grep for `Claude-User (claude-code/…)` returns zero hits in the
-/// 2.1.220 AND 2.1.238 binaries alike. The shape is unchanged across the bump.
+/// 2.1.220 AND 2.1.241 binaries alike. The shape is unchanged across the bump.
 #[test]
-fn web_fetch_user_agent_is_2_1_238() {
+fn web_fetch_user_agent_is_2_1_241() {
     let derived = format!(
         "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
         traits::CLAUDE_CODE_VERSION
     );
     assert_eq!(
         derived,
-        "Claude-User (claude-code/2.1.238; +https://support.anthropic.com/)"
+        "Claude-User (claude-code/2.1.241; +https://support.anthropic.com/)"
     );
 }
 

@@ -191,6 +191,54 @@ impl DeviceContext {
     }
 }
 
+/// Which scaffold an app was created from.
+///
+/// Chosen once, by the agent, from the confirmed specification, and then fixed:
+/// the workspace on disk IS the scaffold, so changing this value later would
+/// leave the generated source and the re-pinned infrastructure describing two
+/// different applications. `update_manifest` rejects a change.
+///
+/// Deliberately NOT called a template. The fixed template catalog
+/// (`AppTemplateKind`, `ListAppTemplates`, …) was removed from the protocol on
+/// purpose and a regression guard keeps those symbols out; this names the SHAPE
+/// an app draws, not a catalog entry.
+///
+/// Its wire twin is `AppSurfaceDto`: the create sheet has to show the surface
+/// and let the user correct it, because a surface is fixed at scaffold time and
+/// immutable afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppSurface {
+    /// A routed, multi-screen interface built from Ionic components.
+    Dom,
+    /// A single drawn surface — a game, a 3D scene, a visualization — that owns
+    /// its own frame loop and renders into a `<canvas>`.
+    Canvas,
+}
+
+impl AppSurface {
+    /// The wire/tool spelling, and the value persisted on the manifest.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dom => "dom",
+            Self::Canvas => "canvas",
+        }
+    }
+
+    /// Parse the tool argument. Unknown values are rejected rather than
+    /// defaulted, so a typo cannot silently scaffold the wrong shape.
+    pub fn parse(value: &str) -> Result<Self, AppError> {
+        match value {
+            "dom" => Ok(Self::Dom),
+            "canvas" => Ok(Self::Canvas),
+            other => Err(AppError::InvalidRequest(format!(
+                "unknown app surface {other:?}; expected \"dom\" or \"canvas\""
+            ))),
+        }
+    }
+}
+
 /// Versioned local application manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -226,6 +274,17 @@ pub struct AppManifest {
     /// Older manifests omit this field and remain valid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_context: Option<DeviceContext>,
+    /// Which scaffold this app was created from. Stamped at creation, never
+    /// changed. `None` means the app predates the scaffold split and cannot be
+    /// rebuilt — [`crate::AppSurface`] and the builder both treat it that way.
+    ///
+    /// `skip_serializing_if` is load-bearing, not tidiness: [`Self::hash`]
+    /// serializes the WHOLE struct and that digest is what binds a manifest to
+    /// its SQLite schema. A field that always serializes would change every
+    /// existing app's hash, and `AppDataStore::ensure_manifest` would then
+    /// reject every read and write with a manifest mismatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<AppSurface>,
 }
 
 impl AppManifest {
@@ -244,6 +303,7 @@ impl AppManifest {
             allowed_domains: Vec::new(),
             capabilities: Vec::new(),
             device_context: None,
+            surface: None,
         }
     }
 
@@ -769,6 +829,7 @@ mod tests {
             allowed_domains: vec!["api.example.com".into()],
             capabilities: Vec::new(),
             device_context: None,
+            surface: None,
         }
     }
 

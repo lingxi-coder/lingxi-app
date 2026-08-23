@@ -807,14 +807,32 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const BODY: &str = "Object and array parameter values must be a single JSON value";
 
-        let default = format(false, true, &[], true, false, false, "claude-fable-5", false);
+        let default = format(
+            false,
+            true,
+            &[],
+            true,
+            false,
+            false,
+            "claude-fable-5",
+            false,
+        );
         assert!(
             !default.contains(BODY),
             "both gates default OFF ⇒ the paragraph must not ship"
         );
 
         std::env::set_var("LINGXI_TOOL_PARAM_STRICTNESS", "1");
-        let on = format(false, true, &[], true, false, false, "claude-fable-5", false);
+        let on = format(
+            false,
+            true,
+            &[],
+            true,
+            false,
+            false,
+            "claude-fable-5",
+            false,
+        );
         std::env::remove_var("LINGXI_TOOL_PARAM_STRICTNESS");
         assert_eq!(
             on.matches(BODY).count(),

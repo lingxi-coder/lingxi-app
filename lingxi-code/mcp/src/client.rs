@@ -1008,23 +1008,26 @@ impl McpClient {
             if let Some(c) = cursor.as_deref() {
                 params["cursor"] = serde_json::Value::String(c.to_string());
             }
-            let resp: DirectoryReadResponse =
-                match self.connection.call("resources/directory/read", params).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        if page > 0 && is_invalid_params(&e) {
-                            tracing::warn!(
-                                target: "lingxi_mcp::client",
-                                server = %self.server_name,
-                                "resources/directory/read {uri}: page {} returned InvalidParams on cursor; returning {} entries from prior pages",
-                                page + 1,
-                                out.len(),
-                            );
-                            return Ok(out);
-                        }
-                        return Err(McpClientError::Rpc(e.to_string()));
+            let resp: DirectoryReadResponse = match self
+                .connection
+                .call("resources/directory/read", params)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if page > 0 && is_invalid_params(&e) {
+                        tracing::warn!(
+                            target: "lingxi_mcp::client",
+                            server = %self.server_name,
+                            "resources/directory/read {uri}: page {} returned InvalidParams on cursor; returning {} entries from prior pages",
+                            page + 1,
+                            out.len(),
+                        );
+                        return Ok(out);
                     }
-                };
+                    return Err(McpClientError::Rpc(e.to_string()));
+                }
+            };
             out.extend(resp.resources);
             cursor = resp.next_cursor;
             page += 1;

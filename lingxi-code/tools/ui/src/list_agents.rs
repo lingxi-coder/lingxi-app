@@ -3,29 +3,13 @@
 //! Lists the agents this process can `SendMessage` to. Cloud / Remote Control
 //! rows are omitted (carve-out); the surviving clauses are the oracle's
 //! (2.1.238 `YmS` @286282922, identical opening in 2.1.220).
-//!
-//! KNOWN GAP (structural, not copy): the oracle's `formatForModel` (`roT`)
-//! renders the in-process `local_agent` tasks FIRST and the peer sessions
-//! second; `format_listing` below still renders only the peer sessions.
-//!
-//! KNOWN GAP (structural): the oracle's peer row is
-//! `V2i(name, [formerNames, kind, p.status, tmux, started …])` (@294228478) —
-//! `status` is the peer's live `busy`/`idle`/`waiting` state, computed by
-//! `KHg` (@302105762: `{status: e.isLoading||e.delegatedActive?"busy":"idle"}`)
-//! and published into the session registry. `traits::live_sessions::
-//! LiveSessionRecord` has no `status` field and nothing publishes one, so
-//! `format_listing` cannot render it. `SendMessage`'s 2.1.238 cross-session
-//! paragraph points the model at that column ("its `ListAgents` row says
-//! whether it is busy or idle right now"), so the copy is ahead of the data
-//! until a turn-boundary status publisher exists — that publisher (a
-//! `status` field on `LiveSessionRecord` plus a writer on the turn
-//! start/end edges) is the seam this gap needs.
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
+use traits::task_registry::TaskRecord;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -77,51 +61,136 @@ static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 
 /// `ListAgents` tool.
 pub struct ListAgentsTool {
-    _ctx: BuiltinToolContext,
+    ctx: BuiltinToolContext,
 }
 
 impl ListAgentsTool {
     /// Construct.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { _ctx: ctx }
+        Self { ctx }
     }
-}
 
-fn format_listing() -> String {
-    let Some(dir) = traits::live_sessions::process_dir() else {
-        return "No reachable agents.".into();
-    };
-    let self_id = traits::live_sessions::process_session_id();
-    let Ok(live) = dir.list_live() else {
-        return "No reachable agents.".into();
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let mut rows = Vec::new();
-    for rec in live {
-        if self_id.as_deref().is_some_and(|id| rec.sid() == id) {
-            continue;
+    async fn format_listing(&self, ctx: &ToolUseContext) -> String {
+        let mut sections = Vec::new();
+
+        if let Some(note) = self.self_note(ctx).await {
+            sections.push(note);
         }
-        let name = rec.display_name();
-        let rref = session_ref(rec.sid(), rec.pid);
-        let kind = rec.kind.as_deref().unwrap_or("session");
-        let started = rec
-            .started_at
-            .map(|t| format!("started {} ago", rel_ms(now.saturating_sub(t))))
-            .unwrap_or_default();
-        let mut bits = vec![format!("{name} [{rref}]"), kind.to_string()];
-        if !started.is_empty() {
-            bits.push(started);
+
+        let in_process = self.in_process_rows().await;
+        if !in_process.is_empty() {
+            sections.push(format!(
+                "In-process agents ({}):\n{}",
+                in_process.len(),
+                in_process.join("\n")
+            ));
         }
-        rows.push(format!("  {}", bits.join("  ·  ")));
+
+        let peer_rows = self.peer_rows();
+        if !peer_rows.is_empty() {
+            sections.push(format!(
+                "Peer sessions ({}):\n{}",
+                peer_rows.len(),
+                peer_rows.join("\n")
+            ));
+        }
+
+        if sections.is_empty() {
+            "No reachable agents.".into()
+        } else {
+            sections.join("\n\n")
+        }
     }
-    if rows.is_empty() {
-        return "No reachable agents.".into();
+
+    async fn self_note(&self, ctx: &ToolUseContext) -> Option<String> {
+        let name = traits::live_sessions::process_name().or_else(|| ctx.agent_name.clone())?;
+        let self_id = traits::live_sessions::process_session_id().unwrap_or_default();
+        let rref = session_ref(&self_id, 0);
+        Some(format!(
+            "This session is {name} [{rref}] — the name other sessions use to message it (it is not listed below; a message to it would be a message to yourself)."
+        ))
     }
-    format!("Peer sessions ({}):\n{}", rows.len(), rows.join("\n"))
+
+    async fn in_process_rows(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        if let Some(router) = &self.ctx.mailbox_router {
+            let mut entries = router.named_recipients().await;
+            entries.sort_by(|l, r| l.0.cmp(&r.0));
+            for (name, agent_id) in entries {
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                let status = if let Some(task_registry) = &self.ctx.task_registry {
+                    match task_registry.get(&agent_id.to_string()).await {
+                        Ok(Some(task)) => task_status(&task),
+                        _ => "busy",
+                    }
+                } else {
+                    "busy"
+                };
+                rows.push(format!("  {name}  ·  teammate  ·  {status}"));
+            }
+        }
+
+        if let Some(registry) = &self.ctx.agent_name_registry {
+            let mut entries = registry.list().await;
+            entries.sort_by(|l, r| l.0.cmp(&r.0));
+            for (name, agent_id) in entries {
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                let status = if let Some(task_registry) = &self.ctx.task_registry {
+                    match task_registry.get(&agent_id.to_string()).await {
+                        Ok(Some(task)) => task_status(&task),
+                        _ => "busy",
+                    }
+                } else {
+                    "busy"
+                };
+                rows.push(format!("  {name}  ·  local_agent  ·  {status}"));
+            }
+        }
+        rows
+    }
+
+    fn peer_rows(&self) -> Vec<String> {
+        let Some(dir) = traits::live_sessions::process_dir() else {
+            return Vec::new();
+        };
+        let self_id = traits::live_sessions::process_session_id();
+        let Ok(live) = dir.list_live() else {
+            return Vec::new();
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let mut rows = Vec::new();
+        for rec in live {
+            if self_id.as_deref().is_some_and(|id| rec.sid() == id) {
+                continue;
+            }
+            let name = rec.display_name();
+            let rref = session_ref(rec.sid(), rec.pid);
+            let kind = rec.kind.as_deref().unwrap_or("session");
+            let started = rec
+                .started_at
+                .map(|t| format!("started {} ago", rel_ms(now.saturating_sub(t))));
+            let mut bits = vec![
+                format!("{name} [{rref}]"),
+                kind.to_string(),
+                status_bits(rec.normalized_status(), rec.waiting_for.as_deref()),
+            ];
+            if let Some(started) = started {
+                bits.push(started);
+            }
+            rows.push(format!("  {}", bits.join("  ·  ")));
+        }
+        rows
+    }
 }
 
 fn session_ref(session_id: &str, pid: u32) -> String {
@@ -145,6 +214,23 @@ fn rel_ms(ms: i64) -> String {
     } else {
         format!("{}h", ms / 3_600_000)
     }
+}
+
+fn task_status(task: &TaskRecord) -> &'static str {
+    match task.status.as_str() {
+        "completed" | "failed" | "killed" => "idle",
+        "waiting" | "blocked" => "waiting",
+        _ => "busy",
+    }
+}
+
+fn status_bits(status: &str, waiting_for: Option<&str>) -> String {
+    if status == "waiting" {
+        if let Some(waiting_for) = waiting_for.filter(|s| !s.trim().is_empty()) {
+            return format!("waiting  ·  waiting for {waiting_for}");
+        }
+    }
+    status.to_string()
 }
 
 #[async_trait]
@@ -211,10 +297,10 @@ impl Tool for ListAgentsTool {
     async fn call(
         &self,
         _input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let listing = format_listing();
+        let listing = self.format_listing(&ctx).await;
         Ok(ToolCallResult {
             data: json!({ "listing": listing }),
             model_content: Some(listing),
@@ -229,6 +315,81 @@ impl Tool for ListAgentsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use traits::agent_name_registry::{AgentNameRegistry, InMemoryAgentNameRegistry};
+    use traits::process::ProcessOutput;
+    use traits::task_registry::{
+        TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRegistryError, TaskRegistryHandle,
+        TaskUpdatePatch,
+    };
+
+    fn dummy_out() -> ProcessOutput {
+        ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }
+    }
+
+    fn process_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[derive(Default)]
+    struct StubTaskRegistry {
+        tasks: Mutex<HashMap<String, TaskRecord>>,
+    }
+
+    #[async_trait]
+    impl TaskRegistryHandle for StubTaskRegistry {
+        async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used")
+        }
+
+        async fn get(&self, id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(self.tasks.lock().unwrap().get(id).cloned())
+        }
+
+        async fn list(
+            &self,
+            _filter: TaskListFilter,
+        ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(self.tasks.lock().unwrap().values().cloned().collect())
+        }
+
+        async fn update(
+            &self,
+            _id: &str,
+            _patch: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used")
+        }
+
+        async fn set_status(
+            &self,
+            _id: &str,
+            _status: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used")
+        }
+
+        async fn kill(&self, _id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("not used")
+        }
+
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
+            unreachable!("not used")
+        }
+    }
 
     #[test]
     fn names_are_byte_exact() {
@@ -262,8 +423,82 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn empty_listing_without_process_dir() {
-        assert_eq!(format_listing(), "No reachable agents.");
+    #[tokio::test]
+    async fn empty_listing_without_any_sources() {
+        let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        traits::live_sessions::set_process_dir(traits::live_sessions::LiveSessionDir::at(
+            temp.path().join("sessions"),
+        ));
+        traits::live_sessions::set_process_session_id("self-session");
+        traits::live_sessions::set_process_name("lead");
+
+        let tool = ListAgentsTool::new(shell_test_ctx(dummy_out()));
+        let result = tool
+            .call(json!({}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("list succeeds");
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some("This session is lead [00000000] — the name other sessions use to message it (it is not listed below; a message to it would be a message to yourself).")
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_includes_self_in_process_and_peer_statuses() {
+        let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        traits::live_sessions::set_process_dir(dir.clone());
+        traits::live_sessions::set_process_session_id("self-session");
+        traits::live_sessions::set_process_name("lead");
+
+        std::fs::create_dir_all(dir.root()).unwrap();
+        let peer_path = dir.root().join("222.json");
+        std::fs::write(
+            &peer_path,
+            serde_json::to_vec(&serde_json::json!({
+                "pid": 222u32,
+                "sessionId": "abcdef12-3456-7890-abcd-ef1234567890",
+                "name": "peer",
+                "kind": "interactive",
+                "startedAt": 0,
+                "status": "waiting",
+                "waitingFor": "permission prompt"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let agent_registry = Arc::new(InMemoryAgentNameRegistry::new());
+        let agent_id = protocol::AgentId::new();
+        agent_registry.register("worker-a", agent_id).await;
+        let task_registry = Arc::new(StubTaskRegistry::default());
+        task_registry.tasks.lock().unwrap().insert(
+            agent_id.to_string(),
+            TaskRecord {
+                task_id: "t1".into(),
+                task_type: "local_agent".into(),
+                status: "running".into(),
+                description: "agent".into(),
+                ..Default::default()
+            },
+        );
+
+        let mut builtin = shell_test_ctx(dummy_out());
+        builtin.agent_name_registry = Some(agent_registry);
+        builtin.task_registry = Some(task_registry);
+        let tool = ListAgentsTool::new(builtin);
+
+        let result = tool
+            .call(json!({}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("list succeeds");
+        let listing = result.model_content.unwrap();
+        assert!(listing.contains("This session is lead [00000000]"));
+        assert!(listing.contains("worker-a  ·  local_agent  ·  busy"));
+        assert!(listing.contains(
+            "peer [abcdef12]  ·  interactive  ·  waiting  ·  waiting for permission prompt"
+        ));
     }
 }

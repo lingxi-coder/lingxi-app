@@ -197,6 +197,51 @@ class LocalAppWebViewTest {
         assertTrue(inspectScript.contains("element.placeholder"))
     }
 
+    /**
+     * Ionic keeps a component's interactive internals in a SHADOW ROOT, which
+     * `document.querySelectorAll` does not cross. Before the walk below, an app
+     * built from `ion-*` components reported `elements: []` — indistinguishable
+     * from a blank screen or a crash, which is the very ambiguity `canvasCount`
+     * exists to resolve for a drawn surface.
+     *
+     * Pinned as tokens rather than by driving a DOM because this file has no
+     * WebView: the assertion is that the SHIPPED script still contains the walk,
+     * the bounds that keep it from hanging, and the shadow-aware id lookup.
+     */
+    @Test
+    fun `ui inspection crosses shadow roots and resolves the native control`() {
+        val inspectScript = buildLocalAppUiExecutionScript(
+            buildLocalAppUiExecutionRequest(LocalAppUiAutomationAction.Inspect),
+        )
+        listOf(
+            "const deepQuery = (selector, limit)",
+            "if (host.shadowRoot) visit(host.shadowRoot, depth + 1)",
+            // Both bounds, or a nested/looping page hangs the tool call.
+            "depth > 8 || found.length >= limit",
+            "const candidates = () => deepQuery(SELECTOR, 400)",
+            // A shadow root is its own id scope; `getElementById` cannot see in.
+            "|| deepQuery('[id=\"' +",
+            // `ion-input` holds the real <input> inside its shadow root.
+            "const nativeControl = element =>",
+            "element.shadowRoot.querySelector('input,textarea,select')",
+            // Every OTHER lookup has to cross the boundary too, or the walk
+            // only fixes enumeration. `canvasCount` is the single signal the
+            // render gate keys on for a drawn app; the key receiver falls back
+            // to `document.body` (events go UP, not into the canvas) when it
+            // cannot see one; and a shadow root is its own id scope, so labels
+            // must resolve against the element's OWN root.
+            "canvasCount: deepQuery('canvas', 64).length",
+            "deepQuery('canvas', 1)[0] || document.body",
+            "const scope = element.getRootNode?.() || document",
+        ).forEach { token ->
+            assertTrue("missing shadow-DOM contract: $token", inspectScript.contains(token))
+        }
+        assertFalse(
+            "the light-DOM-only walk must be gone, not merely supplemented",
+            inspectScript.contains("Array.from(document.querySelectorAll(\n"),
+        )
+    }
+
     @Test
     fun `ui execution parsing rejects false null and no result envelopes`() {
         assertEquals(

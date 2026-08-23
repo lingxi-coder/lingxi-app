@@ -335,7 +335,8 @@ impl Tool for WaitForMcpServersTool {
 
         // Oracle wait loop: poll every 50ms while any selected client is still
         // `pending` and the 5s budget has not elapsed.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(WAIT_TIMEOUT_MS);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(WAIT_TIMEOUT_MS);
         loop {
             let now = select(registry.action_states().await, &requested);
             let any_pending = now

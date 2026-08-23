@@ -125,6 +125,10 @@ impl MailboxRouterHandle for MailboxRouter {
         delivered.sort();
         Ok(delivered)
     }
+
+    async fn named_recipients(&self) -> Vec<(String, AgentId)> {
+        MailboxRouter::named_recipients(self).await
+    }
 }
 
 /// Canonical lowering of [`WorkerStatus`] to the simplified `WorkerInfo.status`

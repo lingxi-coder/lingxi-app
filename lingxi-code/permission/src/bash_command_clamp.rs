@@ -349,8 +349,9 @@ bashCommandClamp; denying rather than running an unverified command."
         assert!(POWERSHELL_CLAMP_DENY_MESSAGE.starts_with(
             "Permission to use PowerShell has been denied: this agent carries a per-spawn "
         ));
-        assert!(POWERSHELL_CLAMP_DENY_MESSAGE
-            .ends_with("PowerShell commands cannot match them. Use the clamped Bash forms instead."));
+        assert!(POWERSHELL_CLAMP_DENY_MESSAGE.ends_with(
+            "PowerShell commands cannot match them. Use the clamped Bash forms instead."
+        ));
         assert!(POWERSHELL_CLAMP_DENY_MESSAGE.contains('\u{2014}'));
     }
 

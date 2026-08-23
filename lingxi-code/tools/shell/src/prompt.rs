@@ -1203,7 +1203,10 @@ mod tests {
         // must carry the find/grep-INCLUSIVE list.
         let long = "`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
         let p = simple_prompt_concise(&disabled_sandbox(), Some("claude-opus-5[1m]"));
-        assert!(p.contains(long), "concise avoid-list must include find/grep");
+        assert!(
+            p.contains(long),
+            "concise avoid-list must include find/grep"
+        );
     }
 
     #[test]
@@ -1321,7 +1324,10 @@ mod tests {
         // Well over.
         let many: Vec<String> = (0..73).map(|i| format!("/p{i}")).collect();
         let out = truncate_for_prompt(many);
-        assert_eq!(out.last().unwrap(), "... and 23 more (truncated for prompt size)");
+        assert_eq!(
+            out.last().unwrap(),
+            "... and 23 more (truncated for prompt size)"
+        );
     }
 
     /// The cap must apply to EVERY list the sandbox section renders, AFTER the
@@ -1330,9 +1336,8 @@ mod tests {
     #[test]
     fn sandbox_section_truncates_every_oversized_list() {
         let _g = env_lock();
-        let paths = |prefix: &str| -> Vec<String> {
-            (0..60).map(|i| format!("{prefix}{i}")).collect()
-        };
+        let paths =
+            |prefix: &str| -> Vec<String> { (0..60).map(|i| format!("{prefix}{i}")).collect() };
         let cfg = SandboxRuntimeConfig {
             enabled: true,
             filesystem: sandbox::runtime_config::FilesystemRestrictionConfig {
@@ -1353,13 +1358,17 @@ mod tests {
         let p = simple_prompt(&cfg);
         // Seven lists × one marker each.
         assert_eq!(
-            p.matches("... and 10 more (truncated for prompt size)").count(),
+            p.matches("... and 10 more (truncated for prompt size)")
+                .count(),
             7,
             "every sandbox list must be capped at 50; got:\n{p}"
         );
         // The 50th entry survives, the 51st does not.
         assert!(p.contains("\"/dr49\""), "entry 50 must survive; got:\n{p}");
-        assert!(!p.contains("\"/dr50\""), "entry 51 must be dropped; got:\n{p}");
+        assert!(
+            !p.contains("\"/dr50\""),
+            "entry 51 must be dropped; got:\n{p}"
+        );
     }
 
     #[test]

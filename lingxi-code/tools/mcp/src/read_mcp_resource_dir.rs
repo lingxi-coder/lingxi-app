@@ -160,10 +160,7 @@ impl ReadMcpResourceDirTool {
 /// Oracle `Ami(clients, name)` (`cc-238.js @224079500`) — resolve a server by
 /// name, erroring with the oracle's three messages in the oracle's order.
 /// Returns the server's raw display name on success.
-async fn resolve_server(
-    registry: &mcp::McpRegistry,
-    requested: &str,
-) -> Result<String, ToolError> {
+async fn resolve_server(registry: &mcp::McpRegistry, requested: &str) -> Result<String, ToolError> {
     use mcp::McpConnectionState;
     let conns = registry.connections.read().await;
     let mut names: Vec<String> = conns.values().map(|s| s.name().to_string()).collect();
@@ -423,7 +420,11 @@ fn dir_listing(entries: Vec<mcp::McpDirectoryEntry>) -> ToolCallResult {
         format!(
             "Directory listing ({} {}):\n{rendered}",
             entries.len(),
-            if entries.len() == 1 { "entry" } else { "entries" },
+            if entries.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            },
         )
     };
     let data = json!({ "resources": entries });
@@ -574,7 +575,10 @@ mod tests {
         );
         // …and the tail is the compact JSON of `{resources:[…]}`.
         assert!(mc.contains("\"resources\":["));
-        assert!(!mc.contains("\n  "), "Ie(e) takes NO indent on the success branch");
+        assert!(
+            !mc.contains("\n  "),
+            "Ie(e) takes NO indent on the success branch"
+        );
         assert!(!r.is_error);
 
         // Singular + empty forms.

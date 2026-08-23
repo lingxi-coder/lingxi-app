@@ -229,14 +229,23 @@ where
     ))
 }
 
-/// Apply the configured local-app workflow model as a DEFAULT for
-/// `local-app-build`. An explicit `args.model` wins and is never overwritten.
+/// Every workflow that builds a local app and therefore honours the app's
+/// configured `workflowModel`.
+///
+/// A LIST, not a single name: the drawn-surface workflow is a sibling of the
+/// routed one, and keying this on `"local-app-build"` alone would have made a
+/// canvas app silently ignore the model the user picked for it — with nothing
+/// failing, because the default is simply not applied.
+const LOCAL_APP_BUILD_WORKFLOWS: &[&str] = &["local-app-build", "local-canvas-build"];
+
+/// Apply the configured local-app workflow model as a DEFAULT for the local-app
+/// build workflows. An explicit `args.model` wins and is never overwritten.
 pub fn apply_local_app_build_default_model(
     cwd: &Path,
     workflow_name: Option<&str>,
     args: &mut Option<Value>,
 ) -> Result<(), WorkflowLaunchError> {
-    if workflow_name != Some("local-app-build") {
+    if !workflow_name.is_some_and(|name| LOCAL_APP_BUILD_WORKFLOWS.contains(&name)) {
         return Ok(());
     }
     // `args.model` is the call-site authority. Do not even read app metadata

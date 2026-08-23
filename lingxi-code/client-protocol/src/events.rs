@@ -24,7 +24,7 @@ use crate::listings::{
 };
 use crate::local_apps::{
     AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
-    AppRuntimeStateDto, AppSessionRowDto, AppWorkflowStateDto,
+    AppRuntimeStateDto, AppSessionRowDto, AppSurfaceDto, AppWorkflowStateDto,
 };
 use crate::message::MessageDto;
 use crate::permission::PermissionResolutionDto;
@@ -378,6 +378,15 @@ pub enum ClientEvent {
 
     ConversationControlsChanged {
         controls: ConversationControlsDto,
+    },
+
+    // Answers exactly one `ClientCommand::ProposeAppIdentity`, echoing its
+    // `request_id`. Always emitted, even when the model was unreachable: the
+    // fields are a create sheet's editable defaults, never an authority.
+    AppIdentityProposed {
+        request_id: String,
+        name: String,
+        surface: AppSurfaceDto,
     },
 }
 

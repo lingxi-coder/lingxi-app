@@ -998,9 +998,15 @@ mod tests {
         for (name, want) in [
             ("hooks", "View hook configurations for tool events"),
             ("keybindings", "Open your keyboard shortcuts file"),
-            ("tasks", "View and manage everything running in the background"),
+            (
+                "tasks",
+                "View and manage everything running in the background",
+            ),
             ("chrome", "Open Claude in Chrome settings"),
-            ("advisor", "Let Claude consult a stronger model at key moments"),
+            (
+                "advisor",
+                "Let Claude consult a stronger model at key moments",
+            ),
             (
                 "usage-credits",
                 "Configure usage credits or request them from your admin when you hit a limit",

@@ -139,7 +139,19 @@ pub trait LocalAppsMcpHost: Send + Sync {
     /// Initialize host metadata and the host-owned scaffold for a freshly
     /// created app so the workflow can edit source immediately without any
     /// package-manager or template bootstrap step.
-    async fn scaffold_app(&self, record: local_apps::AppRecord) -> Result<(), String>;
+    ///
+    /// `surface` picks which scaffold is materialized and is recorded on the
+    /// manifest before any file is written. It is decided ONCE, here: the
+    /// workspace on disk is the scaffold, so it can never be revised later.
+    async fn scaffold_app(
+        &self,
+        record: local_apps::AppRecord,
+        surface: local_apps::AppSurface,
+    ) -> Result<(), String>;
+
+    /// Tell the client that an agent-driven create failed, so a client-side
+    /// "creating…" state has something to disarm it.
+    async fn emit_create_failure(&self, error: &AppError);
 }
 
 /// Live source of the CURRENT conversation session uuid, attached by the
@@ -784,7 +796,8 @@ impl LocalAppsMcpTransport {
                 "Create a local app record and host metadata, then let the host scaffold the workspace before generation; dependencies are already pinned by the host. It queues a locked workspace-local `pnpm install` in the background, and the app remains editable while dependencies prepare.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
-                    "name":{"type":"string","minLength":1,"maxLength":200}
+                    "name":{"type":"string","minLength":1,"maxLength":200},
+                    "surface":{"enum":["dom","canvas"],"description":"Which interface shape to scaffold, decided from the confirmed specification and FIXED at creation. Use \"canvas\" when the whole interface is one drawn surface that owns a frame loop — a game, a 3D scene, a live visualization. Use \"dom\" for everything built from screens, lists and forms. Defaults to \"dom\". This cannot be changed later; an app that needs the other shape has to be created again."}
                 },"required":["brief"],"additionalProperties":false}),
             ),
             Self::tool(
@@ -1297,6 +1310,17 @@ impl LocalAppsMcpTransport {
             "create" => {
                 let brief = Self::required_string(&input, "brief")?;
                 let name = input.get("name").and_then(Value::as_str);
+                // Absent means a routed interface, which is what most apps are.
+                // A bad value is rejected rather than defaulted: silently
+                // scaffolding the wrong shape would only surface much later, as
+                // generated source that does not match the workspace.
+                let surface = match input.get("surface").and_then(Value::as_str) {
+                    Some(value) => match local_apps::AppSurface::parse(value) {
+                        Ok(surface) => surface,
+                        Err(error) => return Ok(Self::app_error(error)),
+                    },
+                    None => local_apps::AppSurface::Dom,
+                };
                 // The origin conversation is ENGINE-injected (the live session
                 // uuid at call time), never read from the model's input — see
                 // `SessionIdProvider`. `None` (provider unattached, e.g. a
@@ -1307,15 +1331,37 @@ impl LocalAppsMcpTransport {
                     Err(error) => return Ok(Self::tool_error(error.to_string())),
                 };
                 let initializer_host = Arc::clone(&host);
+                // An agent-driven create carries no user sheet behind it, so
+                // Git history and the workflow model take their defaults. The
+                // library's own create sheet does NOT come through here: it
+                // sends `ClientCommand::CreateApp` and creates the app before
+                // any conversation exists, which is what keeps the app's first
+                // conversation rooted in the app's own workspace.
+                let git_enabled = local_apps::DEFAULT_GIT_VERSION_CONTROL;
+                let workflow_model: Option<String> = None;
                 let record = match service
-                    .create_app_with_initializer(name, brief, conversation_id, move |record| {
-                        let host = Arc::clone(&initializer_host);
-                        async move { host.scaffold_app(record).await.map_err(AppError::Io) }
-                    })
+                    .create_app_with_git_and_workflow_model_and_initializer(
+                        name,
+                        brief,
+                        conversation_id,
+                        git_enabled,
+                        workflow_model.as_deref(),
+                        move |record| {
+                            let host = Arc::clone(&initializer_host);
+                            async move {
+                                host.scaffold_app(record, surface)
+                                    .await
+                                    .map_err(AppError::Io)
+                            }
+                        },
+                    )
                     .await
                 {
                     Ok(record) => record,
-                    Err(error) => return Ok(Self::app_error(error)),
+                    Err(error) => {
+                        host.emit_create_failure(&error).await;
+                        return Ok(Self::app_error(error));
+                    }
                 };
                 // Dependency installation is independent of init-session
                 // pinning, so start it immediately and overlap the two host
@@ -2739,9 +2785,14 @@ mod tests {
         async fn read_app_events(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
-        async fn scaffold_app(&self, _record: local_apps::AppRecord) -> Result<(), String> {
+        async fn scaffold_app(
+            &self,
+            _record: local_apps::AppRecord,
+            _surface: local_apps::AppSurface,
+        ) -> Result<(), String> {
             unreachable!("not exercised by these tests")
         }
+        async fn emit_create_failure(&self, _error: &AppError) {}
     }
 
     /// The captured frame must reach the model as an IMAGE block.
@@ -2861,10 +2912,15 @@ mod tests {
         async fn read_app_events(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
-        async fn scaffold_app(&self, record: local_apps::AppRecord) -> Result<(), String> {
+        async fn scaffold_app(
+            &self,
+            record: local_apps::AppRecord,
+            _surface: local_apps::AppSurface,
+        ) -> Result<(), String> {
             self.calls.lock().expect("lock").push(record.id);
             self.failure.map_or(Ok(()), |message| Err(message.into()))
         }
+        async fn emit_create_failure(&self, _error: &AppError) {}
     }
 
     /// `create` must reach the attached host's `scaffold_app` with the NEW

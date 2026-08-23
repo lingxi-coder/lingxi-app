@@ -82,6 +82,23 @@ pub struct LiveSessionRecord {
     /// `"interactive"` / `"bg"` / …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Live status: `"idle"` / `"busy"` / `"waiting"` / `"shell"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Reason carried with a `"waiting"` status.
+    #[serde(
+        rename = "waitingFor",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub waiting_for: Option<String>,
+    /// Epoch ms of the last status change.
+    #[serde(
+        rename = "statusUpdatedAt",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub status_updated_at: Option<i64>,
     /// Optional UDS path (oracle `messagingSocketPath`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messaging_socket_path: Option<String>,
@@ -105,6 +122,17 @@ impl LiveSessionRecord {
     #[must_use]
     pub fn sid(&self) -> &str {
         self.session_id.as_deref().unwrap_or("")
+    }
+
+    /// Normalized live status for model-facing listings.
+    #[must_use]
+    pub fn normalized_status(&self) -> &'static str {
+        match self.status.as_deref() {
+            Some("idle") => "idle",
+            Some("waiting") => "waiting",
+            Some(_) => "busy",
+            None => "busy",
+        }
     }
 }
 
@@ -176,6 +204,19 @@ pub struct PeerMessage {
     /// Attested permission class (`bypass` / `prompting`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_mode: Option<String>,
+}
+
+/// One-shot notify-when-idle subscription for a live session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IdleNotificationRequest {
+    /// Subscriber session name.
+    pub from: String,
+    /// Subscriber session id.
+    pub from_session_id: String,
+    /// Optional preview of the accompanying message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// Directory of live sessions. `None` root ⇒ `~/.lingxi/sessions`.
@@ -270,6 +311,9 @@ impl LiveSessionDir {
                 name_since: None,
                 former_names: None,
                 kind: Some("interactive".into()),
+                status: None,
+                waiting_for: None,
+                status_updated_at: None,
                 messaging_socket_path: None,
                 permission_class: None,
             });
@@ -426,6 +470,54 @@ impl LiveSessionDir {
         Ok(msgs)
     }
 
+    /// Append a one-shot idle notification subscription for `to_session_id`.
+    pub fn append_idle_subscription(
+        &self,
+        to_session_id: &str,
+        req: &IdleNotificationRequest,
+    ) -> io::Result<()> {
+        self.ensure_root()?;
+        let path = self.idle_subscription_path(to_session_id);
+        let mut line = serde_json::to_string(req).map_err(io::Error::other)?;
+        line.push('\n');
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        f.write_all(line.as_bytes())?;
+        Ok(())
+    }
+
+    /// Drain one-shot idle notification subscriptions for `session_id`.
+    pub fn drain_idle_subscriptions(
+        &self,
+        session_id: &str,
+    ) -> io::Result<Vec<IdleNotificationRequest>> {
+        let path = self.idle_subscription_path(session_id);
+        // Rotate the queue before reading it. A read-then-remove sequence can
+        // lose a subscription appended by another process between those two
+        // syscalls; writers continue appending to the newly-created original
+        // path while this consumer drains its private snapshot.
+        let drain_path = path.with_file_name(format!(
+            ".{session_id}.idle-notify.{}.{}.drain",
+            std::process::id(),
+            now_ms()
+        ));
+        match fs::rename(&path, &drain_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        }
+        let body = fs::read_to_string(&drain_path)?;
+        let _ = fs::remove_file(&drain_path);
+        let subs = body
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        Ok(subs)
+    }
+
     fn sweep_dead(&self) -> io::Result<()> {
         let rd = match fs::read_dir(&self.root) {
             Ok(rd) => rd,
@@ -507,6 +599,10 @@ impl LiveSessionDir {
 
     fn inbox_path(&self, session_id: &str) -> PathBuf {
         self.root.join(format!("{session_id}.inbox.jsonl"))
+    }
+
+    fn idle_subscription_path(&self, session_id: &str) -> PathBuf {
+        self.root.join(format!("{session_id}.idle-notify.jsonl"))
     }
 
     /// Merge-write `messagingSocketPath` (and session id) onto `sessions/<pid>.json`.
@@ -1678,6 +1774,9 @@ mod tests {
             name_since: None,
             former_names: None,
             kind: Some("interactive".into()),
+            status: None,
+            waiting_for: None,
+            status_updated_at: None,
             messaging_socket_path: None,
             permission_class: None,
         };
@@ -1713,6 +1812,28 @@ mod tests {
         let got = d.drain_inbox("s2").unwrap();
         assert_eq!(got, vec![msg]);
         assert!(d.drain_inbox("s2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn idle_subscription_round_trip_rotates_queue() {
+        let (_t, d) = dir();
+        let request = IdleNotificationRequest {
+            from: "lead".into(),
+            from_session_id: "s1".into(),
+            summary: Some("done".into()),
+        };
+        d.append_idle_subscription("s2", &request).unwrap();
+        assert_eq!(d.drain_idle_subscriptions("s2").unwrap(), vec![request]);
+        assert!(d.drain_idle_subscriptions("s2").unwrap().is_empty());
+
+        // A new append after rotation is a fresh queue and is not affected by
+        // removal of the drained snapshot.
+        d.append_idle_subscription("s2", &IdleNotificationRequest::default())
+            .unwrap();
+        assert_eq!(
+            d.drain_idle_subscriptions("s2").unwrap(),
+            vec![IdleNotificationRequest::default()]
+        );
     }
 
     #[test]

@@ -35,4 +35,18 @@
 /// the generated page reads from `window.lingxi.v2.deviceContext`, and the
 /// record is now written by the host from its own device facts rather than
 /// declared by the agent. Removals are BREAKING under the F1-09 guard.
-pub const CLIENT_PROTOCOL_VERSION: &str = "6.0.0";
+/// Bumped to 7.0.0 for the create-flow reshape: creating a local app no longer
+/// defers to an intake conversation. The library's create sheet resolves the
+/// name and the surface up front (`ProposeAppIdentity` / `AppIdentityProposed`)
+/// and then creates the app outright with `CreateApp.surface`, so the app's very
+/// first conversation is already rooted in the app's own workspace, and
+/// `AppEventDto::AppCreated` names the record that landed.
+///
+/// ⚠️ The F1-09 index diff for this change is purely ADDITIVE — nothing was
+/// removed, so the guard classifies it `Compatible` and did not itself require
+/// a MAJOR. The bump is a DELIBERATE choice to make every client re-bless
+/// against the reshaped create flow rather than silently speak half of it;
+/// `snapshots/blessed_major.txt` is re-blessed to match. Do not cite a removal
+/// here that did not happen — an earlier draft named a `StartAppCreation`
+/// command that has never existed in this repository.
+pub const CLIENT_PROTOCOL_VERSION: &str = "7.0.0";

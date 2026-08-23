@@ -794,7 +794,10 @@ pub(crate) fn file_not_found_message(
 /// strictly under `cwdParent`, the `relative` is exactly the suffix after
 /// `cwdParent`, which [`std::path::Path::strip_prefix`] yields.
 #[must_use]
-pub(crate) fn suggest_path_under_cwd(requested: &std::path::Path, cwd: &std::path::Path) -> Option<String> {
+pub(crate) fn suggest_path_under_cwd(
+    requested: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Option<String> {
     use std::path::MAIN_SEPARATOR;
 
     // `cwdParent = dirname(cwd)`. A cwd with no parent (the filesystem root) has

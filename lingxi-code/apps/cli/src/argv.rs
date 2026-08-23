@@ -161,7 +161,8 @@ fn matches_exponent_number(value: &str) -> bool {
     };
     let mantissa_ok = match mantissa.split_once('.') {
         Some((int_part, frac_part)) => {
-            (!int_part.is_empty() && int_part.bytes().all(|b| b.is_ascii_digit())
+            (!int_part.is_empty()
+                && int_part.bytes().all(|b| b.is_ascii_digit())
                 && frac_part.bytes().all(|b| b.is_ascii_digit()))
                 || (int_part.is_empty()
                     && !frac_part.is_empty()

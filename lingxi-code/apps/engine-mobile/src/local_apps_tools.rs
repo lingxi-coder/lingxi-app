@@ -241,8 +241,26 @@ impl Tool for LocalAppTool {
     /// loop does NOT race the cancel token — ESC would leave the session
     /// parked until the budget expired. The MCP adapter these replaced
     /// returned `Cancel`; keep that.
-    fn interrupt_behavior(&self, _input: &Value) -> InterruptBehavior {
-        InterruptBehavior::Cancel
+    ///
+    /// `create` is the exception, and it is not a preference.
+    ///
+    /// On `Cancel` the turn loop races the token and DROPS the tool future.
+    /// Dropping this one does NOT undo it: `AppService::create_app*` runs its
+    /// mint/persist/commit on a DETACHED `tokio::spawn` precisely so a dropped
+    /// caller cannot leave a half-created app, so the record still lands while
+    /// the model is told the call was aborted. The model's only recovery from
+    /// "aborted" is to call create again — and create is not idempotent, so one
+    /// interrupted intent becomes two apps in the library. Blocking costs a
+    /// bounded wait (create is a few file writes plus a scaffold, not a
+    /// 30-minute build) and buys the guarantee that the model always learns the
+    /// id it just caused to exist.
+    fn interrupt_behavior(&self, input: &Value) -> InterruptBehavior {
+        let _ = input;
+        if self.operation == "create" {
+            InterruptBehavior::Block
+        } else {
+            InterruptBehavior::Cancel
+        }
     }
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {

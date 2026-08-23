@@ -32,12 +32,13 @@ use client_protocol::local_apps::{
     AppCapabilityKindDto, AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto,
     AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto,
     AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
-    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppWorkflowStateDto, DeviceContextDto,
+    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppSurfaceDto, AppWorkflowStateDto,
+    DeviceContextDto,
 };
 use local_apps::{
     load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppError, AppErrorCode,
     AppEvent, AppEventObserver, AppLayout, AppManifest, AppRecord, AppRuntimeRecord,
-    AppRuntimeState, AppService, AppWorkflowState, DataCollectionSchema, DataFieldKind,
+    AppRuntimeState, AppService, AppSurface, AppWorkflowState, DataCollectionSchema, DataFieldKind,
     DataFieldSchema,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -206,6 +207,11 @@ pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
     match event {
         AppEvent::AppsChanged { apps } => Some(ClientEvent::AppsChanged {
             apps: lower_records(&apps),
+        }),
+        AppEvent::AppCreated { record } => Some(ClientEvent::AppEvent {
+            event: AppEventDto::AppCreated {
+                record: lower_record(&record),
+            },
         }),
         AppEvent::RecordChanged { record } => Some(ClientEvent::AppEvent {
             event: AppEventDto::AppRecordChanged {
@@ -487,6 +493,24 @@ pub(crate) fn raise_origin(origin: AppCreateOriginDto) -> Result<AppCreateOrigin
         other => {
             return Err(AppError::InvalidRequest(format!(
                 "unsupported app create origin: {other:?}"
+            )))
+        }
+    })
+}
+
+/// Raise the wire surface to the core scaffold selector.
+///
+/// Fallible like [`raise_origin`]: `AppSurfaceDto` is `#[non_exhaustive]`, and
+/// a surface is IMMUTABLE once scaffolded — a future variant silently laundered
+/// into the routed shape would hand the user an app they cannot convert and
+/// cannot rename, with nothing anywhere saying why.
+pub(crate) fn raise_surface(surface: AppSurfaceDto) -> Result<AppSurface, AppError> {
+    Ok(match surface {
+        AppSurfaceDto::Dom => AppSurface::Dom,
+        AppSurfaceDto::Canvas => AppSurface::Canvas,
+        other => {
+            return Err(AppError::InvalidRequest(format!(
+                "unsupported app surface: {other:?}"
             )))
         }
     })

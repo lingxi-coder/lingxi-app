@@ -21,6 +21,19 @@ pub enum AppEvent {
         /// Every app record, in stored order.
         apps: Vec<AppRecord>,
     },
+    /// A NEW app record just committed.
+    ///
+    /// `AppsChanged` already carries the full list, but a list cannot say which
+    /// entry is new. A client that started a creation and must land the user on
+    /// the result was left to infer it — iOS by diffing against a pre-create id
+    /// snapshot, Android by matching the brief string — and both inferences
+    /// break the moment creation is asynchronous and the agent rewrites the
+    /// brief. Emitted immediately AFTER `AppsChanged` so the list already
+    /// contains the record this names.
+    AppCreated {
+        /// The freshly committed record.
+        record: AppRecord,
+    },
     /// One app record changed without requiring a full catalog snapshot.
     RecordChanged {
         /// The updated app record.

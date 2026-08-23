@@ -28,6 +28,8 @@ use crate::definition::{
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+const UTF8_BOM: char = '\u{feff}';
+
 /// Validated agent color names — claude `AGENT_COLORS` (agentColorManager.ts).
 const AGENT_COLOR_NAMES: [&str; 8] = [
     "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
@@ -211,6 +213,7 @@ pub fn parse_agent_markdown(
     base_dir: PathBuf,
     path_for_error: &Path,
 ) -> Result<AgentDefinition, AgentLoadError> {
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
     let rest = raw
         .strip_prefix("---")
         .ok_or_else(|| AgentLoadError::NoFrontmatter(path_for_error.to_path_buf()))?;
@@ -1497,6 +1500,21 @@ mod tests {
             Path::new("reviewer.md"),
         )
         .unwrap();
+        assert_eq!(def.agent_type, "reviewer");
+        assert_eq!(def.when_to_use, "review code");
+        assert_eq!(def.system_prompt.as_deref(), Some("Body"));
+    }
+
+    #[test]
+    fn utf8_bom_before_frontmatter_is_ignored() {
+        let raw = "\u{feff}---\nname: reviewer\ndescription: review code\n---\nBody";
+        let def = parse_agent_markdown(
+            raw,
+            AgentSource::UserDefined,
+            PathBuf::from("/tmp"),
+            Path::new("reviewer.md"),
+        )
+        .expect("parse with bom");
         assert_eq!(def.agent_type, "reviewer");
         assert_eq!(def.when_to_use, "review code");
         assert_eq!(def.system_prompt.as_deref(), Some("Body"));

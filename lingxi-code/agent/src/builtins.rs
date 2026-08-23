@@ -877,13 +877,15 @@ mod tests {
         assert!(d.when_to_use.starts_with(
             "Use this to fetch and read web pages / URLs when you do not have a direct WebFetch tool of your own (if you do, just call it)."
         ));
-        assert!(d.when_to_use.contains("this session's `tool-results` directory"));
+        assert!(d
+            .when_to_use
+            .contains("this session's `tool-results` directory"));
         assert!(d
             .when_to_use
             .contains("send follow-up questions about pages it has already read via SendMessage"));
-        assert!(d.when_to_use.ends_with(
-            "use `gh` or an authenticated MCP tool for those."
-        ));
+        assert!(d
+            .when_to_use
+            .ends_with("use `gh` or an authenticated MCP tool for those."));
         let p = d.system_prompt.as_deref().unwrap();
         assert!(p.starts_with("You are a web-reading specialist for LingXi."));
         assert!(p.contains("inside <fetched-web-content> tags rather than a summary"));

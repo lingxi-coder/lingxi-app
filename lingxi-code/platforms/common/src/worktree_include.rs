@@ -78,6 +78,43 @@ fn matcher_ignores(
         .is_ignore()
 }
 
+fn literal_prefix(pattern: &str) -> &str {
+    let prefix_len = pattern.find(['*', '?', '[']).unwrap_or(pattern.len());
+    &pattern[..prefix_len]
+}
+
+fn pattern_selects_collapsed_dir(pattern: &str, dir: &str) -> bool {
+    let mut normalized = pattern.strip_prefix('/').unwrap_or(pattern);
+    let mut had_leading_globstar = false;
+    while let Some(rest) = normalized.strip_prefix("**/") {
+        normalized = rest;
+        had_leading_globstar = true;
+    }
+
+    if normalized.starts_with(dir) {
+        return true;
+    }
+
+    if !had_leading_globstar {
+        let literal = literal_prefix(normalized);
+        return !literal.is_empty() && dir.starts_with(literal);
+    }
+
+    let first_segment = normalized.split('/').next().unwrap_or(normalized);
+    let glob_index = first_segment.find(['*', '?', '[']);
+    let literal = glob_index.map_or(first_segment, |idx| &first_segment[..idx]);
+    let literal = literal.replace('\\', "").to_ascii_lowercase();
+    if literal.is_empty() {
+        return false;
+    }
+    dir.trim_end_matches('/')
+        .split('/')
+        .map(str::to_ascii_lowercase)
+        .any(|component| {
+            glob_index.map_or_else(|| component == literal, |_| component.starts_with(&literal))
+        })
+}
+
 /// CC `gVn(dest, worktreeReal)` — would writing to `dest` escape the worktree
 /// via a committed symlink? Walk up `dest`'s ancestors, `realpath`-ing each: if
 /// any resolves outside `worktree_real` (or a non-ENOENT error / a broken
@@ -186,18 +223,9 @@ pub async fn copy_worktree_include_files(repo_root: &Path, worktree_path: &Path)
         .filter(|p| p.ends_with('/'))
         .filter(|p| {
             let dir = **p;
-            let by_pattern = patterns.iter().any(|f| {
-                let m = f.strip_prefix('/').unwrap_or(f);
-                if m.starts_with(dir) {
-                    return true;
-                }
-                if let Some(g) = m.find(['*', '?', '[']) {
-                    if g > 0 && dir.starts_with(&m[..g]) {
-                        return true;
-                    }
-                }
-                false
-            });
+            let by_pattern = patterns
+                .iter()
+                .any(|pattern| pattern_selects_collapsed_dir(pattern, dir));
             by_pattern || matcher_ignores(&matcher, repo_root, dir.trim_end_matches('/'), true)
         })
         .copied()
@@ -460,6 +488,62 @@ mod tests {
                 .unwrap(),
             "AAA"
         );
+    }
+
+    #[tokio::test]
+    async fn leading_globstar_directory_pattern_expands_collapsed_dir() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo).await;
+        tokio::fs::create_dir_all(repo.join("nested/secrets"))
+            .await
+            .unwrap();
+        tokio::fs::write(repo.join("nested/secrets/a.key"), "AAA")
+            .await
+            .unwrap();
+        tokio::fs::write(repo.join("nested/secrets/b.key"), "BBB")
+            .await
+            .unwrap();
+        tokio::fs::write(repo.join(".worktreeinclude"), "**/secrets/\n")
+            .await
+            .unwrap();
+        let wt = add_worktree(repo, "globstar").await;
+
+        let mut copied = copy_worktree_include_files(repo, &wt).await;
+        copied.sort();
+        assert_eq!(
+            copied,
+            vec![
+                PathBuf::from("nested/secrets/a.key"),
+                PathBuf::from("nested/secrets/b.key")
+            ]
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(wt.join("nested/secrets/a.key"))
+                .await
+                .unwrap(),
+            "AAA"
+        );
+    }
+
+    #[test]
+    fn leading_globstar_only_expands_matching_path_components() {
+        assert!(pattern_selects_collapsed_dir(
+            "**/secrets/*.key",
+            "nested/secrets/"
+        ));
+        assert!(pattern_selects_collapsed_dir(
+            "**/sec*/a.key",
+            "nested/secrets/"
+        ));
+        assert!(!pattern_selects_collapsed_dir(
+            "**/secrets/*.key",
+            "nested/cache/"
+        ));
+        assert!(!pattern_selects_collapsed_dir(
+            "**/target.txt",
+            "nested/cache/"
+        ));
     }
 
     #[tokio::test]

@@ -379,7 +379,10 @@ mod tests {
         );
         let item = &s["properties"]["findings"]["items"];
         assert_eq!(item["additionalProperties"], json!(false));
-        assert_eq!(item["required"], json!(["file", "summary", "failure_scenario"]));
+        assert_eq!(
+            item["required"],
+            json!(["file", "summary", "failure_scenario"])
+        );
         assert_eq!(item["properties"]["line"]["type"], json!("integer"));
         assert_eq!(item["properties"]["short_summary"]["maxLength"], json!(60));
         assert_eq!(item["properties"]["category"]["maxLength"], json!(40));

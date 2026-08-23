@@ -521,13 +521,28 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
         SELECT: 'combobox',
         TEXTAREA: 'textbox'
       })[element.tagName] || '');
+      // A password / hidden input's CONTENT must never leave the WebView, in any
+      // field. `snapshot` already redacts `value`, but the accessible name falls
+      // back to `element.value` for an input with no label, no placeholder and
+      // no text — so an unlabelled `<input type="password">` used to ship the
+      // typed password to the model as `name`. `deepQuery` widened the reach of
+      // this walk into shadow roots, so the fallback now sees component-internal
+      // inputs too.
+      const isSensitive = element =>
+        element instanceof HTMLInputElement && ['hidden', 'password'].includes(element.type);
       const nameOf = element => {
+        // `deepQuery` below returns elements from INSIDE shadow roots, and a
+        // shadow root is its own id scope. Resolving their labels against
+        // `document` searches the wrong tree, so an element the walk just
+        // surfaced comes back unnamed and role+name targeting misses it.
+        const scope = element.getRootNode?.() || document;
+        const byId = id => (scope.getElementById ? scope.getElementById(id) : document.getElementById(id));
         const labelledBy = clean(element.getAttribute('aria-labelledby'));
         const labelled = labelledBy
-          ? labelledBy.split(/\s+/).map(id => document.getElementById(id)).find(Boolean)
+          ? labelledBy.split(/\s+/).map(id => byId(id)).find(Boolean)
           : null;
         const explicit = element.id
-          ? document.querySelector(`label[for="${'$'}{CSS.escape(element.id)}"]`)
+          ? scope.querySelector(`label[for="${'$'}{CSS.escape(element.id)}"]`)
           : null;
         return clean(
           element.getAttribute('aria-label')
@@ -535,16 +550,51 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
             || explicit?.textContent
             || element.placeholder
             || element.innerText
-            || element.value
+            || (isSensitive(element) ? '' : element.value)
         );
       };
-      const candidates = () => Array.from(document.querySelectorAll(
-        'button,a[href],input,select,textarea,[role],[tabindex],[contenteditable="true"]'
-      ));
+      // Ionic renders a component's interactive internals inside a SHADOW ROOT, and
+      // `document.querySelectorAll` does not cross that boundary. Without this walk
+      // an app built from ion-* components reports `elements: []` — the same signal
+      // a blank screen and a crashed app produce, which is exactly the ambiguity
+      // `canvasCount` exists to resolve for a drawn surface.
+      const SELECTOR = 'button,a[href],input,select,textarea,[role],[tabindex],[contenteditable="true"]';
+      const deepQuery = (selector, limit) => {
+        const found = [];
+        const seen = new Set();
+        const visit = (root, depth) => {
+          // Bounded on BOTH axes: a component library nests a few roots deep, but a
+          // page that nests further (or loops) must degrade to a partial list rather
+          // than hang the WebView while the tool call waits on it.
+          if (!root || depth > 8 || found.length >= limit) return;
+          let matched = [];
+          try { matched = Array.from(root.querySelectorAll(selector)); } catch (error) { return; }
+          for (const element of matched) {
+            if (found.length >= limit) return;
+            if (!seen.has(element)) { seen.add(element); found.push(element); }
+          }
+          let hosts = [];
+          try { hosts = Array.from(root.querySelectorAll('*')); } catch (error) { return; }
+          for (const host of hosts) if (host.shadowRoot) visit(host.shadowRoot, depth + 1);
+        };
+        visit(document, 0);
+        return found;
+      };
+      const candidates = () => deepQuery(SELECTOR, 400);
+      // `ion-input` and its siblings keep the real <input> in their shadow root, so
+      // a fill aimed at the host would write to a custom element that has no value
+      // setter and no `input` event to dispatch.
+      const nativeControl = element => {
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) return element;
+        return element.shadowRoot ? (element.shadowRoot.querySelector('input,textarea,select') || element) : element;
+      };
       const findTarget = target => {
         if (!target) return null;
         if (target.elementId) {
-          const byId = document.getElementById(target.elementId);
+          // `getElementById` is document-scoped; a shadow root is a separate id
+          // scope, and Ionic mints ids like `ion-input-0` inside one.
+          const byId = document.getElementById(target.elementId)
+            || deepQuery('[id="' + String(target.elementId).replace(/["\\]/g, '\\$&') + '"]', 1)[0];
           if (byId) return byId;
         }
         return candidates().find(element =>
@@ -581,10 +631,10 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
         // verifier tell "no controls" apart from "cannot be seen this way",
         // and it does not depend on the DOM being empty: a canvas game with
         // a score bar and a restart button still needs its frame looked at.
-        canvasCount: document.querySelectorAll('canvas').length,
+        canvasCount: deepQuery('canvas', 64).length,
         elements: candidates().slice(0, 200).map(element => {
           const rect = element.getBoundingClientRect();
-          const sensitive = element instanceof HTMLInputElement && ['hidden', 'password'].includes(element.type);
+          const sensitive = isSensitive(element);
           return {
             elementId: clean(element.id) || null,
             role: roleOf(element) || null,
@@ -664,7 +714,7 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
           // listeners at every level (canvas -> body -> document -> window).
           const receiver = document.activeElement && document.activeElement !== document.body
             ? document.activeElement
-            : (document.querySelector('canvas') || document.body);
+            : (deepQuery('canvas', 1)[0] || document.body);
           // Ordered so the space case is reached: a space HAS length 1, so
           // testing it after the length check made that arm dead code and
           // emitted `code: ''`, which `e.code === 'Space'` never matches.
@@ -684,33 +734,45 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
         if (request.action === 'click') {
           element.click();
         } else if (request.action === 'fill') {
-          if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element.isContentEditable)) {
+          const field = nativeControl(element);
+          if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement || field.isContentEditable)) {
             throw new Error('Target cannot be filled');
           }
-          if (element.isContentEditable) {
-            element.textContent = request.value || '';
+          if (field.isContentEditable) {
+            field.textContent = request.value || '';
           } else {
-            setNativeValue(element, request.value || '');
+            setNativeValue(field, request.value || '');
           }
-          dispatchValueChange(element);
+          dispatchValueChange(field);
         } else if (request.action === 'select') {
-          if (!(element instanceof HTMLSelectElement)) throw new Error('Target is not a select element');
-          const option = Array.from(element.options).find(item =>
+          const field = nativeControl(element);
+          if (!(field instanceof HTMLSelectElement)) throw new Error('Target is not a select element');
+          const option = Array.from(field.options).find(item =>
             item.value === request.value || clean(item.textContent) === clean(request.value)
           );
           if (!option) throw new Error('Select option was not found');
-          setNativeValue(element, option.value);
-          dispatchValueChange(element);
+          setNativeValue(field, option.value);
+          dispatchValueChange(field);
         } else if (request.action === 'toggle') {
           const desired = !!request.checked;
-          if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) {
-            if (!!element.checked !== desired) element.click();
-          } else if (['checkbox', 'switch'].includes(roleOf(element).toLowerCase())) {
-            const current = clean(element.getAttribute('aria-checked')).toLowerCase() === 'true';
-            if (current !== desired) element.click();
-          } else {
-            throw new Error('Target is not toggleable');
-          }
+          // `ion-checkbox`/`ion-toggle` keep the real <input> — and the
+          // `role`/`aria-checked` that describe it — inside their SHADOW ROOT,
+          // exactly like `ion-input`. Reading the host alone answered "not
+          // toggleable" for every checkbox and switch in every Ionic app, so
+          // read the state from whichever node carries it. The CLICK still goes
+          // to the host: that is what the component listens on.
+          const stateOf = node => {
+            if (node instanceof HTMLInputElement && (node.type === 'checkbox' || node.type === 'radio')) {
+              return !!node.checked;
+            }
+            if (['checkbox', 'switch'].includes(roleOf(node).toLowerCase())) {
+              return clean(node.getAttribute('aria-checked')).toLowerCase() === 'true';
+            }
+            return null;
+          };
+          const current = stateOf(nativeControl(element)) ?? stateOf(element);
+          if (current === null) throw new Error('Target is not toggleable');
+          if (current !== desired) element.click();
         } else {
           throw new Error('Unsupported UI action');
         }

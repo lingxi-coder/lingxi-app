@@ -1114,7 +1114,11 @@ mod tests {
           }
         }"#;
         let hooks = parse_hooks_from_settings_json(raw, HookSource::Project).unwrap();
-        assert_eq!(hooks.len(), 1, "an mcp_tool entry must no longer be dropped");
+        assert_eq!(
+            hooks.len(),
+            1,
+            "an mcp_tool entry must no longer be dropped"
+        );
         assert_eq!(hooks[0].events, vec![HookEventType::PostToolUse]);
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(12)));
         assert!(hooks[0].once);

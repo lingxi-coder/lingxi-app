@@ -229,8 +229,16 @@ struct RootView: View {
     }
 
     var body: some View {
+        // Split across three declarations on purpose. As one chained
+        // expression this body exceeds the Swift type-checker's budget and
+        // the build fails outright with "unable to type-check this
+        // expression in reasonable time".
+        withPresentations(withLifecycleObservers(rootStack))
+    }
+
+    private var rootStack: some View {
         @Bindable var navigation = navigation
-        ZStack {
+        return ZStack {
             // Sidebar + chat. In compact width this collapses to a stack whose
             // root is the sidebar, which is what gives the chat a system back
             // button and a back-swipe for free.
@@ -267,135 +275,159 @@ struct RootView: View {
                 )
             #endif
         }
-        .environment(\.locale, localization.effectiveLocale())
-        .onChange(of: scenePhase, handleScenePhase)
-        .onReceive(source.model.backgroundExecutionActivity) { active in
-            conversationBackgroundExecution.setTurnActive(active)
-        }
-        .onChange(of: draft) { _, value in
-            scopedPreferences.setDraft(value, scope: activeScope)
-        }
-        .onChange(of: providerRepository.syncRevision) { _, _ in
-            settingsStore.llmProviders = providerRepository.legacyProviders()
-        }
-        .onChange(of: localAppsStore.requestedPresentationAppID) { _, appID in
-            guard let requestedAppID = appID else { return }
-            navigation.openLocalApps(appID: requestedAppID)
-            _ = localAppsStore.consumeRequestedPresentationAppID()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .lingxiCronNotificationOpened)) { note in
-            cronRepository.handleNotificationUserInfo(note.userInfo ?? [:])
-            if let runID = note.userInfo?["lingxi.cron.run_id"] as? String {
-                navigation.openCronRun(runID)
+    }
+
+    private func withLifecycleObservers(_ content: some View) -> some View {
+        content
+            .environment(\.locale, localization.effectiveLocale())
+            .onChange(of: scenePhase, handleScenePhase)
+            .onReceive(source.model.backgroundExecutionActivity) { active in
+                conversationBackgroundExecution.setTurnActive(active)
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .lingxiAppActionPending)) { _ in
-            Task { await consumePendingAppActions() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
-            Task { await localAppsStore.handleMemoryWarning() }
-        }
-        .onOpenURL(perform: handleIncomingURL)
-        .task(id: sourceGeneration) {
-            let generation = sourceGeneration
-            let sessionToRestore = pendingSessionRestoreID ?? activeSession
-            var current = source
-            wireCurrentSource(preserveCatalog: providerCatalogBootstrapped)
-            do {
-                var preparedByCatalogRebuild = false
-                if !providerCatalogBootstrapped {
-                    providerCatalogBootstrapped = true
-                    let catalogLoaded = await providerRepository.refreshCatalog()
-                    if catalogLoaded, generation == sourceGeneration {
-                        try await rebuildSource(
-                            snapshot: providerRepository.makeLaunchSnapshot(),
-                            preserveSourceGeneration: true
-                        )
-                        current = source
-                        preparedByCatalogRebuild = true
-                    }
-                }
-                if !preparedByCatalogRebuild {
-                    try await current.prepare()
-                }
-                guard generation == sourceGeneration else { return }
-                current.listSessions()
-                if !sessionToRestore.isEmpty, !current.model.sessionTransitionPending {
-                    requestSessionResume(
-                        sessionToRestore,
-                        scope: activeScope,
-                        using: current
-                    )
-                }
-                await providerRepository.refreshCredentialStatus()
-                await localAppsStore.refreshAfterEngineRebind()
-            } catch {
-                guard generation == sourceGeneration else { return }
-                current.warmUp()
+            .onChange(of: draft) { _, value in
+                scopedPreferences.setDraft(value, scope: activeScope)
             }
-        }
-        .task {
-            await cronRepository.handleLaunch()
-        }
-        .task {
-            await consumePendingAppActions()
-        }
-        .sheet(
-            isPresented: Binding(
-                get: { navigation.settingsOpen },
-                set: { if !$0 { navigation.closeSettings() } }
-            ),
-            onDismiss: handleSettingsDismissed
-        ) {
-            SettingsHost(
-                store: settingsStore,
-                convo: source.model,
-                projectCwd: projectStore.activeProject?.workspace.hostURL.path,
-                onRefreshMcp: { source.refreshMcpServers() },
-                onRefreshSkills: {
-                    #if canImport(engine_mobileFFI)
-                        Task {
-                            try? await source.submitEngineCommand(
-                                .refreshListings(which: [.slashCommands])
+            .onChange(of: providerRepository.syncRevision) { _, _ in
+                settingsStore.llmProviders = providerRepository.legacyProviders()
+            }
+            // Land the user in the new app. See `landCreatedAppIfReady` for why
+            // all three of these re-check the same gate rather than one of them
+            // driving.
+            // `@Published` publishes from `willSet`, so `source.model.streaming`
+            // still reads the OLD value inside this sink — on the true→false
+            // edge it reads `true` and the gate below would refuse forever.
+            // Pass the DELIVERED value instead of re-reading the property.
+            .onReceive(source.model.$streaming) { isStreaming in
+                landCreatedAppIfReady(streaming: isStreaming)
+            }
+            .onChange(of: localAppsStore.createdAppLanding) { _, _ in
+                landCreatedAppIfReady()
+            }
+            .onChange(of: localAppsStore.pendingWidgetSetup) { _, _ in
+                landCreatedAppIfReady()
+            }
+            .onChange(of: localAppsStore.requestedPresentationAppID) { _, appID in
+                guard let requestedAppID = appID else { return }
+                navigation.openLocalApps(appID: requestedAppID)
+                _ = localAppsStore.consumeRequestedPresentationAppID()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .lingxiCronNotificationOpened)) { note in
+                cronRepository.handleNotificationUserInfo(note.userInfo ?? [:])
+                if let runID = note.userInfo?["lingxi.cron.run_id"] as? String {
+                    navigation.openCronRun(runID)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .lingxiAppActionPending)) { _ in
+                Task { await consumePendingAppActions() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+                Task { await localAppsStore.handleMemoryWarning() }
+            }
+            .onOpenURL(perform: handleIncomingURL)
+            .task(id: sourceGeneration) {
+                let generation = sourceGeneration
+                let sessionToRestore = pendingSessionRestoreID ?? activeSession
+                var current = source
+                wireCurrentSource(preserveCatalog: providerCatalogBootstrapped)
+                do {
+                    var preparedByCatalogRebuild = false
+                    if !providerCatalogBootstrapped {
+                        providerCatalogBootstrapped = true
+                        let catalogLoaded = await providerRepository.refreshCatalog()
+                        if catalogLoaded, generation == sourceGeneration {
+                            try await rebuildSource(
+                                snapshot: providerRepository.makeLaunchSnapshot(),
+                                preserveSourceGeneration: true
                             )
+                            current = source
+                            preparedByCatalogRebuild = true
                         }
-                    #endif
-                },
-                openTerminal: {
-                    navigation.closeSettings()
-                    openCurrentWorkspaceTerminal()
-                },
-                onPermissionModeChanged: { mode in
-                    #if canImport(engine_mobileFFI)
-                        try await source.submitEngineCommand(.setPermissionMode(mode: mode))
-                    #endif
-                },
-                onClose: { navigation.closeSettings() },
-                navigation: navigation
-            )
-            .presentationDetents([.large])
-            .presentationDragIndicator(.visible)
-        }
-        .fullScreenCover(
-            item: Binding(
-                get: { navigation.presentedRoute },
-                set: { if $0 == nil { navigation.closePresentedRoute() } }
-            )
-        ) { route in
-            modalDestination(route)
-        }
-        // One controller presents one modal. While the local-apps cover is up it
-        // owns the prompt (LocalAppsRootView); this presenter only covers requests
-        // raised with the cover down — e.g. a destructive data migration approved
-        // during background generation.
-        .sheet(
-            item: Binding(
-                get: { navigation.presentedRoute == nil ? localAppsStore.pendingPermission : nil },
-                set: { _ in }
-            )
-        ) { prompt in
-            LocalAppPermissionSheet(store: localAppsStore, prompt: prompt)
-        }
+                    }
+                    if !preparedByCatalogRebuild {
+                        try await current.prepare()
+                    }
+                    guard generation == sourceGeneration else { return }
+                    current.listSessions()
+                    if !sessionToRestore.isEmpty, !current.model.sessionTransitionPending {
+                        requestSessionResume(
+                            sessionToRestore,
+                            scope: activeScope,
+                            using: current
+                        )
+                    }
+                    await providerRepository.refreshCredentialStatus()
+                    await localAppsStore.refreshAfterEngineRebind()
+                } catch {
+                    guard generation == sourceGeneration else { return }
+                    current.warmUp()
+                }
+            }
+            .task {
+                await cronRepository.handleLaunch()
+            }
+            .task {
+                await consumePendingAppActions()
+            }
+    }
+
+    private func withPresentations(_ content: some View) -> some View {
+        content
+            .sheet(
+                isPresented: Binding(
+                    get: { navigation.settingsOpen },
+                    set: { if !$0 { navigation.closeSettings() } }
+                ),
+                onDismiss: handleSettingsDismissed
+            ) {
+                SettingsHost(
+                    store: settingsStore,
+                    convo: source.model,
+                    projectCwd: projectStore.activeProject?.workspace.hostURL.path,
+                    onRefreshMcp: { source.refreshMcpServers() },
+                    onRefreshSkills: {
+                        #if canImport(engine_mobileFFI)
+                            Task {
+                                try? await source.submitEngineCommand(
+                                    .refreshListings(which: [.slashCommands])
+                                )
+                            }
+                        #endif
+                    },
+                    openTerminal: {
+                        navigation.closeSettings()
+                        openCurrentWorkspaceTerminal()
+                    },
+                    onPermissionModeChanged: { mode in
+                        #if canImport(engine_mobileFFI)
+                            try await source.submitEngineCommand(.setPermissionMode(mode: mode))
+                        #endif
+                    },
+                    onClose: { navigation.closeSettings() },
+                    navigation: navigation
+                )
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+            }
+            .fullScreenCover(
+                item: Binding(
+                    get: { navigation.presentedRoute },
+                    set: { if $0 == nil { navigation.closePresentedRoute() } }
+                )
+            ) { route in
+                modalDestination(route)
+            }
+            // One controller presents one modal. While the local-apps cover is up it
+            // owns the prompt (LocalAppsRootView); this presenter only covers requests
+            // raised with the cover down — e.g. a destructive data migration approved
+            // during background generation.
+            .sheet(
+                item: Binding(
+                    get: { navigation.presentedRoute == nil ? localAppsStore.pendingPermission : nil },
+                    set: { _ in }
+                )
+            ) { prompt in
+                LocalAppPermissionSheet(store: localAppsStore, prompt: prompt)
+            }
     }
 
     private var sidebar: some View {
@@ -506,7 +538,6 @@ struct RootView: View {
                 activeModelID: source.model.activeModelId,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
-                onOpenCreatedAppSession: openCreatedAppSession,
                 onNewAppSession: startNewAppSession
             )
         case .sessionDetails(let sessionID):
@@ -546,7 +577,6 @@ struct RootView: View {
                 activeModelID: source.model.activeModelId,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
-                onOpenCreatedAppSession: openCreatedAppSession,
                 onNewAppSession: startNewAppSession
             )
         case .sessionDetails:
@@ -561,14 +591,51 @@ struct RootView: View {
         switchScope(to: .localApp(appID), resumeSessionID: sessionID)
     }
 
+    /// Open the intake conversation the create sheet armed.
+    ///
+    /// NEVER inherits a `.localApp` scope. That workspace belongs to a DIFFERENT
+    /// app: its auto-loaded `LINGXI.md` tells the agent it IS that app and must
+    /// not call `LocalAppCreate` again, and the session cwd points at that app's
+    /// source. Observed on device — the intake ran inside an existing app, so
+    /// the agent hand-rolled a package.json/vite.config.js scaffold by copying
+    /// another app, and every build after that failed on the workspace.
+    ///
+    /// Extracted from the view body for the same reason as the landing below:
+    /// inlined, the body exceeded the type-checker's budget.
+    /// Take the user into the app that was just created.
+    ///
+    /// Three things can be the last to arrive, so all three re-check rather
+    /// than one of them driving:
+    /// - the landing itself (a create from the library sheet: no turn is
+    ///   running, so nothing else will fire afterwards),
+    /// - the end of a turn (an AGENT-driven create: switching scope submits
+    ///   `cancelAndWait()`, which would kill the turn that made the app),
+    /// - the widget-setup sheet closing (it must not be yanked out from under
+    ///   the user by a scope switch).
+    ///
+    /// Extracted from the view body on purpose: inlined, it pushed the body
+    /// past the Swift type-checker's budget and the build failed with "unable
+    /// to type-check this expression in reasonable time".
+    /// `streaming` overrides the stored property for the one caller that is a
+    /// `@Published` sink — see the comment at that `.onReceive`.
+    private func landCreatedAppIfReady(streaming: Bool? = nil) {
+        guard !(streaming ?? source.model.streaming),
+              localAppsStore.pendingWidgetSetup == nil,
+              let landing = localAppsStore.consumeCreatedAppLanding() else { return }
+        openCreatedAppSession(
+            appID: landing.appID,
+            sessionID: landing.initSessionID,
+            brief: landing.brief
+        )
+    }
+
     /// The create-flow landing: same as `openAppSession`, plus the queued
     /// kickoff message that starts the create-local-app flow once the empty
     /// init session is live.
     private func openCreatedAppSession(
         appID: String,
-        sessionID: String,
-        brief: String,
-        modelOverride _: String?
+        sessionID: String?,
+        brief: String
     ) {
         navigation.closePresentedRoute()
         let kickoff = String(localized: "local_apps_init_kickoff \(brief)")
@@ -576,9 +643,13 @@ struct RootView: View {
         // switch would lose the created app with nothing left to re-arm it.
         // `switchScope` refuses only while another switch is in flight, so
         // retry once that finishes.
+        // `sessionID` is nil only when the engine's best-effort init-session
+        // mint failed. Landing on a fresh conversation is still correct: the
+        // scope, not the session, is what roots the agent in the app workspace.
         guard switchScope(
             to: .localApp(appID),
             resumeSessionID: sessionID,
+            startNew: sessionID == nil,
             initialPrompt: kickoff
         ) else {
             Task { @MainActor in
@@ -589,8 +660,7 @@ struct RootView: View {
                 openCreatedAppSession(
                     appID: appID,
                     sessionID: sessionID,
-                    brief: brief,
-                    modelOverride: nil
+                    brief: brief
                 )
             }
             return
@@ -785,7 +855,12 @@ struct RootView: View {
     /// anchor never runs a turn on its own).
     private struct PendingInitKickoff {
         let scope: ConversationScope
-        let sessionID: String
+        /// The session to fire into, or `nil` when the switch started a FRESH
+        /// conversation and the id does not exist yet. `nil` must still arm:
+        /// the create landing takes this path whenever the engine's
+        /// best-effort init-session mint failed, and gating on a known id
+        /// dropped the brief that is the whole point of the create flow.
+        let sessionID: String?
         let text: String
     }
 
@@ -803,7 +878,7 @@ struct RootView: View {
     ) -> Bool {
         guard !projectSwitching else { return false }
         voiceInteraction.handleContextChange()
-        if let initialPrompt, let resumeSessionID {
+        if let initialPrompt, resumeSessionID != nil || startNew {
             pendingInitKickoff = PendingInitKickoff(
                 scope: scope, sessionID: resumeSessionID, text: initialPrompt)
         }
@@ -892,7 +967,10 @@ struct RootView: View {
         if pendingSessionRestoreID == sessionID {
             pendingSessionRestoreID = nil
         }
-        if let kickoff = pendingInitKickoff, kickoff.sessionID == sessionID,
+        // A `nil` sessionID means the switch started a fresh conversation, so
+        // the FIRST session adopted in that scope is the one to fire into.
+        if let kickoff = pendingInitKickoff,
+           kickoff.sessionID == nil || kickoff.sessionID == sessionID,
            kickoff.scope == activeScope {
             pendingInitKickoff = nil
             // Only an EMPTY init session gets the kickoff — re-entering one

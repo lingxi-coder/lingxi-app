@@ -78,10 +78,11 @@ pub use record::{
     TruncatedContent,
 };
 pub use runtime::{
-    emit_assistant_response_log, emit_hook_lifecycle, emit_named_log_event, emit_user_prompt_log,
-    install_process, install_process_with_config, prometheus_text, record_counter,
-    record_git_operation_counters, record_histogram, record_lines_of_code_change,
-    record_tool_permission_decision, TelemetryGuard,
+    capture_current_trace_context, emit_assistant_response_log, emit_hook_lifecycle,
+    emit_named_log_event, emit_user_prompt_log, install_process, install_process_with_config,
+    prometheus_text, record_counter, record_git_operation_counters, record_histogram,
+    record_lines_of_code_change, record_tool_permission_decision, with_trace_context,
+    with_trace_context_future, with_turn_span, SerializedTraceContext, TelemetryGuard,
 };
 
 /// Whether the OpenTelemetry monitoring stack is enabled for this process

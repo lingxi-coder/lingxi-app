@@ -760,7 +760,10 @@ mod tests {
             const UNKNOWN: &str = "mysteryprovider/mystery-9-turbo";
             let r = resolve_auto_compact_window(UNKNOWN, &[], None, true);
             assert_eq!(r.source, AutoCompactWindowSource::UnknownModel);
-            assert_eq!(r.window, crate::context_window::MODEL_CONTEXT_WINDOW_DEFAULT);
+            assert_eq!(
+                r.window,
+                crate::context_window::MODEL_CONTEXT_WINDOW_DEFAULT
+            );
             assert_eq!(r.configured, r.window);
 
             // The kill switch restores the previous behavior (source `auto`).
@@ -785,7 +788,8 @@ mod tests {
 
             // `vyS(e,r)`: a 1M opt-in is never called unrecognized.
             assert_eq!(
-                resolve_auto_compact_window("mysteryprovider/mystery-9[1m]", &[], None, true).source,
+                resolve_auto_compact_window("mysteryprovider/mystery-9[1m]", &[], None, true)
+                    .source,
                 AutoCompactWindowSource::Auto
             );
 
@@ -900,7 +904,11 @@ mod tests {
         with_clean_env(|| {
             std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "150000");
             let r = resolve_auto_compact_window(MODEL, &[], Some(120_000), true);
-            assert_eq!(r.source, AutoCompactWindowSource::Env, "env outranks settings");
+            assert_eq!(
+                r.source,
+                AutoCompactWindowSource::Env,
+                "env outranks settings"
+            );
             assert_eq!(r.window, 150_000);
             assert_eq!(r.configured, 150_000);
             std::env::remove_var("LINGXI_AUTO_COMPACT_WINDOW");

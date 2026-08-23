@@ -46,6 +46,7 @@ use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -1436,13 +1437,13 @@ impl Dispatcher {
                 // DOES set AI_AGENT). We mirror exactly: set LINGXI /
                 // LINGXI_SESSION_ID / LINGXI_CHILD_SESSION unconditionally,
                 // LINGXI_EFFORT only when `ctx.effort` carries a level, and we do NOT
-                // set AI_AGENT. Spread BEFORE LINGXI_PROJECT_DIR so the engine project
-                // dir still wins (no key overlap, so order is cosmetic, but it tracks
-                // the binary's spread position).
-                //
-                // Residual: TRACEPARENT (OTel) — LingXi has no per-turn OTel span, so
-                // `Evt()` is effectively false and the binary would omit it too; the
-                // same documented residual as the Bash spawn path.
+                // set AI_AGENT. `TRACEPARENT` is forwarded only when the composition
+                // root captured a concrete turn trace context into
+                // `HookContext.trace_context`; absent that wiring it stays omitted,
+                // matching the current gate-off behavior. Spread BEFORE
+                // LINGXI_PROJECT_DIR so the engine project dir still wins (no key
+                // overlap, so order is cosmetic, but it tracks the binary's spread
+                // position).
                 child_env.insert("LINGXI".to_string(), "1".to_string());
                 child_env.insert("LINGXI_SESSION_ID".to_string(), ctx.session_id.to_string());
                 child_env.insert("LINGXI_CHILD_SESSION".to_string(), "1".to_string());
@@ -1452,6 +1453,9 @@ impl Dispatcher {
                 let project_dir = ctx.project_dir.clone().unwrap_or_else(|| ctx.cwd.clone());
                 let project_dir_str = project_dir.to_string_lossy().into_owned();
                 child_env.insert("LINGXI_PROJECT_DIR".to_string(), project_dir_str.clone());
+                if let Some(trace_context) = ctx.trace_context.as_ref() {
+                    child_env.insert("TRACEPARENT".to_string(), trace_context.traceparent.clone());
+                }
                 // #43: COLUMNS/LINES from the controlling-terminal size. claude
                 // reads `{columns:L,rows:D}=process.stdout` then
                 // `if(L)P.COLUMNS=String(L);if(D)P.LINES=String(D)` (BIN off
@@ -1546,7 +1550,9 @@ impl Dispatcher {
                     let Some(exe) = resolve_powershell_executable() else {
                         return map_command_output(
                             hook,
-                            Err(ProcessError::Io(powershell_missing_error(&original_command))),
+                            Err(ProcessError::Io(powershell_missing_error(
+                                &original_command,
+                            ))),
                             expected_event,
                         )
                         .0;
@@ -1573,7 +1579,7 @@ impl Dispatcher {
                 let pcmd = ProcessCommand {
                     command,
                     args,
-                    cwd: cwd.clone().or_else(|| Some(ctx.cwd.clone())),
+                    cwd: resolve_hook_command_cwd(cwd.as_ref(), ctx),
                     env: child_env,
                     timeout: Some(effective_timeout),
                     stdin: Some(format!("{body}\n")),
@@ -2037,10 +2043,7 @@ impl HookExecutorImpl {
 ///
 /// A no-op (not even a lock acquisition) when no hook supplied a context, which
 /// is every dispatch in a default install.
-fn publish_classifier_host_contexts(
-    agg: &AggregateHookResult,
-    identity: &HookAttachmentIdentity,
-) {
+fn publish_classifier_host_contexts(agg: &AggregateHookResult, identity: &HookAttachmentIdentity) {
     if agg.classifier_contexts.is_empty() {
         return;
     }
@@ -2265,6 +2268,49 @@ fn substitute_project_dir(s: &str, project_dir: &str) -> String {
         return s.to_string();
     }
     s.replace("${LINGXI_PROJECT_DIR}", project_dir)
+}
+
+fn resolve_hook_command_cwd(configured: Option<&PathBuf>, ctx: &HookContext) -> Option<PathBuf> {
+    if let Some(configured) = configured {
+        if is_existing_dir(configured) {
+            return Some(configured.clone());
+        }
+        return fallback_hook_command_cwd(ctx);
+    }
+    if is_existing_dir(&ctx.cwd) {
+        return Some(ctx.cwd.clone());
+    }
+    fallback_hook_command_cwd(ctx)
+}
+
+fn fallback_hook_command_cwd(ctx: &HookContext) -> Option<PathBuf> {
+    if let Some(project_dir) = ctx
+        .project_dir
+        .as_ref()
+        .filter(|path| is_existing_dir(path))
+    {
+        return Some(project_dir.clone());
+    }
+    hook_home_dir()
+}
+
+fn hook_home_dir() -> Option<PathBuf> {
+    let candidates = [
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("USERPROFILE").map(PathBuf::from),
+        match (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH")) {
+            (Some(drive), Some(path)) => Some(PathBuf::from(drive).join(path)),
+            _ => None,
+        },
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|path| is_existing_dir(path))
+}
+
+fn is_existing_dir(path: &Path) -> bool {
+    path.is_dir()
 }
 
 /// Build the serialized envelope body + `expected_event` marker for an event.

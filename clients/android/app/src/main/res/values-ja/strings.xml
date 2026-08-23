@@ -1129,7 +1129,7 @@
     <string name="local_apps_card_menu_a11y">アプリの操作</string>
     <string name="local_apps_checkpoint_restore_action">復元</string>
     <string name="local_apps_create_and_design">作成してデザインを開始</string>
-    <string name="local_apps_create_name_hint">用途や対象ユーザーは、後でデザイナー内に引き続き詳しく設定できます。</string>
+    <string name="local_apps_create_name_hint">作成後に名前は変更できません。</string>
     <string name="local_apps_data_field_name">フィールド名</string>
     <string name="local_apps_data_field_type_boolean">真偽値</string>
     <string name="local_apps_data_field_type_datetime">日時</string>
@@ -1626,6 +1626,17 @@
     <string name="local_apps_error_bridge_detached">アプリ画面が閉じたため、このリクエストは応答されません。</string>
     <string name="local_apps_error_bridge_payload_invalid">リクエスト内容をシリアライズできません。</string>
     <string name="local_apps_error_brief_required">アプリを一行で説明してください。</string>
+    <string name="local_apps_init_kickoff">このアプリは作成されたばかりで空です。この会話はアプリ自身のワークスペースにあります。アプリ id とワークスペースの規約は LINGXI.md にあります。\n\n概要：%1$s\n\nアプリを作り直したり、足場を作り直したりしないでください。形態と名前はすでに確定していて変更できません。create-local-app スキルで、まず要件を確認してから設計と実装に進んでください。</string>
+    <string name="local_apps_create_name_label">アプリ名</string>
+    <string name="local_apps_create_surface_section">形態</string>
+    <string name="local_apps_create_surface_immutable">形態は作成時に確定し、後から変更できません。間違えた場合は削除して作り直してください。</string>
+    <string name="local_apps_surface_dom">画面</string>
+    <string name="local_apps_surface_canvas">キャンバス</string>
+    <string name="local_apps_surface_dom_detail">画面・リスト・フォーム・ボタンで構成され、画面間を行き来できます。</string>
+    <string name="local_apps_surface_canvas_detail">自分で描画する 1 枚の画面がフレームごとに動きます — ゲーム、シミュレーション、3D シーン。</string>
+    <string name="local_apps_create_next">次へ</string>
+    <string name="local_apps_create_naming">命名中…</string>
+    <string name="local_apps_create_back">戻る</string>
     <string name="local_apps_permission_agent_notify">アプリがアシスタントにイベントを送ることを許可しますか？</string>
     <string name="local_apps_permission_camera">アプリがカメラで撮影することを許可しますか？</string>
     <string name="local_apps_permission_llm">アプリが AI モデルを呼び出すことを許可しますか？（あなたの利用量を消費します）</string>

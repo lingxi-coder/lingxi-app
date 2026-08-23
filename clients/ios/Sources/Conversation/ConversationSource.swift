@@ -1047,7 +1047,8 @@ enum ConversationSourceFactory {
                 let source = MockConversationSource.uiTestFixture(
                     cancelledRun: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_CANCELLED_RUN"] == "1",
                     multiAgent: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_MULTI_AGENT"] == "1",
-                    holdTurn: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_HOLD_TURN"] == "1"
+                    holdTurn: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_HOLD_TURN"] == "1",
+                    askQuestion: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_ASK_QUESTION"] == "1"
                 )
                 source.model.providerConfigured =
                     ProcessInfo.processInfo.environment["LINGXI_UI_TEST_PROVIDER_UNCONFIGURED"] != "1"
@@ -1131,7 +1132,8 @@ final class MockConversationSource: ConversationSource {
         static func uiTestFixture(
             cancelledRun: Bool = false,
             multiAgent: Bool = false,
-            holdTurn: Bool = false
+            holdTurn: Bool = false,
+            askQuestion: Bool = false
         ) -> MockConversationSource {
             let source = MockConversationSource()
             source.cannedReplyDelay = holdTurn ? 30 : 1.1
@@ -1259,6 +1261,9 @@ final class MockConversationSource: ConversationSource {
                     sessionID: "ui-session"
                 )
             }
+            if askQuestion {
+                source.model.pendingQuestions = [Self.uiTestAskQuestion]
+            }
             source.model.availableModels = uiTestModelCatalog
             source.model.activeModelId = uiTestModelCatalog[0]
             #if canImport(engine_mobileFFI)
@@ -1300,6 +1305,31 @@ final class MockConversationSource: ConversationSource {
             source.model.slashCommandsLoaded = true
             return source
         }
+
+        /// A worst-case `AskUserQuestion` request for the questionnaire sheet:
+        /// the wire maximum of 4 questions, each carrying the maximum 4 options
+        /// with the descriptions the tool schema encourages. Real requests look
+        /// like this, and the sheet must show the whole first question plus its
+        /// actions without the user hunting for them.
+        static let uiTestAskQuestion = ConversationPendingQuestion(
+            requestId: 4_242,
+            questions: (1 ... 4).map { index in
+                ConversationAskQuestion(
+                    question: "Which approach should the migration take for step \(index)?",
+                    header: "Step \(index)",
+                    options: (1 ... 4).map { option in
+                        ConversationAskOption(
+                            label: "Option \(index).\(option)",
+                            description: "Rewrite the affected call sites in place and keep the "
+                                + "existing public surface stable for downstream clients.",
+                            preview: nil
+                        )
+                    },
+                    multiSelect: index == 2
+                )
+            },
+            timeoutSecs: nil
+        )
 
         /// A multi-provider stand-in for `ClientEvent::ModelList` so the composer's
         /// model picker is reachable in UI tests (the plain mock leaves

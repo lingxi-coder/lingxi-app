@@ -36,10 +36,9 @@ pub use metadata::SessionMetadata;
 pub use rate_limit_checkpoint::{
     checkpoint_ref, clear_last_checkpoint_result, last_checkpoint_result,
     local_checkpoint_commit_allowed, perform_rate_limit_checkpoint, render_resume_md,
-    sanitize_todo_line, CheckpointGates,
-    CheckpointRequest, CheckpointResult, CheckpointSkipReason, CheckpointTrigger, ResumeDoc,
-    ALLOW_LOCAL_CHECKPOINT_COMMIT_ENV, CHECKPOINT_REF_PREFIX, MAX_CHECKPOINT_FILE_COUNT,
-    MAX_CHECKPOINT_TOTAL_BYTES, RESUME_MD_REPO_PATH,
+    sanitize_todo_line, CheckpointGates, CheckpointRequest, CheckpointResult, CheckpointSkipReason,
+    CheckpointTrigger, ResumeDoc, ALLOW_LOCAL_CHECKPOINT_COMMIT_ENV, CHECKPOINT_REF_PREFIX,
+    MAX_CHECKPOINT_FILE_COUNT, MAX_CHECKPOINT_TOTAL_BYTES, RESUME_MD_REPO_PATH,
 };
 pub use resumer::{ResumeError, ResumedRollout, ResumedSession, SessionResumer};
 pub use rewind::rewind_conversation;

@@ -2962,6 +2962,44 @@ mod pre_tool_hook_tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_tool_hook_ctx_carries_current_trace_context() {
+        let trace_context = telemetry::otel::SerializedTraceContext {
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+            tracestate: Some("foo=bar".into()),
+        };
+
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            ctx_capturing_executor(seen.clone()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+
+        let uses = vec![(ToolUseId::new(), "Echo".into(), json!({}), None)];
+        let _ = telemetry::otel::with_trace_context_future(
+            Some(&trace_context),
+            dispatch_tool_uses_tracked(&orch, &uses, None),
+        )
+        .await
+        .unwrap();
+
+        let ctx = seen.lock().unwrap().clone().expect("PreToolUse hook fired");
+        let trace_context = ctx.trace_context.expect("trace context captured");
+        assert_eq!(
+            trace_context.traceparent,
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        );
+        assert_eq!(trace_context.tracestate.as_deref(), Some("foo=bar"));
+    }
+
     #[tokio::test]
     async fn pre_tool_hook_ctx_transcript_path_is_computed_when_no_writer() {
         // FIX A PRODUCTION PATH: with NO `JsonlWriter` wired (the real production
@@ -5874,7 +5912,11 @@ mod goal_auto_clear_tests {
     #[test]
     fn v4v_labels_and_error_codes_are_byte_exact() {
         for (bucket, label, code) in [
-            (GoalClearBucket::Auth, "authentication failed", "cleared_auth"),
+            (
+                GoalClearBucket::Auth,
+                "authentication failed",
+                "cleared_auth",
+            ),
             (
                 GoalClearBucket::Billing,
                 "credit balance too low",

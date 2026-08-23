@@ -161,6 +161,79 @@ pub enum LlmError {
         /// Unsupported capability name.
         capability: String,
     },
+    /// Vision delegation could not be performed for a non-vision route.
+    #[error("media delegation unavailable: {message}")]
+    MediaDelegationUnavailable {
+        /// Caller-facing explanation of why delegation is unavailable.
+        message: String,
+    },
+    /// Vision delegation spent one or more provider calls before a later batch
+    /// failed. The partial accounting is retained for cost reporting, while the
+    /// incomplete analysis is never persisted.
+    #[error("media delegation failed: {message}")]
+    MediaDelegationPartial {
+        /// Caller-facing explanation of the batch failure.
+        message: String,
+        /// Usage and call accounting from completed/started batches.
+        accounting: MediaDelegationAccounting,
+    },
+}
+
+/// Cost/accounting counters carried across a failed multi-batch delegation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaDelegationAccounting {
+    /// Input tokens from successful provider responses.
+    pub input_tokens: u64,
+    /// Output tokens from successful provider responses.
+    pub output_tokens: u64,
+    /// Standard prompt-cache writes.
+    pub cache_write: u64,
+    /// Prompt-cache reads.
+    pub cache_read: u64,
+    /// Reasoning output tokens.
+    pub reasoning_output: u64,
+    /// One-hour prompt-cache writes.
+    pub cache_write_1h: u64,
+    /// Elapsed wall-clock duration in milliseconds.
+    pub elapsed_ms: u64,
+    /// Retries reported by completed provider calls.
+    pub retry_count: u32,
+    /// Provider batches that were started.
+    pub api_calls: u32,
+}
+
+impl MediaDelegationAccounting {
+    /// Build accounting counters from side-query token buckets.
+    #[must_use]
+    pub fn from_counts(
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_write: u64,
+        cache_read: u64,
+        reasoning_output: u64,
+        cache_write_1h: u64,
+        elapsed: Duration,
+        retry_count: u32,
+        api_calls: u32,
+    ) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            cache_write,
+            cache_read,
+            reasoning_output,
+            cache_write_1h,
+            elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            retry_count,
+            api_calls,
+        }
+    }
+
+    /// Return the elapsed wall-clock duration.
+    #[must_use]
+    pub fn elapsed(self) -> Duration {
+        Duration::from_millis(self.elapsed_ms)
+    }
 }
 
 impl LlmError {
@@ -219,7 +292,9 @@ impl LlmError {
             | LlmError::Transport { message }
             | LlmError::TransportTimeout { message }
             | LlmError::StreamInterrupted { message }
-            | LlmError::CostUnavailable { message } => Some(message),
+            | LlmError::CostUnavailable { message }
+            | LlmError::MediaDelegationUnavailable { message }
+            | LlmError::MediaDelegationPartial { message, .. } => Some(message),
             _ => None,
         }
     }

@@ -4046,6 +4046,32 @@ mod agent_listing_reminder_tests {
         }
     }
 
+    #[test]
+    fn wait_for_mcp_servers_is_visible_only_without_tool_search() {
+        let wait: Arc<dyn Tool> = Arc::new(NamedTool("WaitForMcpServers"));
+        let search: Arc<dyn Tool> = Arc::new(NamedTool("ToolSearch"));
+
+        let mut direct_tools = vec![Arc::clone(&wait)];
+        ConversationOrchestrator::apply_wait_for_mcp_servers_gate(&mut direct_tools);
+        assert_eq!(
+            direct_tools
+                .iter()
+                .map(|tool| tool.name())
+                .collect::<Vec<_>>(),
+            ["WaitForMcpServers"]
+        );
+
+        let mut deferred_tools = vec![wait, search];
+        ConversationOrchestrator::apply_wait_for_mcp_servers_gate(&mut deferred_tools);
+        assert_eq!(
+            deferred_tools
+                .iter()
+                .map(|tool| tool.name())
+                .collect::<Vec<_>>(),
+            ["ToolSearch"]
+        );
+    }
+
     fn agent_def(agent_type: &str, when_to_use: &str, tools: AgentToolPolicy) -> AgentDefinition {
         AgentDefinition {
             agent_type: agent_type.into(),
@@ -4321,9 +4347,15 @@ mod agent_listing_reminder_tests {
             .expect("turn-0")
             .text_content();
         const NOTE: &str = "When you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently.";
-        assert!(t0.contains(NOTE), "initial listing must carry it; got: {t0}");
+        assert!(
+            t0.contains(NOTE),
+            "initial listing must carry it; got: {t0}"
+        );
         // Its own section ⇒ a blank line separates it from the listing lines.
-        assert!(t0.contains(&format!("\n\n{NOTE}\n</system-reminder>")), "got: {t0}");
+        assert!(
+            t0.contains(&format!("\n\n{NOTE}\n</system-reminder>")),
+            "got: {t0}"
+        );
 
         catalog.write().await.push(agent_def(
             "gamma-agent",
@@ -4387,7 +4419,9 @@ mod agent_listing_reminder_tests {
             .expect("turn-1 removal")
             .text_content();
         assert!(
-            t1.contains("The following agent types are no longer available:\n- beta-agent\n- zeta-agent"),
+            t1.contains(
+                "The following agent types are no longer available:\n- beta-agent\n- zeta-agent"
+            ),
             "removed list must be plain-sorted; got: {t1}"
         );
         assert!(
@@ -7523,9 +7557,9 @@ mod persist_with_parent_tests {
         let orch4 = orch_with_writer(dir.path(), session_path_4.clone());
         let orch5 = orch_with_writer(dir.path(), session_path_5.clone());
 
-        let assistant_id = protocol::MessageId::from_uuid(
-            Uuid::from_u128(0x0a0b_0c0d_0e0f_1011_1213_1415_1617_1819),
-        );
+        let assistant_id = protocol::MessageId::from_uuid(Uuid::from_u128(
+            0x0a0b_0c0d_0e0f_1011_1213_1415_1617_1819,
+        ));
         let content = vec![
             protocol::ContentBlock::Text {
                 text: "seeded block".into(),
@@ -7554,12 +7588,8 @@ mod persist_with_parent_tests {
             stop_reason: Some("tool_use".into()),
         };
 
-        orch1
-            .persist_assistant_per_block(&msg_1, None, None)
-            .await;
-        orch2
-            .persist_assistant_per_block(&msg_2, None, None)
-            .await;
+        orch1.persist_assistant_per_block(&msg_1, None, None).await;
+        orch2.persist_assistant_per_block(&msg_2, None, None).await;
         let msg_3 = ConversationMessage::Assistant {
             id: assistant_id,
             content: vec![
@@ -7581,20 +7611,23 @@ mod persist_with_parent_tests {
             ],
             stop_reason: Some("tool_use".into()),
         };
-        orch3
-            .persist_assistant_per_block(&msg_3, None, None)
-            .await;
+        orch3.persist_assistant_per_block(&msg_3, None, None).await;
         let mut input_tool_4 = serde_json::Map::new();
         input_tool_4.insert(
             "x".to_string(),
             serde_json::json!({ "nested": { "b": 2, "a": 1 } }),
         );
         input_tool_4.insert("y".to_string(), serde_json::json!(1));
+        // Same VALUE as `input_tool_4`, different key ORDER at both levels:
+        // `y` before `x` at the top, `a` before `b` inside `nested`. The
+        // `nested` wrapper has to be present here too — without it the two
+        // inputs differ in content, the signatures diverge for the right
+        // reason, and the assertion stops testing ordering at all.
         let mut input_tool_5 = serde_json::Map::new();
         input_tool_5.insert("y".to_string(), serde_json::json!(1));
         input_tool_5.insert(
             "x".to_string(),
-            serde_json::json!({ "a": 1, "b": 2 }),
+            serde_json::json!({ "nested": { "a": 1, "b": 2 } }),
         );
         let msg_4 = ConversationMessage::Assistant {
             id: assistant_id,
@@ -7616,12 +7649,8 @@ mod persist_with_parent_tests {
             }],
             stop_reason: Some("tool_use".into()),
         };
-        orch4
-            .persist_assistant_per_block(&msg_4, None, None)
-            .await;
-        orch5
-            .persist_assistant_per_block(&msg_5, None, None)
-            .await;
+        orch4.persist_assistant_per_block(&msg_4, None, None).await;
+        orch5.persist_assistant_per_block(&msg_5, None, None).await;
 
         let first = read_jsonl(&session_path_1);
         let second = read_jsonl(&session_path_2);
@@ -7660,13 +7689,11 @@ mod persist_with_parent_tests {
             "same turn id / content / position should deterministically derive identical block uuids"
         );
         assert_ne!(
-            uuids_1,
-            uuids_3,
+            uuids_1, uuids_3,
             "content-sensitive signature should change when block payload changes"
         );
         assert_eq!(
-            uuids_4,
-            uuids_5,
+            uuids_4, uuids_5,
             "equivalent tool input json object order must not alter per-block signature"
         );
     }
@@ -9562,12 +9589,12 @@ mod changed_files_reminder_tests {
         noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
         StaticMemoryProvider,
     };
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use tempfile::TempDir;
     use crate::ConversationOrchestrator;
     use crate::OrchestratorConfig;
     use protocol::MessageId;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
     use tool_api::registry::ToolRegistry;
 
     fn orch() -> ConversationOrchestrator {
@@ -9637,7 +9664,9 @@ mod changed_files_reminder_tests {
             "the 2.1.220 wording must be gone; got: {text}"
         );
         assert!(
-            text.contains("Here are the relevant changes (shown with line numbers):\n1\ta\n2\tb\n3\tc"),
+            text.contains(
+                "Here are the relevant changes (shown with line numbers):\n1\ta\n2\tb\n3\tc"
+            ),
             "numbered diff expected; got: {text}"
         );
 
@@ -9771,13 +9800,13 @@ mod memory_update_reminder_tests {
         noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
         StaticMemoryProvider,
     };
+    use crate::ConversationOrchestrator;
+    use crate::OrchestratorConfig;
     use async_trait::async_trait;
+    use protocol::MessageId;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use crate::ConversationOrchestrator;
-    use crate::OrchestratorConfig;
-    use protocol::MessageId;
     use tool_api::registry::ToolRegistry;
 
     struct InlineRuntime;
@@ -9816,13 +9845,16 @@ mod memory_update_reminder_tests {
                 tool_calls: Vec::new(),
                 usage: cost::Usage::default(),
                 stop_reason: Some("end_turn".into()),
+                retry_count: 0,
             })
         }
     }
 
     fn orch_with_memdir(memdir: &std::path::Path) -> ConversationOrchestrator {
         let prefetch = memory::prefetch::MemoryPrefetch::new(
-            Arc::new(memory::selector::MemorySelector::new(Arc::new(NoopSideQuery))),
+            Arc::new(memory::selector::MemorySelector::new(Arc::new(
+                NoopSideQuery,
+            ))),
             Arc::new(InlineRuntime),
             memory::memdir::MemdirRoots {
                 user_memdir: memdir.to_path_buf(),
@@ -9851,7 +9883,10 @@ mod memory_update_reminder_tests {
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn dream_notification(result: Option<&str>, status: &str) -> traits::task_registry::TaskNotification {
+    fn dream_notification(
+        result: Option<&str>,
+        status: &str,
+    ) -> traits::task_registry::TaskNotification {
         traits::task_registry::TaskNotification {
             task_id: "d12345678".into(),
             task_type: "dream".into(),
@@ -9894,7 +9929,10 @@ mod memory_update_reminder_tests {
             true,
         );
 
-        orch.enqueue_memory_updates_from(&[dream_notification(Some("merged 3 notes"), "completed")]);
+        orch.enqueue_memory_updates_from(&[dream_notification(
+            Some("merged 3 notes"),
+            "completed",
+        )]);
         let msgs = orch.memory_update_reminder_messages().await;
         assert_eq!(msgs.len(), 1);
         let text = msgs[0].text_content();
@@ -9914,10 +9952,7 @@ mod memory_update_reminder_tests {
             "only the in-context path is named stale; got: {text}"
         );
         assert!(
-            !text.contains(&format!(
-                "Your loaded copy of {}",
-                other.to_string_lossy()
-            )),
+            !text.contains(&format!("Your loaded copy of {}", other.to_string_lossy())),
             "got: {text}"
         );
         assert!(
@@ -9990,11 +10025,11 @@ mod goal_checkin_wiring_tests {
         noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
         StaticMemoryProvider,
     };
-    use std::path::PathBuf;
-    use std::sync::Arc;
     use crate::ConversationOrchestrator;
     use crate::OrchestratorConfig;
     use protocol::MessageId;
+    use std::path::PathBuf;
+    use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
 
     fn orch() -> ConversationOrchestrator {
@@ -10107,7 +10142,10 @@ mod goal_checkin_wiring_tests {
             !text.contains("<system-reminder>"),
             "the interstitial is a bare meta message; got: {text}"
         );
-        assert!(text.contains("- b1 \u{b7} shell \u{b7} doing things"), "got: {text}");
+        assert!(
+            text.contains("- b1 \u{b7} shell \u{b7} doing things"),
+            "got: {text}"
+        );
     }
 
     /// The `else if(L.deferredSince!==void 0)` arm: background work finished ⇒
@@ -10141,14 +10179,14 @@ mod tool_search_usage_reminder_tests {
         noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
         StaticMemoryProvider,
     };
-    use std::path::PathBuf;
-    use std::sync::{Arc, Mutex as StdMutex};
     use crate::ConversationOrchestrator;
     use crate::OrchestratorConfig;
     use protocol::MessageId;
-    use tool_api::registry::ToolRegistry;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex as StdMutex};
     use tool_api::context::ToolUseContext;
     use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
     use tool_api::tool_trait::{
         DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
         ValidationError,
@@ -10281,7 +10319,9 @@ mod tool_search_usage_reminder_tests {
         std::env::remove_var("LINGXI_TOOL_SEARCH_REMINDER");
         let orch = orch(registry(true), 40).await;
         assert!(
-            orch.tool_search_usage_reminder_message(false).await.is_none(),
+            orch.tool_search_usage_reminder_message(false)
+                .await
+                .is_none(),
             "`Lda()` is null in a stock install ⇒ `Uzm` returns [] immediately"
         );
     }
@@ -10300,7 +10340,10 @@ mod tool_search_usage_reminder_tests {
             "sorted, no remainder; got: {text}"
         );
         // The mark was recorded ⇒ the next call is inside the interval.
-        assert!(orch.tool_search_usage_reminder_message(false).await.is_none());
+        assert!(orch
+            .tool_search_usage_reminder_message(false)
+            .await
+            .is_none());
     }
 
     #[tokio::test]

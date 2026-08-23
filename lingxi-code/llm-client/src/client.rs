@@ -7,10 +7,10 @@ use crate::{
     validate_capabilities, ApiKeyAuthenticator, AuthStrategy, Authenticator, BearerAuthenticator,
     BoxFuture, ChatGptAuthenticator, ClientConfig, CopilotAuthenticator, Credential,
     CredentialConfig, CredentialProvider, CredentialScope, EnvCredentialProvider, FrameStream,
-    LlmError, LlmEvent, LlmRequest, LlmResponse, ModelListing, ModelRegistry, ProtocolFamily,
-    ProviderId, ProviderRequest, ProviderResponse, ProviderStreamTransport, RawStreamFrame,
-    ResponsesWebSocketTransportSession, Route, StreamDecoder, StreamingResponse, Transport,
-    WireCodec,
+    LlmError, LlmEvent, LlmRequest, LlmResponse, MediaRoute, ModelListing, ModelRegistry,
+    ProtocolFamily, ProviderId, ProviderRequest, ProviderResponse, ProviderStreamTransport,
+    RawStreamFrame, ResponsesWebSocketTransportSession, Route, StreamDecoder, StreamingResponse,
+    Transport, WireCodec,
 };
 
 /// Anthropic Messages API version sent by codecs this client constructs.
@@ -267,6 +267,15 @@ impl DefaultLlmClient {
         self.registry.available_models()
     }
 
+    /// Resolve the selected main route plus an optional same-profile vision delegate.
+    pub fn resolve_media_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<MediaRoute, LlmError> {
+        self.registry.resolve_media_route_in(model, profile)
+    }
+
     /// Resolve, validate, encode, and authenticate a request.
     ///
     /// The returned provider request may carry credentials in its headers;
@@ -314,22 +323,6 @@ impl DefaultLlmClient {
                     .iter()
                     .any(|m| m.content.iter().any(is_reasoning_block)));
 
-        // `vision` is similarly best-effort: an image pasted into a conversation
-        // persists in session history, so switching to a model that doesn't
-        // advertise vision must silently drop image blocks from history — not
-        // break every subsequent turn with "unsupported capability: vision".
-        let is_image_block = |b: &crate::ContentBlock| {
-            matches!(
-                b,
-                crate::ContentBlock::Image { .. } | crate::ContentBlock::ImageUrl { .. }
-            )
-        };
-        let needs_vision_degrade = !resolved_route.capabilities.vision
-            && request
-                .messages
-                .iter()
-                .any(|m| m.content.iter().any(is_image_block));
-
         let entry = self
             .routes
             .get(&resolved_route.profile_name)
@@ -343,17 +336,12 @@ impl DefaultLlmClient {
             request.speed.is_some() && !route_allows_first_party_fast_mode(&resolved_route, entry);
 
         let mut owned: Option<LlmRequest> = None;
-        if needs_reasoning_degrade || needs_vision_degrade || needs_speed_degrade {
+        if needs_reasoning_degrade || needs_speed_degrade {
             let mut r = request.clone();
             if needs_reasoning_degrade {
                 r.reasoning = None;
                 for m in &mut r.messages {
                     m.content.retain(|b| !is_reasoning_block(b));
-                }
-            }
-            if needs_vision_degrade {
-                for m in &mut r.messages {
-                    m.content.retain(|b| !is_image_block(b));
                 }
             }
             if needs_speed_degrade {

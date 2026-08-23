@@ -2,6 +2,8 @@ package com.lingxi.code.model
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
+import com.lingxi.code.bindings.ModelBillingModeDto
+import com.lingxi.code.bindings.ModelDetailsDto
 import java.util.UUID
 
 /**
@@ -71,15 +73,250 @@ data class Cron(
  * dynamically, so the UI states those limitations explicitly.
  */
 data class ModelMetadata(
+    val displayName: String? = null,
+    val providerLabel: String? = null,
+    val modelId: String? = null,
+    val description: String? = null,
     val thinking: String? = null,
+    val capabilities: String? = null,
     val contextWindow: String? = null,
     val maxOutput: String? = null,
-    val parameterSize: String? = null,
+    val pricing: String? = null,
+    val status: String? = null,
 ) {
     val summaryItems: List<String>
-        get() = listOfNotNull(thinking, contextWindow, maxOutput, parameterSize)
+        get() = listOfNotNull(thinking, capabilities, contextWindow, maxOutput, pricing, status)
 
-    val searchableText: String get() = summaryItems.joinToString(" ")
+    val searchableText: String
+        get() = listOfNotNull(
+            displayName,
+            providerLabel,
+            modelId,
+            description,
+            *summaryItems.toTypedArray(),
+        ).joinToString(" ")
+
+    companion object {
+        fun fromDetails(detail: ModelDetailsDto): ModelMetadata {
+            val capabilityBadges = buildList {
+                if (detail.capabilities.reasoning) add("Thinking")
+                if (detail.capabilities.vision) add("图片")
+                if (detail.capabilities.documents) add("文档")
+                if (detail.capabilities.tools) add("工具")
+                if (detail.capabilities.structuredOutput) add("结构化输出")
+            }.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+            val thinkingSummary = buildThinkingSummary(detail)
+            val contextSummary = detail.contextWindowTokens?.let(::formatTokenCount)?.let { "$it 上下文" }
+            val maxOutputSummary = detail.maxOutputTokens?.let(::formatTokenCount)?.let { "$it 输出" }
+            val pricingSummary = buildPricingSummary(detail)
+            val statusSummary = detail.status
+                ?.takeIf(String::isNotBlank)
+                ?.replaceFirstChar { it.uppercaseChar() }
+            return ModelMetadata(
+                displayName = detail.displayName.takeIf(String::isNotBlank),
+                providerLabel = detail.providerLabel.takeIf(String::isNotBlank),
+                modelId = detail.modelId.takeIf(String::isNotBlank),
+                description = detail.description?.takeIf(String::isNotBlank),
+                thinking = thinkingSummary,
+                capabilities = capabilityBadges,
+                contextWindow = contextSummary,
+                maxOutput = maxOutputSummary,
+                pricing = pricingSummary,
+                status = statusSummary,
+            )
+        }
+
+        private fun buildThinkingSummary(detail: ModelDetailsDto): String? {
+            val options = detail.reasoning.options
+            if (options.isEmpty()) return null
+            val labels = options.mapNotNull { option ->
+                when (val selection = option.selection) {
+                    is com.lingxi.code.bindings.ReasoningSelectionDto.Automatic -> "自动"
+                    is com.lingxi.code.bindings.ReasoningSelectionDto.Disabled -> "关闭"
+                    is com.lingxi.code.bindings.ReasoningSelectionDto.Enabled -> "开启"
+                    is com.lingxi.code.bindings.ReasoningSelectionDto.Level -> selection.id
+                    is com.lingxi.code.bindings.ReasoningSelectionDto.TokenBudget ->
+                        "${formatTokenCount(selection.tokens)} 预算"
+                }
+            }
+            return if (labels.isEmpty()) null else "Thinking ${labels.joinToString("/")}"
+        }
+
+        private fun buildPricingSummary(detail: ModelDetailsDto): String? {
+            val pricing = detail.pricing ?: return null
+            return when (pricing.billingMode) {
+                ModelBillingModeDto.SUBSCRIPTION -> "套餐/订阅内"
+                ModelBillingModeDto.FREE -> "免费"
+                ModelBillingModeDto.UNKNOWN -> "价格未提供"
+                ModelBillingModeDto.PER_TOKEN -> {
+                    val input = pricing.inputPerMillion?.let { "\$${formatPrice(it)} in" }
+                    val output = pricing.outputPerMillion?.let { "\$${formatPrice(it)} out" }
+                    listOfNotNull(input, output).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+                        ?: "价格未提供"
+                }
+            }
+        }
+
+        private fun formatTokenCount(value: ULong): String {
+            val n = value.toDouble()
+            return when {
+                n >= 1_000_000.0 -> "${trimDecimal(n / 1_000_000.0)}M"
+                n >= 1_000.0 -> "${trimDecimal(n / 1_000.0)}K"
+                else -> value.toString()
+            }
+        }
+
+        private fun formatPrice(value: Double): String = trimDecimal(value)
+
+        private fun trimDecimal(value: Double): String {
+            val rounded = kotlin.math.round(value * 100.0) / 100.0
+            return if (rounded % 1.0 == 0.0) rounded.toInt().toString() else rounded.toString()
+        }
+    }
+}
+
+data class CatalogReasoningOption(
+    val label: String,
+    val persistable: Boolean,
+)
+
+data class CatalogModelPricingTier(
+    val contextThresholdTokens: ULong,
+    val inputPerMillion: Double?,
+    val outputPerMillion: Double?,
+    val cacheReadPerMillion: Double?,
+    val cacheWritePerMillion: Double?,
+    val reasoningPerMillion: Double?,
+)
+
+data class CatalogModelPricing(
+    val billingMode: ModelBillingModeDto,
+    val inputPerMillion: Double?,
+    val outputPerMillion: Double?,
+    val cacheReadPerMillion: Double?,
+    val cacheWritePerMillion: Double?,
+    val reasoningPerMillion: Double?,
+    val tiers: List<CatalogModelPricingTier>,
+    val source: String?,
+)
+
+data class CatalogModelDetails(
+    val reference: String,
+    val providerId: String,
+    val providerLabel: String,
+    val displayName: String,
+    val modelId: String,
+    val description: String?,
+    val family: String?,
+    val status: String?,
+    val releaseDate: String?,
+    val lastUpdated: String?,
+    val knowledgeCutoff: String?,
+    val inputModalities: List<String>,
+    val outputModalities: List<String>,
+    val contextWindowTokens: ULong?,
+    val maxInputTokens: ULong?,
+    val maxOutputTokens: ULong?,
+    val openWeights: Boolean?,
+    val attachments: Boolean?,
+    val temperatureControl: Boolean?,
+    val pricing: CatalogModelPricing?,
+    val capabilities: List<String>,
+    val reasoningOptions: List<CatalogReasoningOption>,
+    val reasoningEditable: Boolean,
+    val reasoningForced: Boolean,
+    val reasoningDefault: String?,
+    val metadata: ModelMetadata,
+) {
+    companion object {
+        fun fromDto(dto: ModelDetailsDto): CatalogModelDetails =
+            CatalogModelDetails(
+                reference = dto.reference,
+                providerId = dto.providerId,
+                providerLabel = dto.providerLabel,
+                displayName = dto.displayName,
+                modelId = dto.modelId,
+                description = dto.description,
+                family = dto.family,
+                status = dto.status,
+                releaseDate = dto.releaseDate,
+                lastUpdated = dto.lastUpdated,
+                knowledgeCutoff = dto.knowledgeCutoff,
+                inputModalities = dto.inputModalities,
+                outputModalities = dto.outputModalities,
+                contextWindowTokens = dto.contextWindowTokens,
+                maxInputTokens = dto.maxInputTokens,
+                maxOutputTokens = dto.maxOutputTokens,
+                openWeights = dto.openWeights,
+                attachments = dto.attachments,
+                temperatureControl = dto.temperatureControl,
+                pricing = dto.pricing?.let { pricing ->
+                    CatalogModelPricing(
+                        billingMode = pricing.billingMode,
+                        inputPerMillion = pricing.inputPerMillion,
+                        outputPerMillion = pricing.outputPerMillion,
+                        cacheReadPerMillion = pricing.cacheReadPerMillion,
+                        cacheWritePerMillion = pricing.cacheWritePerMillion,
+                        reasoningPerMillion = pricing.reasoningPerMillion,
+                        tiers = pricing.tiers.map { tier ->
+                            CatalogModelPricingTier(
+                                contextThresholdTokens = tier.contextThresholdTokens,
+                                inputPerMillion = tier.inputPerMillion,
+                                outputPerMillion = tier.outputPerMillion,
+                                cacheReadPerMillion = tier.cacheReadPerMillion,
+                                cacheWritePerMillion = tier.cacheWritePerMillion,
+                                reasoningPerMillion = tier.reasoningPerMillion,
+                            )
+                        },
+                        source = pricing.source,
+                    )
+                },
+                capabilities = buildCapabilities(dto),
+                reasoningOptions = dto.reasoning.options.mapNotNull { option ->
+                    selectionLabel(option.selection)?.let { label ->
+                        CatalogReasoningOption(label = label, persistable = option.persistable)
+                    }
+                },
+                reasoningEditable = dto.reasoning.editable,
+                reasoningForced = dto.reasoning.forcedReasoning,
+                reasoningDefault = selectionLabel(dto.reasoning.providerDefault),
+                metadata = ModelMetadata.fromDetails(dto),
+            )
+
+        private fun buildCapabilities(dto: ModelDetailsDto): List<String> = buildList {
+            if (dto.capabilities.reasoning) add("Thinking")
+            if (dto.capabilities.vision) add("图片")
+            if (dto.capabilities.documents) add("文档")
+            if (dto.capabilities.tools) add("工具")
+            if (dto.capabilities.structuredOutput) add("结构化输出")
+            if (dto.capabilities.streaming) add("流式")
+        }
+
+        private fun selectionLabel(
+            selection: com.lingxi.code.bindings.ReasoningSelectionDto,
+        ): String? = when (selection) {
+            is com.lingxi.code.bindings.ReasoningSelectionDto.Automatic -> "自动"
+            is com.lingxi.code.bindings.ReasoningSelectionDto.Disabled -> "关闭"
+            is com.lingxi.code.bindings.ReasoningSelectionDto.Enabled -> "开启"
+            is com.lingxi.code.bindings.ReasoningSelectionDto.Level -> selection.id
+            is com.lingxi.code.bindings.ReasoningSelectionDto.TokenBudget ->
+                "${formatTokenCount(selection.tokens)} 预算"
+        }
+
+        private fun formatTokenCount(value: ULong): String {
+            val n = value.toDouble()
+            return when {
+                n >= 1_000_000.0 -> "${trimDecimal(n / 1_000_000.0)}M"
+                n >= 1_000.0 -> "${trimDecimal(n / 1_000.0)}K"
+                else -> value.toString()
+            }
+        }
+
+        private fun trimDecimal(value: Double): String {
+            val rounded = kotlin.math.round(value * 100.0) / 100.0
+            return if (rounded % 1.0 == 0.0) rounded.toInt().toString() else rounded.toString()
+        }
+    }
 }
 
 /**
@@ -120,6 +357,8 @@ data class ModelOption(
     val providerName: String = "",
     /** Published capability/size facts for the compact picker detail line. */
     val metadata: ModelMetadata = ModelMetadata(),
+    /** Full provider/model detail payload for the info dialog. */
+    val details: CatalogModelDetails? = null,
 ) {
     /** Name with the "Lingxi-" prefix stripped (composer chip label). */
     val shortName: String get() = name.replace("Lingxi-", "")
@@ -280,6 +519,7 @@ object MockData {
 data class EngineModelState(
     val available: List<String> = emptyList(),
     val active: String = "",
+    val details: Map<String, CatalogModelDetails> = emptyMap(),
 ) {
     val hasCatalog: Boolean get() = available.isNotEmpty()
 }
@@ -380,108 +620,30 @@ object EngineModelCatalog {
      * Build picker rows only from the engine's curated [ids]. Each
      * [ModelOption.id] remains the verbatim qualified ref sent by `SetModel`.
      */
-    fun options(ids: List<String>): List<ModelOption> =
+    fun options(
+        ids: List<String>,
+        detailsByReference: Map<String, CatalogModelDetails> = emptyMap(),
+    ): List<ModelOption> =
         ids.mapIndexed { i, id ->
             val separator = id.indexOf('/')
             val providerId = id.takeIf { separator > 0 }?.substring(0, separator).orEmpty()
             val requestModel = id.takeIf { separator > 0 && separator < id.lastIndex }
                 ?.substring(separator + 1)
                 ?: id
+            val details = detailsByReference[id]
+            val metadata = details?.metadata ?: ModelMetadata()
             ModelOption(
                 id = id,
-                name = displayName(requestModel),
-                desc = requestModel,
+                name = metadata.displayName ?: displayName(requestModel),
+                desc = metadata.description ?: metadata.modelId ?: requestModel,
                 tag = "",
                 color = accents[i % accents.size],
                 providerId = providerId,
-                providerName = providerDisplayName(providerId),
-                metadata = metadataFor(providerId, requestModel),
+                providerName = metadata.providerLabel ?: providerDisplayName(providerId),
+                metadata = metadata,
+                details = details,
             )
         }
-
-    /**
-     * Published facts for the short curated catalog. Unknown values stay empty;
-     * displaying no fact is preferable to inventing a provider specification.
-     */
-    fun metadataFor(providerId: String, requestModel: String): ModelMetadata {
-        val normalized = requestModel
-            .substringBefore('[')
-            .replace("claude-opus-4.8", "claude-opus-4-8")
-            .replace("claude-sonnet-4.6", "claude-sonnet-4-6")
-            .replace("claude-haiku-4.5", "claude-haiku-4-5")
-
-        if (providerId == "openrouter") {
-            return when {
-                requestModel == "openrouter/auto" -> ModelMetadata(
-                    thinking = "动态路由",
-                    contextWindow = "规格随实际模型",
-                )
-                requestModel.startsWith("~") -> ModelMetadata(
-                    thinking = "动态别名",
-                    contextWindow = "规格随实际模型",
-                )
-                else -> ModelMetadata()
-            }
-        }
-
-        return when (normalized) {
-            "deepseek-v4-flash" -> ModelMetadata(
-                thinking = "Thinking",
-                contextWindow = "1M 上下文",
-                parameterSize = "284B / 13B 激活",
-            )
-            "deepseek-v4-pro" -> ModelMetadata(
-                thinking = "Thinking",
-                contextWindow = "1M 上下文",
-                parameterSize = "1.6T / 49B 激活",
-            )
-            "kimi-k3" -> ModelMetadata(
-                thinking = "Thinking",
-                contextWindow = "1M 上下文",
-                maxOutput = "128K 输出",
-            )
-            "kimi-k2.7-code",
-            "kimi-k2.7-code-highspeed",
-            "kimi-k2.6",
-            -> ModelMetadata(
-                thinking = "Thinking",
-                contextWindow = "256K 上下文",
-            )
-            "k3" -> ModelMetadata(
-                thinking = "Thinking",
-                contextWindow = "最高 1M 上下文",
-            )
-            "k3-256k",
-            "kimi-for-coding",
-            "kimi-for-coding-highspeed",
-            -> ModelMetadata(
-                thinking = "Thinking",
-                contextWindow = "256K 上下文",
-            )
-            "claude-sonnet-5",
-            "claude-sonnet-4-6",
-            "claude-opus-4-8",
-            -> ModelMetadata(
-                thinking = "自适应 Thinking",
-                contextWindow = "1M 上下文",
-                maxOutput = if (normalized == "claude-sonnet-4-6") "64K 输出" else "128K 输出",
-                parameterSize = "参数未公开",
-            )
-            "claude-fable-5" -> ModelMetadata(
-                thinking = "始终 Thinking",
-                contextWindow = "1M 上下文",
-                maxOutput = "128K 输出",
-                parameterSize = "参数未公开",
-            )
-            "claude-haiku-4-5" -> ModelMetadata(
-                thinking = "扩展 Thinking",
-                contextWindow = "200K 上下文",
-                maxOutput = "64K 输出",
-                parameterSize = "参数未公开",
-            )
-            else -> ModelMetadata()
-        }
-    }
 
     /** Search across visible labels, wire ids, provider names and metadata. */
     fun filter(models: List<ModelOption>, query: String): List<ModelOption> {

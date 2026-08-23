@@ -33,7 +33,7 @@
 
 use std::sync::Arc;
 
-use permission::result::PermissionMetadata;
+use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::Value;
 use tool_api::context::ToolUseContext;
@@ -183,6 +183,19 @@ impl LocalAppTool {
             .and_then(permission::local_app_id_for_root)
             .or_else(|| self.session_app_id.clone())
     }
+
+    fn requires_bound_session_for_auto_allow(&self) -> bool {
+        matches!(
+            self.name,
+            "LocalAppGet"
+                | "LocalAppLogs"
+                | "LocalAppCheckpointList"
+                | "LocalAppBackgroundList"
+                | "LocalAppBackgroundStatus"
+                | "LocalAppBuild"
+                | "LocalAppRuntime"
+        )
+    }
 }
 
 #[async_trait::async_trait]
@@ -257,7 +270,30 @@ impl Tool for LocalAppTool {
     /// The tool has NO opinion — the policy layer decides from the defaults
     /// table plus any matching rule. Same "allow-all-gate" convention the
     /// native file tools use; the real gate is `PolicyPermissionGate`.
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        if self.bound_app_id(ctx).is_none() && self.requires_bound_session_for_auto_allow() {
+            let target = input
+                .get("app_id")
+                .and_then(Value::as_str)
+                .map(|app_id| format!(" app `{app_id}`"))
+                .unwrap_or_else(|| " local apps outside an app-bound workspace".to_string());
+            return PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other {
+                    reason: "global local-app sessions must confirm host operations".into(),
+                },
+                prompt: PermissionPrompt {
+                    title: format!("Allow {} here?", self.name),
+                    message: format!(
+                        "This conversation is not bound to a single local app. \
+                         Confirm before {} accesses{}.",
+                        self.name, target
+                    ),
+                    options: vec!["Deny".into(), "Allow once".into(), "Always allow".into()],
+                },
+                pending_classifier_check: None,
+                metadata: PermissionMetadata::default(),
+            };
+        }
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-01 default)".into(),
@@ -724,6 +760,63 @@ mod tests {
             !matches!(&own, Err(ToolError::InvalidInput(m)) if m.contains("does not belong")),
             "the session's own app must pass the binding, got {own:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_global_session_must_confirm_app_targeted_auto_allowed_tools() {
+        let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
+        let tools = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        let build = tools
+            .iter()
+            .find(|t| t.name() == "LocalAppBuild")
+            .expect("LocalAppBuild");
+        let decision = build
+            .check_permissions(
+                &serde_json::json!({"app_id": "app-a"}),
+                &tool_api::test_support::fresh_ctx(),
+            )
+            .await;
+        assert!(matches!(decision, PermissionResult::Ask { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_global_session_must_confirm_background_list_and_status() {
+        let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
+        let tools = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        for name in ["LocalAppBackgroundList", "LocalAppBackgroundStatus"] {
+            let tool = tools.iter().find(|t| t.name() == name).expect("tool");
+            let decision = tool
+                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .await;
+            assert!(matches!(decision, PermissionResult::Ask { .. }), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_workspace_session_keeps_auto_allow_for_its_own_app() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("apps/app-a/workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let transport = Arc::new(LocalAppsMcpTransport::new(root.path().to_path_buf()));
+        let tools = local_app_builtin_tools(&transport, &workspace);
+        for name in [
+            "LocalAppGet",
+            "LocalAppLogs",
+            "LocalAppCheckpointList",
+            "LocalAppBackgroundList",
+            "LocalAppBackgroundStatus",
+            "LocalAppBuild",
+            "LocalAppRuntime",
+        ] {
+            let tool = tools.iter().find(|tool| tool.name() == name).expect("tool");
+            let decision = tool
+                .check_permissions(
+                    &serde_json::json!({"app_id": "app-a"}),
+                    &tool_api::test_support::fresh_ctx(),
+                )
+                .await;
+            assert!(matches!(decision, PermissionResult::Allow { .. }), "{name}");
+        }
     }
 
     /// Read-only classification drives `is_read_only`/`is_concurrency_safe`,

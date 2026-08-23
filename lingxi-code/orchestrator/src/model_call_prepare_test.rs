@@ -1,0 +1,159 @@
+use super::*;
+
+use crate::test_support::{
+    mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
+};
+use crate::test_support_stream::{
+    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
+    text_delta, MockStreamingApiClient,
+};
+use protocol::{ContentBlock, MessageId};
+use std::sync::{Arc, Mutex as StdMutex};
+use tool_api::registry::ToolRegistry;
+
+#[derive(Default)]
+struct RecordingPreparer {
+    paths: StdMutex<Vec<ModelCallPath>>,
+}
+
+struct MarkerRewriter {
+    marker: String,
+}
+
+#[async_trait]
+impl OutgoingHistoryRewriter for MarkerRewriter {
+    async fn rewrite(
+        &self,
+        _orch: &ConversationOrchestrator,
+        mut raw_history: Vec<ConversationMessage>,
+    ) -> Result<Vec<ConversationMessage>, OrchestratorError> {
+        raw_history.push(ConversationMessage::user_meta(
+            MessageId::new(),
+            self.marker.clone(),
+        ));
+        Ok(raw_history)
+    }
+}
+
+#[async_trait]
+impl ModelCallPreparer for RecordingPreparer {
+    async fn prepare(
+        &self,
+        orch: &ConversationOrchestrator,
+        path: ModelCallPath,
+        _system_prompt: Option<&str>,
+        _cancel: Option<&tokio_util::sync::CancellationToken>,
+        draft: PreparedModelCall,
+    ) -> Result<PreparedModelCall, OrchestratorError> {
+        self.paths.lock().unwrap().push(path);
+        let marker = match path {
+            ModelCallPath::Batched => "[prepared batched]",
+            ModelCallPath::Streaming => "[prepared streaming]",
+        };
+        let rewriter: Arc<dyn OutgoingHistoryRewriter> = Arc::new(MarkerRewriter {
+            marker: marker.to_string(),
+        });
+        Ok(PreparedModelCall {
+            history_snapshot: orch
+                .rewrite_outgoing_history(draft.history_snapshot, Some(&rewriter))
+                .await?,
+            model: draft.model,
+            model_profile: draft.model_profile,
+            outgoing_history_rewriter: Some(rewriter),
+        })
+    }
+}
+
+fn request_contains_marker(messages: &[ConversationMessage], marker: &str) -> bool {
+    messages.iter().any(|message| match message {
+        ConversationMessage::User {
+            content, is_meta, ..
+        } if *is_meta => content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == marker)),
+        _ => false,
+    })
+}
+
+#[tokio::test]
+async fn batched_turn_uses_shared_model_call_preparer() {
+    let preparer = Arc::new(RecordingPreparer::default());
+    let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+        vec![llm_client::ContentBlock::Text {
+            text: "done".into(),
+            cache_control: None,
+        }],
+        Some("end_turn"),
+    )]));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_model_call_preparer(preparer.clone());
+
+    let outcome = orch.run_turn("hello").await.expect("batched turn succeeds");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+
+    let calls = api.captured_msgs().await;
+    assert_eq!(calls.len(), 1);
+    assert!(
+        request_contains_marker(&calls[0], "[prepared batched]"),
+        "batched request should include the shared pre-call rewrite"
+    );
+    assert_eq!(
+        preparer.paths.lock().unwrap().as_slice(),
+        &[ModelCallPath::Batched]
+    );
+}
+
+#[tokio::test]
+async fn streaming_turn_uses_shared_model_call_preparer() {
+    let preparer = Arc::new(RecordingPreparer::default());
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+        message_start("msg_stream", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "done"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ]]));
+    let orch = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        streaming.clone(),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_model_call_preparer(preparer.clone());
+
+    let outcome = orch
+        .run_turn_streaming("hello")
+        .await
+        .expect("streaming turn succeeds");
+    assert!(matches!(
+        outcome,
+        crate::ConversationOutcome::EndTurn { .. }
+    ));
+
+    let calls = streaming.captured_calls().await;
+    assert_eq!(calls.len(), 1);
+    assert!(
+        request_contains_marker(&calls[0].messages, "[prepared streaming]"),
+        "streaming request should include the shared pre-call rewrite"
+    );
+    assert_eq!(
+        preparer.paths.lock().unwrap().as_slice(),
+        &[ModelCallPath::Streaming]
+    );
+}

@@ -63,6 +63,7 @@ fn anthropic_client() -> DefaultLlmClient {
                 billing_model: "claude-sonnet-4".to_string(),
                 aliases: vec!["claude".to_string()],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -75,6 +76,7 @@ fn anthropic_client() -> DefaultLlmClient {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     })
     .expect("client")

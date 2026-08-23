@@ -301,6 +301,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 usage: self.canned_usage,
                 stop_reason: Some("end_turn".into()),
+                retry_count: 0,
             })
         }
     }

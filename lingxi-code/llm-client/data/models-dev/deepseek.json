@@ -6,91 +6,13 @@
   ],
   "id": "deepseek",
   "models": {
-    "deepseek-chat": {
-      "attachment": true,
-      "cost": {
-        "cache_read": 0.0028,
-        "input": 0.14,
-        "output": 0.28
-      },
-      "description": "Deprecated 2026/07/24 — maps to deepseek-v4-flash non-thinking mode",
-      "family": "deepseek",
-      "id": "deepseek-chat",
-      "knowledge": "2025-09",
-      "last_updated": "2026-07-09",
-      "limit": {
-        "context": 1000000,
-        "output": 384000
-      },
-      "modalities": {
-        "input": [
-          "text"
-        ],
-        "output": [
-          "text"
-        ]
-      },
-      "name": "DeepSeek Chat",
-      "open_weights": true,
-      "reasoning": true,
-      "reasoning_options": [
-        {
-          "type": "toggle"
-        },
-        {
-          "type": "effort",
-          "values": [
-            "high",
-            "max"
-          ]
-        }
-      ],
-      "release_date": "2025-12-01",
-      "status": "deprecated",
-      "structured_output": true,
-      "temperature": true,
-      "tool_call": true
-    },
-    "deepseek-reasoner": {
-      "attachment": true,
-      "cost": {
-        "cache_read": 0.0028,
-        "input": 0.14,
-        "output": 0.28
-      },
-      "family": "deepseek-thinking",
-      "id": "deepseek-reasoner",
-      "interleaved": {
-        "field": "reasoning_content"
-      },
-      "knowledge": "2025-09",
-      "last_updated": "2026-02-28",
-      "limit": {
-        "context": 1000000,
-        "output": 384000
-      },
-      "modalities": {
-        "input": [
-          "text"
-        ],
-        "output": [
-          "text"
-        ]
-      },
-      "name": "DeepSeek Reasoner",
-      "open_weights": true,
-      "reasoning": true,
-      "reasoning_options": [],
-      "release_date": "2025-12-01",
-      "temperature": true,
-      "tool_call": true
-    },
     "deepseek-v4-flash": {
       "attachment": false,
       "cost": {
         "cache_read": 0.0028,
         "input": 0.14,
-        "output": 0.28
+        "output": 0.28,
+        "reasoning": 0.28
       },
       "family": "deepseek-flash",
       "id": "deepseek-v4-flash",
@@ -98,7 +20,7 @@
         "field": "reasoning_content"
       },
       "knowledge": "2025-05",
-      "last_updated": "2026-04-24",
+      "last_updated": "2026-07-31",
       "limit": {
         "context": 1000000,
         "output": 384000
@@ -121,22 +43,76 @@
         {
           "type": "effort",
           "values": [
+            "low",
             "high",
             "max"
           ]
         }
       ],
-      "release_date": "2026-04-24",
+      "release_date": "2026-07-31",
       "structured_output": true,
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Official DeepSeek V4 Flash release with enhanced agentic capabilities and integrated DSpark speculative decoding"
+    },
+    "deepseek-v4-flash-vision-exp": {
+      "attachment": true,
+      "family": "deepseek-flash",
+      "id": "deepseek-v4-flash-vision-exp",
+      "knowledge": "2025-05",
+      "last_updated": "2026-08-21",
+      "limit": {
+        "context": 1000000,
+        "output": 384000
+      },
+      "modalities": {
+        "input": [
+          "text",
+          "image"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "name": "DeepSeek V4 Flash Vision Exp",
+      "open_weights": false,
+      "reasoning": true,
+      "release_date": "2026-08-21",
+      "structured_output": true,
+      "temperature": true,
+      "tool_call": true,
+      "status": "beta",
+      "description": "Experimental multimodal DeepSeek V4 Flash model for image understanding, coding, and agentic work",
+      "reasoning_options": [
+        {
+          "type": "toggle"
+        },
+        {
+          "type": "effort",
+          "values": [
+            "low",
+            "high",
+            "max"
+          ]
+        }
+      ],
+      "interleaved": {
+        "field": "reasoning_content"
+      },
+      "cost": {
+        "input": 0.14,
+        "output": 0.28,
+        "reasoning": 0.28,
+        "cache_read": 0.0028
+      }
     },
     "deepseek-v4-pro": {
       "attachment": false,
       "cost": {
         "cache_read": 0.003625,
         "input": 0.435,
-        "output": 0.87
+        "output": 0.87,
+        "reasoning": 0.87
       },
       "family": "deepseek-thinking",
       "id": "deepseek-v4-pro",
@@ -144,7 +120,7 @@
         "field": "reasoning_content"
       },
       "knowledge": "2025-05",
-      "last_updated": "2026-04-24",
+      "last_updated": "2026-08-12",
       "limit": {
         "context": 1000000,
         "output": 384000
@@ -158,7 +134,7 @@
         ]
       },
       "name": "DeepSeek V4 Pro",
-      "open_weights": true,
+      "open_weights": false,
       "reasoning": true,
       "reasoning_options": [
         {
@@ -172,10 +148,11 @@
           ]
         }
       ],
-      "release_date": "2026-04-24",
+      "release_date": "2026-08-12",
       "structured_output": true,
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "DeepSeek V4 Pro snapshot with million-token context and support for thinking and non-thinking modes"
     }
   },
   "name": "DeepSeek",

@@ -127,6 +127,7 @@ fn render_blocks(content: &[ContentBlock]) -> String {
             ContentBlock::AdvisorToolResult { content, .. } => {
                 lines.push(format!("[advisor result] {content}"));
             }
+            ContentBlock::MediaAnalysis { .. } => {}
         }
     }
     lines.join("\n")
@@ -309,6 +310,37 @@ mod tests {
         let s = render_messages_to_plain_text(&msgs);
         assert!(s.contains("Assistant: running"));
         assert!(s.contains("[tool: Read]"));
+    }
+
+    #[test]
+    fn skips_internal_media_analysis_blocks() {
+        let msgs = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "hello".to_string(),
+                },
+                ContentBlock::MediaAnalysis {
+                    analysis: protocol::MediaAnalysis {
+                        question_key: "internal-question-key".to_string(),
+                        media_fingerprints: vec!["fp".to_string()],
+                        model: "delegate".to_string(),
+                        prompt_version: 1,
+                        created_at: std::time::SystemTime::UNIX_EPOCH,
+                        task_findings: vec!["internal".to_string()],
+                        media: Vec::new(),
+                        cross_media_findings: Vec::new(),
+                        truncated: false,
+                    },
+                },
+            ],
+            is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }];
+        let rendered = render_messages_to_plain_text(&msgs);
+        assert_eq!(rendered, "User: hello");
+        assert!(!rendered.contains("internal-question-key"));
     }
 
     #[test]

@@ -92,6 +92,11 @@ pub use host::{
     MobileCronStoreHandle, MobileEngineError, MobileEngineHandle, MobileOAuthSessionDto,
     MobileOAuthStateDto, MobileRuntime, ProviderCatalogEntryDto, ProviderConnectionTestDto,
 };
+#[cfg(feature = "uniffi")]
+pub use client_protocol::listings::{
+    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
+    ModelPricingTierDto,
+};
 
 // F3-06: the host-only walking-skeleton support — a portable fake `Platform`
 // shim (fs/http/clock stubs over a temp root), a recording `ClientEventListener`,
@@ -133,15 +138,14 @@ pub struct MobileEngineConfig {
 impl Default for MobileEngineConfig {
     fn default() -> Self {
         Self {
-            // The host's boot default for the Anthropic route. Must stay a
-            // CURATED id (`traits::is_curated_model`), otherwise a client with
-            // no configured provider boots on a model the picker only shows
-            // because `curated_model_refs` pins the active one — the dated
-            // `claude-sonnet-4-20250514` rendered as a stray "Claude Sonnet 4
-            // 20250514" row above the real Anthropic shortlist.
-            default_model: traits::provider_default_model("anthropic")
-                .unwrap_or("claude-sonnet-5")
-                .to_string(),
+            // The host's boot default for the Anthropic route. Keep it
+            // provider-qualified so the shared Claude model ids exposed by
+            // Copilot cannot make the fresh-session default ambiguous.
+            default_model: traits::qualified_model_ref(
+                traits::provider_default_model("anthropic")
+                    .unwrap_or("claude-sonnet-5"),
+                Some("anthropic"),
+            ),
         }
     }
 }

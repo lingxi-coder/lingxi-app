@@ -60,6 +60,12 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     ("sandbox", MergeStrategy::DeepMerge),
     ("hooks", MergeStrategy::DeepMerge),
     ("permissions", MergeStrategy::DeepMerge),
+    ("policyHelpers", MergeStrategy::DeepMerge),
+    ("spellcheck", MergeStrategy::DeepMerge),
+    ("additionalMarketplaces", MergeStrategy::DeepMerge),
+    ("enabledPlugins", MergeStrategy::DeepMerge),
+    ("pluginConfigs", MergeStrategy::DeepMerge),
+    ("extraKnownMarketplaces", MergeStrategy::DeepMerge),
     // NB: `outputStyle` is intentionally NOT here — TS types it as a string and
     // merges it scalar-override (settingsMergeCustomizer special-cases only
     // arrays), so it falls through to the default Override strategy.
@@ -180,12 +186,57 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_user_question_timeout: Option<String>,
 
+    /// Object-merge field (deep-merge). Managed helper commands keyed by OS /
+    /// fallback scope. Kept opaque until the helper-resolution consumer lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_helpers: Option<BTreeMap<String, Value>>,
+
+    /// Scalar field (later source wins). Whether Claude.ai skill sync is
+    /// enabled. Schema-only until the marketplace sync consumer lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_claude_ai_skills: Option<bool>,
+
+    /// Object-merge field (deep-merge). Alias-shaped marketplace declarations
+    /// keyed by marketplace name, parallel to `extraKnownMarketplaces`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_marketplaces: Option<BTreeMap<String, Value>>,
+
+    /// Array field (scalar-override merge). Alias-shaped marketplace allowlist,
+    /// parallel to `strictKnownMarketplaces`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_marketplaces: Option<Vec<Value>>,
+
+    /// Scalar field (later source wins). Managed gate for command-sourced
+    /// plugins. Unset consumer semantics still follow `allowManagedHooksOnly`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_command_plugin_sources: Option<bool>,
+
+    /// Object-merge field (deep-merge). Spellcheck configuration block. Kept
+    /// opaque until the spellcheck consumer lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spellcheck: Option<BTreeMap<String, Value>>,
+
     /// Scalar field (later source wins). `dialogExpiry`: how long permission /
     /// ask-user dialogs stay armed. 2.1.232 `_Vp`:
     /// `["default","60s","5m","10m","never"]`. UI `"default"` is stored as
     /// omitted (`void 0`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialog_expiry: Option<String>,
+
+    /// Scalar field (later source wins). `modelProposedGoals` enum:
+    /// `auto|alwaysAsk|disabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_proposed_goals: Option<String>,
+
+    /// Scalar field (later source wins). `keybindingFlavor` enum:
+    /// `classic|readline`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keybinding_flavor: Option<String>,
+
+    /// Scalar field (later source wins). Whether the UI may auto-continue at a
+    /// usage-limit stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_continue_at_usage_limit: Option<bool>,
 
     /// Scalar field (later source wins). `crossSessionInbound`: accept / hold /
     /// refuse messages from other live sessions on this machine. 2.1.232 `bVp`:
@@ -230,6 +281,12 @@ pub struct SettingsJson {
     /// thinking summaries instead of requesting redacted-thinking blocks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_thinking_summaries: Option<bool>,
+
+    /// LingXi extension. When enabled, a primary model without image input
+    /// support may use its provider profile's internal vision delegate.
+    /// Absence resolves to enabled at the consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_delegation_enabled: Option<bool>,
 
     /// Scalar field (later source wins). User opt-in for the feature-gated
     /// proactive agent/mobile push notification surface.
@@ -583,6 +640,31 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otel_headers_helper: Option<String>,
 
+    /// Object-merge field. On-disk enabled plugin allowlist keyed by
+    /// `plugin@marketplace`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_plugins: Option<BTreeMap<String, Value>>,
+
+    /// Object-merge field. Non-sensitive plugin config records keyed by
+    /// `plugin@marketplace`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_configs: Option<BTreeMap<String, Value>>,
+
+    /// Object-merge field. Extra marketplace declarations keyed by marketplace
+    /// name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_known_marketplaces: Option<BTreeMap<String, Value>>,
+
+    /// Array field (scalar-override merge). Managed allowlist of known
+    /// marketplaces; entries may be strings or structured source objects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_known_marketplaces: Option<Vec<Value>>,
+
+    /// Array field (scalar-override merge). Managed blocklist of marketplace
+    /// names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_marketplaces: Option<Vec<String>>,
+
     /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
     /// such key): named LLM provider profiles. Each entry has the shape:
     /// `{ "type": "openai"|"openai-responses"|"anthropic"|"gemini"|"azure-openai"
@@ -653,8 +735,90 @@ impl SettingsJson {
                 }
             }
         }
+        validate_enum(
+            "modelProposedGoals",
+            self.model_proposed_goals.as_deref(),
+            &["auto", "alwaysAsk", "disabled"],
+        )?;
+        validate_enum(
+            "keybindingFlavor",
+            self.keybinding_flavor.as_deref(),
+            &["classic", "readline"],
+        )?;
         Ok(())
     }
+
+    /// Effective `disableCommandPluginSources` value. When unset, this follows
+    /// the managed hook restriction flag exactly like Claude Code 2.1.238.
+    #[must_use]
+    pub fn effective_disable_command_plugin_sources(&self) -> bool {
+        self.disable_command_plugin_sources
+            .unwrap_or(self.allow_managed_hooks_only == Some(true))
+    }
+
+    /// Effective extra marketplace declarations, honoring the 2.1.238 alias
+    /// key `additionalMarketplaces`. When both spellings are present, the old
+    /// canonical key wins and the alias is ignored with a warning.
+    pub fn effective_extra_known_marketplaces<F>(
+        &self,
+        mut warn: F,
+    ) -> Option<BTreeMap<String, Value>>
+    where
+        F: FnMut(&str),
+    {
+        match (
+            self.extra_known_marketplaces.as_ref(),
+            self.additional_marketplaces.as_ref(),
+        ) {
+            (Some(canonical), Some(_alias)) => {
+                warn(
+                    "additionalMarketplaces is ignored because extraKnownMarketplaces is also set",
+                );
+                Some(canonical.clone())
+            }
+            (Some(canonical), None) => Some(canonical.clone()),
+            (None, Some(alias)) => Some(alias.clone()),
+            (None, None) => None,
+        }
+    }
+
+    /// Effective strict marketplace allowlist, honoring the 2.1.238 alias key
+    /// `allowedMarketplaces`. When both spellings are present, the old
+    /// canonical key wins and the alias is ignored with a warning.
+    pub fn effective_strict_known_marketplaces<F>(&self, mut warn: F) -> Option<Vec<Value>>
+    where
+        F: FnMut(&str),
+    {
+        match (
+            self.strict_known_marketplaces.as_ref(),
+            self.allowed_marketplaces.as_ref(),
+        ) {
+            (Some(canonical), Some(_alias)) => {
+                warn("allowedMarketplaces is ignored because strictKnownMarketplaces is also set");
+                Some(canonical.clone())
+            }
+            (Some(canonical), None) => Some(canonical.clone()),
+            (None, Some(alias)) => Some(alias.clone()),
+            (None, None) => None,
+        }
+    }
+}
+
+fn validate_enum(
+    field_name: &str,
+    value: Option<&str>,
+    allowed: &[&str],
+) -> Result<(), crate::settings::SettingsError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if allowed.contains(&value) {
+        return Ok(());
+    }
+    Err(crate::settings::SettingsError::SchemaViolation(format!(
+        "{field_name} must be one of {} (got {value:?})",
+        allowed.join(", ")
+    )))
 }
 
 #[cfg(test)]
@@ -878,6 +1042,257 @@ mod tests {
         let json = r#"{"trustedDirectories": ["/foo"], "telemetryEnabled": true}"#;
         let parsed: SettingsJson = serde_json::from_str(json).unwrap();
         assert!(parsed.validate().is_ok());
+    }
+
+    #[test]
+    fn new_238_settings_keys_parse_roundtrip_and_validate() {
+        let json = r#"{
+            "policyHelpers": {
+                "defaultSettings": { "command": "/usr/local/bin/policy-helper" },
+                "darwin": { "command": "/opt/policy-helper" }
+            },
+            "syncClaudeAiSkills": true,
+            "additionalMarketplaces": {
+                "corp": { "source": { "source": "directory", "path": "/tmp/corp" } }
+            },
+            "allowedMarketplaces": [
+                "corp",
+                { "source": "github", "repo": "acme/plugins" }
+            ],
+            "disableCommandPluginSources": true,
+            "spellcheck": { "enabled": true, "checkFilenames": false },
+            "dialogExpiry": "5m",
+            "modelProposedGoals": "alwaysAsk",
+            "keybindingFlavor": "readline",
+            "autoContinueAtUsageLimit": false,
+            "crossSessionInbound": "hold"
+        }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("parse");
+        assert_eq!(parsed.sync_claude_ai_skills, Some(true));
+        assert_eq!(
+            parsed
+                .additional_marketplaces
+                .as_ref()
+                .and_then(|m| m.get("corp")),
+            Some(&serde_json::json!({
+                "source": { "source": "directory", "path": "/tmp/corp" }
+            }))
+        );
+        assert_eq!(
+            parsed.allowed_marketplaces.as_deref(),
+            Some(
+                &[
+                    serde_json::json!("corp"),
+                    serde_json::json!({ "source": "github", "repo": "acme/plugins" })
+                ][..]
+            )
+        );
+        assert_eq!(parsed.disable_command_plugin_sources, Some(true));
+        assert_eq!(parsed.model_proposed_goals.as_deref(), Some("alwaysAsk"));
+        assert_eq!(parsed.keybinding_flavor.as_deref(), Some("readline"));
+        assert_eq!(parsed.auto_continue_at_usage_limit, Some(false));
+        assert!(parsed.policy_helpers.is_some());
+        assert!(parsed.spellcheck.is_some());
+        parsed.validate().expect("enum values should validate");
+
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        for key in [
+            "policyHelpers",
+            "syncClaudeAiSkills",
+            "additionalMarketplaces",
+            "allowedMarketplaces",
+            "disableCommandPluginSources",
+            "spellcheck",
+            "dialogExpiry",
+            "modelProposedGoals",
+            "keybindingFlavor",
+            "autoContinueAtUsageLimit",
+            "crossSessionInbound",
+        ] {
+            assert!(
+                back.contains(&format!("\"{key}\"")),
+                "missing {key}: {back}"
+            );
+        }
+        let ordered_keys = [
+            "policyHelpers",
+            "syncClaudeAiSkills",
+            "additionalMarketplaces",
+            "allowedMarketplaces",
+            "disableCommandPluginSources",
+            "spellcheck",
+            "dialogExpiry",
+            "modelProposedGoals",
+            "keybindingFlavor",
+            "autoContinueAtUsageLimit",
+            "crossSessionInbound",
+        ];
+        let positions = ordered_keys
+            .iter()
+            .map(|key| back.find(&format!("\"{key}\"")).expect("serialized key"))
+            .collect::<Vec<_>>();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "2.1.238 settings keys must serialize in oracle schema order: {back}"
+        );
+        assert_eq!(
+            strategy_for("policyHelpers"),
+            Some(MergeStrategy::DeepMerge)
+        );
+        assert_eq!(strategy_for("spellcheck"), Some(MergeStrategy::DeepMerge));
+        assert_eq!(
+            strategy_for("additionalMarketplaces"),
+            Some(MergeStrategy::DeepMerge)
+        );
+        for key in [
+            "syncClaudeAiSkills",
+            "allowedMarketplaces",
+            "disableCommandPluginSources",
+            "modelProposedGoals",
+            "keybindingFlavor",
+            "autoContinueAtUsageLimit",
+        ] {
+            assert!(
+                strategy_for(key).is_none(),
+                "{key} must remain scalar-override"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_invalid_new_238_enums() {
+        let bad_keybinding: SettingsJson =
+            serde_json::from_str(r#"{"keybindingFlavor":"vim"}"#).expect("parse");
+        let err = bad_keybinding
+            .validate()
+            .expect_err("invalid enum must fail");
+        assert!(format!("{err:?}").contains("keybindingFlavor"));
+
+        let bad_goals: SettingsJson =
+            serde_json::from_str(r#"{"modelProposedGoals":"sometimes"}"#).expect("parse");
+        let err = bad_goals.validate().expect_err("invalid enum must fail");
+        assert!(format!("{err:?}").contains("modelProposedGoals"));
+    }
+
+    #[test]
+    fn new_238_alias_helpers_and_disable_command_default_follow_existing_surface() {
+        let parsed: SettingsJson = serde_json::from_str(
+            r#"{
+                "allowManagedHooksOnly": true,
+                "additionalMarketplaces": {
+                    "alias": { "source": { "source": "directory", "path": "/tmp/alias" } }
+                },
+                "allowedMarketplaces": ["alias"]
+            }"#,
+        )
+        .expect("parse");
+        assert!(parsed.effective_disable_command_plugin_sources());
+
+        let mut warnings = Vec::new();
+        let extra =
+            parsed.effective_extra_known_marketplaces(|warning| warnings.push(warning.to_string()));
+        assert_eq!(
+            extra.as_ref().and_then(|m| m.get("alias")),
+            Some(&serde_json::json!({
+                "source": { "source": "directory", "path": "/tmp/alias" }
+            }))
+        );
+        let allowed = parsed
+            .effective_strict_known_marketplaces(|warning| warnings.push(warning.to_string()));
+        assert_eq!(allowed, Some(vec![serde_json::json!("alias")]));
+        assert!(warnings.is_empty());
+
+        let parsed: SettingsJson = serde_json::from_str(
+            r#"{
+                "allowManagedHooksOnly": false,
+                "disableCommandPluginSources": false,
+                "extraKnownMarketplaces": {
+                    "canonical": { "source": { "source": "directory", "path": "/tmp/canonical" } }
+                },
+                "additionalMarketplaces": {
+                    "alias": { "source": { "source": "directory", "path": "/tmp/alias" } }
+                },
+                "strictKnownMarketplaces": ["canonical"],
+                "allowedMarketplaces": ["alias"]
+            }"#,
+        )
+        .expect("parse");
+        assert!(!parsed.effective_disable_command_plugin_sources());
+
+        let mut warnings = Vec::new();
+        let extra =
+            parsed.effective_extra_known_marketplaces(|warning| warnings.push(warning.to_string()));
+        let allowed = parsed
+            .effective_strict_known_marketplaces(|warning| warnings.push(warning.to_string()));
+        assert_eq!(
+            extra.as_ref().and_then(|m| m.get("canonical")),
+            Some(&serde_json::json!({
+                "source": { "source": "directory", "path": "/tmp/canonical" }
+            }))
+        );
+        assert_eq!(allowed, Some(vec![serde_json::json!("canonical")]));
+        assert_eq!(
+            warnings,
+            vec![
+                "additionalMarketplaces is ignored because extraKnownMarketplaces is also set",
+                "allowedMarketplaces is ignored because strictKnownMarketplaces is also set",
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_and_marketplace_settings_parse_roundtrip_and_merge_correctly() {
+        let json = r#"{
+            "enabledPlugins": { "demo@example": true },
+            "pluginConfigs": {
+                "demo@example": { "options": { "REGION": "us-east-1" } }
+            },
+            "extraKnownMarketplaces": {
+                "team": { "source": { "type": "directory", "path": "/tmp/team" } }
+            },
+            "strictKnownMarketplaces": [
+                { "source": "github", "repo": "acme/plugins" }
+            ],
+            "blockedMarketplaces": ["deprecated"],
+            "model": "claude-sonnet-4-5"
+        }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("parse");
+        assert!(parsed.enabled_plugins.is_some());
+        assert!(parsed.plugin_configs.is_some());
+        assert!(parsed.extra_known_marketplaces.is_some());
+        assert!(parsed.strict_known_marketplaces.is_some());
+        assert_eq!(
+            parsed.blocked_marketplaces.as_deref(),
+            Some(&["deprecated".to_string()][..])
+        );
+
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        for key in [
+            "enabledPlugins",
+            "pluginConfigs",
+            "extraKnownMarketplaces",
+            "strictKnownMarketplaces",
+            "blockedMarketplaces",
+        ] {
+            assert!(
+                back.contains(&format!("\"{key}\"")),
+                "missing {key}: {back}"
+            );
+        }
+
+        for key in ["enabledPlugins", "pluginConfigs", "extraKnownMarketplaces"] {
+            assert_eq!(
+                strategy_for(key),
+                Some(MergeStrategy::DeepMerge),
+                "{key} must deep-merge"
+            );
+        }
+        for key in ["strictKnownMarketplaces", "blockedMarketplaces"] {
+            assert!(
+                strategy_for(key).is_none(),
+                "{key} must remain scalar-override"
+            );
+        }
     }
 
     #[test]

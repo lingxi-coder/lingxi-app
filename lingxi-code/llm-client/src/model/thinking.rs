@@ -207,8 +207,10 @@ pub fn is_thinking_env_disabled(name: &str) -> bool {
 /// thinking-off `temperature:1` rule in `ApiService::build_request`.
 #[must_use]
 pub fn session_thinking_active(thinking: ThinkingConfig) -> bool {
-    !matches!(thinking, ThinkingConfig::Disabled | ThinkingConfig::Automatic)
-        && !is_thinking_env_disabled("LINGXI_DISABLE_THINKING")
+    !matches!(
+        thinking,
+        ThinkingConfig::Disabled | ThinkingConfig::Automatic
+    ) && !is_thinking_env_disabled("LINGXI_DISABLE_THINKING")
 }
 
 /// Resolve the boot SESSION [`ThinkingConfig`] from the `MAX_THINKING_TOKENS`

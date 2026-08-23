@@ -74,10 +74,111 @@ pub struct SessionRowDto {
 
 // ── Models ───────────────────────────────────────────────────────────────────
 //
-// `ModelList`/`ModelChanged` carry provider-qualified `String` references, so
-// they have no supporting struct here — they are plain `ClientEvent` variants
-// (see `events.rs`). Keeping the existing wire shape avoids a protocol/UniFFI
-// break while preserving provider identity for grouped client pickers.
+/// User-visible billing semantics for one provider/model route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum ModelBillingModeDto {
+    PerToken,
+    Subscription,
+    Free,
+    Unknown,
+}
+
+/// One context-threshold price sheet, in USD per million tokens.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[allow(missing_docs)]
+pub struct ModelPricingTierDto {
+    pub context_threshold_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_per_million: Option<f64>,
+}
+
+/// Effective display pricing for one provider/model route.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[allow(missing_docs)]
+pub struct ModelPricingDto {
+    pub billing_mode: ModelBillingModeDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_per_million: Option<f64>,
+    pub tiers: Vec<ModelPricingTierDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// Provider-neutral model capability badges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[allow(missing_docs)]
+pub struct ModelCapabilitiesDto {
+    pub streaming: bool,
+    pub tools: bool,
+    pub vision: bool,
+    pub documents: bool,
+    pub reasoning: bool,
+    pub structured_output: bool,
+}
+
+/// Full details for one provider-qualified model choice.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[allow(missing_docs)]
+pub struct ModelDetailsDto {
+    pub reference: String,
+    pub provider_id: String,
+    pub provider_label: String,
+    pub display_name: String,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_updated: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_cutoff: Option<String>,
+    pub input_modalities: Vec<String>,
+    pub output_modalities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_weights: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_control: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<ModelPricingDto>,
+    pub capabilities: ModelCapabilitiesDto,
+    pub reasoning: crate::controls::ReasoningControlSpecDto,
+}
 
 // ── MCP ──────────────────────────────────────────────────────────────────────
 

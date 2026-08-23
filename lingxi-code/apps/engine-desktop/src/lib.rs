@@ -3865,6 +3865,7 @@ fn anthropic_models_for(
             billing_model: id,
             aliases: Vec::new(),
             description: None,
+            metadata: Default::default(),
             capabilities: caps,
         })
         .collect()
@@ -4024,6 +4025,22 @@ fn load_merged_show_thinking_summaries(project_dir: &std::path::Path) -> bool {
         .ok()
         .and_then(|eff| eff.settings.show_thinking_summaries)
         .unwrap_or(false)
+}
+
+/// Load LingXi's `settings.visionDelegationEnabled` preference. The feature is
+/// enabled when absent so existing installations gain the safe image sidecar
+/// without a migration.
+fn load_merged_vision_delegation_enabled(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|effective| effective.settings.vision_delegation_enabled)
+        .unwrap_or(true)
 }
 
 /// Load the merged `settings.agentPushNotifEnabled` preference. The independent
@@ -5605,6 +5622,9 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                 provider_id: profile.clone(),
                 provider_label: label.clone(),
                 description: m.description.clone(),
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: m.capabilities.reasoning,
             })
         })
@@ -6086,6 +6106,7 @@ pub async fn build(
     permission_sink: Arc<dyn PermissionRequestSink>,
 ) -> Result<DesktopRuntime, BuildError> {
     let cwd = cfg.cwd.clone();
+    let vision_delegation_enabled = load_merged_vision_delegation_enabled(&cwd);
 
     // On-disk data-retention sweep (claude-code `fWu`). DELETES stale
     // session-file entries (todos/statsig/logs older than the retention period),
@@ -9060,6 +9081,7 @@ pub async fn build(
         // (/rewind) Share the file-history store so the turn loop snapshots each
         // turn + the write tools back up pre-edit content.
         .with_file_history(file_history.clone())
+        .with_vision_delegation(vision_delegation_enabled)
         .with_config_home(cfg.lingxi_home.clone())
         // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
         // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).
@@ -15100,6 +15122,9 @@ mod tests {
                 provider_id: "openai".to_string(),
                 provider_label: "OpenAI".to_string(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: false,
             },
             traits::ModelListing {
@@ -15108,6 +15133,9 @@ mod tests {
                 provider_id: "github-copilot".to_string(),
                 provider_label: "GitHub Copilot".to_string(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: false,
             },
             traits::ModelListing {
@@ -15116,6 +15144,9 @@ mod tests {
                 provider_id: "anthropic".to_string(),
                 provider_label: "Anthropic".to_string(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: true,
             },
         ];
@@ -15571,6 +15602,9 @@ mod connected_fallback_tests {
             provider_id: provider_id.to_string(),
             provider_label: provider_id.to_string(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: false,
         }
     }
@@ -15925,6 +15959,7 @@ mod workspace_lease_forwarding_tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 

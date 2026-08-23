@@ -1,6 +1,6 @@
-//! M4-09 parity driver — locks v0.5.0 registry cardinality.
+//! Registry parity driver — locks the Claude Code 2.1.238 base builtin surface.
 //!
-//! Asserts that the fixture `registry_42_tools.json` declares exactly 42
+//! Asserts that the fixture `registry_42_tools.json` declares exactly 43
 //! tools across 9 categories AND that each declared name is a known
 //! `*_TOOL_NAME` constant in production (`tools::builtin`).
 //!
@@ -8,9 +8,9 @@
 //! dispatch tools at runtime (that machinery lives behind `dummy_ctx` in
 //! the `lingxi-tools` crate's `#[cfg(test)]` block — see
 //! `register_all_inserts_forty_tools_after_m4_08`). Instead, this driver
-//! cross-checks the fixture (the canonical 40-name list shipped with
-//! v0.5.0) against the per-tool `TOOL_NAME` constants exposed by each
-//! builtin module.
+//! cross-checks the fixture against the per-tool `TOOL_NAME` constants
+//! exposed by each builtin module. Capability-driven MCP resource tools are
+//! tested in `tool-mcp`; they are intentionally not part of this base list.
 
 #![allow(clippy::unwrap_used)]
 
@@ -31,14 +31,14 @@ fn fx() -> Fixture {
 #[test]
 fn registry_42_tools_fixture_totals_to_42() {
     let f = fx();
-    assert_eq!(f.total, 42, "fixture declares total=42");
+    assert_eq!(f.total, 43, "fixture declares total=43");
     let summed: usize = f.by_category.values().map(Vec::len).sum();
     assert_eq!(
-        summed, 42,
-        "sum of by_category lengths is 42 (got {summed})"
+        summed, 43,
+        "sum of by_category lengths is 43 (got {summed})"
     );
     let unique: BTreeSet<&String> = f.by_category.values().flat_map(|v| v.iter()).collect();
-    assert_eq!(unique.len(), 42, "by_category names are unique");
+    assert_eq!(unique.len(), 43, "by_category names are unique");
 }
 
 #[test]
@@ -62,13 +62,14 @@ fn registry_42_tools_fixture_categories_locked() {
     assert_eq!(lens["shell"], 4);
     assert_eq!(lens["web"], 2);
     assert_eq!(lens["workflow"], 5);
-    assert_eq!(lens["agent"], 8);
+    // 9 since 2.1.232 (56760bb1a): ListAgents joins the SendMessage it discovers.
+    assert_eq!(lens["agent"], 9);
     assert_eq!(lens["team"], 2);
-    assert_eq!(lens["mcp_lsp"], 5);
-    assert_eq!(lens["system"], 10);
+    assert_eq!(lens["mcp_lsp"], 4);
+    assert_eq!(lens["system"], 11);
 }
 
-/// Cross-check the fixture's 40 names against the production
+/// Cross-check the fixture's 43 names against the production
 /// `*_TOOL_NAME` constants (when an explicit named constant exists) and
 /// the in-module `TOOL_NAME` constants (single-tool modules).
 #[test]
@@ -80,7 +81,7 @@ fn fixture_names_match_production_constants() {
         .flat_map(|v| v.iter().cloned())
         .collect();
 
-    // Each of the 40 names below must appear as a `pub const … &str`
+    // Each name below must appear as a `pub const … &str`
     // in its module — byte-for-byte equal to the fixture entry.
     let pairs: &[(&str, &str)] = &[
         // File (5)
@@ -118,19 +119,15 @@ fn fixture_names_match_production_constants() {
         // Team (2)
         ("TeamCreate", tool_team::team::TEAM_CREATE_TOOL_NAME),
         ("TeamDelete", tool_team::team::TEAM_DELETE_TOOL_NAME),
-        // MCP + LSP (5)
+        // MCP + LSP (4). Resource tools are capability-driven, not base builtins.
         ("MCP", tool_mcp::mcp_tool::MCP_TOOL_NAME),
         ("McpAuth", tool_mcp::mcp_tool::MCP_AUTH_TOOL_NAME),
         (
-            "ListMcpResourcesTool",
-            tool_mcp::mcp_tool::LIST_MCP_RESOURCES_TOOL_NAME,
-        ),
-        (
-            "ReadMcpResourceTool",
-            tool_mcp::mcp_tool::READ_MCP_RESOURCE_TOOL_NAME,
+            "WaitForMcpServers",
+            tool_mcp::wait_for_mcp_servers::WAIT_FOR_MCP_SERVERS_TOOL_NAME,
         ),
         ("LSP", tool_lsp::lsp_tool::LSP_TOOL_NAME),
-        // System (8)
+        // System (11)
         (
             "AskUserQuestion",
             tool_ui::ask_user_question::ASK_USER_QUESTION_TOOL_NAME,
@@ -153,9 +150,13 @@ fn fixture_names_match_production_constants() {
             "StructuredOutput",
             tool_ui::synthetic_output::SYNTHETIC_OUTPUT_TOOL_NAME,
         ),
+        (
+            "ReportFindings",
+            tool_ui::report_findings::REPORT_FINDINGS_TOOL_NAME,
+        ),
     ];
 
-    assert_eq!(pairs.len(), 42, "production-constant lock covers 42 tools");
+    assert_eq!(pairs.len(), 43, "production-constant lock covers 43 tools");
 
     for (fixture_name, production_const) in pairs {
         assert_eq!(
@@ -168,7 +169,7 @@ fn fixture_names_match_production_constants() {
         );
     }
 
-    // Final sanity: the 42 paired names exactly match the fixture set.
+    // Final sanity: the paired names exactly match the fixture set.
     let paired: BTreeSet<String> = pairs.iter().map(|(n, _)| (*n).to_string()).collect();
     assert_eq!(paired, names, "fixture and production-constant sets agree");
 }

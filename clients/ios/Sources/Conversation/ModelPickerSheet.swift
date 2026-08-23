@@ -16,6 +16,7 @@ struct ModelPickerSheet: View {
 
     /// The engine's curated references (`ClientEvent::ModelList.models`).
     let availableModels: [String]
+    let detailsByReference: [String: ModelRuntimeDetails]
     /// The reference the engine reports as active, for the checkmark.
     let activeModelId: String
     /// References the user picked before, most-recent-first.
@@ -24,6 +25,7 @@ struct ModelPickerSheet: View {
     let onDismiss: () -> Void
 
     @State private var query = ""
+    @State private var selectedDetails: ModelRuntimeDetails?
 
     var body: some View {
         NavigationStack {
@@ -69,18 +71,24 @@ struct ModelPickerSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .sheet(item: $selectedDetails) { details in
+            ModelDetailsSheet(
+                details: details,
+                accent: ModelDisplay.color(for: details.reference)
+            )
+        }
     }
 
     /// The references surviving the search box, in engine order.
     private var matches: [String] {
-        ModelDisplay.filter(availableModels, matching: query)
+        ModelDisplay.filter(availableModels, matching: query, detailsByReference: detailsByReference)
     }
 
     /// Provider sections built from the surviving references — filter first,
     /// then group, so a provider whose models all filter out disappears with
     /// them (same order of operations as the Android picker).
     private var sections: [ModelProviderSection] {
-        ModelDisplay.sections(for: matches)
+        ModelDisplay.sections(for: matches, detailsByReference: detailsByReference)
     }
 
     /// Recently-picked references that also survive the search, in recency
@@ -100,29 +108,51 @@ struct ModelPickerSheet: View {
     /// match two elements and fail with "Multiple matching elements found".
     @ViewBuilder
     private func row(_ reference: String, slot: String) -> some View {
-        let item = ModelDisplay.item(for: reference)
-        Button {
-            onSelect(reference)
-        } label: {
-            HStack(spacing: 10) {
-                Circle().fill(item.color).frame(width: 8, height: 8)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(item.name)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(t.text)
-                    Text(item.modelId)
-                        .font(.system(size: 12))
-                        .foregroundStyle(t.text3)
-                        .lineLimit(1)
+        let item = ModelDisplay.item(for: reference, detailsByReference: detailsByReference)
+        HStack(spacing: 10) {
+            Button {
+                onSelect(reference)
+            } label: {
+                HStack(spacing: 10) {
+                    Circle().fill(item.color).frame(width: 8, height: 8)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.name)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(t.text)
+                        Text(item.details?.description ?? item.modelId)
+                            .font(.system(size: 12))
+                            .foregroundStyle(t.text3)
+                            .lineLimit(1)
+                        if let summary = item.details?.summaryItems, !summary.isEmpty {
+                            Text(summary.joined(separator: " · "))
+                                .font(.system(size: 11))
+                                .foregroundStyle(t.text3)
+                                .lineLimit(2)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    if reference == activeModelId {
+                        LXIcon(name: .check, size: 13, color: t.accent, stroke: 2.5)
+                    }
                 }
-                Spacer(minLength: 8)
-                if reference == activeModelId {
-                    LXIcon(name: .check, size: 13, color: t.accent, stroke: 2.5)
-                }
+                .contentShape(.rect)
             }
-            .contentShape(.rect)
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("composer.model.\(slot).row.\(reference)")
+
+            if item.details != nil {
+                Button {
+                    selectedDetails = item.details
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(t.text3)
+                        .frame(width: 28, height: 28)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("composer.model.\(slot).info.\(reference)")
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("composer.model.\(slot).row.\(reference)")
     }
 }

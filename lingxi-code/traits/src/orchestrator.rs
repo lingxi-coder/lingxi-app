@@ -734,7 +734,7 @@ pub struct StatusSnapshot {
     /// Active model name (e.g. `"claude-opus-4-7"`).
     pub model: String,
     /// Active model's provider profile (e.g. `Some("copilot")`), disambiguating a
-    /// model id shared across providers (e.g. `gpt-5.5` on both OpenAI and
+    /// model id shared across providers (e.g. `gpt-5.6-sol` on both OpenAI and
     /// Copilot). `None` when routing resolves the id by-provider (e.g. after a
     /// cross-provider resume that clears the profile).
     pub model_profile: Option<String>,
@@ -774,11 +774,117 @@ pub struct StatusSnapshot {
     pub setting_sources: Vec<String>,
 }
 
+/// How a provider charges the user for one model route.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelBillingMode {
+    /// Published per-token prices apply.
+    PerToken,
+    /// Usage is governed by a subscription or membership plan.
+    Subscription,
+    /// The provider explicitly publishes the route as free.
+    Free,
+    /// No reliable billing semantics are available.
+    #[default]
+    Unknown,
+}
+
+/// One alternate price sheet activated above a context-size threshold.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(missing_docs)]
+pub struct ModelPricingTier {
+    /// Provider-published threshold in input/context tokens.
+    pub context_threshold_tokens: u64,
+    #[serde(default)]
+    pub input_per_million: Option<f64>,
+    #[serde(default)]
+    pub output_per_million: Option<f64>,
+    #[serde(default)]
+    pub cache_read_per_million: Option<f64>,
+    #[serde(default)]
+    pub cache_write_per_million: Option<f64>,
+    #[serde(default)]
+    pub reasoning_per_million: Option<f64>,
+}
+
+/// Provider-published prices for one model route, in USD per million tokens.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(missing_docs)]
+pub struct ModelPricing {
+    #[serde(default)]
+    pub billing_mode: ModelBillingMode,
+    #[serde(default)]
+    pub input_per_million: Option<f64>,
+    #[serde(default)]
+    pub output_per_million: Option<f64>,
+    #[serde(default)]
+    pub cache_read_per_million: Option<f64>,
+    #[serde(default)]
+    pub cache_write_per_million: Option<f64>,
+    #[serde(default)]
+    pub reasoning_per_million: Option<f64>,
+    #[serde(default)]
+    pub tiers: Vec<ModelPricingTier>,
+    /// `modelsDev`, `official`, or `userOverride` when known.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// Published, provider-specific model facts used by every model picker.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(missing_docs)]
+pub struct ModelMetadata {
+    #[serde(default)]
+    pub family: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub release_date: Option<String>,
+    #[serde(default)]
+    pub last_updated: Option<String>,
+    #[serde(default)]
+    pub knowledge_cutoff: Option<String>,
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
+    #[serde(default)]
+    pub output_modalities: Vec<String>,
+    #[serde(default)]
+    pub context_window_tokens: Option<u64>,
+    #[serde(default)]
+    pub max_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default)]
+    pub open_weights: Option<bool>,
+    #[serde(default)]
+    pub attachments: Option<bool>,
+    #[serde(default)]
+    pub temperature_control: Option<bool>,
+    #[serde(default)]
+    pub pricing: Option<ModelPricing>,
+}
+
+/// Provider-neutral capabilities displayed beside model metadata.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(missing_docs)]
+pub struct ModelCapabilities {
+    pub streaming: bool,
+    pub tools: bool,
+    pub vision: bool,
+    pub documents: bool,
+    pub reasoning: bool,
+    pub structured_output: bool,
+}
+
 /// One model entry for the grouped `/model` picker. Sourced from the llm-client
 /// provider catalog: `display_model` is the human label, `request_model` is the
 /// wire id passed to `switch_model`, `provider_id` is the stable grouping key,
 /// and `provider_label` is the human provider header (e.g. "`GitHub` Copilot").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelListing {
     /// Human-facing model label (e.g. "`DeepSeek` Chat").
     pub display_model: String,
@@ -800,6 +906,15 @@ pub struct ModelListing {
     /// deserializing unchanged.
     #[serde(default)]
     pub supports_reasoning: bool,
+    /// Full provider-specific catalog metadata. Missing values stay unknown.
+    #[serde(default)]
+    pub metadata: ModelMetadata,
+    /// Capabilities used by route preflight and picker badges.
+    #[serde(default)]
+    pub capabilities: ModelCapabilities,
+    /// The exact reasoning controls accepted by this provider/model route.
+    #[serde(default)]
+    pub reasoning: ReasoningControlSpec,
 }
 
 /// Provider-neutral user selection for reasoning / effort controls.
@@ -848,6 +963,20 @@ pub struct ReasoningControlSpec {
     pub modifiable: bool,
     /// Optional reason a control is currently disabled.
     pub disabled_reason: Option<String>,
+}
+
+impl Default for ReasoningControlSpec {
+    fn default() -> Self {
+        Self {
+            available: vec![ReasoningSelection::Automatic],
+            selections_persistable: false,
+            budget_range: None,
+            provider_default: ReasoningSelection::Automatic,
+            forced: false,
+            modifiable: false,
+            disabled_reason: Some("reasoning_unavailable".to_string()),
+        }
+    }
 }
 
 /// Availability of one requested permission mode in the current session.
@@ -936,6 +1065,7 @@ pub fn reasoning_control_spec_for_model(
                 ]
             } else if model.contains("sonnet-5")
                 || model.contains("opus-4-8")
+                || model.contains("opus-5")
                 || model.contains("fable-5")
             {
                 vec![
@@ -977,7 +1107,11 @@ pub fn reasoning_control_spec_for_model(
                 | "gpt-5.4"
                 | "gpt-5.4-mini"
                 | "gpt-5.4-nano"
-                | "gpt-5.5" => (vec!["low", "medium", "high", "xhigh"], true),
+                | "gpt-5.5"
+                | "gpt-5.6"
+                | "gpt-5.6-sol"
+                | "gpt-5.6-terra"
+                | "gpt-5.6-luna" => (vec!["low", "medium", "high", "xhigh", "max"], true),
                 "gpt-5.1-codex" | "gpt-5.1-codex-mini" | "gpt-5.2-codex" => {
                     (vec!["low", "medium", "high"], false)
                 }
@@ -1221,9 +1355,9 @@ pub fn parse_model_ref(input: &str, listings: &[ModelListing]) -> (String, Optio
 /// (`utils/model/modelOptions.ts`) instead of dumping the whole catalog (~460
 /// models, 338 of them OpenRouter); we mirror that. Keyed by the stable
 /// `provider_id` (the catalog profile name, e.g. `"glm-coding"`, NOT the slice
-/// filename) + the wire `request_model`. Note the wire ids differ per provider
-/// (Anthropic/native `claude-opus-4-8` dashes vs the GitHub Copilot proxy's
-/// `claude-opus-4.8` dots). Any provider/model not listed is non-curated;
+/// filename) + the wire `request_model`. Wire ids can differ between provider
+/// profiles, so both values are part of the key. Any provider/model not listed
+/// is non-curated;
 /// callers keep the user's current + recent models visible separately.
 /// OpenRouter is restricted to its auto/latest aliases so its several-hundred
 /// model passthrough catalog never floods the picker.
@@ -1235,44 +1369,39 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
     match provider_id {
         "anthropic" | "builtin" => matches!(
             request_model,
-            // claude-sonnet-5: the 2.1.198 default first-party Sonnet.
-            "claude-sonnet-5"
-                | "claude-sonnet-4-6"
-                | "claude-opus-4-8"
-                | "claude-haiku-4-5"
-                | "claude-fable-5"
+            "claude-opus-5" | "claude-fable-5" | "claude-sonnet-5" | "claude-haiku-4-5"
         ),
-        "openai" => matches!(request_model, "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini"),
-        "openai-chatgpt" => matches!(request_model, "gpt-5.3-codex" | "gpt-5-codex"),
-        "deepseek" => matches!(request_model, "deepseek-v4-flash" | "deepseek-v4-pro"),
-        "kimi" => matches!(
+        "openai" => matches!(
             request_model,
-            "kimi-k3" | "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" | "kimi-k2.6"
+            "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
         ),
-        "kimi-code" => matches!(
+        "openai-chatgpt" => matches!(
             request_model,
-            "k3" | "k3-256k" | "kimi-for-coding" | "kimi-for-coding-highspeed"
+            "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
         ),
+        "deepseek" => matches!(
+            request_model,
+            "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" | "deepseek-v4-pro"
+        ),
+        "kimi" => request_model == "kimi-k3",
+        "kimi-code" => request_model == "k3",
         "gemini" => matches!(
             request_model,
-            "gemini-3.6-flash"
-                | "gemini-3.5-flash"
-                | "gemini-3.5-flash-lite"
-                | "gemini-3.1-pro-preview"
+            "gemini-3.7-flash" | "gemini-3.6-flash" | "gemini-3.5-flash" | "gemini-3.1-pro-preview"
         ),
         "github-copilot" => matches!(
             request_model,
-            "claude-opus-4.8"
-                | "claude-sonnet-4.6"
-                | "claude-haiku-4.5"
-                | "claude-fable-5"
-                | "gpt-5.5"
-                | "gemini-3.1-pro-preview"
+            "claude-opus-5"
+                | "claude-sonnet-5"
+                | "gemini-3.7-flash"
+                | "gpt-5.6-sol"
+                | "gpt-5.6-terra"
+                | "gpt-5.6-luna"
         ),
-        "zai" => matches!(request_model, "glm-5.1" | "glm-5" | "glm-5-turbo"),
+        "zai" => request_model == "glm-5.3",
         // The profile name is "glm-coding" (catalog presets); "zhipuai-coding-plan"
         // is only the vendored slice's filename.
-        "glm-coding" => matches!(request_model, "glm-5.1" | "glm-5-turbo" | "glm-4.7"),
+        "glm-coding" => request_model == "glm-5.3",
         "openrouter" => matches!(
             request_model,
             "openrouter/auto"
@@ -1345,14 +1474,15 @@ pub fn provider_fallback_order() -> &'static [&'static str] {
 pub fn provider_default_model(provider_id: &str) -> Option<&'static str> {
     Some(match provider_id {
         "anthropic" | "builtin" => "claude-sonnet-5",
-        "openai" => "gpt-5.5",
-        "openai-chatgpt" => "gpt-5.3-codex",
+        "openai" => "gpt-5.6-sol",
+        "openai-chatgpt" => "gpt-5.6-sol",
         "deepseek" => "deepseek-v4-flash",
         "kimi" => "kimi-k3",
-        "kimi-code" => "kimi-for-coding",
-        "gemini" => "gemini-3.5-flash",
-        "github-copilot" => "claude-opus-4.8",
-        "zai" | "glm-coding" => "glm-5.1",
+        "kimi-code" => "k3",
+        "gemini" => "gemini-3.7-flash",
+        "github-copilot" => "claude-opus-5",
+        "zai" => "glm-5.3",
+        "glm-coding" => "glm-5.3",
         "openrouter" => "openrouter/auto",
         _ => return None,
     })
@@ -1379,8 +1509,8 @@ pub fn qualified_model_ref(request_model: &str, provider_id: Option<&str>) -> St
 ///
 /// The result contains only the shared "latest and commonly used" shortlist,
 /// plus the active model so the picker can always represent its current value.
-/// Provider identity is never de-duplicated away: `openai/gpt-5.5` and
-/// `github-copilot/gpt-5.5` are distinct choices and route deterministically.
+/// Provider identity is never de-duplicated away: `openai/gpt-5.6-sol` and
+/// `github-copilot/gpt-5.6-sol` are distinct choices and route deterministically.
 ///
 /// When `listings` is empty (library/stub callers with no routing catalog), the
 /// raw `available` list is preserved for backward compatibility.
@@ -1404,6 +1534,43 @@ pub fn curated_model_refs(
         return models;
     }
 
+    let curated = curated_model_listings(listings, current, current_provider_id);
+    let mut refs = curated
+        .into_iter()
+        .map(|listing| qualified_model_ref(&listing.request_model, Some(&listing.provider_id)))
+        .collect::<Vec<_>>();
+    if !current.is_empty() {
+        let inferred = current_provider_id.or_else(|| {
+            let mut providers = listings
+                .iter()
+                .filter(|listing| listing.request_model == current)
+                .map(|listing| listing.provider_id.as_str());
+            let first = providers.next();
+            matches!((first, providers.next()), (Some(_), None))
+                .then_some(first)
+                .flatten()
+        });
+        let current_ref = qualified_model_ref(current, inferred);
+        if let Some(index) = refs.iter().position(|item| item == &current_ref) {
+            if index != 0 {
+                let current = refs.remove(index);
+                refs.insert(0, current);
+            }
+        } else {
+            refs.insert(0, current_ref);
+        }
+    }
+    refs
+}
+
+/// Curate full provider-specific listings using the same ordering and current
+/// model carve-out as [`curated_model_refs`].
+#[must_use]
+pub fn curated_model_listings(
+    listings: &[ModelListing],
+    current: &str,
+    current_provider_id: Option<&str>,
+) -> Vec<ModelListing> {
     let inferred_current_provider = if current_provider_id.is_none() && !current.is_empty() {
         let mut matches = listings
             .iter()
@@ -1422,15 +1589,24 @@ pub fn curated_model_refs(
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     if !current.is_empty() {
-        let current_ref = qualified_model_ref(current, current_provider_id);
-        seen.insert(current_ref.clone());
-        out.push(current_ref);
+        if let Some(current_listing) = listings.iter().find(|listing| {
+            listing.request_model == current
+                && current_provider_id.is_none_or(|provider| listing.provider_id == provider)
+        }) {
+            seen.insert((
+                current_listing.provider_id.clone(),
+                current_listing.request_model.clone(),
+            ));
+            out.push(current_listing.clone());
+        }
     }
     for listing in listings {
-        if is_offered_model(&listing.provider_id, &listing.request_model) {
-            let model_ref = qualified_model_ref(&listing.request_model, Some(&listing.provider_id));
-            if seen.insert(model_ref.clone()) {
-                out.push(model_ref);
+        if is_offered_model(&listing.provider_id, &listing.request_model)
+            && listing.metadata.status.as_deref() != Some("deprecated")
+        {
+            let key = (listing.provider_id.clone(), listing.request_model.clone());
+            if seen.insert(key) {
+                out.push(listing.clone());
             }
         }
     }
@@ -1480,6 +1656,7 @@ pub fn curated_model_names(
     }
     for l in listings {
         if is_offered_model(&l.provider_id, &l.request_model)
+            && l.metadata.status.as_deref() != Some("deprecated")
             && seen.insert(l.display_model.clone())
         {
             out.push(l.display_model.clone());

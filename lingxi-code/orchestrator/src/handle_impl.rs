@@ -753,10 +753,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn conversation_controls(&self) -> Option<traits::ConversationControls> {
         let state = self.session.lock().await;
-        Some(self.conversation_controls_for_model(
-            &state.model,
-            state.model_profile.as_deref(),
-        ))
+        Some(self.conversation_controls_for_model(&state.model, state.model_profile.as_deref()))
     }
 
     async fn set_reasoning_selection(
@@ -1531,6 +1528,9 @@ mod tests {
             provider_id: "deepseek".to_string(),
             provider_label: "DeepSeek".to_string(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: true,
         }]);
         let orch = crate::ConversationOrchestrator::new(
@@ -1583,6 +1583,9 @@ mod tests {
             provider_id: "deepseek".to_string(),
             provider_label: "DeepSeek".to_string(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: true,
         }]);
         let orch = crate::ConversationOrchestrator::new(
@@ -1642,6 +1645,9 @@ mod tests {
             provider_id: "openrouter".to_string(),
             provider_label: "OpenRouter".to_string(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: false,
         }];
         for (recorded, want_model, want_profile) in [

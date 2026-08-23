@@ -207,20 +207,23 @@ mod tests {
                 provider_id: provider_id.to_string(),
                 provider_label: provider_label.to_string(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: true,
             }
         }
 
         let mock = Arc::new(MockOrchestratorHandle::new());
-        mock.set_available_models(vec!["gpt-5.5".into(), "gpt-4o".into()]);
+        mock.set_available_models(vec!["gpt-5.6-sol".into(), "gpt-4o".into()]);
         mock.set_model_listings(vec![
-            listing("openai", "OpenAI", "gpt-5.5"),
-            listing("openai", "OpenAI", "gpt-5.4"),
+            listing("openai", "OpenAI", "gpt-5.6-sol"),
+            listing("openai", "OpenAI", "gpt-5.6-terra"),
             listing("openai", "OpenAI", "gpt-4o"),
-            listing("github-copilot", "GitHub Copilot", "gpt-5.5"),
+            listing("github-copilot", "GitHub Copilot", "gpt-5.6-sol"),
         ]);
         mock.set_status_snapshot(traits::StatusSnapshot {
-            model: "gpt-5.5".into(),
+            model: "gpt-5.6-sol".into(),
             model_profile: Some("github-copilot".into()),
             ..traits::StatusSnapshot::default()
         });
@@ -233,13 +236,13 @@ mod tests {
         assert_eq!(
             s,
             concat!(
-                "Current model: github-copilot/gpt-5.5\n",
+                "Current model: github-copilot/gpt-5.6-sol\n",
                 "Available:\n",
                 "GitHub Copilot:\n",
-                "  - github-copilot/gpt-5.5\n",
+                "  - github-copilot/gpt-5.6-sol\n",
                 "OpenAI:\n",
-                "  - openai/gpt-5.5\n",
-                "  - openai/gpt-5.4"
+                "  - openai/gpt-5.6-sol\n",
+                "  - openai/gpt-5.6-terra"
             )
         );
         assert!(!s.contains("gpt-4o"), "non-curated models stay hidden");
@@ -254,6 +257,9 @@ mod tests {
             provider_id: "deepseek".into(),
             provider_label: "DeepSeek".into(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: true,
         }]);
         mock.set_status_snapshot(traits::StatusSnapshot {
@@ -332,6 +338,9 @@ mod tests {
                 provider_id: provider_id.to_string(),
                 provider_label: provider_id.to_string(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: false,
             }
         }

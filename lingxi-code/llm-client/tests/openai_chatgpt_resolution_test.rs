@@ -1,19 +1,7 @@
-//! Regression: the openai-chatgpt (Codex-backend) model ids must resolve
-//! UNAMBIGUOUSLY even though the `openai` (api.openai.com) preset is also present.
-//!
-//! Originally the hand-authored openai-chatgpt slice reused ids
-//! (gpt-5-codex / gpt-5.3-codex) that also lived in the vendored `openai` AND
-//! `github-copilot` slices, so `ModelRegistry::resolve` returned "ambiguous
-//! across profiles" and the ChatGPT-login backend was unreachable. Fix: the
-//! codex-backend-EXCLUSIVE ids (gpt-5-codex, gpt-5.3-codex) live ONLY in
-//! openai-chatgpt — dropped from both openai and github-copilot. This test pins
-//! that, using the REAL builtin catalog (all presets coexisting, as the engine
-//! builds it).
-//!
-//! NOTE: genuinely-shared standard ids (e.g. gpt-5.2 on both openai and
-//! github-copilot) remain intentionally ambiguous under bare-id resolution —
-//! that is a separate, pre-existing multi-provider concern (the picker
-//! disambiguates by profile), not part of codex-backend reachability.
+//! Regression: the latest GPT-5.6 models are reachable through the
+//! openai-chatgpt (ChatGPT OAuth/Codex-backend) profile even though the same
+//! ids are also exposed by the OpenAI API and Copilot profiles. Profile-qualified
+//! resolution must remain deterministic; bare shared ids remain ambiguous.
 
 use llm_client::{builtin_presets, ClientConfig, ModelRegistry};
 
@@ -26,37 +14,31 @@ fn registry() -> ModelRegistry {
 }
 
 #[test]
-fn codex_models_resolve_to_openai_chatgpt_unambiguously() {
+fn latest_models_resolve_to_openai_chatgpt_by_profile() {
     let reg = registry();
-    for id in ["gpt-5.3-codex", "gpt-5-codex"] {
+    for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
         let route = reg
-            .resolve(id)
+            .resolve_in(id, Some("openai-chatgpt"))
             .unwrap_or_else(|e| panic!("'{id}' must resolve, got: {e:?}"));
         assert_eq!(
             route.profile_name, "openai-chatgpt",
-            "'{id}' must route to the Codex-backend (ChatGPT-login) profile"
+            "'{id}' must route to the ChatGPT-login profile"
         );
     }
 }
 
-/// Codex-exclusive ids must NOT appear in openai or github-copilot anymore, so
-/// the only owner is openai-chatgpt (the assertion above). This guards the
-/// de-collision at the data layer too — a future re-vendor that reintroduces a
-/// codex id into another slice would resurface the ambiguity.
 #[test]
-fn codex_ids_owned_solely_by_openai_chatgpt() {
+fn latest_models_are_present_in_chatgpt_catalog() {
     let cat = builtin_presets();
-    for id in ["gpt-5-codex", "gpt-5.3-codex"] {
-        let owners: Vec<&str> = cat
-            .providers
-            .iter()
-            .filter(|p| p.models.iter().any(|m| m.request_model == id))
-            .map(|p| p.profile_name.as_str())
-            .collect();
-        assert_eq!(
-            owners,
-            ["openai-chatgpt"],
-            "'{id}' must be owned solely by openai-chatgpt"
+    let profile = cat
+        .providers
+        .iter()
+        .find(|p| p.profile_name == "openai-chatgpt")
+        .expect("ChatGPT profile");
+    for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        assert!(
+            profile.models.iter().any(|model| model.request_model == id),
+            "'{id}' must be present in ChatGPT catalog"
         );
     }
 }

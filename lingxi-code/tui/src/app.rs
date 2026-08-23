@@ -1640,6 +1640,8 @@ mod tests {
                     provider_label: "Anthropic".into(),
                     is_current: true,
                     supports_reasoning: true,
+                    supports_multimodal: false,
+                    details: Vec::new(),
                 },
                 crate::session::ModelRow {
                     display: "Sonnet".into(),
@@ -1648,6 +1650,8 @@ mod tests {
                     provider_label: "Anthropic".into(),
                     is_current: false,
                     supports_reasoning: true,
+                    supports_multimodal: false,
+                    details: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -2271,7 +2275,10 @@ mod tests {
         // esc hint. The negative assertion is the load-bearing one: it fails if
         // the invented "allow once" wording ever comes back.
         assert!(all.contains("› Yes"), "{all}");
-        assert!(!all.contains("allow once"), "old invented label survived: {all}");
+        assert!(
+            !all.contains("allow once"),
+            "old invented label survived: {all}"
+        );
         assert!(
             all.contains(&format!(
                 "No, and tell {} what to do differently (esc)",
@@ -2533,7 +2540,10 @@ mod tests {
         // is clipped inside the frame rather than escaping it, and that the old
         // invented "allow once" wording has not come back.
         assert!(all.contains("› Yes"), "{all}");
-        assert!(!all.contains("allow once"), "old invented label survived: {all}");
+        assert!(
+            !all.contains("allow once"),
+            "old invented label survived: {all}"
+        );
         assert!(
             all.contains(&format!("No, and tell {}", branding::PRODUCT_NAME)),
             "clipped deny row missing: {all}"

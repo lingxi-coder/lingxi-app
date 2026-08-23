@@ -143,6 +143,21 @@ struct ProviderListPage: View {
     private var routingSection: some View {
         DisclosureGroup(isExpanded: $showingRouting) {
             VStack(alignment: .leading, spacing: 12) {
+                Toggle(isOn: Binding(
+                    get: { repository.visionDelegationEnabled },
+                    set: { repository.setVisionDelegationEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Vision Delegation")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundColor(t.text2)
+                        Text("Allow non-vision models to batch-analyze images through an internal delegate.")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(t.text4)
+                            .lineSpacing(3)
+                    }
+                }
+                .toggleStyle(.switch)
                 routeField(label: String(localized: "settings_provider_default_model"), text: .constant(repository.makeLaunchSnapshot().defaultModelID ?? String(localized: "settings_provider_unconfigured")), editable: false)
                 routeField(label: String(localized: "settings_provider_max_retries"), text: $retryMaxAttemptsText)
                 routeField(label: String(localized: "settings_provider_backoff_ms"), text: $retryBackoffMsText)
@@ -229,6 +244,7 @@ private struct ProviderEditorSheet: View {
     @State private var draft: ProviderEditorDraft
     @State private var showKey = false
     @State private var editingStoredCredential = false
+    @State private var selectedModelDetails: ModelRuntimeDetails?
     @State private var saving = false
     @State private var removing = false
     @State private var actionError: String?
@@ -267,6 +283,12 @@ private struct ProviderEditorSheet: View {
                 bottomActions
             }
             .navigationTitle(draft.profile.name).navigationBarTitleDisplayMode(.inline)
+            .sheet(item: $selectedModelDetails) { details in
+                ModelDetailsSheet(
+                    details: details,
+                    accent: Accents.color(for: draft.profile.presetID)
+                )
+            }
         }
     }
 
@@ -414,6 +436,10 @@ private struct ProviderEditorSheet: View {
 
     private var modelSection: some View {
         let preset = repository.preset(for: draft.profile.presetID)
+        let catalogEntry = repository.catalogEntries.first(where: { $0.id == draft.profile.presetID })
+        let detailByModelID = Dictionary(
+            uniqueKeysWithValues: (catalogEntry.map { Array($0.modelDetails.values) } ?? []).map { ($0.modelId, $0) }
+        )
         let runtimeModels = repository.runtimeSnapshot.models.compactMap { ref -> String? in
             guard let slash = ref.firstIndex(of: "/") else { return nil }
             guard String(ref[..<slash]) == draft.profile.id || String(ref[..<slash]) == draft.profile.presetID else { return nil }
@@ -424,12 +450,52 @@ private struct ProviderEditorSheet: View {
         return VStack(alignment: .leading, spacing: 8) {
             FieldLabel(text: String(localized: "settings_provider_model_id"))
             if !models.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 7) {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 7) {
                         ForEach(models, id: \.self) { model in
-                            Button { draft.profile.modelID = model } label: {
-                                Text(model).font(.system(size: 11.5, design: .monospaced)).foregroundColor(draft.profile.modelID == model ? .white : t.text3).padding(.horizontal, 9).padding(.vertical, 6).background(draft.profile.modelID == model ? t.accent : t.windowBg).clipShape(Capsule())
-                            }.buttonStyle(.plain)
+                            let details = detailByModelID[model]
+                            HStack(spacing: 8) {
+                                Button { draft.profile.modelID = model } label: {
+                                    HStack(spacing: 8) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(details?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
+                                                .font(.system(size: 12.5, weight: .medium))
+                                                .foregroundColor(draft.profile.modelID == model ? .white : t.text2)
+                                            Text(model)
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundColor(draft.profile.modelID == model ? .white.opacity(0.82) : t.text4)
+                                                .lineLimit(1)
+                                            if let details, !details.summaryItems.isEmpty {
+                                                Text(details.summaryItems.joined(separator: " · "))
+                                                    .font(.system(size: 10.5))
+                                                    .foregroundColor(draft.profile.modelID == model ? .white.opacity(0.82) : t.text4)
+                                                    .lineLimit(2)
+                                            }
+                                        }
+                                        Spacer(minLength: 8)
+                                        if draft.profile.modelID == model {
+                                            LXIcon(name: .check, size: 14, color: .white, stroke: 2.2)
+                                        }
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(draft.profile.modelID == model ? t.accent : t.windowBg)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                                }
+                                .buttonStyle(.plain)
+                                if let details {
+                                    Button {
+                                        selectedModelDetails = details
+                                    } label: {
+                                        Image(systemName: "info.circle")
+                                            .foregroundStyle(t.text3)
+                                            .frame(width: 28, height: 28)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("provider.model.info.\(model)")
+                                }
+                            }
                         }
                     }
                 }

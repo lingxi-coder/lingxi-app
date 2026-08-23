@@ -351,6 +351,7 @@ mod tests {
                 // Field type (`cost::Usage`) inferred — avoids a dev-dep on `cost`.
                 usage: Default::default(),
                 stop_reason: Some("end_turn".into()),
+                retry_count: 0,
             })
         }
     }

@@ -103,6 +103,9 @@ fn content_blocks_to_api(blocks: &[protocol::ContentBlock]) -> Value {
             } => {
                 json!({"type": "advisor_tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error})
             }
+            ContentBlock::MediaAnalysis { analysis } => {
+                json!({"type": "text", "text": format!("[Media analysis sidecar]\n{}", serde_json::to_string(analysis).unwrap_or_else(|_| "{}".to_string()))})
+            }
         })
         .collect();
     Value::Array(arr)

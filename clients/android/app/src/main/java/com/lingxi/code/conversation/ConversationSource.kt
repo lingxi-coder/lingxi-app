@@ -347,7 +347,13 @@ internal class LosslessEventRelay<T>(
  */
 fun reduceModelEvent(prev: EngineModelState, event: ClientEvent): EngineModelState =
     when (event) {
-        is ClientEvent.ModelList -> EngineModelState(available = event.models, active = event.current)
+        is ClientEvent.ModelList -> EngineModelState(
+            available = event.models,
+            active = event.current,
+            details = event.details.associate { detail ->
+                detail.reference to com.lingxi.code.model.CatalogModelDetails.fromDto(detail)
+            },
+        )
         is ClientEvent.ModelChanged -> prev.copy(active = event.model)
         else -> prev
     }
@@ -1306,6 +1312,7 @@ class EngineConversationSource private constructor(
                 model = creds.model.ifBlank { providerLaunch.defaultModel },
                 providerProfilesJson = providerLaunch.providerProfilesJson,
                 routingJson = providerLaunch.routingJson,
+                visionDelegationEnabled = providerLaunch.visionDelegationEnabled,
                 projectWorkspace = projectWorkspace,
                 linuxRuntimeMode = linuxRuntimeMode,
                 onEvent = { event ->

@@ -107,6 +107,13 @@ pub struct LlmRequest {
     /// `metadata` object (claude-code `claude.ts:1699-1728` always sends it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<RequestMetadata>,
+    /// Internal response-accounting hint. This is never serialized to a
+    /// provider request; side-query adapters use it to capture per-call retries.
+    #[serde(skip)]
+    pub capture_retry_count: bool,
+    /// Internal side-query purpose for telemetry; never sent to providers.
+    #[serde(skip)]
+    pub query_source: Option<String>,
     /// `OpenAI` Responses API request controls that do not have provider-neutral
     /// equivalents.
     #[serde(

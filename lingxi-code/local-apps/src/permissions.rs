@@ -486,7 +486,13 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(
             value["permissions"]["allow"],
-            serde_json::json!(["Read(./**)", "Edit(./**)"])
+            serde_json::json!([
+                "Read(./**)",
+                "Edit(./**)",
+                "LocalAppLogs",
+                "LocalAppBuild",
+                "LocalAppRuntime"
+            ])
         );
         assert_eq!(
             value["permissions"]["deny"],

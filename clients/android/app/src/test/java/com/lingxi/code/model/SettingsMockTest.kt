@@ -132,7 +132,7 @@ class SettingsMockTest {
 
         assertEquals("https://api.deepseek.com", deepSeek.defaultUrl)
         assertEquals(
-            listOf("deepseek-v4-flash", "deepseek-v4-pro"),
+            listOf("deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro"),
             deepSeek.models,
         )
     }
@@ -143,7 +143,7 @@ class SettingsMockTest {
 
         assertEquals("https://api.moonshot.cn/v1", kimi.defaultUrl)
         assertEquals(
-            listOf("kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"),
+            listOf("kimi-k3"),
             kimi.models,
         )
     }
@@ -154,7 +154,7 @@ class SettingsMockTest {
 
         assertEquals("https://api.kimi.com/coding/v1", kimiCode.defaultUrl)
         assertEquals(
-            listOf("kimi-for-coding", "k3", "k3-256k", "kimi-for-coding-highspeed"),
+            listOf("k3"),
             kimiCode.models,
         )
     }
@@ -189,7 +189,7 @@ class SettingsMockTest {
         assertEquals("OpenAI", p.name)
         assertEquals("https://api.openai.com/v1", p.url)
         // First preset model is pre-selected; status idle; enabled; not default.
-        assertEquals("gpt-4o", p.model)
+        assertEquals("gpt-5.6-sol", p.model)
         assertEquals(ConnStatus.Idle, p.status)
         assertTrue(p.enabled)
         assertFalse(p.isDefault)

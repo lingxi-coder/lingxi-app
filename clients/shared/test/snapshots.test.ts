@@ -579,6 +579,9 @@ function validateAppUiRequest(v: unknown): void {
       'navigate',
       'back',
       'reload',
+      'capture_view',
+      'pointer',
+      'key',
     ].includes(o['action'] as string),
   );
   if ('target' in o) {
@@ -1036,6 +1039,7 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'model_list':
       assert.ok(Array.isArray(o['models']) && isString(o['current']));
+      if (o['details'] !== undefined) assert.ok(Array.isArray(o['details']));
       break;
     case 'model_changed':
       assert.ok(isString(o['model']));

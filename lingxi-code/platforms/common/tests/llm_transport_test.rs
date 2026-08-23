@@ -366,6 +366,7 @@ async fn bridge_drives_llm_client_event_stream_end_to_end() {
                 billing_model: "claude-sonnet-4".to_string(),
                 aliases: vec![],
                 description: None,
+                metadata: Default::default(),
                 capabilities: llm_client::Capabilities {
                     streaming: true,
                     tools: true,
@@ -378,6 +379,7 @@ async fn bridge_drives_llm_client_event_stream_end_to_end() {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     })
     .expect("client");

@@ -14,11 +14,13 @@
 //! `serde_json::Value` (governing decision §0.4): `effective_json` /
 //! `provenance_json` are JSON **Strings**, not nested objects.
 
+use client_protocol::controls::{ReasoningControlSpecDto, ReasoningSelectionDto};
 use client_protocol::events::ClientEvent;
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
-    SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, SessionRowDto,
+    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 
@@ -120,6 +122,7 @@ fn model_list_and_changed_round_trip() {
             "claude-sonnet-4-6".to_string(),
         ],
         current: "claude-opus-4-7".to_string(),
+        details: Vec::new(),
     };
     let json = serde_json::to_value(&list).expect("serialize ModelList");
     assert_eq!(json["type"], "model_list");
@@ -136,6 +139,77 @@ fn model_list_and_changed_round_trip() {
     assert_eq!(json["model"], "claude-sonnet-4-6");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize ModelChanged");
     assert_eq!(back, changed);
+}
+
+#[test]
+fn rich_model_details_round_trip_and_legacy_event_default() {
+    let detail = ModelDetailsDto {
+        reference: "deepseek/deepseek-v4-flash-vision-exp".into(),
+        provider_id: "deepseek".into(),
+        provider_label: "DeepSeek".into(),
+        display_name: "DeepSeek V4 Flash Vision Exp".into(),
+        model_id: "deepseek-v4-flash-vision-exp".into(),
+        description: None,
+        family: Some("deepseek-flash".into()),
+        status: Some("beta".into()),
+        release_date: None,
+        last_updated: None,
+        knowledge_cutoff: None,
+        input_modalities: vec!["text".into(), "image".into()],
+        output_modalities: vec!["text".into()],
+        context_window_tokens: Some(1_000_000),
+        max_input_tokens: None,
+        max_output_tokens: Some(384_000),
+        open_weights: None,
+        attachments: None,
+        temperature_control: None,
+        pricing: Some(ModelPricingDto {
+            billing_mode: ModelBillingModeDto::PerToken,
+            input_per_million: Some(0.14),
+            output_per_million: Some(0.28),
+            cache_read_per_million: Some(0.0028),
+            cache_write_per_million: None,
+            reasoning_per_million: Some(0.28),
+            tiers: Vec::new(),
+            source: Some("modelsDev".into()),
+        }),
+        capabilities: ModelCapabilitiesDto {
+            streaming: true,
+            tools: true,
+            vision: true,
+            documents: false,
+            reasoning: true,
+            structured_output: false,
+        },
+        reasoning: ReasoningControlSpecDto {
+            options: Vec::new(),
+            budget_range: None,
+            provider_default: ReasoningSelectionDto::Automatic,
+            forced_reasoning: false,
+            editable: true,
+            disabled_reason: None,
+        },
+    };
+    let event = ClientEvent::ModelList {
+        models: vec![detail.reference.clone()],
+        current: detail.reference.clone(),
+        details: vec![detail],
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["details"][0]["status"], "beta");
+    assert_eq!(serde_json::from_value::<ClientEvent>(value).unwrap(), event);
+
+    let legacy = serde_json::json!({
+        "type": "model_list",
+        "models": ["openai/gpt-5.6-sol"],
+        "current": "openai/gpt-5.6-sol"
+    });
+    let ClientEvent::ModelList { details, .. } =
+        serde_json::from_value::<ClientEvent>(legacy).unwrap()
+    else {
+        panic!("model list")
+    };
+    assert!(details.is_empty());
 }
 
 // ── MCP ──────────────────────────────────────────────────────────────────────

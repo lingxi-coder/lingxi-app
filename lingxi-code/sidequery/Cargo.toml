@@ -11,9 +11,13 @@ traits = { path = "../traits" }
 engine = { path = "../engine" }
 llm-client = { path = "../llm-client" }
 platform-common = { path = "../platforms/common" }
+hooks = { path = "../hooks" }
 cost = { path = "../cost" }
 tool-api = { path = "../tool-api" }
 base64 = "0.22"
+sha2 = "0.10"
+futures-core = { workspace = true }
+url = "2"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

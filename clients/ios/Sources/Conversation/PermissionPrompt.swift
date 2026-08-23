@@ -99,6 +99,8 @@ import SwiftUI
             private weak var fallbackPresenter: UIViewController?
             private var presentationInFlight = false
             private var presentationGeneration = 0
+            private var retryScheduled = false
+            private var consumedRunLoopRetryGeneration: Int?
 
             override init() {
                 super.init()
@@ -106,6 +108,18 @@ import SwiftUI
                     self,
                     selector: #selector(sceneDidActivate),
                     name: UIScene.didActivateNotification,
+                    object: nil
+                )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(windowPresentationContextChanged),
+                    name: UIWindow.didBecomeVisibleNotification,
+                    object: nil
+                )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(windowPresentationContextChanged),
+                    name: UIWindow.didBecomeKeyNotification,
                     object: nil
                 )
             }
@@ -156,6 +170,7 @@ import SwiftUI
                 deferredContent = nil
                 fallbackPresenter = nil
                 presentationInFlight = false
+                consumedRunLoopRetryGeneration = nil
                 guard let hostingController else { return }
                 self.hostingController = nil
                 hostingController.dismiss(animated: animated)
@@ -165,12 +180,19 @@ import SwiftUI
                 attemptPresentation()
             }
 
+            @objc private func windowPresentationContextChanged() {
+                attemptPresentation()
+            }
+
             private func attemptPresentation() {
                 guard hostingController == nil,
                       !presentationInFlight,
-                      let deferredContent,
-                      let presenter = activeAttachedPresenter()
+                      let deferredContent
                 else { return }
+                guard let presenter = activeAttachedPresenter() else {
+                    scheduleRetry()
+                    return
+                }
 
                 let host = UIHostingController(rootView: deferredContent)
                 host.view.backgroundColor = .clear
@@ -182,6 +204,18 @@ import SwiftUI
                 hostingController = host
                 presentationInFlight = true
                 present(host, from: presenter, generation: generation)
+            }
+
+            private func scheduleRetry() {
+                guard !retryScheduled, deferredContent != nil else { return }
+                guard consumedRunLoopRetryGeneration != presentationGeneration else { return }
+                consumedRunLoopRetryGeneration = presentationGeneration
+                retryScheduled = true
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.retryScheduled = false
+                    self.attemptPresentation()
+                }
             }
 
             private func activeAttachedPresenter() -> UIViewController? {
@@ -224,7 +258,13 @@ import SwiftUI
             ) {
                 // If another screen is mid-transition, continue from UIKit's
                 // completion callback instead of polling presentation state.
-                if let transition = presenter.transitionCoordinator {
+                // UIKit can expose a stale transition coordinator even when
+                // animations are globally disabled (notably in tests and
+                // accessibility-driven presentation). Its completion is not
+                // guaranteed to fire, so present synchronously in that mode.
+                if UIView.areAnimationsEnabled,
+                   let transition = presenter.transitionCoordinator
+                {
                     transition.animate(alongsideTransition: nil) { [weak self] _ in
                         guard let self,
                               self.presentationGeneration == generation,
@@ -233,6 +273,7 @@ import SwiftUI
                         guard let settledPresenter = self.activeAttachedPresenter() else {
                             self.presentationInFlight = false
                             self.hostingController = nil
+                            self.scheduleRetry()
                             return
                         }
                         self.performPresentation(
@@ -264,6 +305,7 @@ import SwiftUI
                     self.presentationInFlight = false
                     if host.presentingViewController == nil {
                         self.hostingController = nil
+                        self.scheduleRetry()
                     }
                 }
             }

@@ -1182,6 +1182,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_palette_commands_excludes_non_user_and_env_disabled() {
+        let _guard = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let mut registry = CommandRegistry::new();
         registry.register_command(SlashCommand {
             name: "hidden-skill".to_string(),

@@ -494,6 +494,11 @@ impl EngineCommandRouter {
                 let available = self.handle.list_available_models().await;
                 let listings = self.handle.list_model_listings().await;
                 let snapshot = self.handle.get_status_snapshot().await;
+                let curated = traits::curated_model_listings(
+                    &listings,
+                    &snapshot.model,
+                    snapshot.model_profile.as_deref(),
+                );
                 let models = traits::curated_model_refs(
                     &listings,
                     &available,
@@ -502,7 +507,15 @@ impl EngineCommandRouter {
                 );
                 let current =
                     traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
-                sink.emit(ClientEvent::ModelList { models, current }).await;
+                sink.emit(ClientEvent::ModelList {
+                    models,
+                    current,
+                    details: curated
+                        .iter()
+                        .map(client_adapter::lowering::lower_model_details)
+                        .collect(),
+                })
+                .await;
             }
             ListingKindDto::Mcp => {
                 let servers = self

@@ -924,7 +924,7 @@ class ChatViewModel(
      */
     internal fun applyModelState(engine: EngineModelState) {
         if (!engine.hasCatalog) return
-        val options = EngineModelCatalog.options(engine.available)
+        val options = EngineModelCatalog.options(engine.available, engine.details)
         val active = options.firstOrNull { it.id == engine.active } ?: options.first()
         _state.update { it.copy(availableModels = options, model = active) }
     }

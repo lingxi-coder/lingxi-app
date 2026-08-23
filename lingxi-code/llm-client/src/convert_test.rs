@@ -5,7 +5,7 @@ pub use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{MessageId, ToolUseId};
+    use protocol::{MediaAnalysis, MediaObservation, MessageId, ToolUseId};
 
     // ── to_llm_messages ───────────────────────────────────────────────────────
 
@@ -204,6 +204,50 @@ mod tests {
             &result[0].content[0],
             LlmBlock::ImageUrl { url } if url == "https://example.com/img.png"
         ));
+    }
+
+    #[test]
+    fn media_analysis_block_is_lowered_to_model_visible_text() {
+        let msg = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ProtoBlock::MediaAnalysis {
+                analysis: MediaAnalysis {
+                    question_key: "msg-123".into(),
+                    media_fingerprints: vec!["fp-a".into()],
+                    model: "deepseek-v4-flash-vision-exp".into(),
+                    prompt_version: 1,
+                    created_at: std::time::UNIX_EPOCH,
+                    task_findings: vec!["shows a receipt".into()],
+                    media: vec![MediaObservation {
+                        fingerprint: "fp-a".into(),
+                        label: "receipt".into(),
+                        description: "A printed store receipt.".into(),
+                        ocr: Some("TOTAL 12.34".into()),
+                        relevant_facts: vec!["total is 12.34".into()],
+                        uncertainty: Some("merchant name is blurry".into()),
+                    }],
+                    cross_media_findings: vec!["only one image".into()],
+                    truncated: false,
+                },
+            }],
+            is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        let result = to_llm_messages(vec![msg]).unwrap();
+        let LlmBlock::Text {
+            text,
+            cache_control,
+        } = &result[0].content[0]
+        else {
+            panic!("media analysis should become text");
+        };
+        assert_eq!(cache_control, &None);
+        assert!(text.contains("[Media analysis]"));
+        assert!(text.contains("question_key: msg-123"));
+        assert!(text.contains("shows a receipt"));
+        assert!(text.contains("TOTAL 12.34"));
+        assert!(text.contains("merchant name is blurry"));
     }
 
     #[test]

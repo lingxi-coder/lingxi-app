@@ -1,9 +1,13 @@
 //! Model registry and route identity resolution.
 
-use crate::{Capabilities, ClientConfig, LlmError, PricingModelRef, ProviderId};
+use crate::{
+    reasoning_control_spec, Capabilities, ClientConfig, LlmError, PricingModelRef, ProviderId,
+    ReasoningControlSpec, ReasoningTarget,
+};
+use traits::{ModelBillingMode, ModelMetadata, ModelPricing};
 
 /// Model entry exposed to model-picker and listing callers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelListing {
     /// Explicit provider identity.
     pub provider_id: ProviderId,
@@ -22,6 +26,10 @@ pub struct ModelListing {
     pub description: Option<String>,
     /// Model capabilities for this listing.
     pub capabilities: Capabilities,
+    /// Full provider-specific metadata used by model selectors.
+    pub metadata: ModelMetadata,
+    /// Exact reasoning controls accepted by this route.
+    pub reasoning: ReasoningControlSpec,
 }
 
 /// Resolved route identity for one requested model.
@@ -41,6 +49,15 @@ pub struct ResolvedRoute {
     pub capabilities: Capabilities,
 }
 
+/// Resolved main route plus an optional vision delegate route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaRoute {
+    /// Main route selected by the caller.
+    pub main: ResolvedRoute,
+    /// Vision delegate on the same profile, when the main route lacks vision.
+    pub vision_delegate: Option<ResolvedRoute>,
+}
+
 /// Registry that resolves requested model names to route identities.
 #[derive(Debug, Clone)]
 pub struct ModelRegistry {
@@ -48,6 +65,41 @@ pub struct ModelRegistry {
 }
 
 impl ModelRegistry {
+    fn effective_metadata(
+        provider: &crate::ProviderProfile,
+        model: &crate::ModelProfile,
+    ) -> ModelMetadata {
+        let mut metadata = model.metadata.clone();
+        if let Some((_, override_pricing)) = provider
+            .pricing
+            .overrides
+            .iter()
+            .find(|(id, _)| id == &model.display_model || id == &model.request_model)
+        {
+            if metadata
+                .pricing
+                .as_ref()
+                .and_then(|pricing| pricing.source.as_deref())
+                != Some("userOverride")
+            {
+                metadata.pricing = Some(ModelPricing {
+                    billing_mode: ModelBillingMode::PerToken,
+                    input_per_million: Some(override_pricing.input_per_million),
+                    output_per_million: Some(override_pricing.output_per_million),
+                    cache_read_per_million: Some(override_pricing.cache_read_per_million),
+                    cache_write_per_million: Some(override_pricing.cache_write_per_million),
+                    reasoning_per_million: Some(override_pricing.reasoning_per_million),
+                    tiers: Vec::new(),
+                    source: Some("userOverride".to_string()),
+                });
+            }
+        } else if provider.pricing.billing_mode != ModelBillingMode::Unknown {
+            let pricing = metadata.pricing.get_or_insert_with(ModelPricing::default);
+            pricing.billing_mode = provider.pricing.billing_mode;
+        }
+        metadata
+    }
+
     /// Build a registry from validated client config.
     pub fn from_config(config: ClientConfig) -> Result<Self, LlmError> {
         if config
@@ -58,6 +110,41 @@ impl ModelRegistry {
             return Err(LlmError::InvalidRequest {
                 message: "provider profile must declare at least one model".to_string(),
             });
+        }
+
+        for provider in &config.providers {
+            if let Some(delegate_model) = provider.vision_delegate.as_deref() {
+                let delegate = provider
+                    .models
+                    .iter()
+                    .find(|model| {
+                        model.display_model == delegate_model
+                            || model.request_model == delegate_model
+                            || model.aliases.iter().any(|alias| alias == delegate_model)
+                    })
+                    .ok_or_else(|| LlmError::InvalidRequest {
+                        message: format!(
+                            "provider profile '{}' sets visionDelegate to {:?}, but that model is not declared on the same profile",
+                            provider.profile_name, delegate_model
+                        ),
+                    })?;
+                if provider.models.len() == 1 {
+                    return Err(LlmError::InvalidRequest {
+                        message: format!(
+                            "provider profile '{}' sets visionDelegate to {:?}, but a profile's only model cannot delegate to itself",
+                            provider.profile_name, delegate_model
+                        ),
+                    });
+                }
+                if !delegate.capabilities.vision {
+                    return Err(LlmError::InvalidRequest {
+                        message: format!(
+                            "provider profile '{}' sets visionDelegate to {:?}, but that model does not advertise vision capability",
+                            provider.profile_name, delegate_model
+                        ),
+                    });
+                }
+            }
         }
 
         Ok(Self { config })
@@ -79,6 +166,13 @@ impl ModelRegistry {
                     aliases: model.aliases.clone(),
                     description: model.description.clone(),
                     capabilities: model.capabilities,
+                    metadata: Self::effective_metadata(provider, model),
+                    reasoning: reasoning_control_spec(ReasoningTarget {
+                        profile_name: Some(provider.profile_name.as_str()),
+                        protocol: &provider.protocol,
+                        base_url: &provider.base_url,
+                        model: &model.request_model,
+                    }),
                 })
             })
             .collect()
@@ -179,5 +273,38 @@ impl ModelRegistry {
     /// Resolve across all providers (unscoped). Ambiguous ids error.
     pub fn resolve(&self, requested: &str) -> Result<ResolvedRoute, LlmError> {
         self.resolve_in(requested, None)
+    }
+
+    /// Resolve a route and, when needed, its same-profile vision delegate.
+    pub fn resolve_media_route_in(
+        &self,
+        requested: &str,
+        profile: Option<&str>,
+    ) -> Result<MediaRoute, LlmError> {
+        let main = self.resolve_in(requested, profile)?;
+        let provider = self
+            .config
+            .providers
+            .iter()
+            .find(|provider| provider.profile_name == main.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        let vision_delegate = if main.capabilities.vision {
+            None
+        } else {
+            provider
+                .vision_delegate
+                .as_deref()
+                .map(|delegate| self.resolve_in(delegate, Some(provider.profile_name.as_str())))
+                .transpose()?
+        };
+        Ok(MediaRoute {
+            main,
+            vision_delegate,
+        })
+    }
+
+    /// Resolve a route and optional same-profile vision delegate unscoped.
+    pub fn resolve_media_route(&self, requested: &str) -> Result<MediaRoute, LlmError> {
+        self.resolve_media_route_in(requested, None)
     }
 }

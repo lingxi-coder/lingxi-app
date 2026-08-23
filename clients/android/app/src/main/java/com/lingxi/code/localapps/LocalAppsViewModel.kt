@@ -116,7 +116,10 @@ class LocalAppsViewModel(
                         bound.modelState.collect { engine ->
                             _uiState.update {
                                 it.copy(
-                                    workflowModels = EngineModelCatalog.options(engine.available),
+                                    workflowModels = EngineModelCatalog.options(
+                                        engine.available,
+                                        engine.details,
+                                    ),
                                     currentWorkflowModelId = engine.active.takeIf(String::isNotBlank),
                                 )
                             }

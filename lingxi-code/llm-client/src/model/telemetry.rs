@@ -49,6 +49,22 @@ pub async fn emit_started(
     bus.log_event("tengu_api_request_started", m).await;
 }
 
+/// Emit the internal purpose of a side query without adding it to the provider
+/// wire request. Main-turn requests leave this event absent.
+pub async fn emit_query_source(bus: &Option<Arc<AnalyticsBus>>, model: &str, query_source: &str) {
+    let Some(bus) = bus else { return };
+    let mut m = LogEventMetadata::new();
+    m.insert(
+        "model".into(),
+        AnalyticsValue::String(Verified::assert_safe(model.to_string()).into_inner()),
+    );
+    m.insert(
+        "querySource".into(),
+        AnalyticsValue::String(Verified::assert_safe(query_source.to_string()).into_inner()),
+    );
+    bus.log_event("tengu_api_query_source", m).await;
+}
+
 /// Emit `tengu_api_request_succeeded` with wall-clock duration and HTTP status.
 ///
 /// No-op when `bus` is `None`.

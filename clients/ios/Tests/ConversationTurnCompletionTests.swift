@@ -64,7 +64,8 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 apiKey: "",
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
-                projectCwd: nil
+                projectCwd: nil,
+                visionDelegationEnabled: true
             )
             let source = EngineConversationSource(config: config)
             source.setCommandSubmitterForTesting { _ in }

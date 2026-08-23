@@ -37,7 +37,7 @@ use llm_client::{
     LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     StaticCredentialProvider, SystemBlock,
 };
-use protocol::{HttpRequest, HttpResponse};
+use protocol::{HttpRequest, HttpResponse, MediaAnalysis};
 use std::sync::Arc;
 use traits::http::{RawByteStream, SseStream};
 use traits::{HttpError, HttpTransport};
@@ -117,6 +117,7 @@ impl ProviderSideQueryClient {
                 supports_websockets: false,
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
+                vision_delegate: None,
                 // Wildcard model support: sidequery uses any model string the
                 // caller passes (e.g. "claude-haiku-4-5" for memory summaries,
                 // "claude-opus-4-6" for compaction). We register a catch-all
@@ -176,6 +177,7 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
             billing_model: billing.to_string(),
             aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
             description: None,
+            metadata: Default::default(),
             capabilities: Capabilities {
                 streaming: false,
                 tools: true,
@@ -239,6 +241,12 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
 ///   same cross-naming the provider's own cost path uses: API `cache_write` →
 ///   cost `cache_write`, API `cache_read` → cost `cache_read`.
 fn decode_response(resp: llm_client::LlmResponse, want_structured: bool) -> SideQueryResponse {
+    let retry_count = resp
+        .provider_metadata
+        .get("_lingxi_retry_count")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0);
     let mut text_acc = String::new();
     let mut tool_calls: Vec<serde_json::Value> = Vec::new();
 
@@ -295,6 +303,7 @@ fn decode_response(resp: llm_client::LlmResponse, want_structured: bool) -> Side
         tool_calls,
         usage,
         stop_reason: resp.stop_reason,
+        retry_count,
     }
 }
 
@@ -303,8 +312,9 @@ impl SideQueryClient for ProviderSideQueryClient {
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
         if let ProviderSideQueryBackend::Session(service) = &self.backend {
             let wants_structured = request.output_format.is_some();
+            let query_source = request.query_source.as_str();
             let resp = service
-                .messages_create_side_query(
+                .messages_create_side_query_with_thinking(
                     &request.model,
                     request.profile.as_deref(),
                     request.system_prompt.as_deref(),
@@ -317,7 +327,9 @@ impl SideQueryClient for ProviderSideQueryClient {
                     Some(request.max_tokens),
                     convert_tool_choice(request.tool_choice.as_ref()),
                     request.stop_sequences,
+                    request.thinking,
                     request.temperature,
+                    Some(query_source),
                 )
                 .await?;
             return Ok(decode_response(resp, wants_structured));
@@ -357,6 +369,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             )
         });
 
+        let query_source = request.query_source.as_str().to_string();
         let llm_req = LlmRequest {
             model: request.model,
             profile: request.profile,
@@ -370,6 +383,8 @@ impl SideQueryClient for ProviderSideQueryClient {
             max_tokens: Some(request.max_tokens),
             temperature: request.temperature.map(f64::from),
             reasoning,
+            capture_retry_count: true,
+            query_source: Some(query_source),
             ..LlmRequest::default()
         };
 
@@ -381,6 +396,13 @@ impl SideQueryClient for ProviderSideQueryClient {
         let resp = client.execute(&llm_req, &bridge).await?;
 
         Ok(decode_response(resp, request.output_format.is_some()))
+    }
+
+    fn last_retry_count(&self) -> u32 {
+        match &self.backend {
+            ProviderSideQueryBackend::Session(service) => service.last_retry_count(),
+            ProviderSideQueryBackend::Direct { .. } => 0,
+        }
     }
 }
 
@@ -465,6 +487,10 @@ fn convert_content_block(
         }),
         protocol::ContentBlock::Image { source } => convert_image(source),
         protocol::ContentBlock::Document { source } => convert_document(source),
+        protocol::ContentBlock::MediaAnalysis { analysis } => Ok(llm_client::ContentBlock::Text {
+            text: render_media_analysis(&analysis),
+            cache_control: None,
+        }),
         // Low-frequency server-side blocks: replayed verbatim into the request
         // so the provider round-trips them (see agent::convert::convert_block).
         protocol::ContentBlock::RedactedThinking { data } => {
@@ -523,6 +549,13 @@ fn convert_document(
             Ok(llm_client::ContentBlock::Document { media_type, bytes })
         }
     }
+}
+
+fn render_media_analysis(analysis: &MediaAnalysis) -> String {
+    format!(
+        "[Media analysis sidecar]\n{}",
+        serde_json::to_string(analysis).unwrap_or_else(|_| "{}".to_string())
+    )
 }
 
 fn convert_tool_declarations(
@@ -764,6 +797,7 @@ mod tests {
                     billing_model: "claude-sonnet-4".to_string(),
                     aliases: vec![],
                     description: None,
+                    metadata: Default::default(),
                     capabilities: Capabilities {
                         streaming: false,
                         tools: true,
@@ -777,6 +811,7 @@ mod tests {
                 supports_websockets: false,
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
+                vision_delegate: None,
             }],
         };
         let parent_client = DefaultLlmClient::from_config(config)

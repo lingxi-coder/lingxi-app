@@ -71,7 +71,6 @@ pub(crate) const VITE_LOCKED_FILES: &[(&str, &[u8])] = &[
     embedded_template_file!("package.json"),
     embedded_template_file!("pnpm-lock.yaml"),
     embedded_template_file!("pnpm-workspace.yaml"),
-    embedded_template_file!("components.json"),
     embedded_template_file!("jsconfig.json"),
     embedded_template_file!("index.html"),
     embedded_template_file!("vite.config.mjs"),
@@ -90,53 +89,7 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
     embedded_template_file!("app/error-boundary.jsx"),
     embedded_template_file!("app/globals.css"),
     embedded_template_file!("app/screens/home-screen.jsx"),
-    embedded_template_file!("app/screens/component-lab.jsx"),
-    embedded_template_file!("components/ui/accordion.jsx"),
-    embedded_template_file!("components/ui/alert-dialog.jsx"),
-    embedded_template_file!("components/ui/alert.jsx"),
-    embedded_template_file!("components/ui/aspect-ratio.jsx"),
-    embedded_template_file!("components/ui/avatar.jsx"),
-    embedded_template_file!("components/ui/badge.jsx"),
-    embedded_template_file!("components/ui/breadcrumb.jsx"),
-    embedded_template_file!("components/ui/button-group.jsx"),
-    embedded_template_file!("components/ui/button.jsx"),
-    embedded_template_file!("components/ui/card.jsx"),
-    embedded_template_file!("components/ui/checkbox.jsx"),
-    embedded_template_file!("components/ui/collapsible.jsx"),
-    embedded_template_file!("components/ui/context-menu.jsx"),
-    embedded_template_file!("components/ui/dialog.jsx"),
-    embedded_template_file!("components/ui/dropdown-menu.jsx"),
-    embedded_template_file!("components/ui/empty.jsx"),
-    embedded_template_file!("components/ui/field.jsx"),
-    embedded_template_file!("components/ui/hover-card.jsx"),
-    embedded_template_file!("components/ui/input-group.jsx"),
-    embedded_template_file!("components/ui/input.jsx"),
-    embedded_template_file!("components/ui/item.jsx"),
-    embedded_template_file!("components/ui/kbd.jsx"),
-    embedded_template_file!("components/ui/label.jsx"),
-    embedded_template_file!("components/ui/pagination.jsx"),
-    embedded_template_file!("components/ui/popover.jsx"),
-    embedded_template_file!("components/ui/progress.jsx"),
-    embedded_template_file!("components/ui/radio-group.jsx"),
-    embedded_template_file!("components/ui/scroll-area.jsx"),
-    embedded_template_file!("components/ui/select.jsx"),
-    embedded_template_file!("components/ui/separator.jsx"),
-    embedded_template_file!("components/ui/sheet.jsx"),
-    embedded_template_file!("components/ui/sidebar.jsx"),
-    embedded_template_file!("components/ui/skeleton.jsx"),
-    embedded_template_file!("components/ui/slider.jsx"),
-    embedded_template_file!("components/ui/sonner.jsx"),
-    embedded_template_file!("components/ui/spinner.jsx"),
-    embedded_template_file!("components/ui/switch.jsx"),
-    embedded_template_file!("components/ui/table.jsx"),
-    embedded_template_file!("components/ui/tabs.jsx"),
-    embedded_template_file!("components/ui/textarea.jsx"),
-    embedded_template_file!("components/ui/toggle-group.jsx"),
-    embedded_template_file!("components/ui/toggle.jsx"),
-    embedded_template_file!("components/ui/tooltip.jsx"),
-    embedded_template_file!("src/hooks/use-mobile.js"),
-    embedded_template_file!("lib/query-client.js"),
-    embedded_template_file!("lib/utils.js"),
+    embedded_template_file!("app/screens/detail-screen.jsx"),
     embedded_template_file!("src/stores/app-store.js"),
     embedded_template_file!("public/.gitkeep"),
 ];
@@ -157,14 +110,13 @@ pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTar
 ///
 /// The repository-verified Vite scaffold is the single source of truth for the
 /// build infrastructure. Editable application code lives in `app/`, `src/`,
-/// `components/`, `styles/`, and non-host-managed files under `lib/`.
+/// `styles/`, and non-host-managed files under `lib/`.
 fn repinned_host_managed_files(_target: LocalAppBuildTarget) -> &'static [&'static str] {
     &[
         ".gitignore",
         "package.json",
         "pnpm-lock.yaml",
         "pnpm-workspace.yaml",
-        "components.json",
         "jsconfig.json",
         "index.html",
         "vite.config.mjs",
@@ -183,7 +135,6 @@ fn build_locked_files(_target: LocalAppBuildTarget) -> &'static [&'static str] {
         "package.json",
         "pnpm-lock.yaml",
         "pnpm-workspace.yaml",
-        "components.json",
         "jsconfig.json",
         "index.html",
         "vite.config.mjs",
@@ -1880,13 +1831,12 @@ mod tests {
         assert!(!workspace.join("package-lock.json").exists());
         assert!(workspace.join("index.html").is_file());
         assert!(workspace.join("vite.config.mjs").is_file());
-        assert!(workspace.join("components.json").is_file());
         assert!(workspace.join("jsconfig.json").is_file());
         assert!(workspace.join("app/main.jsx").is_file());
         assert!(workspace.join("app/globals.css").is_file());
         assert!(workspace.join("app/providers.jsx").is_file());
-        assert!(workspace.join("app/screens/component-lab.jsx").is_file());
-        assert!(workspace.join("components/ui/button.jsx").is_file());
+        assert!(workspace.join("app/screens/home-screen.jsx").is_file());
+        assert!(workspace.join("app/screens/detail-screen.jsx").is_file());
         assert!(workspace.join("styles/foundation.css").is_file());
         assert!(workspace.join(".lingxi/source-policy.json").is_file());
         let gitignore = fs::read_to_string(workspace.join(".gitignore")).expect("gitignore");
@@ -2318,10 +2268,10 @@ mod tests {
             "android:phone",
             "ios:tablet",
             "android:tablet",
-            "44pt",
-            "48dp",
-            "sidebar-or-split-view",
-            "rail-and-adaptive-pane",
+            "controlDensity: 44",
+            "controlDensity: 48",
+            "ionicMode",
+            "fontFamily",
         ] {
             assert!(adapter.contains(marker), "adapter missing {marker}");
         }
@@ -2337,8 +2287,33 @@ mod tests {
             !vite_config.contains("NODE_PATH"),
             "the pinned Vite config must not rely on NODE_PATH"
         );
-        assert!(foundation.contains("[data-platform^=\"ios:\"]"));
-        assert!(foundation.contains("[data-platform^=\"android:\"]"));
+        // iOS forbids JIT, so iSH runs V8 with `--jitless`, and jitless V8 has
+        // no WebAssembly. iSH substitutes `/lib/wasm-polyfill.js`, which is a
+        // single-purpose llhttp shim installed as the GLOBAL `WebAssembly`:
+        // `compile()` discards the bytes and `instantiate()` always hands back
+        // llhttp's exports. Vite's `vite:build-import-analysis` runs the
+        // bundled es-module-lexer over each output chunk, reads
+        // `exports.__heap_base.value`, gets llhttp instead, and every build on
+        // device dies with "Cannot read properties of undefined (reading
+        // 'value')" -- after transforming every module successfully.
+        //
+        // That plugin's generateBundle starts with `if (format !== "es")
+        // return;`, which returns BEFORE it awaits the lexer's WASM init. A
+        // non-ES output format is therefore the one lever in our control that
+        // keeps the build off WebAssembly entirely. Verified against the real
+        // polyfill: `es` fails, `iife` succeeds.
+        assert!(
+            vite_config.contains("format: \"iife\""),
+            "the pinned Vite config must emit a non-ES bundle; the device's \
+             WebAssembly is an llhttp-only shim and an ES build reaches it"
+        );
+        assert!(
+            vite_config.contains("inlineDynamicImports: true"),
+            "a single iife bundle cannot code-split, so dynamic imports must be \
+             inlined or the build fails on multiple chunks"
+        );
+        assert!(foundation.contains("@import \"@ionic/react/css/core.css\""));
+        assert!(foundation.contains("--ion-safe-area-top: var(--safe-area-top)"));
         assert!(foundation.contains("--safe-area-top: env(safe-area-inset-top"));
         assert!(foundation.contains("prefers-reduced-motion"));
     }

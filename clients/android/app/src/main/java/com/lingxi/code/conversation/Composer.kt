@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.foundation.text.BasicTextField
@@ -50,8 +51,11 @@ import androidx.compose.ui.res.stringResource
 import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
+import com.lingxi.code.components.ModelDetailsDialog
+import com.lingxi.code.components.ModelDetailsInfoButton
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
+import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.ModelProviderStatus
@@ -384,6 +388,7 @@ private fun ModelChip(
     val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
+    var selectedDetails by remember { mutableStateOf<CatalogModelDetails?>(null) }
     val chipShape = RoundedCornerShape(8.dp)
     val filteredModels = remember(models, query) { EngineModelCatalog.filter(models, query) }
     val groups = remember(filteredModels) { EngineModelCatalog.groups(filteredModels) }
@@ -469,6 +474,7 @@ private fun ModelChip(
                         model = m,
                         active = m.id == model.id,
                         providerStatuses = providerStatuses,
+                        onShowDetails = { selectedDetails = it },
                         onSelected = {
                             open = false
                             recentsStore.record(m.id)
@@ -519,6 +525,7 @@ private fun ModelChip(
                         model = m,
                         active = m.id == model.id,
                         providerStatuses = providerStatuses,
+                        onShowDetails = { selectedDetails = it },
                         onSelected = {
                             open = false
                             recentsStore.record(m.id)
@@ -541,6 +548,9 @@ private fun ModelChip(
                 )
             }
         }
+        selectedDetails?.let { details ->
+            ModelDetailsDialog(details = details, onDismiss = { selectedDetails = null })
+        }
     }
 }
 
@@ -555,6 +565,7 @@ private fun ModelPickerRow(
     model: ModelOption,
     active: Boolean,
     providerStatuses: List<ModelProviderStatus>,
+    onShowDetails: (CatalogModelDetails) -> Unit,
     onSelected: () -> Unit,
     onOpenProviderSettings: (String?) -> Unit,
 ) {
@@ -599,6 +610,9 @@ private fun ModelPickerRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+        }
+        model.details?.let { details ->
+            ModelDetailsInfoButton(onClick = { onShowDetails(details) }, modifier = Modifier.size(32.dp))
         }
         when {
             !canSelect -> Row(

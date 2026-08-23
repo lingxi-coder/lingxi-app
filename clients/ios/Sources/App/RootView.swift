@@ -137,6 +137,7 @@ struct RootView: View {
             providerProfilesJson: snapshot.providerProfilesJSON,
             providerRoutingJson: snapshot.routingJSON,
             defaultModelID: snapshot.defaultModelID,
+            visionDelegationEnabled: snapshot.visionDelegationEnabled,
             mobileLinux: runtime
         )
 
@@ -501,6 +502,7 @@ struct RootView: View {
                 store: localAppsStore,
                 initialAppID: appID,
                 availableModels: source.model.availableModels,
+                availableModelDetails: source.model.availableModelDetails,
                 activeModelID: source.model.activeModelId,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
@@ -540,6 +542,7 @@ struct RootView: View {
                 store: localAppsStore,
                 initialAppID: appID,
                 availableModels: source.model.availableModels,
+                availableModelDetails: source.model.availableModelDetails,
                 activeModelID: source.model.activeModelId,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
@@ -723,6 +726,7 @@ struct RootView: View {
             providerProfilesJson: snapshot.providerProfilesJSON,
             providerRoutingJson: snapshot.routingJSON,
             defaultModelID: snapshot.defaultModelID,
+            visionDelegationEnabled: snapshot.visionDelegationEnabled,
             mobileLinux: runtime
         )
     }

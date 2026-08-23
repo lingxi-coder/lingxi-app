@@ -18,6 +18,7 @@
 //! | `ContentBlock::Image { source: ImageSource::Base64 { media_type, data } }` | `ContentBlock::Image { media_type, bytes: base64_decode(data) }` |
 //! | `ContentBlock::Image { source: ImageSource::Url { url } }` | `ContentBlock::ImageUrl { url }` |
 //! | `ContentBlock::Document { source: DocumentSource::Base64 { media_type, data } }` | `ContentBlock::Document { media_type, bytes: base64_decode(data) }` |
+//! | `ContentBlock::MediaAnalysis { analysis }` | `ContentBlock::Text { text: render_media_analysis(analysis) }` |
 //!
 //! Low-frequency server-side variants ARE round-tripped (ingest preserves them
 //! into protocol blocks, and egress here replays them verbatim back to
@@ -27,7 +28,9 @@
 
 use crate::{ContentBlock as LlmBlock, LlmError, Message, ToolDeclaration};
 use base64::Engine as _;
-use protocol::{ContentBlock as ProtoBlock, ConversationMessage, DocumentSource, ImageSource};
+use protocol::{
+    ContentBlock as ProtoBlock, ConversationMessage, DocumentSource, ImageSource, MediaAnalysis,
+};
 use serde_json::Value;
 
 /// Convert a `Vec<ConversationMessage>` into `Vec<llm_client::Message>`.
@@ -648,7 +651,61 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             content,
             is_error,
         }),
+        ProtoBlock::MediaAnalysis { analysis } => Ok(LlmBlock::Text {
+            text: render_media_analysis(&analysis),
+            cache_control: None,
+        }),
     }
+}
+
+fn render_media_analysis(analysis: &MediaAnalysis) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "[Media analysis]");
+    let _ = writeln!(out, "question_key: {}", analysis.question_key);
+    let _ = writeln!(out, "model: {}", analysis.model);
+    let _ = writeln!(out, "prompt_version: {}", analysis.prompt_version);
+    let _ = writeln!(out, "truncated: {}", analysis.truncated);
+    if !analysis.media_fingerprints.is_empty() {
+        let _ = writeln!(
+            out,
+            "media_fingerprints: {}",
+            analysis.media_fingerprints.join(", ")
+        );
+    }
+    if !analysis.task_findings.is_empty() {
+        let _ = writeln!(out, "task_findings:");
+        for finding in &analysis.task_findings {
+            let _ = writeln!(out, "- {}", finding);
+        }
+    }
+    if !analysis.media.is_empty() {
+        let _ = writeln!(out, "media:");
+        for observation in &analysis.media {
+            let _ = writeln!(out, "- {} ({})", observation.label, observation.fingerprint);
+            let _ = writeln!(out, "  description: {}", observation.description);
+            if let Some(ocr) = &observation.ocr {
+                let _ = writeln!(out, "  ocr: {}", ocr);
+            }
+            if !observation.relevant_facts.is_empty() {
+                let _ = writeln!(out, "  relevant_facts:");
+                for fact in &observation.relevant_facts {
+                    let _ = writeln!(out, "  - {}", fact);
+                }
+            }
+            if let Some(uncertainty) = &observation.uncertainty {
+                let _ = writeln!(out, "  uncertainty: {}", uncertainty);
+            }
+        }
+    }
+    if !analysis.cross_media_findings.is_empty() {
+        let _ = writeln!(out, "cross_media_findings:");
+        for finding in &analysis.cross_media_findings {
+            let _ = writeln!(out, "- {}", finding);
+        }
+    }
+    out.trim_end().to_string()
 }
 
 fn convert_image_source(source: ImageSource) -> Result<LlmBlock, LlmError> {

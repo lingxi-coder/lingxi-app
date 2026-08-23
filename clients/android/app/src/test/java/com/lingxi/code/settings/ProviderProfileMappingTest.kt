@@ -1,6 +1,9 @@
 package com.lingxi.code.settings
 
 import com.lingxi.code.model.ConnStatus
+import com.lingxi.code.model.LlmProviderCatalogEntry
+import com.lingxi.code.model.CatalogModelDetails
+import com.lingxi.code.model.ModelMetadata
 import com.lingxi.code.model.GenericProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -122,6 +125,88 @@ class ProviderProfileMappingTest {
             """{"mobileEnabledProfiles":["deepseek","openai"]}""",
             ProviderSettingsRepository.buildMobileRoutingJson(listOf("deepseek", "openai")),
         )
+    }
+
+    @Test
+    fun engineLaunchConfig_defaultsVisionDelegationEnabled() {
+        val config = ProviderSettingsRepository.buildEngineLaunchConfig(
+            savedProviders = listOf(
+                provider(
+                    id = "l_openai",
+                    preset = "openai",
+                    url = "https://api.openai.com/v1",
+                ),
+            ),
+        )
+
+        assertTrue(config.visionDelegationEnabled)
+    }
+
+    @Test
+    fun engineLaunchConfig_propagatesDisabledVisionDelegation() {
+        val config = ProviderSettingsRepository.buildEngineLaunchConfig(
+            savedProviders = listOf(
+                provider(
+                    id = "l_openai",
+                    preset = "openai",
+                    url = "https://api.openai.com/v1",
+                ),
+            ),
+            visionDelegationEnabled = false,
+        )
+
+        assertFalse(config.visionDelegationEnabled)
+    }
+
+    @Test
+    fun newProvider_prefersBuiltinCatalogModelOverStalePresetOrder() {
+        val provider = ProviderSettingsRepository.newProvider(
+            kind = com.lingxi.code.model.ProviderKind.Llm,
+            preset = com.lingxi.code.model.Presets.llm.first { it.id == "openai" },
+            catalogEntries = listOf(
+                LlmProviderCatalogEntry(
+                    profileId = "openai",
+                    displayName = "OpenAI",
+                    baseUrl = "https://api.openai.com/v1",
+                    protocol = "responses",
+                    auth = "apiKey",
+                    credentialEnv = "OPENAI_API_KEY",
+                    modelIds = listOf("gpt-5.6-luna"),
+                    modelDetails = listOf(
+                        CatalogModelDetails(
+                            reference = "openai/gpt-5.6-luna",
+                            providerId = "openai",
+                            providerLabel = "OpenAI",
+                            displayName = "GPT-5.6 Luna",
+                            modelId = "gpt-5.6-luna",
+                            description = null,
+                            family = null,
+                            status = null,
+                            releaseDate = null,
+                            lastUpdated = null,
+                            knowledgeCutoff = null,
+                            inputModalities = emptyList(),
+                            outputModalities = emptyList(),
+                            contextWindowTokens = null,
+                            maxInputTokens = null,
+                            maxOutputTokens = null,
+                            openWeights = null,
+                            attachments = null,
+                            temperatureControl = null,
+                            pricing = null,
+                            capabilities = emptyList(),
+                            reasoningOptions = emptyList(),
+                            reasoningEditable = true,
+                            reasoningForced = false,
+                            reasoningDefault = null,
+                            metadata = ModelMetadata(displayName = "GPT-5.6 Luna"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals("gpt-5.6-luna", provider.model)
     }
 
     private fun provider(

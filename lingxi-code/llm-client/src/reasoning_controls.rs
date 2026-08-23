@@ -134,6 +134,16 @@ pub(crate) fn request_reasoning_intent(request: &LlmRequest) -> RequestReasoning
 }
 
 pub fn reasoning_control_spec(target: ReasoningTarget<'_>) -> ReasoningControlSpec {
+    if let Some(spec) = match target.profile_name {
+        Some("zai") => Some(catalog_control_spec(zai_catalog(), target.model)),
+        Some("glm-coding") => Some(catalog_control_spec(glm_coding_catalog(), target.model)),
+        Some("github-copilot") => {
+            Some(catalog_control_spec(github_copilot_catalog(), target.model))
+        }
+        _ => None,
+    } {
+        return spec;
+    }
     match target.protocol {
         ProtocolFamily::AnthropicMessages
         | ProtocolFamily::BedrockClaude
@@ -143,8 +153,35 @@ pub fn reasoning_control_spec(target: ReasoningTarget<'_>) -> ReasoningControlSp
         ProtocolFamily::GeminiGenerateContent | ProtocolFamily::VertexGemini => {
             gemini_spec(target.model)
         }
-        ProtocolFamily::OpenAiChat => openai_chat_spec(target.profile_name, target.base_url, target.model),
+        ProtocolFamily::OpenAiChat => {
+            openai_chat_spec(target.profile_name, target.base_url, target.model)
+        }
         ProtocolFamily::AzureOpenAi => ReasoningControlSpec::automatic_only(),
+    }
+}
+
+fn catalog_control_spec(
+    catalog: &HashMap<String, CatalogReasoningSpec>,
+    model: &str,
+) -> ReasoningControlSpec {
+    let Some(spec) = catalog.get(model) else {
+        return ReasoningControlSpec::automatic_only();
+    };
+    if !spec.reasoning {
+        return ReasoningControlSpec::automatic_only();
+    }
+    let can_disable = spec.toggle || spec.levels.iter().any(|level| level == "none");
+    ReasoningControlSpec {
+        levels: spec
+            .levels
+            .iter()
+            .filter(|level| level.as_str() != "none")
+            .cloned()
+            .collect(),
+        token_budget: spec.token_budget,
+        can_disable,
+        can_enable: spec.toggle && spec.levels.is_empty() && spec.token_budget.is_none(),
+        mandatory_selection: None,
     }
 }
 
@@ -195,7 +232,10 @@ fn openai_responses_spec(base_url: &str, model: &str) -> ReasoningControlSpec {
                 can_enable: false,
                 mandatory_selection: None,
             },
-            _ => ReasoningControlSpec::automatic_only(),
+            _ => openai_catalog().get(model).map_or_else(
+                ReasoningControlSpec::automatic_only,
+                catalog_spec_for_openai,
+            ),
         };
     }
 
@@ -329,16 +369,18 @@ fn deepseek_spec(model: &str) -> ReasoningControlSpec {
 
 fn kimi_spec(model: &str) -> ReasoningControlSpec {
     match model {
-        "kimi-k2-thinking" | "k2-thinking" | "kimi-k2-thinking-preview"
-        | "kimi-k2.7-code" | "kimi-for-coding" | "kimi-for-coding-highspeed" => {
-            ReasoningControlSpec {
-                levels: Vec::new(),
-                token_budget: None,
-                can_disable: false,
-                can_enable: false,
-                mandatory_selection: Some(ReasoningSelection::Enabled),
-            }
-        }
+        "kimi-k2-thinking"
+        | "k2-thinking"
+        | "kimi-k2-thinking-preview"
+        | "kimi-k2.7-code"
+        | "kimi-for-coding"
+        | "kimi-for-coding-highspeed" => ReasoningControlSpec {
+            levels: Vec::new(),
+            token_budget: None,
+            can_disable: false,
+            can_enable: false,
+            mandatory_selection: Some(ReasoningSelection::Enabled),
+        },
         _ => {
             let spec = kimi_catalog()
                 .get(model)
@@ -408,6 +450,22 @@ fn kimi_code_catalog() -> &'static HashMap<String, CatalogReasoningSpec> {
 fn openrouter_catalog() -> &'static HashMap<String, CatalogReasoningSpec> {
     static OPENROUTER: OnceLock<HashMap<String, CatalogReasoningSpec>> = OnceLock::new();
     OPENROUTER.get_or_init(|| parse_catalog(include_str!("../data/models-dev/openrouter.json")))
+}
+
+fn zai_catalog() -> &'static HashMap<String, CatalogReasoningSpec> {
+    static CATALOG: OnceLock<HashMap<String, CatalogReasoningSpec>> = OnceLock::new();
+    CATALOG.get_or_init(|| parse_catalog(include_str!("../data/models-dev/zai.json")))
+}
+
+fn glm_coding_catalog() -> &'static HashMap<String, CatalogReasoningSpec> {
+    static CATALOG: OnceLock<HashMap<String, CatalogReasoningSpec>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| parse_catalog(include_str!("../data/models-dev/zhipuai-coding-plan.json")))
+}
+
+fn github_copilot_catalog() -> &'static HashMap<String, CatalogReasoningSpec> {
+    static CATALOG: OnceLock<HashMap<String, CatalogReasoningSpec>> = OnceLock::new();
+    CATALOG.get_or_init(|| parse_catalog(include_str!("../data/models-dev/github-copilot.json")))
 }
 
 fn parse_catalog(json: &str) -> HashMap<String, CatalogReasoningSpec> {
@@ -489,7 +547,13 @@ mod tests {
     #[test]
     fn gemini_spec_distinguishes_budget_and_level_models() {
         let budget = gemini_spec("gemini-2.5-flash");
-        assert_eq!(budget.token_budget, Some(TokenBudgetRange { min: 0, max: 24_576 }));
+        assert_eq!(
+            budget.token_budget,
+            Some(TokenBudgetRange {
+                min: 0,
+                max: 24_576
+            })
+        );
         assert!(budget.can_disable);
         assert!(budget.levels.is_empty());
 
@@ -501,7 +565,7 @@ mod tests {
     #[test]
     fn deepseek_and_kimi_specs_only_expose_verified_controls() {
         let deepseek = deepseek_spec("deepseek-v4-flash");
-        assert_eq!(deepseek.levels, vec!["high", "max"]);
+        assert_eq!(deepseek.levels, vec!["low", "high", "max"]);
         assert!(deepseek.can_disable);
         assert!(!deepseek.can_enable);
 
@@ -524,6 +588,31 @@ mod tests {
 
         let unknown = openrouter_spec("openrouter/auto");
         assert_eq!(unknown, ReasoningControlSpec::automatic_only());
+    }
+
+    #[test]
+    fn subscription_and_glm_profiles_use_their_route_catalog() {
+        let protocol = ProtocolFamily::AnthropicMessages;
+        let glm = reasoning_control_spec(ReasoningTarget {
+            profile_name: Some("glm-coding"),
+            protocol: &protocol,
+            base_url: "https://open.bigmodel.cn/api/anthropic",
+            model: "glm-5.3",
+        });
+        assert_eq!(glm.levels, vec!["low", "high", "max"]);
+
+        let chat = ProtocolFamily::OpenAiChat;
+        let copilot = reasoning_control_spec(ReasoningTarget {
+            profile_name: Some("github-copilot"),
+            protocol: &chat,
+            base_url: "https://api.githubcopilot.com",
+            model: "gpt-5.6-sol",
+        });
+        assert_eq!(
+            copilot.levels,
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(copilot.can_disable);
     }
 
     #[test]

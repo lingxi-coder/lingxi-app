@@ -57,6 +57,17 @@ data class ProviderPreset(
     val needsCx: Boolean = false,
 )
 
+data class LlmProviderCatalogEntry(
+    val profileId: String,
+    val displayName: String,
+    val baseUrl: String,
+    val protocol: String,
+    val auth: String,
+    val credentialEnv: String?,
+    val modelIds: List<String>,
+    val modelDetails: List<CatalogModelDetails>,
+)
+
 data class GenericProvider(
     val id: String,
     val preset: String,
@@ -192,14 +203,14 @@ object Presets {
      * `provider_default_model` first, and matches the iOS `Presets.llm` twin.
      */
     val llm: List<ProviderPreset> = listOf(
-        ProviderPreset("anthropic", "Anthropic", "Claude API", Color(red = 0.9351f, green = 0.5079f, blue = 0.4015f), "https://api.anthropic.com", "sk-ant-", listOf("claude-sonnet-5", "claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5")),
-        ProviderPreset("openai", "OpenAI", "ChatGPT API", Color(red = 0.1326f, green = 0.7261f, blue = 0.5350f), "https://api.openai.com/v1", "sk-proj-", listOf("gpt-4o", "gpt-4o-mini", "o1-preview")),
-        ProviderPreset("google", "Google", "Gemini API", Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f), "https://generativelanguage.googleapis.com/v1", "AIza", listOf("gemini-2.5-pro", "gemini-2.5-flash")),
-        ProviderPreset("deepseek", "DeepSeek", "DeepSeek API", Color(red = 0.6451f, green = 0.5662f, blue = 1.0000f), "https://api.deepseek.com", "sk-", listOf("deepseek-v4-flash", "deepseek-v4-pro")),
-        ProviderPreset("kimi", "Kimi", "Moonshot AI", Color(red = 0.4340f, green = 0.5865f, blue = 1.0000f), "https://api.moonshot.cn/v1", "sk-", listOf("kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6")),
-        ProviderPreset("kimi-code", "Kimi Code", "编程会员套餐", Color(red = 0.2784f, green = 0.6980f, blue = 0.9490f), "https://api.kimi.com/coding/v1", "sk-", listOf("kimi-for-coding", "k3", "k3-256k", "kimi-for-coding-highspeed")),
+        ProviderPreset("anthropic", "Anthropic", "Claude API", Color(red = 0.9351f, green = 0.5079f, blue = 0.4015f), "https://api.anthropic.com", "sk-ant-", listOf("claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-haiku-4-5")),
+        ProviderPreset("openai", "OpenAI", "ChatGPT API", Color(red = 0.1326f, green = 0.7261f, blue = 0.5350f), "https://api.openai.com/v1", "sk-proj-", listOf("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")),
+        ProviderPreset("google", "Google", "Gemini API", Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f), "https://generativelanguage.googleapis.com/v1", "AIza", listOf("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro-preview")),
+        ProviderPreset("deepseek", "DeepSeek", "DeepSeek API", Color(red = 0.6451f, green = 0.5662f, blue = 1.0000f), "https://api.deepseek.com", "sk-", listOf("deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro")),
+        ProviderPreset("kimi", "Kimi", "Moonshot AI", Color(red = 0.4340f, green = 0.5865f, blue = 1.0000f), "https://api.moonshot.cn/v1", "sk-", listOf("kimi-k3")),
+        ProviderPreset("kimi-code", "Kimi Code", "编程会员套餐", Color(red = 0.2784f, green = 0.6980f, blue = 0.9490f), "https://api.kimi.com/coding/v1", "sk-", listOf("k3")),
         ProviderPreset("qwen", "通义千问", "DashScope", Color(red = 0.8826f, green = 0.6256f, blue = 0.2074f), "https://dashscope.aliyuncs.com/v1", "sk-", listOf("qwen-max", "qwen-plus", "qwen-turbo")),
-        ProviderPreset("openrouter", "OpenRouter", "多模型聚合", Color(red = 0.0000f, green = 0.7441f, blue = 0.7802f), "https://openrouter.ai/api/v1", "sk-or-", listOf("anthropic/claude-sonnet-4.5", "openai/gpt-4o", "google/gemini-2.5-pro")),
+        ProviderPreset("openrouter", "OpenRouter", "多模型聚合", Color(red = 0.0000f, green = 0.7441f, blue = 0.7802f), "https://openrouter.ai/api/v1", "sk-or-", listOf("openrouter/auto", "~anthropic/claude-sonnet-latest", "~openai/gpt-latest", "~openai/gpt-mini-latest", "~google/gemini-flash-latest")),
         ProviderPreset("custom", "自定义", "OpenAI 兼容端点", Color(red = 0.5728f, green = 0.6177f, blue = 0.7466f), "https://", "", emptyList()),
     )
 

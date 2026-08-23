@@ -4672,9 +4672,9 @@ fn mcp_not_configured_msg(is_all: bool, target: &str) -> String {
 fn mcp_reconnect_block_msg(state: traits::McpActionState, target: &str) -> Option<String> {
     use traits::McpActionState::{Disabled, NeedsApproval, Pending};
     match state {
-        Disabled => {
-            Some(format!("\"{target}\" is disabled. Run `/mcp enable {target}` to bring it back."))
-        }
+        Disabled => Some(format!(
+            "\"{target}\" is disabled. Run `/mcp enable {target}` to bring it back."
+        )),
         Pending => Some(format!(
             "\"{target}\" is already reconnecting \u{2014} retries can take a few minutes when a server keeps failing."
         )),
@@ -5011,17 +5011,32 @@ mod tests {
         );
         // Failed → no "(state)" parenthetical, "Check its config" hint.
         assert_eq!(
-            mcp_toggle_success_message(true, false, "myserver", &[toggle("myserver", Some(Failed))]),
+            mcp_toggle_success_message(
+                true,
+                false,
+                "myserver",
+                &[toggle("myserver", Some(Failed))]
+            ),
             "Enabled \"myserver\", but it isn't connected yet. Check its config with `/mcp` in the terminal.",
         );
         // NeedsAuth → "(needs authentication)" + "Authenticate" hint.
         assert_eq!(
-            mcp_toggle_success_message(true, false, "myserver", &[toggle("myserver", Some(NeedsAuth))]),
+            mcp_toggle_success_message(
+                true,
+                false,
+                "myserver",
+                &[toggle("myserver", Some(NeedsAuth))]
+            ),
             "Enabled \"myserver\", but it isn't connected yet (needs authentication). Authenticate with `/mcp` in the terminal.",
         );
         // Pending → "(connecting)" + "Check its config" hint.
         assert_eq!(
-            mcp_toggle_success_message(true, false, "myserver", &[toggle("myserver", Some(Pending))]),
+            mcp_toggle_success_message(
+                true,
+                false,
+                "myserver",
+                &[toggle("myserver", Some(Pending))]
+            ),
             "Enabled \"myserver\", but it isn't connected yet (connecting). Check its config with `/mcp` in the terminal.",
         );
         // Rejected (None) → "Couldn't enable".
@@ -6545,6 +6560,8 @@ mod tests {
                         provider_label: "Anthropic".into(),
                         is_current: true,
                         supports_reasoning: true,
+                        supports_multimodal: false,
+                        details: Vec::new(),
                     },
                     ModelRow {
                         display: "Sonnet".into(),
@@ -6553,6 +6570,8 @@ mod tests {
                         provider_label: "Anthropic".into(),
                         is_current: false,
                         supports_reasoning: true,
+                        supports_multimodal: false,
+                        details: Vec::new(),
                     },
                 ],
                 ..Default::default()
@@ -7413,6 +7432,8 @@ mod tests {
                         provider_label: "Anthropic".into(),
                         is_current: true,
                         supports_reasoning: true,
+                        supports_multimodal: false,
+                        details: Vec::new(),
                     },
                     ModelRow {
                         display: "OR Auto".into(),
@@ -7421,6 +7442,8 @@ mod tests {
                         provider_label: "OpenRouter".into(),
                         is_current: false,
                         supports_reasoning: true,
+                        supports_multimodal: false,
+                        details: Vec::new(),
                     },
                     ModelRow {
                         display: "OR GPT".into(),
@@ -7429,6 +7452,8 @@ mod tests {
                         provider_label: "OpenRouter".into(),
                         is_current: false,
                         supports_reasoning: true,
+                        supports_multimodal: false,
+                        details: Vec::new(),
                     },
                 ],
                 ..Default::default()
@@ -7538,6 +7563,8 @@ mod tests {
                         provider_label: "OpenAI".into(),
                         is_current: false,
                         supports_reasoning: true,
+                        supports_multimodal: false,
+                        details: Vec::new(),
                     },
                     ModelRow {
                         display: "GPT-5.5".into(),
@@ -7546,6 +7573,8 @@ mod tests {
                         provider_label: "GitHub Copilot".into(),
                         is_current: false,
                         supports_reasoning: true,
+                        supports_multimodal: false,
+                        details: Vec::new(),
                     },
                 ],
                 ..Default::default()

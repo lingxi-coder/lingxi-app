@@ -1,10 +1,11 @@
 {
-  "_comment": "Hand-authored (not from models.dev): codex's Codex-backend model list is dynamic (filter_by_auth) and not published on models.dev. Models reachable via ChatGPT-account login against https://chatgpt.com/backend-api/codex. Codex-EXCLUSIVE ids only — shared ids like gpt-5.2 stay in the openai (api-key) slice to avoid cross-profile resolution ambiguity.",
+  "_comment": "Hand-authored (not from models.dev): the ChatGPT Codex-backend model list is dynamic (filter_by_auth) and not published on models.dev. These are the current GPT-5.6 models reachable through ChatGPT-account login against https://chatgpt.com/backend-api/codex. They intentionally mirror the latest OpenAI API ids; callers must use the explicit openai-chatgpt profile when the same id exists under another provider.",
   "id": "openai-chatgpt",
   "name": "OpenAI (ChatGPT login)",
   "env": [],
   "models": {
-    "gpt-5.3-codex": { "id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "tool_call": true, "reasoning": true, "modalities": { "input": ["text"], "output": ["text"] } },
-    "gpt-5-codex":   { "id": "gpt-5-codex",   "name": "GPT-5 Codex",   "tool_call": true, "reasoning": true, "modalities": { "input": ["text"], "output": ["text"] } }
+    "gpt-5.6-sol":   { "id": "gpt-5.6-sol",   "name": "GPT-5.6 Sol",   "tool_call": true, "reasoning": true, "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] } },
+    "gpt-5.6-terra": { "id": "gpt-5.6-terra", "name": "GPT-5.6 Terra", "tool_call": true, "reasoning": true, "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] } },
+    "gpt-5.6-luna":  { "id": "gpt-5.6-luna",  "name": "GPT-5.6 Luna",  "tool_call": true, "reasoning": true, "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] } }
   }
 }

@@ -89,7 +89,9 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // they matched nothing here and fell through to `DenyByDefault`, so the
     // create flow prompted on every step.
     //
-    // Split by REVERSIBILITY, not read/write.
+    // Split by REVERSIBILITY, not read/write. The allow-by-default operations
+    // still refine to Ask in `LocalAppTool::check_permissions` when a session
+    // is not bound to an app workspace.
     m.insert("LocalAppList", AllowByDefault);
     m.insert("LocalAppGet", AllowByDefault);
     m.insert("LocalAppLogs", AllowByDefault);
@@ -147,15 +149,9 @@ mod tests {
     use super::*;
 
     /// The local-app host operations are FIRST-PARTY builtin tools, not a
-    /// user-configured MCP server. While they were spelled
-    /// `mcp__local_apps__*` they matched no table entry and fell through to
-    /// `DenyByDefault`, so the create flow raised a prompt on every build,
-    /// log read and runtime start.
-    ///
-    /// The split is by REVERSIBILITY, not by read/write: an operation whose
-    /// effect the user can trivially undo (rebuild, restart) auto-allows;
-    /// anything that touches user data, drives the UI on the user's behalf,
-    /// discards uncommitted work, or opens the network still asks.
+    /// user-configured MCP server. The split stays based on reversibility; the
+    /// tool-level permission refinement adds the missing session-scope check
+    /// for every allow-by-default operation that targets an app.
     #[test]
     fn local_app_tools_split_by_reversibility() {
         for name in [
@@ -165,16 +161,13 @@ mod tests {
             "LocalAppCheckpointList",
             "LocalAppBackgroundList",
             "LocalAppBackgroundStatus",
-            // Writes, but app-local and trivially reversible: the build runs
-            // with the network DISABLED and only writes the app's own `dist/`,
-            // and the runtime is a local preview server that can be restarted.
             "LocalAppBuild",
             "LocalAppRuntime",
         ] {
             assert_eq!(
                 tool_default(name),
                 PromptDefault::AllowByDefault,
-                "{name} should not prompt"
+                "{name} should reach its tool-level scope refinement without a policy prompt"
             );
         }
 

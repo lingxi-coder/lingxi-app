@@ -8,7 +8,18 @@ function readSnapshot() {
   const bridge = getLingXiBridge();
   const device = getDeviceContext();
   const adapter = getPlatformAdapter(device);
-  return { bridge, bridgeReady: bridge !== null, device, adapter };
+  // `bridgeResolved` is NOT `bridgeReady`. It answers "has the question been
+  // settled yet", which is what a consumer that must choose once — Ionic's
+  // `mode`, say — has to wait for. `bridgeReady` stays false both while the
+  // poll is still running and after it has given up, and those two states need
+  // different behaviour: hold the first paint, versus render with the fallback.
+  return {
+    bridge,
+    bridgeReady: bridge !== null,
+    bridgeResolved: bridge !== null,
+    device,
+    adapter,
+  };
 }
 
 /// The native `deviceContext` is LIVE — the host defines `viewport`,
@@ -51,7 +62,10 @@ export function LingXiBridgeProvider({ children }) {
     const refresh = () => {
       const next = readSnapshot();
       if (next.bridgeReady || attempts >= 120) {
-        setSnapshot(next);
+        // Giving up is itself an answer: mark it resolved so a consumer that is
+        // holding its first paint renders with the fallback context instead of
+        // waiting forever.
+        setSnapshot({ ...next, bridgeResolved: true });
         return;
       }
       attempts += 1;
@@ -97,9 +111,34 @@ export function LingXiBridgeProvider({ children }) {
     };
   }, [snapshot.bridgeReady]);
 
+  const style = useMemo(() => platformStyle(snapshot.adapter), [snapshot.adapter]);
+
+  // Publish the platform facts on <html>, where no generated code can drop
+  // them.
+  //
+  // These used to live on the root element of `app/screens/home-screen.jsx` —
+  // the one file every prompt tells the generator to rewrite first. An app that
+  // replaced that screen lost `data-platform`, `data-input-mode` and every
+  // safe-area custom property along with it, and nothing failed: the styles
+  // simply stopped applying. <html> is outside the agent-writable roots, so the
+  // contract cannot be broken by generated source.
+  useEffect(() => {
+    const root = document.documentElement;
+    const { adapter } = snapshot;
+
+    root.dataset.platform = adapter.key;
+    root.dataset.inputMode = adapter.context.inputMode;
+    root.dataset.reducedMotion = String(adapter.context.reducedMotion === true);
+    root.classList.toggle("ion-palette-dark", adapter.context.colorScheme === "dark");
+
+    for (const [property, propertyValue] of Object.entries(style)) {
+      root.style.setProperty(property, propertyValue);
+    }
+  }, [snapshot, style]);
+
   const value = useMemo(
-    () => ({ ...snapshot, platformStyle: platformStyle(snapshot.adapter) }),
-    [snapshot],
+    () => ({ ...snapshot, platformStyle: style }),
+    [snapshot, style],
   );
 
   return (

@@ -44,11 +44,47 @@ pub struct ModelRow {
     /// Kept OUT of [`Self::display`] so the statusline / welcome identity — which
     /// read `display` — stay untagged; the suffix is drawn only in the picker.
     pub supports_reasoning: bool,
+    /// Whether the model natively accepts image or document input.
+    pub supports_multimodal: bool,
+    /// Preformatted picker detail strings. The first line is the compact row
+    /// summary (capabilities/context/price); later lines feed the selected-row
+    /// detail panel and search index.
+    pub details: Vec<String>,
+}
+
+impl ModelRow {
+    /// Compact one-line summary rendered beside the row when available.
+    #[must_use]
+    pub fn summary(&self) -> Option<&str> {
+        self.details.first().map(String::as_str)
+    }
+
+    /// Full detail panel lines (excluding the compact summary line).
+    #[must_use]
+    pub fn detail_panel_lines(&self) -> &[String] {
+        self.details.get(1..).unwrap_or(&[])
+    }
+
+    /// Search index content beyond the primary display/provider/request fields.
+    #[must_use]
+    pub fn searchable_detail_text(&self) -> String {
+        self.details.join(" ")
+    }
+
+    /// Whether the catalog marks this route deprecated.
+    #[must_use]
+    pub fn is_deprecated(&self) -> bool {
+        self.details
+            .iter()
+            .any(|line| line.eq_ignore_ascii_case("Status: deprecated"))
+    }
 }
 
 /// The dim suffix the `/model` picker appends to a non-thinking row. Defined
 /// here (not inlined) so the picker render and its width budget agree.
 pub(crate) const NON_THINKING_TAG: &str = " · 无思考";
+/// The dim suffix shown for built-in image/document-capable models.
+pub(crate) const MULTIMODAL_TAG: &str = " · 多模态";
 
 /// Filter the full captured model catalog down to what the `/model` picker
 /// should show: models of ELIGIBLE providers only, trimmed to each curated
@@ -111,6 +147,7 @@ pub fn connected_model_rows_restricted(
             let eligible = availability.get(profile).copied().unwrap_or(false)
                 || current_provider.as_deref() == Some(profile);
             eligible
+                && !m.is_deprecated()
                 && (traits::is_curated_model(profile, &m.request_model)
                     || !traits::provider_has_curated_list(profile))
                 // Managed allowlist gate: a barred model is not selectable.
@@ -256,6 +293,8 @@ mod tests {
             provider_label: provider.to_string(),
             is_current: current,
             supports_reasoning: true,
+            supports_multimodal: false,
+            details: Vec::new(),
         }
     }
 
@@ -401,7 +440,7 @@ mod tests {
             // The current model is Sonnet, which the allowlist does NOT permit —
             // it must stay selectable regardless (is_current carve-out).
             row("Claude Sonnet 5", "claude-sonnet-5", "anthropic", true),
-            row("Claude Opus 4.8", "claude-opus-4-8", "anthropic", false),
+            row("Claude Opus 5", "claude-opus-5", "anthropic", false),
             row("Claude Haiku 4.5", "claude-haiku-4-5", "anthropic", false),
         ];
         let mut avail = BTreeMap::new();
@@ -412,7 +451,7 @@ mod tests {
         let shown = connected_model_rows_restricted(&all, &avail, Some(&allow), None);
         let ids: Vec<&str> = shown.iter().map(|m| m.request_model.as_str()).collect();
         // Opus (permitted) + the current Sonnet (carve-out) survive; Haiku is barred.
-        assert!(ids.contains(&"claude-opus-4-8"), "permitted model shown");
+        assert!(ids.contains(&"claude-opus-5"), "permitted model shown");
         assert!(
             ids.contains(&"claude-sonnet-5"),
             "current kept even though barred"

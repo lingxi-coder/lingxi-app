@@ -149,7 +149,8 @@ impl ToolInvoker for RegistryToolInvoker {
         input: Value,
         ctx: SubagentInvocationContext,
     ) -> Result<Value, ToolInvokerError> {
-        self.invoke_with_workspace_lease(name, input, ctx, None).await
+        self.invoke_with_workspace_lease(name, input, ctx, None)
+            .await
     }
 
     async fn invoke_with_workspace_lease(

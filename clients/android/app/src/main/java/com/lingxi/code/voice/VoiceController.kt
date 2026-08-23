@@ -196,6 +196,7 @@ fun buildVoiceEngine(
     model: String = "",
     providerProfilesJson: String = "{}",
     routingJson: String? = null,
+    visionDelegationEnabled: Boolean = true,
     projectWorkspace: ProjectWorkspace? = null,
     linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.Legacy,
     launchMode: AndroidLaunchModeFfi = AndroidLaunchModeFfi.INTERACTIVE,
@@ -290,6 +291,7 @@ fun buildVoiceEngine(
                 apiBase = apiBase,
                 apiKey = apiKey,
                 model = model,
+                visionDelegationEnabled = visionDelegationEnabled,
                 appFilesRoot = appContext.filesDir.absolutePath,
                 projectCwd = projectWorkspace?.hostPath,
                 providerConfig = AndroidProviderConfigFfi(

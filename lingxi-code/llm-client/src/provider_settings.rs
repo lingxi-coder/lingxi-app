@@ -232,6 +232,7 @@ fn parse_one_provider(
     let supports_websocket_compression =
         parse_optional_bool(obj, name, "supportsWebsocketCompression")?.unwrap_or(false);
     let websocket_connect_timeout_ms = parse_optional_u64(obj, name, "websocketConnectTimeoutMs")?;
+    let vision_delegate = parse_optional_string(obj, name, "visionDelegate")?;
 
     if supports_websockets && matches!(kind, ProviderKind::BedrockClaude) {
         return Err(format!(
@@ -304,18 +305,47 @@ fn parse_one_provider(
         }
     };
 
-    let models = parse_models(
+    let mut models = parse_models(
         obj.get("models"),
         name,
         options.models_required,
         strict,
         &mut warnings,
     )?;
-    let pricing = if let Some(pricing_val) = obj.get("pricing") {
+    let (mut pricing, display_overrides) = if let Some(pricing_val) = obj.get("pricing") {
         parse_pricing_overrides(name, pricing_val, &models)?
     } else {
-        PricingConfig::default()
+        (PricingConfig::default(), Vec::new())
     };
+    if let Some(value) = obj.get("billingMode") {
+        let raw = value
+            .as_str()
+            .ok_or_else(|| format!("provider {name:?}: billingMode must be a string"))?;
+        pricing.billing_mode = match raw {
+            "perToken" => traits::ModelBillingMode::PerToken,
+            "subscription" => traits::ModelBillingMode::Subscription,
+            "free" => traits::ModelBillingMode::Free,
+            "unknown" => traits::ModelBillingMode::Unknown,
+            _ => {
+                return Err(format!(
+                    "provider {name:?}: unsupported billingMode {raw:?}"
+                ));
+            }
+        };
+    }
+    if !pricing.overrides.is_empty() {
+        // A concrete per-model price sheet is stronger evidence than a broad
+        // provider billing hint and must drive both cost lookup and display.
+        pricing.billing_mode = traits::ModelBillingMode::PerToken;
+    }
+    for (model_id, model_pricing) in display_overrides {
+        if let Some(model) = models
+            .iter_mut()
+            .find(|model| model.display_model == model_id)
+        {
+            model.metadata.pricing = Some(model_pricing);
+        }
+    }
 
     Ok(ProviderParseResult {
         provider: ParsedUserProvider {
@@ -333,6 +363,7 @@ fn parse_one_provider(
                 supports_websockets,
                 supports_websocket_compression,
                 websocket_connect_timeout_ms,
+                vision_delegate,
             },
             env_var,
         },
@@ -364,6 +395,24 @@ fn parse_optional_u64(
             value.as_u64().ok_or_else(|| {
                 format!("provider {provider_name:?}: \"{key}\" must be an unsigned integer")
             })
+        })
+        .transpose()
+}
+
+fn parse_optional_string(
+    obj: &Map<String, Value>,
+    provider_name: &str,
+    key: &str,
+) -> Result<Option<String>, String> {
+    obj.get(key)
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    format!("provider {provider_name:?}: \"{key}\" must be a non-empty string")
+                })
         })
         .transpose()
 }
@@ -448,6 +497,7 @@ fn parse_model_entry(provider_name: &str, value: &Value) -> Result<ModelProfile,
             billing_model: id.clone(),
             aliases: Vec::new(),
             description: None,
+            metadata: Default::default(),
             capabilities: permissive_caps(),
         }),
         Value::Object(obj) => {
@@ -463,12 +513,22 @@ fn parse_model_entry(provider_name: &str, value: &Value) -> Result<ModelProfile,
                         .collect()
                 })
                 .unwrap_or_default();
+            let metadata = obj
+                .get("metadata")
+                .cloned()
+                .map(serde_json::from_value::<traits::ModelMetadata>)
+                .transpose()
+                .map_err(|error| {
+                    format!("provider {provider_name:?}: model {id:?} metadata is invalid: {error}")
+                })?
+                .unwrap_or_default();
             Ok(ModelProfile {
                 display_model: id.to_string(),
                 request_model: id.to_string(),
                 billing_model: id.to_string(),
                 aliases,
                 description: None,
+                metadata,
                 capabilities: parse_capabilities(obj.get("capabilities")),
             })
         }
@@ -520,7 +580,7 @@ fn parse_pricing_overrides(
     profile_name: &str,
     pricing_val: &Value,
     model_profiles: &[ModelProfile],
-) -> Result<PricingConfig, String> {
+) -> Result<(PricingConfig, Vec<(String, traits::ModelPricing)>), String> {
     const KNOWN_PRICING_KEYS: &[&str] = &[
         "inputPerMtok",
         "outputPerMtok",
@@ -541,6 +601,7 @@ fn parse_pricing_overrides(
         .map(|model| model.display_model.as_str())
         .collect();
     let mut overrides = Vec::with_capacity(pricing_obj.len());
+    let mut display_overrides = Vec::with_capacity(pricing_obj.len());
 
     for (model_id, model_pricing_val) in pricing_obj {
         if !known_models.contains(model_id.as_str()) {
@@ -567,57 +628,73 @@ fn parse_pricing_overrides(
             model_pricing_obj,
             "inputPerMtok",
             true,
-        )?
-        .unwrap_or(0.0);
+        )?;
         let output_per_million = parse_price_field(
             profile_name,
             model_id,
             model_pricing_obj,
             "outputPerMtok",
             true,
-        )?
-        .unwrap_or(0.0);
+        )?;
         let cache_write_per_million = parse_price_field(
             profile_name,
             model_id,
             model_pricing_obj,
             "cacheWritePerMtok",
             false,
-        )?
-        .unwrap_or(0.0);
+        )?;
         let cache_read_per_million = parse_price_field(
             profile_name,
             model_id,
             model_pricing_obj,
             "cacheReadPerMtok",
             false,
-        )?
-        .unwrap_or(0.0);
+        )?;
         let reasoning_per_million = parse_price_field(
             profile_name,
             model_id,
             model_pricing_obj,
             "reasoningPerMtok",
             false,
-        )?
-        .unwrap_or(0.0);
+        )?;
 
         overrides.push((
             model_id.clone(),
             TokenPricing {
+                input_per_million: input_per_million.unwrap_or(0.0),
+                output_per_million: output_per_million.unwrap_or(0.0),
+                cache_write_per_million: cache_write_per_million.unwrap_or(0.0),
+                cache_read_per_million: cache_read_per_million.unwrap_or(0.0),
+                reasoning_per_million: reasoning_per_million.unwrap_or(0.0),
+            },
+        ));
+        display_overrides.push((
+            model_id.clone(),
+            traits::ModelPricing {
+                billing_mode: traits::ModelBillingMode::PerToken,
                 input_per_million,
                 output_per_million,
-                cache_write_per_million,
                 cache_read_per_million,
+                cache_write_per_million,
                 reasoning_per_million,
+                tiers: Vec::new(),
+                source: Some("userOverride".to_string()),
             },
         ));
     }
 
-    Ok(PricingConfig {
-        require_priced: false,
-        overrides,
-    })
+    Ok((
+        PricingConfig {
+            billing_mode: if overrides.is_empty() {
+                traits::ModelBillingMode::Unknown
+            } else {
+                traits::ModelBillingMode::PerToken
+            },
+            require_priced: false,
+            overrides,
+        },
+        display_overrides,
+    ))
 }
 
 fn parse_price_field(
@@ -659,6 +736,37 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
+fn anthropic_metadata(model: &str) -> traits::ModelMetadata {
+    use crate::model::context_window::{context_window_for_model, max_output_tokens_for_model};
+
+    let rates = match model {
+        "claude-sonnet-5" => Some((3.0, 15.0, 0.3, 3.75)),
+        "claude-fable-5" => Some((10.0, 50.0, 1.0, 12.5)),
+        "claude-haiku-4-5" => Some((1.0, 5.0, 0.1, 1.25)),
+        "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => Some((5.0, 25.0, 0.5, 6.25)),
+        "claude-sonnet-4-6" => Some((3.0, 15.0, 0.3, 3.75)),
+        _ => None,
+    };
+    traits::ModelMetadata {
+        input_modalities: vec!["text".to_string(), "image".to_string(), "pdf".to_string()],
+        output_modalities: vec!["text".to_string()],
+        context_window_tokens: Some(context_window_for_model(model, &[])),
+        max_output_tokens: Some(max_output_tokens_for_model(model)),
+        pricing: rates.map(
+            |(input, output, cache_read, cache_write)| traits::ModelPricing {
+                billing_mode: traits::ModelBillingMode::PerToken,
+                input_per_million: Some(input),
+                output_per_million: Some(output),
+                cache_read_per_million: Some(cache_read),
+                cache_write_per_million: Some(cache_write),
+                source: Some("official".to_string()),
+                ..traits::ModelPricing::default()
+            },
+        ),
+        ..traits::ModelMetadata::default()
+    }
+}
+
 /// Built-in Anthropic Claude model profiles used by desktop/mobile hosts.
 #[must_use]
 pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
@@ -669,6 +777,7 @@ pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
             billing_model: billing.to_string(),
             aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
             description: None,
+            metadata: anthropic_metadata(display),
             capabilities: Capabilities {
                 streaming: true,
                 tools: true,
@@ -757,12 +866,16 @@ pub fn anthropic_provider_profile(
         auth,
         credential,
         models: anthropic_model_profiles(),
-        pricing: PricingConfig::default(),
+        pricing: PricingConfig {
+            billing_mode: traits::ModelBillingMode::PerToken,
+            ..PricingConfig::default()
+        },
         signing: None,
         azure: None,
         supports_websockets: false,
         supports_websocket_compression: false,
         websocket_connect_timeout_ms: None,
+        vision_delegate: None,
     }
 }
 
@@ -1142,6 +1255,91 @@ mod tests {
         assert_eq!(pricing.input_per_million, 1.0);
         assert_eq!(pricing.output_per_million, 2.0);
         assert_eq!(pricing.cache_read_per_million, 0.25);
+        let display = parsed[0].profile.models[0]
+            .metadata
+            .pricing
+            .as_ref()
+            .expect("display pricing override");
+        assert_eq!(display.billing_mode, traits::ModelBillingMode::PerToken);
+        assert_eq!(display.input_per_million, Some(1.0));
+        assert_eq!(display.output_per_million, Some(2.0));
+        assert_eq!(display.cache_read_per_million, Some(0.25));
+        assert_eq!(display.cache_write_per_million, None);
+        assert_eq!(display.reasoning_per_million, None);
+        assert_eq!(display.source.as_deref(), Some("userOverride"));
+    }
+
+    #[test]
+    fn explicit_zero_price_remains_distinct_from_missing_optional_prices() {
+        let providers = one(
+            "free-output",
+            json!({
+                "type": "openai",
+                "baseUrl": "https://example.com/v1",
+                "apiKeyEnv": "EXAMPLE_API_KEY",
+                "billingMode": "subscription",
+                "models": [{"id": "custom"}],
+                "pricing": {
+                    "custom": {
+                        "inputPerMtok": 1.0,
+                        "outputPerMtok": 0.0,
+                        "cacheReadPerMtok": 0.0
+                    }
+                }
+            }),
+        );
+        let parsed = parse_provider_profiles_strict(&providers, ProviderParseOptions::strict_env())
+            .expect("provider parses");
+        let profile = &parsed[0].profile;
+        assert_eq!(
+            profile.pricing.billing_mode,
+            traits::ModelBillingMode::PerToken
+        );
+        let display = profile.models[0]
+            .metadata
+            .pricing
+            .as_ref()
+            .expect("display pricing override");
+        assert_eq!(display.output_per_million, Some(0.0));
+        assert_eq!(display.cache_read_per_million, Some(0.0));
+        assert_eq!(display.cache_write_per_million, None);
+        assert_eq!(display.reasoning_per_million, None);
+    }
+
+    #[test]
+    fn custom_model_metadata_and_billing_mode_round_trip_into_profile() {
+        let providers = one(
+            "custom",
+            json!({
+                "type": "openai",
+                "baseUrl": "https://example.com/v1",
+                "apiKeyEnv": "CUSTOM_API_KEY",
+                "billingMode": "subscription",
+                "models": [{
+                    "id": "custom-vision",
+                    "capabilities": {"vision": true, "reasoning": true},
+                    "metadata": {
+                        "status": "beta",
+                        "inputModalities": ["text", "image"],
+                        "outputModalities": ["text"],
+                        "contextWindowTokens": 128000,
+                        "maxOutputTokens": 32000
+                    }
+                }]
+            }),
+        );
+        let parsed = parse_provider_profiles_strict(&providers, ProviderParseOptions::strict_env())
+            .expect("provider metadata parses");
+        let profile = &parsed[0].profile;
+        assert_eq!(
+            profile.pricing.billing_mode,
+            traits::ModelBillingMode::Subscription
+        );
+        let model = &profile.models[0];
+        assert_eq!(model.metadata.status.as_deref(), Some("beta"));
+        assert_eq!(model.metadata.context_window_tokens, Some(128_000));
+        assert_eq!(model.metadata.max_input_tokens, None);
+        assert!(model.capabilities.vision);
     }
 
     #[test]

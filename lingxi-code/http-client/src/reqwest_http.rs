@@ -125,9 +125,12 @@ impl ReqwestHttp {
         no_redirect: bool,
     ) -> Result<HttpResponse, HttpError> {
         let client = match resolved.as_ref() {
-            Some(resolved) if !resolved.addrs.is_empty() => {
-                self.client_for_resolved_request(resolved, no_redirect)?
+            Some(resolved) if resolved.addrs.is_empty() => {
+                return Err(HttpError::InvalidRequest(
+                    "pre-resolved address override must contain at least one address".to_string(),
+                ));
             }
+            Some(resolved) => self.client_for_resolved_request(resolved, no_redirect)?,
             _ if no_redirect => self.no_redirect_client.clone(),
             _ => self.client.clone(),
         };
@@ -464,6 +467,14 @@ impl HttpTransport for ReqwestHttp {
         self.send_request(req, None, true).await
     }
 
+    async fn request_no_follow_with_resolved_addrs(
+        &self,
+        req: HttpRequest,
+        resolved: Option<ResolvedAddressOverride>,
+    ) -> Result<HttpResponse, HttpError> {
+        self.send_request(req, resolved, true).await
+    }
+
     async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
         let resp = build_reqwest(&self.client, req)
             .send()
@@ -617,6 +628,60 @@ impl HttpTransport for ReqwestHttp {
         }
 
         // Success: map reqwest's `Bytes` chunks to owned `Vec<u8>`.
+        let detailed = self.detailed_connection_errors;
+        let byte_stream = resp.bytes_stream().map(move |r| {
+            r.map(|b| b.to_vec())
+                .map_err(|e| map_reqwest_connection_error(e, detailed))
+        });
+        Ok(RawByteStreamWithMeta {
+            status,
+            headers,
+            stream: Box::pin(byte_stream),
+        })
+    }
+
+    async fn stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(
+        &self,
+        req: HttpRequest,
+        resolved: Option<ResolvedAddressOverride>,
+    ) -> Result<RawByteStreamWithMeta, HttpError> {
+        let client = match resolved.as_ref() {
+            Some(resolved) if resolved.addrs.is_empty() => {
+                return Err(HttpError::InvalidRequest(
+                    "pre-resolved address override must contain at least one address".to_string(),
+                ));
+            }
+            Some(resolved) => self.client_for_resolved_request(resolved, true)?,
+            _ => self.no_redirect_client.clone(),
+        };
+        let resp = build_reqwest(&client, req)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
+        let status = resp.status().as_u16();
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_ascii_lowercase(),
+                    v.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+
+        if status >= 400 {
+            let body_bytes = resp.bytes().await.unwrap_or_default().to_vec();
+            let stream: RawByteStream = Box::pin(futures_util::stream::once(async move {
+                Ok::<Vec<u8>, HttpError>(body_bytes)
+            }));
+            return Ok(RawByteStreamWithMeta {
+                status,
+                headers,
+                stream,
+            });
+        }
+
         let detailed = self.detailed_connection_errors;
         let byte_stream = resp.bytes_stream().map(move |r| {
             r.map(|b| b.to_vec())
@@ -925,6 +990,40 @@ mod tests {
             result.is_err(),
             "unroutable host must error, got: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn empty_resolved_address_override_fails_closed() {
+        use protocol::HttpMethod;
+
+        let request = HttpRequest {
+            method: HttpMethod::Get,
+            url: "https://example.com/image.png".to_string(),
+            headers: vec![],
+            body: None,
+            body_bytes: None,
+            timeout: None,
+        };
+        let resolved = Some(ResolvedAddressOverride {
+            domain: "example.com".to_string(),
+            addrs: Vec::new(),
+        });
+        let transport = ReqwestHttp::new();
+
+        let request_error = transport
+            .request_no_follow_with_resolved_addrs(request.clone(), resolved.clone())
+            .await
+            .expect_err("an empty DNS pin must never fall back to a fresh lookup");
+        assert!(request_error.to_string().contains("at least one address"));
+
+        let stream_error = match transport
+            .stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(request, resolved)
+            .await
+        {
+            Ok(_) => panic!("the streaming seam must fail closed too"),
+            Err(error) => error,
+        };
+        assert!(stream_error.to_string().contains("at least one address"));
     }
 
     /// True no-follow behaviour: against an in-process axum server that returns a

@@ -22,6 +22,7 @@ fn test_config() -> ClientConfig {
                 billing_model: "claude-sonnet-4".to_string(),
                 aliases: vec!["or-sonnet".to_string()],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -37,6 +38,7 @@ fn test_config() -> ClientConfig {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     }
 }
@@ -95,4 +97,121 @@ fn resolve_uses_alias_without_model_string_provider_guessing() {
             name: "openrouter".to_string(),
         }
     );
+}
+
+#[test]
+fn resolve_media_route_uses_same_profile_delegate_for_non_vision_main() {
+    let mut config = test_config();
+    config.providers[0].models.push(ModelProfile {
+        display_model: "Claude Vision".to_string(),
+        request_model: "anthropic/claude-sonnet-4-vision".to_string(),
+        billing_model: "claude-sonnet-4-vision".to_string(),
+        aliases: vec![],
+        description: None,
+        metadata: Default::default(),
+        capabilities: Capabilities {
+            streaming: true,
+            tools: false,
+            vision: true,
+            documents: false,
+            reasoning: false,
+            structured_output: false,
+        },
+    });
+    config.providers[0].vision_delegate = Some("Claude Vision".to_string());
+    let registry = ModelRegistry::from_config(config).expect("registry");
+
+    let route = registry
+        .resolve_media_route("Claude via OpenRouter")
+        .expect("media route");
+    assert_eq!(route.main.profile_name, "openrouter");
+    assert_eq!(
+        route
+            .vision_delegate
+            .as_ref()
+            .map(|route| route.request_model.as_str()),
+        Some("anthropic/claude-sonnet-4-vision")
+    );
+}
+
+#[test]
+fn resolve_media_route_skips_delegate_for_native_vision_model() {
+    let mut config = test_config();
+    config.providers[0].models[0].capabilities.vision = true;
+    config.providers[0].models.push(ModelProfile {
+        display_model: "Fallback Vision".to_string(),
+        request_model: "fallback-vision".to_string(),
+        billing_model: "fallback-vision".to_string(),
+        aliases: vec![],
+        description: None,
+        metadata: Default::default(),
+        capabilities: Capabilities {
+            streaming: true,
+            tools: false,
+            vision: true,
+            documents: false,
+            reasoning: false,
+            structured_output: false,
+        },
+    });
+    config.providers[0].vision_delegate = Some("Claude via OpenRouter".to_string());
+    let registry = ModelRegistry::from_config(config).expect("registry");
+
+    let route = registry
+        .resolve_media_route("Claude via OpenRouter")
+        .expect("media route");
+    assert!(route.vision_delegate.is_none());
+}
+
+#[test]
+fn invalid_vision_delegate_is_rejected_at_registry_build() {
+    let mut config = test_config();
+    config.providers[0].vision_delegate = Some("missing-model".to_string());
+    let err = ModelRegistry::from_config(config).expect_err("invalid delegate");
+    assert!(matches!(
+        err,
+        llm_client::LlmError::InvalidRequest { message }
+            if message.contains("visionDelegate")
+    ));
+}
+
+#[test]
+fn non_vision_delegate_is_rejected_at_registry_build() {
+    let mut config = test_config();
+    config.providers[0].models.push(ModelProfile {
+        display_model: "Also Text Only".to_string(),
+        request_model: "text-only".to_string(),
+        billing_model: "text-only".to_string(),
+        aliases: vec![],
+        description: None,
+        metadata: Default::default(),
+        capabilities: Capabilities {
+            streaming: true,
+            tools: false,
+            vision: false,
+            documents: false,
+            reasoning: false,
+            structured_output: false,
+        },
+    });
+    config.providers[0].vision_delegate = Some("Also Text Only".to_string());
+    let err = ModelRegistry::from_config(config).expect_err("non-vision delegate");
+    assert!(matches!(
+        err,
+        llm_client::LlmError::InvalidRequest { message }
+            if message.contains("visionDelegate") && message.contains("vision capability")
+    ));
+}
+
+#[test]
+fn vision_capable_self_delegate_is_rejected_at_registry_build() {
+    let mut config = test_config();
+    config.providers[0].models[0].capabilities.vision = true;
+    config.providers[0].vision_delegate = Some("Claude via OpenRouter".to_string());
+    let err = ModelRegistry::from_config(config).expect_err("vision-capable self delegate");
+    assert!(matches!(
+        err,
+        llm_client::LlmError::InvalidRequest { message }
+            if message.contains("visionDelegate") && message.contains("cannot delegate to itself")
+    ));
 }

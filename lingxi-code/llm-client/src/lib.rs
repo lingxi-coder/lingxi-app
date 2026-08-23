@@ -76,7 +76,9 @@ pub use credentials::{
     CopilotExchangeCredentialProvider, Credential, CredentialProvider, CredentialScope,
     EnvCredentialProvider, StaticCredentialProvider,
 };
-pub use error::{api_error_detail, api_error_status, error_display_text, LlmError};
+pub use error::{
+    api_error_detail, api_error_status, error_display_text, LlmError, MediaDelegationAccounting,
+};
 pub use eventstream::{crc32, EventStreamMessage, EventStreamSplitter};
 pub use protocol::{
     stream_provider_metadata_from_headers, validate_capabilities, CacheControl, CacheEdit,
@@ -100,7 +102,7 @@ pub use reasoning_controls::{
     ReasoningTarget, TokenBudgetRange,
 };
 pub use redaction::Redactor;
-pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};
+pub use registry::{MediaRoute, ModelListing, ModelRegistry, ResolvedRoute};
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use route::Route;
 pub use service::{ApiService, RetryInfo, RetryReporter, SubscriberState};

@@ -674,7 +674,9 @@ pub fn next_step_with_backoff(
         | LlmError::ModelUnavailable
         | LlmError::StreamInterrupted { .. }
         | LlmError::CostUnavailable { .. }
-        | LlmError::UnsupportedCapability { .. } => {
+        | LlmError::UnsupportedCapability { .. }
+        | LlmError::MediaDelegationUnavailable { .. }
+        | LlmError::MediaDelegationPartial { .. } => {
             state.consecutive_overloaded = 0;
             DriveStep::Terminal
         }

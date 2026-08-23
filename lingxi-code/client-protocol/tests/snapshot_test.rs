@@ -413,6 +413,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     "openai/gpt-5.5".to_string(),
                 ],
                 current: "anthropic/claude-opus-4-8".to_string(),
+                details: Vec::new(),
             },
         ),
         (

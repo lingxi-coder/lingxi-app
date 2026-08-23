@@ -5276,6 +5276,9 @@ mod tests {
             provider_id: "anthropic".to_string(),
             provider_label: "Anthropic".to_string(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: true,
         }];
         // A first-party Claude model on a managed-cloud provider: the catalog
@@ -5310,6 +5313,9 @@ mod tests {
                 provider_id: "anthropic".to_string(),
                 provider_label: "Anthropic".to_string(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: true,
             },
             traits::orchestrator::ModelListing {
@@ -5318,6 +5324,9 @@ mod tests {
                 provider_id: "openai".to_string(),
                 provider_label: "OpenAI".to_string(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: false,
             },
         ];

@@ -419,6 +419,7 @@ async fn parity_force_compact_50_messages() {
                 tool_calls: Vec::new(),
                 usage: cost::Usage::default(),
                 stop_reason: Some("end_turn".into()),
+                retry_count: 0,
             })
         }
     }

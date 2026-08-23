@@ -50,6 +50,7 @@ object HeadlessEngineFactory {
             model = creds.model.ifBlank { providerLaunch.defaultModel },
             providerProfilesJson = providerLaunch.providerProfilesJson,
             routingJson = providerLaunch.routingJson,
+            visionDelegationEnabled = providerLaunch.visionDelegationEnabled,
             projectWorkspace = scope.projectId?.let {
                 ProjectWorkspace(
                     projectId = it,

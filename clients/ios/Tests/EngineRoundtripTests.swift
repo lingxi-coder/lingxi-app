@@ -142,7 +142,7 @@ import XCTest
 
         func onEvent(event: ClientEvent) async {
             switch event {
-            case let .modelList(models, current):
+            case let .modelList(models, current, _):
                 lock.lock(); modelList = (models, current); lock.unlock()
                 gotList.fulfill()
             case let .modelChanged(model):
@@ -188,6 +188,7 @@ import XCTest
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: snapshot.defaultModelID ?? "",
+                visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: sandbox.path,
                 projectCwd: nil,
                 providerConfig: IosProviderConfigFfi(

@@ -1,9 +1,9 @@
+use crate::reasoning_controls::{request_reasoning_intent, RequestReasoningIntent};
 use crate::{
     normalize_anthropic_usage, ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest,
     LlmResponse, MessageDeltaPayload, ProviderRequest, ProviderResponse, RawStreamFrame,
     ResponseFormat, StreamDecoder, ToolDeclaration, WireCodec,
 };
-use crate::reasoning_controls::{request_reasoning_intent, RequestReasoningIntent};
 
 use std::time::Duration;
 
@@ -237,7 +237,10 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
     }
     match request_reasoning_intent(request) {
         RequestReasoningIntent::LegacyAdaptive => {
-            body.insert("thinking".to_string(), serde_json::json!({"type": "adaptive"}));
+            body.insert(
+                "thinking".to_string(),
+                serde_json::json!({"type": "adaptive"}),
+            );
         }
         RequestReasoningIntent::LegacyBudget(budget_tokens) => {
             body.insert(

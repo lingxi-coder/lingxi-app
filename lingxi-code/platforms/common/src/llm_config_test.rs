@@ -458,6 +458,7 @@ fn routing_test_cfg() -> ClientConfig {
             billing_model: "llama-3.3-70b".to_string(),
             aliases: vec!["llama".to_string()],
             description: None,
+            metadata: Default::default(),
             capabilities: llm_client::Capabilities {
                 streaming: true,
                 tools: true,
@@ -470,6 +471,7 @@ fn routing_test_cfg() -> ClientConfig {
         supports_websockets: false,
         supports_websocket_compression: false,
         websocket_connect_timeout_ms: None,
+        vision_delegate: None,
     });
     cfg
 }

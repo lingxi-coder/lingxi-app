@@ -17,6 +17,7 @@ struct Composer: View {
     // refs. Empty means the catalog is still loading; no mock rows are invented.
     // `model` remains in the view API for compatibility with its existing owner.
     var availableModels: [String] = []
+    var availableModelDetails: [String: ModelRuntimeDetails] = [:]
     var activeModelId: String = ""
     var providerConfigured: Bool
     var onSelectModel: (String) -> Void = { _ in }
@@ -90,6 +91,7 @@ struct Composer: View {
     init(
         model: Binding<ModelOption>,
         availableModels: [String] = [],
+        availableModelDetails: [String: ModelRuntimeDetails] = [:],
         activeModelId: String = "",
         providerConfigured: Bool,
         onSelectModel: @escaping (String) -> Void = { _ in },
@@ -131,6 +133,7 @@ struct Composer: View {
     ) {
         self._model = model
         self.availableModels = availableModels
+        self.availableModelDetails = availableModelDetails
         self.activeModelId = activeModelId
         self.providerConfigured = providerConfigured
         self.onSelectModel = onSelectModel
@@ -347,6 +350,7 @@ struct Composer: View {
         .sheet(isPresented: $modelOpen) {
             ModelPickerSheet(
                 availableModels: availableModels,
+                detailsByReference: availableModelDetails,
                 activeModelId: activeModelId,
                 recentModels: recentModels,
                 onSelect: { reference in

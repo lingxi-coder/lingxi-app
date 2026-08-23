@@ -107,6 +107,14 @@ pub struct ProviderProfile {
     /// Optional WebSocket connect timeout in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub websocket_connect_timeout_ms: Option<u64>,
+    /// Optional same-profile vision delegate model used when the selected main
+    /// model cannot accept image input.
+    #[serde(
+        default,
+        rename = "visionDelegate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub vision_delegate: Option<String>,
 }
 
 /// Wire protocol route family.
@@ -199,6 +207,10 @@ pub struct ModelProfile {
     /// present; `None` otherwise.
     #[serde(default)]
     pub description: Option<String>,
+    /// Provider-published display metadata. This is informational and never
+    /// participates in model routing.
+    #[serde(default)]
+    pub metadata: traits::ModelMetadata,
     /// Model capabilities used for preflight validation.
     #[serde(default)]
     pub capabilities: Capabilities,
@@ -222,6 +234,19 @@ pub struct Capabilities {
     pub structured_output: bool,
 }
 
+impl Capabilities {
+    /// Whether this route accepts a non-text input that this client can
+    /// represent as image or document media.
+    ///
+    /// Audio/video modalities remain provider-specific and are not currently
+    /// admitted by the conversation protocol, so they are intentionally not
+    /// folded into this marker.
+    #[must_use]
+    pub const fn supports_multimodal(self) -> bool {
+        self.vision || self.documents
+    }
+}
+
 /// Pricing resolution behavior for a profile.
 ///
 /// ## Per-model overrides
@@ -235,6 +260,10 @@ pub struct Capabilities {
 /// Serde round-trips the field; absent → empty vec (existing configs unaffected).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PricingConfig {
+    /// Whether this provider charges per token, via subscription, or is
+    /// explicitly free. Unknown is distinct from free.
+    #[serde(default, rename = "billingMode")]
+    pub billing_mode: traits::ModelBillingMode,
     /// Whether missing pricing must fail instead of returning unestimated cost.
     #[serde(default)]
     pub require_priced: bool,

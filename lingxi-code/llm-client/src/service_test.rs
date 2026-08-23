@@ -142,6 +142,7 @@ mod tests {
                         billing_model: "claude-sonnet-4".to_string(),
                         aliases: vec!["claude".to_string()],
                         description: None,
+                        metadata: Default::default(),
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -155,6 +156,7 @@ mod tests {
                     supports_websockets: false,
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
                 }],
             })
             .expect("client"),
@@ -193,6 +195,7 @@ mod tests {
                         billing_model: "claude-sonnet-4".to_string(),
                         aliases: vec!["claude".to_string()],
                         description: None,
+                        metadata: Default::default(),
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -206,6 +209,7 @@ mod tests {
                     supports_websockets: false,
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
                 }],
             })
             .expect("client"),
@@ -271,6 +275,7 @@ mod tests {
                         billing_model: "model".to_string(),
                         aliases: Vec::new(),
                         description: None,
+                        metadata: Default::default(),
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -285,6 +290,7 @@ mod tests {
                     supports_websockets: false,
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
                 }],
             })
             .expect("client"),
@@ -2707,6 +2713,27 @@ mod tests {
     }
 
     #[test]
+    fn count_media_includes_nested_openai_image_url_media() {
+        let msgs = vec![ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: protocol::ToolUseId::new(),
+                content: "see image".to_string(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: Some(vec![serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/image.png"}
+                })]),
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }];
+        assert_eq!(count_media(&msgs), 1);
+    }
+
+    #[test]
     fn strip_excess_media_strips_nested_tool_result_media() {
         // Over the cap, nested tool_result media is stripped oldest-first
         // (claude.ts:982-999), leaving the text + the most-recent nested image.
@@ -3897,6 +3924,7 @@ mod tests {
                             billing_model: "claude-opus-4-6".to_string(),
                             aliases: vec![],
                             description: None,
+                            metadata: Default::default(),
                             capabilities: Capabilities {
                                 streaming: true,
                                 tools: true,
@@ -3910,6 +3938,7 @@ mod tests {
                             billing_model: "claude-haiku-4".to_string(),
                             aliases: vec![],
                             description: None,
+                            metadata: Default::default(),
                             capabilities: Capabilities {
                                 streaming: true,
                                 tools: true,
@@ -3923,6 +3952,7 @@ mod tests {
                             billing_model: "claude-sonnet-4".to_string(),
                             aliases: vec!["claude".to_string()],
                             description: None,
+                            metadata: Default::default(),
                             capabilities: Capabilities {
                                 streaming: true,
                                 tools: true,
@@ -3937,6 +3967,7 @@ mod tests {
                     supports_websockets: false,
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
                 }],
             })
             .expect("client"),
@@ -4846,6 +4877,7 @@ mod tests {
                         billing_model: "claude-sonnet-4".to_string(),
                         aliases: vec![],
                         description: None,
+                        metadata: Default::default(),
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -4859,6 +4891,7 @@ mod tests {
                     supports_websockets: false,
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
                 }],
             })
             .expect("client"),
@@ -5029,6 +5062,7 @@ mod tests {
                         billing_model: "model".to_string(),
                         aliases: Vec::new(),
                         description: None,
+                        metadata: Default::default(),
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -5042,6 +5076,7 @@ mod tests {
                     supports_websockets: false,
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
                 }],
             })
             .expect("client"),

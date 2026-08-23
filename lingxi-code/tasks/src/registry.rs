@@ -794,14 +794,17 @@ impl TaskRegistry {
                 TaskState::LocalWorkflow(workflow)
                     if !workflow.base.status.is_terminal()
                         && workflow.workflow_id == "local-app-build"
-                        && workflow.args.as_deref().and_then(|args| {
-                            serde_json::from_str::<serde_json::Value>(args).ok()
-                        }).and_then(|value| {
-                            value
-                                .get("app_id")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string)
-                        }) == Some(app_id.to_string()) =>
+                        && workflow
+                            .args
+                            .as_deref()
+                            .and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
+                            .and_then(|value| {
+                                value
+                                    .get("app_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            == Some(app_id.to_string()) =>
                 {
                     Some(task_id.clone())
                 }

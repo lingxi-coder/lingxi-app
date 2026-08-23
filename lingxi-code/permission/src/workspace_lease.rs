@@ -416,9 +416,7 @@ pub fn local_app_id_for_root(root: &Path) -> Option<String> {
         _ => None,
     });
     match (components.next(), components.next(), components.next()) {
-        (Some("workspace"), Some(app_id), None) if !app_id.is_empty() => {
-            Some(app_id.to_owned())
-        }
+        (Some("workspace"), Some(app_id), None) if !app_id.is_empty() => Some(app_id.to_owned()),
         _ => None,
     }
 }
@@ -631,10 +629,12 @@ fn host_owned_relative(relative: &Path) -> bool {
     //   - EXTENSION: only executable/config extensions, so a file merely
     //     BEGINNING with `vite.config.` is not swallowed either.
     {
-        let mut components = relative.components().filter_map(|component| match component {
-            Component::Normal(name) => name.to_str(),
-            _ => None,
-        });
+        let mut components = relative
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => name.to_str(),
+                _ => None,
+            });
         let (dir, file) = match (components.next(), components.next(), components.next()) {
             (Some(file), None, _) => (None, Some(file)),
             (Some(dir), Some(file), None) => (Some(dir), Some(file)),
@@ -643,8 +643,9 @@ fn host_owned_relative(relative: &Path) -> bool {
         if matches!(dir, None | Some(".config")) {
             if let Some(name) = file {
                 let stem = name.strip_prefix('.').unwrap_or(name);
-                const CONFIG_EXTENSIONS: &[&str] =
-                    &["js", "cjs", "mjs", "ts", "cts", "mts", "json", "yaml", "yml"];
+                const CONFIG_EXTENSIONS: &[&str] = &[
+                    "js", "cjs", "mjs", "ts", "cts", "mts", "json", "yaml", "yml",
+                ];
                 let is_config_of = |tool: &str| {
                     let rc = format!("{tool}rc");
                     if stem == rc {
@@ -1067,21 +1068,13 @@ mod tests {
         let registry = WorkspacePermissionLeaseRegistry::new();
         let _lease = registry.begin("app-a", root.clone());
         let fs = roots(&root);
-        assert!(registry.allows(
-            "LocalAppBuild",
-            &serde_json::json!({"app_id":"app-a"}),
-            &fs
-        ));
+        assert!(registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-a"}), &fs));
         assert!(!registry.allows(
             "LocalAppDeleteApp",
             &serde_json::json!({"app_id":"app-a"}),
             &fs
         ));
-        assert!(!registry.allows(
-            "LocalAppBuild",
-            &serde_json::json!({"app_id":"app-b"}),
-            &fs
-        ));
+        assert!(!registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-b"}), &fs));
     }
 
     #[test]
@@ -1092,16 +1085,8 @@ mod tests {
         let registry = WorkspacePermissionLeaseRegistry::new();
         let _lease = registry.begin("app-b", root.clone());
         let fs = roots(&root);
-        assert!(!registry.allows(
-            "LocalAppBuild",
-            &serde_json::json!({"app_id":"app-b"}),
-            &fs
-        ));
-        assert!(!registry.allows(
-            "LocalAppBuild",
-            &serde_json::json!({"app_id":"app-a"}),
-            &fs
-        ));
+        assert!(!registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-b"}), &fs));
+        assert!(!registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-a"}), &fs));
     }
 
     #[test]

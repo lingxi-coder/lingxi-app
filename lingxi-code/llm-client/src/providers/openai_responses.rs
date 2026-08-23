@@ -12,9 +12,9 @@ use crate::{
     RawStreamFrame, ResponseFormat, StreamDecoder, ToolChoice, ToolDeclaration, WireCodec,
 };
 
+use crate::reasoning_controls::{request_reasoning_intent, RequestReasoningIntent};
 use base64::Engine;
 use serde_json::Value;
-use crate::reasoning_controls::{request_reasoning_intent, RequestReasoningIntent};
 
 #[derive(Debug, Clone)]
 #[allow(missing_docs)]
@@ -102,16 +102,26 @@ impl WireCodec for OpenAiResponsesCodec {
         }
 
         let intent = request_reasoning_intent(request);
-        if !matches!(intent, RequestReasoningIntent::Automatic | RequestReasoningIntent::LegacyAdaptive) {
+        if !matches!(
+            intent,
+            RequestReasoningIntent::Automatic | RequestReasoningIntent::LegacyAdaptive
+        ) {
             let effort = match intent {
                 RequestReasoningIntent::Disabled => "none".to_string(),
                 RequestReasoningIntent::Enabled => "high".to_string(),
                 RequestReasoningIntent::Level(level) => level,
                 RequestReasoningIntent::EffortBudget(tokens)
-                | RequestReasoningIntent::LegacyBudget(tokens) => map_reasoning_effort(tokens).to_string(),
-                RequestReasoningIntent::Automatic | RequestReasoningIntent::LegacyAdaptive => unreachable!(),
+                | RequestReasoningIntent::LegacyBudget(tokens) => {
+                    map_reasoning_effort(tokens).to_string()
+                }
+                RequestReasoningIntent::Automatic | RequestReasoningIntent::LegacyAdaptive => {
+                    unreachable!()
+                }
             };
-            body.insert("reasoning".to_string(), serde_json::json!({"effort": effort}));
+            body.insert(
+                "reasoning".to_string(),
+                serde_json::json!({"effort": effort}),
+            );
         } else if let Some(crate::ReasoningConfig::Enabled { budget_tokens }) = &request.reasoning {
             // The Responses API only accepts discrete effort levels. `Adaptive`
             // never reaches this codec (only the Anthropic/firstParty path emits

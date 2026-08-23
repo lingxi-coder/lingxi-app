@@ -195,6 +195,7 @@ mod tests {
                     billing_model: "claude-sonnet-4".to_string(),
                     aliases: vec!["claude".to_string()],
                     description: None,
+                    metadata: Default::default(),
                     capabilities: Capabilities {
                         streaming: true,
                         tools: true,
@@ -207,6 +208,7 @@ mod tests {
                 supports_websockets: false,
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
+                vision_delegate: None,
             }],
         })
         .expect("client")
@@ -227,6 +229,7 @@ mod tests {
                     billing_model: "gpt-4".to_string(),
                     aliases: vec!["gpt".to_string()],
                     description: None,
+                    metadata: Default::default(),
                     capabilities: Capabilities {
                         streaming: true,
                         tools: true,
@@ -239,6 +242,7 @@ mod tests {
                 supports_websockets: false,
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
+                vision_delegate: None,
             }],
         })
         .expect("client")

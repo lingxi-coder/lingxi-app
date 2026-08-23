@@ -18,6 +18,7 @@ pub mod forked_agent;
 pub mod provider_side_query;
 pub mod purposes;
 pub mod side_query;
+pub mod vision_delegation;
 
 pub use cache_safe_params::{CacheSafeParams, CacheSafeParamsSlot};
 pub use forked_agent::{
@@ -26,3 +27,10 @@ pub use forked_agent::{
 pub use provider_side_query::ProviderSideQueryClient;
 pub use purposes::QuerySource;
 pub use side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+pub use vision_delegation::{
+    collect_media, collect_media_fingerprints, covered_fingerprints,
+    filter_messages_to_fingerprints, prepare_delegation, prepare_media_for_nonvision,
+    rewrite_media_for_nonvision, DelegationMedia, PreparedDelegation, VisionDelegationResult,
+    VisionDelegationService, VisionPacket, MAX_DECODED_BYTES_PER_QUERY, MAX_MEDIA_PER_QUERY,
+    MAX_MEDIA_PER_REQUEST, PROMPT_VERSION,
+};

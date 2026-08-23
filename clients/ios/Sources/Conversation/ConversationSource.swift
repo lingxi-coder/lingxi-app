@@ -412,6 +412,8 @@ final class ConversationModel: ObservableObject {
     // which case the UI falls back to the mock catalog (engine unavailable).
     /// The real model ids the engine accepts (`ModelList.models`). Empty ⇒ mock.
     @Published var availableModels: [String] = []
+    /// Rich per-route facts paired with `availableModels` by the exact qualified reference.
+    @Published var availableModelDetails: [String: ModelRuntimeDetails] = [:]
     /// The active model id the engine reports (`ModelList.current` / `ModelChanged.model`).
     @Published var activeModelId: String = ""
     /// Whether the current source was launched with at least one enabled LLM
@@ -1016,6 +1018,7 @@ enum ConversationSourceFactory {
         var providerProfilesJson: String? = nil
         var providerRoutingJson: String? = nil
         var defaultModelID: String? = nil
+        var visionDelegationEnabled: Bool = true
         var mobileLinux: TerminalRuntimeConfig? = nil
     }
 
@@ -1025,6 +1028,7 @@ enum ConversationSourceFactory {
         providerProfilesJson: String? = nil,
         providerRoutingJson: String? = nil,
         defaultModelID: String? = nil,
+        visionDelegationEnabled: Bool = true,
         mobileLinux: TerminalRuntimeConfig? = nil
     ) -> any ConversationSource {
         make(options: LaunchOptions(
@@ -1033,6 +1037,7 @@ enum ConversationSourceFactory {
             providerProfilesJson: providerProfilesJson,
             providerRoutingJson: providerRoutingJson,
             defaultModelID: defaultModelID,
+            visionDelegationEnabled: visionDelegationEnabled,
             mobileLinux: mobileLinux))
     }
 
@@ -1066,6 +1071,7 @@ enum ConversationSourceFactory {
                     projectCwd: options.projectCwd,
                     providerProfilesJson: options.providerProfilesJson,
                     providerRoutingJson: options.providerRoutingJson,
+                    visionDelegationEnabled: options.visionDelegationEnabled,
                     mobileLinux: options.mobileLinux)
                 let source = EngineConversationSource(config: config)
                 source.model.providerConfigured = options.providerConfigured
@@ -1266,7 +1272,8 @@ final class MockConversationSource: ConversationSource {
                             protocolName: "OpenAiChat",
                             authName: preset.id == "openai-chatgpt" ? "ChatGptOAuth" : "ApiKey",
                             credentialEnv: nil,
-                            models: preset.models
+                            models: preset.models,
+                            modelDetails: [:]
                         )
                     }
             #endif
@@ -1467,6 +1474,7 @@ final class MockConversationSource: ConversationSource {
         var projectCwd: String?
         var providerProfilesJson: String?
         var providerRoutingJson: String?
+        var visionDelegationEnabled: Bool
         var mobileLinux: TerminalRuntimeConfig?
 
         /// Resolve the engine credentials. The API key (and optional base URL)
@@ -1480,6 +1488,7 @@ final class MockConversationSource: ConversationSource {
                                     projectCwd: String? = nil,
                                     providerProfilesJson: String? = nil,
                                     providerRoutingJson: String? = nil,
+                                    visionDelegationEnabled: Bool = true,
                                     mobileLinux: TerminalRuntimeConfig? = nil) -> EngineConfig {
             let env = ProcessInfo.processInfo.environment
             // Key: env override (dev) > Keychain (shipped) > empty.
@@ -1502,6 +1511,7 @@ final class MockConversationSource: ConversationSource {
                 projectCwd: projectCwd,
                 providerProfilesJson: providerProfilesJson,
                 providerRoutingJson: providerRoutingJson,
+                visionDelegationEnabled: visionDelegationEnabled,
                 mobileLinux: mobileLinux
             )
         }
@@ -2565,7 +2575,12 @@ final class MockConversationSource: ConversationSource {
                     protocolName: $0.protocol,
                     authName: $0.auth,
                     credentialEnv: $0.credentialEnv,
-                    models: $0.models
+                    models: $0.models,
+                    modelDetails: Dictionary(
+                        uniqueKeysWithValues: $0.modelDetails.map {
+                            ($0.reference, Self.lowerModelRuntimeDetails($0))
+                        }
+                    )
                 )
             }
         }
@@ -2724,6 +2739,7 @@ final class MockConversationSource: ConversationSource {
                 apiBase: config.apiBase,
                 apiKey: config.apiKey,
                 model: config.model,
+                visionDelegationEnabled: config.visionDelegationEnabled,
                 appSandboxRoot: config.appSandboxRoot,
                 projectCwd: config.projectCwd,
                 providerConfig: providerConfig,
@@ -3678,6 +3694,10 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
+        private static func lowerModelRuntimeDetails(_ dto: ModelDetailsDto) -> ModelRuntimeDetails {
+            ModelRuntimeDetails.from(dto)
+        }
+
         private static func controlsState(from dto: ConversationControlsDto) -> ConversationControlsState {
             let reasoningOptions = dto.reasoning.spec.options.map { option in
                 let id = reasoningID(option.selection)
@@ -4222,11 +4242,14 @@ final class MockConversationSource: ConversationSource {
                 model.updateMainAgent(status: "failed", latestActivity: message)
                 fail(Self.kind(from: kind), message)
 
-            case let .modelList(models, current):
+            case let .modelList(models, current, details):
                 // Out-of-band model catalog (SHIP-BLOCKER #2). Drive the picker off
                 // these REAL engine ids and adopt the engine's reported active model
                 // — not a branded mock default.
                 model.availableModels = models
+                model.availableModelDetails = Dictionary(
+                    uniqueKeysWithValues: details.map { ($0.reference, Self.lowerModelRuntimeDetails($0)) }
+                )
                 applyActiveModel(current)
 
             case let .modelChanged(model: newModel):

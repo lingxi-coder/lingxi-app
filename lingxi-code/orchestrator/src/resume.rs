@@ -533,12 +533,12 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
                 .get("isApiErrorMessage")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false))
-            .then(|| {
-                m.extra
-                    .get("reasoningSelection")
-                    .and_then(|value| serde_json::from_value(value.clone()).ok())
-            })
-            .flatten()
+        .then(|| {
+            m.extra
+                .get("reasoningSelection")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+        })
+        .flatten()
     });
     let effort = messages.iter().rev().find_map(|m| {
         if m.message_type != "assistant"

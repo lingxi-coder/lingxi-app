@@ -64,6 +64,183 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use traits::OrchestratorHandle;
 
+fn trim_decimal(mut rendered: String) -> String {
+    while rendered.ends_with('0') {
+        rendered.pop();
+    }
+    if rendered.ends_with('.') {
+        rendered.pop();
+    }
+    rendered
+}
+
+fn format_token_count(value: Option<u64>) -> Option<String> {
+    let value = value?;
+    if value >= 1_000_000 {
+        Some(format!(
+            "{}M",
+            trim_decimal(format!("{:.2}", value as f64 / 1_000_000.0))
+        ))
+    } else if value >= 1_000 {
+        Some(format!(
+            "{}K",
+            trim_decimal(format!("{:.0}", value as f64 / 1_000.0))
+        ))
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn format_price(value: Option<f64>) -> Option<String> {
+    value.map(|price| {
+        let rendered = if price >= 1.0 {
+            format!("{price:.2}")
+        } else {
+            format!("{price:.3}")
+        };
+        format!("${}", trim_decimal(rendered))
+    })
+}
+
+fn reasoning_summary(spec: &traits::ReasoningControlSpec) -> Option<String> {
+    let labels = spec
+        .available
+        .iter()
+        .filter_map(|selection| match selection {
+            traits::ReasoningSelection::Automatic => Some("auto".to_string()),
+            traits::ReasoningSelection::Disabled => Some("off".to_string()),
+            traits::ReasoningSelection::Enabled => Some("on".to_string()),
+            traits::ReasoningSelection::Level { id } => Some(id.clone()),
+            traits::ReasoningSelection::TokenBudget { tokens } => Some(format!("{tokens}t")),
+        })
+        .collect::<Vec<_>>();
+    (!labels.is_empty()).then(|| labels.join(", "))
+}
+
+fn pricing_summary(pricing: Option<&traits::ModelPricing>) -> String {
+    let Some(pricing) = pricing else {
+        return "价格 未提供".to_string();
+    };
+    match pricing.billing_mode {
+        traits::ModelBillingMode::Subscription => "价格 套餐/订阅内".to_string(),
+        traits::ModelBillingMode::Free => "价格 免费".to_string(),
+        traits::ModelBillingMode::Unknown => "价格 未提供".to_string(),
+        traits::ModelBillingMode::PerToken => match (
+            format_price(pricing.input_per_million),
+            format_price(pricing.output_per_million),
+        ) {
+            (Some(input), Some(output)) => format!("价格 {input}/{output}"),
+            _ => "价格 未提供".to_string(),
+        },
+    }
+}
+
+fn build_model_details(m: &traits::ModelListing) -> Vec<String> {
+    let mut summary_bits = Vec::new();
+    let mut details = Vec::new();
+
+    let mut capabilities = Vec::new();
+    if m.capabilities.tools {
+        capabilities.push("tools");
+    }
+    if m.capabilities.vision {
+        capabilities.push("image");
+    }
+    if m.capabilities.documents {
+        capabilities.push("pdf");
+    }
+    if m.capabilities.structured_output {
+        capabilities.push("json");
+    }
+    if !capabilities.is_empty() {
+        summary_bits.push(capabilities.join("/"));
+        details.push(format!("能力: {}", capabilities.join(", ")));
+    }
+
+    let mut limits = Vec::new();
+    if let Some(context) = format_token_count(m.metadata.context_window_tokens) {
+        limits.push(format!("ctx {context}"));
+    }
+    if let Some(max_input) = format_token_count(m.metadata.max_input_tokens) {
+        limits.push(format!("in {max_input}"));
+    }
+    if let Some(max_output) = format_token_count(m.metadata.max_output_tokens) {
+        limits.push(format!("out {max_output}"));
+    }
+    if !limits.is_empty() {
+        let rendered = limits.join(" · ");
+        summary_bits.push(rendered.clone());
+        details.push(format!("Limits: {rendered}"));
+    }
+
+    let pricing = m.metadata.pricing.as_ref();
+    summary_bits.push(pricing_summary(pricing));
+    match pricing {
+        Some(pricing) => {
+            let mut price_bits = Vec::new();
+            if let Some(input) = format_price(pricing.input_per_million) {
+                price_bits.push(format!("输入 {input}"));
+            }
+            if let Some(output) = format_price(pricing.output_per_million) {
+                price_bits.push(format!("输出 {output}"));
+            }
+            if let Some(cache_read) = format_price(pricing.cache_read_per_million) {
+                price_bits.push(format!("cache读 {cache_read}"));
+            }
+            if let Some(cache_write) = format_price(pricing.cache_write_per_million) {
+                price_bits.push(format!("cache写 {cache_write}"));
+            }
+            if let Some(reasoning) = format_price(pricing.reasoning_per_million) {
+                price_bits.push(format!("thinking {reasoning}"));
+            }
+            if !price_bits.is_empty() {
+                details.push(format!("价格: {} / 1M tok", price_bits.join(" · ")));
+            }
+            for tier in &pricing.tiers {
+                let threshold = format_token_count(Some(tier.context_threshold_tokens))
+                    .unwrap_or_else(|| tier.context_threshold_tokens.to_string());
+                details.push(format!(
+                    "长上下文层级: >{threshold} 输入 {} 输出 {}",
+                    format_price(tier.input_per_million).unwrap_or_else(|| "未提供".to_string()),
+                    format_price(tier.output_per_million).unwrap_or_else(|| "未提供".to_string())
+                ));
+            }
+        }
+        None => details.push("价格: 未提供".to_string()),
+    }
+
+    if let Some(reasoning) = reasoning_summary(&m.reasoning) {
+        details.push(format!("Reasoning: {reasoning}"));
+    }
+    if let Some(status) = m.metadata.status.as_deref() {
+        details.push(format!("状态: {status}"));
+    }
+    if let Some(family) = m.metadata.family.as_deref() {
+        details.push(format!("家族: {family}"));
+    }
+    if let Some(cutoff) = m.metadata.knowledge_cutoff.as_deref() {
+        details.push(format!("知识截止: {cutoff}"));
+    }
+    if !m.metadata.input_modalities.is_empty() || !m.metadata.output_modalities.is_empty() {
+        details.push(format!(
+            "模态: in [{}] → out [{}]",
+            m.metadata.input_modalities.join(", "),
+            m.metadata.output_modalities.join(", ")
+        ));
+    }
+    details.push(format!("模型 ID: {}", m.request_model));
+    if let Some(description) = m.description.as_deref() {
+        details.push(description.to_string());
+    }
+
+    let mut out = Vec::new();
+    if !summary_bits.is_empty() {
+        out.push(summary_bits.join(" · "));
+    }
+    out.extend(details);
+    out
+}
+
 /// Execute the chosen mode. Returns the process exit code.
 ///
 /// `Mode::Print` uses the caller-provided runtime. Interactive modes own their
@@ -2819,25 +2996,31 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         .list_model_listings()
         .await
         .into_iter()
-        .map(|m| ModelRow {
-            // Mark the current row by (model AND provider) so a wire id shared
-            // across providers (e.g. `gpt-5.5` on both OpenAI and Copilot) only
-            // dots the ACTUAL current provider's row. When the current profile
-            // is unknown (None — e.g. resolve-by-id after a cross-provider
-            // resume), fall back to matching by model id alone.
-            is_current: m.request_model == current_model
-                && current_profile
-                    .as_deref()
-                    .is_none_or(|p| p == m.provider_id),
-            // Keep `display` CLEAN — the `· 无思考` non-thinking tag is drawn at
-            // picker-render time from `supports_reasoning`, NOT baked in here, so
-            // the statusline / welcome identity (which read `display`) stay
-            // untagged for a non-thinking current model.
-            display: m.display_model,
-            request_model: m.request_model,
-            profile: (!m.provider_id.is_empty()).then_some(m.provider_id),
-            provider_label: m.provider_label,
-            supports_reasoning: m.supports_reasoning,
+        .map(|m| {
+            let supports_multimodal = m.capabilities.vision || m.capabilities.documents;
+            let details = build_model_details(&m);
+            ModelRow {
+                // Mark the current row by (model AND provider) so a wire id shared
+                // across providers (e.g. `gpt-5.5` on both OpenAI and Copilot) only
+                // dots the ACTUAL current provider's row. When the current profile
+                // is unknown (None — e.g. resolve-by-id after a cross-provider
+                // resume), fall back to matching by model id alone.
+                is_current: m.request_model == current_model
+                    && current_profile
+                        .as_deref()
+                        .is_none_or(|p| p == m.provider_id),
+                // Keep `display` CLEAN — the `· 无思考` non-thinking tag is drawn at
+                // picker-render time from `supports_reasoning`, NOT baked in here, so
+                // the statusline / welcome identity (which read `display`) stay
+                // untagged for a non-thinking current model.
+                display: m.display_model,
+                request_model: m.request_model,
+                profile: (!m.provider_id.is_empty()).then_some(m.provider_id),
+                provider_label: m.provider_label,
+                supports_reasoning: m.supports_reasoning,
+                supports_multimodal,
+                details,
+            }
         })
         .collect();
 

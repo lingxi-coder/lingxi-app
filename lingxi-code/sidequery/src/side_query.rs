@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use protocol::ConversationMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Parameters for one side-query LLM call.
@@ -48,7 +49,7 @@ pub struct SideQueryRequest {
     /// "Subagents + compaction inherit extended thinking config"; binary: the
     /// compaction summarizer passes `thinkingConfig: mXt(r)` — the session
     /// `options.thinkingConfig` — @216945141). `None` = legacy: no `thinking`
-    /// field on the wire (utility side queries — memory selection, WebFetch
+    /// field on the wire (utility side queries — memory selection, `WebFetch`
     /// summarization — match the binary's explicit `{type:"disabled"}`
     /// callers). Replaces the never-forwarded `thinking_budget` knob.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,6 +75,8 @@ pub struct SideQueryResponse {
     pub usage: cost::Usage,
     /// Stop-reason as reported by the provider (`end_turn`, `tool_use`, ...).
     pub stop_reason: Option<String>,
+    /// Budget-consuming retries performed by this specific provider call.
+    pub retry_count: u32,
 }
 
 /// Side-query failure surface.
@@ -86,6 +89,23 @@ pub enum SideQueryError {
     /// [`SideQueryResponse`].
     #[error("invalid response: {0}")]
     InvalidResponse(String),
+    /// One or more batches completed before a later batch failed. The partial
+    /// accounting must still be charged, while the incomplete analysis is not
+    /// safe to persist.
+    #[error("{source}")]
+    Partial {
+        /// Underlying failure that stopped the delegation.
+        #[source]
+        source: Box<SideQueryError>,
+        /// Usage from completed provider calls.
+        usage: cost::Usage,
+        /// Wall-clock time spent before the failure was observed.
+        elapsed: Duration,
+        /// Retries reported by completed provider calls.
+        retry_count: u32,
+        /// Provider batches that were started.
+        api_calls: u32,
+    },
 }
 
 /// One-shot LLM client. Implementations route to `AnthropicProvider` (M1)
@@ -94,4 +114,10 @@ pub enum SideQueryError {
 pub trait SideQueryClient: Send + Sync {
     /// Issue one side query and return the decoded response.
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError>;
+
+    /// Retry attempts observed by the most recently completed provider call.
+    /// Test doubles and direct clients default to zero.
+    fn last_retry_count(&self) -> u32 {
+        0
+    }
 }

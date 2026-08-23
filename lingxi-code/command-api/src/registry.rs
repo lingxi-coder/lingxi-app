@@ -337,6 +337,7 @@ mod tests {
 
     #[test]
     fn palette_commands_include_manual_only_but_filter_non_user_and_env_disabled() {
+        let _guard = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let mut reg = CommandRegistry::new();
 
         let mut manual_only = markdown_cmd("manual-only", vec![]);

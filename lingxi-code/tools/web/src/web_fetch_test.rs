@@ -1424,6 +1424,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                     #[allow(clippy::default_trait_access)]
                     usage: Default::default(),
                     stop_reason: Some("end_turn".into()),
+                    retry_count: 0,
                 })
             }
         }
@@ -1442,6 +1443,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                     #[allow(clippy::default_trait_access)]
                     usage: Default::default(),
                     stop_reason: Some("end_turn".into()),
+                    retry_count: 0,
                 })
             }
         }

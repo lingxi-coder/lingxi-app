@@ -55,9 +55,21 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertEqual(profile.baseURL, "https://chatgpt.com/backend-api/codex")
 
         let snapshot = repository.makeLaunchSnapshot()
-        XCTAssertEqual(snapshot.defaultModelID, "openai-chatgpt/gpt-5.3-codex")
+        XCTAssertEqual(snapshot.defaultModelID, "openai-chatgpt/gpt-5.6-sol")
         XCTAssertEqual(snapshot.enabledProfileIDs, ["openai-chatgpt"])
         XCTAssertEqual(try jsonObject(from: snapshot.providerProfilesJSON)?.count, 0)
+    }
+
+    func testVisionDelegationDefaultsEnabledAndPersists() throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+
+        XCTAssertTrue(repository.makeLaunchSnapshot().visionDelegationEnabled)
+
+        repository.setVisionDelegationEnabled(false)
+
+        XCTAssertFalse(repository.makeLaunchSnapshot().visionDelegationEnabled)
+        let reloaded = ProviderRepository(persistenceURL: persistenceURL)
+        XCTAssertFalse(reloaded.makeLaunchSnapshot().visionDelegationEnabled)
     }
 
     func testAnthropicOAuthCountsAsCredentialWithoutReplacingAPIKeyState() throws {
@@ -139,7 +151,7 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertEqual(customProfile["apiKeyEnv"] as? String, "OPENAI_API_KEY")
         XCTAssertEqual(
             (customProfile["models"] as? [[String: String]])?.map { $0["id"] },
-            ["gpt-4o", "gpt-4o-mini", "o1-preview"]
+            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
         )
     }
 
@@ -191,7 +203,7 @@ final class ProviderRepositoryTests: XCTestCase {
         let preset = try XCTUnwrap(Presets.llm.first(where: { $0.id == "deepseek" }))
 
         XCTAssertEqual(preset.defaultUrl, "https://api.deepseek.com")
-        XCTAssertEqual(preset.models, ["deepseek-v4-flash", "deepseek-v4-pro"])
+        XCTAssertEqual(preset.models, ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro"])
 
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let deepSeek = repository.addProfile(presetID: "deepseek")
@@ -374,7 +386,7 @@ final class ProviderRepositoryTests: XCTestCase {
 
         let draft = repository.makeNewDraft(presetID: "openai")
 
-        XCTAssertEqual(draft.profile.modelID, "gpt-4o")
+        XCTAssertEqual(draft.profile.modelID, "gpt-5.6-sol")
     }
 
     func testOAuthDraftConnectionUsesOAuthTesterInsteadOfAPIKeyTester() async throws {
@@ -486,7 +498,8 @@ final class ProviderRepositoryTests: XCTestCase {
             protocolName: "OpenAiChat",
             authName: "ApiKey",
             credentialEnv: "ENGINE_ONLY_KEY",
-            models: ["engine-model"]
+            models: ["engine-model"],
+            modelDetails: [:]
         )
         repository.configure(submitCommand: nil, providerCatalog: { [entry] })
 
@@ -986,8 +999,8 @@ final class ProviderRepositoryTests: XCTestCase {
             // `Presets.llm` knows: a bare id no preset lists is indistinguishable
             // from a custom Anthropic-compatible proxy model and is adopted.
             "deepseek-v4-flash",
-            "gpt-4o",
-            "gemini-2.5-pro",
+            "gpt-5.6-sol",
+            "gemini-3.7-flash",
             "kimi-k3",
         ] {
             let state = try XCTUnwrap(ProviderRepository.legacyAnthropicProfile(
@@ -1028,14 +1041,13 @@ final class ProviderRepositoryTests: XCTestCase {
     func testTheAnthropicPresetOnlyOffersCuratedModels() throws {
         let preset = try XCTUnwrap(Presets.llm.first(where: { $0.id == "anthropic" }))
         let curated: Set<String> = [
-            "claude-sonnet-5",
-            "claude-sonnet-4-6",
-            "claude-opus-4-8",
-            "claude-haiku-4-5",
+            "claude-opus-5",
             "claude-fable-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
         ]
 
-        XCTAssertEqual(preset.models.first, "claude-sonnet-5",
+        XCTAssertEqual(preset.models.first, "claude-opus-5",
                        "must match traits::provider_default_model(\"anthropic\")")
         for model in preset.models {
             XCTAssertTrue(curated.contains(model), "\(model) is not curated by the engine")

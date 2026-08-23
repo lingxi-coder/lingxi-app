@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "template_id": "vite-react-static-v1",
-  "template_version": 2,
+  "template_version": 3,
   "runtime_compatibility": [
     "store-static"
   ],
@@ -10,7 +10,7 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "vite": "8.2.1",
-    "tailwindcss": "4.3.3"
+    "@ionic/react": "9.0.0"
   },
   "capabilities": {
     "collections": [],

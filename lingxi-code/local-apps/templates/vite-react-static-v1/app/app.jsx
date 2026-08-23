@@ -1,26 +1,23 @@
-import { lazy, Suspense } from "react";
+import { IonRouterOutlet } from "@ionic/react";
 import { Navigate, Route, Routes } from "react-router-dom";
+import { DetailScreen } from "@/app/screens/detail-screen";
 import { HomeScreen } from "@/app/screens/home-screen";
 
-const ComponentLab = lazy(() => import("@/app/screens/component-lab"));
-
-function RouteFallback() {
-  return (
-    <div className="grid min-h-svh place-items-center" role="status">
-      <span className="size-5 animate-spin rounded-full border-2 border-muted border-t-foreground" />
-      <span className="sr-only">正在载入</span>
-    </div>
-  );
-}
-
+/// `IonRouterOutlet` is what turns route changes into native page transitions
+/// and enables the platform back gesture, so routes belong INSIDE it. It reads
+/// its `<Routes>` children directly and treats a `<Navigate>` element as a
+/// redirect.
+///
+/// Every routed component must render an `<IonPage>` as its root, otherwise the
+/// outlet has nothing to animate and the screen appears without a transition.
 export function App() {
   return (
-    <Suspense fallback={<RouteFallback />}>
+    <IonRouterOutlet>
       <Routes>
         <Route path="/" element={<HomeScreen />} />
-        <Route path="/_components" element={<ComponentLab />} />
+        <Route path="/detail" element={<DetailScreen />} />
         <Route path="*" element={<Navigate replace to="/" />} />
       </Routes>
-    </Suspense>
+    </IonRouterOutlet>
   );
 }

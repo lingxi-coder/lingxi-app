@@ -44,8 +44,11 @@ import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
+import com.lingxi.code.components.ModelDetailsDialog
+import com.lingxi.code.components.ModelDetailsInfoButton
 import com.lingxi.code.components.mix
 import com.lingxi.code.components.tint
+import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
 import com.lingxi.code.model.ProviderKind
@@ -178,6 +181,19 @@ fun ProviderListPage(
                     footer = stringResource(R.string.settings_provider_advanced_footer),
                 ) {
                     SettingsRow(
+                        icon = LXIconName.Workflow,
+                        iconColor = t.accent,
+                        label = "Vision Delegation",
+                        sub = "Allow non-vision models to batch-analyze images through an internal delegate.",
+                        chevron = false,
+                        trailing = {
+                            com.lingxi.code.components.LXToggle(
+                                checked = state.visionDelegationEnabled,
+                                onCheckedChange = { store.setVisionDelegationEnabled(it) },
+                            )
+                        },
+                    )
+                    SettingsRow(
                         icon = LXIconName.Sparkle, iconColor = t.accent,
                         label = stringResource(R.string.settings_provider_smart_routing), sub = stringResource(R.string.settings_provider_not_wired_mobile), chevron = false,
                         trailing = {
@@ -257,10 +273,33 @@ private fun ProviderRow(
 @Composable
 fun ProviderPickerPage(
     kind: ProviderKind,
+    state: SettingsUiState,
     store: SettingsStore,
     onPicked: (newId: String) -> Unit,
 ) {
     val t = LingXiTheme.palette
+    val pickerPresets = remember(kind, state.llmCatalogEntries) {
+        if (kind != ProviderKind.Llm || state.llmCatalogEntries.isEmpty()) {
+            kind.presets
+        } else {
+            val fallback = kind.presets.associateBy { it.id }
+            val catalog = state.llmCatalogEntries.map { entry ->
+                val id = if (entry.profileId == "gemini") "google" else entry.profileId
+                val base = fallback[id]
+                ProviderPreset(
+                    id = id,
+                    name = entry.displayName,
+                    sub = base?.sub ?: entry.protocol,
+                    color = base?.color ?: Color.Gray,
+                    defaultUrl = entry.baseUrl,
+                    keyPrefix = base?.keyPrefix.orEmpty(),
+                    models = entry.modelIds,
+                    needsCx = base?.needsCx ?: false,
+                )
+            }
+            (catalog + kind.presets.filter { it.id == "custom" }).distinctBy { it.id }
+        }
+    }
     Column(Modifier.fillMaxWidth()) {
         Blurb(stringResource(R.string.settings_provider_picker_intro))
         Column(
@@ -270,7 +309,7 @@ fun ProviderPickerPage(
                 .background(t.surface)
                 .border(0.5.dp, t.border, RoundedCornerShape(12.dp)),
         ) {
-            kind.presets.forEachIndexed { i, p ->
+            pickerPresets.forEachIndexed { i, p ->
                 Column {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -283,14 +322,27 @@ fun ProviderPickerPage(
                         PresetTile(preset = p, kind = kind, size = 32.dp, fontSize = 14.sp)
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(p.localizedName(kind), color = t.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            val profileId = when (p.id) {
+                                "google" -> "gemini"
+                                else -> p.id
+                            }
+                            val modelCount = if (kind == ProviderKind.Llm) {
+                                state.llmCatalogEntries
+                                    .firstOrNull { it.profileId == profileId }
+                                    ?.modelDetails
+                                    ?.size
+                                    ?: p.models.size
+                            } else {
+                                p.models.size
+                            }
                             Text(
-                                p.localizedSub(kind) + if (p.models.isEmpty()) "" else stringResource(R.string.settings_provider_models_count_fmt, p.models.size),
+                                p.localizedSub(kind) + if (modelCount == 0) "" else stringResource(R.string.settings_provider_models_count_fmt, modelCount),
                                 color = t.text4, fontSize = 11.5f.sp,
                             )
                         }
                         LXIcon(name = LXIconName.Plus, size = 15.dp, color = t.text4, stroke = 2f)
                     }
-                    if (i < kind.presets.size - 1) Box(Modifier.fillMaxWidth().size(0.5.dp).background(t.border))
+                    if (i < pickerPresets.size - 1) Box(Modifier.fillMaxWidth().size(0.5.dp).background(t.border))
                 }
             }
         }
@@ -333,6 +385,7 @@ fun ProviderEditPage(
     var credentialBusy by remember(providerId) { mutableStateOf(false) }
     var connectionBusy by remember(providerId) { mutableStateOf(false) }
     var connectionMessage by remember(providerId) { mutableStateOf<String?>(null) }
+    var selectedModelDetails by remember(providerId) { mutableStateOf<CatalogModelDetails?>(null) }
     val context = LocalContext.current
     var credentialMessage by remember(providerId, editing.credentialConfigured) {
         mutableStateOf(
@@ -346,6 +399,13 @@ fun ProviderEditPage(
         )
     }
     val builtInSupported = kind != ProviderKind.Llm || ProviderSettingsRepository.engineCredentialIdFor(editing) != null
+    val catalogEntry = if (kind == ProviderKind.Llm) {
+        ProviderSettingsRepository.engineCredentialIdFor(editing)
+            ?.let { profileId -> state.llmCatalogEntries.firstOrNull { it.profileId == profileId } }
+    } else {
+        null
+    }
+    val catalogModels = catalogEntry?.modelDetails.orEmpty()
     val applyState = providerApplyUiState(
         hasPendingConfiguration = providerId in state.pendingLlmProviderChanges,
         hasCredentialDraft = keyDraft.isNotBlank(),
@@ -439,9 +499,9 @@ fun ProviderEditPage(
         }
 
         if (kind == ProviderKind.Llm) {
-            if (preset.models.isNotEmpty()) {
+            if (catalogModels.isNotEmpty()) {
                 ModelPicker(
-                    models = preset.models,
+                    models = catalogModels,
                     selected = editing.model,
                     accent = preset.color,
                     onSelect = { m ->
@@ -449,20 +509,27 @@ fun ProviderEditPage(
                         store.updateProvider(kind, providerId) { it.copy(model = m) }
                         store.markProviderConnectionUnverified(kind, providerId)
                     },
-                )
-            } else {
-                FieldLabel(stringResource(R.string.settings_provider_model_id))
-                SettingsField(
-                    value = editing.model,
-                    onValueChange = { v ->
-                        connectionMessage = null
-                        store.updateProvider(kind, providerId) { it.copy(model = v) }
-                        store.markProviderConnectionUnverified(kind, providerId)
-                    },
-                    placeholder = "llama-3.3-70b",
-                    modifier = Modifier.padding(bottom = 14.dp),
+                    onShowDetails = { selectedModelDetails = it },
                 )
             }
+            FieldLabel(stringResource(R.string.settings_provider_model_id))
+            SettingsField(
+                value = editing.model,
+                onValueChange = { v ->
+                    connectionMessage = null
+                    store.updateProvider(kind, providerId) { it.copy(model = v) }
+                    store.markProviderConnectionUnverified(kind, providerId)
+                },
+                placeholder = catalogModels.firstOrNull()?.modelId ?: "llama-3.3-70b",
+                modifier = Modifier.padding(bottom = 14.dp),
+            )
+            FieldHint(
+                if (catalogModels.isNotEmpty()) {
+                    stringResource(R.string.settings_provider_models_count_fmt, catalogModels.size)
+                } else {
+                    stringResource(R.string.settings_provider_preset_not_in_catalog)
+                },
+            )
         }
 
         if (kind == ProviderKind.Llm) {
@@ -655,6 +722,9 @@ fun ProviderEditPage(
                 fontSize = 12.sp,
                 modifier = Modifier.padding(top = 8.dp, start = 4.dp, end = 4.dp),
             )
+        }
+        selectedModelDetails?.let { details ->
+            ModelDetailsDialog(details = details, onDismiss = { selectedModelDetails = null })
         }
     }
 }
@@ -912,10 +982,11 @@ private fun KeyField(
 /** The LLM default-model single-select radio list. */
 @Composable
 private fun ModelPicker(
-    models: List<String>,
+    models: List<CatalogModelDetails>,
     selected: String,
     accent: Color,
     onSelect: (String) -> Unit,
+    onShowDetails: (CatalogModelDetails) -> Unit,
 ) {
     val t = LingXiTheme.palette
     Column(Modifier.fillMaxWidth()) {
@@ -929,14 +1000,14 @@ private fun ModelPicker(
                 .border(0.5.dp, t.border, RoundedCornerShape(10.dp)),
         ) {
             models.forEachIndexed { i, m ->
-                val sel = selected == m
+                val sel = selected == m.modelId
                 Column {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onSelect(m) }
+                            .clickable { onSelect(m.modelId) }
                             .padding(horizontal = 12.dp, vertical = 11.dp),
                     ) {
                         Box(
@@ -948,7 +1019,37 @@ private fun ModelPicker(
                         ) {
                             if (sel) Box(Modifier.size(8.dp).clip(CircleShape).background(accent))
                         }
-                        Text(m, color = t.text, fontSize = 13.sp, fontFamily = LXFont.mono, modifier = Modifier.weight(1f))
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(
+                                m.displayName,
+                                color = t.text,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                m.modelId,
+                                color = t.text3,
+                                fontSize = 11.sp,
+                                fontFamily = LXFont.mono,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            m.metadata.summaryItems
+                                .takeIf { it.isNotEmpty() }
+                                ?.joinToString(" · ")
+                                ?.let { summary ->
+                                    Text(
+                                        summary,
+                                        color = t.text4,
+                                        fontSize = 10.5f.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                        }
+                        ModelDetailsInfoButton(onClick = { onShowDetails(m) })
                     }
                     if (i < models.size - 1) Box(Modifier.fillMaxWidth().size(0.5.dp).background(t.border))
                 }

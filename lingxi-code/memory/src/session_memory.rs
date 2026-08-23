@@ -414,6 +414,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     usage: cost::Usage::default(),
                     stop_reason: Some("end_turn".into()),
+                    retry_count: 0,
                 })
             }
         }

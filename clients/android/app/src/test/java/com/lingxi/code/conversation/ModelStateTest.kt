@@ -2,10 +2,12 @@ package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.ErrorKindDto
+import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.ModelProviderStatus
+import com.lingxi.code.model.ModelMetadata
 import com.lingxi.code.model.ConnStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -58,6 +60,7 @@ class ModelStateTest {
             ClientEvent.ModelList(
                 models = listOf("claude-opus-4-20250514", "claude-sonnet-4-20250514"),
                 current = "claude-sonnet-4-20250514",
+                details = emptyList(),
             ),
         )
         assertEquals(listOf("claude-opus-4-20250514", "claude-sonnet-4-20250514"), next.available)
@@ -73,7 +76,11 @@ class ModelStateTest {
         )
         val next = reduceModelEvent(
             prev,
-            ClientEvent.ModelList(models = listOf("claude-haiku-4"), current = "claude-haiku-4"),
+            ClientEvent.ModelList(
+                models = listOf("claude-haiku-4"),
+                current = "claude-haiku-4",
+                details = emptyList(),
+            ),
         )
         assertEquals(listOf("claude-haiku-4"), next.available)
         assertEquals("claude-haiku-4", next.active)
@@ -201,18 +208,45 @@ class ModelStateTest {
                 "anthropic/claude-sonnet-5",
                 "openrouter/openrouter/auto",
             ),
+            detailsByReference = mapOf(
+                "deepseek/deepseek-v4-flash" to testDetails(
+                    reference = "deepseek/deepseek-v4-flash",
+                    providerId = "deepseek",
+                    displayName = "DeepSeek V4 Flash",
+                    thinking = "Thinking",
+                    contextWindow = "1M 上下文",
+                    capabilities = "工具",
+                ),
+                "anthropic/claude-sonnet-5" to testDetails(
+                    reference = "anthropic/claude-sonnet-5",
+                    providerId = "anthropic",
+                    displayName = "Claude Sonnet 5",
+                    thinking = "自适应 Thinking",
+                    contextWindow = "1M 上下文",
+                    pricing = "价格未提供",
+                ),
+                "openrouter/openrouter/auto" to testDetails(
+                    reference = "openrouter/openrouter/auto",
+                    providerId = "openrouter",
+                    displayName = "OpenRouter Auto",
+                    providerLabel = "OpenRouter",
+                    thinking = "动态路由",
+                    contextWindow = "规格随实际模型",
+                ),
+            ),
         )
 
         assertEquals("Thinking", options[0].metadata.thinking)
         assertEquals("1M 上下文", options[0].metadata.contextWindow)
-        assertEquals("284B / 13B 激活", options[0].metadata.parameterSize)
+        assertEquals("DeepSeek V4 Flash", options[0].name)
 
         assertEquals("自适应 Thinking", options[1].metadata.thinking)
         assertEquals("1M 上下文", options[1].metadata.contextWindow)
-        assertEquals("参数未公开", options[1].metadata.parameterSize)
+        assertEquals("Claude Sonnet 5", options[1].name)
 
         assertEquals("动态路由", options[2].metadata.thinking)
         assertEquals("规格随实际模型", options[2].metadata.contextWindow)
+        assertEquals("OpenRouter", options[2].providerName)
     }
 
     @Test
@@ -223,11 +257,38 @@ class ModelStateTest {
                 "anthropic/claude-sonnet-5",
                 "openrouter/openrouter/auto",
             ),
+            detailsByReference = mapOf(
+                "deepseek/deepseek-v4-flash" to testDetails(
+                    reference = "deepseek/deepseek-v4-flash",
+                    providerId = "deepseek",
+                    displayName = "DeepSeek V4 Flash",
+                    providerLabel = "DeepSeek",
+                    description = "Current DeepSeek fast model",
+                    thinking = "Thinking",
+                    contextWindow = "1M 上下文",
+                ),
+                "anthropic/claude-sonnet-5" to testDetails(
+                    reference = "anthropic/claude-sonnet-5",
+                    providerId = "anthropic",
+                    displayName = "Claude Sonnet 5",
+                    providerLabel = "Anthropic",
+                    description = "Claude API default",
+                    thinking = "自适应 Thinking",
+                ),
+                "openrouter/openrouter/auto" to testDetails(
+                    reference = "openrouter/openrouter/auto",
+                    providerId = "openrouter",
+                    displayName = "OpenRouter Auto",
+                    providerLabel = "OpenRouter",
+                    description = "Dynamic router",
+                    thinking = "动态路由",
+                ),
+            ),
         )
 
         assertEquals(
             listOf("deepseek/deepseek-v4-flash"),
-            EngineModelCatalog.filter(options, "284B").map { it.id },
+            EngineModelCatalog.filter(options, "1M 上下文").map { it.id },
         )
         assertEquals(
             listOf("anthropic/claude-sonnet-5"),
@@ -437,4 +498,51 @@ class ModelStateTest {
         assertEquals("anthropic/claude-sonnet-4-20250514", vm.state.value.model.id)
         assertEquals(listOf("anthropic/claude-sonnet-4-20250514"), source.setModelCalls)
     }
+
+    private fun testDetails(
+        reference: String,
+        providerId: String,
+        displayName: String,
+        providerLabel: String? = null,
+        description: String? = null,
+        thinking: String? = null,
+        capabilities: String? = null,
+        contextWindow: String? = null,
+        pricing: String? = null,
+    ): CatalogModelDetails = CatalogModelDetails(
+        reference = reference,
+        providerId = providerId,
+        providerLabel = providerLabel ?: EngineModelCatalog.providerDisplayName(providerId),
+        displayName = displayName,
+        modelId = reference.substringAfterLast('/'),
+        description = description,
+        family = null,
+        status = null,
+        releaseDate = null,
+        lastUpdated = null,
+        knowledgeCutoff = null,
+        inputModalities = emptyList(),
+        outputModalities = emptyList(),
+        contextWindowTokens = null,
+        maxInputTokens = null,
+        maxOutputTokens = null,
+        openWeights = null,
+        attachments = null,
+        temperatureControl = null,
+        pricing = null,
+        capabilities = emptyList(),
+        reasoningOptions = emptyList(),
+        reasoningEditable = true,
+        reasoningForced = false,
+        reasoningDefault = null,
+        metadata = ModelMetadata(
+            displayName = displayName,
+            providerLabel = providerLabel,
+            description = description,
+            thinking = thinking,
+            capabilities = capabilities,
+            contextWindow = contextWindow,
+            pricing = pricing,
+        ),
+    )
 }

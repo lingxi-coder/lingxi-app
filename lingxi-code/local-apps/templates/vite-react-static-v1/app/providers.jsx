@@ -1,28 +1,45 @@
-import { MotionConfig } from "motion/react";
-import { ThemeProvider } from "next-themes";
-import { HashRouter } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { useRef } from "react";
+import { IonApp, setupIonicReact } from "@ionic/react";
+import { IonReactHashRouter } from "@ionic/react-router";
 import { ErrorBoundary } from "@/app/error-boundary";
-import { Toaster } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { LingXiBridgeProvider } from "@/lib/lingxi-provider";
-import { queryClient } from "@/lib/query-client";
+import { LingXiBridgeProvider, useLingXi } from "@/lib/lingxi-provider";
+
+/// Ionic reads `mode` when a component is CONSTRUCTED, not when it renders, so
+/// `setupIonicReact` has to run before the first `ion-*` element exists and the
+/// value it is given has to already be right.
+///
+/// That is why this waits for `bridgeResolved`. `deviceContext` arrives from the
+/// native host on `window.lingxi.v2`, which is not guaranteed to exist at module
+/// evaluation time; configuring at import would read the fallback context, pick
+/// `md`, and leave every iOS app wearing Material chrome for the whole session
+/// with nothing failing.
+///
+/// Ionic would otherwise sniff the user agent. The host is the better authority:
+/// it knows which client embeds this WebView.
+function IonicHost({ children }) {
+  const { adapter, bridgeResolved } = useLingXi();
+  const configured = useRef(false);
+
+  if (!bridgeResolved) return null;
+
+  if (!configured.current) {
+    setupIonicReact({ mode: adapter.ionicMode });
+    configured.current = true;
+  }
+
+  return (
+    <IonApp>
+      <IonReactHashRouter>{children}</IonReactHashRouter>
+    </IonApp>
+  );
+}
 
 export function AppProviders({ children }) {
   return (
-    <ErrorBoundary>
-      <HashRouter>
-        <QueryClientProvider client={queryClient}>
-          <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-            <MotionConfig reducedMotion="user">
-              <TooltipProvider delayDuration={250}>
-                <LingXiBridgeProvider>{children}</LingXiBridgeProvider>
-                <Toaster position="top-center" richColors />
-              </TooltipProvider>
-            </MotionConfig>
-          </ThemeProvider>
-        </QueryClientProvider>
-      </HashRouter>
-    </ErrorBoundary>
+    <LingXiBridgeProvider>
+      <ErrorBoundary>
+        <IonicHost>{children}</IonicHost>
+      </ErrorBoundary>
+    </LingXiBridgeProvider>
   );
 }

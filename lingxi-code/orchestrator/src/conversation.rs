@@ -20,6 +20,7 @@ use llm_client::{LlmError, LlmEvent, LlmResponse};
 use protocol::{ConversationMessage, HookId, MessageId, SessionId};
 use session::JsonlWriter;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// Re-export of the canonical image-source shape (FROZEN in `protocol`) so callers
@@ -222,6 +223,25 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// to delegate to the router.
     fn available_models(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Resolve the selected main route plus an optional same-profile vision delegate.
+    fn resolve_media_route(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<llm_client::MediaRoute, LlmError> {
+        Err(LlmError::ModelUnavailable)
+    }
+
+    /// Run the internal vision-delegation side query for a non-vision main route.
+    async fn analyze_vision_delegation(
+        &self,
+        _packet: sidequery::VisionPacket,
+    ) -> Result<sidequery::VisionDelegationResult, LlmError> {
+        Err(LlmError::MediaDelegationUnavailable {
+            message: "vision delegation is unavailable for this provider".to_string(),
+        })
     }
 
     /// Replace the thinking policy used for subsequent provider requests.
@@ -663,6 +683,8 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
             | LlmError::TlsCert { .. }
             | LlmError::StreamInterrupted { .. } => (Some("server_error"), None),
             // Generic `Error` fallthrough in `Flp` → "unknown".
+            LlmError::MediaDelegationUnavailable { .. }
+            | LlmError::MediaDelegationPartial { .. } => (Some("invalid_request"), None),
             LlmError::CostUnavailable { .. } | LlmError::UnsupportedCapability { .. } => {
                 (Some("unknown"), None)
             }
@@ -678,6 +700,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         | OrchestratorError::StreamEndedWithoutStop
         | OrchestratorError::Compaction(_)
         | OrchestratorError::CompactionCancelled
+        | OrchestratorError::VisionDelegationCancelled
         | OrchestratorError::RepeatedOverloaded
         | OrchestratorError::RateLimitRejected { .. }
         | OrchestratorError::MaxTurnsReached { .. }
@@ -870,6 +893,10 @@ fn redact_ephemeral_tool_result_images(
 #[path = "conversation_test.rs"]
 mod conversation_test;
 
+#[cfg(test)]
+#[path = "model_call_prepare_test.rs"]
+mod model_call_prepare_test;
+
 /// Bare text injected as a user message when streaming is cancelled (ESC /
 /// SIGINT) DURING tool execution for the current turn. 1:1 with claude-code
 /// `messages.ts:208` `INTERRUPT_MESSAGE_FOR_TOOL_USE`.
@@ -1009,6 +1036,45 @@ pub(crate) struct PlanReminderCadence {
 const PLAN_TURNS_BETWEEN_ATTACHMENTS: usize = 5;
 /// `txl.FULL_REMINDER_EVERY_N_ATTACHMENTS` @296558044.
 const PLAN_FULL_REMINDER_EVERY_N_ATTACHMENTS: u32 = 5;
+
+/// Which main-loop driver is preparing an outgoing model call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelCallPath {
+    Batched,
+    Streaming,
+}
+
+/// Retry-safe rewriter for outgoing model-call history snapshots.
+#[async_trait]
+pub(crate) trait OutgoingHistoryRewriter: Send + Sync {
+    async fn rewrite(
+        &self,
+        orch: &ConversationOrchestrator,
+        raw_history: Vec<ConversationMessage>,
+    ) -> Result<Vec<ConversationMessage>, OrchestratorError>;
+}
+
+/// Shared output from the pre-call preparation seam used by both main loops.
+#[derive(Clone)]
+pub(crate) struct PreparedModelCall {
+    pub(crate) history_snapshot: Vec<ConversationMessage>,
+    pub(crate) model: String,
+    pub(crate) model_profile: Option<String>,
+    pub(crate) outgoing_history_rewriter: Option<Arc<dyn OutgoingHistoryRewriter>>,
+}
+
+/// Shared pre-call hook seam for batched and streaming request preparation.
+#[async_trait]
+pub(crate) trait ModelCallPreparer: Send + Sync {
+    async fn prepare(
+        &self,
+        orch: &ConversationOrchestrator,
+        path: ModelCallPath,
+        system_prompt: Option<&str>,
+        cancel: Option<&CancellationToken>,
+        draft: PreparedModelCall,
+    ) -> Result<PreparedModelCall, OrchestratorError>;
+}
 
 const TOOL_TOKEN_COUNT_OVERHEAD: u64 = 500;
 
@@ -1407,7 +1473,8 @@ pub struct ConversationOrchestrator {
     /// Capped at [`Self::MAX_PENDING_MEMORY_UPDATES`], oldest dropped: the
     /// BATCHED turn driver (`turn_loop.rs`) calls the notification drain but not
     /// the memory-update drain, so on that driver the queue must not grow.
-    pub(crate) pending_memory_updates: std::sync::Mutex<Vec<crate::prompt::memory_update::PendingMemoryUpdate>>,
+    pub(crate) pending_memory_updates:
+        std::sync::Mutex<Vec<crate::prompt::memory_update::PendingMemoryUpdate>>,
     /// REM-09 goal check-in deferral bookkeeping (`deferredSince` /
     /// `checkinCount` / `lastDeferralPassAt` on the oracle's `activeGoal`).
     /// Session-scoped and deliberately NOT on
@@ -1452,6 +1519,13 @@ pub struct ConversationOrchestrator {
     /// [`compaction::Autocompactor::with_forked_runner`] at the composition root
     /// so producer (here) and consumer (the summarizer) share one slot.
     pub(crate) cache_safe_slot: Option<Arc<sidequery::CacheSafeParamsSlot>>,
+    /// Shared pre-call seam for batched/streaming outgoing request rewrites.
+    ///
+    /// Vision delegation plugs in here: it can persist `MediaAnalysis` into
+    /// session history before the main call, rewrite the outgoing snapshot, and
+    /// return a retry-safe rewriter so reconnect/fallback/PTL paths keep the
+    /// same transformed request without mutating `session.history`.
+    pub(crate) model_call_preparer: Option<Arc<dyn ModelCallPreparer>>,
     /// Passive `<new-diagnostics>` source (the LSP diagnostic registry). When
     /// wired (via [`Self::with_new_diagnostics_source`]), each turn polls it for
     /// LSP diagnostics not yet surfaced and injects them as a transient meta
@@ -1991,6 +2065,7 @@ impl ConversationOrchestrator {
             output_token_pool: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_start_output_baseline: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_safe_slot: None,
+            model_call_preparer: None,
             new_diagnostics_source: None,
             current_turn_system_prompt: Mutex::new(None),
             fork_spawner: None,
@@ -2038,6 +2113,65 @@ impl ConversationOrchestrator {
     pub fn with_jsonl_writer(mut self, writer: Arc<JsonlWriter>) -> Self {
         self.jsonl_writer = Some(writer);
         self
+    }
+
+    /// Attach the shared main-loop pre-call preparer.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_model_call_preparer(mut self, preparer: Arc<dyn ModelCallPreparer>) -> Self {
+        self.model_call_preparer = Some(preparer);
+        self
+    }
+
+    /// Enable the shared image sidecar for non-vision primary models. Passing
+    /// `false` keeps the preparer installed so media receives an actionable
+    /// disabled error instead of falling through to a generic capability error.
+    #[must_use]
+    pub fn with_vision_delegation(mut self, enabled: bool) -> Self {
+        self.model_call_preparer = Some(Arc::new(
+            crate::vision_model_call::VisionModelCallPreparer::with_enabled(enabled),
+        ));
+        self
+    }
+
+    /// Clone the current session request state and run the shared pre-call
+    /// preparation hook, if one is wired.
+    pub(crate) async fn prepare_model_call_snapshot(
+        &self,
+        path: ModelCallPath,
+        system_prompt: Option<&str>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<PreparedModelCall, OrchestratorError> {
+        let draft = {
+            let s = self.session.lock().await;
+            PreparedModelCall {
+                history_snapshot: s.history.clone(),
+                model: s.model.clone(),
+                model_profile: s.model_profile.clone(),
+                outgoing_history_rewriter: None,
+            }
+        };
+        match self.model_call_preparer.as_ref() {
+            Some(preparer) => {
+                preparer
+                    .prepare(self, path, system_prompt, cancel, draft)
+                    .await
+            }
+            None => Ok(draft),
+        }
+    }
+
+    /// Apply a retry-safe outgoing-history rewrite when a recovery path rebuilds
+    /// the request from raw `session.history`.
+    pub(crate) async fn rewrite_outgoing_history(
+        &self,
+        raw_history: Vec<ConversationMessage>,
+        rewriter: Option<&Arc<dyn OutgoingHistoryRewriter>>,
+    ) -> Result<Vec<ConversationMessage>, OrchestratorError> {
+        match rewriter {
+            Some(rewriter) => rewriter.rewrite(self, raw_history).await,
+            None => Ok(raw_history),
+        }
     }
 
     /// Build a deterministic assistant-block `uuid` for write-side per-block
@@ -2781,6 +2915,15 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_cost_tracker(mut self, tracker: Arc<cost::CostTracker>) -> Self {
         self.cost_tracker = Some(tracker);
+        self
+    }
+
+    /// Share the API-call counter with other in-process model entry points,
+    /// such as local-app vision delegation, so one `/cost` snapshot includes
+    /// every billable request made on the session's behalf.
+    #[must_use]
+    pub fn with_api_calls_counter(mut self, counter: Arc<std::sync::atomic::AtomicU32>) -> Self {
+        self.api_calls_recorded = counter;
         self
     }
 
@@ -4147,6 +4290,15 @@ impl ConversationOrchestrator {
         // under-threshold), keeping the post-compact history byte-identical to
         // before this finding.
         let preserved_tail = result.messages_to_preserve;
+        let tail_ids = preserved_tail
+            .iter()
+            .map(|message| message.id().to_string())
+            .collect::<HashSet<_>>();
+        let preserved_media_analysis = result
+            .media_analysis_to_preserve
+            .into_iter()
+            .filter(|message| !tail_ids.contains(&message.id().to_string()))
+            .collect::<Vec<_>>();
 
         // CSM.4: build the TS-faithful compact boundary (`createCompactBoundaryMessage`,
         // the byte-exact `"Conversation compacted"` sentinel) instead of the ad-hoc
@@ -4198,8 +4350,8 @@ impl ConversationOrchestrator {
         // (`bin/claude.exe` offset 202817825): `let f=eOt(d.readFileState);
         // d.readFileState.clear(); ...; K2p(f,...)`. The restored attachments are
         // appended AFTER the summary, in the `messagesToKeep`/`attachments`
-        // position of `buildPostCompactMessages` order
-        // `[boundaryMarker, ...summaryMessages, ...attachments, ...]`.
+        // position of `buildPostCompactMessages` order. Internal vision
+        // sidecars are inserted between the kept tail and these attachments.
         let restored_attachments = self
             .restore_post_compact_attachments_against(&preserved_tail)
             .await;
@@ -4217,15 +4369,17 @@ impl ConversationOrchestrator {
 
         // COMPACT.1 / #58: the boundary marker leads the post-compact history,
         // matching TS `buildPostCompactMessages` / `Iqn` order
-        // `[boundaryMarker, ...summaryMessages, ...messagesToKeep, ...attachments,
-        // ...hookResults]` (compact.ts:330). The preserved verbatim tail
-        // (`messagesToKeep`) rides AFTER the summary and BEFORE the restored
-        // attachments. Empty `preserved_tail` ⇒ the order is identical to before
-        // (`[marker, ...summary, ...attachments]`).
+        // `[boundaryMarker, ...summaryMessages, ...messagesToKeep, ...sidecars,
+        // ...attachments, ...hookResults]` (compact.ts:330). The preserved
+        // verbatim tail (`messagesToKeep`) rides AFTER the summary; internal
+        // vision sidecars then retain reusable media evidence before restored
+        // attachments. Empty `preserved_tail` and sidecar set ⇒ the order is
+        // identical to before (`[marker, ...summary, ...attachments]`).
         let mut history_after = Vec::with_capacity(
             result.messages.len()
                 + 1
                 + preserved_tail.len()
+                + preserved_media_analysis.len()
                 + restored_attachments.len()
                 + session_start_messages.len(),
         );
@@ -4234,6 +4388,10 @@ impl ConversationOrchestrator {
         history_after.extend(result.messages.iter().cloned());
         // #58: the usage-zeroed verbatim tail (`messagesToKeep`).
         history_after.extend(preserved_tail);
+        // Vision sidecars from the summarized prefix are internal messages,
+        // not prose that may be dropped by the summary model. Keep them after
+        // the summary so future turns can reuse their fingerprints.
+        history_after.extend(preserved_media_analysis.iter().cloned());
         // Restored file attachments ride after the summary + kept tail (the
         // `attachments` slot in `buildPostCompactMessages`).
         history_after.extend(restored_attachments.iter().cloned());
@@ -4243,8 +4401,8 @@ impl ConversationOrchestrator {
 
         // Claude mutates the boundary metadata only after the complete
         // post-compact message set has been assembled. This includes the
-        // boundary, summary, preserved tail, restored attachments, and
-        // SessionStart hook results.
+        // boundary, summary, preserved tail, vision sidecars, restored
+        // attachments, and SessionStart hook results.
         let post_tokens = compaction::grouping::estimate_tokens_for_range(&history_after);
         metadata.post_tokens = Some(post_tokens);
         metadata.duration_ms = Some(auto_duration_ms.unwrap_or_else(|| {
@@ -4310,8 +4468,9 @@ impl ConversationOrchestrator {
         //    tail, exactly like claude (whose writer chains off the in-memory
         //    array `[boundary, ...summary, ...messagesToKeep, ...]`, skipping
         //    already-persisted members).
-        // 4. Restored file attachments, chained after the tail (the
-        //    `attachments` slot of `buildPostCompactMessages`).
+        // 4. Preserved vision sidecars, then restored file attachments, chained
+        //    after the tail (the `attachments` slot of
+        //    `buildPostCompactMessages`).
         self.persist_compact_boundary_to_jsonl(&marker, &metadata)
             .await;
         for m in &result.messages {
@@ -4321,6 +4480,9 @@ impl ConversationOrchestrator {
             if let Some(tail_last) = pre_boundary_last_uuid {
                 *self.last_jsonl_uuid.lock().await = Some(tail_last);
             }
+        }
+        for m in &preserved_media_analysis {
+            self.persist_message_to_jsonl(m).await;
         }
         for m in &restored_attachments {
             self.persist_message_to_jsonl(m).await;
@@ -4395,11 +4557,10 @@ impl ConversationOrchestrator {
         // `hoe(messages)` (2.1.238 @294688350) sums the last assistant usage
         // INCLUDING output tokens; the `total_tokens_reminder` needs that total,
         // so cache the output half here at the same chokepoint.
-        self.last_response_output_tokens
-            .store(
-                usage.billable_tokens.output,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+        self.last_response_output_tokens.store(
+            usage.billable_tokens.output,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // Feed the shared workflow `budget.spent()` pool: this is the single
         // per-response chokepoint both turn drivers call, so adding the
         // response's output tokens here accumulates the main-loop side of the
@@ -4441,6 +4602,57 @@ impl ConversationOrchestrator {
             .await;
         self.api_calls_recorded
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) async fn record_vision_delegation_usage(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        result: &sidequery::VisionDelegationResult,
+    ) {
+        self.record_vision_delegation_accounting(
+            model,
+            profile,
+            result.usage.clone(),
+            result.elapsed,
+            result.retry_count,
+            result.api_calls,
+        )
+        .await;
+    }
+
+    pub(crate) async fn record_vision_delegation_accounting(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        usage: cost::Usage,
+        elapsed: std::time::Duration,
+        retry_count: u32,
+        api_calls: u32,
+    ) {
+        if api_calls == 0 {
+            return;
+        }
+        let model_ref = crate::cost_wiring::model_ref_from_string(model, profile);
+        if let Some(tracker) = self.cost_tracker.as_ref() {
+            tracker
+                .record_api_response_v2(
+                    model_ref,
+                    usage.clone(),
+                    elapsed,
+                    retry_count,
+                    usage.tokens.cache_read,
+                    usage
+                        .tokens
+                        .cache_write
+                        .saturating_add(usage.tokens.cache_write_1h),
+                    false,
+                    self.analytics_bus.as_ref(),
+                )
+                .await;
+        }
+        self.api_calls_recorded
+            .fetch_add(api_calls, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The shared output-token pool backing a launched workflow's
@@ -8949,10 +9161,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let _ = self.drain_peer_inbox(false).await;
 
             // 2. Open the stream for this turn.
-            let (mut snapshot, model, model_profile) = {
-                let s = self.session.lock().await;
-                (s.history.clone(), s.model.clone(), s.model_profile.clone())
-            };
+            let prepared_call = self
+                .prepare_model_call_snapshot(
+                    ModelCallPath::Streaming,
+                    system_prompt.as_deref(),
+                    user_cancel.as_ref(),
+                )
+                .await?;
+            let mut snapshot = prepared_call.history_snapshot;
+            let model = prepared_call.model;
+            let model_profile = prepared_call.model_profile;
+            let outgoing_history_rewriter = prepared_call.outgoing_history_rewriter;
 
             // R-P1c/R-P1d (streaming twin): PREPEND the leading `additionalContext`
             // meta message (`# claudeMd` / `# userEmail` / `# currentDate`) to THIS
@@ -9382,10 +9601,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // Re-snapshot history — the per-turn `snapshot` was MOVED into
                     // the failed `stream()` call. Prepend the additional-context
                     // meta message, like every `callModel` (claude-code `A6n`).
-                    let (mut recov_snapshot, recov_model, recov_profile) = {
+                    let (recov_snapshot_raw, recov_model, recov_profile) = {
                         let s = self.session.lock().await;
                         (s.history.clone(), s.model.clone(), s.model_profile.clone())
                     };
+                    let mut recov_snapshot = self
+                        .rewrite_outgoing_history(
+                            recov_snapshot_raw,
+                            outgoing_history_rewriter.as_ref(),
+                        )
+                        .await?;
                     self.reattach_outgoing_context(
                         &mut recov_snapshot,
                         deferred_reminder.as_ref(),
@@ -9399,6 +9624,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         &recov_model,
                         recov_profile.as_deref(),
                         recov_snapshot,
+                        outgoing_history_rewriter.clone(),
                         wire_tools.clone(),
                         None,
                         deferred_reminder.clone(),
@@ -9616,10 +9842,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 );
                                 // Re-snapshot history (+ additional context) for
                                 // the retry — same pattern as the 529 fallback.
-                                let (mut re_snapshot, re_model, re_profile) = {
+                                let (re_snapshot_raw, re_model, re_profile) = {
                                     let s = self.session.lock().await;
                                     (s.history.clone(), s.model.clone(), s.model_profile.clone())
                                 };
+                                let mut re_snapshot = self
+                                    .rewrite_outgoing_history(
+                                        re_snapshot_raw,
+                                        outgoing_history_rewriter.as_ref(),
+                                    )
+                                    .await?;
                                 self.reattach_outgoing_context(
                                     &mut re_snapshot,
                                     deferred_reminder.as_ref(),
@@ -9758,10 +9990,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             // Re-snapshot history for the non-streaming call (the partial
                             // stream never touched session.history, so it is still the same
                             // snapshot we used for the stream — no reset needed).
-                            let (mut non_stream_snapshot, non_stream_model, non_stream_profile) = {
+                            let (non_stream_snapshot_raw, non_stream_model, non_stream_profile) = {
                                 let s = self.session.lock().await;
                                 (s.history.clone(), s.model.clone(), s.model_profile.clone())
                             };
+                            let mut non_stream_snapshot = self
+                                .rewrite_outgoing_history(
+                                    non_stream_snapshot_raw,
+                                    outgoing_history_rewriter.as_ref(),
+                                )
+                                .await?;
                             // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
                             // context meta message on EVERY `callModel`, including this
                             // non-streaming fallback. Prepend it to the re-snapshot too.
@@ -11093,6 +11331,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
             }
             Err(OrchestratorError::MaxTurnsReached { .. }) => Ok(TurnOutcome::MaxTurns),
+            Err(OrchestratorError::VisionDelegationCancelled) if cancel.is_cancelled() => {
+                Ok(TurnOutcome::Cancelled)
+            }
             Err(e) => {
                 // B6-T1: status-change emit parity — fire the emit-on-change
                 // helpers for a terminal rate-limited error (the drive fn
@@ -12215,7 +12456,10 @@ As you answer the user's questions, you can use the following context:\n\
     /// brief summary of what you consolidated, updated, or pruned") — falling
     /// back to the task description when the agent returned nothing. A `failed`
     /// / `killed` dream is skipped: nothing was consolidated.
-    fn enqueue_memory_updates_from(&self, notifications: &[traits::task_registry::TaskNotification]) {
+    fn enqueue_memory_updates_from(
+        &self,
+        notifications: &[traits::task_registry::TaskNotification],
+    ) {
         let fresh: Vec<crate::prompt::memory_update::PendingMemoryUpdate> = notifications
             .iter()
             .filter(|n| n.task_type == "dream" && n.status == "completed")
@@ -12599,10 +12843,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         }
         let (history_tail_is_tool_results, model) = {
             let s = self.session.lock().await;
-            (
-                Self::step_follows_tool_results(&s.history),
-                s.model.clone(),
-            )
+            (Self::step_follows_tool_results(&s.history), s.model.clone())
         };
         let reanchor = !history_tail_is_tool_results && tt::after_user_turn(None);
         if !history_tail_is_tool_results && !reanchor {
@@ -13185,7 +13426,8 @@ message with multiple tool uses so they run concurrently."
                 continue;
             }
             // (5) diff.
-            let snippet = crate::prompt::changed_files::render_snippet(&entry.content, &fresh, false);
+            let snippet =
+                crate::prompt::changed_files::render_snippet(&entry.content, &fresh, false);
             if snippet.is_empty() {
                 continue;
             }
@@ -13203,8 +13445,7 @@ message with multiple tool uses so they run concurrently."
         changed
             .iter()
             .map(|file| {
-                let body =
-                    crate::prompt::changed_files::render_changed_file(file, &read_tool_name);
+                let body = crate::prompt::changed_files::render_changed_file(file, &read_tool_name);
                 ConversationMessage::user_meta(
                     MessageId::new(),
                     format!("<system-reminder>\n{body}\n</system-reminder>"),
@@ -14336,7 +14577,7 @@ message with multiple tool uses so they run concurrently."
             .map(|id| traits::ReasoningSelection::Level { id })
             .unwrap_or(traits::ReasoningSelection::Automatic);
         let (validated, thinking, provider_effort, legacy_effort) =
-            Self::reasoning_request_state(model, provider_id, &selection);
+            self.reasoning_request_state(model, provider_id, &selection);
         *self
             .current_reasoning_selection
             .write()
@@ -14365,7 +14606,7 @@ message with multiple tool uses so they run concurrently."
             return;
         }
         let (validated, thinking, provider_effort, legacy_effort) =
-            Self::reasoning_request_state(model, provider_id, &selection);
+            self.reasoning_request_state(model, provider_id, &selection);
         *self
             .current_reasoning_selection
             .write()
@@ -14400,9 +14641,23 @@ message with multiple tool uses so they run concurrently."
     /// request also drives the mobile UI; unknown/custom profiles remain
     /// Auto-only because they have no verified adapter contract.
     fn reasoning_spec_for_model(
+        &self,
         model: &str,
         provider_id: Option<&str>,
     ) -> traits::ReasoningControlSpec {
+        let mut matches = self
+            .api
+            .list_model_listings()
+            .into_iter()
+            .filter(|listing| {
+                listing.request_model == model
+                    && provider_id.is_none_or(|provider| listing.provider_id == provider)
+            });
+        if let Some(first) = matches.next() {
+            if provider_id.is_some() || matches.next().is_none() {
+                return first.reasoning;
+            }
+        }
         // A missing profile is the legacy/builtin route for known Anthropic
         // models. Infer it only from the shared model-capability registry;
         // arbitrary or custom ids remain Auto-only instead of inheriting
@@ -14529,11 +14784,12 @@ message with multiple tool uses so they run concurrently."
     }
 
     fn validate_reasoning_selection(
+        &self,
         selection: &traits::ReasoningSelection,
         model: &str,
         provider_id: Option<&str>,
     ) -> traits::ReasoningSelection {
-        let spec = Self::reasoning_spec_for_model(model, provider_id);
+        let spec = self.reasoning_spec_for_model(model, provider_id);
         let supported = match selection {
             traits::ReasoningSelection::Automatic => true,
             traits::ReasoningSelection::TokenBudget { tokens } => {
@@ -14555,6 +14811,7 @@ message with multiple tool uses so they run concurrently."
     }
 
     fn reasoning_request_state(
+        &self,
         model: &str,
         provider_id: Option<&str>,
         selection: &traits::ReasoningSelection,
@@ -14565,7 +14822,7 @@ message with multiple tool uses so they run concurrently."
         Option<String>,
     ) {
         use llm_client::model::thinking::ThinkingConfig;
-        let validated = Self::validate_reasoning_selection(selection, model, provider_id);
+        let validated = self.validate_reasoning_selection(selection, model, provider_id);
         let effort_level = |id: &str| Some(serde_json::Value::String(id.to_string()));
         let legacy = |id: &str| Some(id.to_string());
         let provider_id = provider_id.or_else(|| {
@@ -14597,8 +14854,8 @@ message with multiple tool uses so they run concurrently."
                 traits::ReasoningSelection::Level { id } => (
                     validated.clone(),
                     ThinkingConfig::Adaptive,
-                    effort_level(id),
-                    legacy(id),
+                    effort_level(id.as_str()),
+                    legacy(id.as_str()),
                 ),
                 traits::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
@@ -14611,8 +14868,8 @@ message with multiple tool uses so they run concurrently."
                 traits::ReasoningSelection::Level { id } => (
                     validated.clone(),
                     ThinkingConfig::Adaptive,
-                    effort_level(id),
-                    legacy(id),
+                    effort_level(id.as_str()),
+                    legacy(id.as_str()),
                 ),
                 traits::ReasoningSelection::Disabled => {
                     // Responses API uses the explicit `none` effort value to
@@ -14640,8 +14897,8 @@ message with multiple tool uses so they run concurrently."
                         traits::ReasoningSelection::Level { id } => (
                             validated.clone(),
                             ThinkingConfig::Adaptive,
-                            effort_level(id),
-                            legacy(id),
+                            effort_level(id.as_str()),
+                            legacy(id.as_str()),
                         ),
                         traits::ReasoningSelection::Disabled => {
                             (validated, ThinkingConfig::Disabled, None, None)
@@ -14691,8 +14948,8 @@ message with multiple tool uses so they run concurrently."
                 traits::ReasoningSelection::Level { id } => (
                     validated.clone(),
                     ThinkingConfig::Adaptive,
-                    effort_level(id),
-                    legacy(id),
+                    effort_level(id.as_str()),
+                    legacy(id.as_str()),
                 ),
                 traits::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
@@ -14710,8 +14967,8 @@ message with multiple tool uses so they run concurrently."
                         traits::ReasoningSelection::Level { id } => (
                             validated.clone(),
                             ThinkingConfig::Adaptive,
-                            effort_level(id),
-                            legacy(id),
+                            effort_level(id.as_str()),
+                            legacy(id.as_str()),
                         ),
                         traits::ReasoningSelection::Disabled => {
                             (validated, ThinkingConfig::Disabled, None, None)
@@ -14743,8 +15000,8 @@ message with multiple tool uses so they run concurrently."
                         traits::ReasoningSelection::Level { id } => (
                             validated.clone(),
                             ThinkingConfig::Adaptive,
-                            effort_level(id),
-                            legacy(id),
+                            effort_level(id.as_str()),
+                            legacy(id.as_str()),
                         ),
                         traits::ReasoningSelection::TokenBudget { tokens } => (
                             validated.clone(),
@@ -14775,7 +15032,7 @@ message with multiple tool uses so they run concurrently."
         self.current_effort_explicit
             .store(true, std::sync::atomic::Ordering::Release);
         let (validated, thinking, effort, legacy_effort) =
-            Self::reasoning_request_state(model, provider_id, &selection);
+            self.reasoning_request_state(model, provider_id, &selection);
         *self
             .current_reasoning_selection
             .write()
@@ -14799,7 +15056,7 @@ message with multiple tool uses so they run concurrently."
         selection: traits::ReasoningSelection,
     ) -> traits::ReasoningSelection {
         let (validated, thinking, effort, legacy_effort) =
-            Self::reasoning_request_state(model, provider_id, &selection);
+            self.reasoning_request_state(model, provider_id, &selection);
         self.current_effort_explicit
             .store(false, std::sync::atomic::Ordering::Release);
         *self
@@ -14821,10 +15078,10 @@ message with multiple tool uses so they run concurrently."
         model: &str,
         provider_id: Option<&str>,
     ) -> traits::ConversationControls {
-        let reasoning_spec = Self::reasoning_spec_for_model(model, provider_id);
+        let reasoning_spec = self.reasoning_spec_for_model(model, provider_id);
         let requested_reasoning = self.current_reasoning_selection();
         let effective_reasoning =
-            Self::validate_reasoning_selection(&requested_reasoning, model, provider_id);
+            self.validate_reasoning_selection(&requested_reasoning, model, provider_id);
         let requested_permission = self
             .permission_mode()
             .unwrap_or_else(|| "default".to_string());

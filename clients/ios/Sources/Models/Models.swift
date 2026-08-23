@@ -57,6 +57,186 @@ struct ModelOption: Identifiable, Equatable {
     var shortName: String { name.replacingOccurrences(of: "Lingxi-", with: "") }
 }
 
+struct ModelRuntimeDetails: Identifiable, Equatable {
+    let reference: String
+    let providerId: String
+    let providerLabel: String
+    let displayName: String
+    let modelId: String
+    let description: String?
+    let family: String?
+    let status: String?
+    let releaseDate: String?
+    let lastUpdated: String?
+    let knowledgeCutoff: String?
+    let inputModalities: [String]
+    let outputModalities: [String]
+    let contextWindowTokens: UInt64?
+    let maxInputTokens: UInt64?
+    let maxOutputTokens: UInt64?
+    let openWeights: Bool?
+    let attachments: Bool?
+    let temperatureControl: Bool?
+    let pricing: ModelPricingDto?
+    let capabilities: ModelCapabilitiesDto
+    let reasoning: ReasoningControlSpecDto
+
+    var id: String { reference }
+
+    static func from(_ dto: ModelDetailsDto) -> ModelRuntimeDetails {
+        ModelRuntimeDetails(
+            reference: dto.reference,
+            providerId: dto.providerId,
+            providerLabel: dto.providerLabel,
+            displayName: dto.displayName,
+            modelId: dto.modelId,
+            description: dto.description?.isEmpty == false ? dto.description : nil,
+            family: dto.family?.isEmpty == false ? dto.family : nil,
+            status: dto.status?.isEmpty == false ? dto.status : nil,
+            releaseDate: dto.releaseDate?.isEmpty == false ? dto.releaseDate : nil,
+            lastUpdated: dto.lastUpdated?.isEmpty == false ? dto.lastUpdated : nil,
+            knowledgeCutoff: dto.knowledgeCutoff?.isEmpty == false ? dto.knowledgeCutoff : nil,
+            inputModalities: dto.inputModalities,
+            outputModalities: dto.outputModalities,
+            contextWindowTokens: dto.contextWindowTokens,
+            maxInputTokens: dto.maxInputTokens,
+            maxOutputTokens: dto.maxOutputTokens,
+            openWeights: dto.openWeights,
+            attachments: dto.attachments,
+            temperatureControl: dto.temperatureControl,
+            pricing: dto.pricing,
+            capabilities: dto.capabilities,
+            reasoning: dto.reasoning
+        )
+    }
+
+    var preferredDisplayName: String? {
+        displayName.isEmpty ? nil : displayName
+    }
+
+    var preferredProviderLabel: String? {
+        providerLabel.isEmpty ? nil : providerLabel
+    }
+
+    var summaryItems: [String] {
+        var summary: [String] = []
+        if capabilities.reasoning {
+            let labels = reasoning.options.map { ModelDetailFormat.reasoningSelectionLabel($0.selection) }
+            if !labels.isEmpty {
+                summary.append("Thinking " + labels.joined(separator: "/"))
+            }
+        }
+        let modalityBits = [
+            capabilities.vision ? "图片" : nil,
+            capabilities.documents ? "文档" : nil,
+            capabilities.tools ? "工具" : nil,
+            capabilities.structuredOutput ? "结构化输出" : nil,
+        ].compactMap { $0 }
+        if !modalityBits.isEmpty {
+            summary.append(modalityBits.joined(separator: " · "))
+        }
+        if let contextWindowTokens {
+            summary.append("\(ModelDetailFormat.tokenCount(contextWindowTokens)) 上下文")
+        }
+        if let maxOutputTokens {
+            summary.append("\(ModelDetailFormat.tokenCount(maxOutputTokens)) 输出")
+        }
+        summary.append(ModelDetailFormat.pricingSummary(pricing))
+        if let status, !status.isEmpty {
+            summary.append(status.capitalized)
+        }
+        return summary.filter { !$0.isEmpty }
+    }
+
+    var searchableText: String {
+        (
+            [
+                reference,
+                providerId,
+                providerLabel,
+                displayName,
+                modelId,
+                description,
+                family,
+                status,
+                releaseDate,
+                lastUpdated,
+                knowledgeCutoff,
+                ModelDetailFormat.pricingSummary(pricing),
+            ]
+            + inputModalities
+            + outputModalities
+            + summaryItems
+            + reasoning.options.map { ModelDetailFormat.reasoningSelectionLabel($0.selection) }
+        )
+            .compactMap { $0 }
+            .joined(separator: " ")
+    }
+}
+
+enum ModelDetailFormat {
+    static func tokenCount(_ value: UInt64) -> String {
+        let n = Double(value)
+        if n >= 1_000_000 {
+            return "\(trimDecimal(n / 1_000_000))M"
+        }
+        if n >= 1_000 {
+            return "\(trimDecimal(n / 1_000))K"
+        }
+        return "\(value)"
+    }
+
+    static func price(_ value: Double) -> String {
+        trimDecimal(value)
+    }
+
+    static func billingModeLabel(_ mode: ModelBillingModeDto) -> String {
+        switch mode {
+        case .perToken: return "按量计费"
+        case .subscription: return "套餐/订阅内"
+        case .free: return "免费"
+        case .unknown: return "价格未提供"
+        }
+    }
+
+    static func pricingSummary(_ pricing: ModelPricingDto?) -> String {
+        guard let pricing else { return "" }
+        switch pricing.billingMode {
+        case .subscription, .free, .unknown:
+            return billingModeLabel(pricing.billingMode)
+        case .perToken:
+            let parts = [
+                pricing.inputPerMillion.map { "$\(price($0)) in" },
+                pricing.outputPerMillion.map { "$\(price($0)) out" },
+            ].compactMap { $0 }
+            return parts.isEmpty ? "价格未提供" : parts.joined(separator: " · ")
+        }
+    }
+
+    static func reasoningSelectionLabel(_ selection: ReasoningSelectionDto) -> String {
+        switch selection {
+        case .automatic: return "自动"
+        case .disabled: return "关闭"
+        case .enabled: return "开启"
+        case let .level(id): return id
+        case let .tokenBudget(tokens): return "\(tokenCount(tokens)) 预算"
+        }
+    }
+
+    static func yesNo(_ value: Bool?) -> String? {
+        guard let value else { return nil }
+        return value ? "是" : "否"
+    }
+
+    private static func trimDecimal(_ value: Double) -> String {
+        let rounded = (value * 100).rounded() / 100
+        if rounded == rounded.rounded(.down) {
+            return String(Int(rounded))
+        }
+        return String(rounded)
+    }
+}
+
 /// One engine-provided model reference prepared for display.
 ///
 /// `reference` remains byte-for-byte identical to `ModelList.models`, so picking
@@ -66,9 +246,10 @@ struct ModelCatalogItem: Identifiable, Equatable {
     let reference: String
     let providerId: String
     let modelId: String
+    let details: ModelRuntimeDetails?
 
     var id: String { reference }
-    var name: String { ModelDisplay.modelName(for: modelId) }
+    var name: String { details?.preferredDisplayName ?? ModelDisplay.modelName(for: modelId) }
     var shortName: String { ModelDisplay.shortModelName(for: modelId) }
     var color: Color { ModelDisplay.providerColor(for: providerId) }
 }
@@ -92,14 +273,17 @@ enum ModelDisplay {
 
     /// Group the exact engine input by provider while preserving its order.
     /// Duplicate references are ignored so every SwiftUI row has stable identity.
-    static func sections(for references: [String]) -> [ModelProviderSection] {
+    static func sections(
+        for references: [String],
+        detailsByReference: [String: ModelRuntimeDetails] = [:]
+    ) -> [ModelProviderSection] {
         var providerOrder: [String] = []
         var itemsByProvider: [String: [ModelCatalogItem]] = [:]
         var seenReferences = Set<String>()
 
         for reference in references where !reference.isEmpty {
             guard seenReferences.insert(reference).inserted else { continue }
-            let item = item(for: reference)
+            let item = item(for: reference, detailsByReference: detailsByReference)
             if itemsByProvider[item.providerId] == nil {
                 providerOrder.append(item.providerId)
             }
@@ -125,35 +309,45 @@ enum ModelDisplay {
     /// capability blurb; iOS's `ModelCatalogItem` carries neither, and inventing
     /// a metadata table just to match that list would be a far larger change
     /// than the search box justifies.
-    static func filter(_ references: [String], matching query: String) -> [String] {
+    static func filter(
+        _ references: [String],
+        matching query: String,
+        detailsByReference: [String: ModelRuntimeDetails] = [:]
+    ) -> [String] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !needle.isEmpty else { return references }
         return references.filter { reference in
-            let item = item(for: reference)
+            let item = item(for: reference, detailsByReference: detailsByReference)
             return [
                 item.name,
                 item.modelId,
-                providerName(for: item.providerId),
+                item.details?.preferredProviderLabel ?? providerName(for: item.providerId),
                 reference,
-            ].contains { $0.lowercased().contains(needle) }
+                item.details?.searchableText,
+            ].compactMap { $0 }.contains { $0.lowercased().contains(needle) }
         }
     }
 
     /// Parse only the first slash: aggregator model ids may themselves contain
     /// slashes (`openrouter/openai/gpt-5.5`).
-    static func item(for reference: String) -> ModelCatalogItem {
+    static func item(
+        for reference: String,
+        detailsByReference: [String: ModelRuntimeDetails] = [:]
+    ) -> ModelCatalogItem {
         guard let slash = reference.firstIndex(of: "/"),
               slash != reference.startIndex,
               reference.index(after: slash) != reference.endIndex else {
             return ModelCatalogItem(
                 reference: reference,
                 providerId: unqualifiedProviderId,
-                modelId: reference)
+                modelId: reference,
+                details: detailsByReference[reference])
         }
         return ModelCatalogItem(
             reference: reference,
             providerId: String(reference[..<slash]),
-            modelId: String(reference[reference.index(after: slash)...]))
+            modelId: String(reference[reference.index(after: slash)...]),
+            details: detailsByReference[reference])
     }
 
     static func providerName(for providerId: String) -> String {
@@ -179,56 +373,39 @@ enum ModelDisplay {
         }
     }
 
-    /// A human-friendly name for the curated model ids shared by all clients.
-    /// Unknown ids remain visible verbatim instead of being guessed incorrectly.
+    /// A human-friendly fallback name when the engine did not provide one.
     static func modelName(for modelId: String) -> String {
         let displayId = modelId.split(separator: "/").last.map(String.init) ?? modelId
-        switch displayId.lowercased() {
-        case "claude-sonnet-5": return "Claude Sonnet 5"
-        case "claude-sonnet-4-6", "claude-sonnet-4.6": return "Claude Sonnet 4.6"
-        case "claude-opus-4-8", "claude-opus-4.8": return "Claude Opus 4.8"
-        case "claude-haiku-4-5", "claude-haiku-4.5": return "Claude Haiku 4.5"
-        case "claude-fable-5": return "Claude Fable 5"
-        case "gpt-5.5": return "GPT-5.5"
-        case "gpt-5.4": return "GPT-5.4"
-        case "gpt-5.4-mini": return "GPT-5.4 Mini"
-        case "gpt-5.3-codex": return "GPT-5.3 Codex"
-        case "gpt-5-codex": return "GPT-5 Codex"
-        case "deepseek-v4-flash": return "DeepSeek V4 Flash"
-        case "deepseek-v4-pro": return "DeepSeek V4 Pro"
-        case "kimi-k3": return "Kimi K3"
-        case "kimi-k2.7-code": return "Kimi K2.7 Code"
-        case "kimi-k2.7-code-highspeed": return "Kimi K2.7 Code HighSpeed"
-        case "kimi-k2.6": return "Kimi K2.6"
-        case "k3": return "K3"
-        case "k3-256k": return "K3 256K"
-        case "kimi-for-coding": return "Kimi For Coding"
-        case "kimi-for-coding-highspeed": return "Kimi For Coding HighSpeed"
-        case "gemini-3.6-flash": return "Gemini 3.6 Flash"
-        case "gemini-3.5-flash": return "Gemini 3.5 Flash"
-        case "gemini-3.5-flash-lite": return "Gemini 3.5 Flash Lite"
-        case "gemini-3.1-pro-preview": return "Gemini 3.1 Pro Preview"
-        case "glm-5.1": return "GLM-5.1"
-        case "glm-5": return "GLM-5"
-        case "glm-5-turbo": return "GLM-5 Turbo"
-        case "glm-4.7": return "GLM-4.7"
-        default:
-            return displayId
-                .split(whereSeparator: { $0 == "-" || $0 == "_" })
-                .map { segment in
-                    switch segment.lowercased() {
-                    case "gpt": return "GPT"
-                    case "glm": return "GLM"
-                    case "deepseek": return "DeepSeek"
-                    case "kimi": return "Kimi"
-                    case "gemini": return "Gemini"
-                    case "claude": return "Claude"
-                    default:
-                        return segment.prefix(1).uppercased() + String(segment.dropFirst())
-                    }
+        if displayId.lowercased().hasPrefix("gpt-") {
+            let remainder = String(displayId.dropFirst(4))
+            return "GPT-" + remainder
+                .split(whereSeparator: { $0 == "_" || $0 == "-" })
+                .enumerated()
+                .map { index, segment in
+                    if index == 0 { return String(segment) }
+                    return segment.prefix(1).uppercased() + String(segment.dropFirst())
                 }
                 .joined(separator: " ")
         }
+        return displayId
+            .split(whereSeparator: { $0 == "-" || $0 == "_" })
+            .map { segment in
+                switch segment.lowercased() {
+                case "gpt": return "GPT"
+                case "glm": return "GLM"
+                case "deepseek": return "DeepSeek"
+                case "kimi": return "Kimi"
+                case "gemini": return "Gemini"
+                case "claude": return "Claude"
+                case "openai": return "OpenAI"
+                default:
+                    if segment.allSatisfy({ $0.isNumber || $0 == "." }) {
+                        return String(segment)
+                    }
+                    return segment.prefix(1).uppercased() + String(segment.dropFirst())
+                }
+            }
+            .joined(separator: " ")
     }
 
     /// A human-friendly full name for a qualified reference.

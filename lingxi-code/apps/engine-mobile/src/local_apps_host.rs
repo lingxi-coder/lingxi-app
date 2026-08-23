@@ -404,7 +404,7 @@ pub(crate) fn remove_app_session_file(
 }
 
 pub(crate) fn create_next_step_guidance() -> String {
-    "Run local-app-build: the workspace already contains the repository-verified Vite + Tailwind + shadcn/ui foundation. Edit app screens, app/globals.css, src/, components/, public/, and non-host-managed lib/style files. A host-owned `pnpm install` prepares workspace-local dependencies in the background; check `LocalAppInstallDeps` or `LocalAppGet` if you need its status. Do not recreate the app scaffold or run a package-manager scaffold command. Then call LocalAppBuild and preview via LocalAppRuntime.".into()
+    "Run local-app-build: the workspace already contains the repository-verified Vite + Ionic foundation. Edit app screens, app/globals.css, src/, public/, and non-host-managed lib/style files. A host-owned `pnpm install` prepares workspace-local dependencies in the background; check `LocalAppInstallDeps` or `LocalAppGet` if you need its status. Do not recreate the app scaffold or run a package-manager scaffold command. Then call LocalAppBuild and preview via LocalAppRuntime.".into()
 }
 
 struct LocalAppsRuntimeConfiguration {
@@ -3069,8 +3069,8 @@ impl LocalAppsHostBroker {
         // cannot edit its own contract.
         let workspace = layout.root().join(layout.workspace_rel());
         let setup_path = "- This workspace already contains the repository-verified Vite + Tailwind + shadcn/ui foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
-             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `components.json`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
-             - Default editable entry points are `app/screens/home-screen.jsx` and `app/globals.css`. The preset files under `components/ui/` are app-owned and may be edited. You may also edit files under `app/`, `src/`, `components/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`. The component lab at `#/_components` is lazy-loaded and must stay outside normal navigation unless the user asks for it.\n\
+             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
+             - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
              - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n";
         // `format!`, not a bare `&str`: this string is interpolated into the
         // enclosing `format!` as a VALUE, so its own `{{` and `{id}` would be
@@ -3089,7 +3089,7 @@ impl LocalAppsHostBroker {
              Brief: {brief}\n\n\
              ## Workspace contract\n\
              - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `LocalAppList` or `LocalAppGet` to rediscover or confirm it, and do not call `LocalAppCreate` again.\n\
-             - Edit ONLY app-owned files under `app/`, `src/`, `components/`, `lib/`, `styles/`, `public/`.\n\
+             - Edit ONLY app-owned files under `app/`, `src/`, `lib/`, `styles/`, `public/`.\n\
              {setup_path}\
              - The page reaches host data/network/device ONLY through `window.lingxi.v2` \
              (see `lib/lingxi-bridge.js`).\n\

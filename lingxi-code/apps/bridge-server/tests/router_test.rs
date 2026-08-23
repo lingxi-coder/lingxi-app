@@ -662,6 +662,9 @@ async fn set_model_keeps_provider_in_acknowledgement() {
         provider_id: "github-copilot".into(),
         provider_label: "GitHub Copilot".into(),
         description: None,
+        metadata: Default::default(),
+        capabilities: Default::default(),
+        reasoning: Default::default(),
         supports_reasoning: true,
     }]);
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
@@ -786,6 +789,7 @@ async fn list_models_routes() {
         ClientEvent::ModelList {
             models: vec!["a".into(), "b".into()],
             current: "a".into(),
+            details: Vec::new(),
         }
     );
 }
@@ -793,14 +797,17 @@ async fn list_models_routes() {
 #[tokio::test]
 async fn list_models_curates_and_preserves_provider_identity() {
     let handle = Arc::new(MockOrchestratorHandle::new());
-    handle.set_available_models(vec!["gpt-5.5".into(), "gpt-4o".into()]);
+    handle.set_available_models(vec!["gpt-5.6-sol".into(), "gpt-4o".into()]);
     handle.set_model_listings(vec![
         traits::ModelListing {
-            display_model: "GPT-5.5".into(),
-            request_model: "gpt-5.5".into(),
+            display_model: "GPT-5.6 Sol".into(),
+            request_model: "gpt-5.6-sol".into(),
             provider_id: "openai".into(),
             provider_label: "OpenAI".into(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: true,
         },
         traits::ModelListing {
@@ -809,19 +816,25 @@ async fn list_models_curates_and_preserves_provider_identity() {
             provider_id: "openai".into(),
             provider_label: "OpenAI".into(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: false,
         },
         traits::ModelListing {
-            display_model: "GPT-5.5".into(),
-            request_model: "gpt-5.5".into(),
+            display_model: "GPT-5.6 Sol".into(),
+            request_model: "gpt-5.6-sol".into(),
             provider_id: "github-copilot".into(),
             provider_label: "GitHub Copilot".into(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: true,
         },
     ]);
     handle.set_status_snapshot(StatusSnapshot {
-        model: "gpt-5.5".into(),
+        model: "gpt-5.6-sol".into(),
         model_profile: Some("github-copilot".into()),
         ..StatusSnapshot::default()
     });
@@ -830,12 +843,27 @@ async fn list_models_curates_and_preserves_provider_identity() {
 
     router.route(ClientCommand::ListModels, sink.clone()).await;
 
+    let events = sink.events().await;
+    assert_eq!(events.len(), 1);
+    let ClientEvent::ModelList {
+        models,
+        current,
+        details,
+    } = &events[0]
+    else {
+        panic!("expected model list event");
+    };
     assert_eq!(
-        sink.events().await,
-        vec![ClientEvent::ModelList {
-            models: vec!["github-copilot/gpt-5.5".into(), "openai/gpt-5.5".into(),],
-            current: "github-copilot/gpt-5.5".into(),
-        }]
+        models,
+        &["github-copilot/gpt-5.6-sol", "openai/gpt-5.6-sol"]
+    );
+    assert_eq!(current, "github-copilot/gpt-5.6-sol");
+    assert_eq!(
+        details
+            .iter()
+            .map(|detail| detail.reference.as_str())
+            .collect::<Vec<_>>(),
+        vec!["github-copilot/gpt-5.6-sol", "openai/gpt-5.6-sol"]
     );
 }
 

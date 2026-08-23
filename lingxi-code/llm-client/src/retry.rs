@@ -36,7 +36,9 @@ impl RetryPolicy {
             | LlmError::ModelUnavailable
             | LlmError::StreamInterrupted { .. }
             | LlmError::CostUnavailable { .. }
-            | LlmError::UnsupportedCapability { .. } => RetryDecision::DoNotRetry,
+            | LlmError::UnsupportedCapability { .. }
+            | LlmError::MediaDelegationUnavailable { .. }
+            | LlmError::MediaDelegationPartial { .. } => RetryDecision::DoNotRetry,
         }
     }
 

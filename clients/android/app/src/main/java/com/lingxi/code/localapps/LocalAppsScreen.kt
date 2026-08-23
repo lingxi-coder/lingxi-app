@@ -67,6 +67,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lingxi.code.R
+import com.lingxi.code.components.ModelDetailsDialog
+import com.lingxi.code.components.ModelDetailsInfoButton
 import com.lingxi.code.model.ModelOption
 import java.text.DateFormat
 import java.util.Date
@@ -366,6 +368,7 @@ private fun WorkflowModelSelector(
     onSelected: (String?) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var selectedDetails by remember { mutableStateOf<com.lingxi.code.model.CatalogModelDetails?>(null) }
     val selectedModel = models.firstOrNull { it.id == selectedModelId }
     val currentModel = models.firstOrNull { it.id == currentModelId }
     val followCurrent = stringResource(R.string.local_apps_create_model_follow_current)
@@ -395,11 +398,25 @@ private fun WorkflowModelSelector(
         ) {
             DropdownMenuItem(
                 text = {
-                    Text(
-                        listOfNotNull(followCurrent, currentModel?.name).joinToString(" · "),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            listOfNotNull(followCurrent, currentModel?.name).joinToString(" · "),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        currentModel?.metadata?.summaryItems
+                            ?.takeIf { it.isNotEmpty() }
+                            ?.joinToString(" · ")
+                            ?.let { summary ->
+                                Text(
+                                    text = summary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                    }
                 },
                 onClick = {
                     onSelected(null)
@@ -409,11 +426,30 @@ private fun WorkflowModelSelector(
             models.forEach { model ->
                 DropdownMenuItem(
                     text = {
-                        Text(
-                            workflowModelOptionLabel(model),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                workflowModelOptionLabel(model),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            model.metadata.summaryItems
+                                .takeIf { it.isNotEmpty() }
+                                ?.joinToString(" · ")
+                                ?.let { summary ->
+                                    Text(
+                                        text = summary,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                        }
+                    },
+                    trailingIcon = {
+                        model.details?.let { details ->
+                            ModelDetailsInfoButton(onClick = { selectedDetails = details })
+                        }
                     },
                     onClick = {
                         onSelected(model.id)
@@ -421,6 +457,9 @@ private fun WorkflowModelSelector(
                     },
                 )
             }
+        }
+        selectedDetails?.let { details ->
+            ModelDetailsDialog(details = details, onDismiss = { selectedDetails = null })
         }
     }
 }

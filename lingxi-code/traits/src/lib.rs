@@ -154,19 +154,20 @@ pub use mobile_runtime_environment::{
 };
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
-    curated_model_names, curated_model_refs, is_curated_model, parse_model_ref,
-    provider_default_model, provider_fallback_order, provider_has_curated_list,
+    curated_model_listings, curated_model_names, curated_model_refs, is_curated_model,
+    parse_model_ref, provider_default_model, provider_fallback_order, provider_has_curated_list,
     qualified_model_ref, reasoning_control_spec_for_model, validated_reasoning_selection_for_model,
     ActiveGoalSnapshot, AgentInfo, AttachmentKind, CheckStatus, CompactionSummary,
     ContextPressureBanner, ContextPressureLevel, ContextUsageCategory, ContextUsageCategoryKind,
     ContextUsageSnapshot, ConversationControls, CostSnapshot, CurrentUsageSnapshot,
     DirectoryAddedHookSummary, DoctorCheck, DoctorReport, DoctorSummary, ForkOutcome,
     GoalStatusAttachment, GoalStatusKind, HandleError, HookInfo, McpActionState, McpServerInfo,
-    McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelListing, ModelUsageRow,
-    OrchestratorHandle, OutputEvent, OutputStream, PermissionControlState,
-    PermissionModeAvailability, PlanSnapshot, RateLimitSnapshot, ReasoningBudgetRange,
-    ReasoningControlSpec, ReasoningSelection, RecapOutcome, RegisterRepoRootOutcome,
-    RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, StatusSnapshot, TurnOutcome,
+    McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelBillingMode, ModelCapabilities,
+    ModelListing, ModelMetadata, ModelPricing, ModelPricingTier, ModelUsageRow, OrchestratorHandle,
+    OutputEvent, OutputStream, PermissionControlState, PermissionModeAvailability, PlanSnapshot,
+    RateLimitSnapshot, ReasoningBudgetRange, ReasoningControlSpec, ReasoningSelection,
+    RecapOutcome, RegisterRepoRootOutcome, RegisterRepoRootRequest, ResumeRuntimeSnapshot,
+    RewindRowData, StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;

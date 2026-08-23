@@ -233,6 +233,18 @@ mod tests {
         use telemetry::AnalyticsBus;
         use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
 
+        // `resolve_task_list_id` reads PROCESS-GLOBAL state before it ever looks
+        // at the context: `LINGXI_TASK_LIST_ID`, `LINGXI_TEAM_NAME` and the
+        // leader-team registry all outrank the session fallback this test needs
+        // ("default"). The swarm tests set `LINGXI_TASK_LIST_ID` under
+        // `ENV_LOCK`; without taking the same lock this test raced them and the
+        // create landed in their list, so the read from `tasks/default` found
+        // nothing — exactly the "spurious Task not found" ENV_LOCK documents.
+        // It passed when run alone, which is why it survived a month of CI.
+        let _env_lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let unique = format!(
             "lingxi-host-task-home-{}-{}",
             std::process::id(),

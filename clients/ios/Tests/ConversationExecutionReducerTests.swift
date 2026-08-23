@@ -28,7 +28,8 @@ import SwiftUI
                 apiKey: "",
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
-                projectCwd: nil)
+                projectCwd: nil,
+                visionDelegationEnabled: true)
             return EngineConversationSource(
                 config: config,
                 permissionModeRepository: permissionModeRepository
@@ -952,8 +953,11 @@ import SwiftUI
                 owner: nil
             ))]
 
+            // `DispatchQueue.main.async` retries need an actual run-loop turn;
+            // repeated task yields are not guaranteed to drain GCD while the
+            // full test target is running under load.
             for _ in 0..<50 where existingModal.presentedViewController == nil {
-                await Task.yield()
+                try await Task.sleep(for: .milliseconds(10))
             }
 
             XCTAssertNotNil(existingModal.presentedViewController)

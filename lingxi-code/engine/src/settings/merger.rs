@@ -66,6 +66,22 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
             .or(prev.ask_user_question_timeout),
         dialog_expiry: next.dialog_expiry.or(prev.dialog_expiry),
         cross_session_inbound: next.cross_session_inbound.or(prev.cross_session_inbound),
+        policy_helpers: deep_merge_object(prev.policy_helpers, next.policy_helpers),
+        sync_claude_ai_skills: next.sync_claude_ai_skills.or(prev.sync_claude_ai_skills),
+        additional_marketplaces: deep_merge_object(
+            prev.additional_marketplaces,
+            next.additional_marketplaces,
+        ),
+        allowed_marketplaces: next.allowed_marketplaces.or(prev.allowed_marketplaces),
+        disable_command_plugin_sources: next
+            .disable_command_plugin_sources
+            .or(prev.disable_command_plugin_sources),
+        spellcheck: deep_merge_object(prev.spellcheck, next.spellcheck),
+        model_proposed_goals: next.model_proposed_goals.or(prev.model_proposed_goals),
+        keybinding_flavor: next.keybinding_flavor.or(prev.keybinding_flavor),
+        auto_continue_at_usage_limit: next
+            .auto_continue_at_usage_limit
+            .or(prev.auto_continue_at_usage_limit),
         process_wrapper: next.process_wrapper.or(prev.process_wrapper),
         status_line: next.status_line.or(prev.status_line),
         subagent_status_line: next.subagent_status_line.or(prev.subagent_status_line),
@@ -79,6 +95,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         show_thinking_summaries: next
             .show_thinking_summaries
             .or(prev.show_thinking_summaries),
+        vision_delegation_enabled: next
+            .vision_delegation_enabled
+            .or(prev.vision_delegation_enabled),
         agent_push_notif_enabled: next
             .agent_push_notif_enabled
             .or(prev.agent_push_notif_enabled),
@@ -151,6 +170,16 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         ),
         // 2.1.207 `otelHeadersHelper` (H-BIN-06) — plain string, scalar Override.
         otel_headers_helper: next.otel_headers_helper.or(prev.otel_headers_helper),
+        enabled_plugins: deep_merge_object(prev.enabled_plugins, next.enabled_plugins),
+        plugin_configs: deep_merge_object(prev.plugin_configs, next.plugin_configs),
+        extra_known_marketplaces: deep_merge_object(
+            prev.extra_known_marketplaces,
+            next.extra_known_marketplaces,
+        ),
+        strict_known_marketplaces: next
+            .strict_known_marketplaces
+            .or(prev.strict_known_marketplaces),
+        blocked_marketplaces: next.blocked_marketplaces.or(prev.blocked_marketplaces),
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
     }
@@ -535,6 +564,101 @@ mod tests {
     }
 
     #[test]
+    fn new_238_settings_fields_merge_with_object_and_scalar_semantics() {
+        use serde_json::json;
+        use std::collections::BTreeMap;
+
+        let mut prev_policy_helpers = BTreeMap::new();
+        prev_policy_helpers.insert(
+            "defaultSettings".to_string(),
+            json!({"command": "/usr/bin/base-helper"}),
+        );
+        let mut next_policy_helpers = BTreeMap::new();
+        next_policy_helpers.insert(
+            "darwin".to_string(),
+            json!({"command": "/opt/darwin-helper"}),
+        );
+
+        let mut prev_spellcheck = BTreeMap::new();
+        prev_spellcheck.insert("enabled".to_string(), json!(true));
+        let mut next_spellcheck = BTreeMap::new();
+        next_spellcheck.insert("checkFilenames".to_string(), json!(false));
+
+        let mut prev_additional_marketplaces = BTreeMap::new();
+        prev_additional_marketplaces.insert(
+            "corp".to_string(),
+            json!({ "source": { "source": "directory", "path": "/tmp/corp" } }),
+        );
+        let mut next_additional_marketplaces = BTreeMap::new();
+        next_additional_marketplaces.insert(
+            "beta".to_string(),
+            json!({ "source": { "source": "directory", "path": "/tmp/beta" } }),
+        );
+
+        let merged = merge(
+            SettingsJson {
+                policy_helpers: Some(prev_policy_helpers),
+                sync_claude_ai_skills: Some(false),
+                additional_marketplaces: Some(prev_additional_marketplaces),
+                allowed_marketplaces: Some(vec![json!("corp"), json!("stable")]),
+                disable_command_plugin_sources: Some(false),
+                spellcheck: Some(prev_spellcheck),
+                model_proposed_goals: Some("auto".into()),
+                keybinding_flavor: Some("classic".into()),
+                auto_continue_at_usage_limit: Some(false),
+                ..Default::default()
+            },
+            SettingsJson {
+                policy_helpers: Some(next_policy_helpers),
+                sync_claude_ai_skills: Some(true),
+                additional_marketplaces: Some(next_additional_marketplaces),
+                allowed_marketplaces: None,
+                disable_command_plugin_sources: Some(true),
+                spellcheck: Some(next_spellcheck),
+                model_proposed_goals: Some("alwaysAsk".into()),
+                keybinding_flavor: Some("readline".into()),
+                auto_continue_at_usage_limit: Some(true),
+                ..Default::default()
+            },
+        );
+
+        let policy_helpers = merged.policy_helpers.expect("policyHelpers");
+        assert_eq!(
+            policy_helpers.get("defaultSettings"),
+            Some(&json!({"command": "/usr/bin/base-helper"}))
+        );
+        assert_eq!(
+            policy_helpers.get("darwin"),
+            Some(&json!({"command": "/opt/darwin-helper"}))
+        );
+
+        let spellcheck = merged.spellcheck.expect("spellcheck");
+        assert_eq!(spellcheck.get("enabled"), Some(&json!(true)));
+        assert_eq!(spellcheck.get("checkFilenames"), Some(&json!(false)));
+
+        assert_eq!(merged.sync_claude_ai_skills, Some(true));
+        let additional_marketplaces = merged
+            .additional_marketplaces
+            .expect("additional marketplaces");
+        assert_eq!(
+            additional_marketplaces.get("corp"),
+            Some(&json!({ "source": { "source": "directory", "path": "/tmp/corp" } }))
+        );
+        assert_eq!(
+            additional_marketplaces.get("beta"),
+            Some(&json!({ "source": { "source": "directory", "path": "/tmp/beta" } }))
+        );
+        assert_eq!(
+            merged.allowed_marketplaces,
+            Some(vec![json!("corp"), json!("stable")])
+        );
+        assert_eq!(merged.disable_command_plugin_sources, Some(true));
+        assert_eq!(merged.model_proposed_goals.as_deref(), Some("alwaysAsk"));
+        assert_eq!(merged.keybinding_flavor.as_deref(), Some("readline"));
+        assert_eq!(merged.auto_continue_at_usage_limit, Some(true));
+    }
+
+    #[test]
     fn emoji_completion_enabled_parses_and_higher_layer_wins() {
         let parsed: SettingsJson =
             serde_json::from_str(r#"{"emojiCompletionEnabled":false}"#).unwrap();
@@ -570,5 +694,24 @@ mod tests {
         assert!(serde_json::to_string(&merged)
             .unwrap()
             .contains("\"showThinkingSummaries\":true"));
+    }
+
+    #[test]
+    fn vision_delegation_parses_and_higher_layer_wins() {
+        let parsed: SettingsJson =
+            serde_json::from_str(r#"{"visionDelegationEnabled":false}"#).unwrap();
+        assert_eq!(parsed.vision_delegation_enabled, Some(false));
+
+        let merged = merge(
+            SettingsJson {
+                vision_delegation_enabled: Some(true),
+                ..Default::default()
+            },
+            parsed,
+        );
+        assert_eq!(merged.vision_delegation_enabled, Some(false));
+        assert!(serde_json::to_string(&merged)
+            .unwrap()
+            .contains("\"visionDelegationEnabled\":false"));
     }
 }

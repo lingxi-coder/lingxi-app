@@ -1822,7 +1822,13 @@ impl PermissionPolicy {
                     let Some(pattern) = rule.value.rule_content.as_deref() else {
                         continue;
                     };
-                    if path_matches_rule_pattern(&target.resolved, pattern, rule.source, rule.behavior, roots) {
+                    if path_matches_rule_pattern(
+                        &target.resolved,
+                        pattern,
+                        rule.source,
+                        rule.behavior,
+                        roots,
+                    ) {
                         return Some(PermissionResult::Deny {
                             reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
                             explanation: Some(target.blocked_message.clone()),
@@ -1853,7 +1859,13 @@ impl PermissionPolicy {
                     let Some(pattern) = rule.value.rule_content.as_deref() else {
                         continue;
                     };
-                    if path_matches_rule_pattern(&target, pattern, rule.source, rule.behavior, roots) {
+                    if path_matches_rule_pattern(
+                        &target,
+                        pattern,
+                        rule.source,
+                        rule.behavior,
+                        roots,
+                    ) {
                         return Some(PermissionResult::Deny {
                             reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
                             explanation: Some(format!(
@@ -1886,7 +1898,13 @@ impl PermissionPolicy {
                     let Some(pattern) = rule.value.rule_content.as_deref() else {
                         continue;
                     };
-                    if path_matches_rule_pattern(&target, pattern, rule.source, rule.behavior, roots) {
+                    if path_matches_rule_pattern(
+                        &target,
+                        pattern,
+                        rule.source,
+                        rule.behavior,
+                        roots,
+                    ) {
                         return Some(PermissionResult::Deny {
                             reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
                             explanation: Some(format!(

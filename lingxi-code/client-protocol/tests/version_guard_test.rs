@@ -316,6 +316,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ModelList", "model_list");
     put("ClientEvent::ModelList.models", "Vec<String>");
     put("ClientEvent::ModelList.current", "String");
+    put("ClientEvent::ModelList.details", "Vec<ModelDetailsDto>");
 
     put("ClientEvent::ModelChanged", "model_changed");
     put("ClientEvent::ModelChanged.model", "String");
@@ -996,6 +997,57 @@ fn current_contract_index() -> ContractIndex {
         "ReasoningSelectionDto",
     );
     put("ReasoningControlStateDto.spec", "ReasoningControlSpecDto");
+
+    put("ModelBillingModeDto::PerToken", "per_token");
+    put("ModelBillingModeDto::Subscription", "subscription");
+    put("ModelBillingModeDto::Free", "free");
+    put("ModelBillingModeDto::Unknown", "unknown");
+
+    put("ModelPricingTierDto.context_threshold_tokens", "u64");
+    put("ModelPricingTierDto.input_per_million", "Option<f64>");
+    put("ModelPricingTierDto.output_per_million", "Option<f64>");
+    put("ModelPricingTierDto.cache_read_per_million", "Option<f64>");
+    put("ModelPricingTierDto.cache_write_per_million", "Option<f64>");
+    put("ModelPricingTierDto.reasoning_per_million", "Option<f64>");
+
+    put("ModelPricingDto.billing_mode", "ModelBillingModeDto");
+    put("ModelPricingDto.input_per_million", "Option<f64>");
+    put("ModelPricingDto.output_per_million", "Option<f64>");
+    put("ModelPricingDto.cache_read_per_million", "Option<f64>");
+    put("ModelPricingDto.cache_write_per_million", "Option<f64>");
+    put("ModelPricingDto.reasoning_per_million", "Option<f64>");
+    put("ModelPricingDto.tiers", "Vec<ModelPricingTierDto>");
+    put("ModelPricingDto.source", "Option<String>");
+
+    put("ModelCapabilitiesDto.streaming", "bool");
+    put("ModelCapabilitiesDto.tools", "bool");
+    put("ModelCapabilitiesDto.vision", "bool");
+    put("ModelCapabilitiesDto.documents", "bool");
+    put("ModelCapabilitiesDto.reasoning", "bool");
+    put("ModelCapabilitiesDto.structured_output", "bool");
+
+    put("ModelDetailsDto.reference", "String");
+    put("ModelDetailsDto.provider_id", "String");
+    put("ModelDetailsDto.provider_label", "String");
+    put("ModelDetailsDto.display_name", "String");
+    put("ModelDetailsDto.model_id", "String");
+    put("ModelDetailsDto.description", "Option<String>");
+    put("ModelDetailsDto.family", "Option<String>");
+    put("ModelDetailsDto.status", "Option<String>");
+    put("ModelDetailsDto.release_date", "Option<String>");
+    put("ModelDetailsDto.last_updated", "Option<String>");
+    put("ModelDetailsDto.knowledge_cutoff", "Option<String>");
+    put("ModelDetailsDto.input_modalities", "Vec<String>");
+    put("ModelDetailsDto.output_modalities", "Vec<String>");
+    put("ModelDetailsDto.context_window_tokens", "Option<u64>");
+    put("ModelDetailsDto.max_input_tokens", "Option<u64>");
+    put("ModelDetailsDto.max_output_tokens", "Option<u64>");
+    put("ModelDetailsDto.open_weights", "Option<bool>");
+    put("ModelDetailsDto.attachments", "Option<bool>");
+    put("ModelDetailsDto.temperature_control", "Option<bool>");
+    put("ModelDetailsDto.pricing", "Option<ModelPricingDto>");
+    put("ModelDetailsDto.capabilities", "ModelCapabilitiesDto");
+    put("ModelDetailsDto.reasoning", "ReasoningControlSpecDto");
 
     put("PermissionModeOptionDto.mode", "String");
     put("PermissionModeOptionDto.available", "bool");

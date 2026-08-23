@@ -71,8 +71,9 @@ use traits::Platform;
 pub use engine_mobile::{
     ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
     LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, PermissionRequestSink,
-    ProviderCatalogEntryDto, ProviderConnectionTestDto,
+    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, ModelBillingModeDto,
+    ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, ModelPricingTierDto,
+    PermissionRequestSink, ProviderCatalogEntryDto, ProviderConnectionTestDto,
 };
 
 /// The foreign (Swift) capability objects + config the engine needs to build an
@@ -169,6 +170,7 @@ pub struct IosEngineLaunchConfigFfi {
     pub api_base: String,
     pub api_key: String,
     pub model: String,
+    pub vision_delegation_enabled: bool,
     pub app_sandbox_root: String,
     /// Optional managed Project workspace. When present it must resolve to
     /// `<app_sandbox_root>/(P|p)rojects/<lowercase UUID>/workspace`; global
@@ -689,6 +691,7 @@ fn ios_mobile_config_from_launch_config(
             .as_ref()
             .map(std::path::PathBuf::from),
         physical_memory_bytes: config.physical_memory_bytes,
+        vision_delegation_enabled: config.vision_delegation_enabled,
         host_environment: Some(config.host_environment.as_ref().map_or_else(
             || {
                 traits::MobileHostEnvironment::new(
@@ -2819,6 +2822,7 @@ pub fn build_ios_engine(
             project_cwd: None,
             provider_config: None,
             mobile_linux,
+            vision_delegation_enabled: true,
             local_apps_full_runtime: false,
             local_apps_runtime_root: None,
             physical_memory_bytes: 0,
@@ -4138,6 +4142,7 @@ mod tests {
             api_base: "https://example.invalid".to_string(),
             api_key: "sk-test".to_string(),
             model: "claude-test".to_string(),
+            vision_delegation_enabled: false,
             app_sandbox_root: temp.path().to_string_lossy().into_owned(),
             project_cwd: Some(workspace.to_string_lossy().into_owned()),
             provider_config: Some(super::IosProviderConfigFfi {
@@ -4161,6 +4166,7 @@ mod tests {
         assert_eq!(cfg.api_base, "https://example.invalid");
         assert_eq!(cfg.api_key, "sk-test");
         assert_eq!(cfg.default_model, "claude-test");
+        assert!(!cfg.vision_delegation_enabled);
         assert_eq!(cfg.physical_memory_bytes, 7 * 1024_u64.pow(3));
         let host = cfg.host_environment.as_ref().expect("mobile host fallback");
         assert_eq!(host.host_os, traits::MobileHostOs::Ios);
@@ -4197,6 +4203,7 @@ mod tests {
             api_base: String::new(),
             api_key: String::new(),
             model: String::new(),
+            vision_delegation_enabled: true,
             app_sandbox_root: temp.path().to_string_lossy().into_owned(),
             project_cwd: None,
             provider_config: None,
@@ -4237,6 +4244,7 @@ mod tests {
             api_base: String::new(),
             api_key: String::new(),
             model: String::new(),
+            vision_delegation_enabled: true,
             app_sandbox_root: temp.path().to_string_lossy().into_owned(),
             project_cwd: None,
             provider_config: None,

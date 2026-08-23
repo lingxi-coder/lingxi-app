@@ -182,7 +182,8 @@ pub fn lower_content_block_with(
         | ContentBlock::RedactedThinking { .. }
         | ContentBlock::ServerToolUse { .. }
         | ContentBlock::ConnectorText { .. }
-        | ContentBlock::AdvisorToolResult { .. } => None,
+        | ContentBlock::AdvisorToolResult { .. }
+        | ContentBlock::MediaAnalysis { .. } => None,
     }
 }
 
@@ -252,6 +253,7 @@ pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
         | OrchestratorError::PermissionAbort { .. }
         | OrchestratorError::Compaction(_)
         | OrchestratorError::CompactionCancelled
+        | OrchestratorError::VisionDelegationCancelled
         // Task 7: all consecutive-overloaded retries exhausted with no fallback model.
         // Byte-locked message: "Repeated 529 Overloaded errors" (errors.ts:166).
         // Treated as a fatal API-side condition — same class as a hard API failure.

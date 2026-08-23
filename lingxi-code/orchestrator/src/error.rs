@@ -106,6 +106,10 @@ pub enum OrchestratorError {
     #[error("compaction cancelled")]
     CompactionCancelled,
 
+    /// The user cancelled while the pre-call image sidecar was in flight.
+    #[error("vision delegation cancelled")]
+    VisionDelegationCancelled,
+
     /// The API returned `Overloaded` (529) on every retry attempt and
     /// `consecutive_overloaded >= MAX_529_RETRIES` for an external,
     /// non-sandbox caller with no fallback model configured.

@@ -40,7 +40,8 @@
       ],
       "release_date": "2025-07-28",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Hybrid-reasoning GLM release that made the 4.5 line broadly useful"
     },
     "glm-4.5-air": {
       "attachment": false,
@@ -76,7 +77,8 @@
       ],
       "release_date": "2025-07-28",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Lighter GLM-4.5 variant for fast coding assistance and cheaper agents"
     },
     "glm-4.5-flash": {
       "attachment": false,
@@ -112,7 +114,8 @@
       ],
       "release_date": "2025-07-28",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Efficient GLM model for fast reasoning, coding, and agent workflows"
     },
     "glm-4.5v": {
       "attachment": true,
@@ -148,7 +151,8 @@
       ],
       "release_date": "2025-08-11",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "GLM vision model for visual reasoning, documents, and multimodal agents"
     },
     "glm-4.6": {
       "attachment": false,
@@ -184,7 +188,8 @@
       ],
       "release_date": "2025-09-30",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Late GLM-4 workhorse for coding agents, reasoning, and structured tasks"
     },
     "glm-4.6v": {
       "attachment": true,
@@ -220,7 +225,8 @@
       ],
       "release_date": "2025-12-08",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "GLM vision model for visual reasoning, documents, and multimodal agents"
     },
     "glm-4.7": {
       "attachment": false,
@@ -259,7 +265,8 @@
       ],
       "release_date": "2025-12-22",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Mature GLM model for dependable coding, reasoning, and structured agent tasks"
     },
     "glm-4.7-flash": {
       "attachment": false,
@@ -295,7 +302,8 @@
       ],
       "release_date": "2026-01-19",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Budget GLM lane for fast coding help, routing, and everyday automation"
     },
     "glm-4.7-flashx": {
       "attachment": false,
@@ -331,7 +339,8 @@
       ],
       "release_date": "2026-01-19",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Efficient GLM model for fast reasoning, coding, and agent workflows"
     },
     "glm-5": {
       "attachment": false,
@@ -346,7 +355,7 @@
       "interleaved": {
         "field": "reasoning_content"
       },
-      "last_updated": "2026-02-11",
+      "last_updated": "2026-02-12",
       "limit": {
         "context": 204800,
         "output": 131072
@@ -367,9 +376,10 @@
           "type": "toggle"
         }
       ],
-      "release_date": "2026-02-11",
+      "release_date": "2026-02-12",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "General GLM flagship for coding, analysis, and tool-heavy engineering workflows"
     },
     "glm-5-turbo": {
       "attachment": false,
@@ -408,7 +418,8 @@
       "release_date": "2026-03-16",
       "structured_output": true,
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Faster GLM-5 lane for coding agents that need lower latency"
     },
     "glm-5.1": {
       "attachment": false,
@@ -423,7 +434,7 @@
       "interleaved": {
         "field": "reasoning_content"
       },
-      "last_updated": "2026-03-27",
+      "last_updated": "2026-04-07",
       "limit": {
         "context": 200000,
         "output": 131072
@@ -437,17 +448,18 @@
         ]
       },
       "name": "GLM-5.1",
-      "open_weights": false,
+      "open_weights": true,
       "reasoning": true,
       "reasoning_options": [
         {
           "type": "toggle"
         }
       ],
-      "release_date": "2026-03-27",
+      "release_date": "2026-04-07",
       "structured_output": true,
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Strong GLM coding model for agentic engineering, terminals, and repository generation"
     },
     "glm-5v-turbo": {
       "attachment": true,
@@ -488,7 +500,88 @@
       ],
       "release_date": "2026-04-01",
       "temperature": true,
-      "tool_call": true
+      "tool_call": true,
+      "description": "Fast GLM vision model for screenshots, documents, and multimodal agent tasks"
+    },
+    "glm-5.3": {
+      "id": "glm-5.3",
+      "name": "GLM-5.3",
+      "description": "Flagship GLM model for hybrid reasoning, coding, and agentic engineering",
+      "family": "glm",
+      "attachment": false,
+      "reasoning": true,
+      "reasoning_options": [
+        {
+          "type": "effort",
+          "values": [
+            "low",
+            "high",
+            "max"
+          ]
+        }
+      ],
+      "tool_call": true,
+      "structured_output": false,
+      "temperature": true,
+      "release_date": "2026-08-14",
+      "last_updated": "2026-08-22",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "open_weights": false,
+      "limit": {
+        "context": 1048576,
+        "output": 131072
+      }
+    },
+    "glm-5.2": {
+      "id": "glm-5.2",
+      "name": "GLM-5.2",
+      "description": "Open flagship GLM for long-horizon coding agents and million-token context work",
+      "family": "glm",
+      "attachment": false,
+      "reasoning": true,
+      "reasoning_options": [
+        {
+          "type": "effort",
+          "values": [
+            "high",
+            "max"
+          ]
+        }
+      ],
+      "tool_call": true,
+      "interleaved": {
+        "field": "reasoning_content"
+      },
+      "structured_output": true,
+      "temperature": true,
+      "release_date": "2026-06-13",
+      "last_updated": "2026-06-13",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "open_weights": true,
+      "limit": {
+        "context": 1000000,
+        "output": 131072
+      },
+      "cost": {
+        "input": 1.4,
+        "output": 4.4,
+        "cache_read": 0.26,
+        "cache_write": 0
+      }
     }
   },
   "name": "Z.AI",

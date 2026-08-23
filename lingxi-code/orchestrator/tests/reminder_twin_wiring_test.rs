@@ -65,38 +65,72 @@ fn every_per_turn_reminder_is_injected_by_both_drivers() {
 /// harness that can drive a real recovery and inspect the retried request. It
 /// pins the invariant "wherever a snapshot is rebuilt, the reminders go back
 /// on", which is exactly what was violated.
+/// Both drivers now route every REBUILD through `reattach_outgoing_context`,
+/// which prepends the leading context and re-appends this step's reminders in
+/// one place. That is strictly stronger than the previous shape (N open-coded
+/// assemblies that each had to remember), so this check moved with it: instead
+/// of counting duplicated `insert`/`extend` lines, it pins that each driver has
+/// exactly ONE hand-rolled assembly and that every other assembly goes through
+/// the shared helper.
+///
+/// The tripwire property is unchanged, and so is the rule for reading a
+/// failure: when it fires, the question is "does the new assembly re-append?"
+/// A new site that routes through `reattach_outgoing_context` is a legitimate
+/// bump; a new site that hand-rolls its own snapshot is the bug this test
+/// exists to catch, and bumping the number to silence it defeats the check.
 #[test]
 fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
     const EXTEND: &str = "extend(turn_reminders.iter().cloned())";
 
-    // In the streaming driver each assembly of an outgoing request prepends the
-    // additional-context message, so that count IS the number of assemblies.
-    let assemblies = STREAMING.matches("insert(0, ctx_msg)").count();
-    assert!(
-        assemblies >= 4,
-        "expected the main path plus its recoveries"
+    // Exactly one hand-rolled assembly per driver: the main path. The receiver
+    // disambiguates the two drivers, as in `call_sites` above.
+    assert_eq!(
+        STREAMING
+            .matches("self.prepend_leading_context(&mut snapshot).await")
+            .count(),
+        1,
+        "the STREAMING driver must hand-roll exactly one assembly (the main \
+         path); any other must go through reattach_outgoing_context"
     );
     assert_eq!(
-        STREAMING.matches(EXTEND).count(),
-        assemblies,
-        "every request assembly in the STREAMING driver must re-append this \
-         step's reminders; one that does not silently drops them"
+        BATCHED
+            .matches("orch.prepend_leading_context(&mut history_snapshot).await")
+            .count(),
+        1,
+        "the BATCHED driver must hand-roll exactly one assembly (the main path)"
     );
 
-    // The batched driver assembles once itself and three times more inside
-    // `call_api_with_ptl_recovery` — the truncation retry, the post-compact
-    // retry, and the context-hint reject retry — each rebuilding from raw
-    // `session.history`.
-    //
-    // This count is a tripwire, not a fact about the code: when it fires, the
-    // question is "did the new rebuild site re-append?" A new site that DOES is
-    // a legitimate bump (the context-hint retry was); a new site that does NOT
-    // is the bug this test exists to catch, and bumping the number to silence
-    // it defeats the whole check.
+    // Every rebuild-from-raw-history path routes through the shared helper:
+    // the 529 fallback, the PTL truncation retry and the non-streaming
+    // fallback in streaming; the three rebuilds inside
+    // `call_api_with_ptl_recovery` in batched.
+    assert_eq!(
+        STREAMING.matches("self.reattach_outgoing_context(").count(),
+        3,
+        "STREAMING rebuilds (529 fallback, PTL retry, non-streaming fallback) \
+         must each reattach; a rebuild that does not silently drops reminders"
+    );
+    assert_eq!(
+        BATCHED.matches("orch.reattach_outgoing_context(").count(),
+        3,
+        "BATCHED rebuilds inside call_api_with_ptl_recovery must each reattach"
+    );
+
+    // Routing through the helper only proves anything while the helper still
+    // re-appends. Two sites in the streaming file: the main path, and the one
+    // inside `reattach_outgoing_context` itself (which the batched driver also
+    // calls — the helper lives on the orchestrator, in conversation.rs).
+    assert_eq!(
+        STREAMING.matches(EXTEND).count(),
+        2,
+        "conversation.rs must re-append on the main path AND inside \
+         reattach_outgoing_context; losing the latter silently un-does every \
+         rebuild path in BOTH drivers"
+    );
     assert_eq!(
         BATCHED.matches(EXTEND).count(),
-        4,
-        "batched driver: one main assembly plus the three rebuilds inside \
-         call_api_with_ptl_recovery"
+        1,
+        "the batched main path re-appends directly; its rebuilds go through \
+         reattach_outgoing_context"
     );
 }

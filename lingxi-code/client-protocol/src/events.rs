@@ -19,8 +19,8 @@ use crate::ask_user_question::AskUserQuestionRequestDto;
 use crate::controls::ConversationControlsDto;
 use crate::listings::{
     AgentDto, AuthStateDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
-    MemoryEntryDto, SessionAgentSummaryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto,
-    TaskRowDto, TaskStatusDto,
+    MemoryEntryDto, ModelDetailsDto, SessionAgentSummaryDto, SessionRowDto, SlashCommandDto,
+    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use crate::local_apps::{
     AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
@@ -186,6 +186,8 @@ pub enum ClientEvent {
     ModelList {
         models: Vec<String>,
         current: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        details: Vec<ModelDetailsDto>,
     },
 
     ModelChanged {

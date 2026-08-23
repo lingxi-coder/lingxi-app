@@ -90,6 +90,10 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
         ("statusLine", layer.status_line.is_some()),
         ("subagentStatusLine", layer.subagent_status_line.is_some()),
         ("telemetryEnabled", layer.telemetry_enabled.is_some()),
+        (
+            "visionDelegationEnabled",
+            layer.vision_delegation_enabled.is_some(),
+        ),
         ("model", layer.model.is_some()),
         // 2.1.198 AWS/GCP auth-refresh script keys (scalar-override). The
         // Project provenance of awsAuthRefresh feeds the workspace-trust gate

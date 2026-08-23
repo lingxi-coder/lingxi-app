@@ -1,6 +1,8 @@
 //! Inner turn-by-turn loop helpers. Private to `ConversationOrchestrator`.
 
-use crate::conversation::{classify_api_error, ApiErrorEnvelope, ConversationOrchestrator};
+use crate::conversation::{
+    classify_api_error, ApiErrorEnvelope, ConversationOrchestrator, ModelCallPath,
+};
 use crate::error::OrchestratorError;
 use crate::test_support::{PermissionDecision, PermissionDecisionSource, PermissionResolution};
 use hooks::events::HookEvent;
@@ -9,6 +11,7 @@ use hooks::response::HookDecision;
 use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use telemetry::tengu::orchestrator as orch_events;
 use tool_api::context::{ToolUseContext, ToolUseOptions};
 use tool_api::ContextModifier;
@@ -385,11 +388,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // before the outgoing snapshot is cloned from history.
     let _ = orch.drain_peer_inbox(false).await;
 
-    // Snapshot the current session history for the API call.
-    let (mut history_snapshot, model, model_profile) = {
-        let s = orch.session.lock().await;
-        (s.history.clone(), s.model.clone(), s.model_profile.clone())
-    };
+    // Snapshot the current session history for the API call via the shared
+    // pre-call seam used by both main-loop drivers.
+    let prepared_call = orch
+        .prepare_model_call_snapshot(ModelCallPath::Batched, system, None)
+        .await?;
+    let mut history_snapshot = prepared_call.history_snapshot;
+    let model = prepared_call.model;
+    let model_profile = prepared_call.model_profile;
+    let outgoing_history_rewriter = prepared_call.outgoing_history_rewriter;
 
     // R-P1c/R-P1d: PREPEND the leading `additionalContext` meta message
     // (`# claudeMd` / `# userEmail` / `# currentDate`) to THIS call's OUTGOING
@@ -594,6 +601,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         &model,
         model_profile.as_deref(),
         history_snapshot,
+        outgoing_history_rewriter,
         tools,
         max_tokens_override,
         deferred_tools_reminder,
@@ -1201,6 +1209,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     model: &str,
     profile: Option<&str>,
     history_snapshot: Vec<ConversationMessage>,
+    outgoing_history_rewriter: Option<Arc<dyn crate::conversation::OutgoingHistoryRewriter>>,
     tools: Vec<serde_json::Value>,
     max_tokens_override: Option<u32>,
     // This step's transient deferred-tool delta. Like the date-change reminder,
@@ -1413,18 +1422,21 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 // Re-snapshot rather than clone the history up front: the
                 // snapshot was moved into the call, and every other recovery
                 // path here rebuilds the same way.
-                let history = {
+                let raw_history = {
                     let s = orch.session.lock().await;
                     s.history.clone()
                 };
                 if let compaction::context_hint::HintErrorOutcome::Reject(edits, _event) =
-                    c.on_request_error(&facts, history)
+                    c.on_request_error(&facts, raw_history)
                 {
-                    let mut retry = edits.messages.clone();
+                    let retry_raw = edits.messages.clone();
                     {
                         let mut s = orch.session.lock().await;
                         s.history.clone_from(&edits.messages);
                     }
+                    let mut retry = orch
+                        .rewrite_outgoing_history(retry_raw, outgoing_history_rewriter.as_ref())
+                        .await?;
                     orch.reattach_outgoing_context(
                         &mut retry,
                         deferred_tools_reminder.as_ref(),
@@ -1453,7 +1465,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
             let s = orch.session.lock().await;
             s.history.clone()
         };
-        let Some(mut truncated) =
+        let Some(truncated_raw) =
             compaction::ptl_retry::truncate_head_for_ptl_retry(history, token_gap)
         else {
             // Nothing safe to drop (< 2 groups). Stop truncating and fall
@@ -1462,8 +1474,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
         };
         {
             let mut s = orch.session.lock().await;
-            s.history.clone_from(&truncated);
+            s.history.clone_from(&truncated_raw);
         }
+        let mut truncated = orch
+            .rewrite_outgoing_history(truncated_raw, outgoing_history_rewriter.as_ref())
+            .await?;
         orch.reattach_outgoing_context(
             &mut truncated,
             deferred_tools_reminder.as_ref(),
@@ -1582,10 +1597,13 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 .await;
                 // PostCompact fires AFTER the transition is applied.
                 orch.fire_post_compact("auto", summary, tokens_freed).await;
-                let mut history = {
+                let history_raw = {
                     let s = orch.session.lock().await;
                     s.history.clone()
                 };
+                let mut history = orch
+                    .rewrite_outgoing_history(history_raw, outgoing_history_rewriter.as_ref())
+                    .await?;
                 orch.reattach_outgoing_context(
                     &mut history,
                     deferred_tools_reminder.as_ref(),
@@ -5577,21 +5595,13 @@ fn tool_search_reference_blocks(data: &serde_json::Value) -> Option<Vec<serde_js
 /// emitted VERBATIM on egress via `ContentBlock::ToolResult.content_blocks`.
 /// `None` for every other result shape (strict no-op: the wire form falls back to
 /// the text `content` exactly as before).
+///
+/// The rule itself lives in `tool_api::tool_result_media` because the subagent
+/// runner needs the identical answer, and it is in another crate. This stays a
+/// named function so the call chain above and the oracle note it carries are
+/// untouched.
 fn image_tool_result_blocks(data: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
-    if data.get("type").and_then(serde_json::Value::as_str) != Some("image") {
-        return None;
-    }
-    let file = data.get("file")?;
-    let base64 = file.get("base64").and_then(serde_json::Value::as_str)?;
-    let media_type = file.get("type").and_then(serde_json::Value::as_str)?;
-    Some(vec![serde_json::json!({
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "data": base64,
-            "media_type": media_type,
-        },
-    })])
+    tool_api::tool_result_media::image_content_blocks(data)
 }
 
 /// The binary's Bash image mapper `hKn`: an `{isImage:true, stdout:<data-URI>}`

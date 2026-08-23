@@ -2,11 +2,12 @@
 //! routing (base URL, protocol, auth, credential). The routing table is the
 //! source of truth for wire/auth and overrides the snapshot's advisory `api`.
 
-use crate::catalog::map::{to_model_profile, to_pricing};
+use crate::catalog::map::{to_metadata, to_model_profile, to_pricing};
 use crate::catalog::models_dev::ProviderSlice;
 use crate::{
     AuthStrategy, CredentialConfig, PricingCatalog, ProtocolFamily, ProviderId, ProviderProfile,
 };
+use traits::{ModelBillingMode, ModelPricing};
 
 /// Built-in catalog: provider profiles plus a matching pricing catalog.
 #[derive(Debug, Clone)]
@@ -31,6 +32,8 @@ struct Preset {
     provider_id: ProviderId,
     /// Credential lookup (env var name, or `None` for OAuth-based presets).
     credential_env: Option<&'static str>,
+    /// User-facing billing semantics for this provider route.
+    billing_mode: ModelBillingMode,
     /// Embedded models.dev slice JSON.
     slice_json: &'static str,
 }
@@ -57,6 +60,7 @@ fn presets() -> Vec<Preset> {
                 name: "openrouter".to_string(),
             },
             credential_env: Some("OPENROUTER_API_KEY"),
+            billing_mode: ModelBillingMode::PerToken,
             slice_json: OPENROUTER,
         },
         Preset {
@@ -68,6 +72,7 @@ fn presets() -> Vec<Preset> {
                 name: "deepseek".to_string(),
             },
             credential_env: Some("DEEPSEEK_API_KEY"),
+            billing_mode: ModelBillingMode::PerToken,
             slice_json: DEEPSEEK,
         },
         // Kimi Open Platform (China): OpenAI-compatible Chat Completions wire
@@ -82,6 +87,7 @@ fn presets() -> Vec<Preset> {
                 name: "kimi".to_string(),
             },
             credential_env: Some("MOONSHOT_API_KEY"),
+            billing_mode: ModelBillingMode::PerToken,
             slice_json: KIMI,
         },
         // Kimi Code is a distinct membership-backed service. Its API keys,
@@ -96,6 +102,7 @@ fn presets() -> Vec<Preset> {
                 name: "kimi-code".to_string(),
             },
             credential_env: Some("KIMI_API_KEY"),
+            billing_mode: ModelBillingMode::Subscription,
             slice_json: KIMI_CODE,
         },
         // GLM coding plan: Anthropic-compatible endpoint (reuses AnthropicMessagesCodec).
@@ -109,6 +116,7 @@ fn presets() -> Vec<Preset> {
                 name: "glm-coding".to_string(),
             },
             credential_env: Some("ZHIPU_API_KEY"),
+            billing_mode: ModelBillingMode::Subscription,
             slice_json: GLM_CODING,
         },
         // Z.AI: international GLM API (the global counterpart to the China-only
@@ -124,6 +132,7 @@ fn presets() -> Vec<Preset> {
                 name: "zai".to_string(),
             },
             credential_env: Some("ZAI_API_KEY"),
+            billing_mode: ModelBillingMode::PerToken,
             slice_json: ZAI,
         },
         // OpenAI first-party: Responses API (codex removed the chat wire, so all
@@ -137,6 +146,7 @@ fn presets() -> Vec<Preset> {
             auth: AuthStrategy::Bearer,
             provider_id: ProviderId::OpenAI,
             credential_env: Some("OPENAI_API_KEY"),
+            billing_mode: ModelBillingMode::PerToken,
             slice_json: OPENAI,
         },
         // OpenAI via ChatGPT-account OAuth login: routes to the Codex backend
@@ -152,6 +162,7 @@ fn presets() -> Vec<Preset> {
                 name: "openai-chatgpt".to_string(),
             },
             credential_env: None,
+            billing_mode: ModelBillingMode::Subscription,
             slice_json: OPENAI_CHATGPT,
         },
         // GitHub Copilot: OpenAI-compatible wire; GitHub OAuth token used
@@ -165,6 +176,7 @@ fn presets() -> Vec<Preset> {
                 name: "github-copilot".to_string(),
             },
             credential_env: Some("GITHUB_TOKEN"),
+            billing_mode: ModelBillingMode::Subscription,
             slice_json: GITHUB_COPILOT,
         },
         // Google Gemini (first-party): generateContent wire; API key sent as the
@@ -179,6 +191,7 @@ fn presets() -> Vec<Preset> {
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::Gemini,
             credential_env: Some("GEMINI_API_KEY"),
+            billing_mode: ModelBillingMode::PerToken,
             slice_json: GEMINI,
         },
     ]
@@ -193,6 +206,8 @@ fn presets() -> Vec<Preset> {
 pub fn builtin_presets() -> BuiltinCatalog {
     let mut providers = Vec::new();
     let mut pricing = PricingCatalog::empty();
+    let openai_reference: ProviderSlice =
+        serde_json::from_str(OPENAI).expect("vendored openai slice must parse");
 
     for preset in presets() {
         let slice: ProviderSlice = serde_json::from_str(preset.slice_json)
@@ -200,7 +215,36 @@ pub fn builtin_presets() -> BuiltinCatalog {
 
         let mut models = Vec::with_capacity(slice.models.len());
         for model in slice.models.values() {
-            models.push(to_model_profile(model));
+            let mut profile = to_model_profile(model);
+            if preset.profile_name == "openai-chatgpt" {
+                if let Some(reference) = openai_reference.models.get(&model.id) {
+                    profile.metadata = to_metadata(reference);
+                    profile.description = reference.description.clone();
+                }
+            }
+            let display_pricing = profile
+                .metadata
+                .pricing
+                .get_or_insert_with(|| ModelPricing {
+                    billing_mode: preset.billing_mode,
+                    source: Some("official".to_string()),
+                    ..ModelPricing::default()
+                });
+            display_pricing.billing_mode = preset.billing_mode;
+            if preset.billing_mode == ModelBillingMode::Subscription
+                || (preset.profile_name == "openai" && model.id.starts_with("gpt-5.6-"))
+            {
+                display_pricing.source = Some("official".to_string());
+            }
+            if preset.billing_mode == ModelBillingMode::Subscription {
+                display_pricing.input_per_million = None;
+                display_pricing.output_per_million = None;
+                display_pricing.cache_read_per_million = None;
+                display_pricing.cache_write_per_million = None;
+                display_pricing.reasoning_per_million = None;
+                display_pricing.tiers.clear();
+            }
+            models.push(profile);
             if let Some(price) = to_pricing(model) {
                 pricing = pricing.with_price(preset.provider_id.clone(), model.id.clone(), price);
             }
@@ -237,7 +281,10 @@ pub fn builtin_presets() -> BuiltinCatalog {
                 },
             },
             models,
-            pricing: crate::config::PricingConfig::default(),
+            pricing: crate::config::PricingConfig {
+                billing_mode: preset.billing_mode,
+                ..crate::config::PricingConfig::default()
+            },
             // main-only fields: catalog presets are all OpenAI/Anthropic-style
             // (no AwsSigV4 / AzureOpenAi), so both default to None.
             signing: None,
@@ -245,6 +292,8 @@ pub fn builtin_presets() -> BuiltinCatalog {
             supports_websockets: matches!(preset.profile_name, "openai" | "openai-chatgpt"),
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: (preset.profile_name == "deepseek")
+                .then_some("deepseek-v4-flash-vision-exp".to_string()),
         });
     }
 
@@ -286,22 +335,28 @@ mod tests {
                 .map_or(0, |p| p.models.len())
         };
         // Exact counts guard against a truncated/partial re-vendor of a slice.
-        assert_eq!(count("openrouter"), 341);
-        assert_eq!(count("deepseek"), 4);
+        assert_eq!(count("openrouter"), 398);
+        assert_eq!(count("deepseek"), 3);
+        let deepseek = catalog
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "deepseek")
+            .expect("deepseek preset present");
+        assert!(deepseek.models.iter().all(|m| !matches!(
+            m.request_model.as_str(),
+            "deepseek-chat" | "deepseek-reasoner"
+        )));
         assert_eq!(count("kimi"), 10);
         assert_eq!(count("kimi-code"), 4);
-        assert_eq!(count("glm-coding"), 6);
-        assert_eq!(count("zai"), 13);
-        // openai sheds the two codex-exclusive ids (gpt-5-codex, gpt-5.3-codex)
-        // so they resolve unambiguously to the openai-chatgpt Codex-backend
-        // profile; gpt-5.2 stays here (a real api-key model).
-        assert_eq!(count("openai"), 48);
-        assert_eq!(count("openai-chatgpt"), 2);
-        // -1: gpt-5.3-codex dropped (codex-backend-exclusive → owned by
-        // openai-chatgpt so it resolves there unambiguously).
-        assert_eq!(count("github-copilot"), 22);
+        assert_eq!(count("glm-coding"), 9);
+        assert_eq!(count("zai"), 15);
+        // OpenAI API and ChatGPT OAuth profiles intentionally share the latest
+        // GPT-5.6 ids; callers qualify the profile when choosing a route.
+        assert_eq!(count("openai"), 55);
+        assert_eq!(count("openai-chatgpt"), 3);
+        assert_eq!(count("github-copilot"), 36);
         // Gemini slice vendored verbatim from models.dev (google provider).
-        assert_eq!(count("gemini"), 22);
+        assert_eq!(count("gemini"), 42);
         let openai = catalog
             .providers
             .iter()
@@ -320,5 +375,87 @@ mod tests {
         assert_eq!(chatgpt.auth, AuthStrategy::ChatGptOAuth);
         assert_eq!(chatgpt.base_url, "https://chatgpt.com/backend-api/codex");
         assert!(chatgpt.supports_websockets);
+    }
+
+    #[test]
+    fn subscription_presets_never_render_zero_token_prices() {
+        let catalog = builtin_presets();
+        for profile_name in [
+            "openai-chatgpt",
+            "kimi-code",
+            "glm-coding",
+            "github-copilot",
+        ] {
+            let provider = catalog
+                .providers
+                .iter()
+                .find(|provider| provider.profile_name == profile_name)
+                .expect("subscription provider");
+            assert_eq!(
+                provider.pricing.billing_mode,
+                ModelBillingMode::Subscription
+            );
+            for model in &provider.models {
+                let pricing = model.metadata.pricing.as_ref().expect("billing metadata");
+                assert_eq!(pricing.billing_mode, ModelBillingMode::Subscription);
+                assert_eq!(pricing.input_per_million, None);
+                assert_eq!(pricing.output_per_million, None);
+            }
+        }
+    }
+
+    #[test]
+    fn chatgpt_models_inherit_openai_limits_without_api_pricing() {
+        let catalog = builtin_presets();
+        let provider = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.profile_name == "openai-chatgpt")
+            .unwrap();
+        let model = provider
+            .models
+            .iter()
+            .find(|model| model.request_model == "gpt-5.6-luna")
+            .unwrap();
+        assert_eq!(model.metadata.context_window_tokens, Some(1_050_000));
+        assert_eq!(model.metadata.max_output_tokens, Some(128_000));
+        assert_eq!(
+            model.metadata.pricing.as_ref().unwrap().billing_mode,
+            ModelBillingMode::Subscription
+        );
+    }
+
+    #[test]
+    fn route_listings_keep_provider_specific_pricing_and_effort() {
+        let catalog = builtin_presets();
+        let registry = crate::ModelRegistry::from_config(crate::ClientConfig {
+            providers: catalog.providers,
+        })
+        .unwrap();
+        let listings = registry.available_models();
+        let openai = listings
+            .iter()
+            .find(|item| item.profile_name == "openai" && item.request_model == "gpt-5.6-sol")
+            .unwrap();
+        let chatgpt = listings
+            .iter()
+            .find(|item| {
+                item.profile_name == "openai-chatgpt" && item.request_model == "gpt-5.6-sol"
+            })
+            .unwrap();
+        assert_eq!(
+            openai.metadata.pricing.as_ref().unwrap().billing_mode,
+            ModelBillingMode::PerToken
+        );
+        assert_eq!(
+            chatgpt.metadata.pricing.as_ref().unwrap().billing_mode,
+            ModelBillingMode::Subscription
+        );
+        assert_eq!(
+            openai.reasoning.levels,
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(openai.reasoning.can_disable);
+        assert_eq!(chatgpt.reasoning.levels, openai.reasoning.levels);
     }
 }

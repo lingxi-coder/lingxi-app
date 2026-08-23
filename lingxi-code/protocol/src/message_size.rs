@@ -3,7 +3,7 @@
 //! field of `CompactionSummary` (UX estimate only — the exact cost
 //! accounting lives in `lingxi-cost`).
 
-use crate::{ContentBlock, ConversationMessage};
+use crate::{ContentBlock, ConversationMessage, MediaAnalysis};
 
 /// Returns the sum, in bytes, of every text payload carried by `msg`.
 ///
@@ -47,7 +47,14 @@ fn content_block_size(b: &ContentBlock) -> u64 {
         ContentBlock::AdvisorToolResult { content, .. } => serde_json::to_string(content)
             .map(|s| s.len() as u64)
             .unwrap_or(0),
+        ContentBlock::MediaAnalysis { analysis } => media_analysis_size(analysis),
     }
+}
+
+fn media_analysis_size(analysis: &MediaAnalysis) -> u64 {
+    serde_json::to_string(analysis)
+        .map(|s| s.len() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -103,5 +110,36 @@ mod tests {
         };
         // {"path":"/a"} → 13 bytes
         assert_eq!(text_byte_size(&m), 13);
+    }
+
+    #[test]
+    fn media_analysis_block_sized_as_json() {
+        let analysis = crate::MediaAnalysis {
+            question_key: "msg-123".to_string(),
+            media_fingerprints: vec!["fp-a".to_string()],
+            model: "deepseek-v4-flash-vision-exp".to_string(),
+            prompt_version: 1,
+            created_at: std::time::UNIX_EPOCH,
+            task_findings: vec!["receipt total is visible".to_string()],
+            media: vec![crate::MediaObservation {
+                fingerprint: "fp-a".to_string(),
+                label: "receipt".to_string(),
+                description: "Printed receipt.".to_string(),
+                ocr: None,
+                relevant_facts: vec!["total 12.34".to_string()],
+                uncertainty: None,
+            }],
+            cross_media_findings: Vec::new(),
+            truncated: false,
+        };
+        let expected = serde_json::to_string(&analysis).unwrap().len() as u64;
+        let message = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::MediaAnalysis { analysis }],
+            is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        assert_eq!(text_byte_size(&message), expected);
     }
 }

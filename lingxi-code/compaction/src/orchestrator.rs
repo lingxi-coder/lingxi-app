@@ -23,8 +23,37 @@ use crate::thresholds::{
     MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, MAX_CONSECUTIVE_RAPID_REFILLS,
 };
 use cost::Usage;
-use protocol::ConversationMessage;
+use protocol::{ContentBlock, ConversationMessage};
 use std::time::SystemTime;
+
+fn media_analysis_messages(messages: &[ConversationMessage]) -> Vec<ConversationMessage> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::User {
+                id,
+                content,
+                is_meta,
+                is_compact_summary,
+                is_visible_in_transcript_only,
+            } => {
+                let analysis_blocks = content
+                    .iter()
+                    .filter(|block| matches!(block, ContentBlock::MediaAnalysis { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!analysis_blocks.is_empty()).then(|| ConversationMessage::User {
+                    id: id.clone(),
+                    content: analysis_blocks,
+                    is_meta: *is_meta,
+                    is_compact_summary: *is_compact_summary,
+                    is_visible_in_transcript_only: *is_visible_in_transcript_only,
+                })
+            }
+            ConversationMessage::Assistant { .. } | ConversationMessage::System { .. } => None,
+        })
+        .collect()
+}
 
 /// Result of one orchestrator pass.
 #[derive(Debug, Clone)]
@@ -72,11 +101,15 @@ pub struct IterationCompactionResult {
     /// (`messagesToPreserve` → `messagesToKeep`). Carried separately from
     /// [`Self::messages`] (which holds the leading `summaryMessages`) so the
     /// orchestrator's `apply_post_compact` can splice it AFTER the summary in
-    /// the `[boundary, ...summary, ...messagesToKeep, ...attachments]` order
-    /// and populate the boundary's `preserved_segment`. Empty unless the
+    /// the `[boundary, ...summary, ...messagesToKeep, ...sidecars, ...attachments]`
+    /// order and populate the boundary's `preserved_segment`. Empty unless the
     /// autocompact layer fired AND a tail was preserved — so the snip/micro-only
     /// and under-threshold paths leave it empty (history shape unchanged).
     pub messages_to_preserve: Vec<ConversationMessage>,
+    /// Internal vision sidecars from the compacted prefix. These messages are
+    /// carried outside the summary so compaction cannot silently discard the
+    /// structured fingerprints that make historical media reusable.
+    pub media_analysis_to_preserve: Vec<ConversationMessage>,
     /// Usage incurred by the summary side-query. `None` when no LLM
     /// compaction ran (snip/micro/under-threshold paths).
     pub compaction_usage: Option<Usage>,
@@ -179,6 +212,7 @@ impl CompactionOrchestrator {
             return Err(CompactionError::NotEnoughMessages);
         }
 
+        let media_analysis_to_preserve = media_analysis_messages(&messages);
         let result = self
             .auto
             .compact_manual_with_instructions(messages, custom_instructions)
@@ -197,6 +231,7 @@ impl CompactionOrchestrator {
             rapid_refill_breaker_tripped: false,
             consecutive_rapid_refills: 0,
             messages_to_preserve: result.messages_to_preserve,
+            media_analysis_to_preserve,
             compaction_usage: result.compaction_usage,
             compaction_model: Some(result.summary_model),
         })
@@ -278,6 +313,7 @@ impl CompactionOrchestrator {
         last_assistant_at: Option<SystemTime>,
         now: SystemTime,
     ) -> Result<IterationCompactionResult, CompactionError> {
+        let media_analysis_to_preserve = media_analysis_messages(&messages);
         let mut layers = Vec::new();
         let mut freed = snip_tokens_freed_already;
         let mut cache_hit = false;
@@ -442,6 +478,7 @@ impl CompactionOrchestrator {
             rapid_refill_breaker_tripped,
             consecutive_rapid_refills: tracking.consecutive_rapid_refills,
             messages_to_preserve,
+            media_analysis_to_preserve,
             compaction_usage,
             compaction_model,
         })
@@ -468,7 +505,7 @@ mod tests {
     use super::*;
     use crate::autocompact::CompactionResult;
     use async_trait::async_trait;
-    use protocol::{ContentBlock, MessageId, ToolUseId};
+    use protocol::{ContentBlock, MediaAnalysis, MessageId, ToolUseId};
     use serde_json::json;
     use sidequery::{
         CacheSafeParams, CacheSafeParamsSlot, ForkedAgentRunner, SideQueryClient, SideQueryError,
@@ -479,6 +516,47 @@ mod tests {
     use tool_api::context::ToolUseOptions;
 
     struct SummaryClient;
+
+    #[test]
+    fn media_analysis_messages_preserves_only_internal_sidecars() {
+        let analysis = MediaAnalysis {
+            question_key: "question".into(),
+            media_fingerprints: vec!["sha256:abc".into()],
+            model: "vision-delegate".into(),
+            prompt_version: 1,
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+            task_findings: vec!["a finding".into()],
+            media: Vec::new(),
+            cross_media_findings: Vec::new(),
+            truncated: false,
+        };
+        let message = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "user text".into(),
+                },
+                ContentBlock::MediaAnalysis {
+                    analysis: analysis.clone(),
+                },
+            ],
+            is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+
+        let preserved = media_analysis_messages(&[
+            message,
+            ConversationMessage::user(MessageId::new(), "ordinary user message".into()),
+        ]);
+        assert_eq!(preserved.len(), 1);
+        let ConversationMessage::User { content, is_meta, .. } = &preserved[0]
+        else {
+            panic!("expected preserved user sidecar");
+        };
+        assert!(*is_meta);
+        assert_eq!(content, &vec![ContentBlock::MediaAnalysis { analysis }]);
+    }
 
     #[async_trait]
     impl SideQueryClient for SummaryClient {
@@ -492,6 +570,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 usage: Usage::default(),
                 stop_reason: Some("end_turn".into()),
+                retry_count: 0,
             })
         }
     }

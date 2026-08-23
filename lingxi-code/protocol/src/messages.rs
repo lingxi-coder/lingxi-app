@@ -7,6 +7,18 @@ use crate::ids::{MessageId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Whether a raw nested tool-result value represents provider-visible media.
+///
+/// This is shared by the delegation collector and the final provider media cap
+/// so both paths retain the same set of image/document blocks.
+#[must_use]
+pub fn is_nested_media_value(value: &Value) -> bool {
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("image") | Some("image_url") | Some("document")
+    )
+}
+
 /// High-level role of a conversation message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -138,6 +150,62 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// Internal sidecar describing delegated vision analysis for one question.
+    ///
+    /// Serialized into JSONL/history and preserved by compaction, but hidden by
+    /// user-facing renderers.
+    MediaAnalysis {
+        /// Structured delegated-media analysis payload.
+        analysis: MediaAnalysis,
+    },
+}
+
+/// Structured vision-delegation analysis persisted into conversation history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaAnalysis {
+    /// Stable key for the user question this analysis belongs to.
+    pub question_key: String,
+    /// Ordered media fingerprints covered by this analysis packet.
+    #[serde(default)]
+    pub media_fingerprints: Vec<String>,
+    /// Delegate model that produced the analysis.
+    pub model: String,
+    /// Prompt schema version used for the analysis request.
+    pub prompt_version: u32,
+    /// Time the analysis was created.
+    pub created_at: std::time::SystemTime,
+    /// Task-level findings relevant to the current user request.
+    #[serde(default)]
+    pub task_findings: Vec<String>,
+    /// Per-media observations in packet order.
+    #[serde(default)]
+    pub media: Vec<MediaObservation>,
+    /// Findings that depend on multiple media items together.
+    #[serde(default)]
+    pub cross_media_findings: Vec<String>,
+    /// Whether the delegate reported truncation or partial output.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// One media item's delegated observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaObservation {
+    /// Fingerprint of the referenced media item.
+    pub fingerprint: String,
+    /// Human-readable label used in the delegate output.
+    pub label: String,
+    /// Plain-language description of what is visible.
+    pub description: String,
+    /// OCR text, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr: Option<String>,
+    /// Facts the delegate marked as relevant to the task.
+    #[serde(default)]
+    pub relevant_facts: Vec<String>,
+    /// Delegate uncertainty note for this media item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncertainty: Option<String>,
 }
 
 /// Source of a [`ContentBlock::Image`]. Serializes to Anthropic's
@@ -374,6 +442,18 @@ impl ConversationMessage {
         Self::User {
             id,
             content: vec![ContentBlock::Text { text }],
+            is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }
+    }
+
+    /// Construct a synthetic/meta user message carrying one media-analysis block.
+    #[must_use]
+    pub fn user_media_analysis(id: MessageId, analysis: MediaAnalysis) -> Self {
+        Self::User {
+            id,
+            content: vec![ContentBlock::MediaAnalysis { analysis }],
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
@@ -1035,5 +1115,63 @@ mod tests {
         );
         let back: ContentBlock = serde_json::from_str(&json).unwrap();
         assert_eq!(back, block);
+    }
+
+    #[test]
+    fn media_analysis_block_round_trips_with_wire_tag() {
+        let analysis = MediaAnalysis {
+            question_key: "msg-123".into(),
+            media_fingerprints: vec!["fp-a".into(), "fp-b".into()],
+            model: "deepseek-v4-flash-vision-exp".into(),
+            prompt_version: 1,
+            created_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            task_findings: vec!["figure shows a chart".into()],
+            media: vec![MediaObservation {
+                fingerprint: "fp-a".into(),
+                label: "image_1".into(),
+                description: "A line chart with two series.".into(),
+                ocr: Some("Q3 revenue".into()),
+                relevant_facts: vec!["trend rises after May".into()],
+                uncertainty: Some("legend is partially obscured".into()),
+            }],
+            cross_media_findings: vec!["image_2 provides zoomed-in detail".into()],
+            truncated: false,
+        };
+        let block = ContentBlock::MediaAnalysis {
+            analysis: analysis.clone(),
+        };
+        let value = serde_json::to_value(&block).unwrap();
+        assert_eq!(value["type"], "media_analysis");
+        let back: ContentBlock = serde_json::from_value(value).unwrap();
+        assert_eq!(back, block);
+    }
+
+    #[test]
+    fn media_analysis_message_round_trips_and_is_meta() {
+        let message = ConversationMessage::user_media_analysis(
+            MessageId::new(),
+            MediaAnalysis {
+                question_key: "msg-123".into(),
+                media_fingerprints: vec!["fp-a".into()],
+                model: "deepseek-v4-flash-vision-exp".into(),
+                prompt_version: 1,
+                created_at: std::time::UNIX_EPOCH,
+                task_findings: vec!["contains a receipt".into()],
+                media: vec![MediaObservation {
+                    fingerprint: "fp-a".into(),
+                    label: "receipt".into(),
+                    description: "Small printed receipt.".into(),
+                    ocr: None,
+                    relevant_facts: vec!["total is visible".into()],
+                    uncertainty: None,
+                }],
+                cross_media_findings: Vec::new(),
+                truncated: false,
+            },
+        );
+        assert!(message.is_meta());
+        let line = serde_json::to_string(&message).unwrap();
+        let back: ConversationMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, message);
     }
 }

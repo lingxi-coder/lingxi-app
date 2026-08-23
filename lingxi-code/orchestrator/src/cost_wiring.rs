@@ -94,7 +94,7 @@ fn llm_provider_to_cost_provider(provider: &llm_client::ProviderId) -> ProviderI
 /// `provider` tag to Anthropic. String-parsing is kept only as the no-profile
 /// fallback (e.g. an explicit `openai/gpt-4o` reference).
 #[must_use]
-pub(crate) fn model_ref_from_string(model: &str, profile: Option<&str>) -> ModelRef {
+pub fn model_ref_from_string(model: &str, profile: Option<&str>) -> ModelRef {
     let (profile, bare) = match profile {
         Some(p) => (p.to_string(), model.to_string()),
         // No LIVE profile (e.g. a cross-provider `--resume` cleared it): recover
@@ -440,15 +440,15 @@ mod tests {
         // Without it, split_profile_model mis-infers `anthropic` for every one of
         // these — misattributing cost + the tengu_api_success provider tag.
 
-        // deepseek bare id → deepseek, NOT anthropic.
-        let mr = model_ref_from_string("deepseek-chat", Some("deepseek"));
+        // DeepSeek V4 bare id → deepseek, NOT anthropic.
+        let mr = model_ref_from_string("deepseek-v4-flash", Some("deepseek"));
         assert_eq!(
             mr.provider,
             ProviderId::OpenAICompatible {
                 name: "deepseek".to_string()
             }
         );
-        assert_eq!(mr.model, "deepseek-chat");
+        assert_eq!(mr.model, "deepseek-v4-flash");
 
         // Provider-shared claude id served by Copilot → copilot, NOT anthropic.
         let mr = model_ref_from_string("claude-opus-4-8", Some("github-copilot"));
@@ -479,7 +479,7 @@ mod tests {
         // Bug fix: after a cross-provider `--resume` clears model_profile, a bare
         // non-claude id must still attribute to its REAL provider (resolved from
         // the catalog), NOT default to Anthropic via split_profile_model.
-        let mr = model_ref_from_string("deepseek-chat", None);
+        let mr = model_ref_from_string("deepseek-v4-flash", None);
         assert_eq!(
             mr.provider,
             ProviderId::OpenAICompatible {

@@ -301,7 +301,8 @@ fn push_user_block(
         // resume/replay byte parity but have no scrollback renderer.
         | ContentBlock::ServerToolUse { .. }
         | ContentBlock::ConnectorText { .. }
-        | ContentBlock::AdvisorToolResult { .. } => {}
+        | ContentBlock::AdvisorToolResult { .. }
+        | ContentBlock::MediaAnalysis { .. } => {}
     }
 }
 
@@ -352,7 +353,8 @@ fn push_assistant_block(
         // resume/replay byte parity but have no scrollback renderer.
         | ContentBlock::ServerToolUse { .. }
         | ContentBlock::ConnectorText { .. }
-        | ContentBlock::AdvisorToolResult { .. } => {}
+        | ContentBlock::AdvisorToolResult { .. }
+        | ContentBlock::MediaAnalysis { .. } => {}
     }
 }
 

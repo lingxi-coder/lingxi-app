@@ -95,6 +95,7 @@ struct ProviderLaunchSnapshot: Equatable {
     let routingJSON: String
     let defaultModelID: String?
     let enabledProfileIDs: [String]
+    let visionDelegationEnabled: Bool
 }
 
 struct ProviderRoutingSettings: Codable, Equatable {
@@ -208,6 +209,7 @@ struct ProviderCatalogEntry: Identifiable, Equatable {
     let authName: String
     let credentialEnv: String?
     let models: [String]
+    let modelDetails: [String: ModelRuntimeDetails]
 
     var supportsOAuth: Bool {
         authName == "ChatGptOAuth" || authName == "OAuthBearer"
@@ -356,6 +358,7 @@ private struct ProviderPersistenceEnvelope: Codable, Equatable {
     var version: Int
     var profiles: [ProviderStoredProfile]
     var routing: ProviderRoutingSettings?
+    var visionDelegationEnabled: Bool?
 }
 
 private enum PendingCredentialOperation: Equatable {
@@ -401,15 +404,15 @@ private enum ProviderRepositoryDefaults {
     /// and may put image/audio or otherwise non-chat models first.
     static let preferredDefaultModelByPreset: [String: String] = [
         "anthropic": "claude-sonnet-5",
-        "openai": "gpt-4o",
-        "openai-chatgpt": "gpt-5.3-codex",
+        "openai": "gpt-5.6-sol",
+        "openai-chatgpt": "gpt-5.6-sol",
         "deepseek": "deepseek-v4-flash",
         "kimi": "kimi-k3",
-        "kimi-code": "kimi-for-coding",
-        "glm-coding": "glm-4.5-air",
-        "zai": "glm-4.5",
-        "openrouter": "anthropic/claude-sonnet-4.5",
-        "gemini": "gemini-2.5-pro",
+        "kimi-code": "k3",
+        "glm-coding": "glm-5.3",
+        "zai": "glm-5.3",
+        "openrouter": "openrouter/auto",
+        "gemini": "gemini-3.7-flash",
     ]
 }
 
@@ -441,6 +444,7 @@ final class ProviderRepository {
 
     private(set) var profiles: [ProviderProfileState]
     private(set) var routingSettings: ProviderRoutingSettings
+    private(set) var visionDelegationEnabled: Bool
     private(set) var storageEncrypted = true
     private(set) var lastRepositoryError: String? = nil
     private(set) var routingMessage: String? = nil
@@ -463,11 +467,13 @@ final class ProviderRepository {
         let didMigrateDeepSeek = loadedProfiles != migratedProfiles
         let didNormalizeOAuthProfiles = migratedProfiles != normalizedOAuthProfiles
         let initialRoutingSettings = loadedEnvelope?.routing ?? ProviderRoutingSettings()
+        let initialVisionDelegationEnabled = loadedEnvelope?.visionDelegationEnabled ?? true
         self.persistenceURL = resolvedPersistenceURL
         self.fileManager = fileManager
         self.credentialOperationTimeout = credentialOperationTimeout
         self.routingSettings = initialRoutingSettings
         self.lastAppliedRoutingSettings = initialRoutingSettings
+        self.visionDelegationEnabled = initialVisionDelegationEnabled
         self.profiles = normalizedOAuthProfiles.map {
             ProviderProfileState(
                 profile: $0,
@@ -925,7 +931,7 @@ final class ProviderRepository {
 
     func handle(event: ClientEvent) {
         switch event {
-        case .modelList(let models, let current):
+        case .modelList(let models, let current, _):
             updateRuntimeSnapshot(
                 models: models,
                 activeModelID: current,
@@ -1120,6 +1126,15 @@ final class ProviderRepository {
     func setRetryBackoffMs(_ value: Int) {
         routingSettings.retryBackoffMs = clampedRetryBackoffMs(value)
         sanitizeRoutingSettings()
+    }
+
+    func setVisionDelegationEnabled(_ enabled: Bool) {
+        guard visionDelegationEnabled != enabled else { return }
+        visionDelegationEnabled = enabled
+        _ = persistProfiles()
+        Task {
+            try? await applyReconnectHandler?(makeLaunchSnapshot())
+        }
     }
 
     func toggleFallbackProfile(_ profileID: String) {
@@ -1667,7 +1682,8 @@ final class ProviderRepository {
             providerProfilesJSON: providerProfilesJSON,
             routingJSON: routingJSON,
             defaultModelID: defaultModelID,
-            enabledProfileIDs: enabledIDs
+            enabledProfileIDs: enabledIDs,
+            visionDelegationEnabled: visionDelegationEnabled
         )
     }
 
@@ -2066,7 +2082,12 @@ final class ProviderRepository {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.withoutEscapingSlashes]
             let data = try encoder.encode(
-                ProviderPersistenceEnvelope(version: 2, profiles: profiles.map(\.profile), routing: routingSettings)
+                ProviderPersistenceEnvelope(
+                    version: 2,
+                    profiles: profiles.map(\.profile),
+                    routing: routingSettings,
+                    visionDelegationEnabled: visionDelegationEnabled
+                )
             )
             try data.write(to: persistenceURL, options: [.atomic])
             lastRepositoryError = nil

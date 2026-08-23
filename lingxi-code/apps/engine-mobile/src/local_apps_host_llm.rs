@@ -262,6 +262,7 @@ impl LocalAppsHostBroker {
             messages,
             max_tokens,
             temperature,
+            cache_scope: Some(app_id.to_string()),
         })
     }
 
@@ -845,6 +846,7 @@ mod tests {
         assert_eq!(seen.max_tokens, 256);
         assert_eq!(seen.temperature, Some(0.4));
         assert_eq!(seen.system.as_deref(), Some("你是这个应用的写作助手"));
+        assert_eq!(seen.cache_scope.as_deref(), Some(h.app_id.as_str()));
     }
 
     #[tokio::test]

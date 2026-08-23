@@ -973,6 +973,8 @@ mod tests {
             provider_label: "Anthropic".into(),
             is_current: true,
             supports_reasoning: true,
+            supports_multimodal: false,
+            details: Vec::new(),
         };
         let lines = status_lines(&d, Some(&model), true, false, ThemeName::Dark, &[]);
         let text = text_of(&lines);

@@ -21,6 +21,7 @@ async fn client_builds_routes_from_config_and_lists_models() {
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec!["fast".to_string()],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -33,6 +34,7 @@ async fn client_builds_routes_from_config_and_lists_models() {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     };
 
@@ -57,6 +59,7 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec!["fast".to_string()],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -69,6 +72,7 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     };
 
@@ -101,6 +105,7 @@ async fn provider_qualified_ui_ref_is_normalized_before_openai_compatible_encodi
                 billing_model: "deepseek-v4-flash".to_string(),
                 aliases: vec![],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -114,6 +119,7 @@ async fn provider_qualified_ui_ref_is_normalized_before_openai_compatible_encodi
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     })
     .unwrap();
@@ -153,6 +159,7 @@ async fn slash_bearing_openrouter_wire_model_is_not_mistaken_for_a_ui_ref() {
                 billing_model: "openrouter/auto".to_string(),
                 aliases: vec![],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -165,6 +172,7 @@ async fn slash_bearing_openrouter_wire_model_is_not_mistaken_for_a_ui_ref() {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     })
     .unwrap();
@@ -193,6 +201,7 @@ fn anthropic_fast_profile(profile_name: &str, base_url: &str) -> ProviderProfile
             billing_model: "claude-opus-5".to_string(),
             aliases: vec![],
             description: None,
+            metadata: Default::default(),
             capabilities: Capabilities {
                 streaming: true,
                 tools: true,
@@ -206,6 +215,7 @@ fn anthropic_fast_profile(profile_name: &str, base_url: &str) -> ProviderProfile
         supports_websockets: false,
         supports_websocket_compression: false,
         websocket_connect_timeout_ms: None,
+        vision_delegate: None,
     }
 }
 
@@ -266,6 +276,7 @@ async fn github_copilot_gpt5_and_codex_route_to_responses_endpoint() {
         billing_model: id.to_string(),
         aliases: vec![],
         description: None,
+        metadata: Default::default(),
         capabilities: Capabilities {
             streaming: true,
             tools: true,
@@ -293,6 +304,7 @@ async fn github_copilot_gpt5_and_codex_route_to_responses_endpoint() {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     };
     let client = DefaultLlmClient::from_config(config).unwrap();
@@ -342,6 +354,7 @@ async fn non_copilot_openai_chat_provider_is_never_overridden() {
                 billing_model: "gpt-5.5".to_string(),
                 aliases: vec![],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -354,6 +367,7 @@ async fn non_copilot_openai_chat_provider_is_never_overridden() {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     };
     let client = DefaultLlmClient::from_config(config).unwrap();
@@ -388,6 +402,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
                 billing_model: "qwen/qwen3-coder:free".to_string(),
                 aliases: vec![],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -401,6 +416,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     };
     let client = DefaultLlmClient::from_config(config).unwrap();
@@ -465,11 +481,9 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
 }
 
 #[tokio::test]
-async fn vision_image_blocks_dropped_for_non_vision_model_not_hard_failed() {
-    // Regression: an image pasted into a conversation persists in session
-    // history, so switching to a model that doesn't advertise vision must
-    // silently drop Image/ImageUrl blocks from history — not break every
-    // subsequent turn with "unsupported capability: vision".
+async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
+    // Regression guard: image-bearing requests without a vision delegate must
+    // now fail explicitly instead of silently deleting media from the wire.
     let config = ClientConfig {
         providers: vec![ProviderProfile {
             provider_id: ProviderId::OpenAICompatible {
@@ -486,6 +500,7 @@ async fn vision_image_blocks_dropped_for_non_vision_model_not_hard_failed() {
                 billing_model: "qwen/qwen3-coder:free".to_string(),
                 aliases: vec![],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -499,6 +514,7 @@ async fn vision_image_blocks_dropped_for_non_vision_model_not_hard_failed() {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     };
     let client = DefaultLlmClient::from_config(config).unwrap();
@@ -518,19 +534,19 @@ async fn vision_image_blocks_dropped_for_non_vision_model_not_hard_failed() {
             },
         ],
     }];
-    let prepared = client
+    let error = client
         .prepare(&image_request)
         .await
-        .expect("image block must be silently dropped, not hard-fail the request");
-    let body = prepared.provider_request.body_json.to_string();
-    assert!(
-        !body.contains("\"type\":\"image\""),
-        "image block must be stripped from the wire body: {body}"
-    );
+        .expect_err("image block must fail explicitly without delegation");
+    assert!(matches!(
+        error,
+        LlmError::UnsupportedCapability { capability } if capability == "vision"
+    ));
 
-    // The MID-CONVERSATION case: history carries Image blocks from an earlier
-    // vision-capable model. All subsequent turns (even text-only) must not
-    // hard-fail.
+    // The MID-CONVERSATION case is also explicit now: if history still carries
+    // image blocks and no delegation layer rewrites them first, prepare must
+    // surface the vision capability error rather than silently mutating the
+    // request.
     let mut history_request = LlmRequest::new("qwen/qwen3-coder:free");
     history_request.messages = vec![
         llm_client::Message {
@@ -561,21 +577,14 @@ async fn vision_image_blocks_dropped_for_non_vision_model_not_hard_failed() {
             }],
         },
     ];
-    // Text-only follow-up: no image in the current turn, but history
-    // carries image blocks. Must silently strip and proceed.
-    let prepared = client
+    let error = client
         .prepare(&history_request)
         .await
-        .expect("history image blocks must be stripped, not hard-fail");
-    let body = prepared.provider_request.body_json.to_string();
-    assert!(
-        !body.contains("\"type\":\"image\""),
-        "history image block must be stripped from the wire body: {body}"
-    );
-    assert!(
-        body.contains("ok what else"),
-        "text follow-up must survive: {body}"
-    );
+        .expect_err("history image blocks must fail explicitly without delegation");
+    assert!(matches!(
+        error,
+        LlmError::UnsupportedCapability { capability } if capability == "vision"
+    ));
 }
 
 #[test]
@@ -595,6 +604,7 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
                     billing_model: "gpt-4o".to_string(),
                     aliases: vec!["fast".to_string()],
                     description: None,
+                    metadata: Default::default(),
                     capabilities: Capabilities {
                         streaming: true,
                         tools: true,
@@ -607,6 +617,7 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
                 supports_websockets: false,
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
+                vision_delegate: None,
             },
             ProviderProfile {
                 provider_id: ProviderId::AnthropicFirstParty,
@@ -621,6 +632,7 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
                     billing_model: "claude-sonnet-4-20250514".to_string(),
                     aliases: vec![],
                     description: None,
+                    metadata: Default::default(),
                     capabilities: Capabilities {
                         streaming: true,
                         tools: true,
@@ -633,6 +645,7 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
                 supports_websockets: false,
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
+                vision_delegate: None,
             },
         ],
     };
@@ -659,6 +672,7 @@ async fn openai_responses_profile_prepares_post_to_responses_endpoint() {
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec![],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -671,6 +685,7 @@ async fn openai_responses_profile_prepares_post_to_responses_endpoint() {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     };
 
@@ -713,6 +728,7 @@ async fn openai_responses_websocket_capability_selects_stream_transport_only_for
                 billing_model: "gpt-5".to_string(),
                 aliases: vec![],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -725,6 +741,7 @@ async fn openai_responses_websocket_capability_selects_stream_transport_only_for
             supports_websockets: true,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: Some(1234),
+            vision_delegate: None,
         }],
     };
     let client = DefaultLlmClient::from_config(config).unwrap();
@@ -765,6 +782,7 @@ fn websocket_capability_is_rejected_for_non_responses_protocols() {
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec![],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -777,6 +795,7 @@ fn websocket_capability_is_rejected_for_non_responses_protocols() {
             supports_websockets: true,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     };
 
@@ -803,6 +822,7 @@ async fn response_format_is_rejected_when_selected_model_lacks_structured_output
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec!["fast".to_string()],
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -816,6 +836,7 @@ async fn response_format_is_rejected_when_selected_model_lacks_structured_output
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }],
     };
 

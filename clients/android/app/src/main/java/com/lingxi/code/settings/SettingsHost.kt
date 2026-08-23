@@ -196,6 +196,7 @@ fun SettingsHost(
                     val kind = providerKindArg(it)
                     ProviderPickerPage(
                         kind = kind,
+                        state = state,
                         store = resolvedStore,
                         // Replace the picker with the edit page so the back stack is
                         // list → edit (the iOS `replaceTopTwo` behavior).

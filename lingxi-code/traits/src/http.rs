@@ -188,6 +188,24 @@ pub trait HttpTransport: Send + Sync {
         self.request(req).await
     }
 
+    /// Send a request WITHOUT following redirects while also pinning the
+    /// connection to pre-vetted DNS answers for the logical hostname.
+    ///
+    /// The default implementation preserves the fail-closed resolved-address
+    /// contract and otherwise delegates to [`Self::request_no_follow`].
+    async fn request_no_follow_with_resolved_addrs(
+        &self,
+        req: HttpRequest,
+        resolved: Option<ResolvedAddressOverride>,
+    ) -> Result<HttpResponse, HttpError> {
+        if resolved.is_some() {
+            return Err(HttpError::InvalidRequest(
+                "HTTP transport does not support pre-resolved address pinning".to_string(),
+            ));
+        }
+        self.request_no_follow(req).await
+    }
+
     /// Open an SSE stream. Caller drives the stream to completion.
     async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError>;
 
@@ -267,6 +285,35 @@ pub trait HttpTransport: Send + Sync {
             status: 200,
             headers: Vec::new(),
             stream: self.stream_raw_bytes(req).await?,
+        })
+    }
+
+    /// Open a raw byte stream without following redirects while optionally
+    /// pinning the connection to pre-resolved addresses.
+    ///
+    /// The default implementation preserves the fail-closed resolved-address
+    /// contract, delegates to [`Self::request_no_follow_with_resolved_addrs`],
+    /// and exposes the full buffered body as a single chunk.
+    async fn stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(
+        &self,
+        req: HttpRequest,
+        resolved: Option<ResolvedAddressOverride>,
+    ) -> Result<RawByteStreamWithMeta, HttpError> {
+        let resp = self
+            .request_no_follow_with_resolved_addrs(req, resolved)
+            .await?;
+        let status = resp.status;
+        let headers = resp.headers;
+        let bytes = if resp.body_bytes.is_empty() {
+            resp.body.into_bytes()
+        } else {
+            resp.body_bytes
+        };
+        let stream: RawByteStream = Box::pin(OnceBytes(Some(Ok::<Vec<u8>, HttpError>(bytes))));
+        Ok(RawByteStreamWithMeta {
+            status,
+            headers,
+            stream,
         })
     }
 

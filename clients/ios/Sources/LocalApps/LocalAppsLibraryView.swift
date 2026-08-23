@@ -12,6 +12,7 @@ struct LocalAppsRootView: View {
     @Bindable var store: LocalAppsStore
     let initialAppID: String?
     let availableModels: [String]
+    let availableModelDetails: [String: ModelRuntimeDetails]
     let activeModelID: String
     let onDismiss: () -> Void
     /// Called with `(appID, sessionUUID)` when the user taps a row of the
@@ -34,6 +35,7 @@ struct LocalAppsRootView: View {
                 store: store,
                 path: $path,
                 availableModels: availableModels,
+                availableModelDetails: availableModelDetails,
                 activeModelID: activeModelID,
                 onDismiss: onDismiss,
                 onOpenAppSession: onOpenCreatedAppSession
@@ -91,6 +93,7 @@ struct LocalAppsRootView: View {
                 store: store,
                 path: $path,
                 availableModels: availableModels,
+                availableModelDetails: availableModelDetails,
                 activeModelID: activeModelID
             )
         case let .details(appID):
@@ -204,6 +207,7 @@ private struct LocalAppsLibraryScreen: View {
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
     let availableModels: [String]
+    let availableModelDetails: [String: ModelRuntimeDetails]
     let activeModelID: String
     let onDismiss: () -> Void
     /// Threaded from the root cover: `(appID, sessionUUID, brief)` →
@@ -443,6 +447,7 @@ struct LocalAppCreateView: View {
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
     let availableModels: [String]
+    let availableModelDetails: [String: ModelRuntimeDetails]
     let activeModelID: String
 
     @State var brief = ""
@@ -456,11 +461,13 @@ struct LocalAppCreateView: View {
         store: LocalAppsStore,
         path: Binding<[LocalAppsRoute]>,
         availableModels: [String] = [],
+        availableModelDetails: [String: ModelRuntimeDetails] = [:],
         activeModelID: String = ""
     ) {
         self.store = store
         self._path = path
         self.availableModels = availableModels
+        self.availableModelDetails = availableModelDetails
         self.activeModelID = activeModelID
     }
 
@@ -532,6 +539,7 @@ struct LocalAppCreateView: View {
         .sheet(isPresented: $showingModelPicker) {
             ModelPickerSheet(
                 availableModels: availableModels,
+                detailsByReference: availableModelDetails,
                 activeModelId: modelOverride ?? activeModelID,
                 recentModels: [],
                 onSelect: { reference in
@@ -550,8 +558,8 @@ struct LocalAppCreateView: View {
             }
             return String(localized: "local_apps_create_model_follow_current_value \(ModelDisplay.shortName(for: activeModelID))")
         }
-        let item = ModelDisplay.item(for: modelOverride)
-        return "\(ModelDisplay.providerName(for: item.providerId)) · \(item.shortName)"
+        let item = ModelDisplay.item(for: modelOverride, detailsByReference: availableModelDetails)
+        return "\((item.details?.preferredProviderLabel ?? ModelDisplay.providerName(for: item.providerId))) · \(item.shortName)"
     }
 
     private func create() async {

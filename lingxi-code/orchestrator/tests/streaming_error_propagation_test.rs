@@ -1,7 +1,7 @@
 use llm_client::{LlmError, LlmEvent};
 use orchestrator::test_support::{
-    content_block_start_text, message_start, text_delta, MockApiClient, MockOutputStream,
-    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
+    message_start, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{
     ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, OrchestratorError,
@@ -32,14 +32,31 @@ fn orch(
 /// ends GRACEFULLY with `reason:"model_error"` and the raw error text is surfaced
 /// as an api-error assistant message — instead of the prior `OrchestratorError`
 /// bubble (which showed a phantom "[Request interrupted by user]" to SDK callers).
+///
+/// The fixture is a TERMINAL error raised before any content, and both halves
+/// of that are load-bearing:
+///
+/// - **Before any content**, because P1-04 (cc 2.1.199) owns the other half:
+///   once a real content block has completed — or a transport close leaves
+///   visible text whose stop frame was lost — the partial is finalized in place
+///   and the byte-exact "API Error: Connection closed mid-response…" notice is
+///   surfaced INSTEAD of the raw error. That case belongs to
+///   `streaming_partial_finalize_test::transport_after_completed_block_finalizes_partial`.
+///   This test kept a `Transport`-after-text fixture until 2026-08-20, so the two
+///   asserted opposite outcomes for one scenario; P1-04 landed in `d7215d659`
+///   without updating this one and it had been red ever since.
+/// - **Terminal**, because a retryable transport error is retried rather than
+///   surfaced, and the turn would end on whatever the retry produced. `TlsCert`
+///   is never retried by construction (a handshake that cannot succeed only
+///   burns the budget), so it reaches the graceful `model_error` catch directly
+///   — which is the invariant #10 is about.
 #[tokio::test]
 async fn mid_stream_err_ends_turn_gracefully_as_model_error() {
     let turn: Vec<Result<LlmEvent, LlmError>> = vec![
         Ok(message_start("m1", "claude-opus-4-7")),
-        Ok(content_block_start_text(0)),
-        Ok(text_delta(0, "before err")),
-        Err(LlmError::Transport {
-            message: "connection reset by peer".into(),
+        Err(LlmError::TlsCert {
+            code: "CERT_HAS_EXPIRED".into(),
+            message: "certificate has expired (CERT_HAS_EXPIRED)".into(),
         }),
     ];
     let api = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![turn]));
@@ -66,13 +83,13 @@ async fn mid_stream_err_ends_turn_gracefully_as_model_error() {
     );
     // The raw error text is surfaced verbatim (createAssistantAPIErrorMessage,
     // NOT an `API Error:`-prefixed template).
+    let texts = output.text_events().await;
     assert!(
-        output
-            .text_events()
-            .await
+        texts
             .iter()
-            .any(|t| t.contains("connection reset by peer")),
-        "the raw error text must be surfaced as the model_error message"
+            .any(|t| t.contains("certificate has expired (CERT_HAS_EXPIRED)")),
+        "the raw error text must be surfaced as the model_error message; \
+         texts={texts:#?}"
     );
 }
 

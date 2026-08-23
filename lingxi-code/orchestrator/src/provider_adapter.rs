@@ -12,7 +12,7 @@ use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use crate::model::rate_limit::{RateLimitInfo, RawUtilization};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use llm_client::{LlmError, LlmEvent, LlmResponse};
+use llm_client::{LlmError, LlmEvent, LlmResponse, MediaDelegationAccounting};
 use protocol::ConversationMessage;
 use std::sync::Arc;
 
@@ -281,8 +281,57 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.available_models()
     }
 
+    fn resolve_media_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<llm_client::MediaRoute, LlmError> {
+        self.service.resolve_media_route(model, profile)
+    }
+
+    async fn analyze_vision_delegation(
+        &self,
+        packet: sidequery::VisionPacket,
+    ) -> Result<sidequery::VisionDelegationResult, LlmError> {
+        let client = std::sync::Arc::new(sidequery::ProviderSideQueryClient::from_service(
+            self.service.clone(),
+        ));
+        let service = sidequery::VisionDelegationService::new(client);
+        service.analyze(packet).await.map_err(|error| match error {
+            sidequery::SideQueryError::Api(error) => error,
+            sidequery::SideQueryError::InvalidResponse(message) => {
+                LlmError::MediaDelegationUnavailable { message }
+            }
+            sidequery::SideQueryError::Partial {
+                source,
+                usage,
+                elapsed,
+                retry_count,
+                api_calls,
+            } => LlmError::MediaDelegationPartial {
+                message: source.to_string(),
+                accounting: MediaDelegationAccounting::from_counts(
+                    usage.tokens.input,
+                    usage.tokens.output,
+                    usage.tokens.cache_write,
+                    usage.tokens.cache_read,
+                    usage.tokens.reasoning_output,
+                    usage.tokens.cache_write_1h,
+                    elapsed,
+                    retry_count,
+                    api_calls,
+                ),
+            },
+        })
+    }
+
     fn list_model_listings(&self) -> Vec<traits::orchestrator::ModelListing> {
-        catalog_model_listings()
+        self.service
+            .model_listings()
+            .into_iter()
+            .filter(|listing| listing.capabilities.tools)
+            .map(lower_model_listing)
+            .collect()
     }
 
     /// Return the most recently observed rate-limit header snapshot.
@@ -360,6 +409,92 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 /// Anthropic in the catalog that special case is gone. Anthropic is listed first
 /// to keep the picker's Claude-first ordering for catalog-only (no live config)
 /// callers.
+fn lower_reasoning_spec(raw: llm_client::ReasoningControlSpec) -> traits::ReasoningControlSpec {
+    let mandatory = raw
+        .mandatory_selection
+        .as_ref()
+        .map(|selection| match selection {
+            llm_client::ReasoningSelection::Automatic => traits::ReasoningSelection::Automatic,
+            llm_client::ReasoningSelection::Disabled => traits::ReasoningSelection::Disabled,
+            llm_client::ReasoningSelection::Enabled => traits::ReasoningSelection::Enabled,
+            llm_client::ReasoningSelection::Level(id) => {
+                traits::ReasoningSelection::Level { id: id.clone() }
+            }
+            llm_client::ReasoningSelection::TokenBudget(tokens) => {
+                traits::ReasoningSelection::TokenBudget {
+                    tokens: u64::from(*tokens),
+                }
+            }
+        });
+    let mut available = vec![traits::ReasoningSelection::Automatic];
+    if let Some(required) = mandatory.as_ref() {
+        available = vec![required.clone()];
+    } else {
+        if raw.can_disable {
+            available.push(traits::ReasoningSelection::Disabled);
+        }
+        if raw.can_enable {
+            available.push(traits::ReasoningSelection::Enabled);
+        }
+        available.extend(
+            raw.levels
+                .iter()
+                .cloned()
+                .map(|id| traits::ReasoningSelection::Level { id }),
+        );
+    }
+    let auto_only = available.len() == 1
+        && matches!(
+            available.first(),
+            Some(traits::ReasoningSelection::Automatic)
+        )
+        && raw.token_budget.is_none();
+    traits::ReasoningControlSpec {
+        available,
+        selections_persistable: mandatory.is_none(),
+        budget_range: raw.token_budget.map(|range| traits::ReasoningBudgetRange {
+            min_tokens: range.min,
+            max_tokens: range.max,
+            supports_dynamic: false,
+            supports_disabled: raw.can_disable,
+        }),
+        provider_default: mandatory.unwrap_or(traits::ReasoningSelection::Automatic),
+        forced: raw.mandatory_selection.is_some(),
+        modifiable: raw.mandatory_selection.is_none() && !auto_only,
+        disabled_reason: if raw.mandatory_selection.is_some() {
+            Some("reasoning_required".to_string())
+        } else if auto_only {
+            Some("reasoning_unavailable".to_string())
+        } else {
+            None
+        },
+    }
+}
+
+/// Project an llm-client route listing into the provider-neutral picker type.
+#[must_use]
+pub fn lower_model_listing(listing: llm_client::ModelListing) -> traits::ModelListing {
+    let capabilities = traits::ModelCapabilities {
+        streaming: listing.capabilities.streaming,
+        tools: listing.capabilities.tools,
+        vision: listing.capabilities.vision,
+        documents: listing.capabilities.documents,
+        reasoning: listing.capabilities.reasoning,
+        structured_output: listing.capabilities.structured_output,
+    };
+    traits::ModelListing {
+        display_model: listing.display_model,
+        request_model: listing.request_model,
+        provider_label: provider_label(&listing.profile_name).to_string(),
+        provider_id: listing.profile_name,
+        description: listing.description,
+        supports_reasoning: capabilities.reasoning,
+        metadata: listing.metadata,
+        capabilities,
+        reasoning: lower_reasoning_spec(listing.reasoning),
+    }
+}
+
 fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
     // Build one listing, defaulting an absent description to a known per-model
     // parity blurb for the Claude family (models.dev / the Anthropic profiles
@@ -379,6 +514,12 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
             provider_id: provider,
             description,
             supports_reasoning,
+            metadata: traits::ModelMetadata::default(),
+            capabilities: traits::ModelCapabilities {
+                reasoning: supports_reasoning,
+                ..traits::ModelCapabilities::default()
+            },
+            reasoning: traits::ReasoningControlSpec::default(),
         }
     };
 
@@ -416,18 +557,7 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
                 .available_models()
                 .into_iter()
                 .filter(|m| m.capabilities.tools)
-                .map(|m| {
-                    let label = provider_label(&m.profile_name).to_string();
-                    let supports_reasoning = m.capabilities.reasoning;
-                    row(
-                        m.display_model,
-                        m.request_model,
-                        label,
-                        m.profile_name,
-                        m.description,
-                        supports_reasoning,
-                    )
-                }),
+                .map(lower_model_listing),
         );
     }
     listings
@@ -784,25 +914,43 @@ mod tests {
                     credential: CredentialConfig::Env {
                         var: "ADAPTER_TEST_KEY".to_string(),
                     },
-                    models: vec![ModelProfile {
-                        display_model: "claude-sonnet-4-20250514".to_string(),
-                        request_model: "claude-sonnet-4-20250514".to_string(),
-                        billing_model: "claude-sonnet-4".to_string(),
-                        aliases: vec!["claude".to_string()],
-                        description: None,
-                        capabilities: Capabilities {
-                            streaming: true,
-                            tools: true,
-                            reasoning: true,
-                            ..Default::default()
+                    models: vec![
+                        ModelProfile {
+                            display_model: "claude-sonnet-4-20250514".to_string(),
+                            request_model: "claude-sonnet-4-20250514".to_string(),
+                            billing_model: "claude-sonnet-4".to_string(),
+                            aliases: vec!["claude".to_string()],
+                            description: None,
+                            metadata: Default::default(),
+                            capabilities: Capabilities {
+                                streaming: true,
+                                tools: true,
+                                reasoning: true,
+                                ..Default::default()
+                            },
                         },
-                    }],
+                        ModelProfile {
+                            display_model: "claude-legacy-no-tools".to_string(),
+                            request_model: "claude-legacy-no-tools".to_string(),
+                            billing_model: "claude-legacy-no-tools".to_string(),
+                            aliases: Vec::new(),
+                            description: None,
+                            metadata: Default::default(),
+                            capabilities: Capabilities {
+                                streaming: true,
+                                tools: false,
+                                reasoning: false,
+                                ..Default::default()
+                            },
+                        },
+                    ],
                     pricing: PricingConfig::default(),
                     signing: None,
                     azure: None,
                     supports_websockets: false,
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
                 }],
             })
             .expect("client"),
@@ -823,79 +971,34 @@ mod tests {
     }
 
     #[test]
-    fn list_model_listings_exposes_catalog() {
+    fn list_model_listings_exposes_actual_configured_catalog() {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let listings = OrchestratorApiClient::list_model_listings(&adapter);
-        // The first-party Anthropic family plus the static llm-client catalog
-        // (openrouter + deepseek + glm-coding + zai + github-copilot) yields well
-        // over 100 model rows.
-        assert!(
-            listings.len() >= 100,
-            "expected >=100 catalog listings, got {}",
-            listings.len()
-        );
-        // Each provider appears with its hand-authored label.
-        let label_for = |id: &str| -> Option<String> {
-            listings
-                .iter()
-                .find(|l| l.provider_id == id)
-                .map(|l| l.provider_label.clone())
-        };
-        assert_eq!(label_for("openrouter").as_deref(), Some("OpenRouter"));
-        assert_eq!(label_for("deepseek").as_deref(), Some("DeepSeek"));
-        assert_eq!(label_for("kimi").as_deref(), Some("Kimi"));
-        assert_eq!(label_for("kimi-code").as_deref(), Some("Kimi Code"));
-        assert_eq!(label_for("glm-coding").as_deref(), Some("GLM (coding)"));
         assert_eq!(
-            label_for("github-copilot").as_deref(),
-            Some("GitHub Copilot")
+            listings.len(),
+            1,
+            "only configured, tool-capable routes are listed"
         );
-        // First-party Anthropic is now part of the catalog (it used to live as a
-        // Claude-only hardcoded fallback in `list_available_models`).
-        assert_eq!(label_for("anthropic").as_deref(), Some("Anthropic"));
-        assert!(
-            listings
-                .iter()
-                .any(|l| l.provider_id == "anthropic" && l.request_model == "claude-opus-4-8"),
-            "expected the first-party Anthropic Claude family in the catalog"
-        );
-        // (model-no-row-descriptions) Claude-family ids in the catalog (e.g.
-        // openrouter's `*opus*`/`*sonnet*`/`*haiku*`) pick up a built-in blurb so
-        // the picker renders a dimmed sub-line. At least one listing carries one.
-        assert!(
-            listings.iter().any(|l| l.description.is_some()),
-            "expected at least one catalog listing to carry a description"
-        );
+        let listing = &listings[0];
+        assert_eq!(listing.provider_id, "anthropic");
+        assert_eq!(listing.provider_label, "Anthropic");
+        assert_eq!(listing.request_model, "claude-sonnet-4-20250514");
+        assert!(listing.capabilities.tools);
+        assert!(listing.capabilities.reasoning);
     }
 
     #[test]
     fn list_model_listings_excludes_no_tool_models() {
-        // Models with `tool_call=false` (image/TTS models, gpt-3.5-turbo, …) can
-        // never complete an agentic turn — the agent always sends tools — so they
-        // must NOT appear in the /model picker catalog. Tool-capable models stay.
+        // Models with `tools=false` cannot complete an agentic turn and are
+        // filtered from the actual configured catalog.
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let listings = OrchestratorApiClient::list_model_listings(&adapter);
         let has = |id: &str| listings.iter().any(|l| l.request_model == id);
 
-        // Excluded: genuinely tool_call=false in the vendored models.dev slices.
-        assert!(
-            !has("gpt-5-chat-latest"),
-            "no-tool OpenAI chat model must be hidden"
-        );
-        assert!(
-            !has("gemini-2.5-flash-image"),
-            "no-tool Gemini image model must be hidden"
-        );
-        // Kept: tool-capable models remain selectable — incl. gpt-3.5-turbo,
-        // whose tool_call=false was a DATA error (it supports function calling).
-        assert!(has("deepseek-v4-flash"), "tool-capable model must remain");
-        assert!(has("gpt-5.2"), "tool-capable OpenAI model must remain");
-        assert!(
-            has("gpt-3.5-turbo"),
-            "gpt-3.5-turbo supports tools — must remain"
-        );
+        assert!(has("claude-sonnet-4-20250514"));
+        assert!(!has("claude-legacy-no-tools"));
     }
 
     #[test]
@@ -911,10 +1014,17 @@ mod tests {
                 .find(|l| l.request_model == id)
                 .map(|l| l.supports_reasoning)
         };
-        // Claude 4.x/5 support extended thinking.
-        assert_eq!(reasoning("claude-opus-4-8"), Some(true));
-        // A visible (tool-capable) but non-thinking model is flagged false.
-        assert_eq!(reasoning("qwen/qwen3-coder:free"), Some(false));
+        assert_eq!(reasoning("claude-sonnet-4-20250514"), Some(true));
+        let listing = listings
+            .iter()
+            .find(|listing| listing.request_model == "claude-sonnet-4-20250514")
+            .expect("configured route listed");
+        assert!(!listing.reasoning.modifiable);
+        assert_eq!(
+            listing.reasoning.disabled_reason.as_deref(),
+            Some("reasoning_unavailable"),
+            "an unverified custom/legacy id stays auto-only even when its broad capability flag is true"
+        );
     }
 
     #[test]
@@ -1073,6 +1183,7 @@ mod tests {
                         billing_model: "claude-sonnet-4".to_string(),
                         aliases: vec!["claude".to_string()],
                         description: None,
+                        metadata: Default::default(),
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -1086,6 +1197,7 @@ mod tests {
                     supports_websockets: false,
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
                 }],
             })
             .expect("client"),
@@ -1175,6 +1287,7 @@ mod tests {
                         billing_model: "claude-future-9999".to_string(),
                         aliases: vec![],
                         description: None,
+                        metadata: Default::default(),
                         capabilities: Capabilities {
                             reasoning: true,
                             ..Default::default()
@@ -1186,6 +1299,7 @@ mod tests {
                     supports_websockets: false,
                     supports_websocket_compression: false,
                     websocket_connect_timeout_ms: None,
+                    vision_delegate: None,
                 }],
             })
             .expect("client"),

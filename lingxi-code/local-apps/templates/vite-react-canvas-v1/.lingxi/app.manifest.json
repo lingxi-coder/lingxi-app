@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "template_id": "vite-react-canvas-v1",
+  "template_version": 3,
+  "runtime_compatibility": [
+    "store-static"
+  ],
+  "dependencies": {
+    "node": "24.18.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "vite": "8.2.1",
+    "@ionic/react": "9.0.0"
+  },
+  "capabilities": {
+    "collections": [],
+    "network_domains": []
+  }
+}

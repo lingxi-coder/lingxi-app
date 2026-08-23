@@ -90,8 +90,10 @@ fn cost_provider_id(profile_name: &str, provider_id: &LlmProviderId) -> CostProv
     }
 }
 
-/// Build the cost catalog: reference tiers + a default-unknown row for every
-/// non-Anthropic profile model the reference catalog does not already price.
+/// Build the cost catalog from reference tiers and models.dev prices.
+///
+/// Unknown models are deliberately left out so [`cost::CostTracker`] can apply
+/// its default tier while marking the model as unpriced for `/cost` warnings.
 #[must_use]
 pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
     let mut catalog = PricingCatalog::builtin_reference();
@@ -116,11 +118,8 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
                 catalog = catalog.with_entry(model_pricing_from_token_pricing(&mr, &tp));
                 continue;
             }
-            // No reference tier and no models.dev price → priced, not errored.
-            catalog = catalog.with_entry(ModelPricing {
-                model_ref: mr.clone(),
-                ..PricingCatalog::default_unknown_pricing(&mr)
-            });
+            // No reference tier and no models.dev price: leave the model out.
+            // CostTracker applies the default unknown tier when it is used.
         }
     }
     catalog
@@ -151,6 +150,7 @@ mod tests {
                 billing_model: model.to_string(),
                 aliases: Vec::new(),
                 description: None,
+                metadata: Default::default(),
                 capabilities: Capabilities::default(),
             }],
             pricing: PricingConfig::default(),
@@ -159,6 +159,7 @@ mod tests {
             supports_websockets: false,
             supports_websocket_compression: false,
             websocket_connect_timeout_ms: None,
+            vision_delegate: None,
         }
     }
 
@@ -174,15 +175,17 @@ mod tests {
 
     #[test]
     fn preset_model_uses_real_models_dev_price_not_default_unknown() {
-        // Feed the real bundled presets through pricing_for; deepseek-chat must
-        // bill at its true $0.14/$0.28 rate, NOT the $5/$25 Claude default.
+        // Feed the real bundled presets through pricing_for; the current
+        // DeepSeek V4 Flash route must bill at its true $0.14/$0.28 rate, NOT
+        // the $5/$25 Claude default. The deprecated deepseek-chat route is no
+        // longer part of the bundled catalog.
         let providers = llm_client::builtin_presets().providers;
         let cat = pricing_for(&providers);
         let mr = ModelRef {
             provider: CostProviderId::OpenAICompatible {
                 name: "deepseek".to_string(),
             },
-            model: "deepseek-chat".to_string(),
+            model: "deepseek-v4-flash".to_string(),
         };
         let (p, _res) = cat.resolve(&mr).expect("priced");
         assert_eq!(
@@ -217,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn unpriced_user_model_gets_default_unknown_row() {
+    fn unpriced_user_model_remains_unpriced_for_tracker_default_tier() {
         let cat = pricing_for(&[user_profile("groq", "llama-3.3-70b")]);
         let mr = ModelRef {
             provider: CostProviderId::OpenAICompatible {
@@ -225,15 +228,9 @@ mod tests {
             },
             model: "llama-3.3-70b".to_string(),
         };
-        let (p, _res) = cat.resolve(&mr).expect("priced");
-        // $5/$25 default-unknown tier.
-        assert_eq!(
-            p.token_rates[&cost::pricing::TokenClass::Input].nano_usd_per_token,
-            5_000
-        );
-        assert_eq!(
-            p.token_rates[&cost::pricing::TokenClass::Output].nano_usd_per_token,
-            25_000
-        );
+        assert!(matches!(
+            cat.resolve(&mr),
+            Err(cost::pricing::CostError::UnpricedModel(_))
+        ));
     }
 }

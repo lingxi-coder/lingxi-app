@@ -1343,7 +1343,13 @@ mod tests {
         .expect("workspace-local permission settings are valid JSON");
         assert_eq!(
             settings["permissions"]["allow"],
-            serde_json::json!(["Read(./**)", "Edit(./**)"])
+            serde_json::json!([
+                "Read(./**)",
+                "Edit(./**)",
+                "LocalAppLogs",
+                "LocalAppBuild",
+                "LocalAppRuntime"
+            ])
         );
         assert!(ids::is_valid_app_id(&record.id));
         assert_eq!(h.service.list_apps().await, vec![record.clone()]);

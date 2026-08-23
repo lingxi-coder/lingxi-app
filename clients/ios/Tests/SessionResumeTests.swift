@@ -34,7 +34,8 @@ import XCTest
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: "",
-                appSandboxRoot: NSTemporaryDirectory())
+                appSandboxRoot: NSTemporaryDirectory(),
+                visionDelegationEnabled: true)
             return EngineConversationSource(config: config)
         }
 
@@ -1269,6 +1270,7 @@ import XCTest
             ])
             let followUp = MessageDto(role: "user", blocks: [.text(text: "继续")])
 
+            source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(
                 .sessionResumed(sessionId: uuid(), messages: [assistant, toolTurn, followUp]))
 
@@ -1373,10 +1375,13 @@ import XCTest
             XCTAssertTrue(receivedCommands)
 
             let commands = await gate.snapshot()
-            guard commands.count >= 2 else { return }
-            guard case let .listSessions(limit) = commands[1] else {
+            guard let sessionList = commands.first(where: { command in
+                if case .listSessions = command { return true }
+                return false
+            }) else {
                 return XCTFail("engine bootstrap must request the session catalog")
             }
+            guard case let .listSessions(limit) = sessionList else { return }
             XCTAssertEqual(limit, UInt32.max,
                            "project persistence requires an uncapped catalog")
         }
@@ -1421,7 +1426,8 @@ import XCTest
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: "",
-                appSandboxRoot: NSTemporaryDirectory())
+                appSandboxRoot: NSTemporaryDirectory(),
+                visionDelegationEnabled: true)
             return EngineConversationSource(config: config, handleBuilder: handleBuilder)
         }
 

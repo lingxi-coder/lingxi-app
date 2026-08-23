@@ -22,12 +22,12 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   {
     id: 'openai', label: 'OpenAI', description: 'GPT models', popular: true,
     authMethod: 'api_key', keyLabel: 'OpenAI API key', keyPlaceholder: 'sk-…',
-    defaultModel: 'openai/gpt-4o', available: true,
+    defaultModel: 'openai/gpt-5.6-sol', available: true,
   },
   {
-    id: 'deepseek', label: 'DeepSeek', description: 'Chat and Reasoner', popular: true,
+    id: 'deepseek', label: 'DeepSeek', description: 'V4 text and vision models', popular: true,
     authMethod: 'api_key', keyLabel: 'DeepSeek API key', keyPlaceholder: 'sk-…',
-    defaultModel: 'deepseek/deepseek-chat', available: true,
+    defaultModel: 'deepseek/deepseek-v4-flash', available: true,
   },
   {
     id: 'kimi', label: 'Kimi', description: 'Moonshot AI models', popular: true,
@@ -37,36 +37,37 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   {
     id: 'kimi-code', label: 'Kimi Code', description: 'Coding membership models', popular: true,
     authMethod: 'api_key', keyLabel: 'Kimi Code API key', keyPlaceholder: 'sk-…',
-    defaultModel: 'kimi-code/kimi-for-coding', available: true,
+    defaultModel: 'kimi-code/k3', available: true,
   },
   {
     id: 'gemini', label: 'Google Gemini', description: 'Gemini models', popular: true,
     authMethod: 'api_key', keyLabel: 'Gemini API key', keyPlaceholder: 'AIza…',
-    defaultModel: 'gemini/gemini-2.5-flash', available: true,
+    defaultModel: 'gemini/gemini-3.7-flash', available: true,
   },
   {
     id: 'openrouter', label: 'OpenRouter', description: 'One key for many models', popular: false,
     authMethod: 'api_key', keyLabel: 'OpenRouter API key', keyPlaceholder: 'sk-or-…',
-    defaultModel: 'openrouter/openai/gpt-4o', available: true,
+    defaultModel: 'openrouter/openrouter/auto', available: true,
   },
   {
     id: 'zai', label: 'Z.AI', description: 'GLM models', popular: false,
     authMethod: 'api_key', keyLabel: 'Z.AI API key', keyPlaceholder: '…',
-    defaultModel: 'zai/glm-4.5', available: true,
+    defaultModel: 'zai/glm-5.3', available: true,
   },
   {
     id: 'glm-coding', label: 'GLM Coding Plan', description: 'Zhipu coding-plan subscription', popular: false,
     authMethod: 'api_key', keyLabel: 'GLM Coding API key', keyPlaceholder: '…',
-    defaultModel: 'glm-coding/glm-4.5-air', available: true,
+    defaultModel: 'glm-coding/glm-5.3', available: true,
   },
   {
     id: 'github-copilot', label: 'GitHub Copilot', description: 'Copilot subscription', popular: true,
     authMethod: 'token', keyLabel: 'GitHub token', keyPlaceholder: 'gho_…',
-    defaultModel: 'github-copilot/gpt-4o', available: true,
+    defaultModel: 'github-copilot/claude-opus-5', available: true,
   },
   {
     id: 'openai-chatgpt', label: 'OpenAI (ChatGPT)', description: 'ChatGPT Plus / Pro', popular: true,
-    authMethod: 'oauth', keyLabel: 'ChatGPT sign-in', keyPlaceholder: '', available: false,
+    authMethod: 'oauth', keyLabel: 'ChatGPT sign-in', keyPlaceholder: '',
+    defaultModel: 'openai-chatgpt/gpt-5.6-sol', available: false,
   },
 ] as const;
 

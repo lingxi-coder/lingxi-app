@@ -203,6 +203,7 @@ mod tests {
                 billing_model: "claude-opus-4-6".to_string(),
                 aliases: Vec::new(),
                 description: None,
+                metadata: Default::default(),
                 capabilities: llm_client::Capabilities::default(),
             }],
             anthropic_has_api_key: true,

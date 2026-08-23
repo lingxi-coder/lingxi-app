@@ -26,6 +26,7 @@ use crate::session::ModelRow;
 
 /// Rows shown in the picker viewport before it scrolls.
 const VIEWPORT: usize = 12;
+const DETAIL_PANEL_ROWS: usize = 4;
 
 /// What the picker shows when the session has no models (plan Phase 11
 /// step 5: the empty state lives IN the view, not in the transcript). The
@@ -80,6 +81,7 @@ impl ModelPickerView {
                     || r.display.to_ascii_lowercase().contains(&q)
                     || r.provider_label.to_ascii_lowercase().contains(&q)
                     || r.request_model.to_ascii_lowercase().contains(&q)
+                    || r.searchable_detail_text().to_ascii_lowercase().contains(&q)
             })
             .cloned()
             .collect();
@@ -145,12 +147,18 @@ impl ModelPickerView {
             .map(|r| {
                 // ` › ● {display}` = display + 4 gutter cols, plus the `· 无思考`
                 // suffix width for a non-thinking row (drawn at render time).
-                let tag = if r.supports_reasoning {
+                let reasoning_tag = if r.supports_reasoning {
                     0
                 } else {
                     crate::session::NON_THINKING_TAG.chars().count()
                 };
-                r.display.chars().count() + 4 + tag
+                let multimodal_tag = if r.supports_multimodal {
+                    crate::session::MULTIMODAL_TAG.chars().count()
+                } else {
+                    0
+                };
+                let summary = r.summary().map_or(0, |summary| summary.chars().count() + 3);
+                r.display.chars().count() + 4 + reasoning_tag + multimodal_tag + summary
             })
             .max()
             .unwrap_or(0);
@@ -160,7 +168,21 @@ impl ModelPickerView {
             .map(|r| r.provider_label.chars().count())
             .max()
             .unwrap_or(0);
-        widest_model.max(widest_header)
+        let widest_detail = self
+            .rows
+            .iter()
+            .flat_map(|row| row.detail_panel_lines().iter())
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        widest_model.max(widest_header).max(widest_detail)
+    }
+
+    fn selected_detail_lines(&self) -> &[String] {
+        self.rows
+            .get(self.selected)
+            .map(ModelRow::detail_panel_lines)
+            .unwrap_or(&[])
     }
 }
 
@@ -219,7 +241,12 @@ impl Renderable for ModelPickerView {
         // models (present iff the catalog is non-empty, independent of the
         // current filter). + group_count() for the dim provider header rows.
         let search_row = usize::from(!self.all_rows.is_empty());
-        let height = u16::try_from(visible + self.group_count() + 4 + search_row)
+        let detail_rows = if self.selected_detail_lines().is_empty() {
+            0
+        } else {
+            2 + self.selected_detail_lines().len().min(DETAIL_PANEL_ROWS)
+        };
+        let height = u16::try_from(visible + self.group_count() + 4 + search_row + detail_rows)
             .unwrap_or(u16::MAX)
             .min(area.height);
         let rect = centered_rect(width, height, area);
@@ -230,7 +257,8 @@ impl Renderable for ModelPickerView {
         block.render(rect, buf);
 
         let end = (self.offset + VIEWPORT).min(self.rows.len());
-        let mut lines: Vec<Line> = Vec::with_capacity(visible + self.group_count() + 3);
+        let mut lines: Vec<Line> =
+            Vec::with_capacity(visible + self.group_count() + detail_rows + 3);
         if self.all_rows.is_empty() {
             lines.push(Line::from(EMPTY_MESSAGE));
         } else {
@@ -277,7 +305,33 @@ impl Renderable for ModelPickerView {
                     Style::default().add_modifier(Modifier::DIM),
                 ));
             }
+            if row.supports_multimodal {
+                spans.push(Span::styled(
+                    crate::session::MULTIMODAL_TAG,
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
+            if let Some(summary) = row.summary() {
+                spans.push(Span::styled(
+                    format!(" · {summary}"),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
             lines.push(Line::from(spans));
+        }
+        let detail_lines = self.selected_detail_lines();
+        if !detail_lines.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "详情",
+                Style::default().add_modifier(Modifier::DIM),
+            )));
+            for line in detail_lines.iter().take(DETAIL_PANEL_ROWS) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {line}"),
+                    Style::default().add_modifier(Modifier::DIM),
+                )));
+            }
         }
         let hint = if self.all_rows.is_empty() {
             "Esc close"
@@ -297,7 +351,14 @@ impl Renderable for ModelPickerView {
     /// hint (no search row).
     fn desired_height(&self, _width: u16) -> u16 {
         let search_row = usize::from(!self.all_rows.is_empty());
-        u16::try_from(self.rows.len().min(12) + self.group_count() + search_row).unwrap_or(0) + 4
+        let detail_rows = if self.selected_detail_lines().is_empty() {
+            0
+        } else {
+            2 + self.selected_detail_lines().len().min(DETAIL_PANEL_ROWS)
+        };
+        u16::try_from(self.rows.len().min(12) + self.group_count() + search_row + detail_rows)
+            .unwrap_or(0)
+            + 4
     }
 }
 
@@ -361,6 +422,8 @@ mod tests {
                 provider_label: "Anthropic".into(),
                 is_current: false,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
             ModelRow {
                 display: "Sonnet".into(),
@@ -369,6 +432,8 @@ mod tests {
                 provider_label: "Anthropic".into(),
                 is_current: true,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
         ]
     }
@@ -406,6 +471,8 @@ mod tests {
                 provider_label: "GLM (coding)".into(),
                 is_current: false,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
             ModelRow {
                 display: "GPT-5.5".into(),
@@ -414,6 +481,8 @@ mod tests {
                 provider_label: "OpenAI".into(),
                 is_current: true,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
             // Same (provider, display) as the first row — must be de-duped.
             ModelRow {
@@ -423,6 +492,8 @@ mod tests {
                 provider_label: "GLM (coding)".into(),
                 is_current: false,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
         ];
         let p = ModelPickerView::new(rows);
@@ -453,6 +524,8 @@ mod tests {
                 provider_label: "Custom".into(),
                 is_current: false,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
             ModelRow {
                 display: "Shared Model".into(),
@@ -461,6 +534,8 @@ mod tests {
                 provider_label: "Custom".into(),
                 is_current: true,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
         ];
         let mut picker = ModelPickerView::new(rows);
@@ -533,6 +608,8 @@ mod tests {
                 provider_label: String::new(),
                 is_current: Some(i) == current,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             })
             .collect()
     }
@@ -565,6 +642,8 @@ mod tests {
                 provider_label: "OpenAI".into(),
                 is_current: true,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
             ModelRow {
                 display: "Qwen3 Coder (free)".into(),
@@ -573,6 +652,8 @@ mod tests {
                 provider_label: "OpenRouter".into(),
                 is_current: false,
                 supports_reasoning: false,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
         ];
         let p = ModelPickerView::new(rows);
@@ -606,6 +687,37 @@ mod tests {
             text.contains("Qwen3 Coder (free)"),
             "clean display renders: {text}"
         );
+    }
+
+    #[test]
+    fn multimodal_catalog_model_renders_the_dim_tag_without_polluting_display() {
+        let rows = vec![ModelRow {
+            display: "Gemini 3.1 Pro".into(),
+            request_model: "gemini-3.1-pro-preview".into(),
+            profile: Some("gemini".into()),
+            provider_label: "Google".into(),
+            is_current: true,
+            supports_reasoning: true,
+            supports_multimodal: true,
+            details: Vec::new(),
+        }];
+        assert!(rows[0].supports_multimodal);
+        let p = ModelPickerView::new(rows);
+        let packed = render_text(&p, Rect::new(0, 0, 80, 20)).replace(' ', "");
+        assert!(packed.contains("多模态"), "{packed}");
+        assert!(p.rows()[0].display == "Gemini 3.1 Pro");
+
+        let anthropic = ModelRow {
+            display: "Claude Sonnet 4".into(),
+            request_model: "claude-sonnet-4-6".into(),
+            profile: Some("anthropic".into()),
+            provider_label: "Anthropic".into(),
+            is_current: false,
+            supports_reasoning: true,
+            supports_multimodal: true,
+            details: Vec::new(),
+        };
+        assert!(anthropic.supports_multimodal);
     }
 
     #[test]
@@ -687,6 +799,8 @@ mod tests {
                 provider_label: String::new(),
                 is_current: false,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             })
             .collect();
         // Caps at the 12-row scroll viewport + 1 Search row + 4 chrome.
@@ -732,6 +846,8 @@ mod tests {
                 provider_label: "Anthropic".into(),
                 is_current: true,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
             ModelRow {
                 display: "GPT-4o".into(),
@@ -740,6 +856,8 @@ mod tests {
                 provider_label: "OpenRouter".into(),
                 is_current: false,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
             ModelRow {
                 display: "Gemini Pro".into(),
@@ -748,6 +866,8 @@ mod tests {
                 provider_label: "OpenRouter".into(),
                 is_current: false,
                 supports_reasoning: true,
+                supports_multimodal: false,
+                details: Vec::new(),
             },
         ]);
         assert_eq!(p.rows().len(), 3, "all rows before filtering");

@@ -871,7 +871,9 @@ mod tests {
                     traits::MobileExecutionTarget::PhysicalDevice,
                     traits::MobileLaunchMode::Interactive,
                 ));
-            manifest.validate().expect("a derived pair always validates");
+            manifest
+                .validate()
+                .expect("a derived pair always validates");
         }
     }
 

@@ -241,10 +241,16 @@ impl MarketplacePolicy {
             let Ok(value) = serde_json::from_str::<Value>(&raw) else {
                 continue;
             };
-            if let Some(entries) = value
+            let strict = value
                 .get("strictKnownMarketplaces")
-                .and_then(Value::as_array)
-            {
+                .and_then(Value::as_array);
+            let allowed_alias = value.get("allowedMarketplaces").and_then(Value::as_array);
+            if strict.is_some() && allowed_alias.is_some() {
+                tracing::warn!(
+                    "allowedMarketplaces is ignored because strictKnownMarketplaces is also set"
+                );
+            }
+            if let Some(entries) = strict.or(allowed_alias) {
                 policy.strict_known =
                     Some(entries.iter().filter_map(MarketplaceRule::parse).collect());
             }
@@ -474,5 +480,20 @@ mod tests {
         ])
         .blocked_names();
         assert_eq!(blocked, BTreeSet::from(["gamma".to_string()]));
+    }
+
+    #[test]
+    fn allowed_marketplaces_alias_feeds_strict_policy() {
+        let policy = policy(r#"{"allowedMarketplaces":["approved"]}"#);
+        assert!(policy.check(Some("approved"), None).is_ok());
+        assert!(policy.check(Some("other"), None).is_err());
+    }
+
+    #[test]
+    fn canonical_strict_marketplaces_wins_over_alias() {
+        let policy =
+            policy(r#"{"strictKnownMarketplaces":["canonical"],"allowedMarketplaces":["alias"]}"#);
+        assert!(policy.check(Some("canonical"), None).is_ok());
+        assert!(policy.check(Some("alias"), None).is_err());
     }
 }

@@ -1,9 +1,9 @@
+use crate::reasoning_controls::{request_reasoning_intent, RequestReasoningIntent};
 use crate::{
     ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest, LlmResponse, MessageDeltaPayload,
     ProviderRequest, ProviderResponse, RawStreamFrame, StreamDecoder, ToolDeclaration, Usage,
     WireCodec,
 };
-use crate::reasoning_controls::{request_reasoning_intent, RequestReasoningIntent};
 
 use base64::Engine;
 use serde_json::Value;
@@ -128,16 +128,12 @@ fn gemini_thinking_config(request: &LlmRequest) -> Option<Value> {
     match request_reasoning_intent(request) {
         RequestReasoningIntent::Automatic => None,
         RequestReasoningIntent::LegacyAdaptive => None,
-        RequestReasoningIntent::Disabled => {
-            Some(serde_json::json!({"thinkingBudget": 0}))
-        }
+        RequestReasoningIntent::Disabled => Some(serde_json::json!({"thinkingBudget": 0})),
         RequestReasoningIntent::LegacyBudget(tokens)
         | RequestReasoningIntent::EffortBudget(tokens) => {
             Some(serde_json::json!({"thinkingBudget": tokens}))
         }
-        RequestReasoningIntent::Level(level) => {
-            Some(serde_json::json!({"thinkingLevel": level}))
-        }
+        RequestReasoningIntent::Level(level) => Some(serde_json::json!({"thinkingLevel": level})),
         RequestReasoningIntent::Enabled => Some(serde_json::json!({"thinkingBudget": -1})),
     }
 }

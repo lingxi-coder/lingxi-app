@@ -1899,15 +1899,11 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
         .await;
 
     assert_eq!(
-        registry
-            .find_nonterminal_local_app_workflows("app-a")
-            .await,
+        registry.find_nonterminal_local_app_workflows("app-a").await,
         vec!["w-app-a1"]
     );
     assert_eq!(
-        registry
-            .find_nonterminal_local_app_workflows("app-b")
-            .await,
+        registry.find_nonterminal_local_app_workflows("app-b").await,
         vec!["w-app-b1"]
     );
 }

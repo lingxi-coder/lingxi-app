@@ -183,9 +183,14 @@ fn read_extra(scope: Scope, home: &Path, cwd: &Path) -> Map<String, Value> {
     read_settings_map(&scope.path(home, cwd))
         .ok()
         .and_then(|m| {
-            m.get("extraKnownMarketplaces")
-                .and_then(Value::as_object)
-                .cloned()
+            let canonical = m.get("extraKnownMarketplaces").and_then(Value::as_object);
+            let alias = m.get("additionalMarketplaces").and_then(Value::as_object);
+            if canonical.is_some() && alias.is_some() {
+                tracing::warn!(
+                    "additionalMarketplaces is ignored because extraKnownMarketplaces is also set"
+                );
+            }
+            canonical.or(alias).cloned()
         })
         .unwrap_or_default()
 }
@@ -1498,6 +1503,45 @@ mod tests {
         )
         .unwrap();
         assert!(project["extraKnownMarketplaces"]["mymkt"].is_object());
+    }
+
+    #[test]
+    fn additional_marketplaces_alias_is_read_when_canonical_key_is_absent() {
+        let e = full_env();
+        std::fs::write(
+            e.home.join("settings.json"),
+            r#"{
+                "additionalMarketplaces": {
+                    "alias": { "source": { "source": "directory", "path": "/tmp/alias" } }
+                }
+            }"#,
+        )
+        .unwrap();
+        let extra = read_extra(Scope::User, &e.home, &e.cwd);
+        assert_eq!(
+            extra.get("alias"),
+            Some(&json!({ "source": { "source": "directory", "path": "/tmp/alias" } }))
+        );
+    }
+
+    #[test]
+    fn extra_known_marketplaces_wins_over_additional_marketplaces_alias() {
+        let e = full_env();
+        std::fs::write(
+            e.home.join("settings.json"),
+            r#"{
+                "extraKnownMarketplaces": {
+                    "canonical": { "source": { "source": "directory", "path": "/tmp/canonical" } }
+                },
+                "additionalMarketplaces": {
+                    "alias": { "source": { "source": "directory", "path": "/tmp/alias" } }
+                }
+            }"#,
+        )
+        .unwrap();
+        let extra = read_extra(Scope::User, &e.home, &e.cwd);
+        assert!(extra.get("canonical").is_some());
+        assert!(extra.get("alias").is_none());
     }
 
     #[test]

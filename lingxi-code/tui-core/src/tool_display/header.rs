@@ -703,7 +703,10 @@ mod tests {
         // Deliberately generic: a build is a tool action with no better icon.
         assert_eq!(tool_icon("LocalAppBuild", &json!({})), ToolIcon::Wrench);
         // A real MCP server still plugs.
-        assert_eq!(tool_icon("mcp__github__search_code", &json!({})), ToolIcon::Plug);
+        assert_eq!(
+            tool_icon("mcp__github__search_code", &json!({})),
+            ToolIcon::Plug
+        );
     }
 
     #[test]

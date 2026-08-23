@@ -52,7 +52,7 @@ use client_protocol::controls::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
-use client_protocol::listings::{SessionAgentSummaryDto, SlashCommandDto};
+use client_protocol::listings::{ModelDetailsDto, SessionAgentSummaryDto, SlashCommandDto};
 use client_protocol::local_apps::{AppCreateOriginDto, AppEventDto};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
@@ -263,6 +263,9 @@ pub struct MobileConfig {
     /// reminder. `None` keeps desktop-style prompt assembly semantics for host
     /// tests and non-mobile embedder scenarios.
     pub host_environment: Option<traits::MobileHostEnvironment>,
+    /// Whether non-vision primary models may delegate image analysis to an
+    /// internal vision model. Defaults to `true` across mobile hosts.
+    pub vision_delegation_enabled: bool,
 }
 
 impl std::fmt::Debug for MobileConfig {
@@ -296,6 +299,7 @@ impl std::fmt::Debug for MobileConfig {
             .field("local_apps_runtime_root", &self.local_apps_runtime_root)
             .field("physical_memory_bytes", &self.physical_memory_bytes)
             .field("host_environment", &self.host_environment)
+            .field("vision_delegation_enabled", &self.vision_delegation_enabled)
             .finish()
     }
 }
@@ -321,6 +325,7 @@ impl Default for MobileConfig {
             local_apps_runtime_root: None,
             physical_memory_bytes: 0,
             host_environment: None,
+            vision_delegation_enabled: true,
         }
     }
 }
@@ -775,11 +780,7 @@ fn decode_reasoning_selection(selection: ReasoningSelectionDto) -> traits::Reaso
     }
 }
 
-fn lower_controls(
-    controls: traits::ConversationControls,
-    requested_permission: String,
-) -> ConversationControlsDto {
-    let spec = controls.reasoning_spec;
+fn lower_reasoning_spec_dto(spec: &traits::ReasoningControlSpec) -> ReasoningControlSpecDto {
     let options = spec
         .available
         .iter()
@@ -790,6 +791,33 @@ fn lower_controls(
             selection: lower_reasoning_selection(&selection),
         })
         .collect();
+    ReasoningControlSpecDto {
+        options,
+        budget_range: spec
+            .budget_range
+            .as_ref()
+            .map(|range| ReasoningBudgetRangeDto {
+                min_tokens: u64::from(range.min_tokens),
+                max_tokens: u64::from(range.max_tokens),
+            }),
+        provider_default: lower_reasoning_selection(&spec.provider_default),
+        forced_reasoning: spec.forced,
+        editable: spec.modifiable,
+        disabled_reason: spec
+            .disabled_reason
+            .as_ref()
+            .map(|code| ControlDisabledReasonDto {
+                code: code.clone(),
+                message: None,
+            }),
+    }
+}
+
+fn lower_controls(
+    controls: traits::ConversationControls,
+    requested_permission: String,
+) -> ConversationControlsDto {
+    let spec = controls.reasoning_spec;
     ConversationControlsDto {
         qualified_model: controls.model_reference,
         permission: PermissionControlStateDto {
@@ -812,22 +840,13 @@ fn lower_controls(
         reasoning: ReasoningControlStateDto {
             requested: lower_reasoning_selection(&controls.requested_reasoning_selection),
             effective: lower_reasoning_selection(&controls.effective_reasoning_selection),
-            spec: ReasoningControlSpecDto {
-                options,
-                budget_range: spec.budget_range.map(|range| ReasoningBudgetRangeDto {
-                    min_tokens: range.min_tokens as u64,
-                    max_tokens: range.max_tokens as u64,
-                }),
-                provider_default: lower_reasoning_selection(&spec.provider_default),
-                forced_reasoning: spec.forced,
-                editable: spec.modifiable,
-                disabled_reason: spec.disabled_reason.map(|code| ControlDisabledReasonDto {
-                    code,
-                    message: None,
-                }),
-            },
+            spec: lower_reasoning_spec_dto(&spec),
         },
     }
+}
+
+fn lower_model_details(listing: &traits::ModelListing) -> ModelDetailsDto {
+    client_adapter::lowering::lower_model_details(listing)
 }
 
 /// Non-secret result of testing one provider endpoint from the mobile engine.
@@ -864,7 +883,7 @@ pub struct ProviderConnectionTestDto {
 /// Credential-free metadata used by mobile settings to render the same
 /// provider choices the engine can actually assemble.
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProviderCatalogEntryDto {
     pub profile_id: String,
     pub display_name: String,
@@ -873,6 +892,7 @@ pub struct ProviderCatalogEntryDto {
     pub auth: String,
     pub credential_env: Option<String>,
     pub models: Vec<String>,
+    pub model_details: Vec<ModelDetailsDto>,
 }
 
 /// Native OAuth authorization session returned to iOS/Android. The verifier
@@ -905,10 +925,18 @@ fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
         } else {
             provider.profile_name.clone()
         };
-        let credential_env = match provider.credential {
-            CredentialConfig::Env { var } => Some(var),
+        let credential_env = match &provider.credential {
+            CredentialConfig::Env { var } => Some(var.clone()),
             _ => None,
         };
+        let listings = model_listings(std::slice::from_ref(&provider));
+        let curated = listings
+            .into_iter()
+            .filter(|listing| {
+                traits::is_curated_model(&listing.provider_id, &listing.request_model)
+                    || !traits::provider_has_curated_list(&listing.provider_id)
+            })
+            .collect::<Vec<_>>();
         ProviderCatalogEntryDto {
             profile_id: provider.profile_name.clone(),
             display_name,
@@ -916,11 +944,11 @@ fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
             protocol: format!("{:?}", provider.protocol),
             auth: format!("{:?}", provider.auth),
             credential_env,
-            models: provider
-                .models
-                .into_iter()
-                .map(|model| model.request_model)
+            models: curated
+                .iter()
+                .map(|listing| listing.request_model.clone())
                 .collect(),
+            model_details: curated.iter().map(lower_model_details).collect(),
         }
     };
 
@@ -2044,6 +2072,7 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
             billing_model: id,
             aliases: Vec::new(),
             description: None,
+            metadata: Default::default(),
             capabilities: caps,
         })
         .collect()
@@ -2074,20 +2103,17 @@ fn anthropic_route_id(model_ref: &str) -> Option<String> {
 /// `request_model` and the profile name stand in for both. Shared with the
 /// tests so they cannot drift from the shape production actually feeds in.
 fn model_listings(providers: &[llm_client::ProviderProfile]) -> Vec<traits::ModelListing> {
-    providers
-        .iter()
-        .flat_map(|p| {
-            let profile = p.profile_name.clone();
-            p.models.iter().map(move |m| traits::ModelListing {
-                display_model: m.request_model.clone(),
-                request_model: m.request_model.clone(),
-                provider_id: profile.clone(),
-                provider_label: profile.clone(),
-                description: m.description.clone(),
-                supports_reasoning: m.capabilities.reasoning,
-            })
-        })
-        .collect()
+    llm_client::ModelRegistry::from_config(llm_client::ClientConfig {
+        providers: providers.to_vec(),
+    })
+    .map(|registry| {
+        registry
+            .available_models()
+            .into_iter()
+            .map(orchestrator::provider_adapter::lower_model_listing)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Parse the configured `default_model` into `(request_model, profile)`, and
@@ -2658,6 +2684,7 @@ async fn build_mobile_inner_with_ask(
             cost_persist_tx,
         ))
     };
+    let api_calls_recorded = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     // Phase 2a-mobile CHAINS BRIDGE: translate the assembled `ChainConfig` into
     // main's richer adapter's `fallback_overrides` shape (same as engine-desktop —
@@ -2717,11 +2744,15 @@ async fn build_mobile_inner_with_ask(
     // model id and provider profile `orch_cfg.model` itself is set from a few
     // lines down — the local-app generator has no separate model selection of
     // its own.
-    let local_apps_llm = Arc::new(LocalAppsLlm::new(Arc::new(ApiServiceModel::new(
-        api_service.clone(),
-        default_model_id.clone(),
-        default_model_profile.clone(),
-    ))));
+    let local_apps_llm = Arc::new(LocalAppsLlm::new(Arc::new(
+        ApiServiceModel::new(
+            api_service.clone(),
+            default_model_id.clone(),
+            default_model_profile.clone(),
+            cfg.vision_delegation_enabled,
+        )
+        .with_cost_tracking(cost_tracker.clone(), api_calls_recorded.clone()),
+    )));
     let provider_adapter = Arc::new(ProviderApiAdapter::new(api_service.clone()));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
@@ -2886,8 +2917,8 @@ async fn build_mobile_inner_with_ask(
             // relativizes component-wise, so the first component would differ
             // and EVERY rule would miss — the guest/host fix would be inert in
             // exactly the disjoint case it exists for.
-            let host_canon = std::fs::canonicalize(&mount.host_path)
-                .unwrap_or_else(|_| mount.host_path.clone());
+            let host_canon =
+                std::fs::canonicalize(&mount.host_path).unwrap_or_else(|_| mount.host_path.clone());
             let cwd_canon = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
             // Which root the rules resolve against.
             //
@@ -3074,9 +3105,8 @@ async fn build_mobile_inner_with_ask(
         // returns `Ok(None)` and the gate is byte-identical to desktop.
         let mut gate = permission::PolicyPermissionGate::new(policy, adapter_gate.clone());
         if mobile_linux.is_some() {
-            gate = gate.with_path_translator(Arc::new(permission::FileSystemPathTranslator(
-                fs.clone(),
-            )));
+            gate = gate
+                .with_path_translator(Arc::new(permission::FileSystemPathTranslator(fs.clone())));
         }
         let enforcing = Arc::new(gate);
         live_model_provider_cell = Some(enforcing.live_model_provider_handle());
@@ -3902,6 +3932,7 @@ async fn build_mobile_inner_with_ask(
     // exposes it for inspection — mobile sibling of desktop's
     // `.with_hook_registry(hook_registry)`).
     .with_hook_registry(hook_registry)
+    .with_vision_delegation(cfg.vision_delegation_enabled)
     // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
     // carry a deterministically-computed `transcript_path` (claude-code
     // `getTranscriptPathForSession`) even though no `JsonlWriter` is wired —
@@ -3914,6 +3945,7 @@ async fn build_mobile_inner_with_ask(
     // CostTracker (desktop parity; accumulates the running session cost total).
     .with_analytics_bus(analytics_bus)
     .with_cost_tracker(cost_tracker)
+    .with_api_calls_counter(api_calls_recorded)
     // Audit fix (#3): attach the compactor + the shared cache-safe slot so the
     // turn loop autocompacts before context-window overflow (desktop parity).
     .with_compaction(compactor)
@@ -7249,7 +7281,21 @@ impl MobileEngineHandle {
             return self.inner.routable_listings.clone();
         }
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-        handle.list_model_listings().await
+        let listings = handle.list_model_listings().await;
+        if !listings.is_empty() {
+            return listings;
+        }
+        // An explicit empty mobile profile allowlist intentionally strips all
+        // live routes. The picker must still show the built-in shortlist so a
+        // fresh install can explain what can be configured next.
+        let anthropic = llm_client::anthropic_provider_profile(
+            "https://api.anthropic.com",
+            llm_client::AuthStrategy::ApiKey,
+            llm_client::CredentialConfig::None,
+        );
+        let mut providers = vec![anthropic];
+        providers.extend(llm_client::builtin_presets().providers);
+        model_listings(&providers)
     }
 
     /// Resolve a client-supplied model reference into the `(wire id, profile)`
@@ -7681,16 +7727,26 @@ impl MobileEngineHandle {
                 let available = handle.list_available_models().await;
                 let listings = self.routable_model_listings().await;
                 let snapshot = handle.get_status_snapshot().await;
+                let curated = traits::curated_model_listings(
+                    &listings,
+                    &snapshot.model,
+                    snapshot.model_profile.as_deref(),
+                );
                 let models = traits::curated_model_refs(
                     &listings,
                     &available,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
+                let details = curated.iter().map(lower_model_details).collect();
                 let current =
                     traits::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
                 self.event_sink
-                    .emit(ClientEvent::ModelList { models, current })
+                    .emit(ClientEvent::ModelList {
+                        models,
+                        current,
+                        details,
+                    })
                     .await;
             }
             ProtocolListingKind::Mcp => {
@@ -9470,6 +9526,10 @@ mod tests {
                 provider
                     .models
                     .iter()
+                    .filter(|model| {
+                        traits::is_curated_model(&provider.profile_name, &model.request_model)
+                            || !traits::provider_has_curated_list(&provider.profile_name)
+                    })
                     .map(|model| model.request_model.clone())
                     .collect::<Vec<_>>()
             );
@@ -10042,10 +10102,10 @@ mod tests {
         assert_eq!(cfg.api_base, "https://api.anthropic.com");
         assert!(cfg.api_key.is_empty());
         assert_eq!(cfg.cwd, std::path::PathBuf::from("."));
-        assert_eq!(cfg.default_model, "claude-sonnet-5");
+        assert_eq!(cfg.default_model, "anthropic/claude-sonnet-5");
         // The boot default must be a CURATED Anthropic id, so a client with no
         // configured provider lands inside the shortlist its picker renders.
-        assert!(traits::is_curated_model("anthropic", &cfg.default_model));
+        assert!(traits::is_curated_model("anthropic", cfg.default_model.rsplit('/').next().unwrap_or_default()));
         assert!(cfg.provider_profiles.is_none());
         assert!(cfg.routing.is_none());
         // P0.2: the injectable memory provider defaults to None (empty,
@@ -11093,17 +11153,17 @@ mod tests {
                 })
                 .expect("ModelList must be emitted");
             assert!(
-                models.iter().any(|model| model == "openai/gpt-5.5"),
+                models.iter().any(|model| model == "openai/gpt-5.6-sol"),
                 "OpenAI's shared model id must stay qualified: {models:?}"
             );
             assert!(
-                models.iter().any(|model| model == "github-copilot/gpt-5.5"),
+                models.iter().any(|model| model == "github-copilot/gpt-5.6-sol"),
                 "Copilot's shared model id must stay qualified: {models:?}"
             );
 
             handle
                 .submit(ClientCommand::SetModel {
-                    model: "github-copilot/gpt-5.5".into(),
+                    model: "github-copilot/gpt-5.6-sol".into(),
                 })
                 .await
                 .expect("submit(SetModel) ok");
@@ -11112,7 +11172,7 @@ mod tests {
             assert!(
                 events.iter().any(|event| matches!(
                     event,
-                    Ev::ModelChanged { model } if model == "github-copilot/gpt-5.5"
+                    Ev::ModelChanged { model } if model == "github-copilot/gpt-5.6-sol"
                 )),
                 "ModelChanged must preserve the selected provider profile: {events:?}"
             );
@@ -12167,6 +12227,9 @@ mod tests {
                 provider_id: "openai".to_string(),
                 provider_label: "openai".to_string(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: false,
             },
             traits::ModelListing {
@@ -12175,6 +12238,9 @@ mod tests {
                 provider_id: "github-copilot".to_string(),
                 provider_label: "github-copilot".to_string(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: false,
             },
             traits::ModelListing {
@@ -12183,6 +12249,9 @@ mod tests {
                 provider_id: "anthropic".to_string(),
                 provider_label: "anthropic".to_string(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: true,
             },
         ];
@@ -12214,41 +12283,47 @@ mod tests {
     fn mobile_model_refs_keep_duplicate_provider_models_distinct() {
         let listings = vec![
             traits::ModelListing {
-                display_model: "gpt-5.5".into(),
-                request_model: "gpt-5.5".into(),
+                display_model: "gpt-5.6-sol".into(),
+                request_model: "gpt-5.6-sol".into(),
                 provider_id: "openai".into(),
                 provider_label: "OpenAI".into(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: true,
             },
             traits::ModelListing {
-                display_model: "gpt-5.5".into(),
-                request_model: "gpt-5.5".into(),
+                display_model: "gpt-5.6-sol".into(),
+                request_model: "gpt-5.6-sol".into(),
                 provider_id: "github-copilot".into(),
                 provider_label: "GitHub Copilot".into(),
                 description: None,
+                metadata: Default::default(),
+                capabilities: Default::default(),
+                reasoning: Default::default(),
                 supports_reasoning: true,
             },
         ];
 
         let refs = traits::curated_model_refs(
             &listings,
-            &["gpt-5.5".into()],
-            "gpt-5.5",
+            &["gpt-5.6-sol".into()],
+            "gpt-5.6-sol",
             Some("github-copilot"),
         );
 
-        assert_eq!(refs[0], "github-copilot/gpt-5.5");
-        assert!(refs.iter().any(|model| model == "openai/gpt-5.5"));
+        assert_eq!(refs[0], "github-copilot/gpt-5.6-sol");
+        assert!(refs.iter().any(|model| model == "openai/gpt-5.6-sol"));
         assert_eq!(
             refs.iter()
-                .filter(|model| model.as_str() == "github-copilot/gpt-5.5")
+                .filter(|model| model.as_str() == "github-copilot/gpt-5.6-sol")
                 .count(),
             1,
             "the active model and catalog row must de-duplicate by qualified id"
         );
         assert!(
-            !refs.iter().any(|model| model == "gpt-5.5"),
+            !refs.iter().any(|model| model == "gpt-5.6-sol"),
             "ambiguous bare ids must not leak into the mobile picker"
         );
     }
@@ -12376,7 +12451,13 @@ mod tests {
             .expect("workspace permission settings are valid JSON");
             assert_eq!(
                 settings["permissions"]["allow"],
-                serde_json::json!(["Read(./**)", "Edit(./**)"])
+                serde_json::json!([
+                    "Read(./**)",
+                    "Edit(./**)",
+                    "LocalAppLogs",
+                    "LocalAppBuild",
+                    "LocalAppRuntime"
+                ])
             );
             assert!(
                 !tmp.path()
@@ -13088,10 +13169,9 @@ mod anthropic_model_registry_tests {
         let ids = ids("claude-sonnet-5");
         for curated in [
             "claude-sonnet-5",
-            "claude-sonnet-4-6",
-            "claude-opus-4-8",
-            "claude-haiku-4-5",
+            "claude-opus-5",
             "claude-fable-5",
+            "claude-haiku-4-5",
         ] {
             assert!(
                 traits::is_curated_model("anthropic", curated),
@@ -13224,15 +13304,15 @@ mod default_model_resolution_tests {
                 Some("deepseek".to_string())
             )
         );
-        // A bare id routes through the Anthropic profile's exact-id registry —
-        // and is SCOPED to it. Regression: returning `None` here left
-        // `ModelList { current }` bare while `curated_model_refs` emitted
-        // provider-qualified rows, so no row matched the active model and the
-        // client's picker showed no selection on every fresh launch (the boot
-        // default is a bare id).
+        // A bare id that is served by more than one assembled profile remains
+        // unscoped. The built-in catalog includes the same Claude ids for
+        // GitHub Copilot, so silently choosing Anthropic here would make the
+        // current row disagree with the actual route. Fresh mobile defaults
+        // are provider-qualified (see `MobileEngineConfig::default`), while
+        // this assertion protects ambiguous persisted bare ids.
         assert_eq!(
             resolve_default_model_ref("claude-sonnet-5", &listings),
-            ("claude-sonnet-5".to_string(), Some("anthropic".to_string()))
+            ("claude-sonnet-5".to_string(), None)
         );
     }
 
@@ -13246,6 +13326,9 @@ mod default_model_resolution_tests {
             provider_id: provider.to_string(),
             provider_label: provider.to_string(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: true,
         };
         let listings = vec![listing("anthropic"), listing("github-copilot")];
@@ -13291,6 +13374,9 @@ mod default_model_resolution_tests {
             provider_id: "deepseek".to_string(),
             provider_label: "deepseek".to_string(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: false,
         }];
         assert_eq!(

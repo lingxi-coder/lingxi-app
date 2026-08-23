@@ -3,6 +3,7 @@ package com.lingxi.code.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import androidx.compose.ui.graphics.Color
 import com.lingxi.code.R
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.DreamConfig
@@ -10,6 +11,8 @@ import com.lingxi.code.model.GenericProvider
 import com.lingxi.code.model.MCPServer
 import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.ProviderKind
+import com.lingxi.code.model.ProviderPreset
+import com.lingxi.code.model.LlmProviderCatalogEntry
 import com.lingxi.code.model.SettingsMock
 import com.lingxi.code.model.Skill
 import com.lingxi.code.model.VoiceConfig
@@ -35,6 +38,7 @@ import kotlinx.coroutines.launch
  */
 data class SettingsUiState(
     val llmProviders: List<GenericProvider> = emptyList(),
+    val llmCatalogEntries: List<LlmProviderCatalogEntry> = emptyList(),
     val searchProviders: List<GenericProvider> = emptyList(),
     val fetchProviders: List<GenericProvider> = emptyList(),
     val voice: VoiceConfig = VoiceConfig(),
@@ -46,6 +50,7 @@ data class SettingsUiState(
     val language: String = "zh-CN",
     val notifs: NotifConfig = NotifConfig(),
     val pendingLlmProviderChanges: Set<String> = emptySet(),
+    val visionDelegationEnabled: Boolean = true,
     val bioLock: Boolean = true,
     val telemetry: Boolean = false,
     val autoUpdate: Boolean = true,
@@ -101,8 +106,10 @@ class SettingsStore(
         providerRepo?.loadProviderState()?.let { (llm, search, fetch) ->
             SettingsUiState(
                 llmProviders = llm,
+                llmCatalogEntries = providerRepo.builtinProviderCatalog(),
                 searchProviders = search,
                 fetchProviders = fetch,
+                visionDelegationEnabled = providerRepo.visionDelegationEnabled(),
                 permissionMode = initialPermissionMode,
                 effectivePermissionMode = initialPermissionMode,
                 voice = voiceRepo?.load() ?: VoiceConfig(),
@@ -116,6 +123,7 @@ class SettingsStore(
                 ),
             )
         } ?: SettingsUiState(
+            visionDelegationEnabled = providerRepo?.visionDelegationEnabled() ?: true,
             voice = voiceRepo?.load() ?: VoiceConfig(),
             permissionMode = initialPermissionMode,
             effectivePermissionMode = initialPermissionMode,
@@ -341,15 +349,50 @@ class SettingsStore(
 
     /** Adds a provider from a preset; returns the new id. */
     fun addProvider(kind: ProviderKind, presetId: String): String {
-        val preset = kind.presets.first { it.id == presetId }
-        val next = ProviderSettingsRepository.newProvider(kind, preset)
+        val preset = kind.presets.firstOrNull { it.id == presetId }
+            ?: catalogPreset(kind, presetId)
+            ?: error("provider preset '$presetId' is not present in the engine catalog")
+        val next = ProviderSettingsRepository.newProvider(
+            kind,
+            preset,
+            _state.value.llmCatalogEntries,
+        )
         setProviders(kind, _state.value.providers(kind) + next)
         if (kind == ProviderKind.Llm) markLlmProviderConfigurationPending(next.id)
         return next.id
     }
 
+    private fun catalogPreset(kind: ProviderKind, presetId: String): ProviderPreset? {
+        if (kind != ProviderKind.Llm) return null
+        val profileId = if (presetId == "google") "gemini" else presetId
+        val entry = _state.value.llmCatalogEntries.firstOrNull { it.profileId == profileId }
+            ?: return null
+        val fallback = kind.presets.firstOrNull { it.id == presetId }
+        return ProviderPreset(
+            id = presetId,
+            name = entry.displayName,
+            sub = fallback?.sub ?: entry.protocol,
+            color = fallback?.color ?: Color.Gray,
+            defaultUrl = entry.baseUrl,
+            keyPrefix = fallback?.keyPrefix.orEmpty(),
+            models = entry.modelIds,
+            needsCx = fallback?.needsCx ?: false,
+        )
+    }
+
     fun markLlmConfigurationApplied() {
         _state.update { it.copy(pendingLlmProviderChanges = emptySet()) }
+    }
+
+    fun setVisionDelegationEnabled(enabled: Boolean) {
+        if (_state.value.visionDelegationEnabled == enabled) return
+        providerRepo?.setVisionDelegationEnabled(enabled)
+        _state.update {
+            it.copy(
+                visionDelegationEnabled = enabled,
+                pendingLlmProviderChanges = it.pendingLlmProviderChanges + VISION_DELEGATION_PENDING_KEY,
+            )
+        }
     }
 
     private fun markLlmProviderConfigurationPending(id: String) {
@@ -567,6 +610,8 @@ class SettingsStore(
     }
 
     companion object {
+        private const val VISION_DELEGATION_PENDING_KEY = "__vision_delegation__"
+
         fun factory(context: Context): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {

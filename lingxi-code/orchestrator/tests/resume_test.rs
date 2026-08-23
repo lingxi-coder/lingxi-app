@@ -629,7 +629,10 @@ fn resume_merges_per_block_assistant_rows_sharing_one_inner_message_id() {
                 &content[0],
                 protocol::ContentBlock::Thinking { thinking, .. } if thinking == "let me think"
             ));
-            assert!(matches!(&content[1], protocol::ContentBlock::ToolUse { .. }));
+            assert!(matches!(
+                &content[1],
+                protocol::ContentBlock::ToolUse { .. }
+            ));
         }
         other => panic!("expected a merged Assistant turn, got {other:?}"),
     }

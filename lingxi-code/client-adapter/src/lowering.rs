@@ -37,8 +37,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use client_protocol::events::CostDto;
 use client_protocol::listings::{
     AgentDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
-    DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, SessionRowDto, StatusSnapshotDto,
-    TaskRowDto, TaskStatusDto,
+    DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, ModelBillingModeDto,
+    ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, SessionRowDto,
+    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 
@@ -52,6 +53,125 @@ use traits::orchestrator::{
 };
 use traits::task_registry::{TaskOutputChunk, TaskRecord};
 use traits::team_registry::WorkerInfo;
+
+fn lower_reasoning_selection(
+    selection: &traits::ReasoningSelection,
+) -> client_protocol::controls::ReasoningSelectionDto {
+    use client_protocol::controls::ReasoningSelectionDto;
+    match selection {
+        traits::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
+        traits::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
+        traits::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
+        traits::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
+        traits::ReasoningSelection::TokenBudget { tokens } => {
+            ReasoningSelectionDto::TokenBudget { tokens: *tokens }
+        }
+    }
+}
+
+/// Lower the exact route-level reasoning contract used by request validation.
+#[must_use]
+pub fn lower_reasoning_control_spec(
+    spec: &traits::ReasoningControlSpec,
+) -> client_protocol::controls::ReasoningControlSpecDto {
+    use client_protocol::controls::{
+        ControlDisabledReasonDto, ReasoningBudgetRangeDto, ReasoningControlSpecDto,
+        ReasoningOptionDto,
+    };
+    ReasoningControlSpecDto {
+        options: spec
+            .available
+            .iter()
+            .map(|selection| ReasoningOptionDto {
+                selection: lower_reasoning_selection(selection),
+                persistable: spec.selections_persistable,
+            })
+            .collect(),
+        budget_range: spec
+            .budget_range
+            .as_ref()
+            .map(|range| ReasoningBudgetRangeDto {
+                min_tokens: u64::from(range.min_tokens),
+                max_tokens: u64::from(range.max_tokens),
+            }),
+        provider_default: lower_reasoning_selection(&spec.provider_default),
+        forced_reasoning: spec.forced,
+        editable: spec.modifiable,
+        disabled_reason: spec
+            .disabled_reason
+            .as_ref()
+            .map(|code| ControlDisabledReasonDto {
+                code: code.clone(),
+                message: None,
+            }),
+    }
+}
+
+/// Lower one provider-qualified model listing without inventing missing facts.
+#[must_use]
+pub fn lower_model_details(listing: &traits::ModelListing) -> ModelDetailsDto {
+    let pricing = listing
+        .metadata
+        .pricing
+        .as_ref()
+        .map(|pricing| ModelPricingDto {
+            billing_mode: match pricing.billing_mode {
+                traits::ModelBillingMode::PerToken => ModelBillingModeDto::PerToken,
+                traits::ModelBillingMode::Subscription => ModelBillingModeDto::Subscription,
+                traits::ModelBillingMode::Free => ModelBillingModeDto::Free,
+                traits::ModelBillingMode::Unknown => ModelBillingModeDto::Unknown,
+            },
+            input_per_million: pricing.input_per_million,
+            output_per_million: pricing.output_per_million,
+            cache_read_per_million: pricing.cache_read_per_million,
+            cache_write_per_million: pricing.cache_write_per_million,
+            reasoning_per_million: pricing.reasoning_per_million,
+            tiers: pricing
+                .tiers
+                .iter()
+                .map(|tier| ModelPricingTierDto {
+                    context_threshold_tokens: tier.context_threshold_tokens,
+                    input_per_million: tier.input_per_million,
+                    output_per_million: tier.output_per_million,
+                    cache_read_per_million: tier.cache_read_per_million,
+                    cache_write_per_million: tier.cache_write_per_million,
+                    reasoning_per_million: tier.reasoning_per_million,
+                })
+                .collect(),
+            source: pricing.source.clone(),
+        });
+    ModelDetailsDto {
+        reference: traits::qualified_model_ref(&listing.request_model, Some(&listing.provider_id)),
+        provider_id: listing.provider_id.clone(),
+        provider_label: listing.provider_label.clone(),
+        display_name: listing.display_model.clone(),
+        model_id: listing.request_model.clone(),
+        description: listing.description.clone(),
+        family: listing.metadata.family.clone(),
+        status: listing.metadata.status.clone(),
+        release_date: listing.metadata.release_date.clone(),
+        last_updated: listing.metadata.last_updated.clone(),
+        knowledge_cutoff: listing.metadata.knowledge_cutoff.clone(),
+        input_modalities: listing.metadata.input_modalities.clone(),
+        output_modalities: listing.metadata.output_modalities.clone(),
+        context_window_tokens: listing.metadata.context_window_tokens,
+        max_input_tokens: listing.metadata.max_input_tokens,
+        max_output_tokens: listing.metadata.max_output_tokens,
+        open_weights: listing.metadata.open_weights,
+        attachments: listing.metadata.attachments,
+        temperature_control: listing.metadata.temperature_control,
+        pricing,
+        capabilities: ModelCapabilitiesDto {
+            streaming: listing.capabilities.streaming,
+            tools: listing.capabilities.tools,
+            vision: listing.capabilities.vision,
+            documents: listing.capabilities.documents,
+            reasoning: listing.capabilities.reasoning,
+            structured_output: listing.capabilities.structured_output,
+        },
+        reasoning: lower_reasoning_control_spec(&listing.reasoning),
+    }
+}
 
 // ── Primitive lowering rules ───────────────────────────────────────────────
 

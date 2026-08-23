@@ -544,15 +544,31 @@ mod provider_boot_default_tests {
     }
 
     #[test]
+    fn latest_shortlists_drop_older_provider_models() {
+        assert!(is_curated_model("openai", "gpt-5.6-sol"));
+        assert!(is_curated_model("openai", "gpt-5.6-terra"));
+        assert!(is_curated_model("openai", "gpt-5.6-luna"));
+        assert!(!is_curated_model("openai", "gpt-5.5"));
+        assert!(is_curated_model("openai-chatgpt", "gpt-5.6-sol"));
+        assert!(!is_curated_model("openai-chatgpt", "gpt-5.3-codex"));
+        assert!(is_curated_model("anthropic", "claude-opus-5"));
+        assert!(!is_curated_model("anthropic", "claude-opus-4-8"));
+        assert!(is_curated_model("glm-coding", "glm-5.3"));
+        assert!(is_curated_model("zai", "glm-5.3"));
+        assert!(is_curated_model("kimi", "kimi-k3"));
+        assert!(is_curated_model("kimi-code", "k3"));
+    }
+
+    #[test]
     fn kimi_profiles_use_accessible_defaults_and_curate_current_agent_models() {
         assert_eq!(provider_default_model("kimi"), Some("kimi-k3"));
         assert!(is_curated_model("kimi", "kimi-k3"));
-        assert!(is_curated_model("kimi", "kimi-k2.7-code"));
-        assert!(is_curated_model("kimi", "kimi-k2.6"));
+        assert!(!is_curated_model("kimi", "kimi-k2.7-code"));
+        assert!(!is_curated_model("kimi", "kimi-k2.6"));
         assert!(!is_curated_model("kimi", "kimi-k2-thinking"));
-        assert_eq!(provider_default_model("kimi-code"), Some("kimi-for-coding"));
+        assert_eq!(provider_default_model("kimi-code"), Some("k3"));
         assert!(is_curated_model("kimi-code", "k3"));
-        assert!(is_curated_model("kimi-code", "kimi-for-coding"));
+        assert!(!is_curated_model("kimi-code", "kimi-for-coding"));
     }
 }
 
@@ -566,6 +582,9 @@ mod parse_model_ref_tests {
             provider_id: provider_id.to_string(),
             provider_label: provider_id.to_string(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: false,
         }
     }
@@ -679,8 +698,8 @@ mod reasoning_controls_tests {
 #[cfg(test)]
 mod curated_model_tests {
     use super::{
-        curated_model_names, curated_model_refs, is_curated_model, qualified_model_ref,
-        ModelListing,
+        curated_model_listings, curated_model_names, curated_model_refs, is_curated_model,
+        qualified_model_ref, ModelListing,
     };
 
     fn listing(provider_id: &str, request_model: &str, display: &str) -> ModelListing {
@@ -690,15 +709,18 @@ mod curated_model_tests {
             provider_id: provider_id.to_string(),
             provider_label: provider_id.to_string(),
             description: None,
+            metadata: Default::default(),
+            capabilities: Default::default(),
+            reasoning: Default::default(),
             supports_reasoning: false,
         }
     }
 
     #[test]
     fn glm_coding_keyed_on_profile_name_not_filename() {
-        assert!(is_curated_model("glm-coding", "glm-5.1"));
-        assert!(is_curated_model("glm-coding", "glm-4.7"));
-        assert!(!is_curated_model("zhipuai-coding-plan", "glm-5.1"));
+        assert!(is_curated_model("glm-coding", "glm-5.3"));
+        assert!(!is_curated_model("glm-coding", "glm-5.2"));
+        assert!(!is_curated_model("zhipuai-coding-plan", "glm-5.3"));
     }
 
     /// A user-defined provider (a proxy, a self-hosted endpoint, any profile the
@@ -709,7 +731,7 @@ mod curated_model_tests {
     #[test]
     fn a_provider_without_a_curated_shortlist_keeps_its_own_catalog() {
         let listings = vec![
-            listing("openai", "gpt-5.5", "GPT-5.5"),
+            listing("openai", "gpt-5.6-sol", "GPT-5.6 Sol"),
             listing("openai", "gpt-4o", "GPT-4o"), // curated provider → trimmed
             listing("my-proxy", "llama-3.3-70b", "Llama 3.3 70B"),
             listing("my-proxy", "some-internal-model", "Internal"),
@@ -719,7 +741,7 @@ mod curated_model_tests {
         assert_eq!(
             refs,
             vec![
-                "openai/gpt-5.5".to_string(),
+                "openai/gpt-5.6-sol".to_string(),
                 "my-proxy/llama-3.3-70b".to_string(),
                 "my-proxy/some-internal-model".to_string(),
             ],
@@ -730,7 +752,7 @@ mod curated_model_tests {
         assert_eq!(
             names,
             vec![
-                "GPT-5.5".to_string(),
+                "GPT-5.6 Sol".to_string(),
                 "Llama 3.3 70B".to_string(),
                 "Internal".to_string(),
             ]
@@ -760,20 +782,20 @@ mod curated_model_tests {
     #[test]
     fn curates_catalog_to_short_list_and_keeps_current() {
         let listings = vec![
-            listing("openai", "gpt-5.5", "GPT-5.5"),
+            listing("openai", "gpt-5.6-sol", "GPT-5.6 Sol"),
             listing("openai", "gpt-4o", "GPT-4o"), // not curated → dropped
-            listing("anthropic", "claude-opus-4-8", "claude-opus-4-8"),
+            listing("anthropic", "claude-opus-5", "claude-opus-5"),
             listing("gemini", "gemini-3.5-flash", "Gemini 3.5 Flash"),
         ];
-        let available = vec!["GPT-5.5".to_string(), "GPT-4o".to_string()];
-        let out = curated_model_names(&listings, &available, "claude-opus-4-8");
+        let available = vec!["GPT-5.6 Sol".to_string(), "GPT-4o".to_string()];
+        let out = curated_model_names(&listings, &available, "claude-opus-5");
         // current first, then curated catalog; non-curated GPT-4o excluded.
-        assert_eq!(out[0], "claude-opus-4-8", "current kept first");
-        assert!(out.contains(&"GPT-5.5".to_string()));
+        assert_eq!(out[0], "claude-opus-5", "current kept first");
+        assert!(out.contains(&"GPT-5.6 Sol".to_string()));
         assert!(out.contains(&"Gemini 3.5 Flash".to_string()));
         assert!(!out.contains(&"GPT-4o".to_string()), "non-curated dropped");
         // current not duplicated even though it is also curated.
-        assert_eq!(out.iter().filter(|m| *m == "claude-opus-4-8").count(), 1);
+        assert_eq!(out.iter().filter(|m| *m == "claude-opus-5").count(), 1);
     }
 
     #[test]
@@ -783,25 +805,35 @@ mod curated_model_tests {
     }
 
     #[test]
+    fn deprecated_catalog_row_is_hidden_but_current_is_retained() {
+        let mut deprecated = listing("openai", "gpt-5.6-sol", "GPT-5.6 Sol");
+        deprecated.metadata.status = Some("deprecated".to_string());
+        assert!(curated_model_listings(&[deprecated.clone()], "", None).is_empty());
+        let current = curated_model_listings(&[deprecated], "gpt-5.6-sol", Some("openai"));
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].request_model, "gpt-5.6-sol");
+    }
+
+    #[test]
     fn qualified_refs_keep_same_model_under_two_providers_distinct() {
         let listings = vec![
-            listing("openai", "gpt-5.5", "GPT-5.5"),
-            listing("github-copilot", "gpt-5.5", "GPT-5.5"),
+            listing("openai", "gpt-5.6-sol", "GPT-5.6 Sol"),
+            listing("github-copilot", "gpt-5.6-sol", "GPT-5.6 Sol"),
             listing("openai", "gpt-4o", "GPT-4o"),
         ];
 
         let refs = curated_model_refs(
             &listings,
-            &["gpt-5.5".to_string()],
-            "gpt-5.5",
+            &["gpt-5.6-sol".to_string()],
+            "gpt-5.6-sol",
             Some("github-copilot"),
         );
 
-        assert_eq!(refs[0], "github-copilot/gpt-5.5");
-        assert!(refs.contains(&"openai/gpt-5.5".to_string()));
+        assert_eq!(refs[0], "github-copilot/gpt-5.6-sol");
+        assert!(refs.contains(&"openai/gpt-5.6-sol".to_string()));
         assert_eq!(
             refs.iter()
-                .filter(|model| model.as_str() == "github-copilot/gpt-5.5")
+                .filter(|model| model.as_str() == "github-copilot/gpt-5.6-sol")
                 .count(),
             1
         );
@@ -811,8 +843,8 @@ mod curated_model_tests {
     #[test]
     fn qualified_ref_supports_provider_local_ids_with_slashes() {
         assert_eq!(
-            qualified_model_ref("openai/gpt-5.5", Some("openrouter")),
-            "openrouter/openai/gpt-5.5"
+            qualified_model_ref("openai/gpt-5.6-sol", Some("openrouter")),
+            "openrouter/openai/gpt-5.6-sol"
         );
     }
 
@@ -820,7 +852,7 @@ mod curated_model_tests {
     fn current_ref_infers_an_unambiguous_provider() {
         let listings = vec![
             listing("deepseek", "deepseek-v4-flash", "DeepSeek V4 Flash"),
-            listing("openai", "gpt-5.5", "GPT-5.5"),
+            listing("openai", "gpt-5.6-sol", "GPT-5.6 Sol"),
         ];
 
         let refs = curated_model_refs(&listings, &[], "deepseek-v4-flash", None);

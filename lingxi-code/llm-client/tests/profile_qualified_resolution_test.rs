@@ -99,6 +99,7 @@ fn two_profile_client() -> llm_client::client::DefaultLlmClient {
         billing_model: "gpt-5.2".to_string(),
         aliases: vec![],
         description: None,
+        metadata: Default::default(),
         capabilities: Capabilities {
             streaming: true,
             tools: true,
@@ -124,6 +125,7 @@ fn two_profile_client() -> llm_client::client::DefaultLlmClient {
                 supports_websockets: false,
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
+                vision_delegate: None,
             },
             ProviderProfile {
                 provider_id: ProviderId::OpenAICompatible {
@@ -143,6 +145,7 @@ fn two_profile_client() -> llm_client::client::DefaultLlmClient {
                 supports_websockets: false,
                 supports_websocket_compression: false,
                 websocket_connect_timeout_ms: None,
+                vision_delegate: None,
             },
         ],
     };

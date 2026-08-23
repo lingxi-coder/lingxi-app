@@ -122,6 +122,7 @@ struct ChatView: View {
                          // model catalog + active id (out-of-band model state). On
                          // pick, the source submits `SetModel(id)` with a real id.
                          availableModels: convo.availableModels,
+                         availableModelDetails: convo.availableModelDetails,
                          activeModelId: convo.activeModelId,
                          providerConfigured: convo.providerConfigured,
                          onSelectModel: { reference in

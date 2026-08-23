@@ -983,8 +983,10 @@ mod tests {
 
     #[tokio::test]
     async fn append_permission_mode_round_trips_through_transcript_metadata() {
-        let tmp = std::env::temp_dir()
-            .join(format!("lingxi-writer-permission-mode-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-permission-mode-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&tmp).expect("create temp dir");
         let session_id = "11111111-2222-3333-4444-555555555555";
         let session_path = tmp.join(format!("{session_id}.jsonl"));

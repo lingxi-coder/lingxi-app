@@ -6304,16 +6304,20 @@ dependencies = [
  "base64 0.22.1",
  "cost",
  "engine",
+ "futures-core",
+ "hooks",
  "llm-client",
  "platform-common",
  "protocol",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
  "tracing",
  "traits",
+ "url",
 ]
 
 [[package]]

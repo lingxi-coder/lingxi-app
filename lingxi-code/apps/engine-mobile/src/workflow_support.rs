@@ -1310,6 +1310,7 @@ mod workspace_lease_forwarding_tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            frozen_command_denies: Vec::new(),
         }
     }
 

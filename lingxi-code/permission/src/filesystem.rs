@@ -711,7 +711,12 @@ mod tests {
     }
 
     fn matches(input: &str, pattern: &str, source: PermissionRuleSource) -> bool {
-        matches_with(input, pattern, source, crate::rule::PermissionBehavior::Allow)
+        matches_with(
+            input,
+            pattern,
+            source,
+            crate::rule::PermissionBehavior::Allow,
+        )
     }
 
     fn matches_with(

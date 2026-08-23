@@ -68,7 +68,8 @@ use traits::Platform;
 pub use engine_mobile::{
     ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
     LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle, PermissionRequestSink, ProviderConnectionTestDto,
+    MobileEngineHandle, ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto,
+    ModelPricingDto, ModelPricingTierDto, PermissionRequestSink, ProviderConnectionTestDto,
 };
 
 /// The foreign (Kotlin) capability objects + config needed to build an
@@ -295,6 +296,7 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub api_base: String,
     pub api_key: String,
     pub model: String,
+    pub vision_delegation_enabled: bool,
     pub app_files_root: String,
     /// Optional Android Project workspace. When present it must resolve to
     /// `<app_files_root>/projects/<lowercase UUID>/workspace`; global `.lingxi`
@@ -3791,6 +3793,7 @@ pub fn build_android_engine(
             api_base,
             api_key,
             model,
+            vision_delegation_enabled: true,
             app_files_root,
             project_cwd: None,
             provider_config: None,
@@ -3846,6 +3849,7 @@ pub fn build_android_engine_with_mobile_linux(
         api_base,
         api_key,
         model,
+        vision_delegation_enabled,
         app_files_root,
         project_cwd,
         provider_config,
@@ -3890,6 +3894,7 @@ pub fn build_android_engine_with_mobile_linux(
             local_apps_full_runtime,
             local_apps_runtime_root: local_apps_runtime_root.map(std::path::PathBuf::from),
             physical_memory_bytes,
+            vision_delegation_enabled,
             host_environment: Some(host_environment.map_or_else(
                 || {
                     traits::MobileHostEnvironment::new(

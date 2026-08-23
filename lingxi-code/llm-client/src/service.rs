@@ -27,10 +27,10 @@ use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
 use crate::{
     CacheControl, CostEstimator, DefaultLlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse,
-    ResponsesWebSocketSession, Transport,
+    MediaRoute, ResponsesWebSocketSession, Transport,
 };
 use futures::stream::BoxStream;
-use protocol::{ContentBlock, ConversationMessage};
+use protocol::{is_nested_media_value, ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -331,6 +331,8 @@ pub struct ApiService {
     settings_backoff_ms: Option<u64>,
     /// Available model ids from the client registry (for `available_models`).
     available_model_ids: Vec<String>,
+    /// Full provider-specific model listings for rich picker surfaces.
+    model_listings: Vec<crate::ModelListing>,
     /// Optional cost estimator for populating `LlmResponse.cost`.
     ///
     /// When `Some`, a successful `decode_response` triggers a cost estimate using
@@ -531,6 +533,44 @@ fn parse_fallback_chain(raw: &str) -> Vec<String> {
 }
 
 impl ApiService {
+    /// Resolve the selected main route plus an optional same-profile vision delegate.
+    pub fn resolve_media_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<MediaRoute, LlmError> {
+        self.client.resolve_media_route(model, profile)
+    }
+
+    fn apply_side_query_thinking(
+        &self,
+        req: &mut LlmRequest,
+        model: &str,
+        thinking: Option<crate::model::thinking::ThinkingConfig>,
+        temperature: Option<f32>,
+    ) {
+        use crate::model::thinking::{model_sends_temperature, session_thinking_active};
+
+        let has_thinking = thinking.is_some_and(session_thinking_active);
+        req.reasoning = thinking.and_then(|thinking| {
+            crate::model::thinking::reasoning_for_request(thinking, model, req.max_tokens)
+        });
+        req.temperature = temperature.map(f64::from).or_else(|| {
+            if thinking.is_some()
+                && !has_thinking
+                && model_sends_temperature(model)
+                && !matches!(
+                    thinking,
+                    Some(crate::model::thinking::ThinkingConfig::Automatic)
+                )
+            {
+                Some(1.0)
+            } else {
+                None
+            }
+        });
+    }
+
     /// Construct the service.  Called by Task 10 host constructors.
     ///
     /// `version` is the build version string embedded in the User-Agent header.
@@ -664,6 +704,7 @@ impl ApiService {
             settings_max_retries,
             settings_backoff_ms,
             available_model_ids,
+            model_listings: models,
             estimator,
             last_rate_limit: Mutex::new(None),
             last_request_id: Mutex::new(None),
@@ -1180,48 +1221,37 @@ impl ApiService {
         Ok(req)
     }
 
-    fn log_deepseek_prepared_request(
-        model: &str,
-        prepared: &crate::PreparedLlmCall,
-        stream: bool,
-    ) {
+    fn log_deepseek_prepared_request(model: &str, prepared: &crate::PreparedLlmCall, stream: bool) {
         let body = &prepared.provider_request.body_json;
         let is_deepseek = model.contains("deepseek")
             || body
                 .get("model")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|model| model.contains("deepseek"))
-            || prepared
-                .provider_request
-                .url
-                .contains("api.deepseek.com");
+            || prepared.provider_request.url.contains("api.deepseek.com");
         if !is_deepseek {
             return;
         }
 
-        let (message_count, messages_with_reasoning_content, last_assistant_reasoning_len) =
-            body
-                .get("messages")
-                .and_then(serde_json::Value::as_array)
-                .map_or((0usize, 0usize, 0usize), |messages| {
-                    let with_reasoning = messages
-                        .iter()
-                        .filter(|message| message.get("reasoning_content").is_some())
-                        .count();
-                    let last_assistant_reasoning_len = messages
-                        .iter()
-                        .rev()
-                        .find(|message| {
-                            message
-                                .get("role")
-                                .and_then(serde_json::Value::as_str)
-                                == Some("assistant")
-                        })
-                        .and_then(|message| message.get("reasoning_content"))
-                        .and_then(serde_json::Value::as_str)
-                        .map_or(0, str::len);
-                    (messages.len(), with_reasoning, last_assistant_reasoning_len)
-                });
+        let (message_count, messages_with_reasoning_content, last_assistant_reasoning_len) = body
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .map_or((0usize, 0usize, 0usize), |messages| {
+                let with_reasoning = messages
+                    .iter()
+                    .filter(|message| message.get("reasoning_content").is_some())
+                    .count();
+                let last_assistant_reasoning_len = messages
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                    })
+                    .and_then(|message| message.get("reasoning_content"))
+                    .and_then(serde_json::Value::as_str)
+                    .map_or(0, str::len);
+                (messages.len(), with_reasoning, last_assistant_reasoning_len)
+            });
         tracing::debug!(
             target = "llm_client::service",
             event = "deepseek_prepared_request",
@@ -1890,6 +1920,8 @@ impl ApiService {
             LlmError::QuotaExceeded => "quota_exceeded",
             LlmError::ModelUnavailable => "model_unavailable",
             LlmError::CostUnavailable { .. } => "cost_unavailable",
+            LlmError::MediaDelegationUnavailable { .. }
+            | LlmError::MediaDelegationPartial { .. } => "media_delegation_unavailable",
             LlmError::UnsupportedCapability { .. } => "unsupported_capability",
         }
     }
@@ -2248,7 +2280,9 @@ impl ApiService {
             | LlmError::TlsCert { .. }
             | LlmError::StreamInterrupted { .. }
             | LlmError::CostUnavailable { .. }
-            | LlmError::UnsupportedCapability { .. } => None,
+            | LlmError::UnsupportedCapability { .. }
+            | LlmError::MediaDelegationUnavailable { .. }
+            | LlmError::MediaDelegationPartial { .. } => None,
         }
     }
 
@@ -2310,6 +2344,9 @@ impl ApiService {
         let request_id = new_request_id();
         let started = Instant::now();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, false).await;
+        if let Some(query_source) = req.query_source.as_deref() {
+            telemetry::emit_query_source(&self.analytics, &req.model, query_source).await;
+        }
 
         // B6-T1: discard any 429 snapshot staged by a PRIOR drive (whose
         // terminal was non-rate-limited, so it never promoted) — TS module
@@ -2441,6 +2478,19 @@ impl ApiService {
                                 provider_resp.status,
                             )
                             .await;
+                            if req.capture_retry_count {
+                                if !response.provider_metadata.is_object() {
+                                    response.provider_metadata = serde_json::json!({});
+                                }
+                                let metadata = response
+                                    .provider_metadata
+                                    .as_object_mut()
+                                    .expect("provider metadata normalized to an object");
+                                metadata.insert(
+                                    "_lingxi_retry_count".to_string(),
+                                    serde_json::Value::from(state.attempt),
+                                );
+                            }
                             // #5: surface this drive's retry count to the cost
                             // path via `last_retry_count()`.
                             *self.last_retry_count.lock().unwrap() = state.attempt;
@@ -2788,6 +2838,7 @@ impl ApiService {
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
         temperature: Option<f32>,
+        query_source: Option<&str>,
     ) -> Result<LlmResponse, LlmError> {
         let mut req =
             self.build_request(model, profile, system, messages, tools, false, max_tokens)?;
@@ -2797,6 +2848,46 @@ impl ApiService {
         req.tool_choice = tool_choice;
         req.stop_sequences = stop_sequences;
         req.temperature = temperature.map(f64::from);
+        req.query_source = query_source.map(str::to_string);
+
+        let ctl = resolve_retry_control_with_settings(
+            model,
+            None,
+            self.effective_subscriber().is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
+        self.drive_non_stream(req, ctl, DispatchHeaderState::AUXILIARY)
+            .await
+    }
+
+    /// Non-streaming side query with explicit thinking semantics.
+    ///
+    /// `thinking = None` means emit no reasoning field at all; `Some(cfg)`
+    /// resolves through the same model-specific thinking policy as the main
+    /// request path.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn messages_create_side_query_with_thinking(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        max_tokens: Option<u32>,
+        tool_choice: Option<crate::ToolChoice>,
+        stop_sequences: Vec<String>,
+        thinking: Option<crate::model::thinking::ThinkingConfig>,
+        temperature: Option<f32>,
+        query_source: Option<&str>,
+    ) -> Result<LlmResponse, LlmError> {
+        let mut req =
+            self.build_request(model, profile, system, messages, tools, false, max_tokens)?;
+        req.tool_choice = tool_choice;
+        req.stop_sequences = stop_sequences;
+        req.capture_retry_count = true;
+        req.query_source = query_source.map(str::to_string);
+        self.apply_side_query_thinking(&mut req, model, thinking, temperature);
 
         let ctl = resolve_retry_control_with_settings(
             model,
@@ -2824,12 +2915,39 @@ impl ApiService {
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
         temperature: Option<f32>,
+        query_source: Option<&str>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         let mut req =
             self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
         req.tool_choice = tool_choice;
         req.stop_sequences = stop_sequences;
         req.temperature = temperature.map(f64::from);
+        req.query_source = query_source.map(str::to_string);
+        self.drive_stream(req).await
+    }
+
+    /// Streaming side query with explicit thinking semantics.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn messages_create_side_query_stream_with_thinking(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        max_tokens: Option<u32>,
+        tool_choice: Option<crate::ToolChoice>,
+        stop_sequences: Vec<String>,
+        thinking: Option<crate::model::thinking::ThinkingConfig>,
+        temperature: Option<f32>,
+        query_source: Option<&str>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut req =
+            self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
+        req.tool_choice = tool_choice;
+        req.stop_sequences = stop_sequences;
+        req.query_source = query_source.map(str::to_string);
+        self.apply_side_query_thinking(&mut req, model, thinking, temperature);
         self.drive_stream(req).await
     }
 
@@ -2999,6 +3117,12 @@ impl ApiService {
         self.available_model_ids.clone()
     }
 
+    /// Enumerate full provider-specific model metadata for picker surfaces.
+    #[must_use]
+    pub fn model_listings(&self) -> Vec<crate::ModelListing> {
+        self.model_listings.clone()
+    }
+
     // ── OpenAI Responses WebSocket preconnect ────────────────────────────────
 
     /// Best-effort startup preconnect for OpenAI Responses WebSocket profiles.
@@ -3090,6 +3214,9 @@ impl ApiService {
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         let request_id = new_request_id();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, true).await;
+        if let Some(query_source) = req.query_source.as_deref() {
+            telemetry::emit_query_source(&self.analytics, &req.model, query_source).await;
+        }
 
         // B6-T1: discard any 429 snapshot staged by a PRIOR drive (see the
         // non-stream drive fn) — per-error state, never carried across calls.
@@ -3608,10 +3735,7 @@ const FIRST_PARTY_API_HOST: &str = "api.anthropic.com";
 /// image/resource result) is a media item — `type === "image" || "document"`,
 /// matching claude-code `isMedia` (`claude.ts:943`).
 fn is_media_value(v: &serde_json::Value) -> bool {
-    matches!(
-        v.get("type").and_then(serde_json::Value::as_str),
-        Some("image") | Some("document")
-    )
+    is_nested_media_value(v)
 }
 
 /// Count media (image/document) content blocks across all messages, INCLUDING

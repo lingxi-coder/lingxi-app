@@ -23,7 +23,8 @@ import XCTest
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: "",
-                appSandboxRoot: NSTemporaryDirectory()
+                appSandboxRoot: NSTemporaryDirectory(),
+                visionDelegationEnabled: true
             )
             return EngineConversationSource(config: config)
         }

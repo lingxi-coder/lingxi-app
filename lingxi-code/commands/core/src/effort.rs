@@ -281,8 +281,7 @@ pub fn persist_reasoning_default_selection_at(
         traits::ReasoningSelection::TokenBudget { tokens } => {
             Some(json!({ "type": "token_budget", "tokens": tokens }))
         }
-        traits::ReasoningSelection::Automatic
-        | traits::ReasoningSelection::Level { .. } => None,
+        traits::ReasoningSelection::Automatic | traits::ReasoningSelection::Level { .. } => None,
     });
 
     if let Some(value) = persisted {
@@ -858,18 +857,18 @@ Effort levels:\n\
         )
         .unwrap();
         let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["reasoning"]["defaultSelection"]["type"], "token_budget");
+        assert_eq!(
+            value["reasoning"]["defaultSelection"]["type"],
+            "token_budget"
+        );
         assert!(value.get("effortLevel").is_none());
         assert_eq!(
             load_reasoning_default_selection_at(&path),
             Some(traits::ReasoningSelection::TokenBudget { tokens: 12_345 })
         );
 
-        persist_reasoning_default_selection_at(
-            &path,
-            Some(&traits::ReasoningSelection::Automatic),
-        )
-        .unwrap();
+        persist_reasoning_default_selection_at(&path, Some(&traits::ReasoningSelection::Automatic))
+            .unwrap();
         let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(value.get("reasoning").is_none());
         assert!(value.get("effortLevel").is_none());

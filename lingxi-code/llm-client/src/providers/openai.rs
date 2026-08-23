@@ -76,9 +76,7 @@ impl OpenAiChatCodec {
     }
 
     fn kimi_thinking_mode(&self, request: &LlmRequest) -> Option<&'static str> {
-        if !self.is_kimi_profile()
-            || !matches!(request.model.as_str(), "kimi-k2.6" | "k2.6")
-        {
+        if !self.is_kimi_profile() || !matches!(request.model.as_str(), "kimi-k2.6" | "k2.6") {
             return None;
         }
         match request.effort.as_ref().and_then(Value::as_str) {
@@ -101,7 +99,12 @@ impl OpenAiChatCodec {
     }
 
     fn deepseek_reasoning(&self, request: &LlmRequest) -> Option<(&'static str, Option<&str>)> {
-        if !self.is_deepseek_profile() || matches!(request.model.as_str(), "deepseek-chat" | "deepseek-reasoner") {
+        if !self.is_deepseek_profile()
+            || matches!(
+                request.model.as_str(),
+                "deepseek-chat" | "deepseek-reasoner"
+            )
+        {
             return None;
         }
         match request.effort.as_ref().and_then(Value::as_str) {
@@ -124,7 +127,8 @@ impl WireCodec for OpenAiChatCodec {
 
         let mut messages = Vec::new();
         let deepseek_profile = self.is_deepseek_profile();
-        let deepseek_rejects_tool_choice = self.deepseek_thinking_rejects_tool_choice(&request.model);
+        let deepseek_rejects_tool_choice =
+            self.deepseek_thinking_rejects_tool_choice(&request.model);
         let preserve_reasoning_content = self.is_kimi_profile() || deepseek_profile;
         let assistant_reasoning_blocks = request
             .messages
@@ -183,25 +187,23 @@ impl WireCodec for OpenAiChatCodec {
         let wire_model = legacy_deepseek.map_or(request.model.as_str(), |(model, _)| model);
         body.insert("model".to_string(), Value::String(wire_model.to_string()));
         body.insert("messages".to_string(), Value::Array(messages));
-        let (encoded_messages_with_reasoning_content, last_assistant_reasoning_len) =
-            body.get("messages")
-                .and_then(Value::as_array)
-                .map_or((0usize, 0usize), |encoded_messages| {
-                    let messages_with_reasoning = encoded_messages
-                        .iter()
-                        .filter(|value| value.get("reasoning_content").is_some())
-                        .count();
-                    let last_assistant_reasoning_len = encoded_messages
-                        .iter()
-                        .rev()
-                        .find(|value| {
-                            value.get("role").and_then(Value::as_str) == Some("assistant")
-                        })
-                        .and_then(|value| value.get("reasoning_content"))
-                        .and_then(Value::as_str)
-                        .map_or(0, str::len);
-                    (messages_with_reasoning, last_assistant_reasoning_len)
-                });
+        let (encoded_messages_with_reasoning_content, last_assistant_reasoning_len) = body
+            .get("messages")
+            .and_then(Value::as_array)
+            .map_or((0usize, 0usize), |encoded_messages| {
+                let messages_with_reasoning = encoded_messages
+                    .iter()
+                    .filter(|value| value.get("reasoning_content").is_some())
+                    .count();
+                let last_assistant_reasoning_len = encoded_messages
+                    .iter()
+                    .rev()
+                    .find(|value| value.get("role").and_then(Value::as_str) == Some("assistant"))
+                    .and_then(|value| value.get("reasoning_content"))
+                    .and_then(Value::as_str)
+                    .map_or(0, str::len);
+                (messages_with_reasoning, last_assistant_reasoning_len)
+            });
         let (deepseek_tool_calls, deepseek_tool_calls_without_reasoning) = body
             .get("messages")
             .and_then(Value::as_array)
@@ -226,9 +228,15 @@ impl WireCodec for OpenAiChatCodec {
             );
         }
         if let Some((thinking_type, effort)) = self.deepseek_reasoning(request) {
-            body.insert("thinking".to_string(), serde_json::json!({"type": thinking_type}));
+            body.insert(
+                "thinking".to_string(),
+                serde_json::json!({"type": thinking_type}),
+            );
             if let Some(effort) = effort {
-                body.insert("reasoning_effort".to_string(), Value::String(effort.to_string()));
+                body.insert(
+                    "reasoning_effort".to_string(),
+                    Value::String(effort.to_string()),
+                );
             }
         }
 
@@ -1344,8 +1352,10 @@ mod tests {
         assert!(
             disabled_messages
                 .iter()
-                .any(|m| m.get("role").and_then(Value::as_str) == Some("assistant")
-                    && m.get("reasoning_content").is_none()),
+                .any(
+                    |m| m.get("role").and_then(Value::as_str) == Some("assistant")
+                        && m.get("reasoning_content").is_none()
+                ),
             "thinking-disabled requests must not gain the backfilled key"
         );
 

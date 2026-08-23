@@ -5,9 +5,12 @@ import android.content.SharedPreferences
 import com.lingxi.code.R
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.ProviderCatalogEntryDto
 import com.lingxi.code.bindings.ProviderCredentialSecretDto
+import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
+import com.lingxi.code.model.LlmProviderCatalogEntry
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.model.ProviderPreset
 import com.lingxi.code.secure.SecureKeyStore
@@ -48,6 +51,7 @@ data class ProviderEngineLaunchConfig(
     val providerProfilesJson: String,
     val routingJson: String,
     val defaultModel: String,
+    val visionDelegationEnabled: Boolean,
 )
 
 interface ProviderCredentialClient : AutoCloseable {
@@ -246,6 +250,13 @@ class ProviderSettingsRepository(
         return Triple(llm, search, fetch)
     }
 
+    fun visionDelegationEnabled(): Boolean =
+        prefs.getBoolean(PREF_VISION_DELEGATION_ENABLED, true)
+
+    fun setVisionDelegationEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(PREF_VISION_DELEGATION_ENABLED, enabled).apply()
+    }
+
     suspend fun refreshLlmStatuses(providers: List<GenericProvider>): ProviderStatusRefreshResult {
         val supportedIds = providers.mapNotNull { engineCredentialIdFor(it) }.distinct()
         if (supportedIds.isEmpty()) {
@@ -340,6 +351,24 @@ class ProviderSettingsRepository(
         )
     }
 
+    fun builtinProviderCatalog(): List<LlmProviderCatalogEntry> =
+        runCatching {
+            buildVoiceEngine(
+                context = appContext,
+                apiBase = "",
+                apiKey = "",
+                model = "",
+                onEvent = {},
+                onPermission = {},
+            )?.let { handle ->
+                try {
+                    handle.builtinProviderCatalog().map(::lowerCatalogEntry)
+                } finally {
+                    runCatching { handle.destroy() }
+                }
+            }.orEmpty()
+        }.getOrDefault(emptyList())
+
     /**
      * Non-secret provider settings consumed by the mobile Rust engine.
      *
@@ -348,7 +377,10 @@ class ProviderSettingsRepository(
      * after the persisted row, allowing more than one account to coexist.
      */
     fun engineLaunchConfig(): ProviderEngineLaunchConfig {
-        return buildEngineLaunchConfig(loadProviderState().first)
+        return buildEngineLaunchConfig(
+            loadProviderState().first,
+            visionDelegationEnabled = visionDelegationEnabled(),
+        )
     }
 
     override fun close() {
@@ -360,6 +392,7 @@ class ProviderSettingsRepository(
         private const val PREF_LLM = "providers_llm"
         private const val PREF_SEARCH = "providers_search"
         private const val PREF_FETCH = "providers_fetch"
+        private const val PREF_VISION_DELEGATION_ENABLED = "vision_delegation_enabled"
 
         internal fun migrateLegacyDeepSeek(provider: GenericProvider): GenericProvider {
             if (provider.preset != "deepseek") return provider
@@ -376,6 +409,7 @@ class ProviderSettingsRepository(
 
         internal fun buildEngineLaunchConfig(
             savedProviders: List<GenericProvider>,
+            visionDelegationEnabled: Boolean = true,
         ): ProviderEngineLaunchConfig {
             val providers = savedProviders.filter {
                 it.enabled && it.credentialConfigured
@@ -395,6 +429,7 @@ class ProviderSettingsRepository(
                 providerProfilesJson = profiles.toString(),
                 routingJson = buildMobileRoutingJson(mobileEnabledProfileNames(savedProviders)),
                 defaultModel = defaultModel,
+                visionDelegationEnabled = visionDelegationEnabled,
             )
         }
 
@@ -487,34 +522,72 @@ class ProviderSettingsRepository(
             )
         }
 
-        internal fun newProvider(kind: ProviderKind, preset: ProviderPreset): GenericProvider {
+        internal fun newProvider(
+            kind: ProviderKind,
+            preset: ProviderPreset,
+            catalogEntries: List<LlmProviderCatalogEntry> = emptyList(),
+        ): GenericProvider {
             val id = kind.idPrefix + "_" + UUID.randomUUID().toString().take(5).lowercase()
+            val seededModel = if (kind == ProviderKind.Llm) {
+                val profileId = when (preset.id) {
+                    "google" -> "gemini"
+                    else -> preset.id
+                }
+                catalogEntries
+                    .firstOrNull { it.profileId == profileId }
+                    ?.modelDetails
+                    ?.firstOrNull()
+                    ?.modelId
+                    ?: preset.models.firstOrNull().orEmpty()
+            } else {
+                preset.models.firstOrNull().orEmpty()
+            }
             return GenericProvider(
                 id = id,
                 preset = preset.id,
                 name = preset.name,
                 url = preset.defaultUrl,
                 key = "",
-                model = preset.models.firstOrNull().orEmpty(),
+                model = seededModel,
                 status = ConnStatus.Idle,
                 enabled = true,
             )
         }
 
+        private fun lowerCatalogEntry(dto: ProviderCatalogEntryDto): LlmProviderCatalogEntry =
+            LlmProviderCatalogEntry(
+                profileId = dto.profileId,
+                displayName = dto.displayName,
+                baseUrl = dto.baseUrl,
+                protocol = dto.protocol,
+                auth = dto.auth,
+                credentialEnv = dto.credentialEnv,
+                modelIds = dto.models,
+                modelDetails = dto.modelDetails.map(CatalogModelDetails::fromDto),
+            )
+
         private fun usesBuiltInProfile(provider: GenericProvider): Boolean {
             val preset = ProviderKind.Llm.presets.firstOrNull { it.id == provider.preset }
-                ?: return false
-            if (provider.preset !in setOf("anthropic", "openai", "google", "deepseek", "kimi", "kimi-code", "openrouter")) {
+            val defaultUrl = preset?.defaultUrl ?: mapOf(
+                "openai-chatgpt" to "https://chatgpt.com/backend-api/codex",
+                "github-copilot" to "https://api.githubcopilot.com",
+                "zai" to "https://api.z.ai/api/paas/v4",
+                "glm-coding" to "https://open.bigmodel.cn/api/anthropic",
+            )[provider.preset] ?: return false
+            if (provider.preset !in setOf(
+                    "anthropic", "openai", "openai-chatgpt", "google", "deepseek", "kimi",
+                    "kimi-code", "github-copilot", "zai", "glm-coding", "openrouter",
+                )) {
                 return false
             }
-            return provider.url.isBlank() ||
-                provider.url.trimEnd('/') == preset.defaultUrl.trimEnd('/')
+            return provider.url.isBlank() || provider.url.trimEnd('/') == defaultUrl.trimEnd('/')
         }
 
         private fun providerType(provider: GenericProvider): String? = when (provider.preset) {
             "anthropic" -> "anthropic"
+            "glm-coding" -> "anthropic"
             "google" -> "gemini"
-            "openai", "deepseek", "kimi", "kimi-code", "openrouter", "qwen", "custom" -> "openai"
+            "openai", "openai-chatgpt", "deepseek", "kimi", "kimi-code", "github-copilot", "zai", "openrouter", "qwen", "custom" -> "openai"
             else -> null
         }
 

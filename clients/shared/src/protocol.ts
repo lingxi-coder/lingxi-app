@@ -461,6 +461,62 @@ export interface ReasoningControlSpecDto {
   disabled_reason?: ControlDisabledReasonDto;
 }
 
+export type ModelBillingModeDto = 'per_token' | 'subscription' | 'free' | 'unknown';
+
+export interface ModelPricingTierDto {
+  context_threshold_tokens: number;
+  input_per_million?: number;
+  output_per_million?: number;
+  cache_read_per_million?: number;
+  cache_write_per_million?: number;
+  reasoning_per_million?: number;
+}
+
+export interface ModelPricingDto {
+  billing_mode: ModelBillingModeDto;
+  input_per_million?: number;
+  output_per_million?: number;
+  cache_read_per_million?: number;
+  cache_write_per_million?: number;
+  reasoning_per_million?: number;
+  tiers: ModelPricingTierDto[];
+  source?: string;
+}
+
+export interface ModelCapabilitiesDto {
+  streaming: boolean;
+  tools: boolean;
+  vision: boolean;
+  documents: boolean;
+  reasoning: boolean;
+  structured_output: boolean;
+}
+
+export interface ModelDetailsDto {
+  reference: string;
+  provider_id: string;
+  provider_label: string;
+  display_name: string;
+  model_id: string;
+  description?: string;
+  family?: string;
+  status?: string;
+  release_date?: string;
+  last_updated?: string;
+  knowledge_cutoff?: string;
+  input_modalities: string[];
+  output_modalities: string[];
+  context_window_tokens?: number;
+  max_input_tokens?: number;
+  max_output_tokens?: number;
+  open_weights?: boolean;
+  attachments?: boolean;
+  temperature_control?: boolean;
+  pricing?: ModelPricingDto;
+  capabilities: ModelCapabilitiesDto;
+  reasoning: ReasoningControlSpecDto;
+}
+
 /** Authoritative state for the active conversation's reasoning controls. */
 export interface ReasoningControlStateDto {
   requested: ReasoningSelectionDto;
@@ -1272,7 +1328,7 @@ export type ClientEvent =
       message: MessageDto;
     }
   // ── Listing / screen events ─────────────────────────────────────────────────
-  | { type: 'model_list'; models: string[]; current: string }
+  | { type: 'model_list'; models: string[]; current: string; details?: ModelDetailsDto[] }
   | { type: 'model_changed'; model: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
   | { type: 'conversation_controls_changed'; controls: ConversationControlsDto }

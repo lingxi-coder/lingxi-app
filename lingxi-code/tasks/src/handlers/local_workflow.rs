@@ -42,11 +42,11 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use traits::filesystem::FileSystem;
 use traits::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
+use traits::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use traits::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
-use traits::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;

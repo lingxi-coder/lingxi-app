@@ -51,6 +51,7 @@ pub mod token_budget;
 pub mod tool_result_persistence;
 pub mod transcript_paths;
 pub mod turn_loop;
+mod vision_model_call;
 
 // test_support carries the HookExecutor / PermissionGate trait definitions
 // that ConversationOrchestrator's signature uses; it MUST be available in

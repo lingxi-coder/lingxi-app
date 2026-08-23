@@ -32,8 +32,32 @@ pub enum QuerySource {
     /// `WebFetch`'s secondary "apply" call: process fetched markdown with the
     /// caller's prompt via a small-fast model (claude-code `web_fetch_apply`).
     WebFetchApply,
+    /// Delegated image analysis performed before a non-vision main-model turn.
+    VisionDelegation,
     /// Caller-supplied label for purposes not enumerated above.
     Custom(String),
+}
+
+impl QuerySource {
+    /// Stable telemetry label for this side-query purpose.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::MemorySelector => "memory_selector",
+            Self::PermissionExplainer => "permission_explainer",
+            Self::SessionSearch => "session_search",
+            Self::Classifier => "classifier",
+            Self::Compaction => "compaction",
+            Self::SessionMemoryExtraction => "session_memory_extraction",
+            Self::Supervisor => "supervisor",
+            Self::PromptSuggestion => "prompt_suggestion",
+            Self::PostTurnSummary => "post_turn_summary",
+            Self::SkillExecution => "skill_execution",
+            Self::WebFetchApply => "web_fetch_apply",
+            Self::VisionDelegation => "vision_delegation",
+            Self::Custom(value) => value.as_str(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -47,5 +71,14 @@ mod tests {
         assert_eq!(json, "\"WebFetchApply\"");
         let back: QuerySource = serde_json::from_str(&json).unwrap();
         assert_eq!(back, QuerySource::WebFetchApply);
+    }
+
+    #[test]
+    fn vision_delegation_roundtrips() {
+        let q = QuerySource::VisionDelegation;
+        let json = serde_json::to_string(&q).unwrap();
+        assert_eq!(json, "\"VisionDelegation\"");
+        let back: QuerySource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, QuerySource::VisionDelegation);
     }
 }

@@ -157,6 +157,7 @@ fn pricing_config_with_overrides_serde_roundtrip() {
         reasoning_per_million: 6.0,
     };
     let cfg = PricingConfig {
+        billing_mode: Default::default(),
         require_priced: false,
         overrides: vec![("my-model".to_string(), tp)],
     };

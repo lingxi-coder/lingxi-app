@@ -23,8 +23,8 @@
 - 非原生支持的 PDF/Document 返回明确错误，不做隐藏降级。
 - 不跨 provider profile 委派，不新增凭据、网络配置或外部依赖。
 - delegate 不获得主系统提示、工具 schema、reasoning 或工具执行权限。
-- `deepseek-v4-flash-vision-exp` 是内部 delegate，不进入 curated `/model` picker。
-- delegate 未确认官方价格前不写价格；成本使用现有 unknown-model tier 并标记 `unpriced_models`。
+- `deepseek-v4-flash-vision-exp` 同时是可供用户选择的 beta 视觉模型和 DeepSeek profile 的内部 delegate；它进入 curated `/model` picker。
+- 视觉模型的价格和能力来自当前 vendored provider catalog；缺失价格仍使用现有 unknown-model tier 并标记 `unpriced_models`，不把缺失值写成 `$0`。
 
 ## 3. 路由与公开数据模型
 
@@ -38,7 +38,7 @@
 
 调用方通过统一的 `MediaRoute { main, vision_delegate }` 和 `resolve_media_route` 获取结果，不自行猜测 profile、凭据或协议。
 
-DeepSeek preset 把 `visionDelegate` 指向 `deepseek-v4-flash-vision-exp`。该 catalog 模型声明 `text+image`、`documents=false`、`tools=false`，不填写价格。
+DeepSeek preset 把 `visionDelegate` 指向 `deepseek-v4-flash-vision-exp`。该 catalog 模型声明 `text+image`、`documents=false`，并按 provider catalog 的实际能力与价格展示 beta 状态；用户也可以直接选择该模型，原生视觉请求不会再次触发 delegate。
 
 ### 3.2 持久化分析块
 

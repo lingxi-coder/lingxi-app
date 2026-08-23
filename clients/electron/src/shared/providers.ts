@@ -12,7 +12,7 @@ export interface ProviderDefinition {
   available: boolean;
 }
 
-/** The curated provider set mirrors the CLI/TUI connect picker. */
+/** Providers with a credential flow wired into the Electron build. */
 export const PROVIDERS: readonly ProviderDefinition[] = [
   {
     id: 'anthropic', label: 'Anthropic', description: 'Claude models', popular: true,
@@ -64,11 +64,8 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
     authMethod: 'token', keyLabel: 'GitHub token', keyPlaceholder: 'gho_…',
     defaultModel: 'github-copilot/claude-opus-5', available: true,
   },
-  {
-    id: 'openai-chatgpt', label: 'OpenAI (ChatGPT)', description: 'ChatGPT Plus / Pro', popular: true,
-    authMethod: 'oauth', keyLabel: 'ChatGPT sign-in', keyPlaceholder: '',
-    defaultModel: 'openai-chatgpt/gpt-5.6-sol', available: false,
-  },
+  // ChatGPT OAuth is intentionally omitted until the Electron credential
+  // bridge supports its sign-in flow; CLI/TUI and mobile keep the route.
 ] as const;
 
 export const PROVIDER_IDS = PROVIDERS.map(({ id }) => id);

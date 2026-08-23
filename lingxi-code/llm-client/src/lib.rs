@@ -108,6 +108,7 @@ pub use route::Route;
 pub use service::{ApiService, RetryInfo, RetryReporter, SubscriberState};
 pub use sse::SseFrameSplitter;
 pub use ssl::{detect_ssl_code, is_ssl_code, ssl_hint};
+pub use traits::ModelBillingMode;
 pub use transport::{
     BoxFuture, FrameStream, ResponsesWebSocketTransportSession, StreamingResponse, Transport,
 };

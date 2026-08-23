@@ -15,6 +15,7 @@ use cost::pricing::{
     MoneyPerToken, NonTokenBillableUnit, PricingSource, ProviderId as CostProviderId, TokenClass,
 };
 use cost::{ModelPricing, ModelRef, PricingCatalog};
+use llm_client::ModelBillingMode;
 
 /// Convert a per-million-token USD price to nano-USD per token.
 /// `$X / Mtok` = `X * 1000` nano-USD per token (1 USD = 1e9 nano-USD; 1 Mtok = 1e6 tokens).
@@ -110,6 +111,22 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
                 provider: provider.clone(),
                 model: model.billing_model.clone(),
             };
+            // A concrete user override is authoritative, including for a
+            // profile that was initially marked as subscription-backed.
+            if let Some((_, override_price)) = profile.pricing.overrides.iter().find(|(id, _)| {
+                id == &model.display_model
+                    || id == &model.request_model
+                    || id == &model.billing_model
+            }) {
+                catalog = catalog.with_entry(model_pricing_from_token_pricing(&mr, override_price));
+                continue;
+            }
+            // A subscription must never inherit a token price from a
+            // models.dev slice that happens to use the same provider/model id.
+            if profile.pricing.billing_mode == ModelBillingMode::Subscription {
+                catalog = catalog.mark_unpriced(mr);
+                continue;
+            }
             if catalog.resolve(&mr).is_ok() {
                 continue; // already priced by the reference catalog.
             }
@@ -130,6 +147,7 @@ mod tests {
     use super::*;
     use llm_client::{
         AuthStrategy, Capabilities, CredentialConfig, ModelProfile, PricingConfig, ProtocolFamily,
+        TokenPricing,
     };
 
     fn user_profile(name: &str, model: &str) -> ProviderProfile {
@@ -232,5 +250,48 @@ mod tests {
             cat.resolve(&mr),
             Err(cost::pricing::CostError::UnpricedModel(_))
         ));
+    }
+
+    #[test]
+    fn subscription_profile_does_not_inherit_preset_token_price() {
+        let mut profile = user_profile("github-copilot", "claude-opus-4.6");
+        profile.pricing.billing_mode = ModelBillingMode::Subscription;
+        let cat = pricing_for(&[profile]);
+        let mr = ModelRef {
+            provider: CostProviderId::OpenAICompatible {
+                name: "github-copilot".to_string(),
+            },
+            model: "claude-opus-4.6".to_string(),
+        };
+        assert!(matches!(
+            cat.resolve(&mr),
+            Err(cost::pricing::CostError::UnpricedModel(_))
+        ));
+    }
+
+    #[test]
+    fn explicit_override_prices_a_subscription_profile() {
+        let mut profile = user_profile("github-copilot", "claude-opus-4.6");
+        profile.pricing.billing_mode = ModelBillingMode::Subscription;
+        profile.pricing.overrides.push((
+            "claude-opus-4.6".to_string(),
+            TokenPricing::input_output(1.0, 2.0),
+        ));
+        let cat = pricing_for(&[profile]);
+        let mr = ModelRef {
+            provider: CostProviderId::OpenAICompatible {
+                name: "github-copilot".to_string(),
+            },
+            model: "claude-opus-4.6".to_string(),
+        };
+        let (pricing, _) = cat.resolve(&mr).expect("explicit override is billable");
+        assert_eq!(
+            pricing.token_rates[&cost::pricing::TokenClass::Input].nano_usd_per_token,
+            1_000
+        );
+        assert_eq!(
+            pricing.token_rates[&cost::pricing::TokenClass::Output].nano_usd_per_token,
+            2_000
+        );
     }
 }

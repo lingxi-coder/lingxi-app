@@ -15,8 +15,8 @@ use local_apps::AppError;
 use protocol::{ConversationMessage, MediaAnalysis, MessageId, MessageRole};
 use sha2::{Digest, Sha256};
 use sidequery::{
-    filter_messages_to_fingerprints, prepare_media_for_nonvision, ProviderSideQueryClient,
-    VisionDelegationService, VisionPacket,
+    ProviderSideQueryClient, VisionDelegationService, VisionPacket,
+    filter_messages_to_fingerprints, prepare_media_for_nonvision,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
@@ -385,7 +385,6 @@ impl ApiServiceModel {
     fn delegate_cache_key(
         scope: &str,
         question_text: &str,
-        prior_text_context: &[(MessageRole, String)],
         fingerprints: &[String],
         delegate_model: &str,
     ) -> String {
@@ -394,8 +393,6 @@ impl ApiServiceModel {
         hasher.update(scope.as_bytes());
         hasher.update(b"\0");
         hasher.update(question_key.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(prior_text_context_key(prior_text_context).as_bytes());
         hasher.update(b"\0");
         hasher.update(delegate_model.as_bytes());
         hasher.update(b"\0");
@@ -532,7 +529,6 @@ impl ApiServiceModel {
         let cache_key = Self::delegate_cache_key(
             &cache_scope,
             &question_text,
-            &prior_text_context,
             &current_ordered_fingerprints,
             &delegate.request_model,
         );
@@ -760,21 +756,6 @@ fn subtract_fingerprints(
     trimmed.task_findings.clear();
     trimmed.cross_media_findings.clear();
     Some(trimmed)
-}
-
-fn prior_text_context_key(prior_text_context: &[(MessageRole, String)]) -> String {
-    let mut hasher = Sha256::new();
-    for (role, text) in prior_text_context {
-        hasher.update(match role {
-            MessageRole::User => b"user".as_slice(),
-            MessageRole::Assistant => b"assistant".as_slice(),
-            MessageRole::System => b"system".as_slice(),
-        });
-        hasher.update(b"\0");
-        hasher.update(normalize_text(text).as_bytes());
-        hasher.update(b"\0");
-    }
-    format!("{:x}", hasher.finalize())
 }
 
 fn merge_cached_analysis(
@@ -1088,56 +1069,27 @@ mod tests {
     #[test]
     fn vision_cache_key_is_scoped_by_app_and_question() {
         let fingerprints = vec!["fp".to_string()];
-        let prior = vec![(MessageRole::Assistant, "previous".to_string())];
-        let base = ApiServiceModel::delegate_cache_key(
-            "app-a",
-            "question-a",
-            &prior,
-            &fingerprints,
-            "vision",
+        let base =
+            ApiServiceModel::delegate_cache_key("app-a", "question-a", &fingerprints, "vision");
+        assert_ne!(
+            base,
+            ApiServiceModel::delegate_cache_key("app-b", "question-a", &fingerprints, "vision")
         );
         assert_ne!(
             base,
-            ApiServiceModel::delegate_cache_key(
-                "app-b",
-                "question-a",
-                &prior,
-                &fingerprints,
-                "vision"
-            )
-        );
-        assert_ne!(
-            base,
-            ApiServiceModel::delegate_cache_key(
-                "app-a",
-                "question-b",
-                &prior,
-                &fingerprints,
-                "vision"
-            )
+            ApiServiceModel::delegate_cache_key("app-a", "question-b", &fingerprints, "vision")
         );
     }
 
     #[test]
-    fn vision_cache_key_changes_when_prior_text_context_changes() {
+    fn vision_cache_key_reuses_analysis_when_prior_text_context_changes() {
         let fingerprints = vec!["fp".to_string()];
-        let previous = vec![(MessageRole::Assistant, "prior answer".to_string())];
-        let changed = vec![(MessageRole::Assistant, "different prior answer".to_string())];
-        assert_ne!(
-            ApiServiceModel::delegate_cache_key(
-                "app-a",
-                "question",
-                &previous,
-                &fingerprints,
-                "vision"
-            ),
-            ApiServiceModel::delegate_cache_key(
-                "app-a",
-                "question",
-                &changed,
-                &fingerprints,
-                "vision"
-            )
+        let key_for_context = |_prior_text_context: &str| {
+            ApiServiceModel::delegate_cache_key("app-a", "question", &fingerprints, "vision")
+        };
+        assert_eq!(
+            key_for_context("prior answer"),
+            key_for_context("different prior answer")
         );
     }
 

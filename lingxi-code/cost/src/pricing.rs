@@ -12,7 +12,7 @@
 //! `5_000` milli-USD per Mtok, which is also `5_000` nano-USD per token.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 use thiserror::Error;
@@ -370,6 +370,7 @@ fn claude_regex_fallback(name: &str) -> Option<String> {
 pub struct PricingCatalog {
     entries: HashMap<ModelRef, ModelPricing>,
     provider_defaults: HashMap<ProviderId, ModelPricing>,
+    explicitly_unpriced: HashSet<ModelRef>,
 }
 
 impl PricingCatalog {
@@ -379,6 +380,7 @@ impl PricingCatalog {
         Self {
             entries: HashMap::new(),
             provider_defaults: HashMap::new(),
+            explicitly_unpriced: HashSet::new(),
         }
     }
 
@@ -499,7 +501,20 @@ impl PricingCatalog {
     /// (Plan 3c §8).
     #[must_use]
     pub fn with_entry(mut self, pricing: ModelPricing) -> Self {
+        self.explicitly_unpriced.remove(&pricing.model_ref);
         self.entries.insert(pricing.model_ref.clone(), pricing);
+        self
+    }
+
+    /// Mark one provider/model route as intentionally unpriced.
+    ///
+    /// This blocks canonical and cross-provider fallback during resolution so
+    /// subscription routes cannot inherit a similarly named API price. The
+    /// cost tracker will use its normal unknown-model tier and surface the
+    /// route in `unpriced_models` instead of reporting a false token price.
+    #[must_use]
+    pub fn mark_unpriced(mut self, model_ref: ModelRef) -> Self {
+        self.explicitly_unpriced.insert(model_ref);
         self
     }
 
@@ -665,6 +680,9 @@ impl PricingCatalog {
     ///
     /// Returns [`CostError::UnpricedModel`] when nothing matches.
     pub fn resolve(&self, mr: &ModelRef) -> Result<(ModelPricing, PricingResolution), CostError> {
+        if self.explicitly_unpriced.contains(mr) {
+            return Err(CostError::UnpricedModel(mr.clone()));
+        }
         // 1. Exact match on the wire id.
         if let Some(p) = self.entries.get(mr) {
             return Ok((
@@ -984,6 +1002,21 @@ mod tests {
         assert!(matches!(
             c.resolve(&mr).unwrap_err(),
             CostError::UnpricedModel(_)
+        ));
+    }
+
+    #[test]
+    fn explicitly_unpriced_route_does_not_cross_provider_fallback() {
+        let mr = ModelRef {
+            provider: ProviderId::OpenAICompatible {
+                name: "github-copilot".to_string(),
+            },
+            model: "claude-opus-4-6".to_string(),
+        };
+        let catalog = PricingCatalog::builtin_reference().mark_unpriced(mr.clone());
+        assert!(matches!(
+            catalog.resolve(&mr),
+            Err(CostError::UnpricedModel(_))
         ));
     }
 

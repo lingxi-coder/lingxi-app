@@ -44,11 +44,10 @@ while IFS=$'\t' read -r slice_name model_id; do
   }
 done <<'EOF'
 openrouter	openrouter/auto
-openrouter	openrouter/free
-openrouter	openrouter/bodybuilder
-openrouter	openrouter/healer-alpha
-openrouter	openrouter/hunter-alpha
-openrouter	openrouter/pony-alpha
+openrouter	~anthropic/claude-sonnet-latest
+openrouter	~openai/gpt-latest
+openrouter	~openai/gpt-mini-latest
+openrouter	~google/gemini-flash-latest
 deepseek	deepseek-v4-flash
 deepseek	deepseek-v4-flash-vision-exp
 deepseek	deepseek-v4-pro

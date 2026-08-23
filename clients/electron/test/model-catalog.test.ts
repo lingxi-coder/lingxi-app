@@ -77,5 +77,5 @@ test('keeps Kimi Code separate from the pay-as-you-go Kimi provider', () => {
 });
 
 test('defaults Kimi Code to the model available on every membership tier', () => {
-  assert.equal(providerById('kimi-code')?.defaultModel, 'kimi-code/kimi-for-coding');
+  assert.equal(providerById('kimi-code')?.defaultModel, 'kimi-code/k3');
 });

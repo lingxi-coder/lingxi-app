@@ -245,8 +245,18 @@ pub fn builtin_presets() -> BuiltinCatalog {
                 display_pricing.tiers.clear();
             }
             models.push(profile);
-            if let Some(price) = to_pricing(model) {
-                pricing = pricing.with_price(preset.provider_id.clone(), model.id.clone(), price);
+            // Subscription routes do not have a per-token charge.  Some
+            // models.dev slices encode those plans as an all-zero price (and
+            // Copilot may publish the underlying API-equivalent rate), but
+            // exposing either value to CostTracker would turn a subscription
+            // into misleading "$0" or token-dollar usage.  Keep the display
+            // metadata above subscription-aware and leave the token catalog
+            // unpriced as well.
+            if preset.billing_mode != ModelBillingMode::Subscription {
+                if let Some(price) = to_pricing(model) {
+                    pricing =
+                        pricing.with_price(preset.provider_id.clone(), model.id.clone(), price);
+                }
             }
             // Multi-provider fix: register the model's real token limits so the
             // window / max-output functions return them for non-Claude models
@@ -402,6 +412,20 @@ mod tests {
                 assert_eq!(pricing.output_per_million, None);
             }
         }
+    }
+
+    #[test]
+    fn subscription_presets_are_absent_from_token_pricing_catalog() {
+        let catalog = builtin_presets();
+        let kimi_code = ProviderId::OpenAICompatible {
+            name: "kimi-code".to_string(),
+        };
+        assert!(catalog.pricing.get(&kimi_code, "k3").is_none());
+
+        let copilot = ProviderId::OpenAICompatible {
+            name: "github-copilot".to_string(),
+        };
+        assert!(catalog.pricing.get(&copilot, "claude-opus-4.6").is_none());
     }
 
     #[test]

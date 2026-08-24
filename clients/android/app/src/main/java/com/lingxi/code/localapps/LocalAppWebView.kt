@@ -645,6 +645,8 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
             url: location.href,
             documentState: document.readyState,
             viewport: vvOf(),
+            runtimeErrors: (window.__lingxiRuntimeErrors || []).slice(0, 8),
+            runtimeErrorsDropped: window.__lingxiRuntimeErrorsDropped || 0,
             // The host gate compares ONLY the pixels inside these rects, so a
             // DOM spinner cannot stand in for a frozen canvas. `canvasCount`
             // stays for compatibility with readers that only counted.
@@ -1445,6 +1447,45 @@ internal fun buildLingxiV1Bootstrap(formFactor: String): String {
 private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
 (() => {
   if (window.lingxi?.v2) return;
+      // Deliberately kept CHARACTER-IDENTICAL to the iOS source
+      // (LocalAppWebView.swift's bridgeSourceTemplate) and to the
+      // plan's Step 3 text, so its indentation intentionally differs
+      // from its neighbours here. Reformatting it would break the
+      // cross-platform identity that LocalAppsStoreTests (iOS) and
+      // LocalAppWebViewTest (Android) both pin.
+      // Criterion 6's evidence. A React ErrorBoundary swallows a render crash
+      // into console.error and never reaches window.onerror, so the console
+      // hook is the one that actually catches the shipped templates' failure
+      // mode. Bounded on count AND per-field length: `result_json` is capped
+      // at 256 KiB and FAILS rather than truncating.
+      if (!window.__lingxiRuntimeErrors) {
+        window.__lingxiRuntimeErrors = [];
+        window.__lingxiRuntimeErrorsDropped = 0;
+        const cap = 8;
+        const trim = (v, n) => String(v == null ? '' : v).replace(/\s+/g, ' ').slice(0, n);
+        const push = entry => {
+          if (window.__lingxiRuntimeErrors.length >= cap) { window.__lingxiRuntimeErrorsDropped += 1; return; }
+          window.__lingxiRuntimeErrors.push(entry);
+        };
+        window.addEventListener('error', e => push({
+          kind: 'error', message: trim(e.message, 200), source: trim(e.filename, 120),
+          line: e.lineno | 0, column: e.colno | 0, at_ms: Date.now(),
+        }));
+        window.addEventListener('unhandledrejection', e => push({
+          kind: 'rejection',
+          // Never expand an arbitrary rejection value — take a safe string only.
+          message: trim(e.reason && e.reason.message ? e.reason.message : e.reason, 200),
+          source: '', line: 0, column: 0, at_ms: Date.now(),
+        }));
+        const nativeConsoleError = console.error.bind(console);
+        console.error = function () {
+          try {
+            push({ kind: 'console', message: trim(Array.from(arguments).map(a => (a && a.message) ? a.message : a).join(' '), 200),
+                   source: '', line: 0, column: 0, at_ms: Date.now() });
+          } catch (ignored) { /* never let the ledger break the page */ }
+          return nativeConsoleError.apply(console, arguments);
+        };
+      }
   const installCsp = () => {
     if (!document.head || document.head.querySelector('meta[data-lingxi-csp]')) return false;
     const meta = document.createElement('meta');

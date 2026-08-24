@@ -261,6 +261,26 @@ class LocalAppWebViewTest {
         }
     }
 
+    /** Phase 1a twin of iOS `testDocumentStartInstallsABoundedRuntimeErrorLedger`. */
+    @Test
+    fun `document start installs a bounded runtime error ledger`() {
+        val bootstrap = buildLingxiV1Bootstrap("phone")
+        listOf(
+            "addEventListener('error'",
+            "addEventListener('unhandledrejection'",
+            "console.error = function",
+            "kind: 'console'",
+            "const cap = 8",
+            "__lingxiRuntimeErrors.length >= cap",
+            "__lingxiRuntimeErrorsDropped",
+        ).forEach { token ->
+            assertTrue("missing runtime-error ledger: $token", bootstrap.contains(token))
+        }
+        assertTrue(
+            buildLocalAppUiExecutionScript("""{"action":"inspect"}""").contains("runtimeErrors:")
+        )
+    }
+
     @Test
     fun `ui execution parsing rejects false null and no result envelopes`() {
         assertEquals(

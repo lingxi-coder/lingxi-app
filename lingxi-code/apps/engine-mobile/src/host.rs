@@ -969,6 +969,29 @@ fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
     entries
 }
 
+/// Tag an OAuth failure with the STAGE it happened in, and log it.
+///
+/// Every OAuth failure used to collapse into a bare
+/// `MobileEngineError::Internal(String)` that iOS renders through
+/// `error.localizedDescription`, so "the login failed" could equally mean the
+/// authorize URL was rejected, the callback never arrived, the token exchange
+/// 400'd, or the keychain write failed — four very different bugs sharing one
+/// indistinguishable message.
+///
+/// The `oauth/<provider>/<stage>: ` prefix is machine-readable and cheap.
+/// `MobileEngineError` deliberately gains no new variant: it derives
+/// `uniffi::Error`, so a new case would change the generated Swift enum.
+fn oauth_err(provider: &str, stage: &str, detail: impl std::fmt::Display) -> MobileEngineError {
+    tracing::warn!(
+        target: "lingxi::mobile_oauth",
+        provider,
+        stage,
+        error = %detail,
+        "oauth stage failed",
+    );
+    MobileEngineError::Internal(format!("oauth/{provider}/{stage}: {detail}"))
+}
+
 const IOS_OAUTH_REDIRECT_URI: &str = "lingxi://oauth/callback";
 const IOS_OAUTH_CALLBACK_SCHEME: &str = "lingxi";
 const MOBILE_OAUTH_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -1039,13 +1062,17 @@ fn validate_mobile_oauth_session(
     returned_state: &str,
 ) -> Result<(), MobileEngineError> {
     if std::time::Instant::now() >= session.expires_at {
-        return Err(MobileEngineError::Internal(
-            "OAuth login session expired".to_string(),
+        return Err(oauth_err(
+            session.provider.id(),
+            "session_expired",
+            "the login was not completed before the session timed out",
         ));
     }
     if session.flow_id != flow_id || session.state != returned_state {
-        return Err(MobileEngineError::Internal(
-            "OAuth callback state mismatch".to_string(),
+        return Err(oauth_err(
+            session.provider.id(),
+            "state_mismatch",
+            "the callback did not echo this flow's CSRF state",
         ));
     }
     Ok(())
@@ -1057,12 +1084,20 @@ fn take_mobile_oauth_session(
     returned_state: &str,
 ) -> Result<PendingMobileOAuthSession, MobileEngineError> {
     let session = pending.as_ref().ok_or_else(|| {
-        MobileEngineError::Internal("OAuth login session is no longer active".to_string())
+        oauth_err(
+            "unknown",
+            "session_missing",
+            "no OAuth login is in progress for this callback",
+        )
     })?;
     if std::time::Instant::now() >= session.expires_at {
+        // Read the provider off the borrow before clearing the slot.
+        let provider = session.provider.id();
         *pending = None;
-        return Err(MobileEngineError::Internal(
-            "OAuth login session expired".to_string(),
+        return Err(oauth_err(
+            provider,
+            "session_expired",
+            "the login was not completed before the session timed out",
         ));
     }
     validate_mobile_oauth_session(session, flow_id, returned_state)?;
@@ -1223,15 +1258,30 @@ impl MobileOAuthManager {
         redirect_uri: String,
     ) -> Result<MobileOAuthSessionDto, MobileEngineError> {
         if redirect_uri != IOS_OAUTH_REDIRECT_URI {
-            return Err(MobileEngineError::Internal(
-                "invalid OAuth redirect URI".to_string(),
+            return Err(oauth_err(
+                "unknown",
+                "redirect_uri",
+                format!("host supplied an unexpected redirect URI: {redirect_uri}"),
             ));
         }
         let provider = MobileOAuthProvider::parse(&provider)?;
         let mut pending = self.pending.lock().await;
+        // Evict an abandoned flow before refusing on conflict. Only
+        // `validate_`/`take_mobile_oauth_session` checked `expires_at`, so a
+        // login the user backgrounded (no `cancel_o_auth`) left the slot
+        // occupied and every retry failed for the whole
+        // `MOBILE_OAUTH_SESSION_TTL`.
+        if pending
+            .as_ref()
+            .is_some_and(|session| std::time::Instant::now() >= session.expires_at)
+        {
+            *pending = None;
+        }
         if pending.is_some() {
-            return Err(MobileEngineError::Internal(
-                "another OAuth login is already in progress".to_string(),
+            return Err(oauth_err(
+                provider.id(),
+                "session_conflict",
+                "another OAuth login is already in progress",
             ));
         }
         let (authorization_url, verifier, state) = match provider {
@@ -1240,6 +1290,16 @@ impl MobileOAuthManager {
             }
             MobileOAuthProvider::OpenAi => self.openai.begin_mobile_browser_login(&redirect_uri),
         };
+        // Log the URL actually opened. It carries no secret — the PKCE
+        // *challenge* is public by construction and the verifier never leaves
+        // Rust — and it is the only way to tell an authorize-page rejection
+        // apart from a client-side bug without rebuilding the app.
+        tracing::info!(
+            target: "lingxi::mobile_oauth",
+            provider = provider.id(),
+            url = %authorization_url,
+            "opening the authorize URL",
+        );
         let flow_id = uuid::Uuid::new_v4().to_string();
         *pending = Some(PendingMobileOAuthSession {
             provider,
@@ -1288,7 +1348,7 @@ impl MobileOAuthManager {
                     fedramp: false,
                 })
                 .map_err(|error| {
-                    MobileEngineError::Internal(format!("OAuth login failed: {error}"))
+                    oauth_err(session.provider.id(), "exchange", error)
                 }),
             MobileOAuthProvider::OpenAi => self
                 .openai
@@ -1303,7 +1363,7 @@ impl MobileOAuthManager {
                     fedramp: info.fedramp,
                 })
                 .map_err(|error| {
-                    MobileEngineError::Internal(format!("OAuth login failed: {error}"))
+                    oauth_err(session.provider.id(), "exchange", error)
                 }),
         }
     }
@@ -9192,8 +9252,19 @@ pub fn build_mobile_engine_inner(
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     // The handle OWNS its runtime (§0.5). A multi-thread runtime so a streaming
     // turn spawned by F3-05 runs concurrently with the FFI read path.
+    //
+    // The worker stack is set explicitly. A turn driven through
+    // `submit(SendPrompt)` builds a deep async state machine, and on tokio's
+    // 2 MiB default it overflows and aborts the process with SIGABRT — measured
+    // on `host::tests::submit_resume_session_mid_turn_is_rejected`, which
+    // reproduces at 2 MiB and passes at 4 MiB. It took the whole engine-mobile
+    // test binary down with it, so every test ordered after it silently never
+    // ran. 8 MiB is 2x the measured debug requirement; release frames are
+    // smaller, but the margin at the default was clearly not there. The size is
+    // reserved address space, not resident memory.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_stack_size(8 * 1024 * 1024)
         .build()
         .map_err(|e| MobileEngineError::Internal(format!("tokio runtime build failed: {e}")))?;
 

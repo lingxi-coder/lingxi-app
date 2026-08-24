@@ -640,33 +640,52 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
             const rect = element.getBoundingClientRect();
             return [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)];
           };
-          const snapshot = () => ({
-            title: clean(document.title),
-            url: location.href,
-            documentState: document.readyState,
-            viewport: vvOf(),
-            runtimeErrors: (window.__lingxiRuntimeErrors || []).slice(0, 8),
-            runtimeErrorsDropped: window.__lingxiRuntimeErrorsDropped || 0,
-            // The host gate compares ONLY the pixels inside these rects, so a
-            // DOM spinner cannot stand in for a frozen canvas. `canvasCount`
-            // stays for compatibility with readers that only counted.
-            canvases: deepQuery('canvas', 16).map(c => ({ rect: rectOf(c) })),
-            canvasCount: deepQuery('canvas', 64).length,
-            elements: candidates().slice(0, 200).map(element => {
-              const rect = element.getBoundingClientRect();
-              const sensitive = isSensitive(element);
-              return {
-                elementId: clean(element.id) || null,
-                role: roleOf(element) || null,
-                name: nameOf(element) || null,
-                value: sensitive ? null : clean(element.value),
-                checked: typeof element.checked === 'boolean' ? element.checked : null,
-                disabled: !!element.disabled,
-                visible: rect.width > 0 && rect.height > 0,
-                rect: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)],
-              };
-            }),
-          });
+          const snapshot = () => {
+            const out = {
+              title: clean(document.title),
+              url: location.href,
+              documentState: document.readyState,
+              viewport: vvOf(),
+              runtimeErrors: (window.__lingxiRuntimeErrors || []).slice(0, 8),
+              runtimeErrorsDropped: window.__lingxiRuntimeErrorsDropped || 0,
+              // The host gate compares ONLY the pixels inside these rects, so a
+              // DOM spinner cannot stand in for a frozen canvas. `canvasCount`
+              // stays for compatibility with readers that only counted.
+              canvases: deepQuery('canvas', 16).map(c => ({ rect: rectOf(c) })),
+              canvasCount: deepQuery('canvas', 64).length,
+              elements: candidates().slice(0, 200).map(element => {
+                const rect = element.getBoundingClientRect();
+                const sensitive = isSensitive(element);
+                return {
+                  elementId: clean(element.id) || null,
+                  role: roleOf(element) || null,
+                  name: nameOf(element) || null,
+                  value: sensitive ? null : clean(element.value),
+                  checked: typeof element.checked === 'boolean' ? element.checked : null,
+                  disabled: !!element.disabled,
+                  visible: rect.width > 0 && rect.height > 0,
+                  rect: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)],
+                };
+              }),
+              truncated: [],
+            };
+            // 256 KiB is a HARD failure on the result channel on iOS, and
+            // Android enforces no cap on `inspect` at all — so this ladder is
+            // the only thing bounding the payload there either way. Leave
+            // room for the JSON envelope and degrade in a fixed order rather
+            // than dying (iOS) or growing unbounded (Android).
+            const BUDGET = 200 * 1024;
+            const truncated = out.truncated;
+            const size = () => JSON.stringify(out).length;
+            for (const seg of ['elements', 'canvases', 'runtimeErrors']) {
+              if (size() <= BUDGET) break;
+              if (seg === 'elements') out.elements = out.elements.slice(0, 50);
+              else if (seg === 'canvases') out.canvases = [];
+              else out.runtimeErrors = [];
+              truncated.push(seg);
+            }
+            return out;
+          };
       try {
         if (request.action === 'inspect') return encode(snapshot());
         if (request.action === 'scroll') {

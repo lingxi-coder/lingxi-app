@@ -391,6 +391,21 @@ final class LocalAppsStoreTests: XCTestCase {
         )
     }
 
+    /// Phase 1a — `result_json` over 256 KiB is a hard failure, not a truncation
+    /// (`LocalAppWebView.swift:407-411`). The ledger must not be able to silence
+    /// the criterion it exists to feed.
+    func testSnapshotDegradesInAFixedOrderAndSaysSo() {
+        let source = LocalAppWebViewController.executionSource(requestJSON: "{}")
+        for token in [
+            "const BUDGET = 200 * 1024",
+            "for (const seg of ['elements', 'canvases', 'runtimeErrors'])",
+            "truncated.push(seg)",
+            "truncated: []",
+        ] {
+            XCTAssertTrue(source.contains(token), "missing payload budget: \(token)")
+        }
+    }
+
     /// The conversation-scope cwd (`RootView.makeSource(scope: .localApp(id))`)
     /// and the code browser resolve the SAME validated workspace directory —
     /// one derivation, `LocalAppWorkspacePath`, no second copy to diverge.

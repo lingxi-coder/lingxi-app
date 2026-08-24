@@ -281,6 +281,20 @@ class LocalAppWebViewTest {
         )
     }
 
+    /** Phase 1a twin of iOS `testSnapshotDegradesInAFixedOrderAndSaysSo`. */
+    @Test
+    fun `snapshot degrades in a fixed order and says so`() {
+        val script = buildLocalAppUiExecutionScript("""{"action":"inspect"}""")
+        listOf(
+            "const BUDGET = 200 * 1024",
+            "for (const seg of ['elements', 'canvases', 'runtimeErrors'])",
+            "truncated.push(seg)",
+            "truncated: []",
+        ).forEach { token ->
+            assertTrue("missing payload budget: $token", script.contains(token))
+        }
+    }
+
     @Test
     fun `ui execution parsing rejects false null and no result envelopes`() {
         assertEquals(

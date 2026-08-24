@@ -2,7 +2,7 @@
 
 > 取代 2026-08-22 落地的「create-first 表单」方案。旧的两步表单整体删除，**不考虑向后兼容**。
 >
-> 经过三轮核验：(1) 内部对抗式核验 116 条断言，31 条修正；(2) 外部 code review（3 P0 / 3 P1），5 条采纳、1 条修正后采纳，另有 4 处其自身不实；(3) 针对本次改稿的对抗式复审，32 条指控、11 条存活并已修正。记录见 §I。
+> 经过多轮内部核验、外部 code review 与用户决策收敛；完整记录见 §J。
 
 ## Context
 
@@ -13,6 +13,8 @@
 **核验推翻了对这个现象的归因**（§0）：那份本该每轮约束代理的工作区合约，在 iOS 上从来没有到达模型。代理不是无视合约，是没看见合约。
 
 本方案把创建过程移进对话：点「创建应用」立刻得到一个**空壳**，会话从第一轮起就扎在它自己的工作区里，代理逐步问清需求、提议名称与形态、经用户确认后落地脚手架。
+
+在这条对话式创建链路稳定之后，§I 以它为唯一入口扩展 Local App 的 2D/3D 运行时：移动端 WebView 先加入五种 profile，桌面 host 再加入 Godot 原生项目。游戏引擎实施**不得**与本方案的 create-local-app 重构并行修改同一技能、工具 schema 或 workflow；必须等本方案合并并通过验收后再开始。
 
 **保证分层**（这是本方案最重要的一条设计原则，见 §C.0）：
 - **保证**由不可绕过的机制提供——首次脚手架**清空可编辑面再写入**（§C.0.1）。判据只有一条：**确认之前写的代码，一个字节都不能进入正式应用。**
@@ -57,7 +59,7 @@
 | 空壳创建时机 | 点击「创建应用」那一刻，记录与工作区目录立即真实存在 |
 | 会话根目录 | 从第一轮起扎在应用工作区，**不引入会话重新扎根机制** |
 | 未完成应用 | 库里显示为「草稿·创建中」，点进去续上同一对话，可随时删除 |
-| 「基础模版」 | 就是 `dom` / `canvas` 两种形态，**不重新引入模版目录** |
+| 「基础模版」 | 底层仍只有 `dom` / `canvas` 两种 surface，**不重新引入面向用户的模版目录**；§I 的 runtime profile 选择 host-managed package/lock 与适配器，不新增第三种 WebView surface |
 | 空壳判据 | `AppRecord.scaffolded == false`（新增持久字段，§A.2） |
 | 脚手架完整性 | **首次脚手架先清空可编辑面再写入**（§C.0.1），不是逐路径覆盖 |
 | 创建模式 | **wire 到服务层同一个概念**：`CreateApp.mode` / `CreateMode::{Shell, Scaffolded}`。空 brief 只在 `Shell` 下合法（§A.3），`surface` 只在 `Scaffolded` 下有意义（§B.1） |
@@ -66,33 +68,35 @@
 | 状态提交点 | `scaffolded = true` 是 **commit point**，最后写，CAS（§C.1） |
 | 创建结果关联 | **`request_id`**，由 `CreateApp` 携带、成功与失败事件原样回传（§D.1） |
 | 协议版本 | **8.0.0**，本方案**先**落地并 bless；另一份 spec rebase 上来（§B.4） |
+| 游戏运行时交付 | 两阶段：先移动端 WebView 五种 profile，再在 desktop Local App host 完成后加入 Godot `NativeGame`（§I） |
+| 引擎依赖 | 不随主应用内置；按确认后的 profile 首次下载，以内容寻址 snapshot 复用（§I.4） |
+| 实施顺序 | 当前 create-local-app 重构先独立合并；§I 只能基于合并后的接口开发（§I.1） |
 
 ## 非目标
 
 - 不做会话 cwd / Linux 挂载点 / session catalog 的热切换。
 - 不重新引入模版目录或起手样板。
-- 不改 `LocalAppCreate` 工具（普通聊天里代理主动建应用那条路）的既有语义。
+- 当前 create-local-app 重构不改 `LocalAppCreate` 工具；后续仅按 §I.2 为它追加可选 `runtime_profile`，保留 `surface` 兼容路径，不改变创建授权、记录归属或会话语义。
 - 不做空壳的自动清理。
-- 不为设备上既有的应用做任何保留。**已确认：一并清掉**（§A.1，破坏性且不可逆）。
+- 不做旧本地应用数据迁移。本方案只在 **clean install** 上实现与验收；开发机上的旧 store 由重装/清数据移除（§A.1）。
 - 不开放「创建后改名」。§C.1 的名称写入是**首次命名**，且受 §C.1.4 的 hash 不变量约束。
+- Phase 1 不提供 Unity、Cocos、Defold、PlayCanvas 编辑器或第三方插件市场；Phase 2 的 Godot 只开放给 desktop host（§I.8）。
 
 ---
 
 ## A. 状态模型
 
-### A.1 既有应用：不保留（用户已确认）
+### A.1 前提：clean install，不做旧 store 迁移
 
-`manifest.surface == None` 今天还有一批持有者——脚手架拆分之前创建的应用（`local-apps/src/manifest.rs:277`：「`None` means the app predates the scaffold split and cannot be rebuilt」）。**本方案不为它们做任何保留。**
+这个 app 尚未发布，仍在开发阶段；本方案的安装与真机验收都会先卸载旧包或清除本地数据。实现面对的是一个空的 local-app store，**不存在**旧 `AppRecord`、旧 manifest、workspace、data 或 build 输出。
 
-⚠️ **后果真实且不可逆，写在这里不是免责声明，是验收前必须知道的事。** 装上这个版本之后，设备上既有的本地应用会被当成空壳：
+因此本方案：
 
-- 库里显示成「新应用 · 创建中」，真名与简介被隐藏；
-- 点击进的是引导对话，不是预览；
-- 一旦在那个对话里跑到 `LocalAppScaffold`，§C.0.1 会**清空可编辑面**——**老应用的源码就没了**。
+- 不实现旧记录迁移，也不把「缺 `scaffolded` 字段」解释成某种业务状态；
+- 不把既有应用延迟伪装成空壳，更不会在下一次 `LocalAppScaffold` 时清理旧项目；
+- 若开发机仍残留旧 store，视为不受支持的安装状态，先清数据再验收。
 
-⇒ 真机验收前若还想留住某个老应用，**先导出或另存**。这是明确选择的处置（「不保护，一并清掉」），不是疏漏。
-
-因此 §A.2 那个字段的存在理由**不再包含**「区分老应用」，只剩下面两条。
+这条前提把迁移问题从运行时代码中删除：新记录从创建那一刻起就必须显式携带 `scaffolded`，所有合法状态都由本版代码自己写出。
 
 ### A.2 判据：`AppRecord.scaffolded: bool`
 
@@ -101,15 +105,13 @@
 ```rust
 /// 工作区里是否已经落下脚手架。
 ///
-/// `#[serde(default)]` ⇒ 缺该字段的记录（本次改动之前创建的一切应用）一律加载成
-/// `false`，即空壳。这是明确选择的处置，见 §A.1——它们的源码会在下一次
-/// `LocalAppScaffold` 时被清掉。
+/// 每一条新记录都显式写入；缺字段是无效的旧 store（§A.1），不是空壳判据。
 ///
-/// 两个写 `true` 的地方，缺一不可：
-///   1. `CreateMode::Scaffolded`（`LocalAppCreate` 那条 create+scaffold 一步到位的路）
-///      **在构造记录时就写 `true`**；⛔ 漏掉这条，那条路建的每个应用都会永远停在空壳态；
-///   2. `LocalAppScaffold` 的提交点，把 `false` 翻成 `true`。
-#[serde(default)]
+/// 三个写入点，缺一不可：
+///   1. `CreateMode::Shell` 在构造记录时写 `false`；
+///   2. `CreateMode::Scaffolded`（`LocalAppCreate` 的 create+scaffold 路径）
+///      在构造记录时写 `true`；
+///   3. `LocalAppScaffold` 的提交点把 `false` 翻成 `true`。
 pub scaffolded: bool,
 ```
 
@@ -118,13 +120,13 @@ pub scaffolded: bool,
 1. **零额外 IO**：`surface` 只在 `AppManifest`（`manifest.rs:287`），**不在 `AppRecord` 上**。要把它送上列表行，`lower_record`（`local_apps_bridge.rs:251`）就得对每个应用多做一次 `load_manifest`（读文件+反序列化+validate，无缓存），而 `AppsChanged` 每次应用变更都发。
 2. **客户端可判**：`surface` 客户端根本拿不到，而草稿态要在列表行上判定。一个布尔随记录直接下发。
 
-代价：持久记录 schema 变更，牵连 `local-apps/tests/serde_compat.rs` 与 `local-apps/tests/fixtures/v1/apps/*/app.json`。必须有一条**从旧 fixture 加载**的测试断言 `scaffolded == false`——把 §A.1 的处置**钉死**，而不是让它靠 `bool` 的默认值悄悄成立。
+代价：持久记录形状改变，当前 fixtures 与结构体字面量都必须显式补字段。**不加 serde default，不写旧 fixture 迁移测试**；缺字段应当加载失败并提示清除开发数据，而不是静默变成可被清空的 shell。
 
 三种样子：
 
 | | `record.scaffolded` | `manifest.surface` | 工作区 | 库里显示 |
 |---|---|---|---|---|
-| 空壳（**含全部既有应用**，§A.1） | `false` | `None` | 新建的只有 `.lingxi/` 与引导版 `LINGXI.md`；既有的还留着老源码，但下次脚手架时会被清空 | 草稿 · 创建中 |
+| 空壳 | `false` | `None` | 只有 `.lingxi/` 与引导版 `LINGXI.md` | 草稿 · 创建中 |
 | 已成形未构建 | `true` | `Some(_)` | 脚手架已落地 | 草稿 |
 | 可运行 | `true` | `Some(_)` | 有 `build/store/dist/` | 就绪 |
 
@@ -172,7 +174,7 @@ pub enum CreateMode {
 
 **widget 快照的处置是「排除」而不是「改文案」**：`scaffolded == false` 的应用**整个不进快照**。这样不需要给 widget 的 DTO 加字段，也不会出现一个点不开的主屏图标。
 
-还有一处**逃出客户端**：`host.rs:9145` / `:9172` 用 `record.name` 作 pin 住的 init 会话**标题**，`"untitled"` 会写进持久化会话目录。处置：`LocalAppScaffold` 提交后**重命名该会话**（§C.1.5，post-commit 可重试）。
+还有一处**逃出客户端**：`host.rs:9145` / `:9172` 用 `record.name` 作 pin 住的 init 会话**标题**，`"untitled"` 会写进持久化会话目录。处置：`LocalAppScaffold` 提交后仅在标题仍是 mobile-empty 占位记录时**条件重命名**；用户已经 `/rename` 的标题不动（§C.1.5，post-commit 可重试）。
 
 ---
 
@@ -297,19 +299,19 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 
    ⚠️ **`LINGXI.md` 渲染顺序**：`scaffold_app_value` 的合约文本是 `format!("# Local App: {name} ({id})\n\nBrief: {brief}…", name = record.name, brief = record.brief)`（`local_apps_host.rs:3219`）。渲染时必须传 `proposed_record` 而不是创建时那份，否则写出来的是 `# Local App: untitled` + 空 Brief——而 `LINGXI.md` **只写这一次**（`restore_host_managed_files` 不含它，二次 `LocalAppScaffold` 被拒），且按 §0 它是**唯一**每轮到达模型的通道 ⇒ 整个对话问出来的需求会在唯一的长期载体里永久丢失。
 4. **提交点**：**一个** `with_app` 闭包内一次性持久化 `name` / `brief` / `workflow_model` / `scaffolded = true`（照 `set_init_session` 的 set-once CAS）。任何一步失败 ⇒ 四个字段一个都没落盘、`scaffolded` 仍是 `false`，预留随 guard 析构释放，构建锁随之释放，允许安全重试（重试安全正是因为 §C.0.1 每次都清空重来）。
-5. **post-commit**：重命名 pin 住的 init 会话（§A.4）。失败只记日志，不回滚。
+5. **post-commit**：对 pin 住的 init 会话做一次条件重命名（§A.4）。**只有最新生效的 `custom-title` 仍是带 `mobileEmptySession: 1` 的初始占位记录时**，才追加应用真名；如果用户已用 `/rename` 或 hook 写过普通 `custom-title`，立即尊重用户、不改名。失败只记日志，不回滚。
 
    ⚠️ **「可重试」必须有真正的触发器，否则只是措辞。** 现有的 boot backfill sweep（`host.rs:9354`）遍历每条记录、自愈目录漂移、补缺失的 pin，但**不碰已存在会话的标题**——所以一次失败的重命名今天永远不会被修好。⇒ 在那个 sweep 里加一条**标题对账**。
 
-⚠️ **判据不能是「标题不等于 `record.name` 就改」——那会在每次启动时抹掉用户自己改的标题。** `/rename`（`orchestrator/src/handle_impl.rs:632` 的 `append_custom_title`）、hook 的 `sessionTitle` 和 mobile 的初始占位**写的是同一条 `custom-title` 通道**，光看标题分不出来。唯一的分辨依据是 `append_mobile_empty_session`（`session/src/jsonl/writer.rs:516`）多带的一个字段：
+⚠️ **即时重命名和 boot 对账必须共用同一判据，不能只在 sweep 里保护用户标题。** 「标题不等于 `record.name` 就改」会抹掉用户自己改的标题。`/rename`（`orchestrator/src/handle_impl.rs:632` 的 `append_custom_title`）、hook 的 `sessionTitle` 和 mobile 的初始占位**写的是同一条 `custom-title` 通道**，光看标题分不出来。唯一的分辨依据是 `append_mobile_empty_session`（`session/src/jsonl/writer.rs:516`）多带的一个字段：
 
 ```json
 {"type":"custom-title","customTitle":"…","sessionId":"…","mobileEmptySession":1}
 ```
 
-对账条件收紧为：**该会话最新生效的 `custom-title` 记录仍然带 `mobileEmptySession: 1`** —— 即用户从未改过名 —— 且 `record.scaffolded == true` 且标题与 `record.name` 不符。一旦后面出现过普通 `custom-title`（没有该标记），**尊重用户，不动**。
+即时重命名与 boot 对账条件统一为：**该会话最新生效的 `custom-title` 记录仍然带 `mobileEmptySession: 1`** —— 即用户从未改过名 —— 且 `record.scaffolded == true` 且标题与 `record.name` 不符。一旦后面出现过普通 `custom-title`（没有该标记），**尊重用户，不动**。
 
-测试要有反例：`/rename` 之后跑 sweep，标题**不变**。
+测试要有两个反例：intake 期间先 `/rename` 再调用 `LocalAppScaffold`，即时重命名不得覆盖；`/rename` 之后跑 sweep，标题也必须**不变**。
 
 ⚠️ **两个标志的写入顺序相反，且都是有意的，不要「统一」它们。**
 `scaffold_app_value` 现有注释**刻意**先盖 `manifest.surface` 再写文件：「Stamping first means a crash between the two steps leaves an app that can be scaffolded again, not one that cannot」——那条性质保留。而 `record.scaffolded` 是**外层**的提交点，必须最后写。一个是「文件层可重入」，一个是「记录层已完成」，各自守各自的东西。
@@ -386,10 +388,12 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 
 | 条件 | 结论 |
 |---|---|
-| `manifest.surface == Some(_)` | 对应目标 |
-| `scaffolded == false` | 空壳 → 「这个应用还没有形态，先用 `LocalAppScaffold` 定下形态」 |
-| `scaffolded == true` 且 `surface == None` | 不可达（§A.1 之后没有这种记录）→ 视为存储损坏报错，不要静默 |
 | 有 `next.config.mjs` | 保持现有的 legacy 拒绝 |
+| `scaffolded == false` 且 `surface == None` | 空壳 → 「这个应用还没有形态，先用 `LocalAppScaffold` 定下形态」 |
+| `scaffolded == true` 且 `surface == Some(_)` | 对应目标 |
+| `false + Some(_)` 或 `true + None` | 本版代码不可产生 → 视为存储损坏报错，不要静默 |
+
+判断顺序要以 `scaffolded` 与 `surface` 的**组合**为准，不能先看到 `surface == Some(_)` 就直接返回目标；否则一个撕裂/损坏记录会绕过空壳门。clean install 前提意味着这里不承担任何旧状态迁移（§A.1）。
 
 ⚠️ **`detect_build_target(layout: &AppLayout)` 拿不到 `AppRecord`，但不用改签名也不用穿 `AppService`**：`storage.rs` 的 `AppMetadataFile` 就是 `apps/<id>/workspace/.lingxi/app.json`——整个 `AppRecord` 的镜像，只凭 `layout` 就能读（`metadata_rel(app_id)`），且 `repair_torn_commit` 明确它在撕裂提交时**优先于索引**。读它就是读 §A.2 那个持久事实，**不违反**本节「不要嗅探文件系统」的禁令——那条禁的是 `package.json` / `vite.config.mjs` 这类**被脚手架自己重写**的文件（循环论证），不是记录镜像。
 
@@ -478,7 +482,7 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 
 ### 引擎
 - `local-apps/src/types.rs` — `AppRecord.scaffolded`
-- ⚠️ `local-apps/tests/serde_compat.rs` + `local-apps/tests/fixtures/v1/apps/*/app.json`
+- ⚠️ `local-apps/tests/serde_compat.rs` + `local-apps/tests/fixtures/v1/apps/*/app.json` — 当前 fixtures 显式补 `scaffolded`；不增加缺字段迁移/default
 - `local-apps/src/service.rs` — ⚠️ `CreateMode::{Shell, Scaffolded}`（§A.3，同时决定 `scaffolded` 初值）；占位名；§C.1.5 的写入方法（提交写照 `set_init_session` 的 set-once CAS）；⚠️ `create_app_*` 及其四个包装构造函数加 `request_id` 参数
 - ⚠️ `local-apps/src/events.rs` — `AppEvent::AppCreated` 追加 `request_id`（§D.1：`AppCreated` 由服务层发出，不是 `host.rs`）
 - `apps/engine-mobile/src/local_apps_build.rs` — `scaffold_workspace_initialized` 的 `first_scaffold` **清空+写入**开关（§C.0.1）；`detect_build_target` 分支
@@ -511,7 +515,7 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 见 §0。**那条坐标测试必须先见红。**
 
 ### Rust
-- **旧 fixture 加载** → `scaffolded == false`（§A.1：既有应用一律按空壳处理）
+- **持久字段必填**：当前 fixtures 显式携带 `scaffolded`；缺字段的旧记录加载失败并提示清除开发数据，不得静默变成 shell（§A.1）
 - **空壳创建**：`scaffolded == false`；工作区只有 `.lingxi/` 与 `LINGXI.md`；引导版合约命中关键指令；空 brief 被接受
 - **`CreateMode` 分界**：`Scaffolded` 模式下空 brief **仍被拒**（旧不变量没被连坐废掉）、且记录 `scaffolded == true`；`Shell` 模式下空 brief 被接受、记录 `scaffolded == false`
 - **`Shell` 模式带 `surface` 被拒**（§B.1：形态只在脚手架时定）
@@ -531,7 +535,7 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
   - 二次调用（已成形）被拒；空 brief 被拒；未知 surface 被拒
 - **§C.1.4 hash 不变量**：断言首次落地前该应用没有数据库；并有一条测试证明「若数据库已存在则拒绝改 `manifest.name`」
 - **`detect_build_target`**：空壳给「先定形态」；`scaffolded == true` 且 `surface == None` 报存储损坏（各自独立断言）
-- **boot sweep 标题对账**：正例——最新 `custom-title` 仍带 `mobileEmptySession: 1` 且标题与 `record.name` 不符时，sweep 后被改正；⚠️ **反例——`/rename` 之后再跑 sweep，标题不变**（钉住不抹用户自定义标题）
+- **session 标题条件改名**：正例——最新 `custom-title` 仍带 `mobileEmptySession: 1` 时，Scaffold 成功后改为应用名；失败后由 boot sweep 用同一判据补偿。⚠️ 反例——intake 期间先 `/rename` 再 Scaffold，及 `/rename` 后再跑 sweep，标题都保持用户值（钉住即时与启动补偿都不抹用户标题）
 - ⛔ **不要改** `create_app_enforces_brief_caps` 与 `create_app_rejects_an_empty_brief`（§A.3）：它们走默认包装 = `Scaffolded`，必须继续绿。改了就等于拆掉该路径上唯一钉住空-brief 不变量的两条测试
 
 ⚠️ 跑法：`cargo test --workspace --all-features --no-fail-fast`。engine-mobile 的 local-apps 模块是 `#[cfg(feature = "uniffi")]`，不加 `--all-features` 整块被跳过。全量输出落文件再 grep（只 grep `FAILED` 会丢掉 `failures:` 块里的测试名），并盯**测试总数**是否下降。
@@ -549,14 +553,15 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 
 **不接受「编过了」。**
 
-**G.0（§0 单独验收，先做）**：在一个**已有**的本地应用会话里，让代理复述 `LINGXI.md` 里只在该文件出现过的一条约束。修复前它应当答不出来。
+**G.-1（clean install 前提）**：先卸载旧包或清除应用数据，启动后确认本地应用库为空。**不拿残留旧 store 验收本方案。**
+
+**G.0（§0 单独验收，先做）**：在干净安装上先创建一个测试用本地应用，再进入它的会话，让代理复述 `LINGXI.md` 里只在该文件出现过的一条约束。修复前它应当答不出来。
 
 1. 点「+」→ **不弹任何表单**，直接进对话，代理第一句在问你想做什么
 2. 回答「打飞机」→ 代理提议名称，并用**原生选项**让你确认形态，且它选的是 `canvas`
 3. 确认后应用成形、草稿标记消失、一路能构建出可玩的东西
 4. 反向用例：第 1 步就退出 → 库里留一张「创建中」卡片，点回去续上**同一个**对话
-5. **既有应用**（§A.1，破坏性）：装机前先确认设备上的老应用你**不再需要**，或已导出。装机后它们应当显示成「创建中」——这是预期，不是 bug
-6. **两端 widget 入口**：iOS 详情页、Android 新承载点各加一次成功
+5. **两端 widget 入口**：iOS 详情页、Android 新承载点各加一次成功
 
 ## H. 风险与已知留口
 
@@ -566,11 +571,262 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 - **门保证不了「代理真的问过用户」。** 它可能问完第一句就自作主张调 `LocalAppScaffold`。只能靠提示词，验收 G.2 就是在验它。若真机反复不过，下一步是让 `LocalAppScaffold` 要求一个「用户已确认」的证据字段——同样可被编造，本期不做。
 - **空壳会堆积**，没有自动清理，靠用户删。
 - **`AppRecord` 多了一个持久字段**，相对最初「不新增状态」的承诺是一次让步（§A.2）。
-- 🚨 **设备上既有的本地应用会被当成空壳，源码会在下次脚手架时被清空**（§A.1）。这是用户明确选择的处置（「不保护，一并清掉」），**不可逆**；验收前要留的先导出。
+- **旧 store 不受支持**（§A.1）。这是未发布开发版的 clean-install 决策，不实现迁移，也绝不把缺字段记录静默解释成可被清空的 shell；开发机残留数据先清除。
 - **8.0.0 的破坏面**：只有**桌面端**（Electron / `clients/shared`）在握手时硬失败。**iOS/Android 走 UniFFI 进程内调用，既没有握手也没有版本交换**（`grep CLIENT_PROTOCOL_VERSION` 在 `engine-mobile` / `ios-framework` / `android-aar` 零命中），失败形式是重新生成绑定后**编译不过**。
 - **跨计划协议冲突**（§B.4）需要人工协调，本方案不动另一份 spec。
 
-## I. 核验记录
+## I. Local App 2D/3D 游戏引擎实施方案
+
+本节建立在 §0-§H 的对话式创建链路上，不另造一条创建入口。交付分成两个阶段：先为 iOS/Android WebView Local App 增加可选 Web runtime profile；待 desktop Local App host 能管理非 WebView 项目后，再增加 Godot 原生项目。
+
+### I.1 实施门与交付顺序
+
+1. **先合并当前 create-local-app 重构。** §0-§H、协议 8.0.0、`LocalAppScaffold`、新创建入口行为和两条现有 workflow 必须先独立落地并通过 §F/§G。
+2. **游戏引擎工作不得与该重构并行修改** `skills/create-local-app/**`、`LocalAppCreate` / `LocalAppScaffold` schema、`local-app-build` 或 `local-canvas-build`。Phase 1 只能 rebase 到合并后的接口；若基线接口仍在变，停止引擎实现，不维护两套临时兼容层。
+3. **Phase 1：WebView profile。** 保持 `AppSurface::{Dom, Canvas}`，增加五个持久 runtime profile、profile-aware scaffold/lock/cache、创建推荐与 WebView 生命周期适配器。
+4. **Phase 2：Godot NativeGame。** 只有 desktop Local App host 已能创建、打开、运行和删除非 WebView 项目后才启动；不把 Godot 塞进 `AppSurface::Canvas`。
+
+Phase 1 是当前 design 的后续里程碑，不是 §0-§H 的合并阻塞项；Phase 2 又以 Phase 1 与 desktop host 为前置。每一阶段单独提交、单独验收，禁止半落地的 profile 字段先于对应 locked scaffold 上线。
+
+### I.2 持久化模型、公共接口与兼容性
+
+新增持久枚举：
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppRuntimeProfile {
+    ReactDom,
+    Canvas2d,
+    Three3d,
+    Phaser2d,
+    Babylon3d,
+}
+```
+
+`AppManifest` 追加 `runtime_profile: Option<AppRuntimeProfile>`。它与 `AppRecord.scaffolded` 的兼容策略不同：
+
+- Phase 1 创建的新 WebView 应用必须持久化 `Some(profile)`；
+- 缺字段或显式 `None` 表示 **legacy v1 scaffold**，继续使用现有 v1 host-managed 文件和 lockfile；
+- 读取 legacy manifest 时不推断、不回填，也不从源码、依赖树或 `surface` 猜 profile；
+- 这条兼容只保护无 profile 的 DOM、Canvas 与 Three.js v1 应用/fixtures，不撤销 §A.1 对旧 `AppRecord.scaffolded` store 的 clean-install 决策。
+
+profile 到 surface 的映射是公共不变量：
+
+| profile | surface |
+|---|---|
+| `react_dom` | `dom` |
+| `canvas_2d` | `canvas` |
+| `three_3d` | `canvas` |
+| `phaser_2d` | `canvas` |
+| `babylon_3d` | `canvas` |
+
+`LocalAppCreate` 追加可选 `runtime_profile`，保留现有 `surface`：
+
+| 输入 | 行为 |
+|---|---|
+| 有 profile、无 surface | 由上表派生 surface，走对应 profile scaffold |
+| profile 与 surface 都有且一致 | 接受，profile 是权威值 |
+| profile 与 surface 冲突 | 在写记录/manifest 前返回校验错误 |
+| 只有 surface | 旧客户端兼容路径，继续创建 legacy v1 scaffold，不擅自挑选引擎 |
+
+新客户端始终发送 profile；旧客户端继续使用 surface-only 路径。不能把 surface-only 的 `canvas` 自动升级成 `canvas_2d` 或 `three_3d`，否则会隐式替换旧 lockfile 和依赖树。
+
+Phase 1 同时把 §C.1 的 `LocalAppScaffold` 入参扩成 `{app_id, name, brief, runtime_profile, surface?, workflow_model?}`：对新对话式创建，`runtime_profile` 必填；兼容性 `surface` 若出现必须与 profile 一致。`LocalAppScaffold` 提交时一次性写入 profile 和派生 surface，仍以 `record.scaffolded = true` 为最后 commit point。
+
+profile 创建后不可修改：
+
+- `update_manifest`、重建、依赖安装与 workflow 都不得接受替换 profile 的参数；
+- host-managed restore 和 build 始终读取 manifest 中已经提交的 profile；
+- 需要换引擎时创建新应用，避免 package、lockfile、模板适配器与依赖 snapshot 被隐式替换；
+- manifest 有 profile 时，若 surface 与映射表不一致，按存储损坏拒绝，不自动修复。
+
+`runtime_profile` 和 `surface` 都会进入 `AppManifest::hash()`，因此沿用 §C.1.4 的数据库不变量：两者必须在首次 scaffold、任何 data store 打开之前一起写定，此后禁止修改。测试必须证明已有数据库时替换 profile 被拒，而不是等到下一次数据访问才报 manifest hash mismatch。
+
+`detect_build_target` 在 Phase 1 扩展为 profile-aware：先保留 §C.4 的 `scaffolded + surface` 完整性检查，再检查 profile/surface 映射；`Some(profile)` 选择对应 locked file set，`None` 选择 legacy v1。绝不通过 `package.json` 或 import 反推 profile。
+
+### I.3 智能推荐、用户覆盖与确认边界
+
+`skills/create-local-app/SKILL.md` 负责从已确认规格中评分并推荐 profile，固定规则如下：
+
+| 需求信号 | 推荐 profile |
+|---|---|
+| 表单、列表、页面导航 | `react_dom` |
+| 简单绘制、模拟或极小游戏 | `canvas_2d` |
+| 自定义着色器或轻量 3D | `three_3d` |
+| 精灵、Tilemap、2D 动画或碰撞 | `phaser_2d` |
+| 3D 模型、场景、动画或刚体物理 | `babylon_3d` |
+
+混合需求不能靠隐藏优先级静默决胜：若两类信号都会实质改变引擎选择，代理先追问主玩法/渲染需求，再给一个推荐与理由；用户始终可以覆盖推荐。
+
+确认仍发生在本方案的对话里，不重新引入被 §D 删除的两步创建表单。「创建前可以修改」在这里指 **`LocalAppScaffold` commit 前**；空壳记录和 pin 会话已经存在。原生 `AskUserQuestion` 确认界面必须显示：
+
+- 推荐 profile 与基于用户需求的理由；
+- 该 profile 当前是否已有可复用 snapshot、是否需要首次下载；
+- 五个可选 profile 和用户最终选择。
+
+为避免代理猜测缓存状态，Phase 1 新增只读 `LocalAppRuntimeProfiles` 工具（operation `runtime_profiles`）：返回 profile、surface、固定引擎版本、snapshot 是否 ready 与 `requires_download`，不触发网络或安装。它加入空壳工具门的放行集合；工具 catalog、默认权限计数和精确名字测试按 Phase 1 的实际表重新生成，不沿用 §C.1.6 的旧硬编码数。
+
+用户确认后的 profile 由 `LocalAppScaffold` 持久化。后续 `local-app-build` / `local-canvas-build` **只能读取已提交 profile**，workflow 参数不允许另带一个可覆盖值；正式 `LINGXI.md` 同步写入 profile。这样生成代理在确认后不能静默切换引擎。安装或构建失败也不改变 profile，用户只能重试或新建应用。
+
+用户确认 profile 即授权该 profile 的首次按需依赖下载；确认页只承诺「需要/不需要首次下载」，不承诺下载耗时。真正安装前仍由 host 在锁内重新检查 snapshot，避免确认期间缓存状态变化产生竞态。
+
+### I.4 Phase 1：依赖、pnpm 构建与内容寻址缓存
+
+host-managed 文件拆成两层：
+
+1. 所有 Web profile 共用的固定 Vite / React / Ionic 基础；
+2. profile 专属的 `package.json`、`pnpm-lock.yaml`、入口种子与运行时适配器。
+
+每个 profile 有独立、完全锁定的 package/lock：
+
+| profile | 额外引擎依赖 |
+|---|---|
+| `react_dom` | 无 |
+| `canvas_2d` | 无 |
+| `three_3d` | `three@0.185.1` |
+| `phaser_2d` | `phaser@4.2.1` |
+| `babylon_3d` | `@babylonjs/core@9.22.1`、`@babylonjs/loaders@9.22.1`、`@babylonjs/havok@1.3.14` |
+
+**包管理器锁死为 pnpm。** 依赖解析、安装、lockfile 和 snapshot 发布全部复用现有 host-owned `pnpm install` 路径；production build 继续调用由该 pnpm 安装物化出的固定 Vite entry。应用工作区、技能、workflow 和文档都不得建议或执行 `npm install`、`npm ci`、`npx`、Yarn，也不运行 package-manager scaffold 命令。
+
+所有引擎依赖均按需下载，不随 LingXi 主应用内置。`install_dependencies` 扩展为 profile-aware，但不新增下载服务：
+
+1. 读取已持久化 profile 和该 profile 的固定 package/lock；
+2. 用现有 dependency input/digest 机制生成包含 profile、lock SHA 与固定 toolchain provenance 的 SHA-256 snapshot key；
+3. snapshot ready 时直接物化到应用工作区，不访问网络；
+4. 未命中时在 host-owned 环境执行 `pnpm install --frozen-lockfile`，验证后原子发布 snapshot；
+5. 相同 profile、相同 lock 与 toolchain 的后续应用复用 snapshot。
+
+DOM 与 Canvas2D 的 lockfile、依赖树证明和构建产物不得出现 Three、Phaser、Babylon 或 Havok。各 profile 的依赖集合互不并入「大一统」lock；否则普通应用会为游戏引擎付下载、供应链与产物体积成本。
+
+无网络且 snapshot 不存在、下载中断或摘要不符时：保留应用记录、manifest、源码和已确认 profile，返回**可重试的依赖失败**；绝不降级到 Canvas2D、Three 或另一引擎。失败 snapshot 不发布，临时目录由现有依赖 staging 清理。
+
+供给链验证按 profile 生成并校验：
+
+- package 与 `pnpm-lock.yaml` SHA-256；
+- pnpm 实际依赖树证明；
+- 许可证清单；
+- SPDX SBOM；
+- snapshot 元数据中的 profile、toolchain 与 lock digest。
+
+### I.5 Phase 1：模板适配器与 WebView 生命周期
+
+Canvas workflow 不再统一要求 `createFrameLoop`。各 profile 只使用自己的生命周期所有者：
+
+- **React DOM**：保留现有 Vite + React/Ionic routed UI；不创建游戏帧循环。
+- **Canvas2D**：保留现有 DPR、resize、visibility、最大模拟步长与 teardown-safe `createFrameLoop`。
+- **Three**：adapter 统一 `WebGLRenderer` 的 size/pixel ratio、WebGL context lost/restored、animation loop 停止与 geometry/material/texture/renderer dispose。
+- **Phaser**：Phaser 自己创建并拥有 canvas、scene 与 frame loop；React 不再包一层逐帧循环。销毁时调用引擎 lifecycle，解除输入和 resize listener。
+- **Babylon**：Babylon 自己拥有 engine、scene 与 render loop。默认 WebGL2；WebGPU 只在 feature detect 成功后显式启用，失败仍按 WebGL2 路径创建，而不是运行中偷偷换 profile。
+- **Babylon physics**：profile 固定包含 Havok 包，但仅需求包含物理时初始化 Havok WASM；初始化失败返回可重试错误，不替换物理实现。场景销毁时释放 physics plugin、scene、engine、WASM/渲染资源和 listener。
+
+React/Ionic 只管理菜单、暂停、设置、Game Over 与 LingXi bridge。逐帧位置、速度、动画、粒子和碰撞状态禁止写入 React state 或 Zustand；游戏引擎/adapter 是高频状态的唯一所有者。
+
+游戏资源随应用写入 `public/`，不依赖外部 CDN；单文件继续受现有 32 MiB 静态资源限制。引擎自带的 host-managed WASM/运行时资产由 locked dependency build 管理，不允许生成代理用 CDN 绕开 pnpm lock 与 SBOM。
+
+### I.6 Phase 1：技能、workflow 与运行中保护
+
+重构合并后修改 `create-local-app`：规格收集完成后执行 §I.3 的评分、读取 profile/cache catalog、展示原生确认，再调用扩展后的 `LocalAppScaffold`。确认之前仍遵守 §C.0 的空壳清空保证。
+
+workflow 路由保持两条：
+
+- `react_dom` → `local-app-build`；
+- `canvas_2d`、`three_3d`、`phaser_2d`、`babylon_3d` → `local-canvas-build`。
+
+`local-canvas-build` 根据 manifest profile 生成对应 adapter/引擎代码，不从 spec 重新猜引擎，也不接受覆盖 profile 的 workflow args。共享的 repair/verify core 继续复用；profile 专属形状、证据和 lifecycle 检查留在 Canvas workflow 侧。
+
+必须先修现有 workflow 身份遗漏：
+
+- `tasks/src/handlers/local_workflow.rs` 当前只对 `workflow_id == "local-app-build"` 获取 workspace lease；改为同时识别两条 Local App build workflow；
+- `tasks/src/registry.rs::find_nonterminal_local_app_workflows` 当前也只识别 `local-app-build`；删除保护必须同时覆盖 `local-canvas-build`；
+- `tools/workflow/src/lib.rs` 已有两条 workflow 的身份集合，所有相关判定改成集合/公共 predicate，禁止再写单个字符串相等；
+- 表驱动测试逐条证明两条 workflow 都只能绑定目标应用 workspace、运行期间都阻止删除，非 Local App workflow 不受影响。
+
+生产构建继续使用固定 IIFE Vite 配置。Phaser、Babylon、glTF loader 与 Havok WASM 必须通过真实 frozen pnpm install + production build + WebView launch；只做 TypeScript/import 验证不算完成。重复 build/restore 必须继续使用 manifest 中的同一 profile 与 lock。
+
+### I.7 Phase 2：Godot 原生模式
+
+前置条件：desktop Local App host 已能创建、打开、运行、终止、删除并恢复**非 WebView**项目；移动 host 不进入本阶段。
+
+- 新增独立 `NativeGame` 项目类型以及 `godot_2d`、`godot_3d` 两种创建选项；不复用 `AppSurface::Canvas`，也不让 Web profile 枚举承载 Godot。
+- 第一版固定使用 [Godot 4.7.2 Standard](https://godotengine.org/download/archive/4.7.2-stable/)，不支持 .NET/C#。
+- 按当前 desktop OS/architecture 按需取得官方 Standard editor/runtime artifact 与 export templates；URL、版本、字节大小和 SHA-256 写入受版本控制的 toolchain manifest，下载后按该本地权威验证再进入版本化缓存，不在运行时信任远端最新版本或远端 checksum。若某平台用同一 Standard executable 的 `--headless` 模式运行，则 editor/headless 可以指向同一已验证 binary；不要假设官方一定发布独立 headless 文件。
+- 提供基础 2D/3D 场景、启动编辑器、运行项目和 headless export。编辑器进程与 export 进程由 desktop host 管理，项目目录仍走应用级互斥与删除保护。
+- 首版只导出当前 desktop OS 的可执行物；Android/iOS SDK、签名、商店发布与跨平台 export 作为后续里程碑。
+- Godot 项目不使用 `window.lingxi.v2`。需要 LingXi 原生能力时另行设计 Godot extension；首版不注入隐式 bridge，也不让 WebView workflow 操作 Godot 项目。
+
+所有 Godot artifact 同样按需下载，不随主应用内置。无缓存且离线时保留项目并返回可重试下载错误；摘要不符不得启动 editor/headless/export binary。
+
+### I.8 测试与验收
+
+#### I.8.1 Phase 1 功能与兼容性
+
+- profile 推荐、用户覆盖、profile→surface 映射、冲突校验和 profile 不可变性都有单元测试。
+- `runtime_profile` 与 `surface` 在 data store 打开前一次性写定；已有数据库时替换任一字段都被拒。
+- `LocalAppRuntimeProfiles` 的 `requires_download` 与 snapshot 实际状态一致，查询本身不访问网络。
+- 五种 Web profile 均能创建、frozen pnpm install、production build、启动和重建。
+- 无 profile 的 legacy DOM、Canvas 和 Three.js v1 fixtures 继续走原 scaffold/lock 并通过原测试；加载不会回填 profile。
+- 第一个 profile 安装发生网络访问；第二个相同 profile、lock 和 toolchain 的应用命中 snapshot，全程不访问网络。
+- DOM/Canvas2D 的 package、lockfile、依赖树、SBOM 和产物不包含 Three、Phaser、Babylon 或 Havok。
+- 离线缓存缺失、下载中断、摘要不符、Havok WASM 初始化失败和 WebGL context loss 都产生明确、可重试错误，不静默切换 profile 或引擎。
+- Phaser 与 Babylon 的 WebView 测试至少捕获两帧不同图像，并覆盖 pointer、键盘、旋转、后台恢复、context loss 和销毁。
+- profile 确认后，workflow 读取 manifest 中的选择；尝试从 workflow 参数换 profile 被拒。
+- `local-app-build` 与 `local-canvas-build` 都取得相同语义的 workspace lease，并在运行中阻止删除目标应用。
+- 负向测试扫描技能、workflow 与 host 文案，禁止 `npm install`、`npm ci`、`npx`、Yarn；唯一允许的包管理链路是 host-owned pnpm。
+- skill validator、workflow tests、Rust workspace tests、Android/iOS Local App tests、供给链验证和 SPDX SBOM 验证全部通过。
+
+#### I.8.2 Phase 1 性能基线
+
+以测试执行时近三代主流 iPhone 与 Android 真机为 60 FPS 基线。设备型号、OS、WebView 版本、电源/温控状态和每个 profile 的版本化 smoke scene 必须随结果记录；没有固定 scene/镜头/输入脚本的数据不可相互比较。
+
+- 标准 Phaser/Babylon smoke scene 预热后中位帧率 ≥55 FPS；
+- p95 frame time ≤25 ms；
+- 后台恢复后的首个模拟步长 ≤66 ms；
+- 输入到视觉响应 p95 ≤80 ms；
+- 连续 mount/unmount 20 次后 JS heap 增长 ≤稳定值的 10%；
+- DOM profile 相比当前 DOM 基线的 production 产物体积增长 ≤1%；
+- 记录每个 profile 的首次依赖安装时间、snapshot 命中率、构建时间、产物大小、运行内存和失败阶段。
+
+heap 与输入延迟通过测试 instrumentation 采集，不把调试探针带进 production bundle。性能 gate 失败时先缩减 smoke scene 或优化 adapter，不通过降低指标、切换 profile 或关闭供应链检查放行。
+
+#### I.8.3 Phase 2 Godot 验收
+
+- 无 Godot 缓存时只展示一次下载，完成后验证摘要并原子发布缓存；
+- 已缓存时可以离线创建、打开、运行和导出示例项目；
+- `godot_2d` 与 `godot_3d` 模板均通过 headless smoke test；
+- editor/headless/export 进程崩溃不会损坏项目；临时导出被清理，最后一次成功导出物继续保留；
+- 摘要不符、下载中断、运行中删除和重复并发导出都有负向测试；
+- 首版只验证当前 desktop OS，不把移动签名或商店发布算进完成条件。
+
+### I.9 实施所有权与主要文件
+
+Phase 1 预期影响以下所有权边界；实现时先以合并后的代码图重新核对，不能机械照抄当前行号：
+
+- `local-apps/src/manifest.rs` — `AppRuntimeProfile`、optional manifest 字段、映射/不可变性/legacy v1 校验；
+- `apps/engine-mobile/src/local_apps_build.rs` — profile-specific locked files、build target 与 production build；
+- `apps/engine-mobile/src/local_apps_host.rs` — pnpm install/snapshot、profile-aware scaffold、正式 `LINGXI.md` 与生命周期资产；
+- `apps/engine-mobile/src/local_apps_mcp.rs`、`local_apps_tools.rs` — `LocalAppCreate` / `LocalAppScaffold` 扩展、只读 profile catalog 与工具门；
+- `skills/create-local-app/SKILL.md`、`agents/openai.yaml` — 评分、推荐、下载提示、确认与 workflow 路由；
+- `tools/workflow/src/builtins.rs` 的 Canvas shape/core、`tasks/src/handlers/local_workflow.rs`、`tasks/src/registry.rs`、`tools/workflow/src/lib.rs` — profile generation、workspace lease 与删除保护；
+- supply-chain、dependency snapshot、SBOM 与 iOS/Android WebView 测试的现有模块和 fixtures。
+
+Phase 2 在 desktop host 下建立独立 NativeGame project/toolchain/cache/export 所有权；不得把 Godot 分支散落进 mobile `local_apps_build.rs` 的 `AppSurface::Canvas` match。
+
+### I.10 明确假设与留口
+
+- 「直接 HTML」指现有 Vite + React/Ionic DOM 应用，不新增纯 HTML/JS scaffold。
+- Phase 1 以 WebGL2 为跨 iOS/Android WebView 通用基线；WebGPU 只做 feature-detect，不承诺所有设备可用。
+- 用户确认 profile 后即授权该 profile 的首次按需依赖下载；下载失败可重试，不撤销已确认选择。
+- Phaser/Babylon/Havok 等包从 registry 获取不等于使用 npm CLI；项目包管理和 lock 权威始终是 pnpm。
+- 旧 manifest 无 profile 的兼容是冻结 v1 行为，不是迁移入口；不自动升级依赖，也不生成 profile。
+- Phase 1 不提供 Unity、Cocos、Defold、PlayCanvas 编辑器或第三方插件市场。
+- Phase 2 的 Godot 仅在 desktop host 开放；移动端继续使用 Phaser/Babylon 等 WebView Local App。
+- Godot extension、移动签名/商店发布、跨 OS export 与第三方 Godot 插件管理均为后续设计，不在首版隐式补齐。
+
+---
+
+## J. 核验记录
 
 ### 第一轮（内部对抗式，2026-08-23）
 9 个查证代理按断言簇分工，凡判「spec 写错」的再交给**默认反驳**的代理证伪。53 个代理、116 条断言，**31 条确认写错并修正，13 条被反驳代理推翻**。改变设计的四条：§0（工作区 `LINGXI.md` 在移动端从未加载，**推翻了对上一版真机现象的归因**）；§A.2（`surface == None` 与历史遗留应用重载）；§C.2（`app_id` 由 builtin 注入，门的判据不成立）；§D.1（落地布防依赖将被删除的 brief 认领）。
@@ -642,6 +898,20 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 「不需要兼容以前的旧版本」，据此改了两处，都是把此前为了兼容而做的将就撤掉：
 
 1. **§B.1 不再翻转 `surface` 的语义。** 初稿保持 `CreateApp` 结构不变、用 `surface: None` 兼作「不脚手架」，代价是一个字段两种含义（§H 曾把它列为接受的疤）。既然删提议变体本来就要 8.0.0 这个破坏性版本，保住 wire 形状换不到任何东西 ⇒ 改为显式 `mode: AppCreateModeDto`，与 §A.3 服务层的 `CreateMode` **同名同概念**，从 wire 一路贯到 `AppRecord.scaffolded` 的初值。§H 那条疤删除。
-2. **§A.1 不再保留既有应用**（用户在被明确告知「源码会被清空、不可逆」后选择「一并清掉」）。`scaffolded` 的 serde 默认从 `true` 翻成 `false`；§A.2 的四行状态表收缩为三行；§C.4 的历史遗留分支改为「不可达 ⇒ 报存储损坏」；§F 的旧 fixture 测试断言从 `true` 翻成 `false`；§G.5 从「老应用不受影响」翻成「老应用应显示为创建中，这是预期」。
+2. **§A.1 改为 clean-install 前提。** 产品尚未发布，开发与真机验收都会重装/清数据，因此不实现旧 store 迁移，也不把缺 `scaffolded` 的记录伪装成空壳。字段改为新记录必填；当前 fixtures 显式补值，残留旧 store 直接提示清除开发数据。
 
 ⚠️ 该字段本身**保留**：它的理由从「区分老应用」缩成两条仍然成立的——`surface` 只在 `AppManifest` 上（送上列表行要对每个应用多读一次 manifest，而 `AppsChanged` 每次变更都发），且客户端拿不到 `surface`。
+
+### 第七轮（用户澄清后的修复，2026-08-24）
+
+1. 用户明确说明产品尚未发布、会全部重装。此前「把所有旧记录默认成 shell，等下次 Scaffold 再清」的延迟迁移被删除：它既不需要，也会制造 `false + Some(surface)` 与已有数据库无法重建的矛盾。§A.1、§A.2、§C.4、fixtures、测试和真机验收统一到 clean install。
+2. session 标题保护从 boot sweep 扩到**即时 post-commit rename**。两条路径都只在最新生效的 `custom-title` 仍带 `mobileEmptySession: 1` 时改名；intake 期间的 `/rename` 或 hook 标题不会被 Scaffold 当场覆盖，也不会在重启后被覆盖。
+
+### 第八轮（2D/3D 游戏引擎扩展，2026-08-24）
+
+1. §I 新增两阶段实施门：当前 create-local-app 重构先合并，Phase 1 再增加五种 WebView runtime profile，Phase 2 等 desktop host 支持非 WebView 项目后加入 Godot `NativeGame`；禁止两批工作并行修改同一技能和 workflow。
+2. profile 作为 `AppManifest` 的可选持久字段，与现有 `AppSurface::{Dom, Canvas}` 正交；新创建持久化 profile，旧 manifest 的 `None` 冻结在 v1 scaffold/lock，不推断、不回填。`LocalAppCreate` 保留 surface-only 兼容，冲突 profile/surface 在写入前拒绝。
+3. 创建确认采用「固定推荐规则 + 用户覆盖」，新增只读 profile/cache catalog；最终 profile 在 `LocalAppScaffold` 提交后不可变，workflow 只能读取 manifest，不能静默换引擎。
+4. 五套依赖全部使用独立 `package.json` / `pnpm-lock.yaml`，复用 host-owned `pnpm install --frozen-lockfile` 与 SHA-256 snapshot；明确禁止 npm/npx/Yarn，并补齐 profile-aware 供应链、SBOM、离线失败和性能验收。
+5. 核对代码后登记了现有 workflow 身份遗漏：workspace lease 与运行中删除保护只认 `local-app-build`，Phase 1 必须同时覆盖 `local-canvas-build`。
+6. Godot 固定 4.7.2 Standard；按 OS 验证下载与 export templates。headless 允许复用同一 Standard executable 的 `--headless` 模式，不假设每个平台都有独立 headless artifact。

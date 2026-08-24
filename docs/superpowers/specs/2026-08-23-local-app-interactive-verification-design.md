@@ -125,8 +125,8 @@ Android-use 又是一套。把它塞进本设计只会得到一个只在本地�
 ─────────────────────                    ──────────────────────
 Design → Generate & Build                 用户玩 app
               │                            │ 点悬浮按钮进标注态
-      build_app 成功点 ──► 冒烟门           │ 拖框 → 描述
-              │  （宿主，不经模型）          ▼
+      [挂载点未定 · spike] ──► 冒烟门        │ 拖框 → 描述
+              │                            ▼
               ▼                        标注入清单（客户端，落盘）
         workflow 结束                       │ 提交
               │                             ▼
@@ -135,14 +135,14 @@ Design → Generate & Build                 用户玩 app
                               切到 app scope，send(prompt) 并留住 token
                                             ▼
                               agent 改源码 → LocalAppBuild ← 同一道冒烟门
-                                   → LocalAppRuntime restart
+                                   → 一次 document load（机制未定，见冒烟门一节）
                                             ▼
-                                  热重载 → 回到「用户玩 app」
+                                  页面刷新 → 回到「用户玩 app」
 ```
 
-**冒烟门挂在 `build_app` 的可服务成功点上，不是挂在 workflow 里。** 这是本轮最大的
-结构改动，理由见下节。右侧一列没有 workflow：它是 app 自己 scope 里的普通对话轮次，
-所以「刚创建完就改」与「三个月后再改」走同一条路径。
+⛔ **冒烟门的挂载点尚未确定，阻塞在一个 spike 上**（四个方案已被逐一证伪，见下节）。
+右侧一列没有 workflow：它是 app 自己 scope 里的普通对话轮次，所以「刚创建完就改」与
+「三个月后再改」走同一条路径。
 
 ### 标注（Annotation）
 
@@ -159,29 +159,75 @@ canvas 应用没有可命中元素，退化为「矩形 + 图 + 描述」，这�
 
 替换 workflow 里由 agent 自述的 gate。
 
-### 挂载点：`build_app`，不是 workflow VM
+### ⛔ 挂载点未定：阻塞在一个 spike 上
 
-`LocalAppsHostBroker::build_app` 有一个定义得很干净的「可服务」成功点：
-`served_index.exists()` 检查通过后 `mark_ready`（`local_apps_host.rs:3477-3492`），
-注释明写「"Ready" means SERVABLE, not "the build tool exited 0"」。**它与调用来源无关**。
+**四轮纸面设计，四个挂载点，四次被杀，四次死因互不相同。本节不再给出方案。**
 
-把门挂在那里，一次解决四件事：
+| 提案 | 死因（均在代码上验证） |
+|---|---|
+| ① workflow VM 新原语 `localAppSmoke()` | 是 `workflow::run_with_progress` 的签名变更（`workflow/src/lib.rs:827`），而 `tools/workflow/Cargo.toml` **没有 `tasks` 依赖边**（方向相反）⇒ trait 归属不成立；~16 个端到端契约测试会以 `ReferenceError` 挂掉 |
+| ② `build_app` 的可服务成功点 | **`build_app` 不启动 runtime**（`local_apps_host.rs:3500-3504` 只回一句 hint）⇒ 初次构建时没有 runtime、没有 WebView；修复构建时看的是**还没 reload 的旧页面** |
+| ③ `manage_runtime` start/restart | **restart 不重新加载页面**：端口刻意稳定 ⇒ URL 逐字节相同 ⇒ `LocalAppWebView.swift:938` 的 `guard loadedURL != url` 直接返回。另有四条独立失败（`start` 对运行中的 runtime 是成功的 no-op；agent 可以不调；`sceneWillEnterForeground` 会对每个先前运行的 app 调 `start`） |
+| ④ ②+ 门自己发 `reload` | **`.reload` 不在自动放行集**（`LocalAppsStore.swift:980` 只放行 `.inspect`/`.captureView`）⇒ 弹权限模态，无人应答则 `UI_TIMEOUT` 120 秒后 `Err` ⇒ **好构建被判失败**；且 reload 的结果在 `webView.reload()` **之后立即返回**（`LocalAppWebView.swift:384-387`），**没有任何 settle 信号**可等 |
 
-1. **修复轮次的构建自动获得同一道门。** 门若只在 workflow 里，那么验收后的每一次
-   修复构建（普通对话轮次）都不过任何检查——而**修复构建恰恰是最可能白屏的**：
-   初次构建是从确认过的 spec 从零生成，修复是按一句「分数一直不涨」在既有代码上动刀。
-2. **修复代理在同一轮就拿到宿主验证过的反馈**（「你改完之后首屏是空白」），
-   而不是等用户再报一次。
-3. **不需要新的 workflow VM 原语。** 早期版本要加 `localAppSmoke(appId)` 全局——
-   那是 `workflow::run_with_progress` 的**签名变更**（7 个定参，`workflow/src/lib.rs:827`），
-   而 `tools/workflow/Cargo.toml:14-21` **没有 `tasks` 依赖边**（依赖方向相反），
-   所以 trait 放 `tasks` 这个方案不成立；那 ~16 个端到端跑真脚本的契约测试会以
-   `ReferenceError` 而非断言差异挂掉，而「加个 `typeof localAppSmoke === 'function'`
-   守卫」会让 16 个全绿却从不执行这道门。
-4. 没有 journal 重放问题（`Plan::Cached`，`local_workflow.rs:1533-1544`），
-   因为根本不经过 agent 通道。
+### 任何方案必须同时满足的五条（这才是本节的实际产出）
 
-JS 只需要读构建结果里宿主写的 `smoke`，并用持久化的 `last_build_id` 校验它对应本次构建。
+1. **宿主保证触发**：不依赖模型记得调用什么。
+   ⚠️ 注意 `restore_checkpoint_value` **不走 `build_app`**，它直接调 `build_workspace`
+   （`local_apps_host.rs:3032-3036`、`:3044`）——**它是三个「产出被服务字节」的路径里唯一
+   会静默逃过门的那个**。早期版本称 `build_app` 「与调用来源无关」，不成立。
+2. **新鲜文档**：被观测的必须是刚构建出来的那份。静态服务器直接对着
+   `build/store/dist` 服务（`:2966-2967`）、`promote_build_root` 原地换目录
+   （`local_apps_build.rs:1136-1140`）⇒ **服务器不用重启，下一次 HTTP 请求就吐新字节；
+   缺的只是一次 document load**。缓存不是障碍：`index.html` 走 `no-cache` + ETag
+   （`:4618-4626`、`:4746-4755`），hashed asset 改名。
+3. **判定不经模型**。🚨 **这条四个方案全部没兑现**：`build_app` 的 `Err` 变成无结构的
+   `tool_error` 文本块（`local_apps_mcp.rs:1445` → `:620-626`），而 workflow runtime
+   **只观察工具名、从不检查结果**（`local_workflow.rs:1152-1156`）⇒ 判定只活在 subagent
+   自己的上下文里。而且 `requirePreviewOnSuccess` 拦不住：`start_runtime` 从不读
+   `workflow_state`，唯一前提是 `dist/index.html` 存在（`:2665-2675`）——**正是门的触发点
+   刚刚证明过的**⇒ 门失败后 agent 照样拿得到 URL 并返回 `{ok:true}`。
+4. **不需要用户在场**：`approvedUIAutomation`（`LocalAppsStore.swift:150`）是纯进程内存、
+   从不持久化 ⇒ 每次冷启后的第一次都会弹窗。后台/无人值守构建必须能过。
+5. **不越权**：`LocalAppBuild` 是 `AllowByDefault`，而 `LocalAppInspectUi`/`CaptureUi`/
+   `ActOnUi` 都是 `DenyByDefault`，`defaults_per_tool.rs:128-130` 写明了威胁模型
+   （*a pixel capture cannot redact anything it renders*）。**让免提示的工具把 DOM 读取和
+   像素捕获做成未经提示的副作用，是权限表上的洞，不是设计取舍。**
+
+### 下一步是 spike，不是第六轮纸面推演
+
+四次死因分别是**时序、页面加载语义、权限表、结果不可观测**——没有一条是靠更仔细地读代码
+能提前发现的，四次都是评审在事后从另一个角度撞出来的。按本仓库自己的判据
+（*重建视口的判据必然逃过单测；实测语义 + 真机取证*），继续在纸上迭代的期望收益是负的。
+
+**spike 的问题**：宿主能否在真机上，对一个刚构建完的 app，拿到一次**新鲜且不可伪造**的
+观测，且不需要用户在场、不越权、不抢占屏幕？
+
+三位评审收敛到同一个候选（**但它本身未经验证，不要当成结论**）：
+store 持有的**离屏 `WKWebView`**（按 `makeUIView` 同款配置挂到 key window、零尺寸），
+配一条**专用的、非 agent 的**宿主事件通道（与 `.inspect`/`.captureView` 同理由自动放行，
+且**绝不写入 `approvedUIAutomation`**），用显式
+`load(URLRequest(cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))` 而非 `reload()`，
+从 `didFinish`/`didFailProvisionalNavigation` 结算。它同时绕开 ①②③④ 的全部死因，
+并且**顺带消除了「门会把用户从聊天里拽走」这个 UX 问题**。
+
+spike 的验收标准就是上面那五条，每条都要在**真机**上被证伪或证实——尤其第 3 条，
+它是本设计存在的全部理由。
+
+**在 spike 有结论之前，阶段 2 不可计划。** 阶段 1 与阶段 3 不依赖它，可以先做。
+
+### 顺带确认的一个结构性缺口：热重载不存在
+
+本文数据流最后一步「热重载 → 回到用户玩 app」**当前没有任何机制实现**。客户端只有三条
+reload 路径：首次挂载（`LocalAppWebView.swift:927-929`）、URL **变化**时的
+`updateUIView`（`:938-941`）、以及 agent 主动发的 `reload` 动作（`:384-387`）。
+**没有任何东西响应 runtime 状态变化**，而 restart 又不改 URL。
+
+所以今天：用户报问题 → agent 改好 → 重建 → 重启 → **WebView 仍显示旧页面**。
+`docs/local-apps/HANDOFF.md:397-401` 那条「Preview shows old code」记的就是这个，
+但它被写成了提示词纪律（「repair build 必须 restart」），而 restart 根本不解决它。
+
+这个缺口与门共用同一个解（一次 document load），所以由同一个 spike 覆盖。
 
 ### 判据
 
@@ -306,25 +352,46 @@ ClientCommand::StoreAppAnnotation {
 （`LocalAppsStore.swift:267`）。**不要用「uniffi 元数据快到上限」当理由——实测
 `AppEventDto` 15.8%、`ClientEvent` 28.7%，不成立。**
 
-### 落盘位置：`apps/<id>/annotations/`，不在 workspace 里
+### 落盘位置：`workspace/.lingxi/annotations/<annotation_id>.jpg`
 
-🚨 **不能写进 `workspace/.lingxi/`**，两个独立原因：
+⛔ **早期版本把它移到 `apps/<id>/annotations/`（workspace 之外）。那是错的，已撤回。**
+移出去的两条理由，一条被证伪、一条是独立 bug 本来就要修；而移出去**引入了一个致命
+新问题：agent 根本读不到那张图**——guest 只挂了 `/workspace/local-app-<id>`
+（`LocalAppCodeBrowser.swift:56`，就是 workspace 目录本身），而
+`escapes_local_app_workspace`（`workspace_lease.rs:202`）注释明写
+「deliberately evaluated **before** generic allow rules」。路径够不着，权限也拒。
 
-1. **`.lingxi` 是构建键的输入。** `collect_workspace_inputs` 的跳过表只有
-   `.git | .lingxi-build-state | node_modules | dist`（`local_apps_build.rs:766-769`）。
-   往 `workspace/.lingxi/` 里写任何可变内容 ⇒ **这个 app 的构建缓存永远不再命中**
-   ⇒ 每轮修复都是一次真机上的完整离线 `vite build`。本设计的出发点之一是「慢」。
-   （模块自己那份包含 `.lingxi` 的「非构建输入」清单 `:1470-1481` 只有 `#[cfg(test)]`
-   到得了。）
-2. **checkpoint restore 会把整个 workspace 读进内存两次、把未跟踪文件删掉再重写**
-   （`checkpoints.rs:210-214, 297-360`）。restore 期间存下的标注会被 ack 一个**已经不存在
-   的路径**。
+逐条清算当初那两个理由：
 
-所以标注落在 `apps/<id>/annotations/`（workspace 之外，`storage.rs` 的 app 目录下），
-引擎回工作区**之外**的相对路径。同时**仍要把 `".lingxi"` 加进 `:766-769` 的跳过表**——
-`spec.md` 和将来任何写进去的东西都会踩同一个坑，且这是独立的在线缺陷
-（`restore_host_managed_files` 在 `:637-639` 于键计算 `:642` **之前**重新钉住
-`.lingxi/source-policy.json`，所以它的字节是常量，加进跳过表是安全的）。
+1. **「`.lingxi` 是构建键输入」——真的，但它是一个独立在线缺陷，修它就完了。**
+   跳过表只有 `.git | .lingxi-build-state | node_modules | dist`
+   （`local_apps_build.rs:766-769`），按 `file_name` 在任意深度匹配。加 `".lingxi"` 安全：
+   `source-policy.json` 由 `restore_host_managed_files` 在 `:639` 于键计算 `:642` **之前**
+   从编译进二进制的字节重新钉住，恒定；`app.manifest.json` 唯一与构建相关的字段
+   `surface` 已经通过 `target.cache_tag()`（`:735`）独立折进键里；其余
+   （`settings.local.json`/`app.json`/`design-spec.json`）是纯服务状态——**它们正是今天在
+   churn 这个键的东西，跳过它们本身就是那个 bug 的修复**。
+2. ⛔ **「checkpoint restore 会删掉它」——假的，我把代码读反了。**
+   `.lingxi` **本来就被整目录递归特殊处理**：`exclude_service_documents`
+   （`checkpoints.rs:257-274`）往 `.git/info/exclude` 写的是目录模式 `/.lingxi/`，
+   且每次 `open_or_init` 都重写；`untrack_service_documents`（`:290-302`）
+   `index.remove_dir(APP_STATE_DIR, 0)` 整目录；`read_service_documents`（`:314-347`）
+   **只递归 `.lingxi/`**，不是整个 workspace；而 restore 的 checkout 请求的是
+   `remove_untracked(true)` 而**不是** `remove_ignored`——`checkpoints.rs:249-251` 明确
+   记录了这个区分。标注放在 `.lingxi/` 下能扛过 restore 两重。
+
+可读性也已核实为三层独立成立：租约层 Reader 被**刻意豁免**
+（`workspace_lease.rs:303-306, 355-358`，还有一条按名字钉住它的测试
+`host_owned_metadata_is_readable_but_never_writable` `:807-822`，断言
+`allows("Read", ".lingxi/settings.local.json") == true`）；模板种下的
+`settings.local.json` 授 `Read(./**)`、只 deny `Edit(./.lingxi/**)`；
+glob 走 gitignore 语义（`filesystem.rs:521`），`permission/src` 里**没有任何隐藏文件规则**。
+
+🚨 **文件名必须是 `annotation_id`，不是时间戳序号。** 这是重启对账能做对的前提，
+见「标注清单的持久化与状态机」。
+
+**仍然要做**：把 `".lingxi"` 加进 `:766-769` 的跳过表——它是独立在线缺陷，
+且 `spec.md` 与将来任何写进去的东西都会踩同一个坑。
 
 🚨 **`engine-mobile` 必须开 `image-read`。** 现在是
 `tool-file = { path = "../../tools/file" }` **裸依赖**（`Cargo.toml:216`），
@@ -499,19 +566,66 @@ RootView 的 `onSubmitAnnotations(appID, batchID, prompt)` 是唯一入口。
 
 清单必须落盘：进程在 `StoreAppAnnotation` 成功后终止会丢掉清单却留下孤儿文件。
 照抄 `LocalAppWebsiteDataStoreRegistry`（`LocalAppWebView.swift:1302` 起）——带版本的
-`Codable` 日志 + 与权威状态对账（`:1358`）。重启时与 `apps/<id>/annotations/` 的实际文件
-对账：盘上有清单里没有的删掉，清单里有盘上没有的降回 `draft(error)`。
+`Codable` 日志。
+
+⛔ **早期版本写「盘上有清单里没有的就删掉」。那会删掉它本来要保护的证据，已撤回。**
+本节承认的窗口正是「引擎写完图、客户端还没提交日志就崩」，而在那个窗口里删除
+= **删掉刚存好的截图**。而且我引的先例被我用反了：`removeDataForDeletedApps`
+（`:1358`）是**日志驱动的删除**——只删日志点名**且**被权威快照确认的条目
+（`:1356-1360`），并且在破坏性操作**之前**先记录意图（`:1334` 的注释原话是
+Journals the exact store identifier BEFORE the engine is asked to delete，
+`prepareForDeletion` `:1337`，引擎拒绝时还有 `cancelDeletion` `:1350` 回滚）。
+我把「日志驱动」写成了「日志差集」。
+
+正确做法**不需要 WAL、不需要 sidecar、不需要隔离区**——**让文件名就是 `annotation_id`**
+（命令本来就带这个参数，它本来就贯穿清单/batch/回执）。于是：
+
+- 盘上有、清单没有 ⇒ **按文件名里的 id 恢复成 `stored`**，不是删除
+- 清单有、盘上没有 ⇒ 降回 `draft(error)`
+- 真正无法归属的文件（id 不是合法 UUID）才回收，且只在该 app 无待提交批次时
+
+（早期版本的文件名是 `1787543300-1.jpg` 这种时间戳序号，**不携带任何归属信息**——
+那才是逼出「只能靠差集猜」的根源。）
 
 ```
-draft ──Store 成功──► stored ──TurnStarted──► submitted ──output_digest 变化──► cleared
-  │                      │                        │
-  └──Store 失败──►draft(error)                     └──turn cancelled/failed──► stored(可重试)
+draft ──Store 成功──► stored ──TurnStarted──► submitted
+  │                                             │
+  └──Store 失败──► draft(error)                  ├──digest 变化──► buildObserved
+                                                │                     │
+                                                │        turn completed 且门通过 ──► cleared
+                                                │                     │
+                                                └──turn cancelled/failed/无构建──► stored(可重试)
 ```
 
-🚨 **清理必须比 `build_id`。** `build_cache_hit` 在写任何 provenance 之前就
-`return Ok(())`（`local_apps_build.rs:642-644`），而 `build_app` 仍视其为成功——
-所以 agent 为了复现问题先跑一次 `LocalAppBuild`（无改动）就会清掉你整批标注。
-判据用 **`output_digest` 变化**（`:659,661`，只在 miss 路径产生），`build_id` 只作 correlator。
+🚨 **`submitted` 不能直接跳到 `cleared`。** 构建成功严格早于 runtime 重启，重启严格早于
+turn 结束，而 turn 在成功构建之后仍有**六个失败发布点**：`ConversationSource.swift:2385`
+（用户 Stop / `cancelAndWait`）、`:4233/:4237/:4241/:4248`（`turnEnded` 四种映射）、
+`:5306`（传输/协议/服务端/拒绝/内部错误）、`:3820`（斜杠命令）。而清理事件
+（`AppEvent::RecordChanged` → `local_apps_bridge.rs:216-220` → `LocalAppsStore.swift:911`）
+**完全不与 turn 耦合**——构建打戳那一刻就到了。
+
+所以中间态 `buildObserved` 是必须的：digest 变化只记录「有新产物」，**只有在 token 匹配的
+`ConversationTurnCompletion.completed` 到达、且门通过之后才清理**。
+
+🚨 **清理必须比 `output_digest`，而 `build_workspace` 今天不告诉调用方它变没变。**
+`build_cache_hit` 在写任何 provenance 之前就 `return Ok(())`（`local_apps_build.rs:642-644`），
+而签名是 `async fn build_workspace(...) -> Result<(), AppError>`（`:589`）——**缓存命中与
+真实重建对调用方逐字节相同**。所以 agent 为了复现问题先跑一次无改动的 `LocalAppBuild`
+就会清掉整批标注。
+
+修法**不需要任何协议工作**（早期评审建议加持久化 digest 字段 + DTO + bless，那是错的）：
+digest 本来就在每次构建时算出来，只是从没离开过 `local_apps_build.rs`。
+
+- 在 `build_workspace` 里把**上一版**被服务树的 digest 提前取出——`digest_tree(dist)`
+  已经在 `build_cache_hit`（`:889`）里算了。**这个顺序是硬要求**：`promote_build_root`
+  （`:1136-1140`）先把旧 `build_root` rename 走，`write_build_provenance` 在下一条语句
+  （`:664`）才写新的 `build.json`，所以 `build_workspace` 一返回旧 digest 就没了。
+- 返回类型加宽成 `Result<bool, AppError>`（或两变体的 `BuildOutcome`），语义是
+  **被服务的 `dist` digest 变了**：缓存命中处（`:643`）为 `false`；miss 路径比
+  `output_sha256`。两个 digest 直接可比——`validate_build_output`（`:979-989`）与缓存
+  路径算的是同一棵树。
+
+`build_id` 仍然只作 correlator。
 
 ### `build_id`：持久化 UUID，落在 `AppRecord`
 
@@ -558,7 +672,7 @@ draft ──Store 成功──► stored ──TurnStarted──► submitted �
 
 | 场景 | 行为 |
 |---|---|
-| 构建仍在跑时提交标注 | **直接提交**。build-vs-build 已被进程互斥锁 + per-app 文件锁排除（`local_apps_build.rs:626,634`），不再建客户端排队机制 |
+| 构建仍在跑时提交标注 | **未定，见「source-vs-source 竞态」** |
 | `StoreAppAnnotation` 失败 | 按回显 `annotation_id` 把该条留草稿标红；其余照常提交，正文只列成功落盘的 |
 | 裁剪图超尺寸 | 引擎按质量阶梯降质；仍超则拒绝该条并回 `error` |
 | 矩形内无命中元素 | 正常提交，元素段写「（无 DOM 元素，canvas 区域）」 |
@@ -570,9 +684,30 @@ draft ──Store 成功──► stored ──TurnStarted──► submitted �
 | `inspect_ui` 载荷被降级 | 判据 6 判 `infrastructure_unavailable`，不判通过 |
 | 用户在 agent 操作中途进标注模式 | 允许；overlay 接管触摸不影响 `act_on_ui`（注入 JS 合成事件，不经 UIKit 触摸链） |
 
-**并发写入风险（明确记录，未消除）**：另一条会话仍可能在同一时刻对同一工作区发起编辑
-轮次。`WorkspacePermissionLeaseRegistry` 是**授权**而非**互斥**机制
-（`permission/src/workspace_lease.rs:60-83`）。若实测出现冲突再引入 app 级编辑互斥。
+### 🚨 source-vs-source 竞态：砍掉排队机制的理由不成立
+
+早期版本砍掉客户端排队，理由是「build-vs-build 已被锁排除」。**锁只包住构建，不包住编辑。**
+`local_apps_build.rs:626-627` 的进程级 `Mutex` 与 `:633-634` 的 per-app `flock` 都在
+`build_workspace` **内部**，只覆盖 restore-host-files → build-key → Vite → promote；
+任何 agent 的 `Edit`/`Write` 都不取这两把锁。唯一的另一个串行器 `reserve_turn`
+（`host.rs:5361-5366`）是 **turn-vs-turn**，而 **workflow 不是 turn**。
+
+交错路径**是本设计自己的 happy path，不需要用户做任何刁钻操作**：
+
+1. app 会话里 agent 启动 `local-app-build`，工具返回 `async_launched`
+   （`tools/workflow/src/lib.rs:1-9`、`:943`），**turn 结束，turn 槽位空出来**；
+2. workflow 在 runtime-spawned worker 里继续跑（`local_workflow.rs:2036`；`:2059` 明说基线
+   「fixed for this workflow's life **even as later turns update** the orchestrator's live
+   baseline」），generate 阶段已起 runtime，app 已可预览；
+3. 用户开始标注并提交 ⇒ 一个**新 turn** 编辑源码，而 workflow 的修复轮**同时**在编辑源码。
+
+`WorkspacePermissionLeaseRegistry` 救不了：它是**授权**不是**互斥**
+（`permission/src/workspace_lease.rs:60-83`）。
+
+**本轮不给方案**——候选（进程级 per-app 编辑租约 / 把活动状态放进 process-wide app service /
+恢复排队但改用可靠的终态信号）各有代价，而上一轮凭「读起来像能行」就砍掉排队机制正是这条
+缺陷的来源。**与冒烟门的 spike 一并决定**：两者都取决于同一个问题——宿主对某个 app 的活动
+状态究竟有没有一个可靠的、进程级的真相源。
 
 ## 测试策略
 
@@ -607,7 +742,10 @@ draft ──Store 成功──► stored ──TurnStarted──► submitted �
   已在同 scope 时保留当前 session；无关 source 正 streaming 时不 `cancelAndWait`；
   `sessionTransitionPending` 不被误判成失败；turn cancelled/failed 让 batch 可重试。
 - **controller 串行**：慢 `execute` 与并发 `makeAnnotation` 观察到同一个 document generation。
-- 清单持久化：杀进程后重启，清单与 `annotations/` 目录对账正确。
+- 清单持久化：**必须进入 in-flight 窗口**——在引擎写完图之后、客户端提交日志之前杀进程，
+  重启后那条标注必须以 `stored` 恢复且**图还在**。
+  ⚠️ 早期版本的测试是「重启后清单与目录对账正确」，那是**自我实现的**：它断言的正是
+  规则本身，永远进不了那个窗口。
 - 清理：两次无改动的连续 build ⇒ `build_id` 不同、`output_digest` 相同、**batch 存活**。
 - ⚠️ WebView 与预览路由**当前没有 `accessibilityIdentifier`**，overlay 需要自己的 id；
   **SwiftUI 容器上的 `accessibilityIdentifier` 会覆盖所有子元素的 id**，
@@ -629,12 +767,14 @@ agent-facing contract 判绿。
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
 | 1 | 两端 `inspect_ui` 几何/canvas rect/runtimeErrors（含 `console.error` 与载荷预算）+ `capture_ui` 区域（修正后的裁剪数学）+ `image-read` + `.lingxi` 进构建键跳过表 + 两处 `local-app-build` 字面量改集合判定 | 无。**完全不碰协议** |
-| 2 | 冒烟门挂 `build_app` + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 的可见信号 | 1 |
+| **spike** | 宿主能否拿到新鲜且不可伪造的观测（五条验收，真机） | 1 |
+| 2 | 冒烟门 + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 可见信号 + source-vs-source 的决定 | **spike** |
 | 3 | `StoreAppAnnotation` + `AppRecord.last_build_id` + 唯一一次 bless | 1 |
 | 4 | iOS overlay + controller 串行 + 标注状态机与持久化 + 提交路由 | 1 与 3 |
 | 5 | 副驾驶条（两态）+ 引导（**先单独评审**，见该节警告） | 4 |
 
-阶段 1 与 3 可并行。阶段 1 是 2 的硬前置（判据依赖 1 新增的 rect 与 runtimeErrors）。
+阶段 1 与 3 可并行。阶段 1 是 spike 与 2 的硬前置。
+**阶段 2 在 spike 出结论前不可计划**；阶段 4、5 不依赖它。
 
 ## 不属于本设计的在线缺陷（建议单独开条目）
 
@@ -728,6 +868,31 @@ engine-mobile 开 `image-read`（否则 agent 根本读不了标注图）；cont
 （registry 是每引擎一个，跟会话过滤无关）；「deadline 需要跨 crate 签名重构」
 （论据错引 `#[cfg(test)]` 里的调用点）；「并发提交会乱序回执」（`@MainActor` 顺序）；
 「uniffi 元数据已接近上限」（实测 15.8%/28.7%）；「Android 绑定是签入的」（gitignored）。
+
+### 第五轮（Codex 6 条 + 定向核验 + 三角度攻击）
+
+七条全部成立。**其中两条 P0 是第四轮我自己的修复造成的**：把门挪到 `build_app`
+（那里没有 runtime），把标注挪出 workspace（那里 agent 读不到）。搬迁是两个改动，
+我只审了搬走那半。
+
+- **标注位置搬回 `workspace/.lingxi/annotations/`**，文件名改成 `annotation_id`。
+  当初搬走的两条理由：构建键那条是真的但**是独立在线缺陷，修它就完了**；
+  checkpoint 那条**是我把代码读反了**（`.lingxi` 本来就被整目录递归排除，
+  restore 用 `remove_untracked` 而非 `remove_ignored`）。
+- **重启对账规则整条撤回**：我引 `removeDataForDeletedApps` 作先例却把它的规则用反了
+  ——它是**日志驱动**的删除，我写成了**日志差集**删除，那会删掉它本要保护的证据。
+  对应的验收测试也是自我实现的，一并改。
+- **digest 通道**：Codex 的补救（加持久化字段 + DTO + bless）是错的，**零协议工作**即可。
+- **清理时机**：新增 `buildObserved` 中间态。
+- **source-vs-source 竞态**：第四轮砍排队机制的理由不成立，与 spike 一并重定。
+- ⛔ **冒烟门的挂载点回到未决**，并升级为「阻塞在 spike 上」。四个方案、四种死因
+  （时序 / 页面加载语义 / 权限表 / 结果不可观测），没有一条是靠更仔细读代码能提前发现的。
+  **其中第三条尤其重要：四个方案没有一个真正兑现过「判定不经模型」**——那是本设计存在的
+  全部理由。
+- 顺带确认**热重载机制不存在**（restart 不改 URL，而客户端 `guard loadedURL != url`）。
+
+**方法论结论**：这个机制上五轮纸面推演产出了五个「读起来对、实际不通」的答案。
+继续纸面迭代的期望收益为负，下一步是 spike。
 
 **四轮之后仍未验证的**（诚实列出，不是「大概没事」）：副驾驶条与引导两节没有任何镜头
 读过；边界表 20 行里 17 行未被检查；**没有任何一轮跑过任何东西**——没有 `cargo test`、

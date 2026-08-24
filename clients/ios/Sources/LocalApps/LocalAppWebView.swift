@@ -387,7 +387,7 @@ final class LocalAppWebViewController {
                 return encodedResult(["ok": true, "action": "reload"])
             }
             if request.action == .captureView {
-                return await captureFrame(in: webView)
+                return await captureFrame(in: webView, value: request.value)
             }
 
             let payload: [String: Any] = [
@@ -446,6 +446,54 @@ final class LocalAppWebViewController {
             ] as [String: Any]
         }
 
+        /// Long-edge cap for a snapshot region, in POINTS.
+        ///
+        /// The whole-view path derives `snapshotWidth` from the view's bounds; a
+        /// crop must derive it from the crop, or WebKit scales the region UP to
+        /// the view-sized width. `min(1, …)` is what forbids the enlargement.
+        ///
+        /// Internal rather than private so `LocalAppsStoreTests` can pin the
+        /// arithmetic directly, matching `executionSource(requestJSON:)` above.
+        static func snapshotWidthPoints(rect: CGRect, capPoints: CGFloat) -> CGFloat {
+            let longEdge = max(rect.width, rect.height)
+            guard longEdge > 0 else { return rect.width }
+            let scale = min(1, capPoints / longEdge)
+            return rect.width * scale
+        }
+
+        /// Parses the optional `{"rect":{"x","y","width","height"}}` payload
+        /// `capture_ui_value` (Rust, `local_apps_host.rs`) puts in
+        /// `AppUiRequestDto.value` for a region capture. The four numbers are
+        /// CSS pixels, which are the same unit `webView.bounds` already is.
+        ///
+        /// `capture_ui_value` deliberately preserves the caller's original
+        /// numeric form, so a field can arrive as either a JSON integer or a
+        /// JSON float. `JSONSerialization` bridges both shapes to `NSNumber`;
+        /// reading through `.doubleValue` (rather than an `as? Double` cast,
+        /// which only succeeds for one of the two underlying storage kinds)
+        /// is what accepts either without favoring one.
+        ///
+        /// Returns `nil` for an absent, malformed, non-finite, or shapeless
+        /// rect — exactly like no `value` at all, i.e. "capture the whole
+        /// view". The Rust side already rejects a non-finite or non-positive
+        /// rect before it is ever sent, so this is a defensive fallback, not
+        /// the primary validation.
+        static func parseRequestedRect(fromValueJSON json: String?) -> CGRect? {
+            guard let json,
+                  let data = json.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed) as? [String: Any],
+                  let rect = object["rect"] as? [String: Any]
+            else { return nil }
+            func field(_ name: String) -> CGFloat? {
+                guard let number = rect[name] as? NSNumber else { return nil }
+                let value = number.doubleValue
+                return value.isFinite ? CGFloat(value) : nil
+            }
+            guard let x = field("x"), let y = field("y"), let width = field("width"), let height = field("height")
+            else { return nil }
+            return CGRect(x: x, y: y, width: width, height: height)
+        }
+
         /// Capture the app view as a JPEG small enough to survive the result
         /// channel.
         ///
@@ -459,7 +507,7 @@ final class LocalAppWebViewController {
         /// UI action, which this file caps at 256 KiB. Base64 inflates by 4/3, so
         /// the JPEG itself has to land well under that — hence the downscale and
         /// the quality ladder rather than a single fixed quality.
-        private func captureFrame(in webView: WKWebView) async -> LocalAppUIExecutionResult {
+        private func captureFrame(in webView: WKWebView, value: String?) async -> LocalAppUIExecutionResult {
             let bounds = webView.bounds
             guard bounds.width > 0, bounds.height > 0 else {
                 // The page IS open — it just has no laid-out geometry to draw,
@@ -469,8 +517,26 @@ final class LocalAppWebViewController {
                 return .failure(String(localized: "local_apps_error_ui_capture_unavailable"))
             }
 
+            // An optional crop rides `value` as `{"rect":{"x","y","width","height"}}`
+            // (`capture_ui_value` in local_apps_host.rs), in CSS pixels — the same
+            // units `webView.bounds` already is. That Rust-side function checks
+            // only shape and finiteness; CLAMPING to the real viewport is this
+            // client's job, since only the client knows it. `intersection` clamps
+            // a partially-out-of-bounds rect down to what is actually on screen; a
+            // rect with no overlap at all collapses to `CGRect.null`, whose width
+            // and height are both 0 (`CGRect(x:.infinity,y:.infinity,width:0,
+            // height:0)` — confirmed by running `CGRect(...).intersection(...)`
+            // directly rather than assuming), so the guard below fails the same
+            // way an unlaid-out webview already does, instead of silently
+            // substituting the whole frame for a region the agent never asked for.
+            let requestedRect = Self.parseRequestedRect(fromValueJSON: value)
+            let region = requestedRect.map { $0.intersection(bounds) } ?? bounds
+            guard region.width > 0, region.height > 0 else {
+                return .failure(String(localized: "local_apps_error_ui_capture_unavailable"))
+            }
+
             let configuration = WKSnapshotConfiguration()
-            configuration.rect = bounds
+            configuration.rect = region
             // Cap the long edge in PIXELS, which is what the encoder below
             // actually sees. `snapshotWidth` is in POINTS and `takeSnapshot`
             // hands back a UIImage at the screen scale, so asking for 1024
@@ -479,12 +545,17 @@ final class LocalAppWebViewController {
             // the same nominal cap (`View.getWidth()` is already pixels there).
             // Dividing by the scale first is what makes the two platforms
             // return comparable evidence.
-            let longEdge = max(bounds.width, bounds.height)
+            //
+            // The cap is computed from the REGION's own long edge, not the
+            // view's. Reusing the whole-view ladder for a crop would ask
+            // WebKit to scale a small region UP to the view-sized width — a
+            // blurry enlargement that also spends the JPEG budget on invented
+            // pixels. `snapshotWidthPoints` is what forbids that (its
+            // `min(1, …)`).
             let displayScale = max(webView.traitCollection.displayScale, 1)
-            let maxPixels: CGFloat = 1_024
-            let targetPointEdge = min(longEdge, maxPixels / displayScale)
+            let capPoints: CGFloat = 1_024 / displayScale
             configuration.snapshotWidth = NSNumber(
-                value: Double(bounds.width * (targetPointEdge / longEdge))
+                value: Double(Self.snapshotWidthPoints(rect: region, capPoints: capPoints))
             )
 
             let image: UIImage

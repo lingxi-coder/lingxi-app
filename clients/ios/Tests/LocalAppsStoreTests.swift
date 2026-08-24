@@ -1446,6 +1446,182 @@ final class LocalAppsStoreTests: XCTestCase {
             )
         }
 
+        /// Phase 1a — reusing the whole-view ladder for a crop UPSCALES it. A tall
+        /// narrow crop must be capped on its own long edge and never enlarged.
+        func testCropIsCappedOnItsOwnLongEdgeAndNeverUpscaled() {
+            let cap: CGFloat = 1_024 / 3   // 1024 px cap on a 3x screen, in points
+            // Tall crop: long edge is the height, so the cap applies to height.
+            let tall = LocalAppWebViewController.snapshotWidthPoints(
+                rect: CGRect(x: 0, y: 0, width: 120, height: 800), capPoints: cap)
+            XCTAssertEqual(tall, 120 * (cap / 800), accuracy: 0.01)
+            // Small crop: already under the cap, so it must be left alone.
+            let small = LocalAppWebViewController.snapshotWidthPoints(
+                rect: CGRect(x: 0, y: 0, width: 118, height: 74), capPoints: cap)
+            XCTAssertEqual(small, 118, accuracy: 0.01, "a crop under the cap must not be enlarged")
+        }
+
+        /// No existing test exercised `captureFrame`'s whole-view (no-crop)
+        /// path before this task, so this pins the dispatch brief's own
+        /// worked example (393x852pt view, 3x screen -> 157.4pt) as a
+        /// regression anchor: the formula is only ALGEBRAICALLY the same as
+        /// the pre-existing one (`bounds.width * min(longEdge, cap) /
+        /// longEdge` vs. this helper's `rect.width * min(1, cap /
+        /// longEdge)`), now that it is factored through the shared helper.
+        func testSnapshotWidthPointsMatchesTheWholeViewWorkedExample() {
+            let capPoints: CGFloat = 1_024 / 3
+            let wholeView = LocalAppWebViewController.snapshotWidthPoints(
+                rect: CGRect(x: 0, y: 0, width: 393, height: 852), capPoints: capPoints)
+            XCTAssertEqual(wholeView, 157.4, accuracy: 0.1)
+        }
+
+        /// Task 7's `capture_ui_value` (Rust) deliberately preserves the
+        /// caller's original numeric form, so `x`/`y`/`width`/`height` can each
+        /// land as a JSON integer OR a JSON float. A parser written against
+        /// only the integer shape would break on a routine fractional CSS
+        /// pixel -- this pins both, plus the mixed case.
+        func testParseRequestedRectAcceptsBothIntegerAndFractionalJSONNumbers() {
+            let fromInts = LocalAppWebViewController.parseRequestedRect(
+                fromValueJSON: #"{"rect":{"x":10,"y":20,"width":120,"height":80}}"#
+            )
+            XCTAssertEqual(fromInts, CGRect(x: 10, y: 20, width: 120, height: 80))
+
+            let fromFloats = LocalAppWebViewController.parseRequestedRect(
+                fromValueJSON: #"{"rect":{"x":10.5,"y":0,"width":118.25,"height":74.0}}"#
+            )
+            XCTAssertEqual(fromFloats, CGRect(x: 10.5, y: 0, width: 118.25, height: 74))
+
+            let mixed = LocalAppWebViewController.parseRequestedRect(
+                fromValueJSON: #"{"rect":{"x":0,"y":0.0,"width":118,"height":74.5}}"#
+            )
+            XCTAssertEqual(mixed, CGRect(x: 0, y: 0, width: 118, height: 74.5))
+        }
+
+        /// An absent, shapeless, or non-numeric rect must fall back to "no
+        /// rect" (whole-view capture) rather than crash or produce garbage
+        /// geometry -- the Rust side already rejects a genuinely invalid rect
+        /// before this ever ships, so this is the client's defensive fallback.
+        func testParseRequestedRectReturnsNilForAbsentOrMalformedValue() {
+            XCTAssertNil(LocalAppWebViewController.parseRequestedRect(fromValueJSON: nil))
+            XCTAssertNil(LocalAppWebViewController.parseRequestedRect(fromValueJSON: #"{"app_id":"demo"}"#))
+            XCTAssertNil(LocalAppWebViewController.parseRequestedRect(fromValueJSON: #"{"rect":{"x":10}}"#))
+            XCTAssertNil(LocalAppWebViewController.parseRequestedRect(fromValueJSON: #"{"rect":{"x":"10","y":0,"width":10,"height":10}}"#))
+            XCTAssertNil(LocalAppWebViewController.parseRequestedRect(fromValueJSON: "not json"))
+        }
+
+        /// Live proof (not just a read of the code) that a crop entirely
+        /// outside the viewport is refused rather than silently widened back
+        /// to the whole frame. `captureFrame`'s clamp-and-guard runs BEFORE
+        /// `takeSnapshot` is ever called, so — unlike a positive capture —
+        /// this does not depend on the webview being on-screen and composited.
+        func testCaptureViewRejectsARectEntirelyOutsideTheViewportInsteadOfWideningIt() async throws {
+            let broker = LocalAppBridgeBroker(appID: "tracker")
+            let controller = LocalAppWebViewController(appID: "tracker", broker: broker)
+            let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+            controller.webView = webView
+            webView.loadHTMLString(#"<div id="ready">hi</div>"#, baseURL: URL(string: "http://127.0.0.1:43123"))
+            try await waitForElement("ready", in: webView)
+
+            let result = await controller.execute(request: AppUiRequestDto(
+                requestId: "capture-outside",
+                appId: "tracker",
+                action: .captureView,
+                target: nil,
+                value: #"{"rect":{"x":1000,"y":1000,"width":50,"height":50}}"#
+            ))
+            XCTAssertNil(result.resultJSON, "an out-of-viewport crop must not fall back to the whole frame")
+            XCTAssertEqual(result.error, String(localized: "local_apps_error_ui_capture_unavailable"))
+        }
+
+        /// Same as above with a FRACTIONAL rect, proving the float path also
+        /// reaches the clamp guard end-to-end and not just the pure parser.
+        func testCaptureViewRejectsAFractionalRectEntirelyOutsideTheViewport() async throws {
+            let broker = LocalAppBridgeBroker(appID: "tracker")
+            let controller = LocalAppWebViewController(appID: "tracker", broker: broker)
+            let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+            controller.webView = webView
+            webView.loadHTMLString(#"<div id="ready">hi</div>"#, baseURL: URL(string: "http://127.0.0.1:43123"))
+            try await waitForElement("ready", in: webView)
+
+            let result = await controller.execute(request: AppUiRequestDto(
+                requestId: "capture-outside-float",
+                appId: "tracker",
+                action: .captureView,
+                target: nil,
+                value: #"{"rect":{"x":500.5,"y":900.25,"width":50.5,"height":50.5}}"#
+            ))
+            XCTAssertNil(result.resultJSON)
+            XCTAssertEqual(result.error, String(localized: "local_apps_error_ui_capture_unavailable"))
+        }
+
+        /// Live proof, on a real composited window (an offscreen `WKWebView`
+        /// can have `takeSnapshot` call back with neither image nor error, so
+        /// only an on-screen view proves anything about the RESULT), that an
+        /// in-bounds crop comes back sized from its OWN long edge and not
+        /// stretched up to the view-sized width -- the enlargement bug this
+        /// task fixes. A whole-view capture on this 393x852pt webview would
+        /// report a width near the 1024px cap; a 118pt-wide crop (well under
+        /// the ~341pt per-edge cap at 3x) must instead come back near
+        /// `118 * displayScale` px.
+        func testCaptureViewHonoursAnInBoundsCropWithoutUpscalingIt() async throws {
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+            let webView = WKWebView(frame: window.bounds)
+            window.rootViewController = UIViewController()
+            window.rootViewController?.view.addSubview(webView)
+            window.makeKeyAndVisible()
+            defer { window.isHidden = true }
+
+            let broker = LocalAppBridgeBroker(appID: "tracker")
+            let controller = LocalAppWebViewController(appID: "tracker", broker: broker)
+            controller.webView = webView
+            webView.loadHTMLString(
+                #"<body style="margin:0;background:#3366ff"><div id="ready">hi</div></body>"#,
+                baseURL: URL(string: "http://127.0.0.1:43123")
+            )
+            try await waitForElement("ready", in: webView)
+
+            let request = AppUiRequestDto(
+                requestId: "capture-crop",
+                appId: "tracker",
+                action: .captureView,
+                target: nil,
+                value: #"{"rect":{"x":0,"y":0,"width":118,"height":74}}"#
+            )
+            var result = await controller.execute(request: request)
+            // `takeSnapshot` can report "not yet composited" on the very first
+            // runloop turns after `makeKeyAndVisible()`; retrying (production
+            // does not) is what makes THIS TEST deterministic, not a change to
+            // the guard being verified -- that guard already returned (or
+            // didn't) synchronously before any of this.
+            for _ in 0 ..< 40 where result.error != nil {
+                try await Task.sleep(for: .milliseconds(50))
+                result = await controller.execute(request: request)
+            }
+            XCTAssertNil(result.error, "capture never succeeded: \(result.error ?? "?")")
+            guard let resultJSON = result.resultJSON,
+                  let data = resultJSON.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let image = object["image"] as? [String: Any],
+                  let width = image["width"] as? Int
+            else { return XCTFail("expected an image in the result, got \(result.resultJSON ?? "nil")") }
+            let scale = Double(webView.traitCollection.displayScale)
+            XCTAssertEqual(
+                Double(width), 118 * scale, accuracy: 2,
+                "a crop under the cap must come back at its own size, not the view's"
+            )
+            // Compare against what a WHOLE-VIEW capture on this same webview
+            // would report, via the identical production formula -- scale-
+            // agnostic proof that the crop was not stretched up to view size,
+            // rather than a hardcoded pixel constant tied to one scale factor.
+            let capPoints = 1_024 / CGFloat(scale)
+            let wholeViewWidthPixels = Double(
+                LocalAppWebViewController.snapshotWidthPoints(rect: webView.bounds, capPoints: capPoints)
+            ) * scale
+            XCTAssertLessThan(
+                Double(width), wholeViewWidthPixels,
+                "a 118pt crop must not be reported as wide as a whole-view capture (\(wholeViewWidthPixels)px)"
+            )
+        }
+
         private func waitUntil(_ description: String, _ condition: () -> Bool) async throws {
             for _ in 0 ..< 200 {
                 if condition() { return }

@@ -621,31 +621,44 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
         ok: false,
         error: clean(message) || 'Lingxi UI action failed'
       });
-      const snapshot = () => ({
-        title: clean(document.title),
-        url: location.href,
-        // A `<canvas>` matches NONE of the selectors `candidates()` uses, so a
-        // drawn interface is invisible in `elements` — an empty list means
-        // the same thing whether the app renders correctly, renders nothing,
-        // or crashed. Reporting the count separately is what lets the
-        // verifier tell "no controls" apart from "cannot be seen this way",
-        // and it does not depend on the DOM being empty: a canvas game with
-        // a score bar and a restart button still needs its frame looked at.
-        canvasCount: deepQuery('canvas', 64).length,
-        elements: candidates().slice(0, 200).map(element => {
-          const rect = element.getBoundingClientRect();
-          const sensitive = isSensitive(element);
-          return {
-            elementId: clean(element.id) || null,
-            role: roleOf(element) || null,
-            name: nameOf(element) || null,
-            value: sensitive ? null : clean('value' in element ? element.value : null),
-            checked: typeof element.checked === 'boolean' ? element.checked : null,
-            disabled: !!element.disabled,
-            visible: rect.width > 0 && rect.height > 0
+          const vvOf = () => {
+            const vv = window.visualViewport;
+            return vv
+              ? { width: Math.round(vv.width), height: Math.round(vv.height),
+                  offsetLeft: Math.round(vv.offsetLeft), offsetTop: Math.round(vv.offsetTop),
+                  scale: vv.scale }
+              : { width: Math.round(window.innerWidth), height: Math.round(window.innerHeight),
+                  offsetLeft: 0, offsetTop: 0, scale: 1 };
           };
-        })
-      });
+          const rectOf = element => {
+            const rect = element.getBoundingClientRect();
+            return [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)];
+          };
+          const snapshot = () => ({
+            title: clean(document.title),
+            url: location.href,
+            documentState: document.readyState,
+            viewport: vvOf(),
+            // The host gate compares ONLY the pixels inside these rects, so a
+            // DOM spinner cannot stand in for a frozen canvas. `canvasCount`
+            // stays for compatibility with readers that only counted.
+            canvases: deepQuery('canvas', 16).map(c => ({ rect: rectOf(c) })),
+            canvasCount: deepQuery('canvas', 64).length,
+            elements: candidates().slice(0, 200).map(element => {
+              const rect = element.getBoundingClientRect();
+              const sensitive = isSensitive(element);
+              return {
+                elementId: clean(element.id) || null,
+                role: roleOf(element) || null,
+                name: nameOf(element) || null,
+                value: sensitive ? null : clean(element.value),
+                checked: typeof element.checked === 'boolean' ? element.checked : null,
+                disabled: !!element.disabled,
+                visible: rect.width > 0 && rect.height > 0,
+                rect: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)],
+              };
+            }),
+          });
       try {
         if (request.action === 'inspect') return encode(snapshot());
         if (request.action === 'scroll') {

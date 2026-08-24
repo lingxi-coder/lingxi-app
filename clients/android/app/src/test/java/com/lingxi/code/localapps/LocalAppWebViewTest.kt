@@ -242,6 +242,25 @@ class LocalAppWebViewTest {
         )
     }
 
+    /**
+     * Phase 1a twin of the iOS `testUIInspectionReportsElementAndCanvasGeometry`.
+     * The two injected scripts are near-copies, so both are pinned or neither is.
+     */
+    @Test
+    fun `ui inspection reports element and canvas geometry`() {
+        val inspectScript = buildLocalAppUiExecutionScript("""{"action":"inspect"}""")
+        listOf(
+            "rect: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)]",
+            "canvases: deepQuery('canvas', 16).map",
+            "canvasCount:",
+            "documentState: document.readyState",
+            "offsetLeft: Math.round(vv.offsetLeft)",
+            "scale: vv.scale",
+        ).forEach { token ->
+            assertTrue("missing geometry contract: $token", inspectScript.contains(token))
+        }
+    }
+
     @Test
     fun `ui execution parsing rejects false null and no result envelopes`() {
         assertEquals(

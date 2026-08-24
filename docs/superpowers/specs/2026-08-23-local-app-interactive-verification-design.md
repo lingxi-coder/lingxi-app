@@ -770,8 +770,11 @@ batch 状态：
   必然变化，续上的对账是假的。
 - `.tmp-*` 或缺任一正式文件的目录不算标注；仅在没有对应 in-flight Store
   且超过有界宽限期后回收；
-- UUID 非法或 sidecar schema/字段校验失败的正式目录进入可见的
-  `recovery_error`，不静默删除用户证据。
+- **目录名不是合法 UUID** 的目录**不进药丸列表**——引擎只发布合法 UUID 名（rename 原子，
+  不存在半个名字），所以它一定是外来垃圾，由宽限期清扫回收并记日志；
+- **目录名合法但 `annotation.json` schema/字段校验失败**的目录进入可见的
+  `recovery_error`（图可能还是好的，属于用户证据，且 id 合法所以可丢弃），
+  不静默删除。
 
 🚨 **必须补一条终态：目前整个引擎侧标注接口是只写的，没有任何删除路径。**
 `cleared` 只是客户端状态，而恢复规则以**盘为权威**⇒ 两种读法都坏：
@@ -800,7 +803,9 @@ ClientCommand::DeleteAppAnnotation { app_id, annotation_id }
 - `annotations/` 的数量与字节上限用**拒绝**而非静默回收：超限时
   `StoreAppAnnotation` 回 `annotation_quota_exceeded`，客户端提示用户先提交或清理。
   ⛔ 不要在超限时自动删最旧的——那会在用户没看见的情况下丢掉证据。
-- **上限取 64 条 / 16 MiB，先到先算**（per app，统计的是 `annotations/` 下的正式目录）。
+- **上限取 64 条 / 16 MiB，先到先算**（per app）。**两个上限都统计 `annotations/` 下的
+  全部目录项，含 `.tmp-*`**——早期版本只让字节数含 tmp、条数仍只数正式目录，
+  于是「反复创建空临时目录后崩溃」可以在 16 MiB 以下耗尽目录项/inode。
   依据：待提交集合是「一个人在一次验收里能记住的问题数」量级，64 已经很宽；
   16 MiB 同时给上面那条 checkpoint 豁免留出确定的最坏值。
 - 超限时**不得产生任何目录**——连 `.tmp-*` 都不许留，配额检查在写第一个字节之前。
@@ -813,14 +818,36 @@ ClientCommand::DeleteAppAnnotation { app_id, annotation_id }
 `DeleteAppAnnotation`」。一个标了 64 条却不想提交、或者其中若干条落盘失败的用户，
 **没有任何办法把它们清掉**——配额永远满，标注功能永久不可用。
 
-补一个终态 `discarded`（药丸上左滑/长按 ⇒ 丢弃）：
+补一个终态 `discarded`（药丸上左滑/长按 ⇒ 丢弃）。**丢弃按当前状态分派，逐状态列全**——
+早期版本用一句「`draft` 从未成功 Store ⇒ 纯本地删除」概括，漏掉了在飞和不可寻址两类：
 
-- `draft`（**从未成功 Store**）⇒ 纯本地删除，不发命令、不留墓碑（盘上没有东西）；
-- `draft(error)` / `stored` / `stored(recovered)` / `submitted` / `buildObserved` /
-  `recovery_error` ⇒ 走**与 `cleared` 完全相同**的终态路径：墓碑 + `DeleteAppAnnotation`，
-  收到无 `error` 的回执后移除墓碑；
-- 丢弃 `submitted`/`buildObserved` 的条目时，把它从所属 batch 移除；**batch 变空则同时
-  移除 `batchTurnCorrelation` 里对应的条目**，否则那份关联会一直挂到 completion 才清。
+| 丢弃时的状态 | 盘上有东西吗 | 动作 |
+|---|---|---|
+| `draft`（**从未发出** Store） | 否 | 纯本地删除，不发命令、不留墓碑 |
+| `storing`（**已发出、回执未到**） | **未知** | 标 `discardPending` 并移出列表；**等 Store 回执**：成功 ⇒ 墓碑 + `DeleteAppAnnotation`；失败 ⇒ 纯本地删除 |
+| `draft(error)` / `stored` / `stored(recovered)` | 是（除非 Store 失败） | 墓碑 + `DeleteAppAnnotation`，回执无 `error` 后移除墓碑 |
+| `submitted` / `buildObserved` | 是 | 标 `discardPending` 并移出列表；**等该 batch 的 turn 走到终态 completion 之后**才发 Delete |
+| `recovery_error`（sidecar 校验失败，**目录名是合法 UUID**） | 是 | 同 `stored`：墓碑 + `DeleteAppAnnotation` |
+
+🚨 **`storing` 不能按 `draft` 处理。** 用户在 Store 已发出、回执未到时丢弃，若只删本地记录，
+随后 Store 成功 ⇒ 盘上留下**无人认领的目录**，重启时又被恢复成 `stored(recovered)`——
+用户丢弃过的东西自己回来了。等回执再分派是确定的，且不依赖两条命令的到达顺序。
+
+🚨 **`submitted`/`buildObserved` 的 Delete 必须延后到 turn 终态。**
+提交出去的 prompt 正文里**已经带着截图路径**，agent 可能正在读它、或正在按它修复。
+立刻删 ⇒ agent 读到不存在的文件。同理**不能提前移除 `batchTurnCorrelation`**：
+completion 还要靠它匹配。所以 batch 变空时**只在 turn 已终态的前提下**才移除关联；
+turn 仍在飞就保留，等 completion 到达时一并清理。
+
+🚨 **目录名不是合法 UUID 的目录不做成 `recovery_error`，由引擎在清扫里回收。**
+早期版本把它显示成用户可丢弃的 `recovery_error`，但丢弃走的是
+`DeleteAppAnnotation`，而该命令**要求合法 UUID** ⇒ 必然回 `invalid_annotation_id`
+⇒ **这条药丸永远删不掉**。而且它本来就不可能是用户证据：引擎**只发布合法 UUID 名的目录**
+（目录 rename 是原子的，不存在「改了一半」的名字），所以非 UUID 名一定是外来垃圾。
+由宽限期清扫回收并记日志即可。
+
+⇒ **`recovery_error` 只保留一种成因：目录名合法、但 `annotation.json` schema/字段校验失败。**
+那种情况图可能还是好的，属于用户证据，且 id 合法所以丢弃走得通。
 
 `discarded` 与 `cleared` 只在**成因**上不同（用户丢弃 vs 修复完成），终态机制共用一套——
 不要为它另造一条删除路径。
@@ -1086,8 +1113,15 @@ the goldens stay byte-identical**"*。签入的 golden
 - **重启降级**：日志为 `submitted` 或 `buildObserved`、目录完整、进程重启 ⇒ 药丸必须回到
   `stored(recovered)` 且**可再次提交**（验证 `batchID` 去重不会吞掉重新提交）；
   `batchTurnCorrelation` 重启后为空。
-- **用户丢弃**：`draft` 丢弃不发命令；其余状态丢弃发 `DeleteAppAnnotation` 并留墓碑，
-  回执后墓碑消失；丢弃到配额以下后 `StoreAppAnnotation` 重新可用。
+- **用户丢弃（逐状态，按转换表全覆盖）**：
+  `draft` 不发命令；`storing` 中丢弃后 Store **成功** ⇒ 目录被删且重启后**不会**复活，
+  Store **失败** ⇒ 纯本地删除；`submitted` 丢弃后在 turn 终态**之前不得**发 Delete
+  （断言截图在 turn 期间一直可读），终态后才删；`batchTurnCorrelation` 在 turn 仍在飞时
+  **不被提前移除**；`recovery_error`（合法 UUID）可丢弃成功。
+  丢弃到配额以下后 `StoreAppAnnotation` 重新可用。
+- **非法目录名**：手工放一个非 UUID 名的目录进 `annotations/` ⇒ 它**不出现在药丸列表里**，
+  且被宽限期清扫回收（有日志）。
+- **配额条数**：只创建空 `.tmp-*` 目录也会计入条数上限。
 - 清单持久化：**必须进入 in-flight 窗口**——在引擎发布 annotation
   目录之后、客户端记录 Store 回执之前杀进程，重启后必须从
   `annotation.json` 恢复 `note/rect/viewport/hitElements` 和图片，状态为

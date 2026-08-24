@@ -362,6 +362,35 @@ final class LocalAppsStoreTests: XCTestCase {
         )
     }
 
+    /// Phase 1a — criterion 6 is structurally blind without `console.error`.
+    /// Both scaffolds wrap the tree in a React ErrorBoundary whose only hook is
+    /// `getDerivedStateFromError`; React 19 routes a caught render error to
+    /// `console.error` and never to `window.onerror`. A crashed app then renders
+    /// its fallback and passes "has elements", "frame is not uniform" and "no
+    /// uncaught exception" all at once.
+    func testDocumentStartInstallsABoundedRuntimeErrorLedger() {
+        let source = LocalAppWebViewRepresentable.bridgeSourceTemplate
+        for token in [
+            "addEventListener('error'",
+            "addEventListener('unhandledrejection'",
+            // The one that actually catches a React ErrorBoundary.
+            "console.error = function",
+            "kind: 'console'",
+            // Bounded on both axes, and cleared per document.
+            // The bound itself, spelled the way the code spells it.
+            "const cap = 8",
+            "__lingxiRuntimeErrors.length >= cap",
+            "__lingxiRuntimeErrorsDropped",
+        ] {
+            XCTAssertTrue(source.contains(token), "missing runtime-error ledger: \(token)")
+        }
+        let snapshotSource = LocalAppWebViewController.executionSource(requestJSON: "{}")
+        XCTAssertTrue(
+            snapshotSource.contains("runtimeErrors:"),
+            "the ledger must surface in the inspect snapshot, not only in the page"
+        )
+    }
+
     /// The conversation-scope cwd (`RootView.makeSource(scope: .localApp(id))`)
     /// and the code browser resolve the SAME validated workspace directory —
     /// one derivation, `LocalAppWorkspacePath`, no second copy to diverge.

@@ -69,8 +69,10 @@
 | 创建结果关联 | **`request_id`**，由 `CreateApp` 携带、成功与失败事件原样回传（§D.1） |
 | 协议版本 | **8.0.0**，本方案**先**落地并 bless；另一份 spec rebase 上来（§B.4） |
 | 游戏运行时交付 | 两阶段：先移动端 WebView 五种 profile，再在 desktop Local App host 完成后加入 Godot `NativeGame`（§I） |
-| 引擎依赖 | 不随主应用内置；按确认后的 profile 首次下载，以内容寻址 snapshot 复用（§I.4） |
-| 实施顺序 | 当前 create-local-app 重构先独立合并；§I 只能基于合并后的接口开发（§I.1） |
+| profile 最终选择 | host-native picker 直接接收用户点击并签发一次性 receipt；生成代理不能改写选择（§I.3） |
+| 引擎依赖 | 不随主应用内置；Full build 只可携带 engine-free base seed；snapshot 按 toolchain + lock digest 复用（§I.4） |
+| 实施顺序 | 当前 create-local-app 重构先独立合并；Babylon/Havok 固定 IIFE spike 先过，才允许落 profile 公共接口（§I.1） |
+| Godot 实施授权 | desktop host 完成后还必须先通过独立 NativeGame design + threat model；本文件不直接授权 Phase 2 编码（§I.7） |
 
 ## 非目标
 
@@ -80,7 +82,7 @@
 - 不做空壳的自动清理。
 - 不做旧本地应用数据迁移。本方案只在 **clean install** 上实现与验收；开发机上的旧 store 由重装/清数据移除（§A.1）。
 - 不开放「创建后改名」。§C.1 的名称写入是**首次命名**，且受 §C.1.4 的 hash 不变量约束。
-- Phase 1 不提供 Unity、Cocos、Defold、PlayCanvas 编辑器或第三方插件市场；Phase 2 的 Godot 只开放给 desktop host（§I.8）。
+- Phase 1 不提供 Unity、Cocos、Defold、PlayCanvas 编辑器或第三方插件市场；Phase 2 的 Godot 只开放给 desktop host，且需独立安全设计（§I.7）。
 
 ---
 
@@ -378,7 +380,9 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 
 ✅ `AskUserQuestion` 在移动端确实注册且有 resolver（`apps/engine-mobile/src/lib.rs:201`、`:254`），本设计对它的依赖成立。
 
-**正式版**——`scaffold_app_value` 现有的两套合约文本（dom / canvas），不动。
+⚠️ 上述 `dom` / `canvas` 确认是 §0-§H 首次合并的基线。Phase 1 开始后必须由 §I.3 **整体替换**：`AskUserQuestion` 只做需求澄清，最终 profile 由 `LocalAppConfirmRuntimeProfile` 的 host-native picker 决定，`LocalAppScaffold` 只接收 receipt；不要让两套确认同时存在。
+
+**正式版**——§0-§H 首次合并时，`scaffold_app_value` 现有的两套合约文本（dom / canvas）不动。Phase 1 在对应 surface 合约上追加已提交 profile、唯一允许的 adapter/frame-loop 所有者和 workflow 路由；核心 bridge/host-owned 文件约束继续共享，不能复制成五份会漂移的完整合约。
 
 ⚠️ **「代理改不了它」的理由**（结论对、初稿的理由错）：该文件在 `apps/<id>/workspace/LINGXI.md`，**就在可写根之内**。真正拦住写入的是 `permission/src/workspace_lease.rs` host-owned 拒绝名单里的 `LINGXI.md`。做 §C.0.2 时若碰了那条规则，等于把合约的编辑权交给代理。
 
@@ -583,10 +587,11 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 
 1. **先合并当前 create-local-app 重构。** §0-§H、协议 8.0.0、`LocalAppScaffold`、新创建入口行为和两条现有 workflow 必须先独立落地并通过 §F/§G。
 2. **游戏引擎工作不得与该重构并行修改** `skills/create-local-app/**`、`LocalAppCreate` / `LocalAppScaffold` schema、`local-app-build` 或 `local-canvas-build`。Phase 1 只能 rebase 到合并后的接口；若基线接口仍在变，停止引擎实现，不维护两套临时兼容层。
-3. **Phase 1：WebView profile。** 保持 `AppSurface::{Dom, Canvas}`，增加五个持久 runtime profile、profile-aware scaffold/lock/cache、创建推荐与 WebView 生命周期适配器。
-4. **Phase 2：Godot NativeGame。** 只有 desktop Local App host 已能创建、打开、运行和删除非 WebView 项目后才启动；不把 Godot 塞进 `AppSurface::Canvas`。
+3. **Phase 1.0：IIFE 可行性门。** 在新增 enum、manifest 字段或工具 schema **之前**，先用固定 pnpm lock 和现有 `format: "iife"` / `inlineDynamicImports: true` 配置完成 Babylon core + glTF loader + Havok 的真实 production build，并在 iOS/Android WebView 各启动一次、载入 glTF、初始化 Havok、捕获两帧。只验证 import 不算通过。若失败，停止 Phase 1，回到设计评审；不得先落公共接口，也不得静默把公共 Vite 配置改成 ESM/code-splitting。
+4. **Phase 1：WebView profile。** Phase 1.0 通过后，保持 `AppSurface::{Dom, Canvas}`，增加五个持久 runtime profile、profile-aware scaffold/lock/cache、创建推荐与 WebView 生命周期适配器。
+5. **Phase 2：Godot NativeGame。** 只有 desktop Local App host 已能创建、打开、运行和删除非 WebView 项目，且 §I.7 要求的独立 design/security review 已通过后才启动；不把 Godot 塞进 `AppSurface::Canvas`。
 
-Phase 1 是当前 design 的后续里程碑，不是 §0-§H 的合并阻塞项；Phase 2 又以 Phase 1 与 desktop host 为前置。每一阶段单独提交、单独验收，禁止半落地的 profile 字段先于对应 locked scaffold 上线。
+Phase 1 是当前 design 的后续里程碑，不是 §0-§H 的合并阻塞项；Phase 2 又以 Phase 1、desktop host 和独立安全设计为前置。每一阶段单独提交、单独验收，禁止半落地的 profile 字段先于对应 locked scaffold 上线。
 
 ### I.2 持久化模型、公共接口与兼容性
 
@@ -604,10 +609,17 @@ pub enum AppRuntimeProfile {
 }
 ```
 
-`AppManifest` 追加 `runtime_profile: Option<AppRuntimeProfile>`。它与 `AppRecord.scaffolded` 的兼容策略不同：
+`AppManifest` 追加以下字段；serde 形状是兼容性契约的一部分，不能省略：
+
+```rust
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub runtime_profile: Option<AppRuntimeProfile>,
+```
+
+它与 `AppRecord.scaffolded` 的兼容策略不同：
 
 - Phase 1 创建的新 WebView 应用必须持久化 `Some(profile)`；
-- 缺字段或显式 `None` 表示 **legacy v1 scaffold**，继续使用现有 v1 host-managed 文件和 lockfile；
+- 缺字段或显式 `None` 且 `surface == Some(_)` 表示 **legacy v1 scaffold**，继续使用现有 v1 host-managed 文件和 lockfile；`surface == None` 仍走当前 pre-scaffold-split 的不可重建拒绝，不因新增 profile 获得新语义；
 - 读取 legacy manifest 时不推断、不回填，也不从源码、依赖树或 `surface` 猜 profile；
 - 这条兼容只保护无 profile 的 DOM、Canvas 与 Three.js v1 应用/fixtures，不撤销 §A.1 对旧 `AppRecord.scaffolded` store 的 clean-install 决策。
 
@@ -632,7 +644,7 @@ profile 到 surface 的映射是公共不变量：
 
 新客户端始终发送 profile；旧客户端继续使用 surface-only 路径。不能把 surface-only 的 `canvas` 自动升级成 `canvas_2d` 或 `three_3d`，否则会隐式替换旧 lockfile 和依赖树。
 
-Phase 1 同时把 §C.1 的 `LocalAppScaffold` 入参扩成 `{app_id, name, brief, runtime_profile, surface?, workflow_model?}`：对新对话式创建，`runtime_profile` 必填；兼容性 `surface` 若出现必须与 profile 一致。`LocalAppScaffold` 提交时一次性写入 profile 和派生 surface，仍以 `record.scaffolded = true` 为最后 commit point。
+Phase 1 不让生成代理直接决定对话式创建的最终 profile。§C.1 的 `LocalAppScaffold` 入参改为 `{app_id, name, brief, profile_confirmation_id, workflow_model?}`；host 用 `profile_confirmation_id` 读取用户在 §I.3 亲自选择的 profile 并派生 surface，schema 不再接受可覆盖它的 `runtime_profile` / `surface`。`LocalAppScaffold` 提交时一次性写入 receipt 绑定的 profile 和派生 surface，仍以 `record.scaffolded = true` 为最后 commit point。`LocalAppCreate` 的直接创建兼容矩阵保持上表行为，不复用这张对话 receipt。
 
 profile 创建后不可修改：
 
@@ -641,7 +653,7 @@ profile 创建后不可修改：
 - 需要换引擎时创建新应用，避免 package、lockfile、模板适配器与依赖 snapshot 被隐式替换；
 - manifest 有 profile 时，若 surface 与映射表不一致，按存储损坏拒绝，不自动修复。
 
-`runtime_profile` 和 `surface` 都会进入 `AppManifest::hash()`，因此沿用 §C.1.4 的数据库不变量：两者必须在首次 scaffold、任何 data store 打开之前一起写定，此后禁止修改。测试必须证明已有数据库时替换 profile 被拒，而不是等到下一次数据访问才报 manifest hash mismatch。
+`Some(runtime_profile)` 和 `surface` 都会进入 `AppManifest::hash()`，因此沿用 §C.1.4 的数据库不变量：两者必须在首次 scaffold、任何 data store 打开之前一起写定，此后禁止修改。`None` 必须因 `skip_serializing_if` 完全不进入序列化字节；测试要用一份无 profile 的 v1 manifest 证明 load 前后的 JSON/hash 字节不变、已有 SQLite 不发生 mismatch，并证明已有数据库时替换 profile 被拒，而不是等到下一次数据访问才报错。
 
 `detect_build_target` 在 Phase 1 扩展为 profile-aware：先保留 §C.4 的 `scaffolded + surface` 完整性检查，再检查 profile/surface 映射；`Some(profile)` 选择对应 locked file set，`None` 选择 legacy v1。绝不通过 `package.json` 或 import 反推 profile。
 
@@ -659,17 +671,38 @@ profile 创建后不可修改：
 
 混合需求不能靠隐藏优先级静默决胜：若两类信号都会实质改变引擎选择，代理先追问主玩法/渲染需求，再给一个推荐与理由；用户始终可以覆盖推荐。
 
-确认仍发生在本方案的对话里，不重新引入被 §D 删除的两步创建表单。「创建前可以修改」在这里指 **`LocalAppScaffold` commit 前**；空壳记录和 pin 会话已经存在。原生 `AskUserQuestion` 确认界面必须显示：
+需求澄清仍发生在本方案的对话里，不重新引入被 §D 删除的两步创建表单；普通追问继续用 `AskUserQuestion`。「创建前可以修改」在这里指 **`LocalAppScaffold` commit 前**；空壳记录和 pin 会话已经存在。
+
+最终 profile 选择改由新的 host-mediated `LocalAppConfirmRuntimeProfile`（operation `confirm_runtime_profile`）完成。生成代理只提交 `{app_id, recommended_profile, reason}`；host 自己渲染原生 picker，用户的点击不经过模型改写。确认界面必须显示：
 
 - 推荐 profile 与基于用户需求的理由；
-- 该 profile 当前是否已有可复用 snapshot、是否需要首次下载；
+- 该 profile 当前的依赖准备状态；
 - 五个可选 profile 和用户最终选择。
 
-为避免代理猜测缓存状态，Phase 1 新增只读 `LocalAppRuntimeProfiles` 工具（operation `runtime_profiles`）：返回 profile、surface、固定引擎版本、snapshot 是否 ready 与 `requires_download`，不触发网络或安装。它加入空壳工具门的放行集合；工具 catalog、默认权限计数和精确名字测试按 Phase 1 的实际表重新生成，不沿用 §C.1.6 的旧硬编码数。
+为避免代理猜测缓存状态，Phase 1 新增只读 `LocalAppRuntimeProfiles` 工具（operation `runtime_profiles`）：返回 profile、surface、固定引擎版本与下面的 `download_status`，不触发网络或安装：
 
-用户确认后的 profile 由 `LocalAppScaffold` 持久化。后续 `local-app-build` / `local-canvas-build` **只能读取已提交 profile**，workflow 参数不允许另带一个可覆盖值；正式 `LINGXI.md` 同步写入 profile。这样生成代理在确认后不能静默切换引擎。安装或构建失败也不改变 profile，用户只能重试或新建应用。
+| 状态 | 含义 / UI 文案 |
+|---|---|
+| `ready_snapshot` | 已有验证过的 snapshot，不需要下载 |
+| `ready_bundled_base` | 该 engine-free lock 与主应用的 base seed 精确匹配，不需要下载 |
+| `download_may_be_required` | 没有可验证的离线完整树，首次准备可能下载；用户确认即授权网络 |
 
-用户确认 profile 即授权该 profile 的首次按需依赖下载；确认页只承诺「需要/不需要首次下载」，不承诺下载耗时。真正安装前仍由 host 在锁内重新检查 snapshot，避免确认期间缓存状态变化产生竞态。
+共享 pnpm store 只作为 `--prefer-offline` 的机会性加速：除非 host 能在不修改 store/应用的前提下证明完整 lock 可离线解析，否则不能把 `download_may_be_required` 降成「不需要下载」。确认 UI 在安装前再次读取状态，所以 snapshot/seed 在对话期间发生变化不会显示旧结论。
+
+`LocalAppConfirmRuntimeProfile` 返回 `{selected_profile, profile_confirmation_id}`。receipt 是 host 进程内保存的不可预测随机 id，绑定 `app_id + selected_profile`，有效期固定 10 分钟：
+
+- `LocalAppScaffold` 在取得 §C.1 的进程内 scaffold 预留后校验并 claim receipt；过期、跨 app、未知或已消费 receipt 一律拒绝；
+- manifest/profile 提交成功后消费 receipt；落地失败则释放 claim，只要仍在 TTL 内即可重试；
+- receipt 不落盘，进程重启后失效，用户重新确认即可；这不会把草稿变砖；
+- schema 不接受另一个 profile，所以代理无法把用户选的 `phaser_2d` 换成 `babylon_3d`。
+
+若落地在 `record.scaffolded = true` 之前失败且 receipt 随后过期/重启失效，用户可以重新确认其他 profile；此时必须再次断言 `scaffolded == false` 且不存在 data store，并按 §C.0 清空后重写暂存 manifest/files。只有 `scaffolded = true` 的 commit 之后 profile 才进入不可变期。
+
+`runtime_profiles` 与 `confirm_runtime_profile` 都加入空壳工具门的放行集合；工具 catalog、默认权限计数和精确名字测试按 Phase 1 的实际表重新生成，不沿用 §C.1.6 的旧硬编码数。
+
+用户确认后的 profile 由 `LocalAppScaffold` 从 receipt 持久化。后续 `local-app-build` / `local-canvas-build` **只能读取已提交 profile**，workflow 参数不允许另带一个可覆盖值；正式 `LINGXI.md` 同步写入 profile。安装或构建失败也不改变 profile，用户只能重试或新建应用。
+
+用户确认 profile 即授权该 profile 的首次按需依赖下载；确认页不承诺下载耗时。真正安装前仍由 host 在 snapshot 锁内重新检查 seed/snapshot，避免确认期间缓存状态变化产生竞态。
 
 ### I.4 Phase 1：依赖、pnpm 构建与内容寻址缓存
 
@@ -688,15 +721,24 @@ host-managed 文件拆成两层：
 | `phaser_2d` | `phaser@4.2.1` |
 | `babylon_3d` | `@babylonjs/core@9.22.1`、`@babylonjs/loaders@9.22.1`、`@babylonjs/havok@1.3.14` |
 
+「独立」指每个 profile 都有受审计的 package/lock 所有权，不要求内容刻意不同。`react_dom` 与 `canvas_2d` 若依赖集合完全相同，可以拥有字节一致的 lock，并安全共享同一个 dependency snapshot；adapter/source 不进入依赖树身份。
+
 **包管理器锁死为 pnpm。** 依赖解析、安装、lockfile 和 snapshot 发布全部复用现有 host-owned `pnpm install` 路径；production build 继续调用由该 pnpm 安装物化出的固定 Vite entry。应用工作区、技能、workflow 和文档都不得建议或执行 `npm install`、`npm ci`、`npx`、Yarn，也不运行 package-manager scaffold 命令。
 
-所有引擎依赖均按需下载，不随 LingXi 主应用内置。`install_dependencies` 扩展为 profile-aware，但不新增下载服务：
+所有引擎依赖均按需下载，不随 LingXi 主应用内置。**Phase 1 必须替换当前 bundled seed，不能继续从含 `three@0.185.1` 的 v1 lock 构建它：**
+
+- Full iOS/Android runtime 只允许携带一个 engine-free base dependency seed；producer 以 `react_dom` / `canvas_2d` 的 engine-free lock 为输入；
+- staged `node_modules`、runtime pins、许可证清单和 bundled SPDX SBOM 都必须断言不存在 `three`、`phaser`、`@babylonjs/*`、Havok/WASM；
+- surface-only legacy v1 app 仍读取原 v1 lock，但该 lock 不再拥有 bundled seed；没有 snapshot 时走正常 pnpm 按需安装；
+- `three_3d` 即使与今天的 v1 依赖集合接近，也不得命中旧的主应用 seed；旧 seed producer/output 必须在同一变更中被 engine-free base seed 取代。
+
+`install_dependencies` 扩展为 profile-aware，但不新增下载服务：
 
 1. 读取已持久化 profile 和该 profile 的固定 package/lock；
-2. 用现有 dependency input/digest 机制生成包含 profile、lock SHA 与固定 toolchain provenance 的 SHA-256 snapshot key；
+2. 沿用现有内容寻址：cache root 由固定 pnpm/toolchain 版本分区，snapshot key 就是 `pnpm-lock.yaml` 的 SHA-256；**profile 不进入 key**，因为相同 lock 产生相同 dependency tree；
 3. snapshot ready 时直接物化到应用工作区，不访问网络；
 4. 未命中时在 host-owned 环境执行 `pnpm install --frozen-lockfile`，验证后原子发布 snapshot；
-5. 相同 profile、相同 lock 与 toolchain 的后续应用复用 snapshot。
+5. 相同 lock 与 toolchain 的后续应用复用 snapshot，即使它们属于两个依赖完全相同的 profile。
 
 DOM 与 Canvas2D 的 lockfile、依赖树证明和构建产物不得出现 Three、Phaser、Babylon 或 Havok。各 profile 的依赖集合互不并入「大一统」lock；否则普通应用会为游戏引擎付下载、供应链与产物体积成本。
 
@@ -708,7 +750,8 @@ DOM 与 Canvas2D 的 lockfile、依赖树证明和构建产物不得出现 Three
 - pnpm 实际依赖树证明；
 - 许可证清单；
 - SPDX SBOM；
-- snapshot 元数据中的 profile、toolchain 与 lock digest。
+- snapshot marker 中的版本、toolchain、lock digest 与 tree digest；
+- 每应用 provenance/SBOM 中的 profile→lock 映射。profile 用于审计和诊断，不改变 snapshot 内容地址。
 
 ### I.5 Phase 1：模板适配器与 WebView 生命周期
 
@@ -743,32 +786,50 @@ workflow 路由保持两条：
 - `tools/workflow/src/lib.rs` 已有两条 workflow 的身份集合，所有相关判定改成集合/公共 predicate，禁止再写单个字符串相等；
 - 表驱动测试逐条证明两条 workflow 都只能绑定目标应用 workspace、运行期间都阻止删除，非 Local App workflow 不受影响。
 
-生产构建继续使用固定 IIFE Vite 配置。Phaser、Babylon、glTF loader 与 Havok WASM 必须通过真实 frozen pnpm install + production build + WebView launch；只做 TypeScript/import 验证不算完成。重复 build/restore 必须继续使用 manifest 中的同一 profile 与 lock。
+生产构建继续使用固定 IIFE Vite 配置。§I.1 的 Phase 1.0 是公共接口开工门，不是最终 QA 才跑的测试；通过后，Phaser、Babylon、glTF loader 与 Havok WASM 的真实 frozen pnpm install + production build + WebView launch 仍作为持续回归。只做 TypeScript/import 验证不算完成。若后续升级重新撞到 IIFE/code-splitting/WASM 构建限制，先停止对应 profile 发布并重新设计 build contract；不得顺手改动所有 profile 共用的 Vite 配置。重复 build/restore 必须继续使用 manifest 中的同一 profile 与 lock。
 
 ### I.7 Phase 2：Godot 原生模式
 
-前置条件：desktop Local App host 已能创建、打开、运行、终止、删除并恢复**非 WebView**项目；移动 host 不进入本阶段。
+前置条件：desktop Local App host 已能创建、打开、运行、终止、删除并恢复**非 WebView**项目；移动 host 不进入本阶段。**本节只锁定 Phase 2 的产品边界，不授权直接编码。** 在任何 Godot 代码落地前，必须先提交并通过一份独立的 NativeGame design + threat model，至少完整定义下面两组契约。
 
-- 新增独立 `NativeGame` 项目类型以及 `godot_2d`、`godot_3d` 两种创建选项；不复用 `AppSurface::Canvas`，也不让 Web profile 枚举承载 Godot。
+#### I.7.1 最小持久化与公共接口
+
+- desktop project catalog 有持久 discriminator：`WebView` 与 `NativeGame`。`NativeGame` 不复用 `AppSurface::Canvas`，也不进入 Web profile 枚举。
+- NativeGame manifest 至少持久化 `{project_kind: native_game, runtime: godot, profile: godot_2d|godot_3d, engine_version, toolchain_digest}`；profile 与 engine version 创建后不可隐式替换。
+- desktop-only create request/DTO 明确携带 `godot_2d` / `godot_3d`；移动协议不能构造该项目类型。
+- desktop host 提供创建、查询 toolchain/download、打开 editor、run、stop、headless export 和删除操作；每个 operation 的错误/重试语义、进程 pid/ownership 与事件 DTO 必须在独立 spec 中 bless。
+- 生命周期至少区分 `creating`、`downloading_toolchain`、`ready`、`running`、`exporting`、`failed`；下载或导出失败保留项目并能重试。
+- editor、run、export、checkpoint/restore 与物理删除共用同一项目级 lease/存储锁；运行中删除和重复并发 export 被拒或有序等待。
+
+若 desktop host 合并后的领域模型无法自然承载这些字段，Phase 2 应创建独立 NativeGame service/manifest，而不是向 mobile `AppManifest` 或 `AppSurface` 追加 Godot 分支。没有以上持久化/API 设计，§I.8.3 的验收不允许启动。
+
+#### I.7.2 工具链与项目执行信任边界
+
 - 第一版固定使用 [Godot 4.7.2 Standard](https://godotengine.org/download/archive/4.7.2-stable/)，不支持 .NET/C#。
 - 按当前 desktop OS/architecture 按需取得官方 Standard editor/runtime artifact 与 export templates；URL、版本、字节大小和 SHA-256 写入受版本控制的 toolchain manifest，下载后按该本地权威验证再进入版本化缓存，不在运行时信任远端最新版本或远端 checksum。若某平台用同一 Standard executable 的 `--headless` 模式运行，则 editor/headless 可以指向同一已验证 binary；不要假设官方一定发布独立 headless 文件。
-- 提供基础 2D/3D 场景、启动编辑器、运行项目和 headless export。编辑器进程与 export 进程由 desktop host 管理，项目目录仍走应用级互斥与删除保护。
-- 首版只导出当前 desktop OS 的可执行物；Android/iOS SDK、签名、商店发布与跨平台 export 作为后续里程碑。
-- Godot 项目不使用 `window.lingxi.v2`。需要 LingXi 原生能力时另行设计 Godot extension；首版不注入隐式 bridge，也不让 WebView workflow 操作 Godot 项目。
+- archive 解包必须拒绝绝对路径、`..` 穿越、逃逸 symlink/hardlink、重复覆盖和非预期 executable；校验完整 inventory 后才原子发布 toolchain cache。
+- **固定 Godot binary 的摘要不等于项目可信。** editor、run 和 export 每次都在 desktop sandbox 内启动：只允许项目根、只读 toolchain cache、专用 user/cache/temp 与本项目 export 根；默认断网；拒绝访问其他 LingXi 应用、会话、用户 home 与任意宿主路径；默认只允许 Godot 自身，若当前 OS export 确实需要 helper，helper 也必须进入 toolchain manifest、固定摘要并显式 allowlist，不能泛化成任意子进程权限。
+- 首版项目 preflight 拒绝 `.gdextension`、`.so` / `.dylib` / `.dll`、`addons/**`、EditorPlugin/EditorScript、import plugin 和带 `@tool` 的脚本。preflight 是清晰报错层，**sandbox 才是不可绕过保证**；用户在已打开的 editor 中修改项目也不能突破宿主边界。
+- 提供基础 2D/3D 场景、启动编辑器、运行项目和 headless export。首版只导出当前 desktop OS 的可执行物；Android/iOS SDK、签名、商店发布与跨平台 export 作为后续里程碑。
+- Godot 项目不使用 `window.lingxi.v2`。需要 LingXi 原生能力时另行设计受审计的 Godot extension；首版不注入隐式 bridge，也不让 WebView workflow 操作 Godot 项目。
 
-所有 Godot artifact 同样按需下载，不随主应用内置。无缓存且离线时保留项目并返回可重试下载错误；摘要不符不得启动 editor/headless/export binary。
+所有 Godot artifact 同样按需下载，不随主应用内置。无缓存且离线时保留项目并返回可重试下载错误；摘要不符、inventory 不符或 sandbox 不可用时不得启动 editor/headless/export binary。
 
 ### I.8 测试与验收
 
 #### I.8.1 Phase 1 功能与兼容性
 
 - profile 推荐、用户覆盖、profile→surface 映射、冲突校验和 profile 不可变性都有单元测试。
+- **Phase 1.0 先行证据**：在任何 profile enum/schema commit 之前保存 Babylon + glTF + Havok 的固定 IIFE production build 日志与 iOS/Android WebView smoke 结果；该证据缺失时 Phase 1 不开工。
 - `runtime_profile` 与 `surface` 在 data store 打开前一次性写定；已有数据库时替换任一字段都被拒。
-- `LocalAppRuntimeProfiles` 的 `requires_download` 与 snapshot 实际状态一致，查询本身不访问网络。
+- 无 profile 的 v1 manifest 使用 `skip_serializing_if`：load 后的 canonical JSON/hash 与加字段前 fixture 完全一致，已有 SQLite 继续打开；`surface == None` 仍保持原不可重建拒绝。
+- `LocalAppRuntimeProfiles.download_status` 分别覆盖 ready snapshot、精确 engine-free bundled seed 与没有可验证离线树；查询本身不访问网络、不修改 app/snapshot/store。
+- host-native picker 的用户选择与 receipt 绑定：跨 app、过期、伪造、重复消费和 receipt/profile 覆盖均被拒；落地失败释放 claim，成功提交后消费；进程重启后要求重新确认。另测一次 pre-commit 失败后重新确认其他 profile：仅在 `scaffolded == false` 且无 data store 时允许清空重写，commit 后永远拒绝。
 - 五种 Web profile 均能创建、frozen pnpm install、production build、启动和重建。
 - 无 profile 的 legacy DOM、Canvas 和 Three.js v1 fixtures 继续走原 scaffold/lock 并通过原测试；加载不会回填 profile。
-- 第一个 profile 安装发生网络访问；第二个相同 profile、lock 和 toolchain 的应用命中 snapshot，全程不访问网络。
-- DOM/Canvas2D 的 package、lockfile、依赖树、SBOM 和产物不包含 Three、Phaser、Babylon 或 Havok。
+- 在清空 snapshot、共享 pnpm store 且不存在 exact bundled seed 的 hermetic 设备上，第一个 `three_3d` / `phaser_2d` / `babylon_3d` 安装发生网络访问；第二个相同 lock/toolchain 的应用命中 snapshot，全程不访问网络。`react_dom` / `canvas_2d` 可以命中 engine-free base seed，不要求伪造一次网络访问。
+- DOM/Canvas2D 的 package、lockfile、依赖树、SBOM 和产物不包含 Three、Phaser、Babylon 或 Havok；两端 Full 主应用内的 staged dependency seed、runtime pins、许可证清单和 bundled SBOM 也不包含任何游戏引擎。
+- 两个 profile 使用字节相同 lock 时命中同一个 snapshot root；profile 变化但 lock/toolchain 不变不会复制 dependency tree。
 - 离线缓存缺失、下载中断、摘要不符、Havok WASM 初始化失败和 WebGL context loss 都产生明确、可重试错误，不静默切换 profile 或引擎。
 - Phaser 与 Babylon 的 WebView 测试至少捕获两帧不同图像，并覆盖 pointer、键盘、旋转、后台恢复、context loss 和销毁。
 - profile 确认后，workflow 读取 manifest 中的选择；尝试从 workflow 参数换 profile 被拒。
@@ -792,37 +853,42 @@ heap 与输入延迟通过测试 instrumentation 采集，不把调试探针带�
 
 #### I.8.3 Phase 2 Godot 验收
 
+- 独立 NativeGame design/threat model 已通过；持久 project kind、create/事件 DTO、desktop-only lifecycle tools 与项目级锁都有契约测试，否则本节全部测试不得作为实现开工替代品；
 - 无 Godot 缓存时只展示一次下载，完成后验证摘要并原子发布缓存；
 - 已缓存时可以离线创建、打开、运行和导出示例项目；
 - `godot_2d` 与 `godot_3d` 模板均通过 headless smoke test；
 - editor/headless/export 进程崩溃不会损坏项目；临时导出被清理，最后一次成功导出物继续保留；
 - 摘要不符、下载中断、运行中删除和重复并发导出都有负向测试；
+- 恶意 archive 的路径穿越/symlink、项目内 `.gdextension`/native library/addon/`@tool`/editor plugin 均在启动前拒绝；
+- sandbox canary 证明 editor、run 与 export 不能读取项目外文件、写入非专用根、访问网络或启动未批准子进程；sandbox 不可用时 fail closed；
 - 首版只验证当前 desktop OS，不把移动签名或商店发布算进完成条件。
 
 ### I.9 实施所有权与主要文件
 
 Phase 1 预期影响以下所有权边界；实现时先以合并后的代码图重新核对，不能机械照抄当前行号：
 
-- `local-apps/src/manifest.rs` — `AppRuntimeProfile`、optional manifest 字段、映射/不可变性/legacy v1 校验；
+- `local-apps/src/manifest.rs` — `AppRuntimeProfile`、带 `default + skip_serializing_if` 的 optional manifest 字段、映射/不可变性/legacy v1 hash 校验；
 - `apps/engine-mobile/src/local_apps_build.rs` — profile-specific locked files、build target 与 production build；
-- `apps/engine-mobile/src/local_apps_host.rs` — pnpm install/snapshot、profile-aware scaffold、正式 `LINGXI.md` 与生命周期资产；
-- `apps/engine-mobile/src/local_apps_mcp.rs`、`local_apps_tools.rs` — `LocalAppCreate` / `LocalAppScaffold` 扩展、只读 profile catalog 与工具门；
+- `apps/engine-mobile/src/local_apps_host.rs` — pnpm install/snapshot、engine-free seed adoption、profile receipt/picker、profile-aware scaffold、正式 `LINGXI.md` 与生命周期资产；
+- `apps/engine-mobile/src/local_apps_mcp.rs`、`local_apps_tools.rs` — `LocalAppCreate` / receipt-bound `LocalAppScaffold`、只读 profile catalog、host-native confirmation 与工具门；
 - `skills/create-local-app/SKILL.md`、`agents/openai.yaml` — 评分、推荐、下载提示、确认与 workflow 路由；
 - `tools/workflow/src/builtins.rs` 的 Canvas shape/core、`tasks/src/handlers/local_workflow.rs`、`tasks/src/registry.rs`、`tools/workflow/src/lib.rs` — profile generation、workspace lease 与删除保护；
-- supply-chain、dependency snapshot、SBOM 与 iOS/Android WebView 测试的现有模块和 fixtures。
+- `lingxi-code/scripts/mobile-linux/build-local-app-node-modules.sh`、同目录的 `stage-local-app-runtime.py`、`docs/mobile-linux/local-app-runtime-pins.json`、runtime license/SBOM、iOS/Android staging/build 配置 — bundled seed 从含 Three 的 v1 tree 切到 engine-free base，并加 bundle inventory guard；
+- supply-chain、dependency snapshot、receipt、固定 IIFE spike 与 iOS/Android WebView 测试的现有模块和 fixtures。
 
-Phase 2 在 desktop host 下建立独立 NativeGame project/toolchain/cache/export 所有权；不得把 Godot 分支散落进 mobile `local_apps_build.rs` 的 `AppSurface::Canvas` match。
+Phase 2 先新增一份独立 NativeGame design/threat model，再在 desktop host 下建立 project service/manifest、toolchain cache、sandboxed process supervisor 和 export 所有权；不得把 Godot 分支散落进 mobile `local_apps_build.rs` 的 `AppSurface::Canvas` match。
 
 ### I.10 明确假设与留口
 
 - 「直接 HTML」指现有 Vite + React/Ionic DOM 应用，不新增纯 HTML/JS scaffold。
 - Phase 1 以 WebGL2 为跨 iOS/Android WebView 通用基线；WebGPU 只做 feature-detect，不承诺所有设备可用。
-- 用户确认 profile 后即授权该 profile 的首次按需依赖下载；下载失败可重试，不撤销已确认选择。
+- 用户在 host-native picker 确认 profile 后即授权该 profile 的首次按需依赖下载；receipt 只绑定选择，不代表依赖已经 ready。下载失败可重试，不撤销已提交选择。
+- Full 主应用可以携带 engine-free base seed，但不得携带 Three、Phaser、Babylon、Havok 或其他游戏引擎；这不违反「引擎按需下载」。
 - Phaser/Babylon/Havok 等包从 registry 获取不等于使用 npm CLI；项目包管理和 lock 权威始终是 pnpm。
 - 旧 manifest 无 profile 的兼容是冻结 v1 行为，不是迁移入口；不自动升级依赖，也不生成 profile。
 - Phase 1 不提供 Unity、Cocos、Defold、PlayCanvas 编辑器或第三方插件市场。
-- Phase 2 的 Godot 仅在 desktop host 开放；移动端继续使用 Phaser/Babylon 等 WebView Local App。
-- Godot extension、移动签名/商店发布、跨 OS export 与第三方 Godot 插件管理均为后续设计，不在首版隐式补齐。
+- Phase 2 的 Godot 仅在 desktop host 开放；移动端继续使用 Phaser/Babylon 等 WebView Local App。本文件只锁定 Phase 2 产品边界，独立 NativeGame design/threat model 才是实施授权。
+- Godot extension、移动签名/商店发布、跨 OS export 与第三方 Godot 插件管理均为后续设计；首版明确拒绝 native extension/editor plugin/`@tool`，不在首版隐式补齐。
 
 ---
 
@@ -915,3 +981,14 @@ Phase 2 在 desktop host 下建立独立 NativeGame project/toolchain/cache/expo
 4. 五套依赖全部使用独立 `package.json` / `pnpm-lock.yaml`，复用 host-owned `pnpm install --frozen-lockfile` 与 SHA-256 snapshot；明确禁止 npm/npx/Yarn，并补齐 profile-aware 供应链、SBOM、离线失败和性能验收。
 5. 核对代码后登记了现有 workflow 身份遗漏：workspace lease 与运行中删除保护只认 `local-app-build`，Phase 1 必须同时覆盖 `local-canvas-build`。
 6. Godot 固定 4.7.2 Standard；按 OS 验证下载与 export templates。headless 允许复用同一 Standard executable 的 `--headless` 模式，不假设每个平台都有独立 headless artifact。
+
+### 第九轮（游戏引擎 plan code review 修复，2026-08-24）
+
+6 条 findings（4 P1 / 2 P2）全部采纳并修复：
+
+1. `runtime_profile` 明确使用 `#[serde(default, skip_serializing_if = "Option::is_none")]`，无 profile 的 v1 manifest 序列化/hash 字节保持不变；`surface == None` 不被误当成 v1 scaffold。
+2. 当前含 Three 的 bundled v1 dependency seed 被明确列为 Phase 1 必改项：Full build 只保留 engine-free base seed；legacy v1 和所有游戏引擎按需安装。下载提示改成能表达 snapshot、base seed 与「可能需要下载」的三态，不再把 `!snapshot_ready` 等同于一定访问网络。
+3. 对话式 profile 选择不再由代理把字符串从 `AskUserQuestion` 搬进 Scaffold。新增 host-native picker 与 10 分钟、绑定 app/profile、成功后一次性消费的进程内 receipt；`LocalAppScaffold` schema 不接受可覆盖 profile/surface。
+4. snapshot identity 回到现有内容寻址边界：toolchain 分区 + lock SHA；profile 只写 provenance/SBOM，依赖相同的 profile 可以共享 tree。
+5. Babylon + glTF + Havok 的固定 IIFE 双端 WebView spike 上移为 Phase 1.0 公共接口开工门；失败时停下重新设计 build contract，不能先落 schema。
+6. Godot Phase 2 改为独立 NativeGame design + threat model 的后续授权，补齐最小 project discriminator/API/lifecycle/锁要求，以及 archive extraction、project preflight 和 desktop sandbox 的 fail-closed 边界。

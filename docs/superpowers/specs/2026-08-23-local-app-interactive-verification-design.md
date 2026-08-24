@@ -1,12 +1,12 @@
 # 本地应用：可交互的验收与编辑
 
-日期：2026-08-23（2026-08-24 第四轮对抗式评审后重写）
+日期：2026-08-23（2026-08-24 第六轮对抗式评审后修订）
 平台：iOS（客户端交互）；引擎改动两端共用
 协议基线：`7.0.0`（`client-protocol/src/version.rs:56`），blessed major `7`
 
-> 本文经四轮对抗式评审。第四轮砍掉的机制多于新增的：协议改动 5 处 → **1 处**，
-> bless 两轮 → **一轮**，workflow VM 新原语 → **不需要**。用户可见的功能没有缩水。
-> 修正记录见文末，不要在没读它的情况下「恢复」任何看起来缺失的东西。
+> 本文经六轮对抗式评审。第五轮把冒烟门收束为必须真机取证的 spike；
+> 第六轮补齐 annotation 原子持久化、build outcome 到 iOS 的传播、scope 切换后
+> one-shot send，并清理了所有已撤回方案的残留契约。修正记录见文末。
 
 ## 起因
 
@@ -170,7 +170,7 @@ canvas 应用没有可命中元素，退化为「矩形 + 图 + 描述」，这�
 | ③ `manage_runtime` start/restart | **restart 不重新加载页面**：端口刻意稳定 ⇒ URL 逐字节相同 ⇒ `LocalAppWebView.swift:938` 的 `guard loadedURL != url` 直接返回。另有四条独立失败（`start` 对运行中的 runtime 是成功的 no-op；agent 可以不调；`sceneWillEnterForeground` 会对每个先前运行的 app 调 `start`） |
 | ④ ②+ 门自己发 `reload` | **`.reload` 不在自动放行集**（`LocalAppsStore.swift:980` 只放行 `.inspect`/`.captureView`）⇒ 弹权限模态，无人应答则 `UI_TIMEOUT` 120 秒后 `Err` ⇒ **好构建被判失败**；且 reload 的结果在 `webView.reload()` **之后立即返回**（`LocalAppWebView.swift:384-387`），**没有任何 settle 信号**可等 |
 
-### 任何方案必须同时满足的五条（这才是本节的实际产出）
+### 任何方案必须同时满足的六条（这才是本节的实际产出）
 
 1. **宿主保证触发**：不依赖模型记得调用什么。
    ⚠️ 注意 `restore_checkpoint_value` **不走 `build_app`**，它直接调 `build_workspace`
@@ -193,6 +193,12 @@ canvas 应用没有可命中元素，退化为「矩形 + 图 + 描述」，这�
    `ActOnUi` 都是 `DenyByDefault`，`defaults_per_tool.rs:128-130` 写明了威胁模型
    （*a pixel capture cannot redact anything it renders*）。**让免提示的工具把 DOM 读取和
    像素捕获做成未经提示的副作用，是权限表上的洞，不是设计取舍。**
+6. **结果可观测**：宿主产生的 `SmokeReport` 必须以结构化数据到达 workflow
+   的 repair 决策和 iOS 的 app 详情标记，不得要求 subagent 转写工具文本。
+   报告至少带 `build_id` 与 `output_change_id`，让客户端能证明它验的是
+   哪一代被服务字节；
+   spike 必须明确这个载体是既有 DTO 字段、新 app event，还是进程级服务状态；
+   在载体未定之前，不得承诺「冒烟报告不动协议」。
 
 ### 下一步是 spike，不是第六轮纸面推演
 
@@ -204,15 +210,47 @@ canvas 应用没有可命中元素，退化为「矩形 + 图 + 描述」，这�
 观测，且不需要用户在场、不越权、不抢占屏幕？
 
 三位评审收敛到同一个候选（**但它本身未经验证，不要当成结论**）：
-store 持有的**离屏 `WKWebView`**（按 `makeUIView` 同款配置挂到 key window、零尺寸），
+store 持有的**离屏 `WKWebView`**（按 `makeUIView` 同款配置，用与目标设备一致的
+**非零固定 viewport** 挂到 key window 的可布局容器，容器移到可见边界之外；
+**不得**用零尺寸、`isHidden=true` 或 `alpha=0` 伪装离屏，这三者都可能让 WebKit
+不布局/不绘制，而现有 capture 路径已明确拒绝零宽高），
 配一条**专用的、非 agent 的**宿主事件通道（与 `.inspect`/`.captureView` 同理由自动放行，
 且**绝不写入 `approvedUIAutomation`**），用显式
 `load(URLRequest(cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))` 而非 `reload()`，
 从 `didFinish`/`didFailProvisionalNavigation` 结算。它同时绕开 ①②③④ 的全部死因，
 并且**顺带消除了「门会把用户从聊天里拽走」这个 UX 问题**。
 
-spike 的验收标准就是上面那五条，每条都要在**真机**上被证伪或证实——尤其第 3 条，
-它是本设计存在的全部理由。
+🚨 **spike 还有一个比「离屏能不能截图」更硬的子问题：路由基座是单例。**
+`LocalAppWebViewRegistry.controllers` 是 `[String: WeakController]`，**只以 `appID` 为键**
+（`LocalAppWebView.swift:43`），而 `register(_:appID:)` 会**不可逆地关掉在位者**：
+`if let replaced = controllers[appID]?.value, replaced !== controller { replaced.close() }`
+（`:48-56`），`close()` 会 `detach` broker、`stopLoading`、摘掉全部 script message handler
+并把 `webView` 置 nil（`:348-359`），**没有任何东西会把它重开**。
+而 `makeUIView` 本身就是注册点（`:927`）。
+
+三条出路全是死的：
+1. 离屏视图注册 ⇒ **当场关掉用户正在看的预览**；
+2. 不注册 ⇒ `execute` 只查 `controllers[appId]`（`:108-116`），
+   判据 2/3/6 就是 `inspect_ui`/`capture_ui`，**没有任何路由能到达页面**；
+3. 走私有路由绕开 registry ⇒ 可见预览随时可能挂载（用户点开 app，或任何 agent UI 请求
+   触发 `requestedPresentationAppID`），`makeUIView` → `register` 又把在位者关掉。
+
+而**共存正是标注流程的常态**：用户看着 app、提交药丸、agent 重建、门开火。
+
+同轴的第二个问题：`dataStore(appID:)`（`:1314`）给两个视图**同一个 identified store**，
+而 `:70-73` 的注释明写「WebKit requires every view using an identified data store to be
+released before `remove(forIdentifier:)` runs」，`close(appID:)`（`:75-78`）只关**注册过的**
+那个——它正是 `removeDataForDeletedApps`（`:1366`）删应用前调用的。一个不在册的离屏
+WKWebView 会**静默破坏应用删除的清理**，而且它启动时的写入会落进用户自己的
+`localStorage`/IndexedDB。
+
+所以 spike 必须回答：registry 是否要改成按 `(appID, role)` 键控（`role ∈ {visible, smoke}`），
+若是，只带 `appId` 的 `resolveBridge`/`deliverStreamFrame` 怎么办；以及谁负责在
+`close(appID:)`/数据存储删除时关掉 smoke 视图。**这是对一个共享单例的客户端改造，
+不是「按 `makeUIView` 同款配置」。**
+
+spike 的验收标准是上面那六条**加上这个子问题**，每条都要在**真机**上被证伪或证实——
+尤其第 3 条，它是本设计存在的全部理由。
 
 **在 spike 有结论之前，阶段 2 不可计划。** 阶段 1 与阶段 3 不依赖它，可以先做。
 
@@ -279,17 +317,15 @@ React 19（`package.json:17` `"react": "19.2.8"`）的默认 `onCaughtError` 路
 `prompt/task_notification.rs:232-246` vs `:133-135`）。
 必须同时加一个 app 详情页的可疑标记 + 一条把 `smoke_report` 摘要带进任务通知的路径。
 
-### 门的请求会把 app 推上屏——这是对的
+### 可见预览路由与宿主冒烟路由必须分开
 
-controller 只在 `LocalAppPreviewView` 真的挂了 `LocalAppWebView` 之后才注册，
-而它只在 `previewURL != nil` 且视图在屏上时挂载（`LocalAppDetailView.swift:586`）。
-把 app 推上屏的正是 `requestedPresentationAppID` → `RootView.swift:309-313`。
-**抑制它 = 让门在主流程下 100% 失效**（早期版本这么写过，已撤回）。
+既有 agent UI 请求仍由 `requestedPresentationAppID` → `RootView.swift:309-313`
+打开可见预览，这是它的权限与用户反馈边界。冒烟 spike 的验收标准则是
+**不需要用户在场、不抢占屏幕**，所以它不得复用 `requestedPresentationAppID`
+来挂载 WebView。若离屏候选在真机上不成立，spike 应判该方案失败，而不是
+回退到把 app 强制推上屏。
 
-在本设计的两条流程里这都是预期行为：用户要么刚要求创建这个 app，要么刚提交标注要求
-修它——**都在等这个 app**。
-
-## 协议改动：只有一处
+## 协议改动：已确定两组，冒烟载体待 spike
 
 `ResolveAppUiRequest.result_json` 和 `AppUiRequestDto.value` 都是不透明
 `Option<String>`（`commands.rs:438`、`local_apps.rs:774`），所以绝大部分能力不触及协议。
@@ -298,10 +334,20 @@ controller 只在 `LocalAppPreviewView` 真的挂了 `LocalAppWebView` 之后才
 |---|---|---|
 | `inspect_ui` 元素几何 / canvas rect / runtimeErrors | `result_json` 内 JSON | 否 |
 | `capture_ui` 区域裁剪 | host schema 序列化到 `value` JSON | 否 |
-| 冒烟门报告 | 宿主写盘 + 构建结果 | 否 |
+| 冒烟门报告 / `needs_user_review` | **待 spike 决定** | **待定，不得预判为否** |
 | 标注 → 消息 | 复用 `SendPrompt` | 否 |
-| 清单清理触发 | 复用既有 `AppRecordChanged` | 否 |
-| **存标注** | 新命令 + `AppEventDto` 回执 | **是（唯一）** |
+| 清单清理触发 | 复用 `AppRecordChanged`，但 `AppRecordDto` 新增 build 字段 | **是** |
+| **存标注** | 新命令 + `AppEventDto` 回执 | **是** |
+
+已确定的协议工作必须在**同一个结构更新批次**中完成：
+
+- `ClientCommand::StoreAppAnnotation` 与 `AppEventDto::AppAnnotationStored`；
+- `AppRecordDto.last_build_id` 与 `AppRecordDto.last_output_change_id`；
+- Rust `lower_record()`、TS protocol mirror/runtime guards、iOS/Android 绑定与 adapter/model、
+  contract index/goldens/snapshots 同步更新。
+
+本项目不要求兼容旧客户端，但「不兼容」不等于可以遗漏当前版本的
+DTO lowering 或生成绑定。
 
 ### 被删掉的三处协议改动，以及为什么
 
@@ -322,7 +368,9 @@ controller 只在 `LocalAppPreviewView` 真的挂了 `LocalAppWebView` 之后才
   `AppRecordChanged` 已经是 blessed 事件且客户端已在处理（`LocalAppsStore.swift:911`）；
   `pin_init_session` 就是从 `with_app` 里发 `AppEvent::RecordChanged` 的现成先例
   （`service.rs:707-712` → `local_apps_bridge.rs:216-220`）。清理改成监听
-  `AppRecordChanged` 且 `record.lastBuildId != batch.baselineBuildId`。
+  `AppRecordChanged`，用 `last_build_id` 对应一次构建、用 `last_output_change_id`
+  对应最近一次**真正改变被服务字节**的构建。这复用既有 event 变体，
+  但仍需要扩展 `AppRecordDto`。
 
 ### `StoreAppAnnotation`
 
@@ -336,7 +384,11 @@ ClientCommand::StoreAppAnnotation {
     note: String,
     image_base64: String,
 }
-// → AppEventDto::AppAnnotationStored { app_id, annotation_id, path: Option<String>, error: Option<String> }
+// → AppEventDto::AppAnnotationStored {
+//      app_id, annotation_id,
+//      path: Option<String>, // ".lingxi/annotations/<id>/image.jpg"
+//      error: Option<String>
+//    }
 ```
 
 ⛔ 早期版本还有一个 `request_id`。删掉：它的论据（并发提交会乱序回执）**未经代码证实**
@@ -352,7 +404,7 @@ ClientCommand::StoreAppAnnotation {
 （`LocalAppsStore.swift:267`）。**不要用「uniffi 元数据快到上限」当理由——实测
 `AppEventDto` 15.8%、`ClientEvent` 28.7%，不成立。**
 
-### 落盘位置：`workspace/.lingxi/annotations/<annotation_id>.jpg`
+### 落盘位置：`workspace/.lingxi/annotations/<annotation_id>/`
 
 ⛔ **早期版本把它移到 `apps/<id>/annotations/`（workspace 之外）。那是错的，已撤回。**
 移出去的两条理由，一条被证伪、一条是独立 bug 本来就要修；而移出去**引入了一个致命
@@ -387,8 +439,20 @@ ClientCommand::StoreAppAnnotation {
 `settings.local.json` 授 `Read(./**)`、只 deny `Edit(./.lingxi/**)`；
 glob 走 gitignore 语义（`filesystem.rs:521`），`permission/src` 里**没有任何隐藏文件规则**。
 
-🚨 **文件名必须是 `annotation_id`，不是时间戳序号。** 这是重启对账能做对的前提，
-见「标注清单的持久化与状态机」。
+🚨 **目录名必须是 `annotation_id`，不是时间戳序号。** 每条标注是一个原子发布单元：
+
+```
+workspace/.lingxi/annotations/<annotation_id>/
+├── image.jpg
+└── annotation.json  # annotation_id/rect/viewport/hit_elements/note/schema_version
+```
+
+引擎先在同父目录写 `.tmp-<annotation_id>-<nonce>/`，两个文件都校验并写完后，
+用一次 directory rename 发布为 `<annotation_id>/`；`AppAnnotationStored` 只能在 rename
+成功后回执。这使「disk-only 恢复」既能找回图，也能找回药丸和 prompt 需要的
+`note/rect/viewport/hit_elements`。详见「标注清单的持久化与状态机」。
+同一 `annotation_id` 重试时：已存在的 `annotation.json` 与本次规范化输入一致则
+幂等回成功；不一致则回 `annotation_id_conflict`，不覆盖已存证据。
 
 **仍然要做**：把 `".lingxi"` 加进 `:766-769` 的跳过表——它是独立在线缺陷，
 且 `spec.md` 与将来任何写进去的东西都会踩同一个坑。
@@ -524,9 +588,21 @@ host 校验有限数字/正尺寸后序列化进既有 `AppUiRequestDto.value`�
 
 RootView 的 `onSubmitAnnotations(appID, batchID, prompt)` 是唯一入口。
 
-1. 已在同一 `.localApp(appID)` scope：直接在当前 source 发。
-2. 在别的 scope 且正 streaming：**只排队，不调 `switchScope`**——`switchScope` 会先
-   `previousSource.cancelAndWait()`（`RootView.swift:909`），直接切会杀掉无关的 turn。
+1. 回调进入时立即在 RootView 保留一个按 `batchID` 键的
+   `PendingAnnotationSubmission { appID, batchID, prompt, targetSessionID, state }`。
+   `state` 只能是 `queued | switching | awaitingTurnStarted(token)`；
+   任意重入都先按 `batchID` 去重。
+   ⚠️ 早期版本还列了一个 `readyToSend`——**没有任何转换产生或消费它**，删掉。
+   **pending 项在三个出口上都必须被移除**，之后由药丸 FSM 独占
+   `stored`/`submitted`：token 被接受 ⇒ 移除 + 药丸转 `submitted`；
+   read-only 返回 `nil` ⇒ 移除 + 药丸转 `stored(error)`；turn cancelled/failed ⇒
+   移除 + 药丸转 `stored(可重试)`。**不写移除规则的话**，`awaitingTurnStarted`
+   没有出边，而「后续重试边沿看到该状态必须 no-op」+「按 `batchID` 去重」会
+   **静默吞掉用户对同一批次的重新提交**——边界表承诺的重试路径是死的。
+2. 只要当前 source 正在 `streaming/isCancelling/sessionTransitionPending`，或 RootView
+   `projectSwitching == true`，就**只排队，不调 `switchScope`**。尤其是
+   `switchScope` 会先 `previousSource.cancelAndWait()`（`RootView.swift:909`），
+   直接切会杀掉无关的 turn。
 3. 目标 session 优先该 app 最近活跃 session。⚠️ **`restoredSessionID` 返回 `String` 不是
    `String?`**，miss 时返回 `""`（`RootView.swift:1030-1039`），判空要用 `.isEmpty`；
    而且它**抹掉了底层刻意保留的区分**——`ProjectScopedPreferences.storedActiveSessionID`
@@ -535,18 +611,54 @@ RootView 的 `onSubmitAnnotations(appID, batchID, prompt)` 是唯一入口。
 4. 🚨 **不能用 `switchScope(initialPrompt:)`**：它只在转录为空时才发
    （`RootView.swift:978` 的 `if source.model.items.isEmpty`，而 `sessionResumed` 在同一个
    同步 handler 里就填好了 `items`，`ConversationSource.swift:4401/4418`）——
-   而规则 3 选的恰恰是几乎必然非空的会话。改为切完 scope 自己 `send(prompt)`。
-5. 🚨 **必须留住 `send` 的返回值。** 它返回 `ConversationTurnToken?`，五个守卫下返回 `nil`
-   （`ConversationSource.swift:2488-2494`），而 `RootView.swift:979`/`:1008` 用 `_ =` 丢了——
-   丢掉的正是 `TurnStarted` 要回显的 correlator。
-   ⚠️ 但 **`sessionTransitionPending` 要排除在「nil ⇒ 失败」之外**：`switchScope` 同步置位
-   它（`RootView.swift:928,937,951,953`），那是规则 4 自己的成功路径。
-6. 🚨 **`ConversationTurnCompletion` 到不了 `LocalAppsStore`。** 它是 `@Published`
+   而规则 3 选的恰恰是几乎必然非空的会话。`switchScope` 只负责切换，
+   pending 项进入 `switching`，**返回 `true` 不等于可以立即 send**。
+5. RootView 新增唯一 `flushPendingAnnotationSubmission()`。它只在以下边沿重试：
+   `sourceGeneration` 变化、`projectSwitching` 变为 `false`、`$streaming` 投递
+   `false`、`$sessionTransitionPending` 投递 `false`。
+
+   🚨 **但「投递 false 之后再调 `send`」这个写法必然永远失败，必须改。**
+   `@Published` 从 **willSet** 发布，所以 sink 里读存储属性拿到的还是**旧值**；
+   而 `send()` 在内部**自己重读**那五个守卫（`ConversationSource.swift:2488-2494`，
+   `@Published var streaming` `:388`、`sessionTransitionPending` `:463`），
+   **没有任何入口能把投递值递给它**。于是在 true→false 那一沿，`send` 读到的仍是
+   `true`、返回 `nil`，本文又把 `nil` 规定为「保持 queued 等下一个边沿」——
+   而其余三个边沿都没动 ⇒ **永远发不出去**。
+
+   ⚠️ 这个陷阱**就记录在本文让你贴着写的那个修饰符上面四行**：
+   `RootView.swift:296-300` 原话「`@Published` publishes from `willSet` … on the
+   true→false edge it reads `true` and the gate below would refuse forever.
+   **Pass the DELIVERED value instead of re-reading the property.**」
+   `landCreatedAppIfReady(streaming:)` 正是靠把投递值作为**参数**接进去才逃掉的
+   （`RootView.swift:621`），而 `send()` 没有这个缝。
+
+   所以落地必须二选一，spike/实现时定：
+   (a) 给 `ConversationSource` 加一个接受投递值的 `send(_:assumingGuards:)` 类入口；
+   (b) flush 不直接在 sink 里调 `send`，而是把投递值写进 pending 项后
+       `Task { @MainActor in }` 跳到下一个 runloop 再读属性（此时 `didSet` 已完成）。
+   ⛔ **不要照字面实现「投递 false 后重新检查五个守卫再 send」。**
+
+   每次重试都重新检查：
+   `activeScope == .localApp(appID)`、目标 session 已 adopt、source 不在五个
+   `send` 守卫中。满足后才调 `send(prompt)`。
+   - 返回 token：先把状态原子改为 `awaitingTurnStarted(token)`，再等
+     token 匹配的 `TurnStarted`；后续重试边沿看到该状态必须 no-op；
+   - 因为 streaming/cancelling/slash/transition 返回 `nil`：保持 queued，等下一个边沿；
+   - 因 read-only 返回 `nil`：改为 `stored(error，可见且可重试)`，不自动循环。
+6. 🚨 **TurnStarted/completion 的完整 token 都要到 RootView。**
+   `ClientEventCenter` 里的原始 `TurnStarted` 只有线上 `turn_id`，没有 `sessionEpoch`
+   或 source generation，不能拿它直接对全局 batch。`ConversationSource` 应在
+   `acceptTurnEvent` 通过后发布 `turnStartedToken: ConversationTurnToken?`，RootView 观察
+   这个值，把 `awaitingTurnStarted(token)` 改成 `submitted`，并记录当时的
+   build baselines。
+   **`ConversationTurnCompletion` 同样到不了 `LocalAppsStore`。** 它是 `@Published`
    （`ConversationSource.swift:397`，发布于 `:1996-2006`），唯一消费者是
    `ChatView.swift:225`；而 `LocalAppsStore` 只接了 `subscribe { handle(event:) }`
    （`RootView.swift:811`、`LocalAppsStore.swift:209`）。需要在 **RootView** 加一个显式
    钩子（挨着 `:300` 那个 `.onReceive(source.model.$streaming)`）——**不能放在详情/预览视图里**，
-   它们会被提交路径自己的关 cover 动作卸载。
+   它们会被提交路径自己的关 cover 动作卸载。两个钩子都用完整
+   `ConversationTurnToken(clientTurnId + sessionEpoch)` 匹配 batch，不得只比线上的
+   `turn_id`。
 
 ### 副驾驶条与引导
 
@@ -566,7 +678,8 @@ RootView 的 `onSubmitAnnotations(appID, batchID, prompt)` 是唯一入口。
 
 清单必须落盘：进程在 `StoreAppAnnotation` 成功后终止会丢掉清单却留下孤儿文件。
 照抄 `LocalAppWebsiteDataStoreRegistry`（`LocalAppWebView.swift:1302` 起）——带版本的
-`Codable` 日志。
+`Codable` 日志。用户创建药丸时就先把完整 `draft` 写入日志，然后才发
+`StoreAppAnnotation`；状态更新也都用 temp + rename 替换整份日志。
 
 ⛔ **早期版本写「盘上有清单里没有的就删掉」。那会删掉它本来要保护的证据，已撤回。**
 本节承认的窗口正是「引擎写完图、客户端还没提交日志就崩」，而在那个窗口里删除
@@ -577,20 +690,57 @@ Journals the exact store identifier BEFORE the engine is asked to delete，
 `prepareForDeletion` `:1337`，引擎拒绝时还有 `cancelDeletion` `:1350` 回滚）。
 我把「日志驱动」写成了「日志差集」。
 
-正确做法**不需要 WAL、不需要 sidecar、不需要隔离区**——**让文件名就是 `annotation_id`**
-（命令本来就带这个参数，它本来就贯穿清单/batch/回执）。于是：
+恢复时以引擎原子发布的 annotation 目录为权威事实，以客户端日志为 UI/
+batch 状态：
 
-- 盘上有、清单没有 ⇒ **按文件名里的 id 恢复成 `stored`**，不是删除
-- 清单有、盘上没有 ⇒ 降回 `draft(error)`
-- 真正无法归属的文件（id 不是合法 UUID）才回收，且只在该 app 无待提交批次时
+- 盘上有完整 `<annotation_id>/annotation.json + image.jpg`、清单没有 ⇒
+  解析 sidecar，恢复完整药丸为 `stored(recovered)`，不是删除；
+- 清单是 `draft/storing`、盘上已有同 id 的完整目录 ⇒ 升为 `stored(recovered)`；
+- 清单是 `stored/submitted/buildObserved`、盘上没有 ⇒ 降回 `draft(error)`；
+- `.tmp-*` 或缺任一正式文件的目录不算标注；仅在没有对应 in-flight Store
+  且超过有界宽限期后回收；
+- UUID 非法或 sidecar schema/字段校验失败的正式目录进入可见的
+  `recovery_error`，不静默删除用户证据。
 
-（早期版本的文件名是 `1787543300-1.jpg` 这种时间戳序号，**不携带任何归属信息**——
-那才是逼出「只能靠差集猜」的根源。）
+🚨 **必须补一条终态：目前整个引擎侧标注接口是只写的，没有任何删除路径。**
+`cleared` 只是客户端状态，而恢复规则以**盘为权威**⇒ 两种读法都坏：
+日志若丢弃 `cleared` 条目，则下次启动时**每一条历史标注都会作为
+`stored(recovered)` 药丸回来**（每一次成功修复之后的每一次启动）；日志若永久保留
+墓碑，则日志与盘上目录**无界增长**（每张图上限 170 KiB，`LocalAppWebView.swift:510`），
+而且长在**构建工作区里**、没有任何 GC。参考的先例本身是一个带版本的
+`UserDefaults` 键（`:1305`），换 `.v2` 就会把墓碑全孤立掉、退回第一种读法。
+
+补法：`cleared` 时由客户端发一条 `DeleteAppAnnotation`（进同一批协议改动），
+或引擎在 `build_and_record` 里当 `last_output_change_id` 越过该 batch 时回收；
+并明确 `cleared` 的 `annotation_id` **在其目录被确认删除前**以墓碑形式留在日志里。
+`annotations/` 需要数量与字节双上限。
+
+🚨 **`StoreAppAnnotation` 不取 per-app 构建锁，而 checkpoint restore 会删掉窗口内新建的目录。**
+`restore_service_documents`（`checkpoints.rs:371-386`）会 `remove_file` 掉**每一个
+reset 之后存在、但不在 reset 之前快照里**的 `.lingxi` 文件。一次 restore 是完整的
+git hard reset，不是瞬时的；在那个窗口里发布的标注会在引擎**已经回执
+`AppAnnotationStored{path}` 之后**被删掉，随后恢复规则把它降成 `draft(error)`
+——用户的截图没了。其他写这棵树的路径都持锁（`service.rs:760` 建 checkpoint、
+`:797` restore、`local_apps_build.rs:633-634` 构建）。
+两个候选修法：`StoreAppAnnotation` 的「temp 写 + rename」外面套
+`storage::lock_app_build`（代价：提交会被一整次 Vite 构建挡住，与
+source-vs-source 那节耦合）；或把 `annotations/` 从
+`restore_service_documents` 的删多余项那一趟里豁免——那一趟的用途是防止 reset
+把**曾被跟踪过的** `.lingxi` blob 重新物化，跟从未被跟踪的标注目录无关。
+
+⚠️ **顺带：把 `annotations/` 从 `read_service_documents` 的递归里跳过。**
+它的注释是「**Read every file** under `workspace/.lingxi/`」，对每个文件
+`std::fs::read` 进 `Vec<u8>`（`checkpoints.rs:317-352`），**无大小无数量上限**；
+`restore()` 会同时持有**两份**完整拷贝（`:211` 的 `preserved` 与 `:371` 的第二次读），
+外加 `:388` 每文件第三次整读做字节比对，rollback 路径再来一遍
+（`local_apps_host.rs:3028`、`:3038`）。跳过之后标注反而**更安全**：
+它们已因 `/.lingxi/` 进了 `.git/info/exclude`，而 checkout 请求的是
+`remove_untracked` 而非 `remove_ignored` ⇒ **不碰它们 = 自动存活**。
 
 ```
 draft ──Store 成功──► stored ──TurnStarted──► submitted
   │                                             │
-  └──Store 失败──► draft(error)                  ├──digest 变化──► buildObserved
+  └──Store 失败──► draft(error)                  ├──output-change generation 变化──► buildObserved
                                                 │                     │
                                                 │        turn completed 且门通过 ──► cleared
                                                 │                     │
@@ -604,30 +754,41 @@ turn 结束，而 turn 在成功构建之后仍有**六个失败发布点**：`C
 （`AppEvent::RecordChanged` → `local_apps_bridge.rs:216-220` → `LocalAppsStore.swift:911`）
 **完全不与 turn 耦合**——构建打戳那一刻就到了。
 
-所以中间态 `buildObserved` 是必须的：digest 变化只记录「有新产物」，**只有在 token 匹配的
-`ConversationTurnCompletion.completed` 到达、且门通过之后才清理**。
+所以中间态 `buildObserved` 是必须的。每个 batch 在对应 `TurnStarted` 到达时同时记下
+`baseline_build_id` 与 `baseline_output_change_id`；只有后续 `AppRecordChanged`
+的 `last_output_change_id != baseline_output_change_id` 才进入
+`buildObserved(observedOutputChangeID: record.last_output_change_id)`。
+**只有在 token 匹配的 `ConversationTurnCompletion.completed` 到达、且通过的
+`SmokeReport.output_change_id == observedOutputChangeID` 时才清理**。这允许后续无改动
+build 铸新 `last_build_id`，又不会把门报告错绑到别的输出上。
+任一失败都回到 `stored(可重试)`；
+重试 turn 在新的 `TurnStarted` 重新取当时的两个 baseline。
 
-🚨 **清理必须比 `output_digest`，而 `build_workspace` 今天不告诉调用方它变没变。**
+🚨 **build outcome 必须用 `output_digest` 判定字节是否真变，而
+`build_workspace` 今天不告诉调用方它变没变。**
 `build_cache_hit` 在写任何 provenance 之前就 `return Ok(())`（`local_apps_build.rs:642-644`），
 而签名是 `async fn build_workspace(...) -> Result<(), AppError>`（`:589`）——**缓存命中与
 真实重建对调用方逐字节相同**。所以 agent 为了复现问题先跑一次无改动的 `LocalAppBuild`
 就会清掉整批标注。
 
-修法**不需要任何协议工作**（早期评审建议加持久化 digest 字段 + DTO + bless，那是错的）：
-digest 本来就在每次构建时算出来，只是从没离开过 `local_apps_build.rs`。
+修法不需要把 digest 本身送上线，但**需要把「最近一次输出变化」持久化并
+通过 `AppRecordDto` 送到客户端**。digest 本来就在每次真构建时算出来，
+只是从没离开过 `local_apps_build.rs`。
 
 - 在 `build_workspace` 里把**上一版**被服务树的 digest 提前取出——`digest_tree(dist)`
   已经在 `build_cache_hit`（`:889`）里算了。**这个顺序是硬要求**：`promote_build_root`
   （`:1136-1140`）先把旧 `build_root` rename 走，`write_build_provenance` 在下一条语句
   （`:664`）才写新的 `build.json`，所以 `build_workspace` 一返回旧 digest 就没了。
-- 返回类型加宽成 `Result<bool, AppError>`（或两变体的 `BuildOutcome`），语义是
-  **被服务的 `dist` digest 变了**：缓存命中处（`:643`）为 `false`；miss 路径比
-  `output_sha256`。两个 digest 直接可比——`validate_build_output`（`:979-989`）与缓存
-  路径算的是同一棵树。
+- 返回类型加宽成
+  `Result<BuildOutcome { output_changed: bool }, AppError>`：缓存命中处（`:643`）
+  为 `false`；miss 路径比较新旧 `output_sha256`。两个 digest 直接可比——
+  `validate_build_output`（`:979-989`）与缓存路径算的是同一棵树。
+- `LocalAppsHostBroker` 增加一个唯一的 `build_and_record` 包装，所有会发布
+  被服务字节的生产路径都走它：`build_app`、`restore_checkpoint_value` 的正向
+  rebuild，以及 restore 失败时的 rollback rebuild。不得只在 `build_app`
+  里打戳，否则 checkpoint restore 会产生新字节却留下旧 record。
 
-`build_id` 仍然只作 correlator。
-
-### `build_id`：持久化 UUID，落在 `AppRecord`
+### build generations：两个持久化 UUID，落在 `AppRecord` 并传到 DTO
 
 三条显而易见的替代方案都不行：
 
@@ -639,14 +800,45 @@ digest 本来就在每次构建时算出来，只是从没离开过 `local_apps_
 - 🚨 **绝不能用进程内计数器**：`RootView.swift:915/928` 每次切 scope 都新建引擎，
   而提交路径自己就会切 ⇒ 新引擎重发 `build-1`，基线永远相等，清理一次都不触发。
 
-落地：`AppRecord` 加
-`#[serde(default, skip_serializing_if = "Option::is_none")] pub last_build_id: Option<String>`
-（`local-apps/src/types.rs:142`），**照抄 `init_session_id` 的 additive 形状**（`:170-176`）
-——`skip_serializing_if` 是硬要求，否则 `AppManifest::hash()` 一变，既有应用立刻
-`database manifest mismatch`。在 `AppService` 里加走同一 `with_app` 闭包的 mutator，
-**不能像 `mark_ready` 那样在「没变化」时提前返回**（`service.rs:721-723`），每次铸新 UUID，
-并从 `with_app` 里发 `AppEvent::RecordChanged`（`pin_init_session` 就是这个先例，`:707-712`）。
-调用点在 `build_app` 的 `served_index.exists()` 检查之后（`local_apps_host.rs:3477-3492`）。
+落地：`AppRecord` 与 `AppRecordDto` 同时增加：
+
+```rust
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub last_build_id: Option<String>,
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub last_output_change_id: Option<String>,
+```
+
+🚨 **这对 serde 属性是硬要求，漏了会让整个 app 库读不出来。**
+（第五轮给这条规则配的理由——「否则 `AppManifest::hash()` 一变」——**是错的**：
+`AppManifest::hash()` 序列化的是 `AppManifest`，字段里没有 `AppRecord`。
+第六轮把错理由和对规则一起删掉了。正确理由如下。）
+
+`AppRecord` 持久化在 `apps/index.json`，并镜像到 `workspace/.lingxi/app.json`
+（`types.rs:138-139`、`storage.rs:364`）。这个仓库**没有迁移函数**——
+`storage.rs:34-36` 原话：*"the legacy-state serde aliases … **IS the on-disk migration**"*。
+serde 对 `Option` **没有隐式默认**，所以裸字段会让
+`serde_json::from_str::<AppIndexFile>` 报 `missing field`，`load_all`（`storage.rs:474`）
+整体返回 `Err` ⇒ **不是某个 app 打不开，是整个库打不开**。
+升 schema 也不是出路：`ensure_schema_version`（`:451-459`）对任何非
+`APPS_SCHEMA_VERSION` 的值硬失败。
+
+照抄 `init_session_id` 的形状（`types.rs:167-176`），它的 docstring 把理由写死了：
+*"Same default+skip serde shape as `conversation_id`, **so old stores load unchanged and
+the goldens stay byte-identical**"*。签入的 golden
+`local-apps/tests/fixtures/v1/apps/index.json` 两个键都没有，
+`serde_compat.rs:14-27` 钉住再持久化的字节——不用跑就能证明。
+
+- 每次 `build_and_record` 得到可服务结果都铸新 `last_build_id`；
+- 仅当 `BuildOutcome.output_changed == true` 时，把 `last_output_change_id`
+  设为同一个新 build id；缓存命中/无改动构建保持旧值；
+- 两个字段都由 `AppService` 的单个 `with_app` mutator 持久化，然后发
+  `AppEvent::RecordChanged`（`pin_init_session` 先例，`:707-712`）；
+- `lower_record()`、`AppRecordDto`、TS mirror/guards、iOS `LocalAppSummary`/adapter/store、
+  Android adapter、contract index/goldens 和生成绑定必须同批更新。
+
+两个字段为 `Option` 是因为新建 app 在首次成功构建前没有 generation，
+不是为了在当前项目里兼容旧客户端。
 
 ## 提交时组装的消息
 
@@ -655,7 +847,7 @@ digest 本来就在每次构建时算出来，只是从没离开过 `local_apps_
 
 1. 分数一直不涨
    区域 x=44 y=96 w=118 h=74
-   截图 ../annotations/1787543300-1.jpg
+   截图 .lingxi/annotations/550e8400-e29b-41d4-a716-446655440000/image.jpg
    区域内元素:
      #score-badge  role=status  name="12 分"  rect=[48,100,72,24]
 
@@ -677,9 +869,9 @@ digest 本来就在每次构建时算出来，只是从没离开过 `local_apps_
 | 裁剪图超尺寸 | 引擎按质量阶梯降质；仍超则拒绝该条并回 `error` |
 | 矩形内无命中元素 | 正常提交，元素段写「（无 DOM 元素，canvas 区域）」 |
 | `capture_ui` 区域越界 | 持有真实 viewport 的客户端钳位；完全在视口外回错误，不静默改整帧 |
-| 提交时 `send` 返回 `nil` | batch 回 `stored(error，可重试)`；**`sessionTransitionPending` 除外**（那是成功路径） |
+| 提交时遇到 send 守卫 | streaming/cancelling/slash/transition/project switch 期间不调 `send`，保持 queued 并由 RootView 在下一个状态边缘 one-shot flush；read-only 则回 `stored(error，可重试)` |
 | 修复轮 turn 被取消/失败 | 经 RootView 的显式钩子把 batch 退回 `stored(可重试)` |
-| 门开火时 WebView 未挂载 | 经既有路由触发 presentation；45 秒整门 deadline 内仍未挂载则 `infrastructure_unavailable` |
+| 门开火时宿主 WebView 未挂载 | 仅走 spike 选定的非可见宿主路由；不得回退到 `requestedPresentationAppID`。有界 deadline 内未完成非零 viewport 挂载则 `infrastructure_unavailable` |
 | 门的 UI 请求返回任何 `Err` | `infrastructure_unavailable`，不判 source defect |
 | `inspect_ui` 载荷被降级 | 判据 6 判 `infrastructure_unavailable`，不判通过 |
 | 用户在 agent 操作中途进标注模式 | 允许；overlay 接管触摸不影响 `act_on_ui`（注入 JS 合成事件，不经 UIKit 触摸链） |
@@ -716,15 +908,26 @@ digest 本来就在每次构建时算出来，只是从没离开过 `local_apps_
 - 冒烟门六条判据各有独立测试，**每条都要有反向用例**。
   🚨 **判据 6 的反向 fixture 必须是「真实出厂的模板 + 一个会抛异常的屏幕」**，
   它必须变红——用手写的 `throw` 页面测不出 `ErrorBoundary` 那条路径。
-- 门只能由 `build_app` 的成功点触发；JS 无法注入一个 `status:"passed"` 覆盖宿主报告。
-- WebView 未挂载/timeout 返回 `verification_unavailable` 且 `agent_calls` 不变，
-  确认 `pending_ui`（`local_apps_host.rs:2115-2119`）被清理。
-- `StoreAppAnnotation` 路径推导测试钉住**真实设备路径形状**（`apps/<id>/annotations/`），
-  而非重复实现里的推导；另测非法 base64/JSON/rect、尺寸上限、原子写。
+- 门的触发点与事件载体由 spike 决定；测试只钉住**宿主必然触发**、
+  覆盖 `build_app` 与 checkpoint restore/rollback 三条会改变被服务字节的路径，
+  且 JS/subagent 无法注入 `status:"passed"` 覆盖宿主报告。不得在 spike
+  前将测试写死为 `build_app` 触发。
+- spike 候选的 WebView 必须使用非零 viewport；未挂载/didFail/timeout
+  按门内判定记为 `infrastructure_unavailable`，workflow 终态记为 `verification_unavailable`
+  （两个名字**不是同义词**：前者是单条判据的分类，后者是 `delivery_status` 的取值），必须释放专用 pending request 与离屏 WebView，
+  且 `agent_calls` 不变。
+- `StoreAppAnnotation` 路径测试钉住
+  `apps/<id>/workspace/.lingxi/annotations/<annotation_id>/{annotation.json,image.jpg}`；
+  另测非法 base64/JSON/rect、尺寸上限、temp-directory rename 发布，以及
+  图写完/目录 rename 前崩溃不得产生正式 annotation。
 - **构建键回归测试**：往 `workspace/.lingxi/<任意>` 写内容**不得**改变 `workspace_build_key`。
-- **`Read` 一个工作区外的 `.jpg` 必须返回 image 结果**（守住 `image-read` feature）。
-- 协议：command + event goldens、contract index、TS union/guards、`clients/shared` 完整
-  `npm test`；测试明确断言 `AppAnnotationStored` 位于 `AppEventDto`。
+- **`Read .lingxi/annotations/<id>/image.jpg` 必须返回 image 结果**（守住
+  `image-read` feature 和 host-owned metadata 可读边界）。
+- build outcome：缓存命中和无字节变化的 miss 都使 `last_build_id` 变、
+  `last_output_change_id` 不变；真正改变 dist 时两者同步变到同一新 id。
+- 协议：command/event/record goldens、contract index、TS union/guards、`clients/shared`
+  完整 `npm test`；断言 `AppAnnotationStored` 位于 `AppEventDto`，且
+  `AppRecordDto` 的两个 build generation 字段经 lowering 到达两端客户端。
   ⚠️ **契约索引是手写的**，漏条目时 version guard 静默放行——新字段必须手动加 `put(...)`。
 - workflow 脚本：阶段序列与 agent 计数断言更新；**同时更新
   `verify-local-app-supply-chain.py` 的 token 清单**，否则 CI 每个 PR 红。
@@ -740,13 +943,18 @@ digest 本来就在每次构建时算出来，只是从没离开过 `local_apps_
 - **裁剪尺寸**：竖长条裁剪（如 120×800 pt）不得超过长边上限，不得放大。
 - prompt 路由：从 global/project/另一个 app scope 提交都进目标 workspace；
   已在同 scope 时保留当前 session；无关 source 正 streaming 时不 `cancelAndWait`；
-  `sessionTransitionPending` 不被误判成失败；turn cancelled/failed 让 batch 可重试。
+  `sessionTransitionPending` 期间不发、变为 false 后由 RootView one-shot flush **恰好发一次**；
+  重复 state edge 不重发；turn cancelled/failed 让 token 匹配的 batch 可重试。
 - **controller 串行**：慢 `execute` 与并发 `makeAnnotation` 观察到同一个 document generation。
-- 清单持久化：**必须进入 in-flight 窗口**——在引擎写完图之后、客户端提交日志之前杀进程，
-  重启后那条标注必须以 `stored` 恢复且**图还在**。
+- 清单持久化：**必须进入 in-flight 窗口**——在引擎发布 annotation
+  目录之后、客户端记录 Store 回执之前杀进程，重启后必须从
+  `annotation.json` 恢复 `note/rect/viewport/hitElements` 和图片，状态为
+  `stored(recovered)`。
   ⚠️ 早期版本的测试是「重启后清单与目录对账正确」，那是**自我实现的**：它断言的正是
   规则本身，永远进不了那个窗口。
-- 清理：两次无改动的连续 build ⇒ `build_id` 不同、`output_digest` 相同、**batch 存活**。
+- 清理：两次无改动的连续 build ⇒ `last_build_id` 不同、
+  `last_output_change_id` 相同、**batch 存活**；输出变化但 turn/runtime/门后续失败
+  ⇒ 停在/`buildObserved` 回退到 `stored`，不清理。
 - ⚠️ WebView 与预览路由**当前没有 `accessibilityIdentifier`**，overlay 需要自己的 id；
   **SwiftUI 容器上的 `accessibilityIdentifier` 会覆盖所有子元素的 id**，
   需 `.accessibilityElement(children: .contain)`。UI 测试要 `-testLanguage zh-Hans`。
@@ -767,14 +975,24 @@ agent-facing contract 判绿。
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
 | 1 | 两端 `inspect_ui` 几何/canvas rect/runtimeErrors（含 `console.error` 与载荷预算）+ `capture_ui` 区域（修正后的裁剪数学）+ `image-read` + `.lingxi` 进构建键跳过表 + 两处 `local-app-build` 字面量改集合判定 | 无。**完全不碰协议** |
-| **spike** | 宿主能否拿到新鲜且不可伪造的观测（五条验收，真机） | 1 |
+| **spike** | 宿主能否拿到新鲜且不可伪造的观测（六条验收，真机） | 1 |
 | 2 | 冒烟门 + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 可见信号 + source-vs-source 的决定 | **spike** |
-| 3 | `StoreAppAnnotation` + `AppRecord.last_build_id` + 唯一一次 bless | 1 |
-| 4 | iOS overlay + controller 串行 + 标注状态机与持久化 + 提交路由 | 1 与 3 |
+| 3 | `StoreAppAnnotation` 原子目录 + `AppRecord`/`AppRecordDto` 两个 build generation 字段 + `BuildOutcome`/`build_and_record` + 协议 bless/绑定生成 | 1 |
+| 4 | iOS overlay + controller 串行 + 标注状态机与持久化 + RootView one-shot 提交路由 | **2 与 3** |
 | 5 | 副驾驶条（两态）+ 引导（**先单独评审**，见该节警告） | 4 |
 
-阶段 1 与 3 可并行。阶段 1 是 spike 与 2 的硬前置。
-**阶段 2 在 spike 出结论前不可计划**；阶段 4、5 不依赖它。
+⛔ **阶段 3 不得先于阶段 1 的「`.lingxi` 进构建键跳过表」交付。**
+`AppRecord` 就存在 `workspace/.lingxi/app.json`（`storage.rs:364`，`MetadataMirror`
+每次持久化都重写，`:829-835`），所以每次构建都铸新 `last_build_id` **本身就在 churn
+一个构建键输入** ⇒ `build_cache_hit`（`local_apps_build.rs:642-644`）永远不再命中，
+每次真机构建都是完整 Vite 重建。而阶段 3 自己的验收测试（两次无改动构建 ⇒
+`last_build_id` 变、`last_output_change_id` 不变）**在这个坏状态下照样通过**，
+本阶段没有任何东西会发现它。`workspace_build_key` 那条回归测试必须**同时**进
+阶段 1 和阶段 3 的门。
+
+除此之外阶段 1 与 3 可并行。阶段 1 是 spike 与 2 的硬前置。
+**阶段 2 在 spike 出结论前不可计划；阶段 4 不得在 2 之前交付**，因为提交路由的
+source-vs-source 互斥策略与 `buildObserved → cleared` 的门结果都由阶段 2 确定。
 
 ## 不属于本设计的在线缺陷（建议单独开条目）
 
@@ -799,8 +1017,9 @@ agent-facing contract 判绿。
 
 ## 已知约束
 
-1. **协议**：`7.0.0`，blessed major 7；additive 也需重新 bless。移动端**无握手**，
-   偏斜不可检测，只有 append-only 纪律在保护。
+1. **协议**：`7.0.0`，blessed major 7。**本项目不兼容旧客户端/旧引擎，
+   两半必须同时发版**；允许必要的结构变更，但仍必须 bless 当前 contract、
+   重生成两端绑定并编译当前客户端。移动端无握手不是跳过这些步骤的理由。
 2. **uniffi**：变体追加到末尾（序数密集且位置相关）；不给无字段枚举加带数据变体
    （会让 Kotlin 生成 `sealed class` 并重命名所有常量）。`AppEventDto` 的 docstring 用
    `//` 而非 `///`。
@@ -841,13 +1060,18 @@ agent-facing contract 判绿。
 
 ## 未决问题
 
+- **阻塞项**：冒烟 spike 的六条验收是否能在真机上同时成立，以及
+  `SmokeReport` 的结构化载体。未决前不计划阶段 2。
+- **阻塞项**：source-vs-source 的进程级互斥/排队真相源。未决前不交付
+  阶段 4 的提交路由。
 - 冒烟门判据 4/5 的阈值：**本轮不需要**（已降为建议）。真要转阻塞时用真实应用标定。
 - 副驾驶条（两态）与引导的具体形态：见该节警告，需单独一轮评审。
 
 ## 评审修正记录
 
-四轮对抗式评审。第一轮 Codex 7 条 + 双评审；第二轮无命题扫描（11 条）；
-第三轮 Codex 6 条 + 双评审；第四轮七个盲镜头 + 逐批打回 + 完整性/计划双批评（18 条）。
+六轮对抗式评审。第一轮 Codex 7 条 + 双评审；第二轮无命题扫描（11 条）；
+第三轮 Codex 6 条 + 双评审；第四轮七个盲镜头 + 逐批打回 + 完整性/计划双批评（18 条）；
+第五轮把冒烟门收束为 spike；第六轮修正数据通道与执行契约。
 
 **第四轮砍掉的**（净简化）：`ResolveAppUiRequest.error_code`（无消费者、Android 不可实现、
 名点的失败点是死资源）；`AppWorkflowTask*` 整族（registry 是每引擎一个，修不好；
@@ -875,7 +1099,7 @@ engine-mobile 开 `image-read`（否则 agent 根本读不了标注图）；cont
 （那里没有 runtime），把标注挪出 workspace（那里 agent 读不到）。搬迁是两个改动，
 我只审了搬走那半。
 
-- **标注位置搬回 `workspace/.lingxi/annotations/`**，文件名改成 `annotation_id`。
+- **标注位置搬回 `workspace/.lingxi/annotations/`**，归属名改成 `annotation_id`。
   当初搬走的两条理由：构建键那条是真的但**是独立在线缺陷，修它就完了**；
   checkpoint 那条**是我把代码读反了**（`.lingxi` 本来就被整目录递归排除，
   restore 用 `remove_untracked` 而非 `remove_ignored`）。
@@ -894,7 +1118,19 @@ engine-mobile 开 `image-read`（否则 agent 根本读不了标注图）；cont
 **方法论结论**：这个机制上五轮纸面推演产出了五个「读起来对、实际不通」的答案。
 继续纸面迭代的期望收益为负，下一步是 spike。
 
-**四轮之后仍未验证的**（诚实列出，不是「大概没事」）：副驾驶条与引导两节没有任何镜头
+### 第六轮（Codex 7 条回归 + 代码图门）
+
+- 冒烟门仍保持 spike 未决，但候选 WebView 改为非零 viewport，删掉了
+  `build_app` 专属测试和「必须把 app 推上屏」的旧结论；
+- annotation 改为 `<annotation_id>/{annotation.json,image.jpg}` 的原子目录，
+  disk-only 恢复能重建完整药丸，不只是找回一张无上下文的图；
+- build 传播改为 `last_build_id + last_output_change_id`，补全
+  `AppRecordDto`/lowering/两端 adapter/contract 工作，撤回「零协议工作」的错误结论；
+- RootView 增加按 batch 去重的 one-shot flush，明确在 session transition 完成后
+  恰好发送一次；
+- 阶段 4 改为依赖 2 + 3，不再把尚未决定的 source-vs-source 竞态带进实现。
+
+**六轮之后仍未验证的**（诚实列出，不是「大概没事」）：副驾驶条与引导两节没有任何镜头
 读过；边界表 20 行里 17 行未被检查；**没有任何一轮跑过任何东西**——没有 `cargo test`、
 没有 `xcodebuild`、没有真机，所有关于测试行为的判断都是静态阅读。
 

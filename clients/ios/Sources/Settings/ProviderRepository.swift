@@ -719,7 +719,10 @@ final class ProviderRepository {
         guard !draft.operationInFlight,
               !(state(for: draft.id)?.operationInFlight ?? false)
         else { return draft }
-        guard let provider = oauthProvider(for: draft.profile.presetID), let oauthLoginHandler else {
+        guard oauthLoginAvailable(for: draft.profile.presetID),
+              let provider = oauthProvider(for: draft.profile.presetID),
+              let oauthLoginHandler
+        else {
             updated.connectionState = .failed
             updated.detailMessage = String(localized: "settings_provider_oauth_unavailable")
             return updated
@@ -1097,6 +1100,27 @@ final class ProviderRepository {
             .caseInsensitiveCompare(preset.defaultUrl) == .orderedSame
     }
 
+    /// OAuth providers whose LOGIN entry point is withheld from the UI.
+    ///
+    /// Anthropic's "Authentication and credential use" policy reserves
+    /// claude.ai OAuth for Claude Code and claude.ai themselves, so LingXi does
+    /// not offer it as a sign-in method. Everything behind it is intact — the
+    /// engine coordinator, the uniffi surface, PKCE, the token exchange, the
+    /// refresh driver — and it is re-enabled by removing the id from this set.
+    /// No other change is needed.
+    ///
+    /// Only LOGIN is withheld. An account that signed in before this gate keeps
+    /// its status row and its Logout button, so an existing credential stays
+    /// visible and removable rather than becoming an orphan in the keychain
+    /// that nothing in the UI can reach.
+    static let hiddenOAuthLoginProviders: Set<String> = ["anthropic"]
+
+    /// Whether the UI may offer an OAuth sign-in for this preset.
+    func oauthLoginAvailable(for presetID: String) -> Bool {
+        guard let provider = oauthProvider(for: presetID) else { return false }
+        return !Self.hiddenOAuthLoginProviders.contains(provider)
+    }
+
     func oauthProvider(for presetID: String) -> String? {
         switch presetID {
         case "anthropic": return "anthropic"
@@ -1361,6 +1385,7 @@ final class ProviderRepository {
 
     func loginOAuth(for id: String) async {
         guard let index = indexOfProfile(id: id),
+              oauthLoginAvailable(for: profiles[index].profile.presetID),
               let provider = oauthProvider(for: profiles[index].profile.presetID),
               let oauthLoginHandler
         else { return }

@@ -1056,6 +1056,82 @@ final class ProviderRepositoryTests: XCTestCase {
 
     // MARK: - Reentrancy: an index captured before an `await` is stale after it
 
+    /// Anthropic OAuth sign-in is withheld from the UI: Anthropic's
+    /// "Authentication and credential use" policy reserves claude.ai OAuth for
+    /// Claude Code and claude.ai themselves. This is a UI gate only — the
+    /// engine coordinator, PKCE, token exchange and refresh driver are all
+    /// still there, and removing "anthropic" from
+    /// `ProviderRepository.hiddenOAuthLoginProviders` restores the button.
+    ///
+    /// The gate must be provider-scoped: ChatGPT has no API-key path
+    /// (`isOAuthOnly`), so withholding its OAuth would strand the provider.
+    func testAnthropicOAuthLoginIsWithheldWhileChatGPTStillSignsIn() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let anthropic = repository.addProfile(presetID: "anthropic")
+        let chatgpt = repository.addProfile(presetID: "openai-chatgpt")
+
+        var loginsAttempted: [String] = []
+        repository.configure(
+            submitCommand: nil,
+            oauthLogin: { provider in
+                loginsAttempted.append(provider)
+                return ProviderOAuthState(
+                    provider: provider,
+                    signedIn: true,
+                    accountLabel: nil,
+                    accountID: nil,
+                    organizationID: nil,
+                    fedramp: false
+                )
+            }
+        )
+
+        XCTAssertFalse(repository.oauthLoginAvailable(for: "anthropic"))
+        XCTAssertTrue(repository.oauthLoginAvailable(for: "openai-chatgpt"))
+
+        await repository.loginOAuth(for: anthropic)
+        XCTAssertEqual(
+            loginsAttempted,
+            [],
+            "no authorize request may be started for Anthropic"
+        )
+        XCTAssertNotEqual(
+            repository.state(for: anthropic)?.oauthState?.signedIn,
+            true,
+            "the withheld provider must not end up signed in"
+        )
+
+        await repository.loginOAuth(for: chatgpt)
+        XCTAssertEqual(
+            loginsAttempted,
+            ["openai-chatgpt"],
+            "the gate is Anthropic-only; ChatGPT still signs in"
+        )
+    }
+
+    /// The gate withholds LOGIN, not cleanup. An account that signed in before
+    /// the gate keeps a working Logout, so its keychain credential never
+    /// becomes an orphan the UI cannot reach.
+    func testAWithheldProviderCanStillSignOut() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let anthropic = repository.addProfile(presetID: "anthropic")
+
+        var logoutsRequested: [String] = []
+        repository.configure(
+            submitCommand: nil,
+            oauthLogout: { provider in logoutsRequested.append(provider) }
+        )
+
+        XCTAssertEqual(
+            repository.oauthProvider(for: "anthropic"),
+            "anthropic",
+            "the provider mapping stays intact — only the login button is gated"
+        )
+
+        await repository.logoutOAuth(for: anthropic)
+        XCTAssertEqual(logoutsRequested, ["anthropic"])
+    }
+
     /// `loginOAuth` resolves the row index, then awaits the reconnect handler.
     /// This class is `@MainActor`, which serializes but does NOT freeze state
     /// across a suspension: a `removeProfile` landing inside that window shifts

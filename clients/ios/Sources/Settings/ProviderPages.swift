@@ -411,7 +411,15 @@ private struct ProviderEditorSheet: View {
             } else {
                 FieldHint(String(localized: "settings_provider_oauth_only"))
             }
-            if repository.oauthProvider(for: draft.profile.presetID) != nil { oauthControls }
+            // Render the OAuth block when this preset can sign in, OR when a
+            // session already exists for a preset whose login is withheld —
+            // otherwise a previously-signed-in account would keep a credential
+            // the UI can no longer show or revoke.
+            if repository.oauthProvider(for: draft.profile.presetID) != nil,
+               repository.oauthLoginAvailable(for: draft.profile.presetID)
+                   || draft.oauthState?.signedIn == true {
+                oauthControls
+            }
         }.padding(.bottom, 14)
     }
 
@@ -428,8 +436,9 @@ private struct ProviderEditorSheet: View {
                     Button(String(localized: "settings_provider_test_connection")) { testConnection() }
                     Button(String(localized: "settings_provider_logout")) { logoutOAuth() }.foregroundColor(t.danger)
                 }.font(.system(size: 12, weight: .medium))
-            } else {
+            } else if repository.oauthLoginAvailable(for: draft.profile.presetID) {
                 Button(String(localized: "settings_provider_login")) { loginOAuth() }.font(.system(size: 13, weight: .semibold)).foregroundColor(t.accent)
+                    .accessibilityIdentifier("provider.oauth.login")
             }
         }.padding(.top, 4)
     }

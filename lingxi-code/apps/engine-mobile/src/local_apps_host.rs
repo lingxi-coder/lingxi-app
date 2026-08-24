@@ -3443,6 +3443,35 @@ impl LocalAppsHostBroker {
     }
 }
 
+/// Build the opaque `value` payload for a capture request.
+///
+/// The rect rides `AppUiRequestDto.value` — an `Option<String>` the wire
+/// already carries — so a region crop costs no DTO change. Shape and
+/// finiteness are checked here; CLAMPING to the viewport happens on the
+/// client, which is the only side that knows the real viewport.
+fn capture_ui_value(input: &Value) -> Result<Option<String>, String> {
+    let Some(rect) = input.get("rect") else {
+        return Ok(None);
+    };
+    // Keep the original `Value` alongside its `f64` reading: shape/range
+    // checks need the number, but re-emitting the parsed f64 would turn an
+    // integral input like `10` into `10.0` in the outgoing JSON text, which
+    // is a needless textual change the client never asked for.
+    let field = |name: &str| -> Result<(&Value, f64), String> {
+        rect.get(name)
+            .and_then(|value| value.as_f64().filter(|n| n.is_finite()).map(|n| (value, n)))
+            .ok_or_else(|| format!("capture_ui rect.{name} must be a finite number"))
+    };
+    let ((x, xn), (y, yn), (w, wn), (h, hn)) =
+        (field("x")?, field("y")?, field("width")?, field("height")?);
+    if xn < 0.0 || yn < 0.0 || wn <= 0.0 || hn <= 0.0 {
+        return Err("capture_ui rect must have non-negative origin and positive size".into());
+    }
+    Ok(Some(
+        json!({ "rect": { "x": x, "y": y, "width": w, "height": h } }).to_string(),
+    ))
+}
+
 #[async_trait]
 impl LocalAppsMcpHost for LocalAppsHostBroker {
     fn create_next_step(&self) -> String {
@@ -3607,7 +3636,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             app_id,
             action: AppUiActionKindDto::CaptureView,
             target: None,
-            value: None,
+            value: capture_ui_value(&input)?,
         })
         .await
     }
@@ -6428,6 +6457,36 @@ mod tests {
                 name: Some("Save".into()),
             })
         );
+    }
+
+    #[test]
+    fn capture_without_a_rect_keeps_the_whole_frame_behaviour() {
+        let value = capture_ui_value(&json!({ "app_id": "demo" })).unwrap();
+        assert_eq!(value, None, "no rect means the whole view, exactly as before");
+    }
+
+    #[test]
+    fn capture_with_a_rect_serializes_it_into_the_opaque_value() {
+        let value = capture_ui_value(&json!({
+            "app_id": "demo",
+            "rect": { "x": 10, "y": 20, "width": 120, "height": 80 }
+        }))
+        .unwrap()
+        .expect("a rect must produce a value payload");
+        let parsed: Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(parsed["rect"]["x"], 10);
+        assert_eq!(parsed["rect"]["width"], 120);
+    }
+
+    #[test]
+    fn capture_rejects_a_non_finite_or_non_positive_rect() {
+        for bad in [
+            json!({ "x": 0, "y": 0, "width": 0, "height": 10 }),
+            json!({ "x": -1, "y": 0, "width": 10, "height": 10 }),
+        ] {
+            let out = capture_ui_value(&json!({ "app_id": "demo", "rect": bad }));
+            assert!(out.is_err(), "invalid rect must be refused host-side: {bad}");
+        }
     }
 
     #[tokio::test]

@@ -924,7 +924,13 @@ impl LocalAppsMcpTransport {
             Self::tool(
                 "capture_ui",
                 "Capture a still image of a running local app's own view and return it as an image. Use this when the DOM snapshot cannot describe what the app is showing — a canvas or WebGL surface renders no inspectable elements, so inspect_ui returns an empty list whether the app is drawing correctly, drawing nothing, or crashed.",
-                json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
+                json!({"type":"object","properties":{
+                    "app_id": app_id.clone(),
+                    "rect": {"type":"object","description":"Optional region to crop, in viewport CSS pixels. Omit for the whole view.",
+                             "properties":{"x":{"type":"number"},"y":{"type":"number"},
+                                           "width":{"type":"number"},"height":{"type":"number"}},
+                             "required":["x","y","width","height"],"additionalProperties":false}
+                },"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "read_logs",

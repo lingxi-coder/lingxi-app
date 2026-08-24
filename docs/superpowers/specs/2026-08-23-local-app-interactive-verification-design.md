@@ -346,9 +346,22 @@ AppEventDto::AppWorkflowTasksSnapshot {
 }
 ```
 
-`MobileWorkflowStatusSink` 继续原样发 `TaskStatusChanged`，并从 task registry 的
-`LocalWorkflow` spawn args 解析 app id；仅两个内置 local-app workflow 在 running 与
-terminal 额外发 `AppWorkflowTaskChanged`。客户端维护
+`MobileWorkflowStatusSink` 继续原样发 `TaskStatusChanged`，并额外发
+`AppWorkflowTaskChanged`；仅两个内置 local-app workflow、在 running 与 terminal 发。
+
+数据可达性已核实（早期评审曾断言「sink 拿不到 app_id / 分不出 workflow 种类」，**不成立**）：
+`WorkflowCheckpoint` 带 `workflow_id` 与 `args_json`，launcher 对**每次**启动都写
+（`workflow_support.rs:19-30`、`:889-903`），`workflow_id` 正是那两处硬编码判的同一个值；
+`bind`（`:444`）本来就收到 `host.rs:3846-3847` 传进来的**具体** `Arc<TaskRegistry>`。
+
+⚠️ 但**不是**「每个 task 直接握着这两样」：`task_runs`（`workflow_support.rs:61`）是
+`HashMap<String, (String, String)>`，只有 session_uuid 和 run_id；`workflow_id`/`args_json`
+在盘上的 `adopt.json` 里。所以落地方式是**把 `task_runs` 的元组加宽**，带上 `workflow_id`
+和从 `args_json` 解析出的 `app_id`，两个写入点（`:104-107` 与 `:393-396`）都拿得到。
+
+🚨 **顺序陷阱**：`set_status` 在 `:562` 先 `checkpoints.remove_task(task_id)`，`:564` 才
+`emit_status_for_owner`（`:535` 同样）。新的 emit **必须复用 `:556` 处已经取出的元组**，
+不能在 remove 之后重新查——否则 terminal 事件恒缺 app_id，而这正是排队守卫等的那一条。客户端维护
 `activeWorkflowTaskIDsByApp: [AppID: Set<TaskID>]`，提交时若集合非空就排队；同 app
 新启动的 workflow 也加入等待。集合回到空且等待期内所有 terminal 都是 completed 才
 具备发送资格；还要等当前 source `streaming == false` 才走 RootView 路由。任一
@@ -378,10 +391,24 @@ checkpoint（`workflow_support.rs:322-382`）。
 （`registry.rs:167`），此时 `registry.rs:705-707` 对一切返回 `true`。所以单测里
 snapshot 恢复得好好的，真机上 100% 失效——和本文列为「历史翻车」的那些形状完全一致。
 
-修法：snapshot 查询**必须绕过会话过滤**，按 `app_id` 查而不是按当前会话查。本文已经
-正确地禁止了对 `AppWorkflowTaskChanged` 套 event 过滤（见下段），但漏掉了 **query**
-过滤——两个都得处理。测试必须**显式设置** `workflow_session_filter`（而不是留默认
-`None`），并在设置后断言 snapshot 仍返回该 app 的在跑 workflow。
+修法比想象的简单：**已经有一个绕过会话过滤的查询存在**——
+`TaskRegistry::find_nonterminal_local_app_workflows(app_id)`（`registry.rs:789-813`）
+直接读 `self.tasks`，**不经 `workflow_visible_in_current_session`**。它今天被删除守卫
+用着（`host.rs:5941`）。snapshot 复用它即可，不必新造绕过。它现在只返回 task_id，
+需要加宽成 `(task_id, workflow_id, status)` 以填 `AppWorkflowTaskDto`。
+
+🚨 **但它的谓词硬编码了 `workflow.workflow_id == "local-app-build"`（`registry.rs:796`），
+排除了 `local-canvas-build`。这是一个独立的在线 bug，不是本设计引入的**：该函数是
+**删除 app 前的守卫**（`host.rs:5938-5952`：这个查询 **或** 活跃 lease），而 lease 那道
+门同样硬编码 `local-app-build`（`local_workflow.rs:1987`）⇒ **一个 canvas 应用可以在
+构建进行中被删掉**。两处必须一起改成集合判定。
+
+`tool_workflow::LOCAL_APP_BUILD_WORKFLOWS`（`tools/workflow/src/lib.rs:239`）已经**就是**
+这个集合，但它是私有的，且 `tasks/Cargo.toml` 依赖的是 `workflow` 而非 `tool_workflow`，
+所以要么 `pub` 出来并加依赖边，要么提到两边都看得见的 crate。
+
+测试必须**显式设置** `workflow_session_filter`（而不是留默认 `None`——默认下
+`registry.rs:705-707` 对一切返回 `true`，测试会假绿），并覆盖**两个**内置 workflow。
 
 `TaskStatusChanged` 现有的 active-origin filter 保持不变；`AppWorkflowTaskChanged` **不能**
 套这个 filter。用户可能在构建时切 scope/打开 app，若 terminal 随旧 conversation
@@ -403,11 +430,37 @@ AppEventDto::AppBuildSucceeded {
 `baseline_build_id` 在收到该 prompt 的 `TurnStarted` 时从 per-app 最新 build ID 取值；
 新建、落盘失败、排队未发和后续新增的标注都不受影响。
 
-⚠️ **`baseline_build_id` 目前无处可取**：`AppRecordDto`（`local_apps.rs:230-258`）与
-`AppDetailsDto`（`:365-371`）都不带 build id。所以引擎必须在 `AppBuildSucceeded` 之外
-把最新 `build_id` 也放进 `AppDetailsDto`（additive），否则客户端在 `TurnStarted` 时刻
-没有基线可记，只能拿「下一个到达的 build_id」当基线——那会把**修复本身产生的 build**
-误判成基线，清理永远不触发。
+### `build_id` 必须是持久化的 UUID，落在 `AppRecord` 上
+
+`baseline_build_id` 目前无处可取，而且三条显而易见的替代方案都不行：
+
+- **不能放进 build provenance。** `BuildProvenance` 只有 `{version, buildKey, outputSha256}`
+  （`local_apps_build.rs:42-49`），而 `build.json` 就在 `build/store` 目录里
+  （`:865-867`），`promote_build_root` **把整个目录 rename 走**再把新树换进来
+  （`:1136-1140`）⇒ 每次 promote 都先销毁再于下一条语句重写（`:663`→`:664`），
+  中间有一个**活着的可服务产物没有 id** 的窗口。且 `write_build_provenance`
+  （`:896-925`）只有 temp+rename、**无 fsync**。
+- **不能用 `buildKey`/`outputSha256`。** 两者都是内容派生的，相同源码重建后不变——
+  满足不了「每次成功调用唯一，即使复用相同 output」。
+- 🚨 **绝不能用进程内计数器。** `RootView.swift:915/922` **每次切 scope 都新建引擎并替换**，
+  而本设计的提交路径自己就会切 scope ⇒ 新引擎重新发 `build-1`，从旧引擎取的基线
+  **永远比较相等**，清理一次都不会触发。
+- 另：**cache-hit 路径在写任何 provenance 之前就 return 了**（`:642-644`），而
+  `build_app` 仍视其为成功并 `mark_ready` ⇒ 存在「一次成功构建没碰任何持久化字节」。
+
+落地：给 `AppRecord`（`local-apps/src/types.rs:142`）加
+`#[serde(default, skip_serializing_if = "Option::is_none")] pub last_build_id: Option<String>`，
+**照抄 `init_session_id` 的 additive 形状**（`types.rs:170-176`）——`skip_serializing_if`
+是硬要求，否则 `AppManifest::hash()` 一变，每个既有应用立刻 `database manifest mismatch`。
+在 `AppService` 里 `mark_ready` 旁边加一个走同一 `with_app(app_id, |app, now| …)` 闭包的
+mutator（拿到原子持久化 + 事件顺序锁），但**不能像 `mark_ready` 那样在「没变化」时提前
+返回**（`service.rs:721-723`）——每次都铸一个新的 v4 UUID。调用点在
+`LocalAppsHostBroker::build_app` 的 `served_index.exists()` 检查**之后**
+（`local_apps_host.rs:3477-3487`），那是唯一把「成功构建」定义成「可服务」的地方，
+且能覆盖 cache-hit 提前返回。
+
+`AppDetailsDto` 完全由持久化状态组装（`host.rs:5607-5622` → `lower_details`
+（`local_apps_bridge.rs:441-452`）），**没有内存通道**，所以不落盘的 id 根本进不去。
 
 ⚠️ **`AppBuildSucceeded` 不带会话/轮次溯源**，而排队守卫看的是只覆盖两个内置 workflow
 的 `AppWorkflowTaskChanged`，清理器却对**普通对话里的 build** 也会触发。这个不对称是
@@ -436,9 +489,25 @@ capture 的新增结构序列化成现有 `value` 里的 JSON，不改 action en
 
 ### bless 四步（command 与 event 必须一起做）
 
-1. `current_contract_index()` 补 command、`AppWorkflowTaskDto` 和四个
-   `AppEventDto` 变体的 `put(...)`；
-   不能只补 AppUi/command 段。
+1. `current_contract_index()` 补 command、`AppWorkflowTaskDto`、四个 `AppEventDto` 变体，
+   **以及 `ResolveAppUiRequest.error_code` 和 `AppRecordDto/AppDetailsDto` 的 build id**
+   的 `put(...)`。不能只补 AppUi/command 段。
+
+   🚨 **这两个新字段的失败模式完全相反，必须分别对待：**
+
+   - **`error_code` 是全静默的**——漏掉索引条目，四道门全绿：
+     `current_contract_matches_index_or_version_bumped`（`version_guard_test.rs:1710`）
+     只 diff 手写索引与 golden，两边都没变；`contract_index_covers_every_dto`
+     （`:1796`）只构造 **10 个** `ClientCommand` 变体而
+     **`ResolveAppUiRequest` 不在其中**，所以没有编译中断；
+     `snapshots/command/resolve_app_ui_request.json` 里 `None` 配
+     `skip_serializing_if` 序列化后**逐字节相同**，snapshot 也绿。
+     ⇒ **必须手动加索引条目 + 一个带 `error_code` 的失败态 golden**，没有任何自动化会提醒。
+   - **build id 不是静默的**：`version_guard_test.rs:2203` 构造穷尽的
+     `AppDetailsDto { app, manifest, runtime, checkpoints }` 字面量，加字段就是**硬编译错误**。
+
+   这正是已知约束第 9 条（契约索引是手写的 ⇒ 不加条目静默放行）的一次实例化——
+   而它这次只对两个字段中的一个成立。
 2. `snapshots/command/` 加 `StoreAppAnnotation` golden；`snapshots/event/` 加
    `AppAnnotationStored`、`AppWorkflowTaskChanged`、`AppWorkflowTasksSnapshot`、
    `AppBuildSucceeded` golden，
@@ -582,6 +651,16 @@ agent 不参与：
    若快照同时有可见文本/图片/canvas 结构证据，本条降为 warning；否则阻塞
 5. canvas 应用：只比较 `canvases[].rect` 覆盖的像素，两帧必须不同；不能让 DOM
    spinner、光标或回放 UI 的变化替冻结 canvas 过关
+
+   🚨 **门的两次 capture 必须显式传 `marker: "none"`。** schema 默认是
+   `last_action`，而标记只在「上一次带坐标动作发生在 5 秒内」时绘制。门自己只发
+   inspect 和 capture、**不发任何坐标动作**，所以那个「上一次动作」来自更早的 agent
+   轮次：若它发生在 T，门在 T+4s 与 T+5.5s 取两帧 ⇒ **第一帧有标记、第二帧没有**。
+   标记是客户端画在合成快照之上的，可以落在 canvas 矩形内 ⇒ 判据 5 看到「变化」⇒
+   **冻结的 canvas 通过**。这正是本判据存在的意义所要挡住的东西。
+
+   推广成规则：**任何程序化的像素比对都必须走 `marker:"none"`。** 标记是给人和给
+   模型看的证据，不是给比较器看的数据。
 6. `inspect_ui.runtimeErrors` 为空
 
 无 blocking finding → 构建成功。任一阻塞判据不过 → **一次**修复轮；再不过 →
@@ -688,15 +767,31 @@ agent 无法「声称」自己看过。这正面回应了 `local_app_build_workf
   那层 cover。这与本文「流水线在后台跑」的前提直接冲突，也与提交路径（规定要**关掉**
   这层 cover）互相打架。
 
-  决定：**冒烟门的请求走一条不触发 presentation 的旁路。** `inspect` 与 `captureView`
-  本来就自动放行、不弹权限（iOS `LocalAppsStore.swift:981-982`，Android
-  `LocalAppsViewModel.kt:716-717`），所以门是非交互的；缺的只是「不要把它当成用户
-  可见的 UI 自动化」。做法是给 `AppUiRequestDto` 之外的传输层加一个 host-origin 标记
-  （不进协议：门的请求由宿主直接经 `request_ui` 发出，客户端可按「当前无 agent turn
-  在飞 + 该 app 已有 controller 注册」判定为静默请求），静默请求不设
-  `requestedPresentationAppID`。**代价明确记录**：若 app 的 WebView 当时没挂载，静默
-  请求就拿不到 controller，返回 `ui_not_open` → `infrastructure_unavailable`。这是
-  正确的降级——宁可诚实报「没验」，也不要为了验一个后台构建而抢走用户的屏幕。
+  ⛔ **早期版本在这里决定「走一条不触发 presentation 的静默旁路」。那是错的，已撤回。**
+
+  **presentation 就是唯一挂载 WebView 的机制。** controller 只在
+  `LocalAppPreviewView` / `LocalAppEmbeddedPreview` 真的挂了 `LocalAppWebView` 之后
+  才注册，而它只在 `previewURL != nil` **且该视图在屏上**时挂载
+  （`LocalAppDetailView.swift:586`）。把 app 推上屏的正是
+  `requestedPresentationAppID` → `RootView.swift:309-313`。抑制掉它 ⇒ 没有 controller
+  ⇒ `ui_not_open` ⇒ **主流程（新建）下冒烟门 100% 跑不起来**。
+
+  这是同一个错误的第三次（前两次：删 `getDetails`、以为 Verify 阶段是纯成本）：
+  **把一个看起来只有成本的机制删掉，而它正是让功能能跑的那一环。**
+
+  **决定：presentation 保留，不加旁路，也不做 origin 推断。** 理由不是妥协，而是它在
+  本设计的流程里本来就正确：每一次构建要么是（a）用户刚要求创建这个 app，要么是
+  （b）用户刚提交标注要求修它——**两种情况下用户都正在等这个 app**，被带到它面前是
+  预期行为，不是劫持。配上副驾驶条，用户看到的是「门正在检查我的 app」，这是本设计
+  想要的效果。
+
+  ⚠️ 同时撤回「origin 信号」那套：客户端只收到 `AppUiRequestDto`，靠「无 agent turn
+  在飞 + 已有 controller」去推断「这是冒烟请求」**是有竞态的**，而且现在不需要了。
+
+  剩下的真实缺口只有一个：**由其他会话里的代理触发的后台构建**会把用户拉到那个 app。
+  本轮不为它建抑制机制（YAGNI；本设计的两条流程都不产生这种情况）。若实测确认它讨厌，
+  再做——届时正确解法是宿主侧的离屏 WebView 宿主，而不是抑制 presentation，因为抑制
+  等于让门失效。
 
 这样 `maxRepairRounds` 仍由 JS 消费、repair prompt 仍与 `SHAPE` 放在一起，宿主只
 拥有不可伪造的观察与判定。`LocalWorkflowHandler` 不需要重新实现 agent prompt。
@@ -923,7 +1018,7 @@ class 上**——照字面写不出来。新标志沿用 `didSet + defaults` 这
 | 冒烟门第 4 条误判（应用本来就是纯色设计） | 快照同时有可见文本/图片/canvas 结构证据时降为 warning 并写进诊断；否则阻塞 |
 | `StoreAppAnnotation` 提交后 8 秒无回执 | 该条置 `draft(error: "no_receipt")` 并在 UI 可见。`submit` 的兜底臂会静默吞掉未识别命令（`host.rs:7064-7074`）且移动端无握手，所以「没回音」必须是一个显式状态，不能靠等 |
 | 提交时 `send` 返回 `nil`（五个守卫之一命中） | batch 回到 `stored(error，可重试)`；**不能**用 `_ =` 丢掉返回值，那个 token 是 `TurnStarted` 的 correlator |
-| 冒烟门开火时 app 的 WebView 未挂载 | 静默请求拿不到 controller ⇒ `ui_not_open` ⇒ `infrastructure_unavailable`。**不为了验证而抢用户的屏幕**，诚实报「没验」 |
+| 冒烟门开火时 app 的 WebView 未挂载 | 门的请求经既有路由触发 presentation，预览挂载后 controller 注册、请求继续。若 45 秒整门 deadline 内仍未挂载（app 已删、运行时没起来），报 `infrastructure_unavailable` |
 | `inspect_ui` 载荷被降级（`truncated` 含 `runtimeErrors`） | 判据 6 判为 `infrastructure_unavailable`，**不判通过**——观测不到不等于没异常 |
 | 用户在 agent 操作中途进标注模式 | 允许。overlay 接管触摸不影响 `act_on_ui`（后者是注入 JS 合成事件，不经过 UIKit 触摸链） |
 | 同一 app 多条 annotation 回执乱序 | 只按 `request_id + annotation_id` 归并，不按数组位置或最后一次请求猜测 |
@@ -934,6 +1029,34 @@ class 上**——照字面写不出来。新标志沿用 `didSet + defaults` 这
 `WorkspacePermissionLeaseRegistry` 是**授权**而非**互斥**机制
 （`permission/src/workspace_lease.rs:60-83`），不构成保护。若实测出现真实
 冲突，再引入 app 级的编辑互斥；本设计不预先建造它。
+
+### 清单必须落盘，`submitted` 必须有出口
+
+**标注清单只在内存里是不够的。** 进程在 `StoreAppAnnotation` 成功之后终止，会丢掉
+清单与批次，却在工作区留下**孤儿图片文件**。仓库里已有两个可照抄的先例：
+`LocalAppsStore.swift:788` 的 `UserDefaults` 键 `local-apps.running-before-suspension`
+（重载时在 `:791-802` 与权威状态对账），以及 `LocalAppWebsiteDataStoreRegistry`——
+一个完整的带版本 `Codable` 日志（键 `local-apps.pending-web-data-cleanup.v1`，
+`LocalAppWebView.swift:1302`，写在 `:1344/1351/1373`，**并在 `:1358`
+`removeDataForDeletedApps(activeAppIDs:)` 里与引擎的权威快照对账**）。
+
+照第二个先例做：per-app 的带版本 Codable 清单，重启时加载，并与工作区
+`.lingxi/annotations/` 的实际文件对账——**盘上有文件而清单里没有的，删掉；清单里有而
+盘上没有的，降回 `draft(error)`**。
+
+🚨 **`submitted` 目前是死胡同**：状态机唯一的出边是「新 build_id → cleared」，所以修复
+轮次被**取消 / 失败 / 完成但没产生构建**时，那批标注永远停在 `submitted`，既不会清也
+不能重试。出口已经现成：`ConversationTurnCompletion`（`ConversationSource.swift:155-168`）
+带 `Outcome.{completed, maxTurns, cancelled, failed}`，**键正是规则 5 要求留住的那个
+`ConversationTurnToken`**，发布在 `:1996-2006`。
+
+而且不需要新增任何管道：`ConversationSource.apply` 在自己的 switch **之前**就把每条原始
+事件转给 `externalEventHandler`（`:3785`），`RootView.swift:813/918` 泵进
+`clientEventCenter.publish`，`RootView.swift:192` 无过滤地订阅 `localApps.handle(event:)`
+⇒ `LocalAppsStore.handle(event:)`（`:209`）**本来就收得到**。
+
+新增边：`submitted --Outcome != completed--> stored(error，可重试)`；
+`submitted --completed 但超时未见 post-baseline build--> stored(可重试)`。
 
 客户端 annotation 状态机是：
 
@@ -1029,7 +1152,7 @@ instrumentation 覆盖：element/canvas rect、runtimeErrors、区域 PixelCopy 
 |---|---|---|
 | **0** | **`additional_context_message` 走 `prompt_probe_cwd_resolver`，让 `LINGXI.md` 真正到达移动端模型** | 无；**阻塞其后一切** |
 | 1 | 两端 `inspect_ui` 几何/canvas rect/runtimeErrors（含载荷预算）+ `capture_ui` 区域（自算裁剪尺寸）/光标标记 + `ResolveAppUiRequest.error_code` + 该项的 bless | 0 |
-| 2 | `localAppSmoke` primitive（新 global，非 agent 通道）+ 宿主判定 + host-evidenced repair loop + 静默请求旁路 + `request_ui` deadline + canvas lease 修复 + spec 落盘 | 1 |
+| 2 | `localAppSmoke` primitive（新 global，非 agent 通道）+ 宿主判定（capture 一律 `marker:"none"`）+ host-evidenced repair loop + `request_ui` deadline + **两处 `local-app-build` 字面量改集合判定**（lease `local_workflow.rs:1987` 与删除守卫 `registry.rs:796`）+ spec 落盘 | 1 |
 | 3 | `StoreAppAnnotation` + workflow/build 事件 + `AppDetailsDto` build_id + snapshot 绕过会话过滤 + 完整 command/event bless | 1（仅 bless 流程复用） |
 | 4 | iOS overlay + 标注状态机（含无回执超时）+ app-scope 路由（不用 `initialPrompt`）+ 副驾驶条三态 | 1 与 3 |
 | 5 | 引导 + 文案 + UI 测试 override | 4 |
@@ -1048,9 +1171,29 @@ instrumentation 覆盖：element/canvas rect、runtimeErrors、区域 PixelCopy 
 2. **uniffi**：变体追加到末尾；不给无字段枚举加带数据变体。
    `ClientEvent` / `AppEventDto` 的 docstring 会被烤进定容元数据缓冲区且
    **已接近上限**——新事件注释用 `//` 而非 `///`。
-3. **生成绑定**：Android `bindings/android_aar.kt` 是签入的构建产物；
-   iOS uniffi 绑定是 gitignored 构建产物。改 wire DTO 不重新生成 ⇒
-   客户端不可能编过。
+3. **生成绑定：两端都是 gitignored 的构建产物，不是签入文件。**
+   Android `clients/android/.gitignore:7` 忽略整个
+   `app/src/main/java/com/lingxi/code/bindings/`（`git ls-files` 对 `android_aar.kt`
+   报 "did not match any file(s) known to git"）；iOS 同理
+   （`clients/ios/.gitignore:6-7`，`Generated/` + `Frameworks/`）。
+   ⛔ 早期版本写「Android 是签入的构建产物」——错的。（错误来源值得记：我的记忆正文
+   写对了，但那条记忆的文件名保留了它第一版的错误结论，我按文件名认的。）
+
+   **改 wire DTO 后必须先重新生成再声称客户端编得过**，`cargo test` 全绿对两个客户端
+   零信息量，「我写了对应的 when 臂」同样零信息量——只有重新生成的绑定能把两者接上。
+   - iOS：`LINGXI_REUSE_STAGED_LINUX_RUNTIME=1 clients/ios/scripts/build-xcframework.sh`
+     （不带该环境变量会重建 Alpine rootfs 并需要 Podman 运行）
+   - Android：`clients/android/scripts/build-jni.sh`（会先构建全部 NDK ABI）。
+     只要绑定的话约 1 分钟：`cargo build -p android-aar --features uniffi` 然后
+     `cargo run -p ios-framework --features cli --bin uniffi-bindgen -- generate
+     --library target/debug/libandroid_aar.dylib --language kotlin
+     --config apps/android-aar/uniffi.toml --out-dir ../clients/android/app/src/main/java`
+     （**stock `uniffi-bindgen` 在这个 surface 上会 panic**，必须用
+     `ios-framework --features cli` 里那个打过补丁的 bin）
+   - Android gradle 任务是带 flavor 的：`:app:compilePlayDebugKotlin` /
+     `compileDirectDebugKotlin`；裸 `:app:compileDebugKotlin` 报 ambiguous——
+     看着像构建挂了，其实是拼错。
+   - ⚠️ 陈旧绑定**只表现为编译失败，没有任何测试或 CI 步骤会提前抓到它**。
 4. **CSP**：单一无条件常量 `LOCAL_APP_CONTENT_SECURITY_POLICY`
    （`local_apps_host.rs:100`），三处同源（该常量、iOS `LocalAppWebView.swift:1076`
    注入的 meta、Android `LocalAppWebView.kt:1434`）。
@@ -1079,6 +1222,16 @@ instrumentation 覆盖：element/canvas rect、runtimeErrors、区域 PixelCopy 
 9. **契约索引 `current_contract_index()` 是手写的** ⇒ 不加条目版本守卫静默放行。
 10. **构建环境**：cargo target 曾涨到 84G 撑爆磁盘（`errno 28`，表现为随机
     `could not compile`，看着像代码错）。`rm -rf target/debug/incremental` 安全回收。
+
+11. 🚨 **任何「顺带删掉 X」的条目，落地前必须回答「谁依赖 X 的副作用」，而不只是
+    「X 做了什么」。** 本设计三次栽在同一个形状上：
+    - 删 model Verify 阶段 —— 副作用是**保证 app 在交付前被打开过一次**
+    - 删 `getDetails(appID:)` 往返 —— 副作用是**触发预览路由挂载 WebView**
+    - 抑制 presentation —— 副作用同样是**触发 WebView 挂载**（而且是唯一的那个）
+
+    三个副作用都不在各自函数的名字里，也不在它们的直接调用链上；靠读那段代码
+    「做了什么」永远看不出来。判据：**先看谁在时序上紧跟着它、依赖它建立的状态**，
+    再决定它是不是纯成本。三次里三次都是评审抓的，没有一次是自查发现的。
 
 ## 未决问题
 
@@ -1118,6 +1271,27 @@ CSP 约束写反；256 KiB 是硬失败且体积估算漏了十倍；capture 阶
 `builtins.rs` 漏两个合约测试；`StoreAppAnnotation` 无「无回执」态；`initialPrompt`
 只在空转录时发出且 `send` 的 token 被丢弃；桌面 unavailable 路径不可达；
 `AppDetailsDto` 没有 build_id 可作基线；`tool-api` 不 re-export `image`。
+
+### 第三轮（Codex 6 条 + 双评审）
+
+- **P0 冒烟门验不了新建流程：成立。** 早期版本为了不劫持屏幕而抑制 presentation，
+  但 presentation **就是唯一挂载 WebView 的机制**，抑制它 = 让门在主流程下 100% 失效。
+  已撤回，连同那套有竞态的 origin 推断。见已知约束 11。
+- **绑定是 gitignored 不是签入：成立，早期版本写反了。** 错误来源：那条记忆的正文
+  写对了，文件名却保留了它第一版的错误结论。
+- **门必须传 `marker:"none"`：成立。** 门自己不发坐标动作，5 秒过期规则会让两帧一有
+  标记一无 ⇒ 冻结 canvas 假过。
+- **workflow sink 拿不到 app_id：headline 不成立**（`WorkflowCheckpoint` 带
+  `workflow_id`/`args_json`，`bind` 本来就收到具体 `Arc<TaskRegistry>`），
+  **但 `registry.rs:796` 的硬编码成立**，且它是**删除守卫**——canvas 应用可以在构建中
+  被删掉，这是本文之外的在线 bug。同时发现 snapshot 不必新造绕过：
+  `find_nonterminal_local_app_workflows` 已经不走会话过滤。
+- **批次持久化 / `submitted` 死胡同：成立**，且两个先例与出口（`ConversationTurnCompletion`）
+  都已存在，无需新管道。
+- **`build_id` 无持久归属：成立**，且三条显而易见的替代方案（provenance / `buildKey` /
+  进程内计数器）**逐条不可用**，理由见正文。
+- **bless 清单不全：一半成立。** 索引条目确实漏了；绑定那半在上一轮已修正。
+  新发现 `error_code` 的漏项是**四道门全绿的静默漏**，而 build id 是硬编译错误。
 
 **最重要的一条来自本文之外**：§0 的 `LINGXI.md` 缺陷。它击穿了本文最初「既有对话
 通道已经够用」的论证——写入端确实写了文件，但唯一渲染路径读的是未转换的 guest 路径。

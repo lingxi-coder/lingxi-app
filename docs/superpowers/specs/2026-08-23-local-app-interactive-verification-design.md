@@ -7,6 +7,12 @@
 > 本文经六轮对抗式评审。第五轮把冒烟门收束为必须真机取证的 spike；
 > 第六轮补齐 annotation 原子持久化、build outcome 到 iOS 的传播、scope 切换后
 > one-shot send，并清理了所有已撤回方案的残留契约。修正记录见文末。
+>
+> 📌 **本文的一条编辑纪律**（三轮评审各抓到一次同形状的遗漏后加的）：
+> 任何决定都必须同时落到**三处**——正文、**阶段表**、**测试清单**。
+> 只写正文的决定在这份文档里已经被漏掉过三次（阶段 3 的必做项、Android 的
+> `verification_unavailable` 分支、token 交接与重启降级）：写正文的人认为已经定了，
+> 而按阶段表和测试清单干活的人看不到它。
 
 ## 起因
 
@@ -798,6 +804,26 @@ ClientCommand::DeleteAppAnnotation { app_id, annotation_id }
   依据：待提交集合是「一个人在一次验收里能记住的问题数」量级，64 已经很宽；
   16 MiB 同时给上面那条 checkpoint 豁免留出确定的最坏值。
 - 超限时**不得产生任何目录**——连 `.tmp-*` 都不许留，配额检查在写第一个字节之前。
+- 🚨 **配额必须统计 `annotations/` 下的全部字节，包括 `.tmp-*`**，否则它根本不限制磁盘：
+  崩溃遗留和并发写入的临时目录在宽限期内不计数，可以反复绕过上限。
+  顺序固定为：**先回收超过宽限期的 `.tmp-*`，再统计全部剩余字节，最后判配额**。
+
+🚨 **必须有用户主动丢弃的入口，否则配额会把用户永久锁死。**
+上面写「提示用户先提交或清理」，但设计里唯一的删除路径是「修复成功 ⇒ `cleared` ⇒
+`DeleteAppAnnotation`」。一个标了 64 条却不想提交、或者其中若干条落盘失败的用户，
+**没有任何办法把它们清掉**——配额永远满，标注功能永久不可用。
+
+补一个终态 `discarded`（药丸上左滑/长按 ⇒ 丢弃）：
+
+- `draft`（**从未成功 Store**）⇒ 纯本地删除，不发命令、不留墓碑（盘上没有东西）；
+- `draft(error)` / `stored` / `stored(recovered)` / `submitted` / `buildObserved` /
+  `recovery_error` ⇒ 走**与 `cleared` 完全相同**的终态路径：墓碑 + `DeleteAppAnnotation`，
+  收到无 `error` 的回执后移除墓碑；
+- 丢弃 `submitted`/`buildObserved` 的条目时，把它从所属 batch 移除；**batch 变空则同时
+  移除 `batchTurnCorrelation` 里对应的条目**，否则那份关联会一直挂到 completion 才清。
+
+`discarded` 与 `cleared` 只在**成因**上不同（用户丢弃 vs 修复完成），终态机制共用一套——
+不要为它另造一条删除路径。
 
 🚨 **`StoreAppAnnotation` 不取 per-app 构建锁，而 checkpoint restore 会删掉窗口内新建的目录。**
 `restore_service_documents`（`checkpoints.rs:371-386`）会 `remove_file` 掉**每一个
@@ -1001,6 +1027,10 @@ the goldens stay byte-identical**"*。签入的 golden
 - 冒烟门六条判据各有独立测试，**每条都要有反向用例**。
   🚨 **判据 6 的反向 fixture 必须是「真实出厂的模板 + 一个会抛异常的屏幕」**，
   它必须变红——用手写的 `throw` 页面测不出 `ErrorBoundary` 那条路径。
+- 🚨 **无冒烟能力的平台必须红**：在没有注册冒烟能力的宿主上跑完整 workflow，
+  终态必须是 `delivery_status: "verification_unavailable"`，**不得是 `ready`**。
+  这条是防止共享的 workflow 在 Android 上静默判通过的唯一机器守卫——
+  正文写了不算，必须有测试。
 - 门的触发点与事件载体由 spike 决定；测试只钉住**宿主必然触发**、
   覆盖 `build_app` 与 checkpoint restore/rollback 三条会改变被服务字节的路径，
   且 JS/subagent 无法注入 `status:"passed"` 覆盖宿主报告。不得在 spike
@@ -1050,6 +1080,14 @@ the goldens stay byte-identical**"*。签入的 golden
   `sessionTransitionPending` 期间不发、变为 false 后由 RootView one-shot flush **恰好发一次**；
   重复 state edge 不重发；turn cancelled/failed 让 token 匹配的 batch 可重试。
 - **controller 串行**：慢 `execute` 与并发 `makeAnnotation` 观察到同一个 document generation。
+- **token 交接**：`TurnStarted` 到达 ⇒ pending 被移除**且** `batchTurnCorrelation` 里同时
+  出现该 batch 的完整 token；收到该 token 的 completion（任意 outcome）后关联被移除；
+  丢弃某 batch 的最后一条标注也会移除关联。
+- **重启降级**：日志为 `submitted` 或 `buildObserved`、目录完整、进程重启 ⇒ 药丸必须回到
+  `stored(recovered)` 且**可再次提交**（验证 `batchID` 去重不会吞掉重新提交）；
+  `batchTurnCorrelation` 重启后为空。
+- **用户丢弃**：`draft` 丢弃不发命令；其余状态丢弃发 `DeleteAppAnnotation` 并留墓碑，
+  回执后墓碑消失；丢弃到配额以下后 `StoreAppAnnotation` 重新可用。
 - 清单持久化：**必须进入 in-flight 窗口**——在引擎发布 annotation
   目录之后、客户端记录 Store 回执之前杀进程，重启后必须从
   `annotation.json` 恢复 `note/rect/viewport/hitElements` 和图片，状态为
@@ -1080,7 +1118,7 @@ agent-facing contract 判绿。
 |---|---|---|
 | 1 | 两端 `inspect_ui` 几何/canvas rect/runtimeErrors（含 `console.error` 与载荷预算）+ `capture_ui` 区域（修正后的裁剪数学）+ `image-read` + `.lingxi` 进构建键跳过表 + 两处 `local-app-build` 字面量改集合判定 | 无。**完全不碰协议** |
 | **spike** | 宿主能否拿到新鲜且不可伪造的观测（六条验收，真机） | 1 |
-| 2 | 冒烟门 + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 可见信号 + source-vs-source 的决定 | **spike** |
+| 2 | 冒烟门 + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 可见信号 + source-vs-source 的决定。**iOS only**：引擎必须显式表达「本平台无冒烟能力」并返回 `verification_unavailable`，Android 对等能力是独立 spike | **spike** |
 | 3 | `StoreAppAnnotation` 原子目录 + **`DeleteAppAnnotation`** + **`annotation_id` 落盘前校验/归一** + **`annotations/` 的 read/delete 双豁免** + `AppRecord`/`AppRecordDto` 两个 build generation 字段 + `BuildOutcome`/`build_and_record` + 协议 bless/绑定生成。**硬门：并发 restore 测试** | 1 |
 | 4 | iOS overlay + controller 串行 + 标注状态机与持久化 + RootView one-shot 提交路由 | **2 与 3** |
 | 5 | 副驾驶条（两态）+ 引导（**先单独评审**，见该节警告） | 4 |

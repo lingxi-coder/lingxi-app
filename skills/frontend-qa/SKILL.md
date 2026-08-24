@@ -28,10 +28,27 @@ For those apps:
 - `LocalAppCaptureUi` returns the actual frame. This is the only way to
   distinguish a working render from a blank one. The result carries
   `image.width`/`image.height` (the frame's own pixels) beside `viewport`
-  (CSS pixels): a feature at image `(ix, iy)` is at CSS
+  (CSS pixels): for a WHOLE-VIEW capture (no `rect` requested, see below), a
+  feature at image `(ix, iy)` is at CSS
   `(ix * viewport.width / image.width, iy * viewport.height / image.height)`.
   Do not send an image coordinate as a pointer coordinate — the frame is
   downscaled, and a coordinate outside the viewport is rejected.
+- `LocalAppCaptureUi` also takes an optional `rect` (`{x, y, width, height}`,
+  CSS pixels) to crop to one region instead of the whole view — useful to
+  read a small area at full resolution instead of spending the capture's
+  fixed pixel budget on the rest of the screen. When a crop was requested,
+  the result additionally carries `capture_rect` (`{x, y, width, height}`,
+  CSS pixels): the region actually captured AFTER clamping to the viewport,
+  which can differ from the requested `rect` if part of it was off-screen.
+  `viewport` still reports the WHOLE view either way, so it cannot convert a
+  cropped image's coordinates — use `capture_rect` in its place instead, AND
+  add its origin back in, since a crop is not anchored at the view's
+  `(0, 0)`: `(capture_rect.x + ix * capture_rect.width / image.width,
+  capture_rect.y + iy * capture_rect.height / image.height)`. A smaller
+  `image` than `viewport` implies is not itself evidence a crop happened —
+  the whole-view capture already downscales — so branch on whether
+  `capture_rect` is present in the result, not on `image` being smaller than
+  expected.
 - `LocalAppActOnUi` with `action: "pointer"` drives it — `value` is `"x,y"` or
   `"x,y,phase"` in CSS pixels, phase `tap` (default), `down`, `move` or `up`.
   `click` cannot reach a canvas: it resolves an element by selector/role/name,

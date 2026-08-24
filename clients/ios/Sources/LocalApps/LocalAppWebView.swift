@@ -468,10 +468,18 @@ final class LocalAppWebViewController {
         ///
         /// `capture_ui_value` deliberately preserves the caller's original
         /// numeric form, so a field can arrive as either a JSON integer or a
-        /// JSON float. `JSONSerialization` bridges both shapes to `NSNumber`;
-        /// reading through `.doubleValue` (rather than an `as? Double` cast,
-        /// which only succeeds for one of the two underlying storage kinds)
-        /// is what accepts either without favoring one.
+        /// JSON float. `JSONSerialization` bridges BOTH shapes to the same
+        /// `NSNumber` representation regardless of which one the source text
+        /// used (confirmed empirically -- a hand-parsed `{"x":10}` and
+        /// `{"x":10.5}` both come back as `__NSCFNumber`, and `as? Double`
+        /// succeeds for both; see task-8-report.md, fix round 1, which also
+        /// corrects an earlier, unverified claim here that `as? Double` was
+        /// shape-sensitive -- it is not). Going through `NSNumber` and
+        /// `.doubleValue` explicitly, rather than `rect[name] as? Double`
+        /// directly, is still deliberate: `as? Int` (not `Double`) is the
+        /// cast that IS shape-sensitive -- it fails outright on a fractional
+        /// value like `10.5` -- so reading as a floating type is what keeps
+        /// a fractional CSS pixel from being rejected.
         ///
         /// Returns `nil` for an absent, malformed, non-finite, or shapeless
         /// rect — exactly like no `value` at all, i.e. "capture the whole
@@ -591,7 +599,7 @@ final class LocalAppWebViewController {
                 return .failure(String(localized: "local_apps_error_ui_capture_too_large"))
             }
 
-            return encodedResult([
+            var payload: [String: Any] = [
                 "ok": true,
                 "action": "capture_view",
                 "image": [
@@ -609,15 +617,54 @@ final class LocalAppWebViewController {
                 // Without these the frame is unreadable as evidence: the same app
                 // is a different layout on an iPad in landscape and an iPhone in
                 // portrait, and the pixels alone do not say which one this is.
-                // In CSS pixels, which is the unit `pointer` takes: divide an
-                // image coordinate by `image.width / viewport.width`.
+                // `viewport` is ALWAYS the whole view, regardless of `capture_rect`
+                // below -- it answers "what device/layout is this", not "what does
+                // `image` show".
+                //
+                // In CSS pixels, which is the unit `pointer` takes, for a
+                // WHOLE-VIEW capture (no `capture_rect` in this result): divide an
+                // image coordinate by `image.width / viewport.width`. That ratio
+                // is *only* valid when `image` and `viewport` describe the same
+                // origin — true for the whole view, false for a crop, and the
+                // existing whole-view downscale means a smaller `image` than
+                // `viewport * device_pixel_ratio` is not itself proof a crop
+                // happened, hence `capture_rect`'s presence being the actual
+                // signal (see below).
                 "viewport": [
                     "width": Int(bounds.width.rounded()),
                     "height": Int(bounds.height.rounded()),
                 ],
                 "device_pixel_ratio": Double(webView.traitCollection.displayScale),
                 "jpeg_quality": Double(usedQuality),
-            ])
+            ]
+            // Present ONLY when a crop was requested (never for a whole-view
+            // capture, which is what keeps that path's JSON byte-for-byte
+            // unchanged) and always the CLAMPED region actually handed to
+            // `takeSnapshot` -- not the caller's original request -- because a
+            // partly-out-of-bounds request is silently narrowed by `intersection`
+            // above, and the agent needs the rect that was ACTUALLY captured to
+            // convert a coordinate back correctly.
+            //
+            // For a crop, the whole-view ratio above does not apply: it uses the
+            // VIEW's width and has no origin term, so it is wrong both by scale
+            // (view width vs. the crop's own width) and by a missing additive
+            // offset (the crop is not anchored at the view's origin). The correct
+            // conversion, in CSS pixels, replaces `viewport` with `capture_rect`
+            // as the ratio's base AND adds its origin back in:
+            //   CSS_x = capture_rect.x + imageX * capture_rect.width / image.width
+            //   CSS_y = capture_rect.y + imageY * capture_rect.height / image.height
+            // (`skills/frontend-qa/SKILL.md` carries this same formula for the
+            // agent, since a formula that lives only in this comment is a formula
+            // the model calling this tool never sees.)
+            if requestedRect != nil {
+                payload["capture_rect"] = [
+                    "x": Double(region.origin.x),
+                    "y": Double(region.origin.y),
+                    "width": Double(region.width),
+                    "height": Double(region.height),
+                ]
+            }
+            return encodedResult(payload)
         }
 
         private func evaluate(_ source: String, in webView: WKWebView) async throws -> Any? {

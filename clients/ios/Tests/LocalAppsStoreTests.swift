@@ -1622,6 +1622,105 @@ final class LocalAppsStoreTests: XCTestCase {
             )
         }
 
+        /// Fix round 1 — sets up a window-attached, composited webview the way
+        /// `testCaptureViewHonoursAnInBoundsCropWithoutUpscalingIt` does, so the
+        /// two `capture_rect` tests below don't each hand-roll the same setup.
+        private func makeComposedCaptureController() -> (controller: LocalAppWebViewController, webView: WKWebView, window: UIWindow) {
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+            let webView = WKWebView(frame: window.bounds)
+            window.rootViewController = UIViewController()
+            window.rootViewController?.view.addSubview(webView)
+            window.makeKeyAndVisible()
+            let broker = LocalAppBridgeBroker(appID: "tracker")
+            let controller = LocalAppWebViewController(appID: "tracker", broker: broker)
+            controller.webView = webView
+            return (controller, webView, window)
+        }
+
+        /// `takeSnapshot` can report "not yet composited" on the first runloop
+        /// turns after `makeKeyAndVisible()`; retrying here (production does
+        /// not retry) is what makes a WINDOWED capture test deterministic
+        /// without changing what is being verified — `captureFrame`'s
+        /// clamp/guard already ran (or didn't) synchronously before any of
+        /// this, same rationale as the in-bounds-crop test above.
+        private func captureUntilComposited(
+            _ controller: LocalAppWebViewController, request: AppUiRequestDto
+        ) async -> LocalAppUIExecutionResult {
+            var result = await controller.execute(request: request)
+            for _ in 0 ..< 40 where result.error != nil {
+                try? await Task.sleep(for: .milliseconds(50))
+                result = await controller.execute(request: request)
+            }
+            return result
+        }
+
+        /// Fix round 1, ruling point 1 — `capture_rect` must be OMITTED
+        /// entirely for a whole-view capture (no `rect` in the request), not
+        /// present-and-null, so that path's JSON stays exactly as it was
+        /// before crops existed.
+        func testCaptureViewOmitsCaptureRectForAWholeViewCapture() async throws {
+            let (controller, webView, window) = makeComposedCaptureController()
+            defer { window.isHidden = true }
+            webView.loadHTMLString(
+                #"<body style="margin:0;background:#3366ff"><div id="ready">hi</div></body>"#,
+                baseURL: URL(string: "http://127.0.0.1:43123")
+            )
+            try await waitForElement("ready", in: webView)
+
+            let result = await captureUntilComposited(controller, request: AppUiRequestDto(
+                requestId: "capture-whole",
+                appId: "tracker",
+                action: .captureView,
+                target: nil,
+                value: nil
+            ))
+            XCTAssertNil(result.error, "capture never succeeded: \(result.error ?? "?")")
+            guard let resultJSON = result.resultJSON,
+                  let data = resultJSON.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return XCTFail("expected a result, got \(result.resultJSON ?? "nil")") }
+            XCTAssertNil(object["capture_rect"], "a whole-view capture must not carry capture_rect at all")
+            XCTAssertNotNil(object["viewport"], "viewport must still be present")
+        }
+
+        /// Fix round 1, ruling point 4 (CRITICAL fix) — `capture_rect` must be
+        /// the CLAMPED region actually handed to `takeSnapshot`, not the
+        /// caller's original request. That distinction is the whole reason
+        /// this field has to be computed from `region` after `intersection`,
+        /// not echoed back from the parsed request. The requested rect below
+        /// extends past BOTH the right and bottom edges of a 393x852 view, so
+        /// a clamp bug on just one axis would not be caught by a single-edge
+        /// case (matches the `intersection` behaviour independently verified
+        /// against a standalone CoreGraphics script in the task-8 report:
+        /// `(300,800,200,200)` ∩ `(0,0,393,852)` = `(300,800,93,52)`).
+        func testCaptureViewReportsCaptureRectAsTheClampedRegionNotTheRequestedOne() async throws {
+            let (controller, webView, window) = makeComposedCaptureController()
+            defer { window.isHidden = true }
+            webView.loadHTMLString(
+                #"<body style="margin:0;background:#3366ff"><div id="ready">hi</div></body>"#,
+                baseURL: URL(string: "http://127.0.0.1:43123")
+            )
+            try await waitForElement("ready", in: webView)
+
+            let result = await captureUntilComposited(controller, request: AppUiRequestDto(
+                requestId: "capture-partial",
+                appId: "tracker",
+                action: .captureView,
+                target: nil,
+                value: #"{"rect":{"x":300,"y":800,"width":200,"height":200}}"#
+            ))
+            XCTAssertNil(result.error, "capture never succeeded: \(result.error ?? "?")")
+            guard let resultJSON = result.resultJSON,
+                  let data = resultJSON.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let captureRect = object["capture_rect"] as? [String: Any]
+            else { return XCTFail("expected capture_rect in the result, got \(result.resultJSON ?? "nil")") }
+            XCTAssertEqual(captureRect["x"] as? Double, 300, "origin inside the viewport is unchanged by clamping")
+            XCTAssertEqual(captureRect["y"] as? Double, 800)
+            XCTAssertEqual(captureRect["width"] as? Double, 93, "393 - 300: the CLAMPED width, not the requested 200")
+            XCTAssertEqual(captureRect["height"] as? Double, 52, "852 - 800: the CLAMPED height, not the requested 200")
+        }
+
         private func waitUntil(_ description: String, _ condition: () -> Bool) async throws {
             for _ in 0 ..< 200 {
                 if condition() { return }

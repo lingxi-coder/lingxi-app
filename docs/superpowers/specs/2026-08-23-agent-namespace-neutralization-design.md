@@ -33,7 +33,7 @@
 | **D2** | 混合绑定：**命名空间编译期固定，只有显示名运行期注入** | 命名空间是跨 app 的统一标准，不该每个 app 一套；`branding` 的命名空间常量保持 `const &str` |
 | **D3** | **Clean break** | 不迁移、不双读、不设废弃窗口。`~/.lingxi`（30M / 236 session / 凭证）直接作废，重新认证 |
 | **D4** | 源码树**全部中性化** | `lingxi-code/` → `agent-code/`、crate `lingxi-cli` → `agent-cli`、`memory/src/lingxi_md/` → `agent_md/`、CI `lingxi-release.yml` → `agent-release.yml`、CLI 二进制默认 `agent`、npm 包 `agent` |
-| **D5** | `CLAUDE_*` **只留「外部写入」的入口契约** | 保留 `CLAUDE_AGENT_SDK_*`、`CLAUDE_CODE_ENTRYPOINT`、`CLAUDE_CODE_EXTRA_BODY`、`CLAUDE_CODE_EXTRA_METADATA`。其余全改 `AGENT_*`。`ANTHROPIC_*` 不动 |
+| **D5** | `CLAUDE_*` **只留「外部写入」的入口契约** | 保留 `CLAUDE_AGENT_SDK_*`、`CLAUDE_CODE_ENTRYPOINT`、`CLAUDE_CODE_EXTRA_BODY`、`CLAUDE_CODE_EXTRA_METADATA`、`CLAUDE_CODE_OAUTH_TOKEN`（O1）。其余全改 `AGENT_*`。`ANTHROPIC_*` 不动 |
 | **D6** | `AGENT_` 前缀保留，但**合成路径加白名单** | `env_parser` 不再把任意 `AGENT_*` 当设置；子进程转发从前缀匹配改成显式 key 列表 |
 | **D7** | 设备端「名字即句柄」的标识符**全改**，能迁移的写迁移，不能的接受丢失 | 详见 §6 |
 
@@ -430,15 +430,15 @@ L12 启动抛异常 · L5 静默降级到 Store 路径 · iOS 数据根分叉（
 | `LINGXI_AGENT_LIST_IN_MESSAGES` | **`AGENT_LIST_IN_MESSAGES`**（去重叠） | ⛔ 必须在 §4.2 的 iOS bridge 显式映射落地**之后**才应用去重叠模式（H9） |
 | `LINGXI_DISABLE_LINGXI_MDS` | **`AGENT_DISABLE_MEMORY_FILES`** | 唯一的双品牌名；`MDS` 只在文件叫 `CLAUDE.md` 时才讲得通。Clean break 下改名零成本 |
 
-### 9.2 仍然开放（实施前需拍板）
+### 9.2 曾经开放，现已收敛（2026-08-23）
 
-| # | 问题 |
-|---|---|
-| **O1** | `CLAUDE_CODE_OAUTH_TOKEN` 保留还是改？它命名的是 Anthropic 签发的凭证，企业 CI 会设它，但按 D5 字面它不是「第三方进程写入」。**建议保留**，与 `CLAUDE_AGENT_SDK_*` 同类 |
-| **O2** | `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` —— 我方自己的旋钮，**建议改**。与 O1 一起确认 |
-| **O3** | §3.3 的 34 个硬编码 `"LingXi"` const 项里，哪些跟随 L2 注入、哪些声明为 L3 冻结？规则建议：**第三方看得见或据以索引的值**（Copilot/OpenAI/WebSearch UA `LingXi-Code`、IDE lockfile 名、MCP clientInfo、keychain service 基名、git author 名、PR attribution）→ L3 冻结，除非配迁移；只有用户读的 → L2 注入。需逐项列表 |
-| **O4** | coordinator 的身份行（3 处）跟随 L2 注入，还是编译期中性字面量？ |
-| **O5** | npm 包名 `agent` 在 npm 上是否可用？不可用时的回退命名（连带 6 个平台包 `agent-{linux,darwin,win32}-{x64,arm64}`） |
+| # | 问题 | 裁定 |
+|---|---|---|
+| **O1** | `CLAUDE_CODE_OAUTH_TOKEN` 保留还是改？ | **保留**，加入 D5 保留清单。它命名的是 Anthropic 签发的凭证，与 `CLAUDE_AGENT_SDK_*` 同类 |
+| **O2** | `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` | **改成 `AGENT_API_KEY_HELPER_TTL_MS`** —— 我方自己的旋钮 |
+| **O3** | §3.3 的 34 个硬编码 `"LingXi"` const 项如何分配 | **规则采纳**：第三方看得见或据以索引的值（Copilot/OpenAI/WebSearch UA `LingXi-Code`、IDE lockfile 名、MCP clientInfo、keychain service 基名、git author 名、PR attribution）→ **L3 冻结**，除非配迁移；只有用户读的 → **L2 注入**。**逐项列表在实施计划里产出，不在本文** |
+| **O4** | coordinator 的身份行（3 处） | **跟随 L2 注入**（与 CLI 身份行一致）。⚠️ 这是**未经用户逐项确认的假设**，若 coordinator 的身份需要与主 agent 区分则应推翻 |
+| **O5** | npm 包名 `agent` 是否可用 | **降级为实施任务，不是设计问题**：计划 B 里加一步查 npm registry（连带 6 个平台包 `agent-{linux,darwin,win32}-{x64,arm64}`）。⚠️ 若 `agent` 已被占用，回退命名需要用户拍板，届时阻塞 S5 而非更早 |
 
 ---
 

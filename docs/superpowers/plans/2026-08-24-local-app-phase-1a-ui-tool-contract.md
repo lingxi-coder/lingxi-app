@@ -185,9 +185,11 @@ func testUIInspectionReportsElementAndCanvasGeometry() {
     ] {
         XCTAssertTrue(source.contains(token), "missing geometry contract: \(token)")
     }
-    XCTAssertFalse(
-        source.contains("visible: rect.width > 0 && rect.height > 0,\n                canvasCount"),
-        "geometry must be added alongside `visible`, not replace the element shape"
+    // Geometry is ADDED to the element shape, not substituted for `visible`:
+    // a reader that only asks "is it on screen" must keep working.
+    XCTAssertTrue(
+        source.contains("visible: rect.width > 0 && rect.height > 0,"),
+        "`visible` must survive alongside the new rect, not be replaced by it"
     )
 }
 ```
@@ -388,7 +390,9 @@ func testDocumentStartInstallsABoundedRuntimeErrorLedger() {
         "console.error = function",
         "kind: 'console'",
         // Bounded on both axes, and cleared per document.
-        "__lingxiRuntimeErrors.length >= 8",
+        // The bound itself, spelled the way the code spells it.
+        "const cap = 8",
+        "__lingxiRuntimeErrors.length >= cap",
         "__lingxiRuntimeErrorsDropped",
     ] {
         XCTAssertTrue(source.contains(token), "missing runtime-error ledger: \(token)")
@@ -502,7 +506,8 @@ fun `document start installs a bounded runtime error ledger`() {
         "addEventListener('unhandledrejection'",
         "console.error = function",
         "kind: 'console'",
-        "__lingxiRuntimeErrors.length >= 8",
+        "const cap = 8",
+        "__lingxiRuntimeErrors.length >= cap",
         "__lingxiRuntimeErrorsDropped",
     ).forEach { token ->
         assertTrue("missing runtime-error ledger: $token", bootstrap.contains(token))
@@ -570,7 +575,7 @@ func testSnapshotDegradesInAFixedOrderAndSaysSo() {
         "const BUDGET = 200 * 1024",
         "for (const seg of ['elements', 'canvases', 'runtimeErrors'])",
         "truncated.push(seg)",
-        "truncated,",
+        "truncated: []",
     ] {
         XCTAssertTrue(source.contains(token), "missing payload budget: \(token)")
     }
@@ -588,7 +593,7 @@ fun `snapshot degrades in a fixed order and says so`() {
         "const BUDGET = 200 * 1024",
         "for (const seg of ['elements', 'canvases', 'runtimeErrors'])",
         "truncated.push(seg)",
-        "truncated,",
+        "truncated: []",
     ).forEach { token ->
         assertTrue("missing payload budget: $token", script.contains(token))
     }

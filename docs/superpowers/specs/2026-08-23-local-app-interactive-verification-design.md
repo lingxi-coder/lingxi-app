@@ -8,8 +8,9 @@
 > 第六轮补齐 annotation 原子持久化、build outcome 到 iOS 的传播、scope 切换后
 > one-shot send，并清理了所有已撤回方案的残留契约。修正记录见文末。
 >
-> 📌 **本文的一条编辑纪律**（三轮评审各抓到一次同形状的遗漏后加的）：
-> 任何决定都必须同时落到**三处**——正文、**阶段表**、**测试清单**。
+> 📌 **本文的一条编辑纪律**（四轮评审各抓到一次同形状的遗漏后加的）：
+> 任何决定都必须同时落到**四处**——正文、**阶段表**、**测试清单**、**状态/转换表**。
+> 第四处是后补的：`discarded` 那轮改完正文和测试后，权威状态图里仍缺五个状态。
 > 只写正文的决定在这份文档里已经被漏掉过三次（阶段 3 的必做项、Android 的
 > `verification_unavailable` 分支、token 交接与重启降级）：写正文的人认为已经定了，
 > 而按阶段表和测试清单干活的人看不到它。
@@ -883,15 +884,54 @@ restore 结束后该标注必须完整存在且回执有效。
 它们已因 `/.lingxi/` 进了 `.git/info/exclude`，而 checkout 请求的是
 `remove_untracked` 而非 `remove_ignored` ⇒ **不碰它们 = 自动存活**。
 
+**happy path**（只是导航用，**不是**契约）：
+
 ```
-draft ──Store 成功──► stored ──TurnStarted──► submitted
-  │                                             │
-  └──Store 失败──► draft(error)                  ├──output-change generation 变化──► buildObserved
-                                                │                     │
-                                                │        turn completed 且门通过 ──► cleared
-                                                │                     │
-                                                └──turn cancelled/failed/无构建──► stored(可重试)
+draft → storing → stored → submitted → buildObserved → cleared
 ```
+
+**契约是下面这张全量转换表。** 每个状态把它能收到的每个事件都列全——
+早期版本只画了 happy path 的箭头，于是 `storing` / `discardPending` /
+`discarded` / `stored(recovered)` / `recovery_error` **五个状态从没出现在图里**，
+只活在散文里；而散文允许作者只写想到的那几个分支，正是三条 P1 的成因。
+
+| 状态 | 事件 | 结果 |
+|---|---|---|
+| `draft`（本地，未发 Store） | 提交 / 立即修 | 发 Store ⇒ `storing` |
+| | 用户丢弃 | 纯本地删除（盘上无物） |
+| | 重启：盘上有同 id 完整目录 | `stored(recovered)` |
+| | 重启：盘上无 | 保持 `draft` |
+| `storing`（已发 Store，回执未到） | 回执 ok | `stored` |
+| | 回执 err / 8 秒无回执 | `draft(error)` |
+| | 用户丢弃 | `discardPending(storing)` |
+| | 重启 | 盘上有 ⇒ `stored(recovered)`；盘上无 ⇒ `draft` |
+| `stored` / `stored(recovered)` | token 匹配的 `TurnStarted` | `submitted` |
+| | `send` 返回 nil（read-only） | `stored(error，可重试)` |
+| | 用户丢弃 | 墓碑 + `DeleteAppAnnotation` ⇒ `discarded` |
+| | 重启 | 盘上有 ⇒ `stored(recovered)`；盘上无 ⇒ `draft(error)` |
+| `draft(error)` | 用户重试 | 发 Store ⇒ `storing` |
+| | 用户丢弃 | 盘上无 ⇒ 本地删除；盘上有 ⇒ 墓碑 + Delete ⇒ `discarded` |
+| `submitted` | output-change generation 变化 | `buildObserved` |
+| | turn cancelled / failed / 无构建 | `stored(可重试)` |
+| | 用户丢弃 | `discardPending(turn)` |
+| | **重启** | **降级 `stored(recovered)`**（token 是进程内的，无法续上） |
+| `buildObserved` | turn completed 且门通过 且 `SmokeReport.output_change_id` 匹配 | `cleared` |
+| | turn cancelled / failed | `stored(可重试)` |
+| | 用户丢弃 | `discardPending(turn)` |
+| | **重启** | **降级 `stored(recovered)`** |
+| `discardPending(storing)` | Store 回执 ok | 墓碑 + Delete ⇒ `discarded` |
+| | Store 回执 err | 纯本地删除 |
+| | 重启 | 盘上有 ⇒ 墓碑 + Delete；盘上无 ⇒ 本地删除 |
+| `discardPending(turn)` | 该 batch 的 turn 走到终态 completion | 墓碑 + Delete ⇒ `discarded` |
+| | 重启 | 直接墓碑 + Delete（turn 不可能还在飞，安全） |
+| `recovery_error`（名字合法、sidecar 校验失败） | 用户丢弃 | 墓碑 + Delete ⇒ `discarded` |
+| | 重启 | 保持 `recovery_error` |
+| `cleared` / `discarded`（终态） | 墓碑存在 | 重发 `DeleteAppAnnotation` |
+| | Delete 回执无 `error` | 移除墓碑（真正终结） |
+| | 重启且墓碑仍在 | 重发 Delete |
+
+⚠️ **目录名不是合法 UUID 的目录不是本表的任何状态**——它不进药丸列表，
+由宽限期清扫回收（见上文）。
 
 🚨 **`submitted` 不能直接跳到 `cleared`。** 构建成功严格早于 runtime 重启，重启严格早于
 turn 结束，而 turn 在成功构建之后仍有**六个失败发布点**：`ConversationSource.swift:2385`

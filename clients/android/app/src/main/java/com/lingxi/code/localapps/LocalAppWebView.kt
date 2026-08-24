@@ -621,6 +621,12 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
         ok: false,
         error: clean(message) || 'Lingxi UI action failed'
       });
+          // Deliberately kept CHARACTER-IDENTICAL to the iOS source
+          // (LocalAppWebView.swift's snapshot()) and to the plan's Step 3
+          // text, so its indentation intentionally differs from its
+          // neighbours below. Reformatting it would break the cross-platform
+          // identity that LocalAppsStoreTests (iOS) and LocalAppWebViewTest
+          // (Android) both pin.
           const vvOf = () => {
             const vv = window.visualViewport;
             return vv

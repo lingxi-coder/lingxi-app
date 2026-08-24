@@ -78,22 +78,45 @@ cwd = `apps/<id>/workspace`），scope 的 cwd、工具绑定、工作区都是�
 | 决定 | 选择 |
 |---|---|
 | 自动 verify 的角色 | 退成便宜的冒烟门；验收交给人 |
-| 光标可视化形态 | 静态标注在截图上（非实时动画光标） |
+| ~~光标可视化~~ | **已撤销（2026-08-24 用户决定）** —— 见「被撤销的需求」 |
 | 反馈提交节奏 | 默认攒清单，单条可「立即修」 |
-| 光标回放的位置 | app 界面上的回放条；同时回喂给 LLM |
+| ~~操作回放条~~ | **已撤销（同上）** |
 | 编辑的适用范围 | 库里任何 app、任何时候 |
 | 落地平台 | 客户端 UI 仅 iOS；引擎改动两端共用 |
 | 进入标注模式 | 悬浮按钮切模式 |
-| 界面布局 | 一条三态复用的副驾驶条 |
+| 界面布局 | 一条两态复用的副驾驶条（输入框 / 药丸清单） |
 
 ### 非目标
 
 - Android 的 overlay / 副驾驶条 UI（后补）；agent-facing 的 `inspect_ui`/`capture_ui`
   WebView contract 仍须两端一致
 - 修 `SendPrompt.images`（移动端定义了但从不读，`host.rs:6146`）
-- 实时动画光标
+- 任何形式的光标可视化（实时或截图标注）—— 见「被撤销的需求」
 - 跨 app 引用
 - 桌面/Web 客户端
+
+### 被撤销的需求：光标可视化与操作回放条
+
+2026-08-24 用户决定撤销。原始需求是「LLM 自动操作时显示鼠标位置」，用户澄清其用意是：
+**在 LLM 通过 app-use 或 computer-use 控制、模拟点击时，让用户看清楚它到底做了什么操作**。
+
+这是一个**跨子系统的通用诉求**，不是本地应用验收流程特有的——computer-use 是另一套
+子系统（`lingxi-code/tools/computer-use/`，其 `:21` 明确把 overlay 划在范围之外），
+Android-use 又是一套。把它塞进本设计只会得到一个只在本地应用里生效的半吊子版本。
+**记录在此，等它作为独立条目被设计时一并覆盖三个子系统。**
+
+撤销连带删掉的东西（不要因为「看起来缺了」而恢复）：
+
+- `capture_ui` 的 `marker` 入参与 `result_json` 的 `last_action` 字段
+- 客户端在 `captureFrame` 里的标记绘制（iOS `UIGraphicsImageRenderer` / Android `Canvas`）
+- 副驾驶条的第三态（操作帧横排）、每动作一张 240 px 缩略图、24 项与 6 MiB 双上限
+- 「任何程序化像素比对必须传 `marker:"none"`」这条规则——**没有标记就没有这个 bug 类**
+- 给 `AppUiRequestDto` 追加 `origin` 字段的必要性——回放条不存在了，门自己的探测
+  不会再被显示成「我正在操作你的 app」
+- 引导里「第一次看到回放条」那一次 coach mark
+
+净效果：副驾驶条从三态降为两态，`capture_ui` 的 schema 只剩 `rect`，
+判据 3 不再有前置条件，客户端少一个 ring buffer 和两条内存预算。
 
 ## 架构
 
@@ -166,7 +189,7 @@ JS 只需要读构建结果里宿主写的 `smoke`，并用持久化的 `last_bu
 |---|---|---|
 | 1 | 运行时已启动且 `preview_url` 非空 | **阻塞** |
 | 2 | `inspect_ui` 成功；document 为 interactive/complete、viewport 非零；canvas 应用要求 `canvases` 至少一个且 rect 非零 | **阻塞** |
-| 3 | `capture_ui` 取到两帧（间隔 1.5 秒，**均传 `marker:"none"`**） | **阻塞** |
+| 3 | `capture_ui` 取到两帧（间隔 1.5 秒） | **阻塞** |
 | 4 | 首帧非纯色（整帧像素方差） | **建议** |
 | 5 | canvas 应用：`canvases[].rect` 内两帧不同 | **建议** |
 | 6 | 运行时错误账本为空 | **阻塞** |
@@ -220,12 +243,6 @@ controller 只在 `LocalAppPreviewView` 真的挂了 `LocalAppWebView` 之后才
 在本设计的两条流程里这都是预期行为：用户要么刚要求创建这个 app，要么刚提交标注要求
 修它——**都在等这个 app**。
 
-⚠️ 但 `AppUiRequestDto` **没有 origin 字段**（`local_apps.rs:767-775`），所以副驾驶条
-无法区分「agent 在操作」和「宿主的门在探测」，门自己的 3–6 次探测会显示成
-「我正在操作你的 app」。落地时二选一：给 `AppUiRequestDto` 追加一个可选 `origin`
-字段（进本设计唯一那次 bless），或副驾驶条只在有 agent turn 在飞时显示。
-**倾向后者**（不加协议字段）。
-
 ## 协议改动：只有一处
 
 `ResolveAppUiRequest.result_json` 和 `AppUiRequestDto.value` 都是不透明
@@ -234,7 +251,7 @@ controller 只在 `LocalAppPreviewView` 真的挂了 `LocalAppWebView` 之后才
 | 能力 | 承载 | 动协议 |
 |---|---|---|
 | `inspect_ui` 元素几何 / canvas rect / runtimeErrors | `result_json` 内 JSON | 否 |
-| `capture_ui` 区域裁剪 + marker | host schema 序列化到 `value` JSON | 否 |
+| `capture_ui` 区域裁剪 | host schema 序列化到 `value` JSON | 否 |
 | 冒烟门报告 | 宿主写盘 + 构建结果 | 否 |
 | 标注 → 消息 | 复用 `SendPrompt` | 否 |
 | 清单清理触发 | 复用既有 `AppRecordChanged` | 否 |
@@ -345,12 +362,12 @@ the image codecs」（`tools/file/Cargo.toml:47-49`）；engine-desktop 开了�
 组装后若仍超 200 KiB，按 `elements` → `canvases` → `runtimeErrors` 逐段降级并写
 `truncated: [<段名>]`。
 
-### `capture_ui`：区域裁剪 + marker
+### `capture_ui`：区域裁剪
 
 对模型暴露的 schema additive 增加：
 
 ```json
-{ "app_id": "…", "rect": {"x":10,"y":20,"width":120,"height":80}, "marker": "last_action" }
+{ "app_id": "…", "rect": {"x":10,"y":20,"width":120,"height":80} }
 ```
 
 host 校验有限数字/正尺寸后序列化进既有 `AppUiRequestDto.value`，**DTO 不变**。
@@ -368,20 +385,6 @@ host 校验有限数字/正尺寸后序列化进既有 `AppUiRequestDto.value`�
   目标尺寸按裁剪区定，钳裁剪区，不放大。
   ⚠️ **`× density` 这一步必须在文档里写出来**——本仓库已经栽过一次
   （`LocalAppWebView.kt:344-353`）。
-
-### 光标标记（用户需求 #3）
-
-客户端在 `captureFrame` 里画标记圈再编码：iOS `UIGraphicsImageRenderer`，
-Android 在 PixelCopy/fallback bitmap 上用平台 `Canvas`。
-**仓库里没有任何服务端图像绘制库**（`imageproc`/`tiny-skia`/`resvg`/`ab_glyph` 都不是
-依赖），所以必须在客户端画。
-
-标记位置来自紧邻的上一次带坐标动作（客户端记 `{kind,x,y,at}`），仅当 5 秒内才画。
-`result_json` 加 `last_action: {kind,x,y,age_ms}`。
-
-🚨 **任何程序化像素比对都必须传 `marker:"none"`**：门自己不发坐标动作，5 秒过期规则会让
-两帧一有标记一无，标记若落在 canvas 矩形内会让**冻结的 canvas 假过**判据 5。
-标记是给人和给模型看的证据，不是给比较器看的数据。
 
 ### workflow 脚本删减（同一个 commit 里必须一起做）
 
@@ -478,14 +481,12 @@ RootView 的 `onSubmitAnnotations(appID, batchID, prompt)` 是唯一入口。
    钩子（挨着 `:300` 那个 `.onReceive(source.model.$streaming)`）——**不能放在详情/预览视图里**，
    它们会被提交路径自己的关 cover 动作卸载。
 
-### 副驾驶条（用户需求 #3）与引导
+### 副驾驶条与引导
 
-三态：agent 操作中显示带标记的操作帧；刚框完变输入框；有待提交标注时变药丸清单。
+两态：刚框完变输入框；有待提交标注时变药丸清单。非标注态时整条收起。
 
-⚠️ **本节与引导一节（coach mark）未经任何对抗性评审覆盖** —— 第四轮的七个镜头没有一个
-读过它们。它们是用户明确要求的功能（需求 #3），所以保留在设计里，但**落地前需要单独一轮
-评审**，且排在最后一个阶段。已知的一个问题见「门的请求会把 app 推上屏」一节末尾
-（`AppUiRequest` 没有 origin 字段）。
+⚠️ **本节与引导一节未经任何对抗性评审覆盖** —— 第四轮的七个镜头没有一个读过它们，
+落地前需要单独一轮评审，且排在最后一个阶段。
 
 引导复用 `AppState` 上的 `didSet + defaults` 形状——**不是 `@AppStorage`**
 （全树零命中；`AppState` 是 `@Observable @MainActor final class`，`Theme.swift:25-27,48`，
@@ -627,11 +628,11 @@ agent-facing contract 判绿。
 
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
-| 1 | 两端 `inspect_ui` 几何/canvas rect/runtimeErrors（含 `console.error` 与载荷预算）+ `capture_ui` 区域（修正后的裁剪数学）+ 光标标记 + `image-read` + `.lingxi` 进构建键跳过表 + 两处 `local-app-build` 字面量改集合判定 | 无。**完全不碰协议** |
+| 1 | 两端 `inspect_ui` 几何/canvas rect/runtimeErrors（含 `console.error` 与载荷预算）+ `capture_ui` 区域（修正后的裁剪数学）+ `image-read` + `.lingxi` 进构建键跳过表 + 两处 `local-app-build` 字面量改集合判定 | 无。**完全不碰协议** |
 | 2 | 冒烟门挂 `build_app` + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 的可见信号 | 1 |
 | 3 | `StoreAppAnnotation` + `AppRecord.last_build_id` + 唯一一次 bless | 1 |
 | 4 | iOS overlay + controller 串行 + 标注状态机与持久化 + 提交路由 | 1 与 3 |
-| 5 | 副驾驶条 + 引导（**先单独评审**，见该节警告） | 4 |
+| 5 | 副驾驶条（两态）+ 引导（**先单独评审**，见该节警告） | 4 |
 
 阶段 1 与 3 可并行。阶段 1 是 2 的硬前置（判据依赖 1 新增的 rect 与 runtimeErrors）。
 
@@ -701,7 +702,7 @@ agent-facing contract 判绿。
 ## 未决问题
 
 - 冒烟门判据 4/5 的阈值：**本轮不需要**（已降为建议）。真要转阻塞时用真实应用标定。
-- 副驾驶条与引导的具体形态：见该节警告，需单独一轮评审。
+- 副驾驶条（两态）与引导的具体形态：见该节警告，需单独一轮评审。
 
 ## 评审修正记录
 
@@ -731,3 +732,8 @@ engine-mobile 开 `image-read`（否则 agent 根本读不了标注图）；cont
 **四轮之后仍未验证的**（诚实列出，不是「大概没事」）：副驾驶条与引导两节没有任何镜头
 读过；边界表 20 行里 17 行未被检查；**没有任何一轮跑过任何东西**——没有 `cargo test`、
 没有 `xcodebuild`、没有真机，所有关于测试行为的判断都是静态阅读。
+
+**2026-08-24 撤销**：光标可视化与操作回放条整体移出本设计，见「被撤销的需求」。
+评审曾以「未经评审」为由建议砍掉这两节，那不是砍需求的正当理由（那是评审自己的覆盖
+缺口）；实际撤销依据是用户澄清了它的用意——它属于 app-use / computer-use 的通用能力，
+不该在本地应用里做一个半吊子版本。

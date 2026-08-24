@@ -254,6 +254,17 @@ spike 的验收标准是上面那六条**加上这个子问题**，每条都要�
 
 **在 spike 有结论之前，阶段 2 不可计划。** 阶段 1 与阶段 3 不依赖它，可以先做。
 
+🚨 **阶段 2 的门只覆盖 iOS，这必须写进契约而不是默认。** workflow 与引擎的改动两端共用，
+但 spike 的候选是 iOS 的离屏 `WKWebView`，而 Android 的 WebView registry 是**另一套独立
+实现**（`LocalAppWebView.kt`、`LocalAppsViewModel.kt`），不会自动复用。所以：
+
+- 引擎侧必须显式表达「本平台没有冒烟能力」，并据此返回
+  `delivery_status: "verification_unavailable"`——**绝不能在没有能力的平台上静默判通过**；
+- Android 的对等能力是**独立的一次 spike + 独立的验收门**，不在本设计的阶段 2 里；
+- 非目标一节里「Android UI 后补」指的是 overlay 与副驾驶条；
+  **agent-facing 的 `inspect_ui`/`capture_ui` contract 仍然两端一致**（阶段 1），
+  两者不要混为一谈。
+
 ### 顺带确认的一个结构性缺口：热重载不存在
 
 本文数据流最后一步「热重载 → 回到用户玩 app」**当前没有任何机制实现**。客户端只有三条
@@ -453,9 +464,22 @@ glob 走 gitignore 语义（`filesystem.rs:521`），`permission/src` 里**没�
 
 照抄 `local-apps/src/ids.rs` 既有的形状（`is_valid_app_id` `:46` / `validate_app_id` `:61`
 → `AppError`），加一对 `is_valid_annotation_id` / `validate_annotation_id`：
-必须是**规范小写 UUID**（单一路径组件，无分隔符、无 `.`/`..`、非绝对路径），
+必须是**规范 UUID 且是单一路径组件**（无分隔符、无 `.`/`..`、非绝对路径），
 在处理器最开头校验，失败即回 `invalid_annotation_id`，**在拼任何路径之前**。
-测试必须覆盖 `../`、绝对路径、含 `/` 与 `\\`、大写 UUID、超长串、空串。
+
+🚨 **大小写必须按「校验时不敏感、落盘时归一为小写」处理，不能只收小写。**
+两端的原生 UUID 大小写**相反**：Swift 的 `UUID().uuidString` 是**大写**
+（`7C725956-…`），Kotlin 的 `UUID.randomUUID().toString()` 是**小写**。
+只接受小写会让 iOS 生成的每一个 id 被引擎拒绝。
+
+- 引擎：`validate_annotation_id` 大小写不敏感地校验规范 UUID 形状，
+  **归一为小写之后**再拼路径；回执里回归一后的值。
+- iOS：仍应写 `UUID().uuidString.lowercased()`——这是**本仓库既有约定**
+  （`LXISHNativeBridge.swift:1605`、`:1732`，`LXISHNativeRootfs.swift:104`、`:286`），
+  让日志、prompt 正文和目录名三处一致。
+
+测试必须覆盖 `../`、绝对路径、含 `/` 与 `\\`、**大写 UUID（必须被接受并归一）**、
+超长串、空串，以及**同一 UUID 的大小写两种写法映射到同一个目录**。
 
 🚨 **目录名必须是 `annotation_id`，不是时间戳序号。** 每条标注是一个原子发布单元：
 
@@ -612,7 +636,18 @@ RootView 的 `onSubmitAnnotations(appID, batchID, prompt)` 是唯一入口。
    任意重入都先按 `batchID` 去重。
    ⚠️ 早期版本还列了一个 `readyToSend`——**没有任何转换产生或消费它**，删掉。
    **pending 项在三个出口上都必须被移除**，之后由药丸 FSM 独占
-   `stored`/`submitted`：**token 匹配的 `TurnStarted` 到达** ⇒ 移除 + 药丸转 `submitted`
+   `stored`/`submitted`。
+
+   🚨 **但 token 必须在移除 pending 之前先交出去，否则 completion 无从匹配。**
+   本文后面要求用完整 `ConversationTurnToken` 匹配 `ConversationTurnCompletion`，
+   而 token 原本只存在于 pending 项里。RootView 需要一份**非持久化**的
+   `batchTurnCorrelation: [BatchID: ConversationTurnToken]`：
+   - 在移除 pending 的**同一次 MainActor 执行里**原子写入；
+   - 收到该 token 的 completion（任意 outcome）后移除；
+   - 进程重启后天然为空——这与「重启把 `submitted`/`buildObserved` 降级为
+     `stored(recovered)`」是同一条推论的两面，两处必须一起改。
+
+   三个出口：**token 匹配的 `TurnStarted` 到达** ⇒ 移除 + 药丸转 `submitted`
    （**不是** `send()` 返回 token 那一刻——那时只进 `awaitingTurnStarted`）；
    read-only 返回 `nil` ⇒ 移除 + 药丸转 `stored(error)`；turn cancelled/failed ⇒
    移除 + 药丸转 `stored(可重试)`。**不写移除规则的话**，`awaitingTurnStarted`
@@ -759,6 +794,10 @@ ClientCommand::DeleteAppAnnotation { app_id, annotation_id }
 - `annotations/` 的数量与字节上限用**拒绝**而非静默回收：超限时
   `StoreAppAnnotation` 回 `annotation_quota_exceeded`，客户端提示用户先提交或清理。
   ⛔ 不要在超限时自动删最旧的——那会在用户没看见的情况下丢掉证据。
+- **上限取 64 条 / 16 MiB，先到先算**（per app，统计的是 `annotations/` 下的正式目录）。
+  依据：待提交集合是「一个人在一次验收里能记住的问题数」量级，64 已经很宽；
+  16 MiB 同时给上面那条 checkpoint 豁免留出确定的最坏值。
+- 超限时**不得产生任何目录**——连 `.tmp-*` 都不许留，配额检查在写第一个字节之前。
 
 🚨 **`StoreAppAnnotation` 不取 per-app 构建锁，而 checkpoint restore 会删掉窗口内新建的目录。**
 `restore_service_documents`（`checkpoints.rs:371-386`）会 `remove_file` 掉**每一个
@@ -980,6 +1019,11 @@ the goldens stay byte-identical**"*。签入的 golden
   `apps/<id>/workspace/.lingxi/annotations/<annotation_id>/{annotation.json,image.jpg}`；
   另测非法 base64/JSON/rect、尺寸上限、temp-directory rename 发布，以及
   图写完/目录 rename 前崩溃不得产生正式 annotation。
+- **删除生命周期**：`DeleteAppAnnotation` 幂等（目录已不存在 ⇒ 成功）；重启后日志里的
+  墓碑会**重发**删除命令并在收到回执后消失；超配额时 `StoreAppAnnotation` 被拒且
+  `annotations/` 下**不留任何目录（含 `.tmp-*`）**。
+- **并发 restore（阶段 3 硬门）**：restore 进行中发布一条标注，restore 结束后该标注
+  **完整存在**且回执有效。
 - **构建键回归测试**：往 `workspace/.lingxi/<任意>` 写内容**不得**改变 `workspace_build_key`。
 - **`Read .lingxi/annotations/<id>/image.jpg` 必须返回 image 结果**（守住
   `image-read` feature 和 host-owned metadata 可读边界）。
@@ -1037,7 +1081,7 @@ agent-facing contract 判绿。
 | 1 | 两端 `inspect_ui` 几何/canvas rect/runtimeErrors（含 `console.error` 与载荷预算）+ `capture_ui` 区域（修正后的裁剪数学）+ `image-read` + `.lingxi` 进构建键跳过表 + 两处 `local-app-build` 字面量改集合判定 | 无。**完全不碰协议** |
 | **spike** | 宿主能否拿到新鲜且不可伪造的观测（六条验收，真机） | 1 |
 | 2 | 冒烟门 + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 可见信号 + source-vs-source 的决定 | **spike** |
-| 3 | `StoreAppAnnotation` 原子目录 + `AppRecord`/`AppRecordDto` 两个 build generation 字段 + `BuildOutcome`/`build_and_record` + 协议 bless/绑定生成 | 1 |
+| 3 | `StoreAppAnnotation` 原子目录 + **`DeleteAppAnnotation`** + **`annotation_id` 落盘前校验/归一** + **`annotations/` 的 read/delete 双豁免** + `AppRecord`/`AppRecordDto` 两个 build generation 字段 + `BuildOutcome`/`build_and_record` + 协议 bless/绑定生成。**硬门：并发 restore 测试** | 1 |
 | 4 | iOS overlay + controller 串行 + 标注状态机与持久化 + RootView one-shot 提交路由 | **2 与 3** |
 | 5 | 副驾驶条（两态）+ 引导（**先单独评审**，见该节警告） | 4 |
 
@@ -1054,9 +1098,11 @@ agent-facing contract 判绿。
 **阶段 2 在 spike 出结论前不可计划；阶段 4 不得在 2 之前交付**，因为提交路由的
 source-vs-source 互斥策略与 `buildObserved → cleared` 的门结果都由阶段 2 确定。
 
-## 不属于本设计的在线缺陷（建议单独开条目）
+## 先于本设计存在的在线缺陷
 
-四轮评审顺带确认的、与本功能无关的现存 bug：
+四轮评审顺带确认的现存 bug。⚠️ **其中第 1、3 条本设计有依赖，已排进阶段 1**——
+列在这里是为了说明「它们不是本设计引入的、也应当独立于本设计被修」，
+不是说它们在范围之外。第 2、4 条与本设计无关，建议单独开条目。
 
 1. **`.lingxi` 不在构建键跳过表**（`local_apps_build.rs:766-769`）——任何写入都让缓存永不命中。
 2. **`Paused` 的收养检查点让 app 永久不可删**：`registry.rs:903` 把收养的检查点登记为
@@ -1097,8 +1143,17 @@ source-vs-source 互斥策略与 `buildObserved → cleared` 的门结果都由�
    （`:96-99` 作为历史保留，只 grep 到 "both blocks were real" 会读成现状）。
 5. **Ionic**：`iife` 下无法按需引入，~1.4 MB 固定底盘；重度 Shadow DOM，两端 `deepQuery`
    已穿透，几何输出必须走同一条 walk。
-6. **设备**：真机 rootfs 无 Node 工具链；`AppManifest::hash()` 序列化整个结构体且绑定
-   SQLite schema ⇒ 新字段必须 `skip_serializing_if`。
+6. **设备**：真机 rootfs 无 Node 工具链。
+6a. **给 `AppManifest` 加字段**：`AppManifest::hash()`（`manifest.rs:460-465`）序列化整个
+   结构体且绑定 SQLite schema ⇒ 新字段必须 `skip_serializing_if`，否则既有应用立刻
+   `database manifest mismatch`。
+6b. **给 `AppRecord` 加字段**：理由**不是** `AppManifest::hash()`——它不序列化 `AppRecord`。
+   真实理由是这个仓库**没有迁移函数**（`storage.rs:34-36`：*serde aliases … IS the on-disk
+   migration*），serde 对 `Option` 无隐式默认 ⇒ 裸字段让 `load_all` 整体 `Err`，
+   **整个 app 库打不开**。必须 `#[serde(default, skip_serializing_if = "Option::is_none")]`，
+   照抄 `init_session_id`（`types.rs:167-176`）。
+   ⚠️ 这两条**规则相同、理由不同、适用的结构体不同**。早期版本把 6b 挂在 6a 的理由上，
+   评审核出理由是假的、把规则一并删掉，险些造成整库读不出来。
 7. **`ClientCommand` 是 `#[non_exhaustive]` 且分发有兜底臂**（`host.rs:7064-7074` 静默
    `Ok(())`）⇒ 新命令加了也编译通过但被静默忽略，必须显式加处理臂。
    本仓库的答案是兜底臂加 `debug_assert!` + 两半一起发版，不是给单个命令定制活性协议。

@@ -62,7 +62,13 @@ sealed interface LocalAppUiAutomationAction {
 
     /// Capture the WebView as an image. Read-only like [Inspect], but it renders
     /// what the DOM snapshot redacts, so the host prompts for it.
-    data object CaptureView : LocalAppUiAutomationAction
+    ///
+    /// [value] is the same opaque `AppUiRequestDto.value` string every other
+    /// action already carries, holding an optional crop request: shape
+    /// `{"rect":{"x":..,"y":..,"width":..,"height":..}}`. Null (or anything
+    /// that fails to parse) means the whole view, exactly as before this
+    /// field existed.
+    data class CaptureView(val value: String? = null) : LocalAppUiAutomationAction
 
     /// Pointer event at viewport coordinates. `Click` resolves an element and
     /// fires at (0,0); a canvas has no element and needs real coordinates.
@@ -78,6 +84,14 @@ data class LocalAppUiExecutionResult(
 )
 
 private data class RawJson(val json: String)
+
+/**
+ * Shared by every path in `captureFrame` that cannot produce a frame: an
+ * offscreen view, and a requested crop that clamps to nothing, or that
+ * cannot be honoured on a path with no source-rect concept.
+ * One literal, not a copy at each call site, so the three cannot drift apart.
+ */
+private const val LOCAL_APP_CAPTURE_UNAVAILABLE_ERROR = "The app view could not be captured; it may be offscreen."
 
 /**
  * Executes only the versioned, structured UI action vocabulary.
@@ -151,7 +165,7 @@ class LocalAppWebViewController internal constructor(
                     ),
                 )
             }
-            LocalAppUiAutomationAction.CaptureView -> captureFrame(webView, onResult)
+            is LocalAppUiAutomationAction.CaptureView -> captureFrame(webView, action.value, onResult)
         }
     }
 
@@ -181,29 +195,74 @@ class LocalAppWebViewController internal constructor(
      * the same bridge and land in the model's context. Base64 inflates by 4/3, so
      * the JPEG is stepped down until it fits rather than encoded once and hoped
      * for.
+     *
+     * [value] is the optional crop request (see [LocalAppUiAutomationAction.CaptureView]).
+     * When present and it parses, the region it names becomes `PixelCopy`'s
+     * SOURCE rect and the destination bitmap is sized from the CROP, never
+     * from the whole view — cropping a bitmap that `PixelCopy` already
+     * returned at the whole-view's capped resolution would sample out of a
+     * frame already thrown away ~2.3x too much detail.
      */
-    private fun captureFrame(webView: WebView, onResult: (LocalAppUiExecutionResult) -> Unit) {
+    private fun captureFrame(webView: WebView, value: String?, onResult: (LocalAppUiExecutionResult) -> Unit) {
         val width = webView.width
         val height = webView.height
         if (width <= 0 || height <= 0) {
             onResult(
                 LocalAppUiExecutionResult(
                     resultJson = null,
-                    error = "The app view could not be captured; it may be offscreen.",
+                    error = LOCAL_APP_CAPTURE_UNAVAILABLE_ERROR,
                 ),
             )
             return
         }
-        // Cap the long edge before encoding: a 3x tablet view is several
-        // megabytes of bitmap before the quality ladder ever runs.
-        val maxEdge = 1_024
-        val scale = if (maxOf(width, height) > maxEdge) {
-            maxEdge.toFloat() / maxOf(width, height).toFloat()
-        } else {
-            1f
+        val density = webView.resources.displayMetrics.density
+
+        // `localCrop`, once computed, is THE clamped region for the rest of
+        // this call: it drives the PixelCopy source rect below AND (in
+        // `finishCapture`) the reported `capture_rect` — never two
+        // independent derivations of the same rectangle.
+        val requestedRect = parseRequestedCaptureRect(value)
+        val localCrop = requestedRect?.let { cropSourceRect(it, density, width, height) }
+        if (localCrop != null && localCrop.isEmpty()) {
+            // Clamped to nothing: the requested rect was entirely outside the
+            // viewport. Fail the same way an offscreen view does, rather than
+            // silently returning the whole frame for a region nobody asked for.
+            onResult(
+                LocalAppUiExecutionResult(
+                    resultJson = null,
+                    error = LOCAL_APP_CAPTURE_UNAVAILABLE_ERROR,
+                ),
+            )
+            return
         }
-        val targetWidth = maxOf(1, (width * scale).toInt())
-        val targetHeight = maxOf(1, (height * scale).toInt())
+
+        // Cap the long edge before encoding: a 3x tablet view is several
+        // megabytes of bitmap before the quality ladder ever runs. A crop is
+        // capped on ITS OWN long edge via the same helper below, never the
+        // view's — `cropTargetSize` is algebraically the same formula as the
+        // inline one here, just parameterised on the region actually being
+        // captured instead of always the whole view.
+        val maxEdge = 1_024
+        val scale: Float
+        val targetWidth: Int
+        val targetHeight: Int
+        if (localCrop != null) {
+            val (cropWidth, cropHeight) = cropTargetSize(localCrop, maxEdge)
+            targetWidth = cropWidth
+            targetHeight = cropHeight
+            // Only consulted below for the whole-view software-draw path,
+            // which a crop never reaches (see the two `localCrop != null`
+            // branches after `hostActivityWindow`/`PixelCopy` below).
+            scale = 1f
+        } else {
+            scale = if (maxOf(width, height) > maxEdge) {
+                maxEdge.toFloat() / maxOf(width, height).toFloat()
+            } else {
+                1f
+            }
+            targetWidth = maxOf(1, (width * scale).toInt())
+            targetHeight = maxOf(1, (height * scale).toInt())
+        }
 
         val bitmap = try {
             android.graphics.Bitmap.createBitmap(
@@ -218,44 +277,81 @@ class LocalAppWebViewController internal constructor(
             return
         }
 
+        // A crop that cannot go through PixelCopy (no window, or PixelCopy
+        // itself refused the rect) fails outright rather than falling back to
+        // a whole-view software draw: the software path draws the whole
+        // `WebView` with no source-rect concept, so honouring a crop there
+        // would need Canvas transform math this file has no way to verify —
+        // and a wrong crop with a `capture_rect` that vouches for it is worse
+        // than a clean failure.
+        fun failCropUnavailable() {
+            bitmap.recycle()
+            onResult(LocalAppUiExecutionResult(resultJson = null, error = LOCAL_APP_CAPTURE_UNAVAILABLE_ERROR))
+        }
+
         // `PixelCopy` scales the source rect into whatever bitmap it is handed,
         // so the long-edge cap above is applied by the copy itself rather than
         // by allocating a full-resolution frame first and shrinking it after.
         val window = webView.hostActivityWindow()
         if (window == null) {
+            if (localCrop != null) {
+                failCropUnavailable()
+                return
+            }
             // No Activity window to copy from — a detached or test host. The
             // software draw still captures DOM chrome, which is worth more than
             // an error, and `render_check` has the canvas count to tell the
             // agent the drawn surface is the part it cannot trust.
-            finishCapture(webView, bitmap, scale, softwareDraw = true, width, height, targetWidth, targetHeight, onResult)
+            finishCapture(webView, bitmap, scale, softwareDraw = true, width, height, targetWidth, targetHeight, null, density, onResult)
             return
         }
         val location = IntArray(2)
         webView.getLocationInWindow(location)
-        val source = android.graphics.Rect(
-            location[0],
-            location[1],
-            location[0] + width,
-            location[1] + height,
-        )
+        // `localCrop` is in the WebView's OWN pixel space (0,0 = the view's
+        // top-left, matching the CSS space `capture_rect`/`viewport` report);
+        // `PixelCopy` on a `Window` needs WINDOW-relative pixels, hence the
+        // `location` offset — the same offset the whole-view rect below has
+        // always used.
+        val source = if (localCrop != null) {
+            android.graphics.Rect(
+                location[0] + localCrop.left,
+                location[1] + localCrop.top,
+                location[0] + localCrop.right,
+                location[1] + localCrop.bottom,
+            )
+        } else {
+            android.graphics.Rect(
+                location[0],
+                location[1],
+                location[0] + width,
+                location[1] + height,
+            )
+        }
         try {
             android.view.PixelCopy.request(
                 window,
                 source,
                 bitmap,
                 { status ->
-                    if (status == android.view.PixelCopy.SUCCESS) {
-                        finishCapture(webView, bitmap, scale, false, width, height, targetWidth, targetHeight, onResult)
-                    } else {
-                        finishCapture(webView, bitmap, scale, true, width, height, targetWidth, targetHeight, onResult)
+                    when {
+                        status == android.view.PixelCopy.SUCCESS ->
+                            finishCapture(webView, bitmap, scale, false, width, height, targetWidth, targetHeight, localCrop, density, onResult)
+                        localCrop != null -> failCropUnavailable()
+                        else ->
+                            finishCapture(webView, bitmap, scale, true, width, height, targetWidth, targetHeight, null, density, onResult)
                     }
                 },
                 android.os.Handler(android.os.Looper.getMainLooper()),
             )
         } catch (error: IllegalArgumentException) {
             // The rect can leave the window between measuring and requesting —
-            // a scroll or a rotation is enough. Fall back rather than fail.
-            finishCapture(webView, bitmap, scale, true, width, height, targetWidth, targetHeight, onResult)
+            // a scroll or a rotation is enough. Fall back rather than fail,
+            // unless a crop made that fallback unable to honour what was asked.
+            if (localCrop != null) {
+                failCropUnavailable()
+            } else {
+                finishCapture(webView, bitmap, scale, true, width, height, targetWidth, targetHeight, null, density, onResult)
+            }
         }
     }
 
@@ -274,6 +370,13 @@ class LocalAppWebViewController internal constructor(
      *
      * [softwareDraw] paints the view into the bitmap first — the fallback path
      * for when `PixelCopy` could not run. It captures the DOM but not WebGL.
+     * Always null-crop by construction: see the `failCropUnavailable` calls
+     * in `captureFrame`, which keep a crop from ever reaching this path.
+     *
+     * [localCrop], when non-null, is read for `capture_rect` — the SAME
+     * clamped-region value `captureFrame` already used to build the
+     * `PixelCopy` source rect and to size [targetWidth]/[targetHeight], not a
+     * second computation from the original request.
      */
     @Suppress("LongParameterList")
     private fun finishCapture(
@@ -285,6 +388,8 @@ class LocalAppWebViewController internal constructor(
         height: Int,
         targetWidth: Int,
         targetHeight: Int,
+        localCrop: LocalAppPxRect?,
+        density: Float,
         onResult: (LocalAppUiExecutionResult) -> Unit,
     ) {
         val budget = 170 * 1_024
@@ -351,7 +456,6 @@ class LocalAppWebViewController internal constructor(
         // device: a centre tap landed off-screen, `elementFromPoint` returned
         // null, the event went to `document.body`, and the call still answered
         // ok:true. iOS reports `bounds` in points, which already IS CSS pixels.
-        val density = webView.resources.displayMetrics.density
         val viewport = org.json.JSONObject()
             .put("width", Math.round(width / density))
             .put("height", Math.round(height / density))
@@ -368,6 +472,25 @@ class LocalAppWebViewController internal constructor(
             // it" — otherwise it reports render_check failed and burns a repair
             // round on an app that renders correctly.
             .put("capture_path", if (softwareDraw) "software_draw" else "pixel_copy")
+        // Present if and only if the request carried a `rect` — omitted
+        // entirely (not `null`) for a whole-view capture, so that JSON stays
+        // byte-for-byte what it was before crops existed. `viewport` above is
+        // unchanged either way: it always reports the WHOLE view, so an agent
+        // must branch on `capture_rect`'s presence — not on `image` being
+        // smaller than `viewport` implies — to know a crop happened; see
+        // `skills/frontend-qa/SKILL.md`'s "Canvas and WebGL surfaces" section
+        // for the inversion formula this enables, matching iOS's field name
+        // and semantics exactly.
+        if (localCrop != null) {
+            payload.put(
+                "capture_rect",
+                org.json.JSONObject()
+                    .put("x", localCrop.left / density.toDouble())
+                    .put("y", localCrop.top / density.toDouble())
+                    .put("width", localCrop.width() / density.toDouble())
+                    .put("height", localCrop.height() / density.toDouble()),
+            )
+        }
         onResult(LocalAppUiExecutionResult(resultJson = payload.toString(), error = null))
     }
 
@@ -443,6 +566,120 @@ class LocalAppWebViewController internal constructor(
     }
 }
 
+/**
+ * A CSS-pixel rect as parsed from `capture_view`'s optional crop request
+ * (`AppUiRequestDto.value` = `{"rect":{"x","y","width","height"}}`), before
+ * density scaling or viewport clamping.
+ */
+internal data class LocalAppCssRect(val x: Double, val y: Double, val width: Double, val height: Double)
+
+/**
+ * A rect in real surface/view pixels: the shape `PixelCopy`'s source rect and
+ * (divided by density) the reported `capture_rect` are both read from — never
+ * two independent derivations of one rectangle.
+ *
+ * Plain `Int` fields, not `android.graphics.Rect`/`RectF`: this module's JVM
+ * unit tests run against the Android Gradle Plugin's mockable `android.jar`
+ * (`testOptions.unitTests.isReturnDefaultValues = true` in
+ * `app/build.gradle.kts`), which replaces EVERY `android.graphics.Rect`
+ * constructor and method body with one that returns the return type's
+ * default value — confirmed empirically before writing this: a throwaway
+ * `@Test` constructing `Rect(10, 20, 130, 100)` and printing its fields read
+ * back `left=0, top=0, right=0, bottom=0, width()=0, isEmpty=false` (the
+ * constructor never set the fields, and `width()`/`isEmpty()` ignored field
+ * state and returned their type defaults regardless). A real
+ * `android.graphics.Rect` is built from this type only at the `PixelCopy`
+ * call site in `captureFrame`, where no test ever inspects its fields — on a
+ * real device (no mockable jar involved) `android.graphics.Rect` behaves
+ * normally.
+ */
+internal data class LocalAppPxRect(val left: Int, val top: Int, val right: Int, val bottom: Int) {
+    fun width(): Int = right - left
+    fun height(): Int = bottom - top
+    fun isEmpty(): Boolean = left >= right || top >= bottom
+}
+
+/**
+ * CSS rect -> `PixelCopy` source rect, in real surface pixels, clamped to the
+ * view's own pixel bounds.
+ *
+ * `× density` is the step this repo has already got wrong once (see the note
+ * above `viewport` in `finishCapture`): a CSS pixel is not a surface pixel,
+ * and `PixelCopy` samples the surface.
+ *
+ * A degenerate input (e.g. a negative `width`, which the engine host already
+ * rejects server-side — this function does not re-check sign, only the
+ * caller's finiteness parse) standardizes safely here rather than crashing:
+ * `right`/`bottom`'s `coerceIn(left, ...)`/`coerceIn(top, ...)` cannot go
+ * below `left`/`top`, so the worst case is an empty (zero-size) result,
+ * caught by [LocalAppPxRect.isEmpty].
+ */
+internal fun cropSourceRect(cssRect: LocalAppCssRect, density: Float, viewWidthPx: Int, viewHeightPx: Int): LocalAppPxRect {
+    val left = (cssRect.x * density).toInt().coerceIn(0, viewWidthPx)
+    val top = (cssRect.y * density).toInt().coerceIn(0, viewHeightPx)
+    val right = ((cssRect.x + cssRect.width) * density).toInt().coerceIn(left, viewWidthPx)
+    val bottom = ((cssRect.y + cssRect.height) * density).toInt().coerceIn(top, viewHeightPx)
+    return LocalAppPxRect(left, top, right, bottom)
+}
+
+/**
+ * Cap the CROP's own long edge — never the whole view's long edge.
+ * `coerceAtMost(1f)` forbids enlargement: a crop smaller than [capPx] is
+ * returned at its real resolution, not blown up to fill the cap.
+ *
+ * Algebraically the same formula `captureFrame`'s whole-view branch computes
+ * inline (`scale = min(1, capPx / longEdge)`, then `dimension * scale`) —
+ * this is only ever called with the CROP's own dimensions, so the two never
+ * disagree for the no-crop case without ever being the same code path.
+ */
+internal fun cropTargetSize(sourcePx: LocalAppPxRect, capPx: Int): Pair<Int, Int> {
+    val longEdge = maxOf(sourcePx.width(), sourcePx.height())
+    if (longEdge <= 0) return 1 to 1
+    val scale = (capPx.toFloat() / longEdge).coerceAtMost(1f)
+    return maxOf(1, (sourcePx.width() * scale).toInt()) to maxOf(1, (sourcePx.height() * scale).toInt())
+}
+
+/**
+ * Parse `capture_view`'s optional crop request out of the opaque
+ * `AppUiRequestDto.value` string. Shape: `{"rect":{"x","y","width","height"}}`,
+ * each field EITHER a JSON integer or a JSON floating-point number — the
+ * engine host preserves the caller's original numeric form rather than
+ * re-deriving one from a parsed `f64`, so a fractional CSS pixel is routine,
+ * not an edge case.
+ *
+ * Returns null for anything absent, malformed, non-numeric, or non-finite,
+ * which collapses to the same "whole view" behaviour as no `value` at all —
+ * mirroring iOS's `parseRequestedRect`.
+ */
+internal fun parseRequestedCaptureRect(value: String?): LocalAppCssRect? {
+    if (value == null) return null
+    return try {
+        val rect = org.json.JSONObject(value).optJSONObject("rect") ?: return null
+        val x = rect.opt("x").asFiniteCssNumber() ?: return null
+        val y = rect.opt("y").asFiniteCssNumber() ?: return null
+        val w = rect.opt("width").asFiniteCssNumber() ?: return null
+        val h = rect.opt("height").asFiniteCssNumber() ?: return null
+        LocalAppCssRect(x, y, w, h)
+    } catch (error: org.json.JSONException) {
+        null
+    }
+}
+
+// `is Number`, not a cast to a specific numeric type: verified empirically
+// (a throwaway test against this module's `org.json:json` test dependency)
+// that a whole-number JSON literal like `10` parses to `java.lang.Integer`
+// while a fractional one like `10.5` parses to `java.math.BigDecimal` — NOT
+// `Double` — under this specific org.json build, and Android's own bundled
+// org.json (a different fork, used at runtime) is free to choose yet another
+// concrete type again. Reading through the common `Number` supertype's
+// `.toDouble()` is correct for any of them without depending on which one a
+// a given org.json build picks, and it correctly rejects a JSON string (e.g.
+// `"10"`) or boolean, neither of which is a `Number` — matching iOS's
+// `parseRequestedRect`, which similarly avoids a bridging-shape-sensitive
+// cast.
+private fun Any?.asFiniteCssNumber(): Double? =
+    (this as? Number)?.toDouble()?.takeIf { it.isFinite() }
+
 internal fun buildLocalAppUiExecutionRequest(action: LocalAppUiAutomationAction): String {
     return when (action) {
         LocalAppUiAutomationAction.Inspect -> jsonObjectString("action" to "inspect")
@@ -501,7 +738,7 @@ internal fun buildLocalAppUiExecutionRequest(action: LocalAppUiAutomationAction)
         // Handled natively (`captureFrame`) — a screenshot cannot be produced by
         // injected script, which is the whole reason it captures the composited
         // view rather than reading back a canvas.
-        LocalAppUiAutomationAction.CaptureView -> error("Structured script is not used for $action")
+        is LocalAppUiAutomationAction.CaptureView -> error("Structured script is not used for $action")
     }
 }
 

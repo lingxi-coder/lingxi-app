@@ -1354,7 +1354,11 @@ private fun AppUiRequestDto.toUiAutomationAction(): LocalAppUiAutomationAction? 
                 ?.let(LocalAppUiAutomationAction::Navigate)
         AppUiActionKindDto.BACK -> LocalAppUiAutomationAction.Back
         AppUiActionKindDto.RELOAD -> LocalAppUiAutomationAction.Reload
-        AppUiActionKindDto.CAPTURE_VIEW -> LocalAppUiAutomationAction.CaptureView
+        // The opaque `value` carries an optional crop request
+        // (`{"rect":{"x","y","width","height"}}`) straight through; the
+        // WebView layer parses it, clamps it to the real viewport, and
+        // reports what it actually captured back as `capture_rect`.
+        AppUiActionKindDto.CAPTURE_VIEW -> LocalAppUiAutomationAction.CaptureView(value)
         // `"x,y"` / `"x,y,phase"`, the same comma-packed `value` convention
         // SCROLL already uses. The wire variant is fieldless on purpose: a
         // data-carrying uniffi variant renders this enum as a Kotlin sealed

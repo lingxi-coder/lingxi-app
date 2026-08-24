@@ -336,4 +336,189 @@ class LocalAppWebViewTest {
         assertTrue(result.resultJson?.contains("Save") == true)
         assertTrue(result.resultJson?.contains("Title") == true)
     }
+
+    /**
+     * Phase 1a twin of iOS `testCropIsCappedOnItsOwnLongEdgeAndNeverUpscaled`,
+     * ported from the task-9 brief's `RectF`/`Rect`-typed snippet to
+     * [LocalAppCssRect]/[LocalAppPxRect].
+     *
+     * That retyping is deliberate, not cosmetic: this module's unit tests run
+     * against AGP's mockable `android.jar` (`isReturnDefaultValues = true`),
+     * which stubs EVERY `android.graphics.Rect`/`RectF` constructor and
+     * method to return the return type's default — confirmed with a
+     * throwaway test before writing this one, whose printed evidence was
+     * `Rect(10,20,130,100)` reading back `left=0 width=0 isEmpty=false`. The
+     * numbers pinned below are the brief's own worked example, just carried
+     * by a type this test environment can actually exercise: `RectF(left=10,
+     * top=20, right=130, bottom=100)` is `LocalAppCssRect(x=10, y=20,
+     * width=120, height=80)`.
+     */
+    @Test
+    fun `crop uses a density-scaled source rect and is never upscaled`() {
+        val src = cropSourceRect(
+            LocalAppCssRect(x = 10.0, y = 20.0, width = 120.0, height = 80.0),
+            density = 3f,
+            viewWidthPx = 1179,
+            viewHeightPx = 2556,
+        )
+        assertEquals(30, src.left)
+        assertEquals(60, src.top)
+        assertEquals(360, src.width()) // (130-10) * 3, the brief's own worked number
+        assertEquals(240, src.height()) // (100-20) * 3
+
+        val (w, h) = cropTargetSize(src, capPx = 1024)
+        assertEquals(360, w) // already under the cap -> untouched
+        assertEquals(240, h)
+
+        val (bigW, _) = cropTargetSize(LocalAppPxRect(0, 0, 600, 2400), capPx = 1024)
+        assertEquals(256, bigW) // 600 * (1024/2400)
+    }
+
+    /**
+     * Phase 1a twin of iOS `testCaptureViewReportsCaptureRectAsTheClampedRegionNotTheRequestedOne`.
+     * The iOS test drives a live `WKWebView` at 393x852 points and asserts
+     * `capture_rect == {x:300,y:800,width:93,height:52}` for a
+     * `{x:300,y:800,width:200,height:200}` request — chosen to extend past
+     * BOTH the right edge (300+200=500 > 393) and the bottom edge
+     * (800+200=1000 > 852) in the same request, so a one-axis clamp bug could
+     * not hide behind the other axis being correct. This test cannot drive a
+     * live WebView (no instrumented/device harness exists for this module —
+     * see the task report), so it pins the same scenario one layer down, at
+     * the geometry helper `captureFrame` actually calls: density=1 makes CSS
+     * pixels and surface pixels coincide, so the expected numbers are
+     * identical to iOS's.
+     */
+    @Test
+    fun `crop source rect clamps a partially off-screen request to the real viewport, not the requested size`() {
+        val src = cropSourceRect(
+            LocalAppCssRect(x = 300.0, y = 800.0, width = 200.0, height = 200.0),
+            density = 1f,
+            viewWidthPx = 393,
+            viewHeightPx = 852,
+        )
+        assertEquals(300, src.left)
+        assertEquals(800, src.top)
+        assertEquals(93, src.width())
+        assertEquals(52, src.height())
+        assertFalse("a partially off-screen crop must still capture something", src.isEmpty())
+    }
+
+    /**
+     * `PixelCopy`'s source rect is `android.graphics.Rect` — INTEGER pixels
+     * only; there is no float-rect overload (confirmed by reading the
+     * platform's `PixelCopy.java`/`request(Window, Rect, ...)` source, not
+     * assumed). At a density that is not a clean divisor of the request (2.625
+     * is a real Android bucket, 420dpi), a CSS `x` of exactly 10 does not land
+     * on an integer surface pixel, so the region ACTUALLY captured — and thus
+     * `capture_rect`, which is read off that same pixel value — is the
+     * nearest real pixel, not the mathematically exact request. This is
+     * honest, not a bug: `finishCapture`'s pre-existing `viewport` field
+     * already rounds the same way (`Math.round(width / density)`). It is also
+     * a genuine, small (< 1/density CSS px) numeric divergence from iOS,
+     * whose `CGRect`-based capture never rounds the rect itself — the
+     * CONTRACT (report the actually-captured region, clamped, off the same
+     * variable the capture used) still matches exactly; only the platform's
+     * pixel granularity differs. See the task report's "Concerns" section.
+     */
+    @Test
+    fun `a density that is not a clean divisor rounds the reportable crop to the nearest real pixel`() {
+        val density = 2.625f
+        val src = cropSourceRect(
+            LocalAppCssRect(x = 10.0, y = 10.0, width = 100.0, height = 100.0),
+            density = density,
+            viewWidthPx = 2000,
+            viewHeightPx = 2000,
+        )
+        assertEquals(26, src.left) // (10 * 2.625).toInt() == 26.25 -> 26, not 26.25
+        val reportedX = src.left / density.toDouble()
+        assertTrue(
+            "must round to the nearest real pixel, within 1/density CSS px of the request",
+            kotlin.math.abs(reportedX - 10.0) < (1.0 / density),
+        )
+        assertTrue("but it is NOT exactly the request once a real pixel boundary is involved", reportedX != 10.0)
+    }
+
+    /**
+     * A rect entirely outside the viewport, on each of the four sides, must
+     * clamp to an EMPTY region — the signal `captureFrame` uses to answer
+     * the existing "could not be captured" failure instead of silently
+     * returning the whole frame for a region nobody asked for. Mirrors iOS's
+     * `testCaptureViewRejectsARectEntirelyOutsideTheViewportInsteadOfWideningIt`
+     * at the geometry-helper layer, for the same live-WebView-harness reason
+     * as the test above.
+     */
+    @Test
+    fun `crop source rect collapses to empty for a request entirely outside the viewport`() {
+        val viewWidthPx = 1179
+        val viewHeightPx = 2556
+        val density = 3f
+        val toTheRight = cropSourceRect(LocalAppCssRect(500.0, 100.0, 50.0, 50.0), density, viewWidthPx, viewHeightPx)
+        val toTheLeft = cropSourceRect(LocalAppCssRect(-500.0, 100.0, 50.0, 50.0), density, viewWidthPx, viewHeightPx)
+        val below = cropSourceRect(LocalAppCssRect(10.0, 5000.0, 50.0, 50.0), density, viewWidthPx, viewHeightPx)
+        val above = cropSourceRect(LocalAppCssRect(10.0, -5000.0, 50.0, 50.0), density, viewWidthPx, viewHeightPx)
+        listOf("right" to toTheRight, "left" to toTheLeft, "below" to below, "above" to above).forEach { (label, rect) ->
+            assertTrue("disjoint $label must clamp to empty, not a positive-size region", rect.isEmpty())
+        }
+    }
+
+    /**
+     * Phase 1a twin of iOS `testParseRequestedRectAcceptsBothIntegerAndFractionalJSONNumbers`.
+     * A parser exercised only against the brief's integer example breaks on
+     * a routine fractional CSS pixel — accepting both is the point of this
+     * test, not an edge case.
+     */
+    @Test
+    fun `parseRequestedCaptureRect accepts both integer and fractional JSON numbers`() {
+        val fromIntegers = parseRequestedCaptureRect("""{"rect":{"x":10,"y":20,"width":120,"height":80}}""")
+        assertEquals(LocalAppCssRect(10.0, 20.0, 120.0, 80.0), fromIntegers)
+
+        val fromFloats = parseRequestedCaptureRect("""{"rect":{"x":10.5,"y":20.25,"width":120.75,"height":80.125}}""")
+        assertEquals(LocalAppCssRect(10.5, 20.25, 120.75, 80.125), fromFloats)
+
+        val mixed = parseRequestedCaptureRect("""{"rect":{"x":10,"y":20.5,"width":120,"height":80.5}}""")
+        assertEquals(LocalAppCssRect(10.0, 20.5, 120.0, 80.5), mixed)
+    }
+
+    /**
+     * Phase 1a twin of iOS `testParseRequestedRectReturnsNilForAbsentOrMalformedValue`.
+     * Every case collapses to "no rect" (null), the same as `value == null`
+     * entirely — never a thrown exception, and never a partially-populated
+     * rect.
+     */
+    @Test
+    fun `parseRequestedCaptureRect returns null for absent or malformed input`() {
+        assertNull("no value at all", parseRequestedCaptureRect(null))
+        assertNull("no rect key", parseRequestedCaptureRect("""{"app_id":"demo"}"""))
+        assertNull("incomplete rect (missing height)", parseRequestedCaptureRect("""{"rect":{"x":1,"y":2,"width":3}}"""))
+        assertNull("string-typed number", parseRequestedCaptureRect("""{"rect":{"x":"1","y":2,"width":3,"height":4}}"""))
+        assertNull("boolean-typed field", parseRequestedCaptureRect("""{"rect":{"x":true,"y":2,"width":3,"height":4}}"""))
+        assertNull("rect is not an object", parseRequestedCaptureRect("""{"rect":"oops"}"""))
+        assertNull("explicit JSON null field", parseRequestedCaptureRect("""{"rect":{"x":null,"y":2,"width":3,"height":4}}"""))
+        assertNull("non-JSON text", parseRequestedCaptureRect("not json"))
+        assertNull("empty string", parseRequestedCaptureRect(""))
+    }
+
+    /** Non-finite must be rejected even though it is syntactically a `Number` once parsed. */
+    @Test
+    fun `parseRequestedCaptureRect rejects a non-finite number`() {
+        assertNull(parseRequestedCaptureRect("""{"rect":{"x":1e400,"y":2,"width":3,"height":4}}"""))
+    }
+
+    /**
+     * `CaptureView` moved from a fieldless `data object` to a `data class`
+     * carrying the crop request, which turns every exhaustive `when` branch
+     * that matched it by value into a compile error unless updated to `is
+     * LocalAppUiAutomationAction.CaptureView`. This pins that the native/
+     * script-rejection branch in `buildLocalAppUiExecutionRequest` still
+     * fires correctly after that change, for a value-carrying instance.
+     */
+    @Test
+    fun `structured script still rejects capture view natively now that it carries a value`() {
+        val error = org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            buildLocalAppUiExecutionRequest(
+                LocalAppUiAutomationAction.CaptureView("""{"rect":{"x":1,"y":2,"width":3,"height":4}}"""),
+            )
+        }
+        assertTrue(error.message.orEmpty().contains("Structured script is not used"))
+    }
 }

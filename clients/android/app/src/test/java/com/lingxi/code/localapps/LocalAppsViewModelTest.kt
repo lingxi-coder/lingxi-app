@@ -1171,6 +1171,76 @@ class LocalAppsViewModelTest {
         }
     }
 
+    /**
+     * Task 9: `CaptureView` moved from a fieldless `data object` to a `data
+     * class` carrying the opaque crop request, so `AppUiRequestDto.value`
+     * (already wired for FILL/SELECT/etc.) must now also reach CAPTURE_VIEW.
+     * `toUiAutomationAction()` is `private` to `LocalAppsViewModel.kt` (a
+     * file-scoped, not just package-scoped, Kotlin visibility), so this
+     * drives it the same way the CLICK/RELOAD test above does: through the
+     * public event pipeline down to `pendingUiAction?.action`.
+     */
+    @Test
+    fun `a capture_view ui request threads the opaque rect value into the automation action`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "full",
+            )
+            runCurrent()
+
+            val rectValue = """{"rect":{"x":10,"y":20,"width":120,"height":80}}"""
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppUiRequest(
+                        AppUiRequestDto(
+                            requestId = "ui-capture-rect",
+                            appId = APP_ID,
+                            action = AppUiActionKindDto.CAPTURE_VIEW,
+                            target = null,
+                            value = rectValue,
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            // CAPTURE_VIEW is read-only (rides with INSPECT — see the comment
+            // in the reducer), so it needs no prior `ui_control` grant.
+            assertNull(viewModel.uiState.value.pendingAuthorization)
+            assertEquals(
+                LocalAppUiAutomationAction.CaptureView(rectValue),
+                viewModel.uiState.value.pendingUiAction?.action,
+            )
+
+            // A whole-view capture (no crop) must thread a null value, not an
+            // empty string — `parseRequestedCaptureRect(null)` and
+            // `parseRequestedCaptureRect("")` are NOT the same thing.
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppUiRequest(
+                        AppUiRequestDto(
+                            requestId = "ui-capture-whole",
+                            appId = APP_ID,
+                            action = AppUiActionKindDto.CAPTURE_VIEW,
+                            target = null,
+                            value = null,
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+            assertEquals(
+                LocalAppUiAutomationAction.CaptureView(null),
+                viewModel.uiState.value.pendingUiAction?.action,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     @Test
     fun `missing target and explicit ui execution errors resolve app ui requests as failures`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))

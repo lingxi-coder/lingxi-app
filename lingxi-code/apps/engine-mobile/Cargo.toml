@@ -213,7 +213,7 @@ url = { version = "2", optional = true }
 async-trait = { workspace = true, optional = true }
 
 # Cross-platform tool crates (shared with engine-desktop).
-tool-file = { path = "../../tools/file" }
+tool-file = { path = "../../tools/file", features = ["image-read"] }
 tool-task = { path = "../../tools/task" }
 # Audit fix (WebFetch parity): enable `web-markdown` so mobile WebFetch converts
 # HTML→markdown (htmd) instead of returning raw HTML to the model (raw HTML can

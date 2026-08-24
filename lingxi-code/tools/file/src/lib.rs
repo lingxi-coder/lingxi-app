@@ -30,6 +30,15 @@
 pub const FILE_STATE_CURRENT_SUFFIX: &str =
     " (file state is current in your context — no need to Read it back)";
 
+/// Whether this build of `tool-file` can decode images for `FileRead`.
+///
+/// A consumer that hands the model an image BY PATH (the local-app annotation
+/// crop does) needs this on, or `Read` falls to the NUL scan and returns
+/// `format_binary` — a silent failure where the call succeeds and the model
+/// sees no picture. Exposed as a const so a downstream crate can assert its
+/// own build has it, which a behavioural test cannot do through a dummy FS.
+pub const IMAGE_READ_ENABLED: bool = cfg!(feature = "image-read");
+
 mod dir_validate;
 pub mod edit;
 pub mod file_meta;

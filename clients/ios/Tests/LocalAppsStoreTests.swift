@@ -394,6 +394,14 @@ final class LocalAppsStoreTests: XCTestCase {
     /// Phase 1a — `result_json` over 256 KiB is a hard failure, not a truncation
     /// (`LocalAppWebView.swift:407-411`). The ledger must not be able to silence
     /// the criterion it exists to feed.
+    ///
+    /// Fix round 1: code review found the budget measured `.length` — UTF-16
+    /// CODE UNITS — while the guard above measures `resultJSON.utf8.count` —
+    /// real UTF-8 BYTES. A CJK character is 1 code unit but 3 bytes, so a
+    /// length-only check could call a payload "safe" at roughly a third of
+    /// its true size, and this product's default content is Chinese. The
+    /// `TextEncoder` token below is pinned so a future edit back to `.length`
+    /// fails here instead of silently reintroducing the gap.
     func testSnapshotDegradesInAFixedOrderAndSaysSo() {
         let source = LocalAppWebViewController.executionSource(requestJSON: "{}")
         for token in [
@@ -401,6 +409,7 @@ final class LocalAppsStoreTests: XCTestCase {
             "for (const seg of ['elements', 'canvases', 'runtimeErrors'])",
             "truncated.push(seg)",
             "truncated: []",
+            "new TextEncoder().encode(JSON.stringify(out)).length",
         ] {
             XCTAssertTrue(source.contains(token), "missing payload budget: \(token)")
         }
@@ -1101,6 +1110,56 @@ final class LocalAppsStoreTests: XCTestCase {
 
             let value = try await webView.evaluateJavaScript("document.getElementById('title').value") as? String
             XCTAssertEqual(value, "Orders")
+        }
+
+        /// Fix round 1 — code review required PROOF, not an assertion, that
+        /// `TextEncoder` (which the budget ladder in `snapshot()` now calls
+        /// to measure real UTF-8 bytes) is not silently blocked by the CSP
+        /// every local app page gets. This installs the REAL production CSP
+        /// via the REAL bootstrap entry point (`LocalAppWebViewRepresentable
+        /// .bridgeSource`, not a hand-copied duplicate that could drift), on
+        /// a REAL WKWebView, then probes `TextEncoder` and runs an actual
+        /// `.inspect` through `LocalAppWebViewController.execute` -- the
+        /// same host-injected `evaluateJavaScript` channel `evaluate(_:in:)`
+        /// uses in production (verified by reading it: it wraps
+        /// `webView.evaluateJavaScript(source) { ... }` directly). If the
+        /// CSP blocked `TextEncoder`, `new TextEncoder()` would throw inside
+        /// `executionSource`'s `try` block and `inspect.error` would be
+        /// non-nil here -- this is a live result, not a read of the spec.
+        func testTextEncoderSurvivesTheInstalledCSPDuringARealInspect() async throws {
+            let broker = LocalAppBridgeBroker(appID: "tracker")
+            let controller = LocalAppWebViewController(appID: "tracker", broker: broker)
+            let webView = WKWebView()
+            controller.webView = webView
+            webView.loadHTMLString(
+                #"<button id="go">中文按钮文字标签</button>"#,
+                baseURL: URL(string: "http://127.0.0.1:43123")
+            )
+            try await waitForElement("go", in: webView)
+
+            _ = try await webView.evaluateJavaScript(LocalAppWebViewRepresentable.bridgeSource(formFactor: "iphone"))
+            let cspInstalled = try await webView.evaluateJavaScript(
+                "document.head.querySelector('meta[http-equiv=\"Content-Security-Policy\"]') !== null"
+            ) as? Bool
+            XCTAssertEqual(cspInstalled, true, "installCsp() must actually install the meta tag or the probe below proves nothing")
+
+            let probe = try await webView.evaluateJavaScript(
+                "JSON.stringify({has: typeof TextEncoder !== 'undefined', bytes: new TextEncoder().encode('中文').length, units: '中文'.length})"
+            ) as? String
+            XCTAssertEqual(
+                probe, #"{"has":true,"bytes":6,"units":2}"#,
+                "TextEncoder must survive the installed CSP and report real UTF-8 bytes (3/char for CJK), not `.length`'s UTF-16 code units (1/char)"
+            )
+
+            let inspect = await controller.execute(request: AppUiRequestDto(
+                requestId: "inspect-1",
+                appId: "tracker",
+                action: .inspect,
+                target: nil,
+                value: nil
+            ))
+            XCTAssertNil(inspect.error)
+            XCTAssertTrue(inspect.resultJSON?.contains("中文按钮文字标签") == true)
         }
 
         func testFailedRuntimeLabelCarriesTheEngineReason() {

@@ -281,7 +281,17 @@ class LocalAppWebViewTest {
         )
     }
 
-    /** Phase 1a twin of iOS `testSnapshotDegradesInAFixedOrderAndSaysSo`. */
+    /**
+     * Phase 1a twin of iOS `testSnapshotDegradesInAFixedOrderAndSaysSo`.
+     *
+     * Fix round 1: code review found the budget measured `.length` — UTF-16
+     * CODE UNITS — while the native guard this ladder exists to stay under
+     * measures real UTF-8 BYTES. A CJK character is 1 code unit but 3 bytes,
+     * so a length-only check could call a payload "safe" at roughly a third
+     * of its true size, and this product's default content is Chinese. The
+     * `TextEncoder` token below is pinned so a future edit back to `.length`
+     * fails here instead of silently reintroducing the gap.
+     */
     @Test
     fun `snapshot degrades in a fixed order and says so`() {
         val script = buildLocalAppUiExecutionScript("""{"action":"inspect"}""")
@@ -290,6 +300,7 @@ class LocalAppWebViewTest {
             "for (const seg of ['elements', 'canvases', 'runtimeErrors'])",
             "truncated.push(seg)",
             "truncated: []",
+            "new TextEncoder().encode(JSON.stringify(out)).length",
         ).forEach { token ->
             assertTrue("missing payload budget: $token", script.contains(token))
         }

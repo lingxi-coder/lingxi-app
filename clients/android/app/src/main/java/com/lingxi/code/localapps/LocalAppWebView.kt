@@ -673,10 +673,15 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
             // Android enforces no cap on `inspect` at all — so this ladder is
             // the only thing bounding the payload there either way. Leave
             // room for the JSON envelope and degrade in a fixed order rather
-            // than dying (iOS) or growing unbounded (Android).
+            // than dying (iOS) or growing unbounded (Android). Measured in
+            // UTF-8 BYTES via TextEncoder, matching the native guard this
+            // budget exists to stay under (`resultJSON.utf8.count` on iOS) —
+            // `.length` counts UTF-16 code units, and CJK text is 1 unit but
+            // 3 bytes per character, so a length-only check could call a
+            // payload "safe" at roughly a third of its real size.
             const BUDGET = 200 * 1024;
             const truncated = out.truncated;
-            const size = () => JSON.stringify(out).length;
+            const size = () => new TextEncoder().encode(JSON.stringify(out)).length;
             for (const seg of ['elements', 'canvases', 'runtimeErrors']) {
               if (size() <= BUDGET) break;
               if (seg === 'elements') out.elements = out.elements.slice(0, 50);

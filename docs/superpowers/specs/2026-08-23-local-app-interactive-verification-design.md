@@ -902,7 +902,8 @@ draft → storing → stored → submitted → buildObserved → cleared
 | | 重启：盘上有同 id 完整目录 | `stored(recovered)` |
 | | 重启：盘上无 | 保持 `draft` |
 | `storing`（已发 Store，回执未到） | 回执 ok | `stored` |
-| | 回执 err / 8 秒无回执 | `draft(error)` |
+| | 回执 err | `draft(error)` |
+| | **一直没有回执** | **保持 `storing` 并可见地显示「保存中」——本设计没有超时计时器**（见下） |
 | | 用户丢弃 | `discardPending(storing)` |
 | | 重启 | 盘上有 ⇒ `stored(recovered)`；盘上无 ⇒ `draft` |
 | `stored` / `stored(recovered)` | token 匹配的 `TurnStarted` | `submitted` |
@@ -916,6 +917,7 @@ draft → storing → stored → submitted → buildObserved → cleared
 | | 用户丢弃 | `discardPending(turn)` |
 | | **重启** | **降级 `stored(recovered)`**（token 是进程内的，无法续上） |
 | `buildObserved` | turn completed 且门通过 且 `SmokeReport.output_change_id` 匹配 | `cleared` |
+| | turn completed 但**门未通过** / 报告缺失 / `verification_unavailable` / `output_change_id` **不匹配** | `stored(可重试)`，药丸上显示具体原因 |
 | | turn cancelled / failed | `stored(可重试)` |
 | | 用户丢弃 | `discardPending(turn)` |
 | | **重启** | **降级 `stored(recovered)`** |
@@ -926,12 +928,24 @@ draft → storing → stored → submitted → buildObserved → cleared
 | | 重启 | 直接墓碑 + Delete（turn 不可能还在飞，安全） |
 | `recovery_error`（名字合法、sidecar 校验失败） | 用户丢弃 | 墓碑 + Delete ⇒ `discarded` |
 | | 重启 | 保持 `recovery_error` |
-| `cleared` / `discarded`（终态） | 墓碑存在 | 重发 `DeleteAppAnnotation` |
+| `cleared` / `discarded`（终态） | 墓碑存在 | 发 `DeleteAppAnnotation` |
 | | Delete 回执无 `error` | 移除墓碑（真正终结） |
-| | 重启且墓碑仍在 | 重发 Delete |
+| | **Delete 回执带 `error`** | **保留墓碑**，药丸区显示可见错误；按**有界退避**重试（1s/4s/16s，共 3 次），仍失败则停在可见错误并等用户手动重试或下次启动 |
+| | 重启且墓碑仍在 | 重发 Delete（退避计数重置） |
 
 ⚠️ **目录名不是合法 UUID 的目录不是本表的任何状态**——它不进药丸列表，
 由宽限期清扫回收（见上文）。
+
+🚨 **`storing` 没有超时计时器，这是刻意的。** 早期版本有过一个 8 秒「无回执」计时器，
+已在「`StoreAppAnnotation`」一节明确删除——它是为 `#[non_exhaustive]` 兜底臂
+（`host.rs:7064-7074` 静默 `Ok(())`）定制的单命令活性协议，而那个陷阱对全部 40+ 命令
+一视同仁，本仓库的答案是**兜底臂加 `debug_assert!` + 两半一起发版**。
+⚠️ 写这张表时我把它当成正式转换又写了回来——**一个慢但会成功的 Store 会被提前判成
+`draft(error)`，随后回执到达、目录落盘，变成迟到的孤儿**。已删。
+
+没有计时器时 `storing` 的出口是：**回执**（正常路径）、**用户丢弃**（走
+`discardPending(storing)`）、以及**重启对账**（按盘上有无分派）。在一个会话内
+一直收不到回执就一直显示「保存中」——这是诚实的，比编造一个失败结论好。
 
 🚨 **`submitted` 不能直接跳到 `cleared`。** 构建成功严格早于 runtime 重启，重启严格早于
 turn 结束，而 turn 在成功构建之后仍有**六个失败发布点**：`ConversationSource.swift:2385`
@@ -1149,7 +1163,8 @@ the goldens stay byte-identical**"*。签入的 golden
 - **controller 串行**：慢 `execute` 与并发 `makeAnnotation` 观察到同一个 document generation。
 - **token 交接**：`TurnStarted` 到达 ⇒ pending 被移除**且** `batchTurnCorrelation` 里同时
   出现该 batch 的完整 token；收到该 token 的 completion（任意 outcome）后关联被移除；
-  丢弃某 batch 的最后一条标注也会移除关联。
+  丢弃某 batch 的最后一条标注**只在该 batch 的 turn 已走到终态时**才移除关联；
+  turn 仍在飞时关联必须保留（否则 completion 无从匹配）。
 - **重启降级**：日志为 `submitted` 或 `buildObserved`、目录完整、进程重启 ⇒ 药丸必须回到
   `stored(recovered)` 且**可再次提交**（验证 `batchID` 去重不会吞掉重新提交）；
   `batchTurnCorrelation` 重启后为空。
@@ -1159,6 +1174,16 @@ the goldens stay byte-identical**"*。签入的 golden
   （断言截图在 turn 期间一直可读），终态后才删；`batchTurnCorrelation` 在 turn 仍在飞时
   **不被提前移除**；`recovery_error`（合法 UUID）可丢弃成功。
   丢弃到配额以下后 `StoreAppAnnotation` 重新可用。
+- **`discardPending` 的两条重启分支**：`discardPending(storing)` 重启后，盘上**有**目录 ⇒
+  墓碑 + Delete，盘上**无** ⇒ 纯本地删除；`discardPending(turn)` 重启后**直接**墓碑 + Delete
+  （不再等 completion）。
+- **`buildObserved` 下用户丢弃** ⇒ 进 `discardPending(turn)`，且在 turn 终态**之前**
+  不得发 Delete。
+- **`buildObserved` 的非通过出口**：门未通过 / 报告缺失 / `verification_unavailable` /
+  `output_change_id` 不匹配，四种都必须回到 `stored(可重试)` 且药丸显示原因——
+  **不得停在 `buildObserved`**。
+- **Delete 失败**：回执带 `error` ⇒ 墓碑保留、显示可见错误、按有界退避重试；
+  退避耗尽后不静默循环。
 - **非法目录名**：手工放一个非 UUID 名的目录进 `annotations/` ⇒ 它**不出现在药丸列表里**，
   且被宽限期清扫回收（有日志）。
 - **配额条数**：只创建空 `.tmp-*` 目录也会计入条数上限。

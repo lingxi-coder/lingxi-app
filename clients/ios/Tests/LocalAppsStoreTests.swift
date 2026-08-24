@@ -331,6 +331,37 @@ final class LocalAppsStoreTests: XCTestCase {
         )
     }
 
+    /// Phase 1a — a user-drawn rectangle can only be mapped onto elements if the
+    /// snapshot carries geometry. `getBoundingClientRect()` was already being
+    /// computed and then discarded down to a `visible` boolean.
+    ///
+    /// The Android twin is `LocalAppWebViewTest.ui inspection reports element and
+    /// canvas geometry`; the two scripts are near-copies, so both are pinned or
+    /// neither is.
+    func testUIInspectionReportsElementAndCanvasGeometry() {
+        let source = LocalAppWebViewController.executionSource(requestJSON: "{}")
+        for token in [
+            // Element rect, integer CSS pixels.
+            "rect: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)]",
+            // Canvas rects, bounded at 16 — the host gate compares only these pixels.
+            "canvases: deepQuery('canvas', 16).map",
+            // The legacy count stays for compatibility.
+            "canvasCount:",
+            // Readiness and the coordinate frame the rect is expressed in.
+            "documentState: document.readyState",
+            "offsetLeft: Math.round(vv.offsetLeft)",
+            "scale: vv.scale",
+        ] {
+            XCTAssertTrue(source.contains(token), "missing geometry contract: \(token)")
+        }
+        // Geometry is ADDED to the element shape, not substituted for `visible`:
+        // a reader that only asks "is it on screen" must keep working.
+        XCTAssertTrue(
+            source.contains("visible: rect.width > 0 && rect.height > 0,"),
+            "`visible` must survive alongside the new rect, not be replaced by it"
+        )
+    }
+
     /// The conversation-scope cwd (`RootView.makeSource(scope: .localApp(id))`)
     /// and the code browser resolve the SAME validated workspace directory —
     /// one derivation, `LocalAppWorkspacePath`, no second copy to diverge.

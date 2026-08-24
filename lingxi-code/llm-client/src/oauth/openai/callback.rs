@@ -33,6 +33,11 @@ pub enum CallbackError {
     /// `state` returned by the `IdP` didn't match the local CSRF token.
     #[error("state mismatch")]
     StateMismatch,
+    /// The provider redirected with `error=` instead of a code — most often
+    /// the user pressed Deny. Reporting this as "missing code" hid the real
+    /// reason. Shape mirrors `mcp::oauth::callback::CallbackError::Provider`.
+    #[error("authorization denied: {0}")]
+    Provider(String),
 }
 
 /// Parameters parsed out of a `GET /auth/callback?code=...&state=...` request.
@@ -145,21 +150,22 @@ async fn handle_connection(
     mut stream: TcpStream,
     expected_state: &str,
 ) -> Result<Option<CallbackParams>, CallbackError> {
-    let mut buf = vec![0u8; 4096];
-    let n = stream
-        .read(&mut buf)
-        .await
-        .map_err(|e| CallbackError::InvalidRequest(e.to_string()))?;
-    let req = String::from_utf8_lossy(&buf[..n]);
+    let Some(req) = read_request_head(&mut stream).await else {
+        // A connection that carried no readable request head is not a failed
+        // login. Safari opens speculative connections to the redirect host and
+        // drops them; aborting `accept()` on one of those killed the flow
+        // before the real redirect ever arrived.
+        return Ok(None);
+    };
 
-    let line = req
+    let Some(path) = req
         .lines()
         .next()
-        .ok_or_else(|| CallbackError::InvalidRequest("empty request".into()))?;
-    let path = line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| CallbackError::InvalidRequest("no path".into()))?;
+        .and_then(|line| line.split_whitespace().nth(1))
+    else {
+        let _ = write_response(&mut stream, "400 Bad Request", "Malformed request.").await;
+        return Ok(None);
+    };
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
 
     // Only the OpenAI OAuth redirect path is interesting; everything else
@@ -171,18 +177,35 @@ async fn handle_connection(
 
     let mut code = None;
     let mut state = None;
+    let mut error = None;
+    let mut error_description = None;
     for kv in query.split('&') {
         if let Some(v) = kv.strip_prefix("code=") {
             code = Some(url_decode(v));
         } else if let Some(v) = kv.strip_prefix("state=") {
             state = Some(url_decode(v));
+        } else if let Some(v) = kv.strip_prefix("error=") {
+            error = Some(url_decode(v));
+        } else if let Some(v) = kv.strip_prefix("error_description=") {
+            error_description = Some(url_decode(v));
         }
     }
-    let code = code.ok_or_else(|| CallbackError::InvalidRequest("missing code".into()))?;
-    let state = state.ok_or_else(|| CallbackError::InvalidRequest("missing state".into()))?;
+
+    // Order matters, and mirrors `mcp::oauth::callback`: CSRF first, then the
+    // provider's own error, then the code. Checking `code` first — as this did
+    // — reported "missing code" for a user who pressed Deny, and masked a state
+    // mismatch behind the same message. A missing `state` is a mismatch.
+    let state = state.unwrap_or_default();
     if state != expected_state {
+        let _ = write_response(&mut stream, "400 Bad Request", "Invalid state parameter.").await;
         return Err(CallbackError::StateMismatch);
     }
+    if let Some(error) = error {
+        let detail = format!("{error}: {}", error_description.unwrap_or_default());
+        let _ = write_response(&mut stream, "200 OK", "Authorization was denied.").await;
+        return Err(CallbackError::Provider(detail));
+    }
+    let code = code.ok_or_else(|| CallbackError::InvalidRequest("missing code".into()))?;
 
     let _ = write_response(
         &mut stream,
@@ -192,6 +215,36 @@ async fn handle_connection(
     .await;
 
     Ok(Some(CallbackParams { code, state }))
+}
+
+/// Read one HTTP request head (through the blank line) off `stream`.
+///
+/// Returns `None` when the peer sent nothing, the head never terminated within
+/// `MAX_REQUEST_HEAD`, or nothing arrived within `READ_TIMEOUT` — each of which
+/// means "ignore this connection", never "fail the login".
+///
+/// The previous single 4 KiB `read` also truncated any request split across TCP
+/// segments, which a long `code` plus browser headers can trigger.
+async fn read_request_head(stream: &mut TcpStream) -> Option<String> {
+    const MAX_REQUEST_HEAD: usize = 8 * 1024;
+    const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let read = async {
+        let mut head: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            head.extend_from_slice(&chunk[..n]);
+            if head.windows(4).any(|w| w == b"\r\n\r\n") || head.len() >= MAX_REQUEST_HEAD {
+                break;
+            }
+        }
+        (!head.is_empty()).then(|| String::from_utf8_lossy(&head).into_owned())
+    };
+    tokio::time::timeout(READ_TIMEOUT, read).await.ok().flatten()
 }
 
 /// Best-effort `percent`-decode. Base64url callback values contain no `%`, but
@@ -234,6 +287,7 @@ mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpStream;
+    use tokio::time::{sleep, Duration};
 
     /// Serialize tests that compete for the fixed ports 1455/1457.
     /// Delegates to the shared guard in `testsupport` so handle tests and
@@ -274,6 +328,92 @@ mod tests {
         );
         assert!(resp.contains("200 OK"));
         assert!(resp.contains("Login complete"));
+    }
+
+    /// Safari opens speculative connections to the redirect host and drops
+    /// them without sending a byte. That used to surface as
+    /// `InvalidRequest("empty request")` out of `accept()` and killed the
+    /// login before the real redirect arrived.
+    #[tokio::test]
+    async fn a_zero_byte_connection_does_not_abort_the_flow() {
+        let _g = port_guard().await;
+        let listener = CallbackListener::bind().await.expect("bind");
+        let port = listener.port();
+        let server = tokio::spawn(async move { listener.accept("S").await });
+
+        // Connect and close without writing anything.
+        {
+            let probe = TcpStream::connect(("127.0.0.1", port)).await.expect("probe");
+            drop(probe);
+        }
+        sleep(Duration::from_millis(20)).await;
+
+        // The real redirect still completes.
+        let _ = send_get(port, "/auth/callback?code=abc&state=S").await;
+        let params = server.await.expect("join").expect("accept survived the probe");
+        assert_eq!(params.code, "abc");
+    }
+
+    /// A user pressing Deny redirects with `error=`, no `code`. Reporting
+    /// "missing code" for that hid the actual reason.
+    #[tokio::test]
+    async fn a_provider_error_redirect_is_surfaced_as_provider() {
+        let _g = port_guard().await;
+        let listener = CallbackListener::bind().await.expect("bind");
+        let port = listener.port();
+        let server = tokio::spawn(async move { listener.accept("S").await });
+        let _ = send_get(
+            port,
+            "/auth/callback?error=access_denied&error_description=User%20denied&state=S",
+        )
+        .await;
+        match server.await.expect("join") {
+            Err(CallbackError::Provider(detail)) => {
+                assert!(detail.contains("access_denied"), "detail: {detail}");
+                assert!(detail.contains("User denied"), "detail: {detail}");
+            }
+            other => panic!("expected Provider, got {other:?}"),
+        }
+    }
+
+    /// State is validated before `code`, so a CSRF mismatch is never masked as
+    /// a missing parameter. A missing `state` counts as a mismatch.
+    #[tokio::test]
+    async fn state_is_checked_before_code() {
+        let _g = port_guard().await;
+        let listener = CallbackListener::bind().await.expect("bind");
+        let port = listener.port();
+        let server = tokio::spawn(async move { listener.accept("EXPECTED").await });
+        let _ = send_get(port, "/auth/callback?state=WRONG").await;
+        assert!(matches!(
+            server.await.expect("join"),
+            Err(CallbackError::StateMismatch)
+        ));
+    }
+
+    /// A single 4 KiB `read` truncated any request split across TCP segments.
+    #[tokio::test]
+    async fn a_request_split_across_two_writes_is_parsed() {
+        let _g = port_guard().await;
+        let listener = CallbackListener::bind().await.expect("bind");
+        let port = listener.port();
+        let server = tokio::spawn(async move { listener.accept("S").await });
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.expect("connect");
+        client
+            .write_all(b"GET /auth/callback?code=split&state=S HTTP/1.1\r\n")
+            .await
+            .expect("write line");
+        sleep(Duration::from_millis(30)).await;
+        client
+            .write_all(b"Host: localhost\r\nUser-Agent: probe\r\n\r\n")
+            .await
+            .expect("write headers");
+        let mut resp = Vec::new();
+        let _ = client.read_to_end(&mut resp).await;
+
+        let params = server.await.expect("join").expect("accept ok");
+        assert_eq!(params.code, "split");
     }
 
     #[tokio::test]

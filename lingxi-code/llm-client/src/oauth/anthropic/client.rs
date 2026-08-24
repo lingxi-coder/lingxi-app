@@ -17,9 +17,44 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use traits::{Clock, HttpTransport};
 
-/// Timeout for the token-exchange POST. Matches claude-code's 15-second
-/// `exchangeCodeForTokens` deadline.
-const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Timeout for the token-exchange POST.
+///
+/// The oracle posts `TOKEN_URL` with `{timeout:30000}` (2.1.241, the `kba`
+/// token-exchange helper), so the deadline is 30 s — the old comment asserted
+/// 15 s and the constant matched the comment rather than the oracle.
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Render a non-2xx token-endpoint response as a diagnosable one-liner.
+///
+/// The raw body used to be inlined verbatim, which both leaked whatever the
+/// endpoint echoed back and buried the one field that identifies the failure.
+/// Anthropic's shape is `{"error":{"type":..,"message":..}}`; anything else
+/// falls back to a length-capped body so an unexpected shape is still legible.
+/// The full body is emitted at `debug` only.
+fn describe_token_error(status: u16, body: &str) -> String {
+    tracing::debug!(target: "lingxi::oauth", status, body, "token endpoint rejected the exchange");
+    let parsed: Option<serde_json::Value> = serde_json::from_str(body).ok();
+    let error = parsed.as_ref().and_then(|v| v.get("error"));
+    let kind = error
+        .and_then(|e| e.get("type").or_else(|| e.get("code")))
+        .and_then(serde_json::Value::as_str);
+    let message = error
+        .and_then(|e| e.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| parsed.as_ref()?.get("error_description")?.as_str());
+    match (kind, message) {
+        (Some(kind), Some(message)) => format!("status {status} [{kind}]: {message}"),
+        (Some(kind), None) => format!("status {status} [{kind}]"),
+        (None, Some(message)) => format!("status {status}: {message}"),
+        (None, None) => {
+            let mut snippet: String = body.chars().take(200).collect();
+            if body.chars().count() > 200 {
+                snippet.push('\u{2026}');
+            }
+            format!("status {status}: {snippet}")
+        }
+    }
+}
 
 /// OAuth-flow failures.
 #[derive(Debug, Error)]
@@ -327,7 +362,11 @@ impl ClaudeAiOAuthClient {
         }
         if let Some(login_method) = options.login_method.as_deref() {
             url.push_str("&login_method=");
-            url.push_str(&urlencoding::encode(login_method));
+            // `form_encode`, like every other param: the oracle builds the whole
+            // URL through `URLSearchParams`, which is form-urlencoded. Latent
+            // today (the only value is "sso"), but the two encodings disagree on
+            // SPACE.
+            url.push_str(&form_encode(login_method));
         }
         url
     }
@@ -415,9 +454,8 @@ impl ClaudeAiOAuthClient {
                 ))
             }
             other => {
-                return Err(OAuthError::TokenExchange(format!(
-                    "status {other}: {}",
-                    resp.body
+                return Err(OAuthError::TokenExchange(describe_token_error(
+                    other, &resp.body,
                 )))
             }
         };

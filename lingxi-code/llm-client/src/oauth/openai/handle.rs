@@ -41,7 +41,11 @@ impl Clock for RealClock {
 }
 
 /// Login-flow deadline for the browser-PKCE path.
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
+///
+/// 60 s could not cover a real sign-in — email, password, and an MFA prompt —
+/// and expired the flow mid-login. Codex sets no deadline at all on this path;
+/// 10 minutes is a bound that still releases the fixed callback port.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Injectable browser opener. Production shells the platform "open" command;
 /// tests pass a no-op (optionally recording the URL).
@@ -132,17 +136,9 @@ impl OpenAiOAuthHandle {
             .as_deref()
             .and_then(parse_id_token)
             .unwrap_or_default();
-        let id_token = tokens.id_token.as_deref().ok_or_else(|| {
-            OpenAiAuthError::ServerError(
-                "token exchange did not return an id_token; cannot mint API key".into(),
-            )
-        })?;
-        let api_key = self
-            .client
-            .obtain_api_key(id_token)
-            .await
-            .map_err(|e| OpenAiAuthError::ServerError(e.to_string()))?;
-
+        // Persist the OAuth session BEFORE minting the API key: the mint is
+        // best-effort (see `mint_api_key_best_effort`), and failing it used to
+        // throw away an already-completed sign-in.
         let refresh = tokens
             .refresh_token
             .as_ref()
@@ -158,16 +154,58 @@ impl OpenAiOAuthHandle {
             )
             .await
             .map_err(|e| OpenAiAuthError::ServerError(format!("persist tokens: {e}")))?;
-        self.credentials
-            .set_provider_key("chatgpt", &api_key)
-            .await
-            .map_err(|e| OpenAiAuthError::ServerError(format!("persist api_key: {e}")))?;
+        let api_key = self
+            .mint_api_key_best_effort(tokens.id_token.as_deref())
+            .await;
 
         Ok(OpenAiLoginInfo {
             account_id: claims.account_id,
             fedramp: claims.fedramp,
             api_key,
         })
+    }
+
+    /// Mint the RFC-8693 API key and persist it under credential id
+    /// `chatgpt` — best-effort, never fatal.
+    ///
+    /// Codex treats the mint as optional: `.ok()` on the loopback path
+    /// (`codex-rs/login/src/server.rs:408-415`) and a literal `None` on the
+    /// device path (`device_code_auth.rs:224`), because an account on a
+    /// subscription-only ChatGPT plan cannot create API keys at all. Hard
+    /// failing here discarded a sign-in that had already succeeded, taking the
+    /// OAuth tokens with it.
+    ///
+    /// The empty string on failure is not load-bearing: mobile inference reads
+    /// the bearer from `OpenAiOAuthCredentialProvider` (backed by the refresh
+    /// driver), not this slot, and `current_user` already defaults it.
+    async fn mint_api_key_best_effort(&self, id_token: Option<&str>) -> String {
+        let Some(id_token) = id_token else {
+            tracing::warn!(
+                target: "lingxi::openai_oauth",
+                "token response carried no id_token; skipping the API-key mint",
+            );
+            return String::new();
+        };
+        match self.client.obtain_api_key(id_token).await {
+            Ok(api_key) => {
+                if let Err(error) = self.credentials.set_provider_key("chatgpt", &api_key).await {
+                    tracing::warn!(
+                        target: "lingxi::openai_oauth",
+                        %error,
+                        "could not persist the minted API key; the OAuth session stands",
+                    );
+                }
+                api_key
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "lingxi::openai_oauth",
+                    %error,
+                    "API-key mint failed; continuing with the OAuth session",
+                );
+                String::new()
+            }
+        }
     }
 
     // ── Browser-PKCE flow ─────────────────────────────────────────────────
@@ -222,20 +260,8 @@ impl OpenAiOAuthHandle {
             .and_then(parse_id_token)
             .unwrap_or_default();
 
-        // (7) Mint an API key via RFC-8693 token exchange (requires id_token).
-        let api_key = if let Some(id_token) = tokens.id_token.as_deref() {
-            self.client
-                .obtain_api_key(id_token)
-                .await
-                .map_err(|e| OpenAiAuthError::ServerError(e.to_string()))?
-        } else {
-            // No id_token — cannot mint; surface a clear error.
-            return Err(OpenAiAuthError::ServerError(
-                "token exchange did not return an id_token; cannot mint API key".into(),
-            ));
-        };
-
-        // (8) Persist OAuth tokens.
+        // (7) Persist OAuth tokens. This comes BEFORE the API-key mint, which
+        // is best-effort — see `mint_api_key_best_effort`.
         let refresh = tokens
             .refresh_token
             .as_ref()
@@ -252,11 +278,11 @@ impl OpenAiOAuthHandle {
             .await
             .map_err(|e| OpenAiAuthError::ServerError(format!("persist tokens: {e}")))?;
 
-        // (9) Persist the minted API key under credential id "chatgpt".
-        self.credentials
-            .set_provider_key("chatgpt", &api_key)
-            .await
-            .map_err(|e| OpenAiAuthError::ServerError(format!("persist api_key: {e}")))?;
+        // (8) Mint an API key via RFC-8693 token exchange and persist it under
+        // credential id "chatgpt", best-effort.
+        let api_key = self
+            .mint_api_key_best_effort(tokens.id_token.as_deref())
+            .await;
 
         // (10) Return resolved identity.
         Ok(OpenAiLoginInfo {
@@ -290,19 +316,6 @@ impl OpenAiOAuthHandle {
             .and_then(parse_id_token)
             .unwrap_or_default();
 
-        let api_key = if let Some(id_token) = tokens.id_token.as_deref() {
-            // For the device-code path we need to call obtain_api_key through
-            // a separate client configured the same way.
-            self.client
-                .obtain_api_key(id_token)
-                .await
-                .map_err(|e| OpenAiAuthError::ServerError(e.to_string()))?
-        } else {
-            return Err(OpenAiAuthError::ServerError(
-                "device-code exchange did not return an id_token".into(),
-            ));
-        };
-
         let refresh = tokens
             .refresh_token
             .as_ref()
@@ -319,10 +332,9 @@ impl OpenAiOAuthHandle {
             .await
             .map_err(|e| OpenAiAuthError::ServerError(format!("persist tokens: {e}")))?;
 
-        self.credentials
-            .set_provider_key("chatgpt", &api_key)
-            .await
-            .map_err(|e| OpenAiAuthError::ServerError(format!("persist api_key: {e}")))?;
+        let api_key = self
+            .mint_api_key_best_effort(tokens.id_token.as_deref())
+            .await;
 
         Ok(OpenAiLoginInfo {
             account_id: claims.account_id,
@@ -382,6 +394,9 @@ fn callback_to_auth_err(e: CallbackError) -> OpenAiAuthError {
         CallbackError::StateMismatch => OpenAiAuthError::Cancelled,
         CallbackError::Bind(m) => OpenAiAuthError::ServerError(format!("loopback bind: {m}")),
         CallbackError::InvalidRequest(m) => OpenAiAuthError::ServerError(format!("callback: {m}")),
+        // The provider redirected with `error=` — most often the user pressed
+        // Deny, which is a cancellation, not a server fault.
+        CallbackError::Provider(detail) => OpenAiAuthError::ServerError(format!("denied: {detail}")),
     }
 }
 
@@ -427,13 +442,17 @@ mod tests {
     fn handle_with_token_body(
         token_body: &str,
     ) -> (OpenAiOAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
-        let http = MockHttp::new(vec![(
+        handle_from_http(MockHttp::new(vec![(
             "oauth/token",
             Canned {
                 status: 200,
                 body: token_body.into(),
             },
-        )]);
+        )]))
+    }
+
+    fn handle_from_http(http: Arc<MockHttp>) -> (OpenAiOAuthHandle, Arc<MemStorage>, Arc<AtomicBool>)
+    {
         let clock = TestClock::new(1_000);
         let storage = MemStorage::new();
         let cm = mem_credential_manager(storage.clone(), clock.clone());
@@ -563,6 +582,29 @@ mod tests {
         handle_with_token_body(&unified_token_body())
     }
 
+    /// Same as [`handle_for_login`], but the RFC-8693 API-key mint 403s.
+    ///
+    /// Both exchanges POST to the same token URL, so the failure is keyed on
+    /// the grant type in the request BODY.
+    fn handle_with_failing_api_key_mint() -> (OpenAiOAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
+        handle_from_http(MockHttp::with_body_routes(
+            vec![(
+                "oauth/token",
+                Canned {
+                    status: 200,
+                    body: unified_token_body(),
+                },
+            )],
+            vec![(
+                "grant-type%3Atoken-exchange",
+                Canned {
+                    status: 403,
+                    body: r#"{"error":{"code":"api_key_not_available"}}"#.into(),
+                },
+            )],
+        ))
+    }
+
     #[tokio::test]
     async fn login_persists_tokens_and_api_key() {
         let _g = port_guard().await;
@@ -573,9 +615,44 @@ mod tests {
         assert!(!info.fedramp);
         assert_eq!(info.api_key, "sk-test-key");
 
-        // 3 OpenAI OAuth entries + 1 provider-key entry = 4 total under "lingxi".
-        // (openai-oauth-access, openai-oauth-refresh, openai-oauth-meta, provider-key-chatgpt)
-        assert_eq!(storage.count("lingxi"), 4);
+        // Assert the exact slot NAMES, not just the count. A count is
+        // slot-blind: writing the ChatGPT token into the Anthropic slots keeps
+        // the total at 4, which is exactly how that defect shipped green out of
+        // the refresh driver.
+        assert_eq!(
+            storage.accounts("lingxi"),
+            vec![
+                "openai-oauth-access".to_string(),
+                "openai-oauth-meta".to_string(),
+                "openai-oauth-refresh".to_string(),
+                "provider-key-chatgpt".to_string(),
+            ],
+        );
+    }
+
+    /// A failed RFC-8693 API-key mint must not discard a completed sign-in.
+    ///
+    /// Accounts on a subscription-only ChatGPT plan cannot mint one at all;
+    /// codex passes `.ok()` / `None` for exactly this reason. The OAuth tokens
+    /// are what mobile inference actually uses.
+    #[tokio::test]
+    async fn login_survives_a_failed_api_key_mint() {
+        let _g = port_guard().await;
+        let (handle, storage, _) = handle_with_failing_api_key_mint();
+        let info = handle.login().await.expect("login ok despite mint failure");
+        assert_eq!(info.account_id.as_deref(), Some("acct_test"));
+        assert_eq!(info.api_key, "", "no key minted");
+
+        // The OAuth session is persisted; only the provider-key slot is absent.
+        assert_eq!(
+            storage.accounts("lingxi"),
+            vec![
+                "openai-oauth-access".to_string(),
+                "openai-oauth-meta".to_string(),
+                "openai-oauth-refresh".to_string(),
+            ],
+        );
+        assert!(handle.current_user().await.is_some(), "session usable");
     }
 
     #[tokio::test]
@@ -595,6 +672,11 @@ mod tests {
         let (handle, storage, _) = handle_for_login();
         handle.login().await.expect("login ok");
         assert_eq!(storage.count("lingxi"), 4);
+        assert!(
+            storage.accounts("lingxi").iter().all(|a| !a.starts_with("anthropic-")),
+            "login wrote an Anthropic slot: {:?}",
+            storage.accounts("lingxi"),
+        );
 
         handle.logout().await.expect("logout ok");
         // OpenAI OAuth slots cleared; provider-key-chatgpt overwritten with "".

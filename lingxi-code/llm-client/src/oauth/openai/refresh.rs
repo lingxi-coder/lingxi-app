@@ -238,26 +238,34 @@ impl AuthState {
 
     /// Persist the rotated token to the keychain via `CredentialManager`.
     /// No-op when no manager is configured (test path).
+    ///
+    /// Writes the `openai-oauth-*` slots. It must NOT touch `store_oauth_tokens`
+    /// / `get_oauth_tokens`: those are the ANTHROPIC slots
+    /// (`anthropic-oauth-access|-refresh|-meta`, `secret::credential`), and this
+    /// driver fires after every ChatGPT rotation — writing there overwrote the
+    /// user's Claude session roughly an hour after any ChatGPT login while
+    /// leaving the stale ChatGPT token behind in `openai-oauth-access`.
+    ///
+    /// The identity is taken from the in-memory `TokenInfo`, which the caller
+    /// has already refreshed from the new `id_token` claims (or carried
+    /// forward when the response had none), so no read-back is needed. `scopes`
+    /// is `vec![]` to match the login path (`OpenAiOAuthHandle`'s three persist
+    /// sites); nothing reads OpenAI scopes back.
     async fn persist_to_keychain(&self, info: &TokenInfo) -> Result<(), OAuthError> {
         let Some(cm) = &self.credentials else {
             return Ok(());
-        };
-        // Preserve the prior identity from the stored session blob.
-        let (email, org_id) = match cm.get_oauth_tokens().await {
-            Ok(Some(prev)) => (prev.email, prev.org_id),
-            _ => (String::new(), String::new()),
         };
         let refresh = info
             .refresh_token
             .as_ref()
             .map(|s| s.expose_secret().clone());
-        cm.store_oauth_tokens(
+        cm.store_openai_oauth_tokens(
             info.access_token.expose_secret(),
             refresh.as_deref(),
             info.expires_at,
             vec![],
-            &email,
-            &org_id,
+            info.account_id.as_deref(),
+            info.fedramp,
         )
         .await
         .map_err(|e| OAuthError::TokenExchange(format!("keychain store: {e}")))?;
@@ -637,7 +645,68 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeS
 #[cfg(test)]
 mod refresh_tests {
     use super::*;
-    use crate::oauth::openai::testsupport::{Canned, MockHttp, TestClock};
+    use crate::oauth::openai::testsupport::{
+        mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
+    };
+
+    /// A rotated ChatGPT token must land in the `openai-oauth-*` slots and
+    /// must not touch `anthropic-oauth-*`.
+    ///
+    /// `persist_to_keychain` used to call `store_oauth_tokens`, which is the
+    /// ANTHROPIC writer — so roughly an hour after any ChatGPT login the
+    /// proactive refresh clobbered the user's Claude session while leaving the
+    /// stale ChatGPT token in place. Asserting the slot NAMES (not the entry
+    /// count) is what makes this detectable: the buggy write kept the total
+    /// unchanged.
+    #[tokio::test]
+    async fn rotated_chatgpt_token_lands_in_the_openai_slot_only() {
+        let http = MockHttp::new(vec![(
+            "oauth/token",
+            Canned {
+                status: 200,
+                body: r#"{"access_token":"NEW_ACCESS","refresh_token":"NEW_REFRESH","expires_in":3600}"#
+                    .into(),
+            },
+        )]);
+        let clock = TestClock::new(2_000);
+        let storage = MemStorage::new();
+        let credentials = mem_credential_manager(storage.clone(), clock.clone() as Arc<dyn traits::Clock>);
+
+        let state = AuthState::new(
+            OpenAiOAuthConfig::default(),
+            Secret::new("OLD_ACCESS".into()),
+            Some(Secret::new("OLD_REFRESH".into())),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2_010),
+            Some("acc_XYZ".into()),
+            false,
+            http.clone() as Arc<dyn traits::HttpTransport>,
+            clock.clone() as Arc<dyn traits::Clock>,
+            None,
+            Some(credentials.clone()),
+        );
+        let driver = RefreshDriver::new(state.clone());
+        let prev = state.token.read().await.token_hash();
+        driver.refresh(prev).await.expect("refresh ok");
+
+        let accounts = storage.accounts("lingxi");
+        assert!(
+            accounts.iter().all(|a| !a.starts_with("anthropic-")),
+            "ChatGPT rotation wrote an Anthropic slot: {accounts:?}"
+        );
+        assert!(
+            accounts.iter().any(|a| a == "openai-oauth-access"),
+            "rotated token never reached the OpenAI slot: {accounts:?}"
+        );
+
+        // And the value actually rotated in the OpenAI slot.
+        let stored = credentials
+            .get_openai_oauth_tokens()
+            .await
+            .expect("read openai slot")
+            .expect("session present");
+        assert_eq!(stored.access_token.expose_secret(), "NEW_ACCESS");
+        assert_eq!(stored.account_id.as_deref(), Some("acc_XYZ"));
+    }
 
     #[tokio::test]
     async fn reactive_refresh_sends_json_body_and_rotates_token() {

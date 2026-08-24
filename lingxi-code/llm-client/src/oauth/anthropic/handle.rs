@@ -484,6 +484,9 @@ fn callback_to_auth_err(e: CallbackError) -> AuthError {
         CallbackError::StateMismatch => AuthError::Cancelled,
         CallbackError::Bind(m) => AuthError::ServerError(format!("loopback bind: {m}")),
         CallbackError::InvalidRequest(m) => AuthError::ServerError(format!("callback: {m}")),
+        // The provider redirected with `error=` — most often the user pressed
+        // Deny, which is a cancellation, not a server fault.
+        CallbackError::Provider(detail) => AuthError::ServerError(format!("denied: {detail}")),
     }
 }
 

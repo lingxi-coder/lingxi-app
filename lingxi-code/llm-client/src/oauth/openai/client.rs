@@ -13,8 +13,44 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use traits::{Clock, HttpTransport};
 
-/// Timeout for the token-exchange POST. Matches codex's 15-second deadline.
+/// Timeout for the token-exchange POST.
+///
+/// Codex itself sets no deadline here (`http-client/src/request.rs`,
+/// `timeout: None`); 15 s is a local choice, not a matched constant. Keeping
+/// the value, correcting the claim.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Render a non-2xx token-endpoint response as a diagnosable one-liner.
+///
+/// The raw body used to be inlined verbatim, which both leaked whatever the
+/// endpoint echoed back and buried the one field that identifies the failure.
+/// Anthropic's shape is `{"error":{"type":..,"message":..}}`; anything else
+/// falls back to a length-capped body so an unexpected shape is still legible.
+/// The full body is emitted at `debug` only.
+fn describe_token_error(status: u16, body: &str) -> String {
+    tracing::debug!(target: "lingxi::oauth", status, body, "token endpoint rejected the exchange");
+    let parsed: Option<serde_json::Value> = serde_json::from_str(body).ok();
+    let error = parsed.as_ref().and_then(|v| v.get("error"));
+    let kind = error
+        .and_then(|e| e.get("type").or_else(|| e.get("code")))
+        .and_then(serde_json::Value::as_str);
+    let message = error
+        .and_then(|e| e.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| parsed.as_ref()?.get("error_description")?.as_str());
+    match (kind, message) {
+        (Some(kind), Some(message)) => format!("status {status} [{kind}]: {message}"),
+        (Some(kind), None) => format!("status {status} [{kind}]"),
+        (None, Some(message)) => format!("status {status}: {message}"),
+        (None, None) => {
+            let mut snippet: String = body.chars().take(200).collect();
+            if body.chars().count() > 200 {
+                snippet.push('\u{2026}');
+            }
+            format!("status {status}: {snippet}")
+        }
+    }
+}
 
 /// Originator value sent as an OAuth query param. Matches codex's
 /// `DEFAULT_ORIGINATOR` constant (`login/src/auth/default_client.rs`).
@@ -227,9 +263,8 @@ impl OpenAiOAuthClient {
                 ))
             }
             other => {
-                return Err(OAuthError::TokenExchange(format!(
-                    "status {other}: {}",
-                    resp.body
+                return Err(OAuthError::TokenExchange(describe_token_error(
+                    other, &resp.body,
                 )))
             }
         };

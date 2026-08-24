@@ -29,6 +29,7 @@ pub struct Canned {
 /// the first registered response when nothing matches (single-endpoint tests).
 pub struct MockHttp {
     routes: Vec<(String, Canned)>,
+    body_routes: Vec<(String, Canned)>,
     pub requests: Mutex<Vec<HttpRequest>>,
     pub calls: AtomicU64,
 }
@@ -36,10 +37,27 @@ pub struct MockHttp {
 impl MockHttp {
     /// Build a transport from `(url_substring, response)` routes.
     pub fn new(routes: Vec<(&str, Canned)>) -> Arc<Self> {
+        Self::with_body_routes(routes, Vec::new())
+    }
+
+    /// Build a transport that can also discriminate on the request BODY.
+    ///
+    /// `body_routes` are matched first, by substring against `req.body`. The
+    /// OpenAI token endpoint serves two different exchanges at one URL — the
+    /// authorization-code grant and the RFC-8693 API-key mint — so a
+    /// URL-keyed route cannot make one succeed and the other fail.
+    pub fn with_body_routes(
+        routes: Vec<(&str, Canned)>,
+        body_routes: Vec<(&str, Canned)>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             routes: routes
                 .into_iter()
                 .map(|(u, c)| (u.to_string(), c))
+                .collect(),
+            body_routes: body_routes
+                .into_iter()
+                .map(|(b, c)| (b.to_string(), c))
                 .collect(),
             requests: Mutex::new(Vec::new()),
             calls: AtomicU64::new(0),
@@ -62,11 +80,19 @@ impl HttpTransport for MockHttp {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.requests.lock().unwrap().push(req.clone());
-        let canned = self
-            .routes
-            .iter()
-            .find(|(u, _)| req.url.contains(u.as_str()))
-            .map(|(_, c)| c.clone())
+        let body_match = req.body.as_deref().and_then(|body| {
+            self.body_routes
+                .iter()
+                .find(|(needle, _)| body.contains(needle.as_str()))
+                .map(|(_, c)| c.clone())
+        });
+        let canned = body_match
+            .or_else(|| {
+                self.routes
+                    .iter()
+                    .find(|(u, _)| req.url.contains(u.as_str()))
+                    .map(|(_, c)| c.clone())
+            })
             .or_else(|| self.routes.first().map(|(_, c)| c.clone()))
             .ok_or_else(|| HttpError::InvalidRequest("no canned route".into()))?;
         Ok(HttpResponse {
@@ -122,6 +148,26 @@ impl MemStorage {
             .keys()
             .filter(|(s, _)| s == service)
             .count()
+    }
+
+    /// The account names stored under `service`, sorted.
+    ///
+    /// [`Self::count`] is slot-blind: a write that lands in the wrong
+    /// provider's slot keeps the total identical, which is how the ChatGPT
+    /// refresh driver came to overwrite the Anthropic session while its tests
+    /// stayed green. Assert against this instead whenever WHICH slot was
+    /// written is the thing under test.
+    pub fn accounts(&self, service: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .map
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|(s, _)| s == service)
+            .map(|(_, a)| a.clone())
+            .collect();
+        names.sort();
+        names
     }
 }
 

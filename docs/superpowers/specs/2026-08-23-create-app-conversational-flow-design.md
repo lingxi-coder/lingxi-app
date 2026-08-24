@@ -3,6 +3,8 @@
 > 取代 2026-08-22 落地的「create-first 表单」方案。旧的两步表单整体删除，**不考虑向后兼容**。
 >
 > 经过多轮内部核验、外部 code review 与用户决策收敛；完整记录见 §J。
+>
+> 与交互验收 design 的共享补丁、协议 rebase 和实施顺序统一由 [`2026-08-24-local-app-implementation-order.md`](./2026-08-24-local-app-implementation-order.md) 管理。
 
 ## Context
 
@@ -40,6 +42,12 @@
 ### 修复
 
 把 `additional_context_message` 的 `memory.load` 也经过 `prompt_probe_cwd_resolver`。桌面端没有该 resolver，`probe_cwd == cwd`，字节不变。
+
+🚨 **这三行修复的影响面远大于它的体积，必须独立提交、独立浸泡。** 它会给**整个移动平台**
+同时打开 memory 加载——不只是本地应用：嵌套 `@import` 展开、外部包含门、read-state 播种、
+以及**每条首用户消息里新增的 token**。所以不要把它和 §A 之后的任何改动打进同一个提交，
+也不要在同一轮真机验收里和别的变更一起验。
+（这条警告原本写在 verification design 里；ownership 迁到本节时它一度在两份文档里同时消失。）
 
 ### 测试
 
@@ -226,13 +234,15 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 
 ### B.4 协议所有权与顺序（跨计划）
 
-`docs/superpowers/specs/2026-08-23-local-app-interactive-verification-design.md:5` 声明基线 `7.0.0` / blessed major 7，且自身也有多项 protocol 追加。**两份计划不能各自独立 bless。**
+`2026-08-23-local-app-interactive-verification-design.md` 也有 annotation/build-generation protocol 追加。**两份计划不能从各自的旧基线独立 bless。**
 
 定案顺序：
 1. **本方案先落地并 bless 8.0.0。**
-2. 另一份 rebase 到 8.0.0 之后再走它自己的 bless。
+2. verification Phase 3 rebase 到 8.0.0 与 profile-aware 代码之后，再按实际 contract diff 决定下一版本并只生成一次两端 bindings。
 
-⚠️ 该文件当前是**另一个会话正在改的未提交工作**，本方案**不修改它**；顺序需要人工在两个会话间协调。实施本方案时若发现它已抢先 bless，停下来问，不要自行合并。
+完整顺序与共享文件唯一 owner 见 [`2026-08-24-local-app-implementation-order.md`](./2026-08-24-local-app-implementation-order.md)。实施时若 verification 仍从 7.0.0 开始修改协议，立即停止并 rebase；不得人工拼接两个 contract snapshot。
+
+以后若本方案继续修改 `scaffolded` commit point、surface/profile、workspace/session pin、build workflow 集合、pnpm/profile lock 或 create protocol anchors，**同一变更必须更新 master order 与 verification 的「上游 create-flow 契约与防漂移门」**。只改本文件而把下游留给以后，视为 design 未完成。
 
 ---
 
@@ -577,7 +587,7 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 - **`AppRecord` 多了一个持久字段**，相对最初「不新增状态」的承诺是一次让步（§A.2）。
 - **旧 store 不受支持**（§A.1）。这是未发布开发版的 clean-install 决策，不实现迁移，也绝不把缺字段记录静默解释成可被清空的 shell；开发机残留数据先清除。
 - **8.0.0 的破坏面**：只有**桌面端**（Electron / `clients/shared`）在握手时硬失败。**iOS/Android 走 UniFFI 进程内调用，既没有握手也没有版本交换**（`grep CLIENT_PROTOCOL_VERSION` 在 `engine-mobile` / `ios-framework` / `android-aar` 零命中），失败形式是重新生成绑定后**编译不过**。
-- **跨计划协议冲突**（§B.4）需要人工协调，本方案不动另一份 spec。
+- **跨计划协议与共享文件冲突**按 §B.4 的 master order 串行处理；不得另开一份临时顺序或重复实现共享补丁。
 
 ## I. Local App 2D/3D 游戏引擎实施方案
 
@@ -786,6 +796,8 @@ workflow 路由保持两条：
 - `tools/workflow/src/lib.rs` 已有两条 workflow 的身份集合，所有相关判定改成集合/公共 predicate，禁止再写单个字符串相等；
 - 表驱动测试逐条证明两条 workflow 都只能绑定目标应用 workspace、运行期间都阻止删除，非 Local App workflow 不受影响。
 
+⚠️ 这组修复的**唯一实现 owner** 是 master order 的 verification Phase 1。本文把它列作 runtime-profile 的进入条件和回归测试，不允许 Phase 1 再提交第二份同义补丁；若上游尚未落地，按 master order 先完成共享基础步骤。
+
 生产构建继续使用固定 IIFE Vite 配置。§I.1 的 Phase 1.0 是公共接口开工门，不是最终 QA 才跑的测试；通过后，Phaser、Babylon、glTF loader 与 Havok WASM 的真实 frozen pnpm install + production build + WebView launch 仍作为持续回归。只做 TypeScript/import 验证不算完成。若后续升级重新撞到 IIFE/code-splitting/WASM 构建限制，先停止对应 profile 发布并重新设计 build contract；不得顺手改动所有 profile 共用的 Vite 配置。重复 build/restore 必须继续使用 manifest 中的同一 profile 与 lock。
 
 ### I.7 Phase 2：Godot 原生模式
@@ -992,3 +1004,10 @@ Phase 2 先新增一份独立 NativeGame design/threat model，再在 desktop ho
 4. snapshot identity 回到现有内容寻址边界：toolchain 分区 + lock SHA；profile 只写 provenance/SBOM，依赖相同的 profile 可以共享 tree。
 5. Babylon + glTF + Havok 的固定 IIFE 双端 WebView spike 上移为 Phase 1.0 公共接口开工门；失败时停下重新设计 build contract，不能先落 schema。
 6. Godot Phase 2 改为独立 NativeGame design + threat model 的后续授权，补齐最小 project discriminator/API/lifecycle/锁要求，以及 archive extraction、project preflight 和 desktop sandbox 的 fail-closed 边界。
+
+### 第十轮（跨计划 master order 与下游防漂移，2026-08-24）
+
+1. create-flow 与 interactive-verification 保持独立 design，不拼成 2400 行单体；新增 `2026-08-24-local-app-implementation-order.md` 作为跨计划顺序和共享文件 owner 的唯一权威。
+2. 本方案继续先 bless 8.0.0；verification Phase 3 必须在 8.0.0 与 profile-aware 代码上 rebase，不能从 major 7 独立 bless。
+3. `LINGXI.md` resolver 归本方案 §0；canvas workflow lease/delete guard 与 `.lingxi` build-key 归 verification Phase 1。两份文档只允许一个实现 owner，另一份保留进入断言与回归测试。
+4. 增加 downstream freshness rule：以后本方案修改 post-create seam 时，同一变更必须更新 master order 和 verification 的上游契约/阶段/测试/状态表，并由真实 create 路径的 compatibility test 防止下游继续使用旧 flow。

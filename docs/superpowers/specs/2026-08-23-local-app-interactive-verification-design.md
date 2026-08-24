@@ -2,7 +2,12 @@
 
 日期：2026-08-23（2026-08-24 第六轮对抗式评审后修订）
 平台：iOS（客户端交互）；引擎改动两端共用
-协议基线：`7.0.0`（`client-protocol/src/version.rs:56`），blessed major `7`
+协议：**代码当前是 `7.0.0` / blessed major `7`**（`client-protocol/src/version.rs:52`、
+`snapshots/blessed_major.txt`）。create-flow §B 计划先 bless **`8.0.0`**；**那次 bless 落地之后**，
+本文 Phase 3 在 8.0.0 与 profile-aware 代码上 rebase，不再从 7.0.0 独立 bless。
+⚠️ 8.0.0 目前是**计划**不是既成事实——引用它时不要写成现状。
+
+> 跨计划实施顺序、共享补丁 owner 与协议 rebase 统一由 [`2026-08-24-local-app-implementation-order.md`](./2026-08-24-local-app-implementation-order.md) 管理。本文保持交互验收的行为权威，不复制 create-flow/runtime-profile 设计。
 
 > 本文经六轮对抗式评审。第五轮把冒烟门收束为必须真机取证的 spike；
 > 第六轮补齐 annotation 原子持久化、build outcome 到 iOS 的传播、scope 切换后
@@ -28,6 +33,36 @@
 > 两条都不是读代码读错，是**没有回读这份文档**。
 >
 > 这两条纪律是一对：纪律一防「改了正文没改结构」，纪律二防「改了结构没回读正文」。
+
+## 上游 create-flow 契约与防漂移门
+
+本文是 create-flow 的**下游行为设计**，不是一份冻结在 2026-08-23 代码形状上的独立实现说明。verification 不依赖创建页长什么样，但依赖以下 post-create 契约：
+
+| 上游不变量 | verification 的依赖 |
+|---|---|
+| `AppRecord.scaffolded == true` 是首次脚手架 commit point | 只对已经成形的 app 启用 build/smoke/annotation；空壳只回创建会话 |
+| manifest 有合法 surface；新应用还有不可变 runtime profile | DOM/canvas 观测与 workflow 路由从持久事实读取，不从源码猜 |
+| app 有稳定 workspace、pin/init session 与 app scope | annotation prompt 必须进入目标 workspace/session，不能重新扎根 |
+| `local-app-build` / `local-canvas-build` 是完整 build workflow 集合 | lease、删除保护、smoke 与 source-vs-source 判定必须覆盖二者 |
+| client protocol 已包含 create-flow 的 mode/request/scaffolded 契约 | Phase 3 只能追加 annotation/build-generation 字段，不能拿旧 golden 覆盖它们 |
+| host-owned pnpm/build/restore 读取已经提交的 profile/lock | verification rebuild 不得重选 profile 或恢复 v1 package/lock |
+
+**任何 create-flow 变更只要触及上表一项，就必须在同一变更中：**
+
+1. 更新 [`2026-08-24-local-app-implementation-order.md`](./2026-08-24-local-app-implementation-order.md) 的顺序/owner；
+2. 更新本节、阶段表、测试清单与状态/转换表中受影响的 verification 契约；
+3. 在实现 PR/commit 的 `Related:` 或等价记录中写明 verification 所基于的 create-flow baseline commit；
+4. 跑一条 downstream compatibility test：分别通过当前 direct-create/profile 路径与 shell→host-confirmation→Scaffold 路径创建应用，再执行 verification 的 build/inspect/capture 基础流程。禁止只用手写旧 fixture 证明兼容。
+
+每个 verification 阶段开工前都要重新 rebase 并核对上表；spec 中的旧行号只能作调查入口。若代码与上游契约不符，先更新设计，不能让 executor 临场猜测。
+
+Phase 3 另有机器门：contract index **必须包含**（这些由 create-flow §B 引入，**今天代码里还没有**——
+`CreateApp.mode` 与 `AppRecordDto.scaffolded` 现在 grep 为 0 命中）`CreateApp.mode`、
+`CreateApp.request_id`、`AppRecordDto.scaffolded`、创建成功/失败的 `request_id`，
+并且旧 identity-proposal 命令/事件已删除；缺任一项就拒绝 verification bless，
+防止用 major-7 snapshot 覆盖 create-flow。
+⚠️ 这道门**在 create-flow §B 落地之前必然不通过**，这是设计意图（它就是用来挡「在 §B 之前
+抢先 bless」的），不是待修的红。
 
 ## 起因
 
@@ -273,7 +308,7 @@ WKWebView 会**静默破坏应用删除的清理**，而且它启动时的写入
 spike 的验收标准是上面那六条**加上这个子问题**，每条都要在**真机**上被证伪或证实——
 尤其第 3 条，它是本设计存在的全部理由。
 
-**在 spike 有结论之前，阶段 2 不可计划。** 阶段 1 与阶段 3 不依赖它，可以先做。
+**在 spike 有结论之前，阶段 2 不可计划。** 阶段 1a/1b 与阶段 3 不依赖它，可以先做。
 
 🚨 **阶段 2 的门只覆盖 iOS，这必须写进契约而不是默认。** workflow 与引擎的改动两端共用，
 但 spike 的候选是 iOS 的离屏 `WKWebView`，而 Android 的 WebView registry 是**另一套独立
@@ -383,6 +418,8 @@ React 19（`package.json:17` `"react": "19.2.8"`）的默认 `onCaughtError` 路
 本项目不要求兼容旧客户端，但「不兼容」不等于可以遗漏当前版本的
 DTO lowering 或生成绑定。
 
+⚠️ 本批不是从本文原始的 7.0.0 snapshot 开始。按 master order，create-flow 先 bless 8.0.0；本节 Phase 3 只在其上 rebase，并在 runtime-profile Phase 1 合并后修改 `AppRecord`/host/adapter。版本号由 rebase 后的实际 contract diff 与版本守卫决定，不在本文预写成第二个 8.0.0，也不复用旧 major-7 golden。
+
 ### 被删掉的三处协议改动，以及为什么
 
 - ⛔ **`ResolveAppUiRequest.error_code`**：没有任何按它分支的消费者
@@ -390,7 +427,7 @@ DTO lowering 或生成绑定。
   且**在 Android 上不可实现**——spec 点名的失败点在那边不存在
   （`LocalAppWebView.kt:192` 是离屏截图错误），而 `local_apps_error_ui_not_open`
   是个**死资源**：五个语种的 catalog 都有、**Kotlin 零引用**。
-  替换成上面那条一行的门策略。**这一删让阶段 1 完全不碰协议。**
+  替换成上面那条一行的门策略。**这一删让阶段 1a/1b 都完全不碰协议。**
 - ⛔ **`AppWorkflowTaskChanged` / `AppWorkflowTasksSnapshot` / `AppWorkflowTaskDto`
   + `task_runs` 加宽 + 客户端 active-set 状态机**：整族删掉。它防的是「构建中提交标注」，
   但 **`TaskRegistry` 是每个引擎一个**（`host.rs:3383`，在 `build_mobile_inner_with_ask`
@@ -743,8 +780,13 @@ RootView 的 `onSubmitAnnotations(appID, batchID, prompt)` 是唯一入口。
 
 两态：刚框完变输入框；有待提交标注时变药丸清单。非标注态时整条收起。
 
-⚠️ **本节与引导一节未经任何对抗性评审覆盖** —— 第四轮的七个镜头没有一个读过它们，
-落地前需要单独一轮评审，且排在最后一个阶段。
+🚨 **最小可用的副驾驶条是阶段 4 的功能门，不是阶段 5 的视觉附件。**
+阶段 4 必须同时交付：输入态、药丸清单、提交、重试、丢弃，以及
+`annotation_quota_exceeded` 的可见错误和恢复入口。没有这个最小界面，阶段 3 的配额会把
+用户锁死在“请先清理”，却无处清理的状态。
+
+⚠️ **阶段 5 只保留副驾驶条的视觉/交互打磨和引导。** 这部分未经对抗性评审覆盖，
+落地前需要单独一轮评审；但它不得承载提交/重试/丢弃/配额恢复这四个功能性入口。
 
 引导复用 `AppState` 上的 `didSet + defaults` 形状——**不是 `@AppStorage`**
 （全树零命中；`AppState` 是 `@Observable @MainActor final class`，`Theme.swift:25-27,48`，
@@ -911,6 +953,8 @@ draft → storing → stored → submitted → buildObserved → cleared
 
 | 状态 | 事件 | 结果 |
 |---|---|---|
+| 尚未进入 annotation 状态机：`record.scaffolded == false` | 用户尝试进入标注模式 | 不创建 `draft`；回到该 app 的创建会话并显示「先完成应用创建」 |
+| 尚未进入 annotation 状态机：`scaffolded == true` 但 surface/profile 持久组合非法 | 任意 verification 入口 | 不创建 `draft`；显示 storage-corrupt 错误，禁止从源码猜 profile 后继续 |
 | `draft`（本地，未发 Store） | 提交 / 立即修 | 发 Store ⇒ `storing` |
 | | 用户丢弃 | 纯本地删除（盘上无物） |
 | | 重启：盘上有同 id 完整目录 | `stored(recovered)` |
@@ -1119,6 +1163,9 @@ the goldens stay byte-identical**"*。签入的 golden
 
 ### 引擎 / Rust
 
+- **上游兼容门**：测试 app 不得只靠手写 fixture 构造。分别通过当前 direct-create/profile 路径与 shell→host-native profile confirmation→`LocalAppScaffold` 路径创建一个 app，断言 `scaffolded`、surface/profile、workspace/session pin、workflow 路由正确，再跑 build/inspect/capture 基础流程。
+- **协议防回退门（Phase 3）**：contract index/golden 必须保留 create-flow 的 `CreateApp.mode`、两处创建 `request_id`、`AppRecordDto.scaffolded`，并继续缺少已删除的 identity-proposal 命令/事件；从 major-7 fixture 生成 snapshot 必须失败。
+- **共享补丁唯一性**：Phase 1 直接测试 `local-app-build` 与 `local-canvas-build` 共用 lease/delete guard，以及 workspace `LINGXI.md` 已由上游 resolver 加载；不得为 verification 新增第二套实现路径。
 - 冒烟门六条判据各有独立测试，**每条都要有反向用例**。
   🚨 **判据 6 的反向 fixture 必须是「真实出厂的模板 + 一个会抛异常的屏幕」**，
   它必须变红——用手写的 `throw` 页面测不出 `ErrorBoundary` 那条路径。
@@ -1198,6 +1245,9 @@ the goldens stay byte-identical**"*。签入的 golden
   **不得停在 `buildObserved`**。
 - **Delete 失败**：回执带 `error` ⇒ 墓碑保留、显示可见错误、按有界退避重试；
   退避耗尽后不静默循环。
+- **阶段 4 最小副驾驶条（硬门）**：药丸清单必须实际暴露提交/重试/丢弃；
+  触发 `annotation_quota_exceeded` 后错误可见，用户丢弃到配额以下后能继续创建标注。
+  没有这条验收，阶段 4 不完成，不得以“阶段 5 会做 UI”为由交付。
 - **非法目录名**：手工放一个非 UUID 名的目录进 `annotations/` ⇒ 它**不出现在药丸列表里**，
   且被宽限期清扫回收（有日志）。
 - **配额条数**：只创建空 `.tmp-*` 目录也会计入条数上限。
@@ -1221,39 +1271,41 @@ the goldens stay byte-identical**"*。签入的 golden
 
 冒烟门必须上机验证，不接受单测绿即交付：重建视口/几何的判据历史上必然逃过单测。
 DOM 应用与 canvas 应用各走一遍完整流程（框选、提交、修复、热重载）。
-Android 虽不落 overlay，阶段 1 的共享 UI tool contract 仍需设备或 instrumentation 覆盖；
-若该轮上不了 Android 设备，**必须记为阶段 1 未完成**，不能用「Android UI 非目标」把
+Android 虽不落 overlay，阶段 **1a** 的共享 UI tool contract 仍需设备或 instrumentation 覆盖；
+若该轮上不了 Android 设备，**必须记为阶段 1a 未完成**，不能用「Android UI 非目标」把
 agent-facing contract 判绿。
 
 ## 分阶段落地
 
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
-| 1 | 两端 `inspect_ui` 几何/canvas rect/runtimeErrors（含 `console.error` 与载荷预算）+ `capture_ui` 区域（修正后的裁剪数学）+ `image-read` + `.lingxi` 进构建键跳过表 + 两处 `local-app-build` 字面量改集合判定 | 无。**完全不碰协议** |
-| **spike** | 宿主能否拿到新鲜且不可伪造的观测（六条验收，真机） | 1 |
-| 2 | 冒烟门 + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 可见信号 + source-vs-source 的决定。**iOS only**：引擎必须显式表达「本平台无冒烟能力」并返回 `verification_unavailable`，Android 对等能力是独立 spike | **spike** |
-| 3 | `StoreAppAnnotation` 原子目录 + **`DeleteAppAnnotation`** + **`annotation_id` 落盘前校验/归一** + **`annotations/` 的 read/delete 双豁免** + `AppRecord`/`AppRecordDto` 两个 build generation 字段 + `BuildOutcome`/`build_and_record` + 协议 bless/绑定生成。**硬门：并发 restore 测试** | 1 |
-| 4 | iOS overlay + controller 串行 + 标注状态机与持久化 + RootView one-shot 提交路由 | **2 与 3** |
-| 5 | 副驾驶条（两态）+ 引导（**先单独评审**，见该节警告） | 4 |
+| **1a** | 两端 `inspect_ui` 几何/canvas rect/runtimeErrors（含 `console.error` 与载荷预算）+ `capture_ui` 区域（修正后的裁剪数学）+ `image-read` | **无依赖，今天即可开工**。这些只动 `LocalAppWebView.swift`/`.kt` 与 `engine-mobile/Cargo.toml`——按 create-flow 全文 grep，`LocalAppWebView` 与 `image-read` 命中数**均为 0**，零文件重叠。**完全不碰协议** |
+| **1b** | `.lingxi` 进构建键跳过表 + 两处 `local-app-build` 字面量改集合判定（lease 与删除守卫） | master step 2 的写入窗口——这三处落在 `local_apps_build.rs` / `local_workflow.rs` / `registry.rs`，与 create-flow 有文件级重叠，按 master order 串行 |
+| **spike** | 宿主能否拿到新鲜且不可伪造的观测（六条验收，真机） | 1a |
+| 2 | 冒烟门 + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 可见信号 + source-vs-source 的决定。**iOS only**：引擎必须显式表达「本平台无冒烟能力」并返回 `verification_unavailable`，Android 对等能力是独立 spike | **spike + create-flow Web runtime profile Phase 1**；所有 workflow 判定必须覆盖最终 profile 集合 |
+| 3 | `StoreAppAnnotation` 原子目录 + **`DeleteAppAnnotation`** + **`annotation_id` 落盘前校验/归一** + **`annotations/` 的 read/delete 双豁免** + `AppRecord`/`AppRecordDto` 两个 build generation 字段 + `BuildOutcome`/`build_and_record` + 协议 bless/绑定生成。**硬门：并发 restore 测试** | 1 + create-flow 协议 8.0.0 + runtime-profile Phase 1；按 master order rebase 后再 bless |
+| 4 | iOS overlay + controller 串行 + 标注状态机与持久化 + RootView one-shot 提交路由 + **最小可用副驾驶条**（输入/药丸清单/提交/重试/丢弃/quota 错误） | **2 与 3** |
+| 5 | 副驾驶条的视觉/交互打磨 + 引导（**先单独评审**，不承载功能性恢复入口） | 4 |
 
-⛔ **阶段 3 不得先于阶段 1 的「`.lingxi` 进构建键跳过表」交付。**
+⛔ **阶段 3 不得先于阶段 1b 的「`.lingxi` 进构建键跳过表」交付。**
 `AppRecord` 就存在 `workspace/.lingxi/app.json`（`storage.rs:364`，`MetadataMirror`
 每次持久化都重写，`:829-835`），所以每次构建都铸新 `last_build_id` **本身就在 churn
 一个构建键输入** ⇒ `build_cache_hit`（`local_apps_build.rs:642-644`）永远不再命中，
 每次真机构建都是完整 Vite 重建。而阶段 3 自己的验收测试（两次无改动构建 ⇒
 `last_build_id` 变、`last_output_change_id` 不变）**在这个坏状态下照样通过**，
 本阶段没有任何东西会发现它。`workspace_build_key` 那条回归测试必须**同时**进
-阶段 1 和阶段 3 的门。
+阶段 1b 和阶段 3 的门。
 
-除此之外阶段 1 与 3 可并行。阶段 1 是 spike 与 2 的硬前置。
+阶段 1b 与 3 在 verification 自身的数据依赖上可以并行，**但集成上不得并行写入**：master order 将阶段 3 排在 runtime-profile Phase 1 之后，以避免 `AppRecord`、DTO、host、bindings 和客户端 adapter 两轮冲突修改。阶段 **1a** 是 spike 与 2 的硬前置（判据依赖 1a 新增的 rect 与 runtimeErrors）；
+**1b 不是** spike 的前置，它只在阶段 3 之前必须落地（构建键那条）。
 **阶段 2 在 spike 出结论前不可计划；阶段 4 不得在 2 之前交付**，因为提交路由的
 source-vs-source 互斥策略与 `buildObserved → cleared` 的门结果都由阶段 2 确定。
 
 ## 先于本设计存在的在线缺陷
 
-四轮评审顺带确认的现存 bug。⚠️ **其中第 1、3 条本设计有依赖，已排进阶段 1**——
+四轮评审顺带确认的现存 bug。⚠️ **其中第 1、3 条由本设计 Phase 1b 唯一实现；第 4 条由 create-flow §0 唯一实现**——
 列在这里是为了说明「它们不是本设计引入的、也应当独立于本设计被修」，
-不是说它们在范围之外。第 2、4 条与本设计无关，建议单独开条目。
+不是说它们在范围之外。第 2 条与本设计无关，建议单独开条目。
 
 1. **`.lingxi` 不在构建键跳过表**（`local_apps_build.rs:766-769`）——任何写入都让缓存永不命中。
 2. **`Paused` 的收养检查点让 app 永久不可删**：`registry.rs:903` 把收养的检查点登记为
@@ -1262,21 +1314,29 @@ source-vs-source 互斥策略与 `buildObserved → cleared` 的门结果都由�
    `matches!(status, Running | Queued)`。
 3. **canvas 构建既没有 workspace lease、也不被删除守卫保护**：
    `local_workflow.rs:1987` 与 `registry.rs:796` 都硬编码 `"local-app-build"`
-   ⇒ canvas 应用可以在构建进行中被删掉。
+   ⇒ canvas 应用可以在构建进行中被删掉。按 master order，本条的唯一实现 owner 是
+   verification Phase 1b；create-flow runtime-profile 只保留进入断言与回归测试。
 4. **`LINGXI.md` 在移动端从未加载**：`session_cwd` 持 guest 路径
    （`host.rs:3291-3293, 3329`），`build_system_prompt` 走了 `prompt_probe_cwd_resolver`
    做 guest→host（`conversation.rs:12059-12075`）但**那条路径已不再渲染**
    （`prompt/mod.rs:150-153`），唯一渲染的 `additional_context_message`（`:12270`）
    读的是未转换的 guest 路径 ⇒ 加载零个文件、静默无错。
-   ⚠️ **它不阻塞本设计**（工具名每轮经 `all_names()` 喂给模型，标注消息正文自带指令），
-   但它是平台级缺陷：修复会给**整个移动平台**同时打开 memory 加载（嵌套 `@import` 展开、
-   外部包含门、read-state 播种、每条首用户消息的新 token），所以应独立提交、独立浸泡。
+   它由 create-flow §0 在 master step 1 单独提交、单独浸泡；verification 不再复制实现。
+   ⚠️ **「必须独立提交、独立浸泡」的理由不能跟着 ownership 一起丢**：这个三行修复会给
+   **整个移动平台**同时打开 memory 加载（嵌套 `@import` 展开、外部包含门、read-state 播种、
+   每条首用户消息的新 token）。完整表述见 create-flow §0；本文只保留指针。
+   （早期一次 ownership 迁移把这段警告从两份文档里同时删掉了——迁移是两个动作，
+   附带约束必须跟着走，见顶部纪律二。）
+   本文已核实**它不阻塞 Phase 1a**（工具名每轮经 `all_names()` 喂给模型、标注消息正文
+   自带指令）；**Phase 4** 的提交路由依赖工作区合约真正到达模型，开工时要跑 upstream
+   compatibility test 证明它已加载。
 
 ## 已知约束
 
-1. **协议**：`7.0.0`，blessed major 7。**本项目不兼容旧客户端/旧引擎，
-   两半必须同时发版**；允许必要的结构变更，但仍必须 bless 当前 contract、
-   重生成两端绑定并编译当前客户端。移动端无握手不是跳过这些步骤的理由。
+1. **协议**：代码今天是 `7.0.0` / blessed 7；实施基线将是 create-flow §B bless 后的 `8.0.0`。
+   **本项目不兼容旧客户端/旧引擎，两半必须同时发版**；Phase 3 必须先验证 create-flow
+   contract anchors 仍在，再 bless rebase 后的实际 diff、重生成两端绑定并编译当前客户端。
+   移动端无握手不是跳过这些步骤的理由。
 2. **uniffi**：变体追加到末尾（序数密集且位置相关）；不给无字段枚举加带数据变体
    （会让 Kotlin 生成 `sealed class` 并重命名所有常量）。`AppEventDto` 的 docstring 用
    `//` 而非 `///`。
@@ -1404,3 +1464,12 @@ engine-mobile 开 `image-read`（否则 agent 根本读不了标注图）；cont
 评审曾以「未经评审」为由建议砍掉这两节，那不是砍需求的正当理由（那是评审自己的覆盖
 缺口）；实际撤销依据是用户澄清了它的用意——它属于 app-use / computer-use 的通用能力，
 不该在本地应用里做一个半吊子版本。
+
+### 第七轮（跨计划 rebase 与 create-flow 防漂移，2026-08-24）
+
+- 协议实施基线从原始写作时的 7.0.0 改为 create-flow bless 后的 8.0.0；Phase 3 必须保留 mode/request/scaffolded contract anchors，并在 profile-aware 代码上决定下一次 bless。
+- 新增「上游 create-flow 契约与防漂移门」：verification 明确消费 scaffolded、surface/profile、workspace/session、workflow 集合、pnpm/build 与 create protocol 六组 post-create seam。
+- happy-path 测试禁止只靠旧手写 fixture，必须分别从 direct-create/profile 与 shell→host-confirmation→Scaffold 两条当前创建路径进入 verification。
+- 状态表增加两个前置 guard：空壳不能进入 annotation 状态机；非法 surface/profile 组合必须报存储损坏，不能从源码猜测后继续。
+- 共享补丁只留一个 owner：`LINGXI.md` resolver 属于 create-flow §0；canvas workflow lease/delete guard 与 `.lingxi` build-key 属于 verification Phase 1。
+- 新增 `2026-08-24-local-app-implementation-order.md`，规定两份 design 的串行写入、spike 与协议 rebase 顺序；create-flow 以后改动 post-create seam 时，必须同一变更更新本文和 master order。

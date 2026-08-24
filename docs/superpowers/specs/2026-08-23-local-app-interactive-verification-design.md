@@ -337,11 +337,13 @@ React 19（`package.json:17` `"react": "19.2.8"`）的默认 `onCaughtError` 路
 | 冒烟门报告 / `needs_user_review` | **待 spike 决定** | **待定，不得预判为否** |
 | 标注 → 消息 | 复用 `SendPrompt` | 否 |
 | 清单清理触发 | 复用 `AppRecordChanged`，但 `AppRecordDto` 新增 build 字段 | **是** |
-| **存标注** | 新命令 + `AppEventDto` 回执 | **是** |
+| **存标注 / 删标注** | 两条新命令 + `AppEventDto` 回执 | **是** |
 
 已确定的协议工作必须在**同一个结构更新批次**中完成：
 
 - `ClientCommand::StoreAppAnnotation` 与 `AppEventDto::AppAnnotationStored`；
+- `ClientCommand::DeleteAppAnnotation` 与 `AppEventDto::AppAnnotationDeleted`
+  （`cleared` 的终态；理由见「标注清单的持久化与状态机」）；
 - `AppRecordDto.last_build_id` 与 `AppRecordDto.last_output_change_id`；
 - Rust `lower_record()`、TS protocol mirror/runtime guards、iOS/Android 绑定与 adapter/model、
   contract index/goldens/snapshots 同步更新。
@@ -363,7 +365,8 @@ DTO lowering 或生成绑定。
   `:2329` 里），而提交路径每次切 scope 都新建引擎（`RootView.swift:915/928`）⇒
   新 registry 是空的，**跟会话过滤无关，修不好**。而 build-vs-build 本来就被进程互斥锁 +
   per-app 文件锁排除了（`local_apps_build.rs:626,634`；`storage.rs:185-216`）。
-  提交直接发，让锁去串行化。
+  ⚠️ **但「所以提交直接发、让锁去串行化」这个后续结论是错的，已删**——那两把锁
+  **不覆盖 agent 的源码编辑**，见「source-vs-source 竞态」。提交时机待阶段 2 决定。
 - ⛔ **`AppEventDto::AppBuildSucceeded` + `AppDetailsDto` 单独的 build id**：
   `AppRecordChanged` 已经是 blessed 事件且客户端已在处理（`LocalAppsStore.swift:911`）；
   `pin_init_session` 就是从 `with_app` 里发 `AppEvent::RecordChanged` 的现成先例
@@ -423,14 +426,20 @@ ClientCommand::StoreAppAnnotation {
    `surface` 已经通过 `target.cache_tag()`（`:735`）独立折进键里；其余
    （`settings.local.json`/`app.json`/`design-spec.json`）是纯服务状态——**它们正是今天在
    churn 这个键的东西，跳过它们本身就是那个 bug 的修复**。
-2. ⛔ **「checkpoint restore 会删掉它」——假的，我把代码读反了。**
+2. ⚠️ **「checkpoint restore 会删掉它」——按当时的表述是错的，但有一个真实的窄窗口。**
+   （先说结论：**加上下面那条豁免之后，两种情况都安全**；不加豁免则窗口内的标注会丢。）
    `.lingxi` **本来就被整目录递归特殊处理**：`exclude_service_documents`
    （`checkpoints.rs:257-274`）往 `.git/info/exclude` 写的是目录模式 `/.lingxi/`，
    且每次 `open_or_init` 都重写；`untrack_service_documents`（`:290-302`）
    `index.remove_dir(APP_STATE_DIR, 0)` 整目录；`read_service_documents`（`:314-347`）
    **只递归 `.lingxi/`**，不是整个 workspace；而 restore 的 checkout 请求的是
    `remove_untracked(true)` 而**不是** `remove_ignored`——`checkpoints.rs:249-251` 明确
-   记录了这个区分。标注放在 `.lingxi/` 下能扛过 restore 两重。
+   记录了这个区分。**reset 之前就已存在的**标注因此能扛过 restore。
+
+   🚨 **但 `restore_service_documents`（`:371-386`）还会 `remove_file` 掉「reset 之后存在、
+   却不在 reset 之前那份快照里」的每一个 `.lingxi` 文件**——所以在 restore 窗口**之内**
+   发布的标注会被删掉，而且是在引擎已经回执成功之后。这就是下文那条豁免要解决的窗口，
+   两处必须一起读。
 
 可读性也已核实为三层独立成立：租约层 Reader 被**刻意豁免**
 （`workspace_lease.rs:303-306, 355-358`，还有一条按名字钉住它的测试
@@ -438,6 +447,15 @@ ClientCommand::StoreAppAnnotation {
 `allows("Read", ".lingxi/settings.local.json") == true`）；模板种下的
 `settings.local.json` 授 `Read(./**)`、只 deny `Edit(./.lingxi/**)`；
 glob 走 gitignore 语义（`filesystem.rs:521`），`permission/src` 里**没有任何隐藏文件规则**。
+
+🚨 **`annotation_id` 在任何 `Path::join` 之前必须先校验**，恢复时再查非法 UUID 已经太迟。
+命令收到的是裸 `String`，随后**直接当目录名用**——这是一条路径穿越面。
+
+照抄 `local-apps/src/ids.rs` 既有的形状（`is_valid_app_id` `:46` / `validate_app_id` `:61`
+→ `AppError`），加一对 `is_valid_annotation_id` / `validate_annotation_id`：
+必须是**规范小写 UUID**（单一路径组件，无分隔符、无 `.`/`..`、非绝对路径），
+在处理器最开头校验，失败即回 `invalid_annotation_id`，**在拼任何路径之前**。
+测试必须覆盖 `../`、绝对路径、含 `/` 与 `\\`、大写 UUID、超长串、空串。
 
 🚨 **目录名必须是 `annotation_id`，不是时间戳序号。** 每条标注是一个原子发布单元：
 
@@ -594,7 +612,8 @@ RootView 的 `onSubmitAnnotations(appID, batchID, prompt)` 是唯一入口。
    任意重入都先按 `batchID` 去重。
    ⚠️ 早期版本还列了一个 `readyToSend`——**没有任何转换产生或消费它**，删掉。
    **pending 项在三个出口上都必须被移除**，之后由药丸 FSM 独占
-   `stored`/`submitted`：token 被接受 ⇒ 移除 + 药丸转 `submitted`；
+   `stored`/`submitted`：**token 匹配的 `TurnStarted` 到达** ⇒ 移除 + 药丸转 `submitted`
+   （**不是** `send()` 返回 token 那一刻——那时只进 `awaitingTurnStarted`）；
    read-only 返回 `nil` ⇒ 移除 + 药丸转 `stored(error)`；turn cancelled/failed ⇒
    移除 + 药丸转 `stored(可重试)`。**不写移除规则的话**，`awaitingTurnStarted`
    没有出边，而「后续重试边沿看到该状态必须 no-op」+「按 `batchID` 去重」会
@@ -632,11 +651,15 @@ RootView 的 `onSubmitAnnotations(appID, batchID, prompt)` 是唯一入口。
    `landCreatedAppIfReady(streaming:)` 正是靠把投递值作为**参数**接进去才逃掉的
    （`RootView.swift:621`），而 `send()` 没有这个缝。
 
-   所以落地必须二选一，spike/实现时定：
-   (a) 给 `ConversationSource` 加一个接受投递值的 `send(_:assumingGuards:)` 类入口；
-   (b) flush 不直接在 sink 里调 `send`，而是把投递值写进 pending 项后
-       `Task { @MainActor in }` 跳到下一个 runloop 再读属性（此时 `didSet` 已完成）。
-   ⛔ **不要照字面实现「投递 false 后重新检查五个守卫再 send」。**
+   **定死用这一种**（不留实现期选择）：sink 里**只**把投递值记进 pending 项并标脏，
+   然后 `Task { @MainActor in flushPendingAnnotationSubmission() }` 跳到下一个 main-actor
+   调度点再读属性——属性赋值是同步完成的，所以那时 `didSet` 已结束、读到的是新值。
+   ⛔ **不要**给 `ConversationSource` 加接受投递值的 `send` 变体：那是一个被大量调用的
+   共享 API，为一个调用方改它的代价远大于一次 runloop 跳转。
+   ⛔ **不要**照字面实现「投递 false 后立刻重新检查五个守卫再 send」。
+
+   ⚠️ 跳转后重新检查时可能发现**另一个**守卫已经置位（比如新一轮 turn 刚开始）——
+   此时保持 queued 等下一个边沿，这是正确行为，不是失败。
 
    每次重试都重新检查：
    `activeScope == .localApp(appID)`、目标 session 已 adopt、source 不在五个
@@ -697,6 +720,13 @@ batch 状态：
   解析 sidecar，恢复完整药丸为 `stored(recovered)`，不是删除；
 - 清单是 `draft/storing`、盘上已有同 id 的完整目录 ⇒ 升为 `stored(recovered)`；
 - 清单是 `stored/submitted/buildObserved`、盘上没有 ⇒ 降回 `draft(error)`；
+- 🚨 **清单是 `submitted` 或 `buildObserved`、盘上有 ⇒ 一律降到 `stored(recovered)`。**
+  这两个状态的推进依赖 `ConversationTurnToken`，而 token 是**进程内的**，重启后
+  live turn 已经不存在、无法再对账。**降级是安全的**（最坏是用户重新提交一次，
+  证据都还在），而**留在 `submitted` 是不可恢复的**：没有任何边沿能再推动它，
+  药丸永久卡住，且 `batchID` 去重会静默吞掉用户的重新提交。
+  ⛔ 不要试图持久化 token 来「续上」——`sessionEpoch` 与 source generation 在重启后
+  必然变化，续上的对账是假的。
 - `.tmp-*` 或缺任一正式文件的目录不算标注；仅在没有对应 in-flight Store
   且超过有界宽限期后回收；
 - UUID 非法或 sidecar schema/字段校验失败的正式目录进入可见的
@@ -710,10 +740,25 @@ batch 状态：
 而且长在**构建工作区里**、没有任何 GC。参考的先例本身是一个带版本的
 `UserDefaults` 键（`:1305`），换 `.v2` 就会把墓碑全孤立掉、退回第一种读法。
 
-补法：`cleared` 时由客户端发一条 `DeleteAppAnnotation`（进同一批协议改动），
-或引擎在 `build_and_record` 里当 `last_output_change_id` 越过该 batch 时回收；
-并明确 `cleared` 的 `annotation_id` **在其目录被确认删除前**以墓碑形式留在日志里。
-`annotations/` 需要数量与字节双上限。
+**定死用带回执的删除命令**，进阶段 3 的同一批协议改动：
+
+```rust
+ClientCommand::DeleteAppAnnotation { app_id, annotation_id }
+// → AppEventDto::AppAnnotationDeleted { app_id, annotation_id, error: Option<String> }
+```
+
+⛔ **不用「引擎在 `build_and_record` 里 GC」那个候选**：`build_and_record` 手里
+**没有 batch、没有 turn、没有 `SmokeReport`**，它无法判断哪些标注真的可以删——
+它唯一知道的是「输出变了」，而输出变化和「这批反馈已被处理」不是一回事
+（用户可能在修复途中又加了新标注）。
+
+- `cleared` 的 `annotation_id` **以墓碑形式留在日志里，直到收到该 id 的
+  `AppAnnotationDeleted` 且无 `error`**；墓碑在收到回执后才移除。
+- 删除命令**可重试且幂等**：目录已不存在 ⇒ 回成功。
+- 重启时若日志里还有墓碑 ⇒ 重发删除命令（这条要有测试）。
+- `annotations/` 的数量与字节上限用**拒绝**而非静默回收：超限时
+  `StoreAppAnnotation` 回 `annotation_quota_exceeded`，客户端提示用户先提交或清理。
+  ⛔ 不要在超限时自动删最旧的——那会在用户没看见的情况下丢掉证据。
 
 🚨 **`StoreAppAnnotation` 不取 per-app 构建锁，而 checkpoint restore 会删掉窗口内新建的目录。**
 `restore_service_documents`（`checkpoints.rs:371-386`）会 `remove_file` 掉**每一个
@@ -722,11 +767,20 @@ git hard reset，不是瞬时的；在那个窗口里发布的标注会在引擎
 `AppAnnotationStored{path}` 之后**被删掉，随后恢复规则把它降成 `draft(error)`
 ——用户的截图没了。其他写这棵树的路径都持锁（`service.rs:760` 建 checkpoint、
 `:797` restore、`local_apps_build.rs:633-634` 构建）。
-两个候选修法：`StoreAppAnnotation` 的「temp 写 + rename」外面套
-`storage::lock_app_build`（代价：提交会被一整次 Vite 构建挡住，与
-source-vs-source 那节耦合）；或把 `annotations/` 从
-`restore_service_documents` 的删多余项那一趟里豁免——那一趟的用途是防止 reset
-把**曾被跟踪过的** `.lingxi` blob 重新物化，跟从未被跟踪的标注目录无关。
+**定死用豁免，不用锁**：把 `annotations/` 同时从
+`read_service_documents` 的递归**和** `restore_service_documents` 的删多余项那一趟里
+豁免掉。那一趟的用途是防止 reset 把**曾被跟踪过的** `.lingxi` blob 重新物化，
+跟从未被跟踪的标注目录无关。
+
+⛔ **不用 `storage::lock_app_build`**：那会让一次提交被一整次 Vite 构建（可达数分钟）
+挡住，而提交是用户正在等的交互动作；而且它与「source-vs-source 竞态」那节的未决
+决定耦合，会把一个已经能定的问题绑到一个还不能定的问题上。
+
+豁免之后，标注在 restore 中的行为是**完全不被触碰**：它们已因 `/.lingxi/` 进了
+`.git/info/exclude`，而 checkout 请求的是 `remove_untracked` 而非 `remove_ignored`。
+
+**并发 restore 测试是阶段 3 的硬门**：在 restore 进行中发布一条标注，
+restore 结束后该标注必须完整存在且回执有效。
 
 ⚠️ **顺带：把 `annotations/` 从 `read_service_documents` 的递归里跳过。**
 它的注释是「**Read every file** under `workspace/.lingxi/`」，对每个文件
@@ -912,6 +966,12 @@ the goldens stay byte-identical**"*。签入的 golden
   覆盖 `build_app` 与 checkpoint restore/rollback 三条会改变被服务字节的路径，
   且 JS/subagent 无法注入 `status:"passed"` 覆盖宿主报告。不得在 spike
   前将测试写死为 `build_app` 触发。
+- 🚨 **smoke 视图与可见预览的共存必须进测试门**（不是只写在 spike 问题里）：
+  (i) 可见预览挂载时冒烟门跑一遍，**用户的预览不得被 `close()`**、页面状态不丢；
+  (ii) 反向：冒烟视图存在时用户打开 app，两者都能收到各自的消息，
+  `resolveBridge`/`deliverStreamFrame` 不串台；
+  (iii) 删除 app 时**两个视图都被关闭**，`remove(forIdentifier:)` 不因残留引用失败
+  （`LocalAppWebView.swift:70-78`、`:1366`）。
 - spike 候选的 WebView 必须使用非零 viewport；未挂载/didFail/timeout
   按门内判定记为 `infrastructure_unavailable`，workflow 终态记为 `verification_unavailable`
   （两个名字**不是同义词**：前者是单条判据的分类，后者是 `delivery_status` 的取值），必须释放专用 pending request 与离屏 WebView，
@@ -926,7 +986,7 @@ the goldens stay byte-identical**"*。签入的 golden
 - build outcome：缓存命中和无字节变化的 miss 都使 `last_build_id` 变、
   `last_output_change_id` 不变；真正改变 dist 时两者同步变到同一新 id。
 - 协议：command/event/record goldens、contract index、TS union/guards、`clients/shared`
-  完整 `npm test`；断言 `AppAnnotationStored` 位于 `AppEventDto`，且
+  完整 `npm test`；断言 `AppAnnotationStored` **与 `AppAnnotationDeleted`** 都位于 `AppEventDto`，且
   `AppRecordDto` 的两个 build generation 字段经 lowering 到达两端客户端。
   ⚠️ **契约索引是手写的**，漏条目时 version guard 静默放行——新字段必须手动加 `put(...)`。
 - workflow 脚本：阶段序列与 agent 计数断言更新；**同时更新

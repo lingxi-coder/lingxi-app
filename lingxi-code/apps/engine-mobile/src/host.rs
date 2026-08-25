@@ -106,7 +106,7 @@ use crate::{
         canonical_cwd_string, remove_app_session_file, AgentOutputRouter, AgentOutputStream,
         AgentTurnUsageState, LocalAppsAgentExecutor, LocalAppsHostBroker,
     },
-    local_apps_llm::{ApiServiceModel, ChatMessage, ChatPart, ChatRequest, ChatRole, LocalAppsLlm},
+    local_apps_llm::{ApiServiceModel, LocalAppsLlm},
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
     local_apps_profile::{profile_apps, ProfileApps},
     mobile_command_registry, mobile_tool_registry_with_skill_loader,
@@ -5682,66 +5682,6 @@ impl MobileEngineHandle {
         }
     }
 
-    /// Answer a create sheet's `ProposeAppIdentity` with a name and a surface.
-    ///
-    /// ALWAYS emits. Both values are fixed at creation — a surface is immutable
-    /// once scaffolded and apps have no rename — so the sheet has to render
-    /// them as editable defaults before it commits. That makes an unreachable
-    /// or babbling model a non-event: the fallback is exactly the placeholder
-    /// name `AppService::create_app` would have derived anyway, and the routed
-    /// surface, which is what most apps are. Failing the command instead would
-    /// wedge a sheet whose fields the user can simply type over.
-    async fn handle_propose_app_identity(&self, request_id: String, brief: &str) {
-        let (name, surface) = self.propose_app_identity(brief).await;
-        self.event_sink
-            .emit(ClientEvent::AppIdentityProposed {
-                request_id,
-                name,
-                surface,
-            })
-            .await;
-    }
-
-    async fn propose_app_identity(&self, brief: &str) -> (String, AppSurfaceDto) {
-        let fallback = || (fallback_app_name(brief), AppSurfaceDto::Dom);
-        let request = ChatRequest {
-            system: Some(APP_IDENTITY_SYSTEM_PROMPT.to_string()),
-            messages: vec![ChatMessage {
-                role: ChatRole::User,
-                content: vec![ChatPart::Text(brief.to_string())],
-            }],
-            // Two short fields. A cap this tight also bounds what a brief that
-            // is really a prompt injection can make the model emit.
-            max_tokens: 200,
-            temperature: Some(0.0),
-            cache_scope: None,
-        };
-        // Read the model through the profile's swap cell rather than the
-        // runtime's own `Arc`: `profile_apps` replaces that cell on every
-        // reconnect, and a holder of the old `Arc` keeps authenticating as a
-        // credential that may since have rotated out — silently.
-        let Some(llm) = self.local_apps_host.current_llm() else {
-            tracing::debug!("ProposeAppIdentity: no model attached; using the derived default");
-            return fallback();
-        };
-        match llm.chat(request).await {
-            Ok(outcome) => parse_app_identity(&outcome.text).unwrap_or_else(|| {
-                tracing::debug!(
-                    answer = %outcome.text,
-                    "ProposeAppIdentity: unparseable answer; using the derived default"
-                );
-                fallback()
-            }),
-            Err(error) => {
-                tracing::debug!(
-                    error = %error,
-                    "ProposeAppIdentity: model unavailable; using the derived default"
-                );
-                fallback()
-            }
-        }
-    }
-
     async fn handle_create_app(
         &self,
         name: &str,
@@ -5774,10 +5714,10 @@ impl MobileEngineHandle {
         // inside AppService's pre-commit initializer so neither the native UI
         // nor observers can see an app that is not buildable yet.
         // An absent surface is a caller that expressed no preference, not an
-        // error: the routed shape is what most apps are, and it is the same
-        // default `ProposeAppIdentity` falls back to. Raising is fallible like
-        // every other inbound DTO raise — an unknown `#[non_exhaustive]` future
-        // surface must fail typed rather than launder into a routed create.
+        // error: the routed shape is what most apps are. Raising is fallible
+        // like every other inbound DTO raise — an unknown `#[non_exhaustive]`
+        // future surface must fail typed rather than launder into a routed
+        // create.
         let surface = match surface.map(crate::local_apps_bridge::raise_surface) {
             Some(Ok(surface)) => surface,
             Some(Err(error)) => {
@@ -6817,6 +6757,14 @@ impl MobileEngineHandle {
                 self.handle_get_app_details(app_id).await;
                 Ok(())
             }
+            // ⚠️ `mode` and `request_id` are NOT forwarded yet. Protocol
+            // 8.0.0 adds them; the create-flow task is what forks this handler
+            // on the mode and threads the correlation key through to the
+            // success/failure events. Bound to `_`-prefixed names rather than
+            // matched with `..` so this drop stays greppable and so the arm
+            // breaks again if either field is renamed. Until that task lands
+            // EVERY create is treated as `Scaffolded` — which is today's
+            // behaviour, and is why no client sends `Shell` yet.
             ClientCommand::CreateApp {
                 name,
                 origin,
@@ -6825,6 +6773,8 @@ impl MobileEngineHandle {
                 workflow_model,
                 conversation_id,
                 surface,
+                mode: _mode,
+                request_id: _request_id,
             } => {
                 self.handle_create_app(
                     &name,
@@ -7111,17 +7061,6 @@ impl MobileEngineHandle {
                         origin_session_id: Some(resume_session),
                     })
                     .await;
-                Ok(())
-            }
-
-            ClientCommand::ProposeAppIdentity { request_id, brief } => {
-                let brief = brief.trim().to_string();
-                if brief.is_empty() {
-                    return Err(ClientError::Rejected {
-                        message: "app identity proposal requires a brief".into(),
-                    });
-                }
-                self.handle_propose_app_identity(request_id, &brief).await;
                 Ok(())
             }
 
@@ -9139,58 +9078,6 @@ pub fn build_mobile_engine(
 /// workspace — history follows the user, the source session stays put; a
 /// library create (or a fork that fails, e.g. an empty source) anchors an
 /// empty mobile session instead. Returns the minted uuid; the caller pins it
-/// What the model is asked when a create sheet wants a name and a surface.
-///
-/// Names the two shapes by what the app DOES rather than by the scaffold's
-/// internal spelling, because the answer is shown to the user: "canvas" is a
-/// build detail, "a single drawn surface with its own frame loop" is the thing
-/// the user can tell is right or wrong.
-const APP_IDENTITY_SYSTEM_PROMPT: &str = "\
-You name a small mobile app from a one-line brief and choose its shape.
-
-Reply with ONLY a JSON object, no prose and no code fence:
-{\"name\": \"<short display name>\", \"surface\": \"dom\" | \"canvas\"}
-
-name: 2-4 words, in the SAME language the brief is written in. It is a label a
-person picks out of a list, not a description of the brief.
-
-surface:
-- \"canvas\" when the app is one drawn surface that animates itself frame by
-  frame — a game, a simulation, a 3D scene, a generative visual toy.
-- \"dom\" for everything else: anything built from screens, lists, forms,
-  settings, text and buttons. When unsure, answer \"dom\".";
-
-/// The name the sheet shows when the model gave nothing usable.
-///
-/// Deliberately the SAME derivation `AppService::create_app` applies to a blank
-/// name (the brief's first 24 CHARS, never bytes — a byte cut would split a CJK
-/// codepoint), so the field the user sees is what they would have got anyway.
-fn fallback_app_name(brief: &str) -> String {
-    brief.trim().chars().take(24).collect()
-}
-
-/// Read `{"name": …, "surface": …}` out of a model answer.
-///
-/// Tolerates a code fence or a sentence around the object by taking the text
-/// between the first `{` and the last `}`. Returns `None` unless BOTH fields
-/// are usable: a half-parsed answer that kept the name and defaulted the shape
-/// would be indistinguishable, at the sheet, from a deliberate choice.
-fn parse_app_identity(text: &str) -> Option<(String, AppSurfaceDto)> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    let parsed: serde_json::Value = serde_json::from_str(text.get(start..=end)?).ok()?;
-    let name = parsed.get("name")?.as_str()?.trim();
-    let surface = match parsed.get("surface")?.as_str()?.trim() {
-        "dom" => AppSurfaceDto::Dom,
-        "canvas" => AppSurfaceDto::Canvas,
-        _ => return None,
-    };
-    if name.is_empty() || name.len() > local_apps::service::MAX_NAME_BYTES {
-        return None;
-    }
-    Some((name.to_string(), surface))
-}
-
 async fn mint_app_init_session(
     lingxi_home: &std::path::Path,
     source_cwd: &str,
@@ -10846,12 +10733,11 @@ mod tests {
 
     // ── F3-05: the async `submit` FFI entry point ───────────────────────────
 
-    use super::{build_mobile_engine, fallback_app_name, parse_app_identity, MobileEngineHandle};
+    use super::{build_mobile_engine, MobileEngineHandle};
     use crate::local_apps_llm::test_support::ScriptedModel;
     use client_protocol::commands::ClientCommand;
     use client_protocol::error::ClientError;
     use client_protocol::events::ClientEvent as Ev;
-    use client_protocol::local_apps::AppSurfaceDto;
     use client_protocol::permission::PermissionResponseDto;
 
     /// Build a real, fully-wired [`MobileEngineHandle`] off-device (host fake
@@ -12551,6 +12437,7 @@ mod tests {
     // ── LOCAL-APPS (phase 1): handler-level tests (command in → state +
     //    events out) over the real engine handle ─────────────────────────────
 
+    use client_protocol::commands::AppCreateModeDto;
     use client_protocol::local_apps::{
         AppCreateOriginDto, AppErrorCodeDto, AppEventDto, AppRuntimeStateDto,
     };
@@ -12578,165 +12465,6 @@ mod tests {
         })
     }
 
-    /// `parse_app_identity` takes BOTH fields or nothing.
-    ///
-    /// A half-parsed answer that kept the name and defaulted the shape would be
-    /// indistinguishable, at the create sheet, from a deliberate choice — and
-    /// the shape is immutable once the app is scaffolded.
-    #[test]
-    fn app_identity_parsing_requires_both_fields_and_tolerates_a_fence() {
-        // A bare object.
-        assert_eq!(
-            parse_app_identity(r#"{"name": "打砖块", "surface": "canvas"}"#),
-            Some(("打砖块".to_string(), AppSurfaceDto::Canvas))
-        );
-        // A fenced object with prose around it — models do this constantly.
-        assert_eq!(
-            parse_app_identity(
-                "Sure!\n```json\n{\"name\": \"记事本\", \"surface\": \"dom\"}\n```\n"
-            ),
-            Some(("记事本".to_string(), AppSurfaceDto::Dom))
-        );
-        // Whitespace around the name is trimmed, not preserved into the record.
-        assert_eq!(
-            parse_app_identity(r#"{"name": "  记事本  ", "surface": "dom"}"#),
-            Some(("记事本".to_string(), AppSurfaceDto::Dom))
-        );
-        // A surface this build does not know is a REJECT, never a silent `dom`.
-        assert_eq!(
-            parse_app_identity(r#"{"name": "X", "surface": "hologram"}"#),
-            None
-        );
-        for bad in [
-            r#"{"name": "X"}"#,                    // no surface
-            r#"{"surface": "dom"}"#,               // no name
-            r#"{"name": "", "surface": "dom"}"#,   // empty name
-            r#"{"name": "  ", "surface": "dom"}"#, // whitespace-only name
-            "not json at all",
-            "",
-        ] {
-            assert_eq!(parse_app_identity(bad), None, "must reject {bad:?}");
-        }
-        // Over the service's own cap — accepting it would only fail later, at
-        // create time, with the sheet already dismissed.
-        let too_long = "名".repeat(local_apps::service::MAX_NAME_BYTES);
-        assert_eq!(
-            parse_app_identity(&format!(r#"{{"name": "{too_long}", "surface": "dom"}}"#)),
-            None
-        );
-    }
-
-    /// The fallback name is the SAME derivation `AppService::create_app`
-    /// applies to a blank name, so the sheet shows what the user would have got
-    /// anyway. Characters, never bytes: a byte cut splits a CJK codepoint.
-    #[test]
-    fn fallback_app_name_truncates_by_characters() {
-        let brief = "记".repeat(40);
-        let name = fallback_app_name(&brief);
-        assert_eq!(name.chars().count(), 24);
-        assert_eq!(name, "记".repeat(24));
-        assert_eq!(fallback_app_name("  一个记事本  "), "一个记事本");
-    }
-
-    /// `ProposeAppIdentity` asks the model once and answers on the SAME
-    /// request id.
-    #[test]
-    fn propose_app_identity_answers_with_the_models_choice() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, listener) = build_submit_handle(tmp.path());
-        let model = ScriptedModel::with_chat(vec![Ok(crate::local_apps_llm::ChatOutcome {
-            text: r#"{"name": "打砖块", "surface": "canvas"}"#.into(),
-            stop_reason: None,
-        })]);
-        handle.set_local_apps_model(model.clone());
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::ProposeAppIdentity {
-                    request_id: "req-1".into(),
-                    brief: "  一个打砖块游戏  ".into(),
-                })
-                .await
-                .expect("submit(ProposeAppIdentity)");
-            let events = drain_events(&handle, &listener).await;
-            let proposed = events
-                .iter()
-                .find_map(|event| match event {
-                    Ev::AppIdentityProposed {
-                        request_id,
-                        name,
-                        surface,
-                    } => Some((request_id.clone(), name.clone(), *surface)),
-                    _ => None,
-                })
-                .expect("ProposeAppIdentity must answer");
-            assert_eq!(proposed.0, "req-1", "the request id is echoed verbatim");
-            assert_eq!(proposed.1, "打砖块");
-            assert_eq!(proposed.2, AppSurfaceDto::Canvas);
-            // The brief reaches the model trimmed, and nothing creates an app.
-            let asked = model.chat_request_at(0);
-            assert!(
-                asked.system.is_some(),
-                "the naming instructions must ride the system prompt"
-            );
-            assert!(
-                !events
-                    .iter()
-                    .any(|event| matches!(event, Ev::AppsChanged { .. })),
-                "proposing must not create anything"
-            );
-        });
-    }
-
-    /// A model that is unreachable must still answer.
-    ///
-    /// The sheet's fields are editable, so the derived default is a usable
-    /// starting point; failing the command instead would wedge a sheet the user
-    /// could simply have typed over.
-    #[test]
-    fn propose_app_identity_falls_back_when_the_model_is_unavailable() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        // `build_submit_handle` installs a model with NO scripted answers, so
-        // any call fails immediately and in-process.
-        let (handle, listener) = build_submit_handle(tmp.path());
-
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::ProposeAppIdentity {
-                    request_id: "req-2".into(),
-                    brief: "一个记事本".into(),
-                })
-                .await
-                .expect("an unreachable model is not a command failure");
-            let events = drain_events(&handle, &listener).await;
-            let proposed = events
-                .iter()
-                .find_map(|event| match event {
-                    Ev::AppIdentityProposed { name, surface, .. } => Some((name.clone(), *surface)),
-                    _ => None,
-                })
-                .expect("the answer is emitted even when the model failed");
-            assert_eq!(proposed.0, "一个记事本");
-            assert_eq!(proposed.1, AppSurfaceDto::Dom);
-        });
-    }
-
-    /// An empty brief is refused rather than answered with an empty name.
-    #[test]
-    fn propose_app_identity_rejects_an_empty_brief() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let (handle, _listener) = build_submit_handle(tmp.path());
-        handle.runtime().block_on(async {
-            let refused = handle
-                .submit(ClientCommand::ProposeAppIdentity {
-                    request_id: "req-3".into(),
-                    brief: "   ".into(),
-                })
-                .await;
-            assert!(matches!(refused, Err(ClientError::Rejected { .. })));
-        });
-    }
-
     /// This round trip covers the dynamic application list/details protocol;
     /// the retired static-catalog exchange is intentionally absent.
     #[test]
@@ -12754,6 +12482,8 @@ mod tests {
                     workflow_model: None,
                     conversation_id: None,
                     surface: None,
+                    mode: AppCreateModeDto::Scaffolded,
+                    request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
@@ -12798,6 +12528,8 @@ mod tests {
                     workflow_model: None,
                     conversation_id: None,
                     surface: None,
+                    mode: AppCreateModeDto::Scaffolded,
+                    request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
@@ -13053,6 +12785,8 @@ mod tests {
                     workflow_model: Some("deepseek/deepseek-v4-flash".into()),
                     conversation_id: None,
                     surface: None,
+                    mode: AppCreateModeDto::Scaffolded,
+                    request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
@@ -13107,6 +12841,8 @@ mod tests {
                     workflow_model: None,
                     conversation_id: Some("conv-7".into()),
                     surface: None,
+                    mode: AppCreateModeDto::Scaffolded,
+                    request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
@@ -13222,6 +12958,8 @@ mod tests {
                     workflow_model: None,
                     conversation_id: None,
                     surface: None,
+                    mode: AppCreateModeDto::Scaffolded,
+                    request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
@@ -13298,6 +13036,8 @@ mod tests {
                     workflow_model: None,
                     conversation_id: None,
                     surface: None,
+                    mode: AppCreateModeDto::Scaffolded,
+                    request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
@@ -13397,6 +13137,8 @@ mod tests {
                     workflow_model: None,
                     conversation_id: None,
                     surface: None,
+                    mode: AppCreateModeDto::Scaffolded,
+                    request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp) must not be a transport error");

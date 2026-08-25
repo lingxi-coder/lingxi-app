@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '7.0.0';
+export const CLIENT_PROTOCOL_VERSION = '8.0.0';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // commands.rs
@@ -172,9 +172,21 @@ export type ClientCommand =
        * the surface is immutable once scaffolded.
        */
       surface?: AppSurfaceDto;
+      /**
+       * `shell` creates the empty shell only (the record lands with
+       * `scaffolded: false` and no scaffold); `scaffolded` creates and
+       * scaffolds in one step. Required — there is no default. In `shell` mode
+       * `surface` must be omitted: the shape is decided when the scaffold
+       * lands, not before.
+       */
+      mode: AppCreateModeDto;
+      /**
+       * Client-generated correlation key, echoed verbatim on both
+       * `app_created` and `app_operation_failed`, so the caller that started
+       * this creation recognises its own outcome.
+       */
+      request_id?: string;
     }
-  /** Ask the host to propose a display name and a surface for a one-line brief. */
-  | { type: 'propose_app_identity'; request_id: string; brief: string }
   | { type: 'start_app'; app_id: string }
   | { type: 'stop_app'; app_id: string }
   | { type: 'restart_app'; app_id: string }
@@ -779,6 +791,14 @@ export type AppCreateOriginDto = 'chat' | 'library';
  */
 export type AppSurfaceDto = 'dom' | 'canvas';
 
+/**
+ * How a `create_app` creates the app (commands.rs `AppCreateModeDto`) — the
+ * same concept, with the same names, as the engine's `local_apps::CreateMode`.
+ * `shell` is the empty shell the "+" button creates before the user confirms a
+ * shape; `scaffolded` creates and scaffolds in one step.
+ */
+export type AppCreateModeDto = 'shell' | 'scaffolded';
+
 /** Typed local-app failure code carried by `app_operation_failed` (local_apps.rs `AppErrorCodeDto`). */
 export type AppErrorCodeDto =
   | 'not_found'
@@ -862,6 +882,12 @@ export interface AppRecordDto {
   /** The app's pinned "init" session (bare uuid) — listed first in its catalog. */
   init_session_id?: string;
   workspace_rel: string;
+  /**
+   * Whether the app's scaffold has landed. `false` is the empty shell the "+"
+   * button creates before the user confirms a shape. REQUIRED — the engine
+   * declares no serde default, so a record that omits it does not decode.
+   */
+  scaffolded: boolean;
 }
 
 /** One restorable app checkpoint (local_apps.rs `AppCheckpointDto`). */
@@ -1210,7 +1236,7 @@ export type AppAuthorizationDecisionDto =
  */
 export type AppEventDto =
   | { type: 'app_details_changed'; details: AppDetailsDto }
-  | { type: 'app_created'; record: AppRecordDto }
+  | { type: 'app_created'; record: AppRecordDto; request_id?: string }
   | { type: 'app_record_changed'; record: AppRecordDto }
   | { type: 'app_profile_proposal'; proposal: AppAgentProfileProposalDto }
   | { type: 'app_bridge_response'; response: AppBridgeResponseDto }
@@ -1349,8 +1375,6 @@ export type ClientEvent =
   | { type: 'model_changed'; model: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
   | { type: 'conversation_controls_changed'; controls: ConversationControlsDto }
-  /** Answers exactly one `propose_app_identity`, echoing its `request_id`. */
-  | { type: 'app_identity_proposed'; request_id: string; name: string; surface: AppSurfaceDto }
   | {
       type: 'provider_credential_status';
       operation_id: number;
@@ -1409,7 +1433,14 @@ export type ClientEvent =
       next_offset?: number;
     }
   | { type: 'app_checkpoint_created'; app_id: string; checkpoint: AppCheckpointDto }
-  | { type: 'app_operation_failed'; app_id?: string; code: AppErrorCodeDto; message: string }
+  | {
+      type: 'app_operation_failed';
+      app_id?: string;
+      code: AppErrorCodeDto;
+      message: string;
+      /** Correlation key echoed back from the command that failed. */
+      request_id?: string;
+    }
   // ── Reserved / feed-deferred (round-trip only) ──────────────────────────────
   | { type: 'coordinator_status'; active_workers: number; team?: string }
   | {

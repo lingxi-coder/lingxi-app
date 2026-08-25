@@ -64,24 +64,41 @@ enum Compatibility {
     Breaking,
 }
 
-/// Classify the structural diff from `old` (checked-in) to `new` (current).
+/// Every entry that makes the diff from `old` (checked-in) to `new` (current)
+/// BREAKING, described one per line.
 ///
-/// - A key present in `old` but ABSENT in `new` ⇒ removed/renamed ⇒ `Breaking`.
-/// - A key present in BOTH but with a DIFFERENT type ⇒ retyped ⇒ `Breaking`.
-/// - A key present only in `new` ⇒ additive ⇒ contributes `Compatible`.
+/// - A key present in `old` but ABSENT in `new` ⇒ removed/renamed.
+/// - A key present in BOTH but with a DIFFERENT type ⇒ retyped.
+/// - A key present only in `new` ⇒ additive ⇒ never listed here.
 ///
-/// The overall result is `Breaking` if ANY entry is breaking, else `Compatible`.
-fn classify(old: &ContractIndex, new: &ContractIndex) -> Compatibility {
-    // Removed or retyped keys are breaking.
+/// This is the single source of truth for [`classify`] (which is just "is this
+/// list empty"), so the guard's failure message can NAME the entries that broke
+/// instead of asserting that something, somewhere, did. An exit code — or a
+/// message that only says "a removed / renamed / retyped entry" — does not tell
+/// the next author whether the guard actually saw the symbol they deleted.
+fn breaking_entries(old: &ContractIndex, new: &ContractIndex) -> Vec<String> {
+    let mut broken = Vec::new();
     for (key, old_ty) in old {
         match new.get(key) {
-            None => return Compatibility::Breaking, // removed / renamed
-            Some(new_ty) if new_ty != old_ty => return Compatibility::Breaking, // retyped
+            None => broken.push(format!("{key}: REMOVED (was {old_ty:?})")),
+            Some(new_ty) if new_ty != old_ty => {
+                broken.push(format!("{key}: RETYPED {old_ty:?} -> {new_ty:?}"));
+            }
             Some(_) => {}
         }
     }
-    // Any key only in `new` is purely additive — not breaking.
-    Compatibility::Compatible
+    broken
+}
+
+/// Classify the structural diff from `old` (checked-in) to `new` (current).
+///
+/// The overall result is `Breaking` if ANY entry is breaking, else `Compatible`.
+fn classify(old: &ContractIndex, new: &ContractIndex) -> Compatibility {
+    if breaking_entries(old, new).is_empty() {
+        Compatibility::Compatible
+    } else {
+        Compatibility::Breaking
+    }
 }
 
 /// Parse the `major` component of a `major.minor.patch` version string.
@@ -334,11 +351,6 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::ConversationControlsChanged.controls",
         "ConversationControlsDto",
     );
-    put("ClientEvent::AppIdentityProposed", "app_identity_proposed");
-    put("ClientEvent::AppIdentityProposed.request_id", "String");
-    put("ClientEvent::AppIdentityProposed.name", "String");
-    put("ClientEvent::AppIdentityProposed.surface", "AppSurfaceDto");
-
     put(
         "ClientEvent::ProviderCredentialStatus",
         "provider_credential_status",
@@ -459,6 +471,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::AppOperationFailed.app_id", "Option<String>");
     put("ClientEvent::AppOperationFailed.code", "AppErrorCodeDto");
     put("ClientEvent::AppOperationFailed.message", "String");
+    put("ClientEvent::AppOperationFailed.request_id", "Option<String>");
 
     put("ClientEvent::CoordinatorStatus", "coordinator_status");
     put("ClientEvent::CoordinatorStatus.active_workers", "u32");
@@ -596,10 +609,6 @@ fn current_contract_index() -> ContractIndex {
         "ClientCommand::SetReasoningSelection.selection",
         "ReasoningSelectionDto",
     );
-    put("ClientCommand::ProposeAppIdentity", "propose_app_identity");
-    put("ClientCommand::ProposeAppIdentity.request_id", "String");
-    put("ClientCommand::ProposeAppIdentity.brief", "String");
-
     put("ClientCommand::RunSlashCommand", "run_slash_command");
     put("ClientCommand::RunSlashCommand.raw", "String");
     put("ClientCommand::RunSlashCommand.turn_id", "Option<u64>");
@@ -662,6 +671,8 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::CreateApp.workflow_model", "Option<String>");
     put("ClientCommand::CreateApp.conversation_id", "Option<String>");
     put("ClientCommand::CreateApp.surface", "Option<AppSurfaceDto>");
+    put("ClientCommand::CreateApp.mode", "AppCreateModeDto");
+    put("ClientCommand::CreateApp.request_id", "Option<String>");
 
     put("ClientCommand::StartApp", "start_app");
     put("ClientCommand::StartApp.app_id", "String");
@@ -1237,6 +1248,8 @@ fn current_contract_index() -> ContractIndex {
     put("AppCreateOriginDto::Library", "library");
     put("AppSurfaceDto::Dom", "dom");
     put("AppSurfaceDto::Canvas", "canvas");
+    put("AppCreateModeDto::Shell", "shell");
+    put("AppCreateModeDto::Scaffolded", "scaffolded");
 
     put("AppErrorCodeDto::NotFound", "not_found");
     put("AppErrorCodeDto::RevisionConflict", "revision_conflict");
@@ -1291,6 +1304,7 @@ fn current_contract_index() -> ContractIndex {
     put("AppRecordDto.workflow_state", "AppWorkflowStateDto");
     put("AppRecordDto.conversation_id", "Option<String>");
     put("AppRecordDto.workspace_rel", "String");
+    put("AppRecordDto.scaffolded", "bool");
 
     put("AppCheckpointDto.id", "String");
     put("AppCheckpointDto.label", "String");
@@ -1496,6 +1510,7 @@ fn current_contract_index() -> ContractIndex {
     put("AppEventDto::AppBridgeStreamFrame.frame_json", "String");
     put("AppEventDto::AppCreated", "app_created");
     put("AppEventDto::AppCreated.record", "AppRecordDto");
+    put("AppEventDto::AppCreated.request_id", "Option<String>");
     put("AppEventDto::AppRecordChanged", "app_record_changed");
     put("AppEventDto::AppRecordChanged.record", "AppRecordDto");
     put("AppEventDto::AppProfileProposal", "app_profile_proposal");
@@ -1763,16 +1778,24 @@ fn current_contract_matches_index_or_version_bumped() {
                     blessed_major_path().display()
                 )
             });
+            // NAME the entries. A bare "something broke" leaves the author
+            // unable to tell a guard that saw their deletion from a guard that
+            // is blind to it and tripped on an unrelated key.
+            let broken = breaking_entries(&checked_in, &current);
             assert!(
                 major_was_bumped_past(current_major, blessed_major),
-                "BREAKING contract change detected (a removed / renamed / retyped \
-                 entry) but `CLIENT_PROTOCOL_VERSION`'s major ({current_major}, from \
-                 {CLIENT_PROTOCOL_VERSION:?}) does not exceed the major blessed alongside \
-                 the checked-in contract index ({blessed_major}, from `{}`). Per decision \
-                 §0.10 a breaking change REQUIRES a major bump PAST the last blessed one. \
-                 Bump the major in `client-protocol/src/version.rs`, then re-bless with \
-                 `BLESS=1 cargo test -p client-protocol --test version_guard_test`.",
-                blessed_major_path().display()
+                "BREAKING contract change detected but `CLIENT_PROTOCOL_VERSION`'s major \
+                 ({current_major}, from {CLIENT_PROTOCOL_VERSION:?}) does not exceed the \
+                 major blessed alongside the checked-in contract index ({blessed_major}, \
+                 from `{}`). Per decision §0.10 a breaking change REQUIRES a major bump \
+                 PAST the last blessed one. Bump the major in \
+                 `client-protocol/src/version.rs`, then re-bless with \
+                 `BLESS=1 cargo test -p client-protocol --test version_guard_test`.\n\
+                 The {} breaking entr{} (checked-in index -> current contract):\n  {}",
+                blessed_major_path().display(),
+                broken.len(),
+                if broken.len() == 1 { "y" } else { "ies" },
+                broken.join("\n  ")
             );
         }
     }
@@ -1795,8 +1818,8 @@ fn current_contract_matches_index_or_version_bumped() {
 #[allow(clippy::too_many_lines, clippy::no_effect_underscore_binding)]
 fn contract_index_covers_every_dto() {
     use client_protocol::commands::{
-        ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto, PromptModeDto,
-        ProviderCredentialSecretDto,
+        AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto,
+        PromptModeDto, ProviderCredentialSecretDto,
     };
     use client_protocol::computer_access::{
         AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -2141,6 +2164,7 @@ fn contract_index_covers_every_dto() {
             conversation_id: None,
             init_session_id: None,
             workspace_rel: String::new(),
+            scaffolded: false,
         },
         AppCheckpointDto {
             id: String::new(),
@@ -2150,11 +2174,13 @@ fn contract_index_covers_every_dto() {
         },
         AppRuntimeStateDto::Stopped,
         AppCreateOriginDto::Library,
+        AppCreateModeDto::Shell,
         AppErrorCodeDto::NotYetAvailable,
         ClientEvent::AppOperationFailed {
             app_id: None,
             code: AppErrorCodeDto::NotFound,
             message: String::new(),
+            request_id: None,
         },
         ClientCommand::ListApps,
     );
@@ -2212,6 +2238,7 @@ fn contract_index_covers_every_dto() {
             conversation_id: None,
             init_session_id: None,
             workspace_rel: String::new(),
+            scaffolded: false,
         },
         manifest: None,
         runtime: AppRuntimeDetailsDto {
@@ -2310,6 +2337,7 @@ fn contract_index_covers_every_dto() {
                 conversation_id: None,
                 init_session_id: None,
                 workspace_rel: String::new(),
+                scaffolded: false,
             },
         },
         AppEventDto::AppProfileProposal {

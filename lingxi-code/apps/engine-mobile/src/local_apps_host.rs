@@ -3101,6 +3101,11 @@ impl LocalAppsHostBroker {
                 app_id: None,
                 code: crate::local_apps_bridge::lower_error_code(error.code()),
                 message: error.to_string(),
+                // Correctly `None`, not a stub: `request_id` is the
+                // correlation key a client puts on its own `CreateApp`, and
+                // this failure belongs to an AGENT-driven create that no
+                // client command started. There is nothing to echo.
+                request_id: None,
             })
             .await;
     }

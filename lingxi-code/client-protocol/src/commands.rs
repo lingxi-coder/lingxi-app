@@ -49,6 +49,26 @@ fn is_default_git_version_control(value: &bool) -> bool {
     *value
 }
 
+/// How a [`CreateApp`](ClientCommand::CreateApp) creates the app — the same
+/// concept, with the same names, as the service layer's
+/// `local_apps::CreateMode`. It is deliberately NOT a translated vocabulary:
+/// the host maps `Shell` to `CreateMode::Shell` and `Scaffolded` to
+/// `CreateMode::Scaffolded`, one to one.
+///
+/// A bare wire STRING (`"shell"` / `"scaffolded"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum AppCreateModeDto {
+    /// Create the empty shell only: the record is written with
+    /// `scaffolded: false` and no scaffold is laid down. In this mode
+    /// `surface` MUST be `None` — the shape is decided when the scaffold
+    /// lands, not before.
+    Shell,
+    /// Create and scaffold in one step (today's behaviour).
+    Scaffolded,
+}
+
 /// A provider credential carried over the authenticated local bridge.
 ///
 /// The wire representation is a plain JSON string for TypeScript/UniFFI
@@ -396,6 +416,16 @@ pub enum ClientCommand {
         /// bindings.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface: Option<AppSurfaceDto>,
+        /// `Shell` = create the empty shell only; `Scaffolded` = create and
+        /// scaffold. Appended LAST (with `request_id`) for the same positional
+        /// reason as `surface` above.
+        mode: AppCreateModeDto,
+        /// Client-generated correlation key, echoed verbatim on both the
+        /// success event (`AppEventDto::AppCreated`) and the failure event
+        /// (`ClientEvent::AppOperationFailed`) so the caller that started this
+        /// creation can recognise its own outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 
     /// Start the app's dev-server runtime. Phase 1 validates the app exists,
@@ -520,32 +550,6 @@ pub enum ClientCommand {
     SetReasoningSelection {
         /// Provider-neutral reasoning selection.
         selection: ReasoningSelectionDto,
-    },
-
-    /// Ask the host to propose a display name and a surface for a one-line
-    /// brief, WITHOUT creating anything. Answered by exactly one
-    /// [`AppIdentityProposed`](crate::events::ClientEvent::AppIdentityProposed)
-    /// carrying the same `request_id`.
-    ///
-    /// This exists because both values are fixed at creation — a surface is
-    /// immutable once scaffolded and apps cannot be renamed — so the user has
-    /// to see and be able to correct them BEFORE the create commits. The host
-    /// asks the model once, headlessly; it never opens a conversation, and a
-    /// model that is unreachable or answers badly still yields a usable
-    /// proposal rather than an error, because the sheet's fields are editable
-    /// anyway.
-    ///
-    /// Appended to preserve existing UniFFI enum ordinals — this enum is
-    /// encoded positionally by the generated mobile bindings, so inserting a
-    /// variant anywhere above would silently renumber every command after it on
-    /// a client built against the previous bindings.
-    ProposeAppIdentity {
-        /// Correlates the reply. Echoed verbatim on the answering event so a
-        /// sheet that was retyped and re-submitted cannot adopt a stale
-        /// proposal for an older brief.
-        request_id: String,
-        /// The one-line brief the user typed.
-        brief: String,
     },
 }
 

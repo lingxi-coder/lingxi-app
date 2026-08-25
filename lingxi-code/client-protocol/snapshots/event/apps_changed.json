@@ -10,7 +10,8 @@
       "updated_at_ms": 1750000000001,
       "workflow_state": "draft",
       "conversation_id": "55555555-5555-4555-8555-555555555555",
-      "workspace_rel": "apps/habits-1a2b/workspace"
+      "workspace_rel": "apps/habits-1a2b/workspace",
+      "scaffolded": true
     }
   ]
 }

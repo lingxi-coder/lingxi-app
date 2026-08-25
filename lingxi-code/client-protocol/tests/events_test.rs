@@ -469,6 +469,7 @@ fn apps_changed_round_trips() {
             conversation_id: None,
             init_session_id: None,
             workspace_rel: "apps/habits-1a2b/workspace".to_string(),
+            scaffolded: true,
         }],
     };
     let json = serde_json::to_value(&ev).expect("serialize AppsChanged");
@@ -604,6 +605,7 @@ fn extended_local_app_events_round_trip() {
                     conversation_id: Some("conv-9".to_string()),
                     init_session_id: Some("init-1".to_string()),
                     workspace_rel: "apps/habits-1a2b/workspace".to_string(),
+                    scaffolded: true,
                 },
             },
         },
@@ -699,19 +701,25 @@ fn app_checkpoint_created_round_trips() {
 }
 
 /// `AppOperationFailed` — bare-string typed code; `app_id` is optional
-/// (skipped when the failure addressed no specific app).
+/// (skipped when the failure addressed no specific app), and so is the
+/// `request_id` echoed back from the command that failed.
 #[test]
 fn app_operation_failed_round_trips() {
     let ev = ClientEvent::AppOperationFailed {
         app_id: Some("habits-1a2b".to_string()),
         code: AppErrorCodeDto::NotYetAvailable,
         message: "app runtime lands in phase 4".to_string(),
+        request_id: Some("req-7".to_string()),
     };
     let json = serde_json::to_value(&ev).expect("serialize AppOperationFailed");
     assert_eq!(json["type"], "app_operation_failed");
     assert_eq!(json["app_id"], "habits-1a2b");
     assert_eq!(json["code"], "not_yet_available");
     assert_eq!(json["message"], "app runtime lands in phase 4");
+    assert_eq!(
+        json["request_id"], "req-7",
+        "the failing command's correlation key rides back verbatim"
+    );
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppOperationFailed");
     assert_eq!(back, ev);
 
@@ -719,11 +727,16 @@ fn app_operation_failed_round_trips() {
         app_id: None,
         code: AppErrorCodeDto::InvalidRequest,
         message: "bad app id".to_string(),
+        request_id: None,
     };
     let json_g = serde_json::to_value(&ev_global).expect("serialize global AppOperationFailed");
     assert!(
         json_g.get("app_id").is_none(),
         "None app_id must be skipped"
+    );
+    assert!(
+        json_g.get("request_id").is_none(),
+        "None request_id must be skipped"
     );
     let back_g: ClientEvent =
         serde_json::from_value(json_g).expect("deserialize global AppOperationFailed");

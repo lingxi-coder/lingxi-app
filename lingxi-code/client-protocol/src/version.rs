@@ -36,17 +36,32 @@
 /// record is now written by the host from its own device facts rather than
 /// declared by the agent. Removals are BREAKING under the F1-09 guard.
 /// Bumped to 7.0.0 for the create-flow reshape: creating a local app no longer
-/// defers to an intake conversation. The library's create sheet resolves the
-/// name and the surface up front (`ProposeAppIdentity` / `AppIdentityProposed`)
-/// and then creates the app outright with `CreateApp.surface`, so the app's very
-/// first conversation is already rooted in the app's own workspace, and
-/// `AppEventDto::AppCreated` names the record that landed.
+/// defers to an intake conversation. The library's create sheet resolved the
+/// name and the surface up front and then created the app outright with
+/// `CreateApp.surface`, so the app's very first conversation is already rooted
+/// in the app's own workspace, and `AppEventDto::AppCreated` names the record
+/// that landed.
 ///
-/// ⚠️ The F1-09 index diff for this change is purely ADDITIVE — nothing was
-/// removed, so the guard classifies it `Compatible` and did not itself require
-/// a MAJOR. The bump is a DELIBERATE choice to make every client re-bless
-/// against the reshaped create flow rather than silently speak half of it;
-/// `snapshots/blessed_major.txt` is re-blessed to match. Do not cite a removal
-/// here that did not happen — an earlier draft named a `StartAppCreation`
-/// command that has never existed in this repository.
-pub const CLIENT_PROTOCOL_VERSION: &str = "7.0.0";
+/// Bumped to 8.0.0 for the conversational create flow. This one IS breaking
+/// under the F1-09 guard — the diff removes entries, it does not only add them:
+///
+/// - REMOVED the create sheet's identity-proposal command and its answering
+///   event (the host's pre-creation guess at a name and a surface). "+" now
+///   creates an empty shell and the app's own conversation settles both, so
+///   there is nothing left to guess at before anything exists. Named
+///   descriptively rather than by symbol so the deletion sweep's zero-hit grep
+///   for those identifiers stays honest.
+/// - ADDED `CreateApp.mode` (`shell` / `scaffolded`) — required, so an existing
+///   client's `CreateApp` no longer deserializes. That is deliberate: the mode
+///   is the single decision point for whether a scaffold lands, and a default
+///   would let a client that never heard of shells mint one by accident.
+/// - ADDED `AppRecordDto.scaffolded` — required, no serde default, for the same
+///   reason: a record whose shell-ness is guessed is worse than a record that
+///   fails to parse.
+/// - ADDED the `request_id` correlation key on `CreateApp`,
+///   `AppEventDto::AppCreated` and `ClientEvent::AppOperationFailed`, so the
+///   caller that started a creation can recognise its own outcome instead of
+///   inferring it from whatever record appeared last.
+///
+/// `snapshots/blessed_major.txt` is re-blessed to 8 in lockstep.
+pub const CLIENT_PROTOCOL_VERSION: &str = "8.0.0";

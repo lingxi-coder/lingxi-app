@@ -143,6 +143,16 @@ impl AppEmissionQueue {
             app_id,
             code: lower_error_code(error.code()),
             message: error.to_string(),
+            // NOT WIRED: this helper is reached from `emit_app_failure`,
+            // which has no originating request in scope — every app command
+            // funnels through it. Protocol 8.0.0 added the field so a failing
+            // `CreateApp` can be matched by the client that started it; making
+            // that true needs the `request_id` threaded from the CreateApp
+            // handler down to here, which is the create-flow task's business,
+            // not the protocol bump's. Until then a client that gets a failure
+            // sees `null` and must fall back to the app-id/message. ⚠️ Do not
+            // read this `None` as "the correlation key is meant to be absent".
+            request_id: None,
         });
     }
 
@@ -208,20 +218,18 @@ pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
         AppEvent::AppsChanged { apps } => Some(ClientEvent::AppsChanged {
             apps: lower_records(&apps),
         }),
-        // `request_id` is dropped here, not yet forwarded: the wire DTO has
-        // no `AppEventDto::AppCreated.request_id` field until Task 4 adds
-        // it, and Task 5 is what wires this arm through to it. When that
-        // field exists, this arm MUST become `request_id: Some(request_id)`
-        // (forwarded, not `None`) — the `AppCreated` case in
+        // `request_id` is FORWARDED verbatim, never re-synthesized and never
+        // `None`-ed out. This is the whole point of the field: the client that
+        // pressed "+" recognises its own creation by matching this key, so a
+        // constant `None` here would leave every device unable to open the app
+        // it just created. The `AppCreated` case in
         // `every_app_event_arm_lowers_field_exact` below feeds this arm a
-        // `Some("req-1")` input specifically so that leaving `None` here
-        // fails that test instead of shipping a silent drop.
-        AppEvent::AppCreated {
-            record,
-            request_id: _,
-        } => Some(ClientEvent::AppEvent {
+        // `Some("req-1")` input for exactly that reason — writing `None` here
+        // compiles, but fails that test.
+        AppEvent::AppCreated { record, request_id } => Some(ClientEvent::AppEvent {
             event: AppEventDto::AppCreated {
                 record: lower_record(&record),
+                request_id,
             },
         }),
         AppEvent::RecordChanged { record } => Some(ClientEvent::AppEvent {
@@ -271,6 +279,7 @@ pub(crate) fn lower_record(record: &AppRecord) -> AppRecordDto {
         conversation_id: record.conversation_id.clone(),
         init_session_id: record.init_session_id.clone(),
         workspace_rel: record.workspace_rel.clone(),
+        scaffolded: record.scaffolded,
     }
 }
 
@@ -642,6 +651,37 @@ mod tests {
         // laundering into a library create.
     }
 
+    /// `lower_record` carries the record's OWN `scaffolded` flag.
+    ///
+    /// Every other fixture in this module is a `scaffolded: true` record, so a
+    /// hardcoded `scaffolded: true` in `lower_record` would pass all of them.
+    /// The `false` half below is what makes the mapping observable: a shell
+    /// that lowers as formed would let a client offer a real app's UI over an
+    /// empty workspace.
+    #[test]
+    fn lower_record_carries_the_records_own_scaffolded_flag() {
+        let mut record = AppRecord {
+            id: "app00001".into(),
+            name: "Habits".into(),
+            brief: "a habit tracker".into(),
+            workflow_model: None,
+            git_enabled: true,
+            scaffolded: true,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            workflow_state: AppWorkflowState::Draft,
+            conversation_id: None,
+            init_session_id: None,
+            workspace_rel: "apps/app00001/workspace".into(),
+        };
+        assert!(lower_record(&record).scaffolded, "a formed app lowers formed");
+        record.scaffolded = false;
+        assert!(
+            !lower_record(&record).scaffolded,
+            "a shell must lower as a shell — a constant here would pass the true case alone"
+        );
+    }
+
     /// The trimmed detail snapshot carries record + manifest + runtime +
     /// checkpoints and nothing else — a regression that resurrects a
     /// pipeline field fails to compile against `AppDetailsDto`, and a
@@ -732,6 +772,7 @@ mod tests {
             conversation_id: Some("conv-9".into()),
             init_session_id: None,
             workspace_rel: "apps/app00001/workspace".into(),
+            scaffolded: true,
         };
         let checkpoint = AppCheckpoint {
             id: "cp-1".into(),
@@ -750,17 +791,13 @@ mod tests {
                 },
             ),
             (
-                // `AppEventDto::AppCreated` has no `request_id` field yet
-                // (Task 4 adds it) — the expected literal below can't name
-                // the field until then, and today's `lower_app_event` arm
-                // drops it via `request_id: _` (see the comment there). The
-                // INPUT deliberately carries `Some("req-1")`, not `None`:
-                // once the DTO gains the field, this expected struct
-                // literal becomes non-exhaustive and forces whoever adds it
-                // to consciously write `request_id: Some("req-1".into())`
-                // here. Writing `None` would compile and pass, but it would
-                // be asserting the exact silent drop this test exists to
-                // catch — don't do that.
+                // The INPUT carries `Some("req-1")` and so does the
+                // EXPECTATION: `lower_app_event` must forward the correlation
+                // key, not drop it. This pairing was set up one task ahead of
+                // the DTO field precisely so that adding the field could not
+                // be "made to compile" with a `None` on this side — that
+                // would pin the silent drop as correct behaviour and the "+"
+                // button would never match its own creation event.
                 AppEvent::AppCreated {
                     record: record.clone(),
                     request_id: Some("req-1".into()),
@@ -768,6 +805,7 @@ mod tests {
                 ClientEvent::AppEvent {
                     event: AppEventDto::AppCreated {
                         record: record_dto.clone(),
+                        request_id: Some("req-1".into()),
                     },
                 },
             ),

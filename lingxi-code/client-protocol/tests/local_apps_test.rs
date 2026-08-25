@@ -121,7 +121,9 @@ fn checkpoint_kind_serializes_as_bare_string() {
 }
 
 /// `AppRecordDto` — `snake_case` protocol fields; an absent `conversation_id` is
-/// omitted from the wire.
+/// omitted from the wire, while `scaffolded` is REQUIRED (no serde default, so
+/// a record that omits it fails to decode rather than silently deciding that a
+/// shell is a formed app).
 #[test]
 fn app_record_round_trips_and_skips_none_conversation() {
     let record = AppRecordDto {
@@ -135,6 +137,10 @@ fn app_record_round_trips_and_skips_none_conversation() {
         conversation_id: None,
         init_session_id: None,
         workspace_rel: "apps/habits-1a2b/workspace".to_string(),
+        // Deliberately `true`, not `false`: `false` is `bool::default()`, so a
+        // future `#[serde(default)]` on this field would still round-trip a
+        // `false` fixture and this test would stop noticing.
+        scaffolded: true,
     };
     let json = serde_json::to_value(&record).expect("serialize AppRecordDto");
     assert_eq!(json["id"], "habits-1a2b");
@@ -147,8 +153,25 @@ fn app_record_round_trips_and_skips_none_conversation() {
         json.get("conversation_id").is_none(),
         "None conversation_id must be skipped"
     );
-    let back: AppRecordDto = serde_json::from_value(json).expect("deserialize AppRecordDto");
+    assert_eq!(json["scaffolded"], true);
+    let back: AppRecordDto =
+        serde_json::from_value(json.clone()).expect("deserialize AppRecordDto");
     assert_eq!(back, record);
+
+    // `scaffolded` carries NO serde default: dropping it from the wire must be
+    // a decode ERROR that names the field, never a silent `false`.
+    let mut without_scaffolded = json;
+    without_scaffolded
+        .as_object_mut()
+        .expect("record serializes to a JSON object")
+        .remove("scaffolded")
+        .expect("the field was on the wire to begin with");
+    let error = serde_json::from_value::<AppRecordDto>(without_scaffolded)
+        .expect_err("a record without `scaffolded` must not decode");
+    assert!(
+        error.to_string().contains("scaffolded"),
+        "the decode error must NAME the missing field, got: {error}"
+    );
 
     let chat_born = AppRecordDto {
         conversation_id: Some("conv-42".to_string()),

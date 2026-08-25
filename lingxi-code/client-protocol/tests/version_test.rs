@@ -32,15 +32,15 @@ fn version_is_semver() {
     }
 }
 
-/// The create-flow reshape — a local app is now CREATED by the library's
-/// create sheet rather than deferred to an intake conversation — pins the
-/// contract at `7.0.0` (a further MAJOR bump past the `DeviceContextDto` shrink
-/// at `6.0.0`; the index diff is additive, so the bump is deliberate rather
-/// than forced by the F1-09 guard — see
-/// `client_protocol::version::CLIENT_PROTOCOL_VERSION`'s doc comment). A
-/// change here is a deliberate, reviewed bump — this test makes an accidental
-/// edit visible.
+/// The conversational create flow pins the contract at `8.0.0`: "+" now creates
+/// an empty shell (`CreateApp.mode`, `AppRecordDto.scaffolded`) correlated by a
+/// `request_id`, and the pre-creation identity-proposal command and its
+/// answering event are GONE. Unlike the `7.0.0` bump, this diff removes index
+/// entries, so the F1-09 guard FORCES the major — see
+/// `client_protocol::version::CLIENT_PROTOCOL_VERSION`'s doc comment. A change
+/// here is a deliberate, reviewed bump — this test makes an accidental edit
+/// visible.
 #[test]
-fn version_is_seven_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "7.0.0");
+fn version_is_eight_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "8.0.0");
 }

@@ -24,7 +24,7 @@ use crate::listings::{
 };
 use crate::local_apps::{
     AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
-    AppRuntimeStateDto, AppSessionRowDto, AppSurfaceDto, AppWorkflowStateDto,
+    AppRuntimeStateDto, AppSessionRowDto, AppWorkflowStateDto,
 };
 use crate::message::MessageDto;
 use crate::permission::PermissionResolutionDto;
@@ -322,6 +322,16 @@ pub enum ClientEvent {
         app_id: Option<String>,
         code: AppErrorCodeDto,
         message: String,
+        /// Correlation key from the `CreateApp` (or other app command) that
+        /// failed, echoed verbatim so the caller that started the operation
+        /// can recognise its own failure. `None` for a failure the engine
+        /// synthesized with no originating request.
+        ///
+        /// Appended LAST: UniFFI encodes struct variants POSITIONALLY, so a
+        /// field inserted above `message` would be reinterpreted by a client
+        /// built against the previous bindings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 
     // ── Live thinking/usage (§0.7 follow-up) + reserved (§0.9) ────────────
@@ -378,15 +388,6 @@ pub enum ClientEvent {
 
     ConversationControlsChanged {
         controls: ConversationControlsDto,
-    },
-
-    // Answers exactly one `ClientCommand::ProposeAppIdentity`, echoing its
-    // `request_id`. Always emitted, even when the model was unreachable: the
-    // fields are a create sheet's editable defaults, never an authority.
-    AppIdentityProposed {
-        request_id: String,
-        name: String,
-        surface: AppSurfaceDto,
     },
 }
 

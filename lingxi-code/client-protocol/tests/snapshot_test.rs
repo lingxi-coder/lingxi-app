@@ -40,7 +40,8 @@ use std::path::{Path, PathBuf};
 
 use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use client_protocol::commands::{
-    ClientCommand, ImageRefDto, ListingKindDto, PromptModeDto, ProviderCredentialSecretDto,
+    AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto, PromptModeDto,
+    ProviderCredentialSecretDto,
 };
 use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -436,17 +437,6 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
-            "event/app_identity_proposed.json",
-            ClientEvent::AppIdentityProposed {
-                request_id: "2f1e0d9c-8b7a-4655-9443-2211ffee0099".to_string(),
-                name: "打砖块".to_string(),
-                // Non-default on purpose: `Dom` is the fallback the host emits
-                // when the model is unreachable, so a golden using it could not
-                // tell a real answer from a give-up.
-                surface: AppSurfaceDto::Canvas,
-            },
-        ),
-        (
             "event/provider_credential_status.json",
             ClientEvent::ProviderCredentialStatus {
                 operation_id: 17,
@@ -741,6 +731,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 app_id: Some("habits-1a2b".to_string()),
                 code: AppErrorCodeDto::NotYetAvailable,
                 message: "app runtime lands in phase 4".to_string(),
+                // Non-default on purpose: a `None` here would drop the key
+                // from the golden, so a rename of the field could not be
+                // caught by this snapshot.
+                request_id: Some("2f1e0d9c-8b7a-4655-9443-2211ffee0099".to_string()),
             },
         ),
         (
@@ -916,13 +910,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             },
         ),
         (
-            "command/propose_app_identity.json",
-            ClientCommand::ProposeAppIdentity {
-                request_id: "2f1e0d9c-8b7a-4655-9443-2211ffee0099".to_string(),
-                brief: "一个打砖块游戏".to_string(),
-            },
-        ),
-        (
             "command/run_slash_command.json",
             ClientCommand::RunSlashCommand {
                 raw: "/model opus".to_string(),
@@ -1012,6 +999,10 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 // so a golden using it would freeze a payload in which the field
                 // never appears and could not catch a rename of it.
                 surface: Some(AppSurfaceDto::Canvas),
+                mode: AppCreateModeDto::Scaffolded,
+                // Non-default on purpose, for the same reason as `surface`:
+                // a `None` would drop the key from the golden entirely.
+                request_id: Some("2f1e0d9c-8b7a-4655-9443-2211ffee0099".to_string()),
             },
         ),
         (
@@ -1563,6 +1554,7 @@ fn canonical_app_record() -> AppRecordDto {
         conversation_id: Some("55555555-5555-4555-8555-555555555555".to_string()),
         init_session_id: None,
         workspace_rel: "apps/habits-1a2b/workspace".to_string(),
+        scaffolded: true,
     }
 }
 

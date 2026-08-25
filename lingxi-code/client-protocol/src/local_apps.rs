@@ -256,6 +256,16 @@ pub struct AppRecordDto {
     /// Workspace directory relative to the engine data root (always
     /// `apps/<id>/workspace`, forward slashes).
     pub workspace_rel: String,
+    /// Whether the app's scaffold has landed. `false` is the empty shell the
+    /// "+" button creates before the user confirms a shape; `true` is a fully
+    /// formed app. REQUIRED on the wire with NO serde default: a record that
+    /// omits it is not a record this contract can interpret, and a default
+    /// would silently mint shells as formed apps.
+    ///
+    /// Appended LAST: UniFFI encodes record fields POSITIONALLY, so a field
+    /// inserted above `workspace_rel` would be reinterpreted by a client built
+    /// against the previous bindings.
+    pub scaffolded: bool,
 }
 
 /// One restorable checkpoint of an app workspace — the lowered core
@@ -916,6 +926,15 @@ pub enum AppEventDto {
     /// regeneration by reading the ordinals out of the generated Kotlin.
     AppCreated {
         record: AppRecordDto,
+        /// Correlation key from the originating `CreateApp`, echoed verbatim.
+        /// `None` when the creation had no client request behind it (an
+        /// agent-tool create, a backfill). A client that started a creation
+        /// matches on this to land the user on the app it just asked for.
+        ///
+        /// Appended after `record` for the same positional reason as the
+        /// variant itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 }
 

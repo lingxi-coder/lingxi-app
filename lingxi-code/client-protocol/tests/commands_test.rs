@@ -16,7 +16,7 @@
 //! input lives in JSON Strings elsewhere.
 
 use client_protocol::commands::{
-    ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto, PromptModeDto,
+    AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto, PromptModeDto,
     ProviderCredentialSecretDto,
 };
 use client_protocol::controls::ReasoningSelectionDto;
@@ -573,7 +573,9 @@ fn extended_local_app_commands_round_trip() {
 /// `None`). `template` was removed (local-apps#questionnaire, Task 5,
 /// coordinator ruling: total removal of the static template catalog);
 /// `brief` was added by Task 11 (the questionnaire-authoring seed, distinct
-/// from `name`).
+/// from `name`). `mode` (required, always on the wire) and `request_id`
+/// (optional, skipped when `None`) were appended for the conversational
+/// create flow.
 #[test]
 fn create_app_round_trips() {
     let cmd = ClientCommand::CreateApp {
@@ -584,6 +586,8 @@ fn create_app_round_trips() {
         workflow_model: Some("deepseek/deepseek-v4-flash".to_string()),
         conversation_id: Some("conv-42".to_string()),
         surface: Some(AppSurfaceDto::Canvas),
+        mode: AppCreateModeDto::Scaffolded,
+        request_id: Some("req-42".to_string()),
     };
     let json = serde_json::to_value(&cmd).expect("serialize CreateApp");
     assert_eq!(json["type"], "create_app");
@@ -595,6 +599,14 @@ fn create_app_round_trips() {
     assert_eq!(
         json["surface"], "canvas",
         "the surface rides as a bare wire string, like origin"
+    );
+    assert_eq!(
+        json["mode"], "scaffolded",
+        "the create mode rides as a bare wire string, like origin"
+    );
+    assert_eq!(
+        json["request_id"], "req-42",
+        "the correlation key rides verbatim so the caller can match its own outcome"
     );
     assert!(
         json.get("git_enabled").is_none(),
@@ -612,9 +624,19 @@ fn create_app_round_trips() {
         workflow_model: None,
         conversation_id: None,
         surface: None,
+        mode: AppCreateModeDto::Shell,
+        request_id: None,
     };
     let json_l = serde_json::to_value(&from_library).expect("serialize library CreateApp");
     assert_eq!(json_l["origin"], "library");
+    assert_eq!(
+        json_l["mode"], "shell",
+        "a shell create names its mode explicitly — there is no default"
+    );
+    assert!(
+        json_l.get("request_id").is_none(),
+        "None request_id must be skipped"
+    );
     assert!(
         json_l.get("conversation_id").is_none(),
         "None conversation_id must be skipped"
@@ -635,6 +657,8 @@ fn create_app_round_trips() {
         workflow_model: None,
         conversation_id: None,
         surface: Some(AppSurfaceDto::Dom),
+        mode: AppCreateModeDto::Scaffolded,
+        request_id: None,
     };
     let json_without_git = serde_json::to_value(&without_git).expect("serialize no-Git CreateApp");
     assert_eq!(json_without_git["git_enabled"], false);
@@ -792,6 +816,8 @@ fn no_live_command_carries_session_id() {
             workflow_model: None,
             conversation_id: Some("conv-42".to_string()),
             surface: Some(AppSurfaceDto::Dom),
+            mode: AppCreateModeDto::Scaffolded,
+            request_id: None,
         },
         ClientCommand::StartApp {
             app_id: "habits-1a2b".to_string(),

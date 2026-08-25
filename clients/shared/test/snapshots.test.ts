@@ -389,6 +389,10 @@ function validateAppSurface(v: unknown): void {
   assert.ok(['dom', 'canvas'].includes(v as string));
 }
 
+function validateAppCreateMode(v: unknown): void {
+  assert.ok(['shell', 'scaffolded'].includes(v as string));
+}
+
 function validateAppErrorCode(v: unknown): void {
   assert.ok(
     [
@@ -617,7 +621,10 @@ function validateAppRecord(v: unknown): void {
       isBool(o['git_enabled']) &&
       isNumber(o['created_at_ms']) &&
       isNumber(o['updated_at_ms']) &&
-      isString(o['workspace_rel']),
+      isString(o['workspace_rel']) &&
+      // REQUIRED, not `if ('scaffolded' in o)`: the Rust field carries no
+      // serde default, so a record without it is not a record.
+      isBool(o['scaffolded']),
   );
   validateAppWorkflowState(o['workflow_state']);
   if ('conversation_id' in o) assert.ok(isString(o['conversation_id']));
@@ -646,6 +653,9 @@ function validateAppEvent(v: unknown): void {
       validateAppDetails(o['details']);
       break;
     case 'app_created':
+      validateAppRecord(o['record']);
+      if ('request_id' in o) assert.ok(isString(o['request_id']));
+      break;
     case 'app_record_changed':
       validateAppRecord(o['record']);
       break;
@@ -864,9 +874,8 @@ function validateCommand(name: string, v: unknown): void {
       if ('workflow_model' in o) assert.ok(isString(o['workflow_model']));
       if ('conversation_id' in o) assert.ok(isString(o['conversation_id']));
       if ('surface' in o) validateAppSurface(o['surface']);
-      break;
-    case 'propose_app_identity':
-      assert.ok(isString(o['request_id']) && isString(o['brief']));
+      validateAppCreateMode(o['mode']);
+      if ('request_id' in o) assert.ok(isString(o['request_id']));
       break;
     case 'start_app':
     case 'stop_app':
@@ -1059,10 +1068,6 @@ function validateEvent(name: string, v: unknown): void {
     case 'conversation_controls_changed':
       validateConversationControls(o['controls']);
       break;
-    case 'app_identity_proposed':
-      assert.ok(isString(o['request_id']) && isString(o['name']));
-      validateAppSurface(o['surface']);
-      break;
     case 'provider_credential_status':
       assert.ok(
         isNumber(o['operation_id']) &&
@@ -1224,6 +1229,7 @@ function validateEvent(name: string, v: unknown): void {
       if ('app_id' in o) assert.ok(isString(o['app_id']));
       validateAppErrorCode(o['code']);
       assert.ok(isString(o['message']));
+      if ('request_id' in o) assert.ok(isString(o['request_id']));
       break;
     case 'coordinator_status':
       assert.ok(isNumber(o['active_workers']));
@@ -1322,7 +1328,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 48, `expected 48 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 47, `expected 47 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1336,6 +1342,17 @@ test('workflow model metadata and paused task status pass the wire guards', () =
     origin: 'chat',
     brief: 'Demo app',
     workflow_model: 'deepseek/deepseek-v4-flash',
+    mode: 'scaffolded',
+  });
+  // The "+" button's shape: an empty shell, no surface, correlated by a
+  // client-generated request id.
+  validateCommand('create_app.json', {
+    type: 'create_app',
+    name: '',
+    origin: 'library',
+    brief: '',
+    mode: 'shell',
+    request_id: 'req-1',
   });
   validateSessionAgent({
     agent_id: 'design',
@@ -1349,7 +1366,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 63, `expected 63 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 62, `expected 62 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

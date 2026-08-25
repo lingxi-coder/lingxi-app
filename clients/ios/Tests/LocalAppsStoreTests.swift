@@ -1864,193 +1864,138 @@ final class LocalAppsStoreTests: XCTestCase {
         }
     #endif
 
-    /// `LocalAppCreateView` refuses a whitespace-only brief.
-    /// Drives the predicate directly rather than poking `view.brief`: that
-    /// property is `@State`, so assigning to it on a bare struct outside a
-    /// view hierarchy silently does nothing.
-    func testTheCreateViewRefusesAWhitespaceOnlyBrief() {
-        XCTAssertFalse(LocalAppCreateView.canSubmit(brief: "   \n  "))
-        XCTAssertFalse(LocalAppCreateView.canSubmit(brief: ""))
-    }
-
-    func testTheCreateViewAcceptsANonEmptyBrief() {
-        XCTAssertTrue(LocalAppCreateView.canSubmit(brief: "a shared grocery list for my household"))
-        XCTAssertTrue(LocalAppCreateView.canSubmit(brief: "  记事本  "))
-    }
-
     #if canImport(engine_mobileFFI)
-        /// The create sheet creates the app OUTRIGHT, carrying the name and the
-        /// surface the user confirmed.
+        // ── The conversational create flow ────────────────────────────────
+        //
+        // The whole block these replaced was built around a create FORM: a
+        // brief, a name, a surface, a model, and a claim that matched the
+        // record by its brief. All of it is gone. "+" now commits an empty
+        // SHELL and the interview happens inside the app's own conversation,
+        // so the only thing tying an `AppCreated` back to the tap that caused
+        // it is the client-generated `request_id`.
+
+        /// "+" sends exactly one `CreateApp`, in shell mode, with a client
+        /// correlation key and nothing the user was never asked for.
         ///
-        /// Both are fixed at creation — a surface is immutable once scaffolded
-        /// and apps have no rename — so neither may be left to a value the user
-        /// never saw, and neither may travel through the model.
-        func testCreateSendsCreateAppWithTheConfirmedNameAndSurface() async throws {
+        /// Every field is asserted, including the ones that must be EMPTY: a
+        /// name or a brief invented here would be a value the user never
+        /// chose being written into a record they cannot rename, and a
+        /// non-nil `surface` would fix the app's shape before anyone had
+        /// discussed what it is.
+        func testPlusSendsAShellCreateWithAClientCorrelationKey() async throws {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            let created = await store.createApp(
-                brief: "一个打砖块游戏",
-                name: "打砖块",
-                surface: .canvas,
-                gitEnabled: false,
-                modelOverride: "anthropic/claude-sonnet-4-5")
+            let started = await store.createShellApp(conversationID: "conv-77")
 
-            XCTAssertTrue(created)
+            XCTAssertTrue(started)
+            XCTAssertEqual(submitted.count, 1)
             guard case let .createApp(name, origin, brief, gitEnabled, workflowModel,
-                                      conversationId, surface) =
+                                      conversationId, surface, mode, requestId) =
                 try XCTUnwrap(submitted.first)
             else { return XCTFail("expected CreateApp, got \(submitted)") }
-            XCTAssertEqual(name, "打砖块")
+            XCTAssertEqual(name, "", "a shell has no name yet — the agent proposes one")
             XCTAssertEqual(origin, .library)
-            XCTAssertEqual(brief, "一个打砖块游戏")
-            XCTAssertFalse(gitEnabled)
-            XCTAssertEqual(workflowModel, "anthropic/claude-sonnet-4-5")
+            XCTAssertEqual(brief, "", "a shell has no brief — that is what the interview is for")
+            XCTAssertTrue(gitEnabled, "the default, not a form toggle")
+            XCTAssertNil(workflowModel, "the model picker went with the form")
+            XCTAssertEqual(
+                conversationId, "conv-77",
+                "the conversation the user pressed + from, so the engine can fork its history")
             XCTAssertNil(
-                conversationId,
-                "a library create binds no conversation — none exists yet")
-            XCTAssertEqual(
-                surface, .canvas,
-                "the user's confirmed surface, not the routed default")
+                surface, "the shape is decided when the scaffold lands, not now")
+            XCTAssertEqual(mode, .shell, "no scaffold may be laid down by this command")
+            let key = try XCTUnwrap(requestId, "without a correlation key nothing can be claimed")
+            XCTAssertNotNil(
+                UUID(uuidString: key), "the key must be a client-generated UUID, got \(key)")
         }
 
-        /// `ProposeAppIdentity` is a REAL command, and its answer is routed back
-        /// to the ONE sheet that asked.
-        func testProposeIdentityAsksTheHostAndAdoptsTheAnswer() async throws {
+        /// A blank conversation id is sent as `nil`, not as `""`.
+        ///
+        /// The engine parses `conversation_id` as a uuid to fork from; an
+        /// empty string is not "no conversation", it is a parse failure that
+        /// happens to degrade the same way. Say `nil` and mean it.
+        func testAShellCreateWithNoActiveConversationSendsNilNotEmptyString() async throws {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            async let proposal = store.proposeIdentity(brief: "一个打砖块游戏")
-            // Reply on the request id the store actually sent. Echoing a
-            // fabricated one would let this pass against a store that never
-            // correlates at all.
-            var requestID: String?
-            for _ in 0..<200 where requestID == nil {
-                if case let .proposeAppIdentity(id, _) = submitted.first { requestID = id }
-                try await Task.sleep(for: .milliseconds(5))
-            }
-            let id = try XCTUnwrap(requestID, "the store must send ProposeAppIdentity")
-            guard case let .proposeAppIdentity(_, brief) = try XCTUnwrap(submitted.first)
-            else { return XCTFail("expected ProposeAppIdentity, got \(submitted)") }
-            XCTAssertEqual(brief, "一个打砖块游戏")
-            store.handle(event: .appIdentityProposed(
-                requestId: id, name: "打砖块", surface: .canvas))
+            _ = await store.createShellApp(conversationID: "   ")
 
-            let answer = await proposal
-            XCTAssertEqual(answer.name, "打砖块")
-            XCTAssertEqual(answer.surface, .canvas)
+            guard case let .createApp(_, _, _, _, _, conversationId, _, _, _) =
+                try XCTUnwrap(submitted.first)
+            else { return XCTFail("expected CreateApp, got \(submitted)") }
+            XCTAssertNil(conversationId)
         }
 
-        /// An answer for a DIFFERENT request must not resolve this one.
+        /// Only the `AppCreated` carrying OUR request id is claimed.
         ///
-        /// A sheet that was retyped and re-submitted has a stale proposal in
-        /// flight; adopting it would name the app after the abandoned brief.
-        /// Written so a store that ignored `request_id` entirely FAILS: the
-        /// wrong-id answer is delivered first, and only the matching one may
-        /// resolve the call.
-        func testProposeIdentityIgnoresAnAnswerForAnotherRequest() async throws {
+        /// The engine emits `AppCreated` for BOTH creation paths, so an agent
+        /// creating an app in another conversation lands one on this client
+        /// mid-flight. Written so a store that claims the first event it sees
+        /// FAILS: the foreign event is delivered first, and it is the one
+        /// carrying a real (but different) request id — the case a bare
+        /// "is this event correlated at all?" check would still get wrong.
+        func testOnlyTheAppCreatedCarryingOurRequestIdIsClaimed() async throws {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            let resolved = Resolved()
-            async let proposal: LocalAppsStore.AppIdentityProposal = {
-                let answer = await store.proposeIdentity(brief: "一个记事本")
-                await resolved.mark()
-                return answer
-            }()
+            _ = await store.createShellApp(conversationID: "conv-1")
+            let key = try XCTUnwrap(sentCreateRequestID(submitted))
 
-            var requestID: String?
-            for _ in 0..<200 where requestID == nil {
-                if case let .proposeAppIdentity(id, _) = submitted.first { requestID = id }
-                try await Task.sleep(for: .milliseconds(5))
-            }
-            let id = try XCTUnwrap(requestID)
+            let theirs = shellRecord(id: "theirs", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(
+                record: theirs, requestId: "somebody-elses")))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: theirs)))
 
-            store.handle(event: .appIdentityProposed(
-                requestId: "somebody-elses", name: "别的应用", surface: .canvas))
-            try await Task.sleep(for: .milliseconds(50))
-            let resolvedEarly = await resolved.value
-            XCTAssertFalse(
-                resolvedEarly,
-                "an answer for another request must not resolve this call")
+            XCTAssertNil(store.createdAppLanding, "not this client's create")
+            XCTAssertNil(store.consumeCreatedAppID())
+            XCTAssertTrue(
+                store.apps.contains { $0.id == "theirs" },
+                "an unclaimed app still belongs in the catalog — it is just not OURS")
 
-            store.handle(event: .appIdentityProposed(
-                requestId: id, name: "记事本", surface: .dom))
-            let answer = await proposal
-            XCTAssertEqual(answer.name, "记事本")
-            XCTAssertEqual(answer.surface, .dom)
+            let mine = shellRecord(id: "mine", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: mine, requestId: key)))
+            store.handle(event: .appEvent(event: .appRecordChanged(
+                record: shellRecord(id: "mine", name: "untitled", initSessionId: "session-9"))))
+
+            XCTAssertEqual(store.createdAppLanding?.appID, "mine")
         }
 
-        /// Tiny actor so the test can observe "has it resolved yet" without a
-        /// data race on a plain `var`.
-        private actor Resolved {
-            private(set) var value = false
-            func mark() { value = true }
-        }
-
-        /// An engine that never answers must not wedge the sheet: the fields
-        /// are editable, so the derived default is a usable starting point.
-        func testProposeIdentityFallsBackWhenTheEngineIsNotConnected() async throws {
-            let store = LocalAppsStore()
-            // Deliberately NOT configured: `send` fails closed.
-
-            let answer = await store.proposeIdentity(brief: "  一个记事本  ")
-
-            XCTAssertEqual(
-                answer.name, "一个记事本",
-                "the same first-24-characters derivation AppService applies")
-            XCTAssertEqual(answer.surface, .dom)
-        }
-
-        /// The fallback truncates by CHARACTERS. A byte cut would split a CJK
-        /// codepoint and produce invalid UTF-8.
-        func testFallbackNameTruncatesByCharacters() {
-            let long = String(repeating: "记", count: 40)
-            XCTAssertEqual(
-                LocalAppsStore.fallbackName(brief: long).count, 24)
-        }
-
-        /// `AppCreated` names the record the engine just committed.
-        ///
-        /// The previous version inferred it by diffing the catalog against a
-        /// pre-create snapshot — an inference the deferred flow invalidates,
-        /// because minutes pass and the user can create something else.
-        func testAppCreatedLandsTheNewAppAndArmsTheWidget() async throws {
+        /// An `AppCreated` with NO request id is an agent-tool create or a
+        /// backfill. It must never be claimed, however convenient it looks.
+        func testAnAppCreatedWithoutARequestIdIsNeverClaimed() async throws {
             let store = LocalAppsStore()
             store.configure { _ in }
 
-            _ = await store.createApp(brief: "一个带桌面入口的记事本", name: "", surface: .dom, addWidget: true)
-            let record = app(id: "notes", name: "记事本", brief: "一个带桌面入口的记事本")
-            store.handle(event: .appsChanged(apps: [record]))
-            store.handle(event: .appEvent(event: .appCreated(record: record)))
+            _ = await store.createShellApp(conversationID: nil)
+            let agents = shellRecord(id: "agents", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: agents, requestId: nil)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: agents)))
 
-            XCTAssertEqual(store.consumeCreatedAppID(), "notes")
-            XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
+            XCTAssertNil(store.createdAppLanding)
+            XCTAssertNil(store.consumeCreatedAppID())
         }
 
-        /// The hand-off into the app's own conversation arms on `AppCreated`
-        /// and is completed by the pin that arrives afterwards.
+        /// The hand-off arms on `AppCreated` and is completed by the pin that
+        /// arrives afterwards on `AppRecordChanged`.
         ///
-        /// `AppCreated` is emitted inside the create transaction and the init
-        /// session is minted AFTER it, so the record on the create event never
-        /// carries one. Gating the landing on it made the hand-off unreachable
-        /// — the agent stayed in a conversation rooted outside the app and
-        /// every build failed on the workspace.
-        func testTheLandingArmsOnAppCreatedAndTakesThePinFromTheRecordUpdate()
-            async throws
-        {
+        /// `AppCreated` is emitted INSIDE the create transaction and the init
+        /// session is minted after it, so the record on the create event never
+        /// carries one. Publishing the landing there hands `RootView` a
+        /// `nil` pin, which it answers by starting a FRESH conversation —
+        /// orphaning the session the engine is about to mint.
+        func testTheLandingArmsOnAppCreatedAndTakesThePinFromTheRecordUpdate() async throws {
             let store = LocalAppsStore()
-            store.configure { _ in }
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
 
-            _ = await store.createApp(
-                brief: "一个记事本", name: "记事本", surface: .dom,
-                modelOverride: "anthropic/claude-sonnet-4-5")
-            let created = app(id: "notes", name: "记事本", brief: "一个记事本")
-            store.handle(event: .appsChanged(apps: [created]))
-            store.handle(event: .appEvent(event: .appCreated(record: created)))
+            _ = await store.createShellApp(conversationID: "conv-1")
+            let key = try XCTUnwrap(sentCreateRequestID(submitted))
+            let created = shellRecord(id: "notes", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: created, requestId: key)))
 
             XCTAssertNil(
                 store.createdAppLanding,
@@ -2059,161 +2004,300 @@ final class LocalAppsStoreTests: XCTestCase {
                     + "orphan the session the engine is about to mint")
 
             store.handle(event: .appEvent(event: .appRecordChanged(
-                record: appRecord(
-                    id: "notes", name: "记事本", brief: "简介",
-                    initSessionId: "session-9"))))
+                record: shellRecord(id: "notes", name: "untitled", initSessionId: "session-9"))))
 
             let landing = try XCTUnwrap(store.createdAppLanding)
             XCTAssertEqual(landing.appID, "notes")
             XCTAssertEqual(landing.initSessionID, "session-9")
-            XCTAssertEqual(
-                landing.modelOverride, "anthropic/claude-sonnet-4-5",
-                "the sheet's model choice rides the landing — the record does "
-                    + "not echo it back")
             XCTAssertEqual(store.consumeCreatedAppLanding()?.appID, "notes")
             XCTAssertNil(store.consumeCreatedAppLanding(), "the landing is one-shot")
         }
 
-        /// A create whose best-effort init-session mint FAILED must still land.
-        ///
-        /// The engine announces the record either way. Landing on a fresh
-        /// conversation is still correct: the SCOPE, not the session, is what
-        /// roots the agent in the app workspace.
+        /// A create whose best-effort init-session mint FAILED must still
+        /// land: the SCOPE, not the session, is what roots the agent in the
+        /// app workspace.
         func testTheLandingStillFiresWhenNoInitSessionWasPinned() async throws {
             let store = LocalAppsStore()
-            store.configure { _ in }
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
 
-            _ = await store.createApp(brief: "一个记事本", name: "记事本", surface: .dom)
-            let created = app(id: "notes", name: "记事本", brief: "一个记事本")
-            store.handle(event: .appsChanged(apps: [created]))
-            store.handle(event: .appEvent(event: .appCreated(record: created)))
+            _ = await store.createShellApp(conversationID: nil)
+            let key = try XCTUnwrap(sentCreateRequestID(submitted))
+            let created = shellRecord(id: "notes", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: created, requestId: key)))
             store.handle(event: .appEvent(event: .appRecordChanged(record: created)))
 
             let landing = try XCTUnwrap(
-                store.createdAppLanding,
-                "a failed pin must not strand the hand-off")
+                store.createdAppLanding, "a failed pin must not strand the hand-off")
             XCTAssertEqual(landing.appID, "notes")
             XCTAssertNil(landing.initSessionID)
         }
 
-        /// A create committed by an AGENT in another conversation must not be
-        /// claimed by this sheet.
+        /// The production stop-loss is THIRTY seconds, and a fresh store uses
+        /// it.
         ///
-        /// `AppCreated` carries no correlator back to the client that asked, so
-        /// an unkeyed claim opens whichever app committed first — the user
-        /// lands in someone else's app and their own create never lands at all.
-        func testAnotherConversationsCreateIsNotClaimedBySheet() async throws {
-            let store = LocalAppsStore()
-            store.configure { _ in }
-
-            _ = await store.createApp(
-                brief: "我的记事本", name: "记事本", surface: .dom, addWidget: true)
-
-            // The agent's app commits first.
-            let theirs = app(id: "theirs", name: "别人的", brief: "代理自己的应用")
-            store.handle(event: .appsChanged(apps: [theirs]))
-            store.handle(event: .appEvent(event: .appCreated(record: theirs)))
-            store.handle(event: .appEvent(event: .appRecordChanged(record: theirs)))
-
-            XCTAssertNil(store.createdAppLanding, "not this sheet's app")
-            XCTAssertNil(store.consumeCreatedAppID())
-            XCTAssertNil(store.pendingWidgetSetup, "the widget belongs to MY create")
-
-            // Mine commits afterwards and is still claimable.
-            let mine = app(id: "mine", name: "记事本", brief: "我的记事本")
-            store.handle(event: .appsChanged(apps: [theirs, mine]))
-            store.handle(event: .appEvent(event: .appCreated(record: mine)))
-            store.handle(event: .appEvent(event: .appRecordChanged(record: mine)))
-
-            XCTAssertEqual(store.createdAppLanding?.appID, "mine")
-            XCTAssertEqual(store.pendingWidgetSetup?.appID, "mine")
+        /// The timer tests below shorten `createResultTimeout` so they can
+        /// exercise the real code path in milliseconds; this is what stops
+        /// that override from quietly becoming the shipped value.
+        func testTheCreateResultStopLossIsThirtySeconds() {
+            XCTAssertEqual(LocalAppsStore.defaultCreateResultTimeout, .seconds(30))
+            XCTAssertEqual(
+                LocalAppsStore().createResultTimeout,
+                LocalAppsStore.defaultCreateResultTimeout,
+                "a store built the production way must use the production timeout")
         }
 
-        /// An app that simply APPEARS is not the one this session asked for.
-        func testANewAppWithoutAppCreatedIsNotClaimed() async throws {
+        /// On timeout the pending create is dropped, the user is told the
+        /// result is unknown and pointed at the library — and a matching
+        /// `AppCreated` that shows up LATER must no longer be claimed.
+        ///
+        /// The second half is the part that matters: a timeout that only
+        /// showed a message while leaving the claim armed would still hijack
+        /// the user minutes later.
+        func testTheCreateResultTimeoutClearsPendingAndStopsClaiming() async throws {
             let store = LocalAppsStore()
-            store.configure { _ in }
+            var submitted: [ClientCommand] = []
+            store.createResultTimeout = .milliseconds(30)
+            store.configure { command in submitted.append(command) }
 
-            _ = await store.createApp(brief: "一个记事本", name: "", surface: .dom, addWidget: true)
-            store.handle(event: .appsChanged(apps: [app(id: "someone-elses", name: "别人的")]))
+            _ = await store.createShellApp(conversationID: nil)
+            let key = try XCTUnwrap(sentCreateRequestID(submitted))
+            try await Task.sleep(for: .milliseconds(300))
 
+            XCTAssertEqual(
+                store.errorMessage,
+                String(localized: "local_apps_creation_result_unknown"))
+            XCTAssertNotEqual(
+                store.errorMessage, "local_apps_creation_result_unknown",
+                "the key must resolve in the catalog, not fall through as itself")
+
+            let late = shellRecord(id: "late", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: late, requestId: key)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: late)))
             XCTAssertNil(
-                store.consumeCreatedAppID(),
-                "a catalog row alone must not be claimed")
-            XCTAssertNil(store.pendingWidgetSetup)
+                store.createdAppLanding,
+                "a create that already timed out must not hijack the user later")
+
+            // …and the store is usable again rather than latched shut.
+            let again = await store.createShellApp(conversationID: nil)
+            XCTAssertTrue(again, "the timeout is a stop-loss, not a permanent latch")
         }
 
-        /// A second create is refused while one is in flight, so a double tap
-        /// cannot create two apps.
+        /// A reconnect clears the pending create, says so, and refuses to
+        /// claim anything that arrives afterwards.
+        ///
+        /// `AppCreated` is one-shot on the connection that was just torn down,
+        /// so the answer to this create can never arrive on the new one.
+        func testAReconnectClearsPendingAndRefusesToClaimALaterEvent() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            _ = await store.createShellApp(conversationID: nil)
+            let key = try XCTUnwrap(sentCreateRequestID(submitted))
+
+            await store.refreshAfterEngineRebind()
+
+            XCTAssertEqual(
+                store.errorMessage,
+                String(localized: "local_apps_creation_result_unknown"))
+
+            let stray = shellRecord(id: "stray", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: stray, requestId: key)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: stray)))
+            XCTAssertNil(store.createdAppLanding)
+            XCTAssertNil(store.consumeCreatedAppID())
+        }
+
+        /// A failure carrying OUR request id disarms the create and surfaces
+        /// its message; a failure carrying somebody else's does neither.
+        ///
+        /// The old rule was `app_id == nil`, which is not a correlation key at
+        /// all: an agent create that fails before it has a record also reports
+        /// no app id, and letting that disarm this create leaves the app the
+        /// user asked for sitting in the library with nobody waiting for it.
+        func testOnlyAFailureCarryingOurRequestIdDisarmsTheCreate() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            _ = await store.createShellApp(conversationID: nil)
+            let key = try XCTUnwrap(sentCreateRequestID(submitted))
+
+            store.handle(event: .appOperationFailed(
+                appId: nil, code: .io, message: "别人的创建失败了",
+                requestId: "somebody-elses"))
+            let mine = shellRecord(id: "mine", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: mine, requestId: key)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: mine)))
+            XCTAssertEqual(
+                store.createdAppLanding?.appID, "mine",
+                "another request's failure must not disarm this create")
+            _ = store.consumeCreatedAppLanding()
+
+            submitted.removeAll()
+            _ = await store.createShellApp(conversationID: nil)
+            let second = try XCTUnwrap(sentCreateRequestID(submitted))
+            store.handle(event: .appOperationFailed(
+                appId: nil, code: .io, message: "创建失败", requestId: second))
+            XCTAssertEqual(store.errorMessage, "创建失败")
+
+            let later = shellRecord(id: "later", name: "untitled")
+            store.handle(event: .appEvent(event: .appCreated(record: later, requestId: second)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: later)))
+            XCTAssertNil(
+                store.createdAppLanding,
+                "a create that already failed must not claim a later app")
+        }
+
+        /// A double tap on "+" creates one app, not two.
         func testASecondCreateWhileOneIsInFlightIsRefused() async throws {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            let first = await store.createApp(brief: "第一个", name: "", surface: .dom)
-            let second = await store.createApp(brief: "第二个", name: "", surface: .dom)
+            let first = await store.createShellApp(conversationID: nil)
+            let second = await store.createShellApp(conversationID: nil)
 
             XCTAssertTrue(first)
             XCTAssertFalse(second, "only one create may be in flight at a time")
             XCTAssertEqual(
-                submitted.count, 1,
-                "the refused create must not reach the engine")
+                submitted.count, 1, "the refused create must not reach the engine")
+            XCTAssertEqual(
+                store.errorMessage,
+                String(localized: "local_apps_error_create_in_progress"))
         }
 
-        /// A GLOBAL failure disarms the claim; a per-app failure belongs to some
-        /// other app and must leave it alone.
-        func testOnlyAGlobalFailureDisarmsTheArmedCreate() async throws {
-            let store = LocalAppsStore()
-            store.configure { _ in }
+        // ── Draft-state rendering ─────────────────────────────────────────
 
-            _ = await store.createApp(brief: "一个记事本", name: "", surface: .dom, addWidget: true)
-            store.handle(event: .appOperationFailed(
-                appId: "another-app", code: .workflowStateInvalid, message: "别的应用失败了"))
-            let mine = app(id: "mine", name: "我的", brief: "一个记事本")
-            store.handle(event: .appsChanged(apps: [mine]))
-            store.handle(event: .appEvent(event: .appCreated(record: mine)))
-            XCTAssertEqual(store.consumeCreatedAppID(), "mine")
+        /// A shell renders the localized draft copy and shows NEITHER its
+        /// stored name nor its brief.
+        ///
+        /// The stored name is an engine placeholder the user never chose and
+        /// the brief is empty, so both are values the UI must refuse to put on
+        /// screen. Asserted against the localized catalog rather than a
+        /// hardcoded string, and asserted to be DIFFERENT from the raw key, so
+        /// deleting the key later fails this test instead of silently
+        /// rendering `local_apps_draft_card_title` to the user.
+        func testAShellRendersTheDraftCopyAndHidesItsNameAndBrief() {
+            let shell = LocalAppsProtocolAdapter.app(
+                shellRecord(id: "shell", name: "untitled"))
 
-            _ = await store.createApp(brief: "第二个", name: "", surface: .dom, addWidget: true)
-            store.handle(event: .appOperationFailed(
-                appId: nil, code: .workflowStateInvalid, message: "创建失败"))
-            let later = app(id: "later", name: "后来的", brief: "第二个")
-            store.handle(event: .appsChanged(apps: [later]))
-            store.handle(event: .appEvent(event: .appCreated(record: later)))
+            XCTAssertFalse(shell.scaffolded, "the flag must come off the wire")
+            XCTAssertTrue(shell.isDraftShell)
+            XCTAssertEqual(shell.displayName, String(localized: "local_apps_draft_card_title"))
+            XCTAssertNotEqual(shell.displayName, "untitled", "the placeholder must not reach the UI")
+            XCTAssertNotEqual(
+                shell.displayName, "local_apps_draft_card_title",
+                "the key must resolve in the catalog, not fall through as itself")
+            XCTAssertEqual(
+                shell.draftStatusLine, String(localized: "local_apps_draft_card_subtitle"))
+            XCTAssertNotEqual(shell.draftStatusLine, "local_apps_draft_card_subtitle")
+            XCTAssertNil(shell.displayBrief, "a shell's brief is empty and must not be rendered")
+
+            let formed = LocalAppsProtocolAdapter.app(
+                formedRecord(id: "notes", name: "记事本", brief: "一个记事本"))
+            XCTAssertTrue(formed.scaffolded)
+            XCTAssertEqual(formed.displayName, "记事本")
             XCTAssertNil(
-                store.consumeCreatedAppID(),
-                "a disarmed create must not claim a later app")
+                formed.draftStatusLine,
+                "a formed app keeps its own status line — the draft line is the exception")
+            XCTAssertEqual(formed.displayBrief, "一个记事本")
         }
 
-        /// Restored with the new trigger: the widget must not arm for a create
-        /// that never asked for one.
-        func testCreateWithoutWidgetDoesNotArmSetupGuide() async throws {
+        /// Search matches what the card SHOWS.
+        ///
+        /// A query typed against the placeholder name must not surface a card
+        /// whose visible title has nothing to do with it.
+        func testSearchMatchesTheDraftTitleAndNotThePlaceholderName() {
             let store = LocalAppsStore()
-            store.configure { _ in }
+            store.handle(event: .appsChanged(apps: [
+                shellRecord(id: "shell", name: "untitled"),
+                formedRecord(id: "notes", name: "记事本", brief: "一个记事本"),
+            ]))
 
-            let armed = await store.createApp(brief: "一个记事本", name: "", surface: .dom)
-            XCTAssertTrue(armed)
-            let record = app(id: "notes", name: "记事本", brief: "一个记事本")
-            store.handle(event: .appsChanged(apps: [record]))
-            store.handle(event: .appEvent(event: .appCreated(record: record)))
+            store.searchQuery = "untitled"
+            XCTAssertTrue(
+                store.filteredApps.isEmpty,
+                "the placeholder name is invisible to the user and must be invisible to search")
 
+            store.searchQuery = String(localized: "local_apps_draft_card_title")
+            XCTAssertEqual(store.filteredApps.map(\.id), ["shell"])
+
+            store.searchQuery = "记事本"
+            XCTAssertEqual(store.filteredApps.map(\.id), ["notes"])
+        }
+
+        // ── The widget ────────────────────────────────────────────────────
+
+        /// A shell is EXCLUDED from the home-screen snapshot, not relabelled.
+        ///
+        /// The widget extension renders `name` and `brief` straight out of the
+        /// snapshot — it never sees this client's draft branches — so a shell
+        /// left in it appears on the user's home screen as a placeholder-named
+        /// icon that cannot be opened.
+        func testTheWidgetSnapshotExcludesUnscaffoldedShells() throws {
+            let store = LocalAppsStore()
+            var published: [LocalAppWidgetSnapshot] = []
+            store.widgetSnapshotPublisher = { snapshot in
+                published.append(snapshot)
+                return nil
+            }
+            store.handle(event: .appsChanged(apps: [
+                formedRecord(id: "notes", name: "记事本", brief: "一个记事本"),
+            ]))
+            store.requestWidgetSetup(appID: "notes")
+
+            let snapshot = try XCTUnwrap(published.last)
+            XCTAssertEqual(snapshot.apps.map(\.id), ["notes"])
+
+            published.removeAll()
+            store.handle(event: .appsChanged(apps: [
+                formedRecord(id: "notes", name: "记事本", brief: "一个记事本"),
+                shellRecord(id: "shell", name: "untitled"),
+            ]))
+            store.requestWidgetSetup(appID: "notes")
+            let second = try XCTUnwrap(published.last)
+            XCTAssertEqual(
+                second.apps.map(\.id), ["notes"],
+                "the shell must not reach the home screen")
+        }
+
+        /// The widget entry's new home arms the setup guide for a formed app
+        /// and refuses a shell.
+        func testRequestWidgetSetupArmsAFormedAppAndRefusesAShell() {
+            let store = LocalAppsStore()
+            store.widgetSnapshotPublisher = { _ in nil }
+            store.handle(event: .appsChanged(apps: [
+                formedRecord(id: "notes", name: "记事本", brief: "一个记事本"),
+                shellRecord(id: "shell", name: "untitled"),
+            ]))
+
+            store.requestWidgetSetup(appID: "shell")
+            XCTAssertNil(
+                store.pendingWidgetSetup,
+                "a shell is not in the snapshot, so there is nothing to pin")
+
+            store.requestWidgetSetup(appID: "notes")
+            XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
+            XCTAssertEqual(store.pendingWidgetSetup?.appName, "记事本")
+
+            store.completeWidgetSetup()
             XCTAssertNil(store.pendingWidgetSetup)
         }
 
-        /// A missing App Group is a CONFIGURATION fact, not a create failure:
-        /// the setup guide still arms so the user can be walked through it.
-        func testAddWidgetStillArmsSetupWhenTheAppGroupIsMissing() async throws {
+        /// A missing App Group is a CONFIGURATION fact, not a failure: the
+        /// guide still arms so the user can be walked through it.
+        func testWidgetSetupStillArmsWhenTheAppGroupIsMissing() {
             let store = LocalAppsStore()
-            store.configure { _ in }
             store.widgetSnapshotPublisher = { _ in
                 LocalAppWidgetSnapshotStore.SnapshotError.containerUnavailable
             }
+            store.handle(event: .appsChanged(apps: [
+                formedRecord(id: "notes", name: "记事本", brief: "一个记事本"),
+            ]))
 
-            let armed = await store.createApp(brief: "一个记事本", name: "", surface: .dom, addWidget: true)
-            XCTAssertTrue(armed)
-            let record = app(id: "notes", name: "记事本", brief: "一个记事本")
-            store.handle(event: .appsChanged(apps: [record]))
-            store.handle(event: .appEvent(event: .appCreated(record: record)))
+            store.requestWidgetSetup(appID: "notes")
 
             XCTAssertNil(store.errorMessage)
             XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
@@ -2221,49 +2305,86 @@ final class LocalAppsStoreTests: XCTestCase {
 
         /// A REAL write failure is different from a missing container and must
         /// still reach the user.
-        func testAddWidgetSurfacesARealSnapshotWriteFailure() async throws {
+        func testWidgetSetupSurfacesARealSnapshotWriteFailure() {
             struct DiskFull: Error {}
             let store = LocalAppsStore()
-            store.configure { _ in }
             store.widgetSnapshotPublisher = { _ in DiskFull() }
+            store.handle(event: .appsChanged(apps: [
+                formedRecord(id: "notes", name: "记事本", brief: "一个记事本"),
+            ]))
 
-            let armed = await store.createApp(brief: "一个记事本", name: "", surface: .dom, addWidget: true)
-            XCTAssertTrue(armed)
-            let record = app(id: "notes", name: "记事本", brief: "一个记事本")
-            store.handle(event: .appsChanged(apps: [record]))
-            store.handle(event: .appEvent(event: .appCreated(record: record)))
+            store.requestWidgetSetup(appID: "notes")
 
             XCTAssertEqual(
                 store.errorMessage,
-                String(localized: "local_apps_error_widget_snapshot")
-            )
+                String(localized: "local_apps_error_widget_snapshot"))
             XCTAssertEqual(store.pendingWidgetSetup?.appID, "notes")
         }
 
-        /// A missing App Group must not be reported as a create error.
-        func testCreateDoesNotSurfaceAMissingAppGroupAsAnError() async throws {
-            let store = LocalAppsStore()
-            store.configure { _ in }
-            store.widgetSnapshotPublisher = { _ in
-                LocalAppWidgetSnapshotStore.SnapshotError.containerUnavailable
+        // ── Fixtures ──────────────────────────────────────────────────────
+
+        /// The `request_id` the store actually put on the wire.
+        ///
+        /// Read off the submitted command rather than fabricated, so a store
+        /// that never correlates at all cannot pass these tests by having a
+        /// test echo a key it invented.
+        private func sentCreateRequestID(_ submitted: [ClientCommand]) -> String? {
+            for command in submitted {
+                if case let .createApp(_, _, _, _, _, _, _, _, requestId) = command {
+                    return requestId
+                }
             }
-
-            let armed = await store.createApp(brief: "一个记事本", name: "", surface: .dom)
-            XCTAssertTrue(armed)
-            let record = app(id: "notes", name: "记事本", brief: "一个记事本")
-            store.handle(event: .appsChanged(apps: [record]))
-            store.handle(event: .appEvent(event: .appCreated(record: record)))
-
-            XCTAssertNil(store.errorMessage)
-            XCTAssertEqual(store.consumeCreatedAppID(), "notes")
+            return nil
         }
 
-        private func app(
+        /// A wire record, spelled out here rather than taken from the shared
+        /// `appRecord` fixture, so `scaffolded` is stated explicitly at every
+        /// call site instead of inherited from a default that would make the
+        /// draft tests pass for the wrong reason.
+        private func wireRecord(
             id: String,
             name: String,
-            brief: String = "简介"
+            brief: String,
+            scaffolded: Bool,
+            initSessionId: String? = nil
         ) -> AppRecordDto {
-            appRecord(id: id, name: name, brief: brief)
+            AppRecordDto(
+                id: id,
+                name: name,
+                brief: brief,
+                gitEnabled: true,
+                createdAtMs: 1,
+                updatedAtMs: 2,
+                workflowState: .draft,
+                conversationId: nil,
+                initSessionId: initSessionId,
+                workspaceRel: "apps/\(id)/workspace",
+                scaffolded: scaffolded
+            )
+        }
+
+        /// An unscaffolded shell: an engine placeholder for a name, an EMPTY
+        /// brief — exactly what `mode: .shell` commits.
+        private func shellRecord(
+            id: String,
+            name: String,
+            initSessionId: String? = nil
+        ) -> AppRecordDto {
+            wireRecord(
+                id: id, name: name, brief: "", scaffolded: false,
+                initSessionId: initSessionId)
+        }
+
+        /// An app whose scaffold has landed.
+        private func formedRecord(
+            id: String,
+            name: String,
+            brief: String,
+            initSessionId: String? = nil
+        ) -> AppRecordDto {
+            wireRecord(
+                id: id, name: name, brief: brief, scaffolded: true,
+                initSessionId: initSessionId)
         }
     #endif
 }

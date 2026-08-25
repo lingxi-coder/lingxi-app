@@ -1,9 +1,6 @@
 import SwiftUI
 
 enum LocalAppsRoute: Hashable {
-    /// The brief-input create screen — there is no template catalog to pick
-    /// from, only a one-line brief to collect.
-    case create
     case details(String)
     case preview(String)
 }
@@ -11,9 +8,13 @@ enum LocalAppsRoute: Hashable {
 struct LocalAppsRootView: View {
     @Bindable var store: LocalAppsStore
     let initialAppID: String?
-    let availableModels: [String]
-    let availableModelDetails: [String: ModelRuntimeDetails]
-    let activeModelID: String
+    /// The conversation the user is in right now, forwarded to `CreateApp` so
+    /// the engine forks its history into the new app's workspace. `nil` when
+    /// there is nothing to fork.
+    ///
+    /// The model-picker parameters this replaced existed ONLY to feed the
+    /// deleted create form.
+    let currentConversationID: String?
     let onDismiss: () -> Void
     /// Called with `(appID, sessionUUID)` when the user taps a row of the
     /// app's session catalog. RootView dismisses this cover and switches the
@@ -30,10 +31,10 @@ struct LocalAppsRootView: View {
             LocalAppsLibraryScreen(
                 store: store,
                 path: $path,
-                availableModels: availableModels,
-                availableModelDetails: availableModelDetails,
-                activeModelID: activeModelID,
-                onDismiss: onDismiss
+                currentConversationID: currentConversationID,
+                onDismiss: onDismiss,
+                onOpenAppSession: onOpenAppSession,
+                onNewAppSession: onNewAppSession
             )
             .navigationDestination(for: LocalAppsRoute.self) { route in
                 destination(route)
@@ -83,14 +84,6 @@ struct LocalAppsRootView: View {
     @ViewBuilder
     private func destination(_ route: LocalAppsRoute) -> some View {
         switch route {
-        case .create:
-            LocalAppCreateView(
-                store: store,
-                path: $path,
-                availableModels: availableModels,
-                availableModelDetails: availableModelDetails,
-                activeModelID: activeModelID
-            )
         case let .details(appID):
             LocalAppDetailView(
                 store: store,
@@ -201,11 +194,14 @@ private struct LocalAppsLibraryScreen: View {
     @Environment(\.theme) private var theme
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
-    let availableModels: [String]
-    let availableModelDetails: [String: ModelRuntimeDetails]
-    let activeModelID: String
+    let currentConversationID: String?
     let onDismiss: () -> Void
+    let onOpenAppSession: (String, String) -> Void
+    let onNewAppSession: (String) -> Void
     @State private var pendingDelete: LocalAppSummary?
+    /// True between tapping "+" and the command reaching the engine. Only the
+    /// round-trip — the CREATE itself resolves out of band on `AppCreated`.
+    @State private var creating = false
 
     var body: some View {
         Group {
@@ -235,10 +231,11 @@ private struct LocalAppsLibraryScreen: View {
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
-                    path.append(.create)
+                    Task { await createShellApp() }
                 } label: {
                     Label("local_apps_create", systemImage: "plus")
                 }
+                .disabled(creating)
                 .accessibilityIdentifier("local-apps.create")
             }
         }
@@ -276,7 +273,7 @@ private struct LocalAppsLibraryScreen: View {
             }
         }
         .confirmationDialog(
-            "local_apps_delete_confirm \(pendingDelete?.name ?? String(localized: "local_apps_title"))",
+            "local_apps_delete_confirm \(pendingDelete?.displayName ?? String(localized: "local_apps_title"))",
             isPresented: Binding(
                 get: { pendingDelete != nil },
                 set: { if !$0 { pendingDelete = nil } }
@@ -300,21 +297,58 @@ private struct LocalAppsLibraryScreen: View {
         } description: {
             Text(store.isRefreshing ? String(localized: "local_apps_empty_loading") : String(localized: "local_apps_empty_hint"))
         } actions: {
-            Button("local_apps_create") { path.append(.create) }
+            Button("local_apps_create") { Task { await createShellApp() } }
                 .buttonStyle(.borderedProminent)
+                .disabled(creating)
+                .accessibilityIdentifier("local-apps.create.empty-state")
         }
     }
 
+    /// Tapping a card.
+    ///
+    /// A SHELL has no detail page worth showing — no brief, no surface, no
+    /// runtime — and the one thing the user wants from it is the conversation
+    /// that is going to define it. So a draft card resumes the app's pinned
+    /// session (or, if the engine's best-effort mint failed, starts a fresh
+    /// conversation in the app's scope, which is still rooted in its
+    /// workspace). A formed app opens its details as before.
     private func open(_ app: LocalAppSummary) {
-        path.append(.details(app.id))
+        guard app.isDraftShell else {
+            path.append(.details(app.id))
+            return
+        }
+        if let sessionID = app.initSessionId {
+            onOpenAppSession(app.id, sessionID)
+        } else {
+            onNewAppSession(app.id)
+        }
+    }
+
+    /// The "+" button: create the empty shell and let the landing take the
+    /// user into its conversation. There is no form to push any more.
+    private func createShellApp() async {
+        guard !creating else { return }
+        creating = true
+        _ = await store.createShellApp(conversationID: currentConversationID)
+        creating = false
     }
 
     private func openCreatedAppIfNeeded() {
-        // The library's own landing: show the new app's details page. It only
-        // ever wins if the cover is still up, which means `RootView` has not
-        // taken the user into the app's conversation — the primary landing.
+        // The library's own landing. It only ever wins if the cover is still
+        // up, which means `RootView` has not taken the user into the app's
+        // conversation — the primary landing.
         guard store.pendingWidgetSetup == nil else { return }
         guard let appID = store.consumeCreatedAppID() else { return }
+        // A SHELL is left entirely to the primary landing. This fallback runs
+        // on `AppCreated`, which is one event too early: the pin is minted
+        // afterwards, so opening the conversation from here would start a
+        // FRESH one — without the kickoff, and orphaning the session the
+        // engine is about to pin. `RootView.landCreatedAppIfReady` waits for
+        // the record that carries the pin and sends the kickoff with it.
+        // Consuming the id and doing nothing is what keeps this fallback from
+        // racing it. A shell whose primary landing never fires is still one
+        // tap away in the list.
+        if store.app(id: appID)?.isDraftShell == true { return }
         path = [.details(appID)]
     }
 }
@@ -375,14 +409,18 @@ private struct LocalAppLibraryRow: View {
                     .background(theme.accent.opacity(0.12), in: .rect(cornerRadius: 11))
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(app.name)
+                    // `displayName`, never `name`: a shell's name is an engine
+                    // placeholder the user never chose.
+                    Text(app.displayName)
                         .font(.headline)
                         .foregroundStyle(theme.text)
                     HStack(spacing: 6) {
                         Circle()
                             .fill(runtimeColor)
                             .frame(width: 7, height: 7)
-                        Text("\(app.workflow.label) · \(runtime.label)")
+                        // A shell has no workflow state or runtime worth
+                        // naming — it is being created.
+                        Text(app.draftStatusLine ?? "\(app.workflow.label) · \(runtime.label)")
                             .font(.caption)
                             .foregroundStyle(theme.text3)
                             .lineLimit(1)
@@ -390,17 +428,22 @@ private struct LocalAppLibraryRow: View {
                 }
                 Spacer()
                 Menu {
-                    if case .running = runtime {
-                        Button("composer_stop", systemImage: "stop.fill", action: onStop)
-                    } else {
-                        Button("common_start", systemImage: "play.fill", action: onStart)
+                    // Nothing to start or stop until the scaffold lands; delete
+                    // works exactly as before, so an abandoned shell can be
+                    // thrown away.
+                    if !app.isDraftShell {
+                        if case .running = runtime {
+                            Button("composer_stop", systemImage: "stop.fill", action: onStop)
+                        } else {
+                            Button("common_start", systemImage: "play.fill", action: onStart)
+                        }
                     }
                     Button("common_delete", systemImage: "trash", role: .destructive, action: onDelete)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .frame(width: 36, height: 36)
                 }
-                .accessibilityLabel("local_apps_row_actions \(app.name)")
+                .accessibilityLabel("local_apps_row_actions \(app.displayName)")
             }
             .contentShape(.rect)
         }
@@ -414,237 +457,6 @@ private struct LocalAppLibraryRow: View {
         case .starting, .stopping: .orange
         case .failed: theme.danger
         case .stopped, .suspended: theme.text4
-        }
-    }
-}
-
-/// The create sheet: a one-line brief, then a name and a surface to confirm.
-///
-/// Two steps, in ONE sheet, because both of the second step's fields are fixed
-/// at creation — a surface is immutable once scaffolded and apps have no rename
-/// — so neither may be decided by something the user never saw. The host
-/// proposes both from the brief (`ProposeAppIdentity`, one headless model call,
-/// no conversation); this screen shows the proposal and gives the user the last
-/// word.
-///
-/// The app is then created OUTRIGHT. There is no intake conversation: the app's
-/// first conversation opens in the app's own scope, so its cwd is the app
-/// workspace from the first message.
-struct LocalAppCreateView: View {
-    @Bindable var store: LocalAppsStore
-    @Binding var path: [LocalAppsRoute]
-    let availableModels: [String]
-    let availableModelDetails: [String: ModelRuntimeDetails]
-    let activeModelID: String
-
-    /// Which half of the sheet is on screen.
-    enum Step: Equatable {
-        /// Typing the brief.
-        case brief
-        /// Confirming the proposed name and surface.
-        case identity
-    }
-
-    @State var brief = ""
-    @State private var step: Step = .brief
-    @State private var name = ""
-    @State private var surface: LocalAppSurface = .dom
-    @State private var proposing = false
-    @State private var gitEnabled = true
-    @State private var addWidget = false
-    @State private var creating = false
-    @State private var modelOverride: String?
-    @State private var showingModelPicker = false
-
-    init(
-        store: LocalAppsStore,
-        path: Binding<[LocalAppsRoute]>,
-        availableModels: [String] = [],
-        availableModelDetails: [String: ModelRuntimeDetails] = [:],
-        activeModelID: String = ""
-    ) {
-        self.store = store
-        self._path = path
-        self.availableModels = availableModels
-        self.availableModelDetails = availableModelDetails
-        self.activeModelID = activeModelID
-    }
-
-    /// The submit predicate, as a pure function of the text.
-    ///
-    /// It lives here rather than inline in `canSubmit` because `brief` is
-    /// `@State`: assigning to it on a bare struct outside a view hierarchy
-    /// does NOT take effect, so a test that pokes `view.brief` and reads
-    /// `view.canSubmit` is really only ever reading the initial `""`. That
-    /// made the whitespace test pass vacuously (it asserts `false` on a value
-    /// that was already empty) while the non-empty test failed — the first
-    /// run of the iOS suite is what surfaced it. Tests call this directly.
-    static func canSubmit(brief: String) -> Bool {
-        !brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// Instance mirror of the toolbar button's guard below (minus the
-    /// transient `creating` flag) — same source of truth `body` disables on,
-    /// not a parallel description of it. `createApp(brief:)` itself repeats
-    /// this same empty check server-side, so this is belt-and-suspenders,
-    /// not the only gate.
-    var canSubmit: Bool { Self.canSubmit(brief: brief) }
-
-    var body: some View {
-        Form {
-            switch step {
-            case .brief: briefStep
-            case .identity: identityStep
-            }
-        }
-        .navigationTitle("local_apps_create")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbarContent }
-        .sheet(isPresented: $showingModelPicker) {
-            ModelPickerSheet(
-                availableModels: availableModels,
-                detailsByReference: availableModelDetails,
-                activeModelId: modelOverride ?? activeModelID,
-                recentModels: [],
-                onSelect: { reference in
-                    modelOverride = reference
-                    showingModelPicker = false
-                },
-                onDismiss: { showingModelPicker = false }
-            )
-        }
-    }
-
-    @ViewBuilder
-    private var briefStep: some View {
-        Section("local_apps_create_brief_section") {
-            TextEditor(text: $brief)
-                .frame(minHeight: 120)
-            Text("local_apps_create_brief_detail")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            Toggle("local_apps_create_git_version_control", isOn: $gitEnabled)
-            Toggle("local_apps_create_add_widget", isOn: $addWidget)
-            Text("local_apps_create_add_widget_detail")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-        Section("local_apps_create_model_section") {
-            Button {
-                showingModelPicker = true
-            } label: {
-                LabeledContent("local_apps_create_model_label") {
-                    Text(modelSelectionLabel)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .disabled(availableModels.isEmpty)
-            if modelOverride != nil {
-                Button("local_apps_create_model_follow_current") {
-                    modelOverride = nil
-                }
-            }
-            Text("local_apps_create_model_detail")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    @ViewBuilder
-    private var identityStep: some View {
-        Section("local_apps_create_name_label") {
-            TextField("local_apps_create_name_label", text: $name)
-                .accessibilityIdentifier("local-apps.create.name")
-            Text("local_apps_create_name_hint")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-        Section("local_apps_create_surface_section") {
-            Picker("local_apps_create_surface_section", selection: $surface) {
-                ForEach(LocalAppSurface.allCases, id: \.self) { option in
-                    Text(option.label).tag(option)
-                }
-            }
-            .pickerStyle(.segmented)
-            .accessibilityIdentifier("local-apps.create.surface")
-            Text(surface.detail)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            Text("local_apps_create_surface_immutable")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-        Section("local_apps_create_brief_section") {
-            Text(brief)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .confirmationAction) {
-            switch step {
-            case .brief:
-                Button(proposing ? "local_apps_create_naming" : "local_apps_create_next") {
-                    Task { await advanceToIdentity() }
-                }
-                .disabled(proposing || !canSubmit)
-                .accessibilityIdentifier("local-apps.create.next")
-            case .identity:
-                Button(creating ? "local_apps_creating" : "local_apps_create") {
-                    Task { await create() }
-                }
-                .disabled(creating || !canSubmit)
-                .accessibilityIdentifier("local-apps.create.submit")
-            }
-        }
-        ToolbarItem(placement: .cancellationAction) {
-            if step == .identity {
-                Button("local_apps_create_back") { step = .brief }
-                    .disabled(creating)
-            }
-        }
-    }
-
-    private var modelSelectionLabel: String {
-        guard let modelOverride else {
-            if activeModelID.isEmpty {
-                return String(localized: "local_apps_create_model_follow_current")
-            }
-            return String(localized: "local_apps_create_model_follow_current_value \(ModelDisplay.shortName(for: activeModelID))")
-        }
-        let item = ModelDisplay.item(for: modelOverride, detailsByReference: availableModelDetails)
-        return "\((item.details?.preferredProviderLabel ?? ModelDisplay.providerName(for: item.providerId))) · \(item.shortName)"
-    }
-
-    /// Ask the host to name and shape the app, then show what it said.
-    ///
-    /// Advances even when the proposal is the derived fallback: the fields are
-    /// editable, so a model that is unreachable costs the user a moment of
-    /// typing rather than blocking the create outright.
-    private func advanceToIdentity() async {
-        proposing = true
-        let proposal = await store.proposeIdentity(brief: brief)
-        proposing = false
-        name = proposal.name
-        surface = proposal.surface
-        step = .identity
-    }
-
-    private func create() async {
-        creating = true
-        let succeeded = await store.createApp(
-            brief: brief,
-            name: name,
-            surface: surface,
-            gitEnabled: gitEnabled,
-            modelOverride: modelOverride,
-            addWidget: addWidget
-        )
-        creating = false
-        if succeeded, !path.isEmpty {
-            path.removeLast()
         }
     }
 }

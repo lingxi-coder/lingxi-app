@@ -45,7 +45,7 @@ struct LocalAppDetailView: View {
 
     var body: some View {
         content
-            .navigationTitle(app?.name ?? String(localized: "local_apps_detail_title"))
+            .navigationTitle(app?.displayName ?? String(localized: "local_apps_detail_title"))
             .navigationBarTitleDisplayMode(.inline)
             .task {
                 // Library/create events normally already supplied the summary.
@@ -120,6 +120,22 @@ struct LocalAppDetailView: View {
                         Menu {
                             Button("local_apps_restart", systemImage: "arrow.clockwise") {
                                 Task { await store.restart(appID: appID) }
+                            }
+                            // The home-screen widget entry's PERMANENT home.
+                            // It used to be a toggle inside the create form,
+                            // which the conversational flow deletes — without
+                            // this the feature would simply disappear from the
+                            // product. Hidden for a shell, which is excluded
+                            // from the widget snapshot and so has nothing to
+                            // put on the home screen.
+                            if app.scaffolded {
+                                Button(
+                                    "local_apps_widget_add",
+                                    systemImage: "rectangle.on.rectangle"
+                                ) {
+                                    store.requestWidgetSetup(appID: appID)
+                                }
+                                .accessibilityIdentifier("local-apps.detail.add-widget")
                             }
                         } label: {
                             Label("local_apps_more", systemImage: "ellipsis.circle")
@@ -289,8 +305,9 @@ private struct LocalAppOverviewSection: View {
                         .frame(width: 64, height: 64)
                         .background(theme.accent.opacity(0.12), in: .rect(cornerRadius: 16))
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(app.name).font(.title2.bold())
-                        Text(app.workflow.label).foregroundStyle(theme.text3)
+                        Text(app.displayName).font(.title2.bold())
+                        Text(app.draftStatusLine ?? app.workflow.label)
+                            .foregroundStyle(theme.text3)
                         Label(runtime.label, systemImage: runtimeSystemImage)
                             .font(.caption)
                             .foregroundStyle(runtimeColor)
@@ -303,7 +320,11 @@ private struct LocalAppOverviewSection: View {
                 VStack(alignment: .leading, spacing: 10) {
                     LabeledContent("local_apps_runtime_mode", value: distribution.runtimeLabel)
                     LabeledContent("local_apps_workspace", value: app.workspaceRelativePath)
-                    LabeledContent("local_apps_brief", value: app.brief)
+                    // A shell's brief is `""` — the interview has not happened
+                    // yet — so the row is omitted rather than rendered empty.
+                    if let brief = app.displayBrief {
+                        LabeledContent("local_apps_brief", value: brief)
+                    }
                     LabeledContent("local_apps_updated_at") {
                         Text(app.updatedAt, format: .relative(presentation: .named))
                     }

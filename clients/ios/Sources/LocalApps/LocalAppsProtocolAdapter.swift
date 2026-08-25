@@ -43,7 +43,11 @@ enum LocalAppsProtocolAdapter {
             updatedAt: Date(timeIntervalSince1970: TimeInterval(dto.updatedAtMs) / 1_000),
             workflow: workflow(dto.workflowState),
             workspaceRelativePath: dto.workspaceRel,
-            initSessionId: dto.initSessionId
+            initSessionId: dto.initSessionId,
+            // Carried, never assumed. Hardcoding `true` here compiles and
+            // passes every fixture that describes a formed app, and shows the
+            // engine's placeholder name on every shell card in the library.
+            scaffolded: dto.scaffolded
         )
     }
 
@@ -51,28 +55,6 @@ enum LocalAppsProtocolAdapter {
         switch dto {
         case .draft: .draft
         case .ready: .ready
-        }
-    }
-
-    /// The create sheet's surface choice lowered to the wire enum.
-    static func surfaceDto(_ surface: LocalAppSurface) -> AppSurfaceDto {
-        switch surface {
-        case .dom: .dom
-        case .canvas: .canvas
-        }
-    }
-
-    /// The host's proposed surface raised to the UI model.
-    ///
-    /// `AppSurfaceDto` is `#[non_exhaustive]`, so an engine newer than this
-    /// build can name a surface this client cannot render a picker row for.
-    /// Falling back to `.dom` keeps the sheet usable — and the user can still
-    /// change it — where a crash or an empty picker could not.
-    static func surface(_ dto: AppSurfaceDto) -> LocalAppSurface {
-        switch dto {
-        case .dom: .dom
-        case .canvas: .canvas
-        @unknown default: .dom
         }
     }
 

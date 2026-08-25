@@ -533,9 +533,7 @@ struct RootView: View {
             LocalAppsRootView(
                 store: localAppsStore,
                 initialAppID: appID,
-                availableModels: source.model.availableModels,
-                availableModelDetails: source.model.availableModelDetails,
-                activeModelID: source.model.activeModelId,
+                currentConversationID: activeConversationIDForAppCreate,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
                 onNewAppSession: startNewAppSession
@@ -572,9 +570,7 @@ struct RootView: View {
             LocalAppsRootView(
                 store: localAppsStore,
                 initialAppID: appID,
-                availableModels: source.model.availableModels,
-                availableModelDetails: source.model.availableModelDetails,
-                activeModelID: source.model.activeModelId,
+                currentConversationID: activeConversationIDForAppCreate,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
                 onNewAppSession: startNewAppSession
@@ -624,9 +620,16 @@ struct RootView: View {
               let landing = localAppsStore.consumeCreatedAppLanding() else { return }
         openCreatedAppSession(
             appID: landing.appID,
-            sessionID: landing.initSessionID,
-            brief: landing.brief
+            sessionID: landing.initSessionID
         )
+    }
+
+    /// The conversation a "+" create forks its history from — the one the user
+    /// is looking at. `nil` when there is no session id yet, in which case the
+    /// engine anchors an empty conversation in the new app's workspace.
+    private var activeConversationIDForAppCreate: String? {
+        let trimmed = activeSession.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// The create-flow landing: same as `openAppSession`, plus the queued
@@ -634,11 +637,13 @@ struct RootView: View {
     /// init session is live.
     private func openCreatedAppSession(
         appID: String,
-        sessionID: String?,
-        brief: String
+        sessionID: String?
     ) {
         navigation.closePresentedRoute()
-        let kickoff = String(localized: "local_apps_init_kickoff \(brief)")
+        // Placeholder-free and identical on both platforms: a shell has no
+        // brief to interpolate — finding out what the user wants is the whole
+        // job of the conversation this message opens.
+        let kickoff = String(localized: "local_apps_kickoff_message")
         // The library consumed its one-shot signal to call this, so a refused
         // switch would lose the created app with nothing left to re-arm it.
         // `switchScope` refuses only while another switch is in flight, so
@@ -659,8 +664,7 @@ struct RootView: View {
                 guard !projectSwitching else { return }
                 openCreatedAppSession(
                     appID: appID,
-                    sessionID: sessionID,
-                    brief: brief
+                    sessionID: sessionID
                 )
             }
             return

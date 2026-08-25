@@ -34,6 +34,49 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
     /// The app's pinned "init" session (bare uuid), listed first in its
     /// session catalog. `nil` for pre-v3 records before the boot backfill.
     var initSessionId: String? = nil
+    /// Whether the scaffold has landed (protocol 8.0.0's `AppRecordDto.scaffolded`).
+    ///
+    /// `false` is a SHELL: the record exists and owns a workspace and a pinned
+    /// conversation, but `name` is an engine-side placeholder the user never
+    /// chose and `brief` is the empty string. Both are decided later, in the
+    /// app's own conversation, and only then does `LocalAppScaffold` lay the
+    /// scaffold down and flip this to `true`.
+    ///
+    /// Defaulted to `true` so a fixture or a caller that constructs a summary
+    /// without saying anything describes a FORMED app — the shell is the
+    /// exceptional state and has to be asked for explicitly.
+    var scaffolded: Bool = true
+
+    /// `true` while this app is still an unscaffolded shell.
+    ///
+    /// The single predicate every render point branches on, so "does this
+    /// place hide the placeholder name?" is one question with one answer
+    /// rather than five independent `!scaffolded` spellings that can drift.
+    var isDraftShell: Bool { !scaffolded }
+
+    /// The title to put on screen.
+    ///
+    /// A shell's `name` is the engine's placeholder, so showing it would put a
+    /// string the user never chose — and cannot act on — at the top of a card.
+    var displayName: String {
+        isDraftShell ? String(localized: "local_apps_draft_card_title") : name
+    }
+
+    /// The secondary line a shell replaces its normal status line with, or
+    /// `nil` once the app is formed and its own status applies.
+    ///
+    /// Returned as an Optional rather than a plain String so each call site
+    /// reads `app.draftStatusLine ?? <its own status>` and cannot forget the
+    /// shell case by writing only its own branch.
+    var draftStatusLine: String? {
+        isDraftShell ? String(localized: "local_apps_draft_card_subtitle") : nil
+    }
+
+    /// The brief, or `nil` while this app is a shell.
+    ///
+    /// A shell's brief is `""` — the engine writes no placeholder for it —
+    /// so rendering it produces an empty labelled row, which reads as a bug.
+    var displayBrief: String? { isDraftShell ? nil : brief }
 }
 
 enum LocalAppLaunchDestination: String, Hashable, Sendable {
@@ -53,32 +96,6 @@ enum LocalAppWorkflow: String, CaseIterable, Hashable, Sendable {
         switch self {
         case .draft: String(localized: "local_apps_state_draft")
         case .ready: String(localized: "local_apps_state_ready")
-        }
-    }
-}
-
-/// Which shape an app draws — the UI mirror of protocol 7.0.0's
-/// `AppSurfaceDto`. Chosen in the create sheet and IMMUTABLE afterwards: the
-/// scaffold is laid down at creation, so this is the one field the sheet must
-/// get in front of the user rather than infer silently.
-enum LocalAppSurface: String, CaseIterable, Hashable, Sendable {
-    case dom
-    case canvas
-
-    var label: String {
-        switch self {
-        case .dom: String(localized: "local_apps_surface_dom")
-        case .canvas: String(localized: "local_apps_surface_canvas")
-        }
-    }
-
-    /// One line under the picker saying what the choice actually decides —
-    /// "canvas" is a build detail, "一块自己绘制的画面" is something a user can
-    /// tell is right or wrong.
-    var detail: String {
-        switch self {
-        case .dom: String(localized: "local_apps_surface_dom_detail")
-        case .canvas: String(localized: "local_apps_surface_canvas_detail")
         }
     }
 }

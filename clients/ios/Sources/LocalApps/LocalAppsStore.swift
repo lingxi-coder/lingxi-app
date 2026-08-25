@@ -15,15 +15,6 @@ final class LocalAppsStore {
         #endif
     }
 
-    /// The host's answer to `ProposeAppIdentity` — a create sheet's editable
-    /// defaults, never an authority. Both fields are fixed at creation (a
-    /// surface is immutable once scaffolded and apps have no rename), so the
-    /// sheet shows them and the user gets the last word.
-    struct AppIdentityProposal: Equatable {
-        let name: String
-        let surface: LocalAppSurface
-    }
-
     private(set) var apps: [LocalAppSummary] = []
     private(set) var runtimes: [String: LocalAppRuntimeStatus] = [:]
     /// Manifest-declared data collections per app (v3: the manifest is the
@@ -62,8 +53,6 @@ final class LocalAppsStore {
         /// mint failed, in which case the hand-off opens a fresh conversation
         /// in the app's scope. That is still rooted in the app workspace.
         var initSessionID: String?
-        let brief: String
-        let modelOverride: String?
     }
 
     struct PendingWidgetSetup: Identifiable, Equatable {
@@ -97,41 +86,21 @@ final class LocalAppsStore {
     /// attach the init-session pin the engine mints immediately afterwards.
     @ObservationIgnored private var landingAwaitingPin: CreatedAppLanding?
 
-    /// In-flight `ProposeAppIdentity` calls, keyed by request id. Keyed rather
-    /// than a single slot so a sheet that was retyped and re-submitted resolves
-    /// its OWN answer instead of adopting the stale one.
-    @ObservationIgnored private var identityProposalWaiters:
-        [String: CheckedContinuation<AppIdentityProposal?, Never>] = [:]
-    /// Request ids whose `ProposeAppIdentity` has been armed but whose waiter
-    /// may not be installed yet, and the answers that arrived in that window.
+    /// The `request_id` of the ONE `CreateApp` this client started and has not
+    /// yet seen resolve, or `nil` when nothing is in flight.
     ///
-    /// The engine emits `AppIdentityProposed` INSIDE the same `submit` call
-    /// that asks for it, so the answer can reach `handle(event:)` while
-    /// `proposeIdentity` is still suspended in `send` — before
-    /// `withCheckedContinuation` has run. Without this the answer was dropped
-    /// and the sheet sat on "naming…" for the full 20-second timeout. Bounded
-    /// by the armed set: nothing is buffered for an id that is not in flight.
-    @ObservationIgnored private var identityProposalsArmed: Set<String> = []
-    @ObservationIgnored private var identityProposalAnswers: [String: AppIdentityProposal] = [:]
-    /// Whether a create is armed. A COUNT of one, not a keyed claim: the engine
-    /// now names the record it committed on `AppCreated`, so nothing has to be
-    /// matched by brief or inferred from a catalog diff.
-    /// The brief of the create this sheet submitted and has not yet seen land.
-    ///
-    /// KEYED, not a bare flag. `AppCreated` carries no correlator back to the
-    /// client that asked, and an agent in another conversation can commit its
-    /// own `LocalAppCreate` in the same window — claiming that record would
-    /// open someone else's app and leave this one with no landing at all.
-    /// Matching the brief is exact rather than inferred: create-first sends the
-    /// user's own sentence and `AppService::create_app` stores it verbatim
-    /// (both ends trim). The deferred flow could not do this — the agent
-    /// rewrote the brief before creating anything.
-    @ObservationIgnored private var creationBrief: String?
-    @ObservationIgnored private var creationWantsWidget = false
-    /// The workflow model the create sheet picked, held until `AppCreated` can
-    /// put it on the landing. The record does not echo it back, and the app's
-    /// first conversation is where it has to take effect.
-    @ObservationIgnored private var creationModelOverride: String?
+    /// A CORRELATION KEY, not a boolean and not a brief. The engine emits
+    /// `AppCreated` for BOTH creation paths, so a bare flag claims whichever
+    /// app committed first — under concurrent creation that is the one an
+    /// agent created in another conversation, and the user is hijacked into
+    /// someone else's app. Matching the brief (what this used to do) is no
+    /// longer possible either: a shell create sends `brief: ""`, so every
+    /// concurrent shell would match every other one.
+    @ObservationIgnored private var pendingCreateRequestID: String?
+    /// Stop-loss timer for [`pendingCreateRequestID`]. Cancelled the moment
+    /// the create resolves either way.
+    @ObservationIgnored private var createResultTimeoutTask: Task<Void, Never>?
+
     /// Offset each in-flight `ListAppSessions` was issued at, so the reply can
     /// be reduced as a replace (offset 0) or an append (later pages) — the
     /// `AppSessionsChanged` event does not echo the requested offset.
@@ -177,7 +146,11 @@ final class LocalAppsStore {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return apps }
         return apps.filter { app in
-            app.name.localizedStandardContains(query)
+            // `displayName`, so a query only ever matches text the user can
+            // actually see on the card. A shell's stored `name` is an engine
+            // placeholder that is never rendered; matching it would surface a
+            // card whose visible title has nothing to do with the query.
+            app.displayName.localizedStandardContains(query)
                 || app.workflow.label.localizedStandardContains(query)
         }
     }
@@ -225,23 +198,6 @@ final class LocalAppsStore {
                 // record the engine just committed — see `handleAppEvent`.
                 lastRefreshAt = .now
                 isRefreshing = false
-
-            case let .appIdentityProposed(requestId, name, surface):
-                // Delivered to the ONE waiter that asked. An id with no waiter
-                // is a proposal whose sheet already timed out or was dismissed;
-                // dropping it is correct, and adopting it would overwrite a
-                // name the user has since typed.
-                let proposal = AppIdentityProposal(
-                    name: name,
-                    surface: LocalAppsProtocolAdapter.surface(surface)
-                )
-                if let waiter = identityProposalWaiters.removeValue(forKey: requestId) {
-                    identityProposalsArmed.remove(requestId)
-                    waiter.resume(returning: proposal)
-                } else if identityProposalsArmed.contains(requestId) {
-                    // The answer beat its waiter — see `identityProposalsArmed`.
-                    identityProposalAnswers[requestId] = proposal
-                }
 
             case let .appWorkflowChanged(appId, state, detail):
                 let workflow = LocalAppsProtocolAdapter.workflow(state)
@@ -291,19 +247,18 @@ final class LocalAppsStore {
                 values.append(item)
                 checkpoints[appId] = values.sorted { $0.createdAt > $1.createdAt }
 
-            case let .appOperationFailed(appId, _, message):
+            case let .appOperationFailed(_, _, message, requestId):
                 isRefreshing = false
                 errorMessage = message
-                // CreateApp failures carry no app id. Fail-closed: drop the
-                // in-flight create claim so a later AppsChanged cannot arm
-                // widget setup or steal landing. Per-app failures must not
-                // cancel a create that already announced and is only waiting
-                // for its init-session pin.
-                if appId == nil {
-                    creationBrief = nil
-                    creationWantsWidget = false
-                    creationModelOverride = nil
-                }
+                // Disarm ONLY on the failure of the create this client
+                // started. `app_id == nil` used to stand in for that, but it
+                // is not a correlation key: an agent-tool create that fails
+                // before it has a record also reports no app id, and letting
+                // that disarm this create means the app the user just asked
+                // for lands in the library with nobody waiting to open it.
+                // A create failure with no `request_id` at all is left to the
+                // 30-second stop-loss below.
+                if let requestId { clearPendingCreate(requestID: requestId) }
 
             default:
                 break
@@ -386,14 +341,19 @@ final class LocalAppsStore {
         // The create claim does NOT survive a rebind. `AppCreated` is a
         // one-shot event on the source that was just torn down, so a create
         // still in flight across a project/scope switch can never resolve its
-        // claim — and nothing else clears `creationBrief`. Left armed it is a
-        // permanent latch: every later Create returns
-        // `local_apps_error_create_in_progress` for the process lifetime. The
-        // app itself still gets created; only this session's landing is lost,
-        // which the refresh below makes visible in the catalog anyway.
-        creationBrief = nil
-        creationWantsWidget = false
-        creationModelOverride = nil
+        // claim — and nothing else clears `pendingCreateRequestID`. Left armed
+        // it is a permanent latch: every later create returns
+        // `local_apps_error_create_in_progress` for the process lifetime.
+        //
+        // The app itself was probably still created, which is exactly why the
+        // user is TOLD rather than left to assume it failed — and why the
+        // client must not go on to claim some later `AppCreated`. Nothing that
+        // arrives after this point carries a request id this store is still
+        // waiting on, so nothing can be claimed.
+        if let pending = pendingCreateRequestID {
+            clearPendingCreate(requestID: pending)
+            errorMessage = String(localized: "local_apps_creation_result_unknown")
+        }
         await refresh()
         let appIDs = apps.map(\.id)
         // Rebind used to issue one bridge round-trip after another. Keep a
@@ -411,126 +371,129 @@ final class LocalAppsStore {
         }
     }
 
-    /// How long the sheet waits for a proposal before showing its own defaults.
+    /// The default stop-loss for one in-flight `CreateApp`.
     ///
-    /// A ceiling, not an expectation: this is one short model call. It exists so
-    /// a dropped event cannot leave the sheet spinning with no way forward —
-    /// the fields it would have filled are editable either way.
-    static let identityProposalTimeout: Duration = .seconds(20)
+    /// A NEW constant, deliberately not anchored to the 20-second identity
+    /// proposal timeout this commit deletes: that one bounded a single model
+    /// call. This one bounds a local create that also mints a session, and
+    /// forks a source conversation's history into the new workspace when one
+    /// is bound — which a cold device can take real time over. Thirty seconds
+    /// is stop-loss, not an expectation: the app is almost certainly already
+    /// in the library, which is what the user is told to check.
+    static let defaultCreateResultTimeout: Duration = .seconds(30)
 
-    /// The name shown when no proposal arrives.
+    /// The stop-loss this instance actually uses.
     ///
-    /// Deliberately the SAME derivation `AppService::create_app` applies to a
-    /// blank name (the brief's first 24 CHARACTERS, never bytes — a byte cut
-    /// would split a CJK codepoint), so the field the user sees is what they
-    /// would have got anyway.
-    static func fallbackName(brief: String) -> String {
-        String(brief.trimmingCharacters(in: .whitespacesAndNewlines).prefix(24))
-    }
+    /// Overridable so a test can exercise the REAL timer instead of asserting
+    /// that a constant equals thirty. `createResultTimeoutIsThirtySeconds`
+    /// pins the production value so shortening it here cannot go unnoticed.
+    @ObservationIgnored var createResultTimeout: Duration = LocalAppsStore.defaultCreateResultTimeout
 
-    /// Ask the host to name and shape an app from the brief, WITHOUT creating
-    /// anything.
+    /// Create the empty SHELL app that the conversational create flow
+    /// interviews the user inside.
     ///
-    /// Never fails: an unreachable engine, a refused command or a lost event
-    /// all yield the same derived defaults the host itself falls back to. Both
-    /// fields are editable in the sheet, so a bad proposal costs a correction,
-    /// not a create.
-    func proposeIdentity(brief: String) async -> AppIdentityProposal {
-        let trimmed = brief.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallback = AppIdentityProposal(
-            name: Self.fallbackName(brief: trimmed), surface: .dom)
-        guard !trimmed.isEmpty else { return fallback }
-        #if canImport(engine_mobileFFI)
-            let requestID = UUID().uuidString
-            // Arm BEFORE submitting: the engine answers inside `submit`.
-            identityProposalsArmed.insert(requestID)
-            guard await send(.proposeAppIdentity(requestId: requestID, brief: trimmed))
-            else {
-                abandonIdentityProposal(requestID: requestID)
-                return fallback
-            }
-            if let early = identityProposalAnswers.removeValue(forKey: requestID) {
-                identityProposalsArmed.remove(requestID)
-                return early
-            }
-            let answer = await withCheckedContinuation {
-                (continuation: CheckedContinuation<AppIdentityProposal?, Never>) in
-                identityProposalWaiters[requestID] = continuation
-                Task { [weak self] in
-                    try? await Task.sleep(for: Self.identityProposalTimeout)
-                    self?.abandonIdentityProposal(requestID: requestID)
-                }
-            }
-            return answer ?? fallback
-        #else
-            return fallback
-        #endif
-    }
-
-    /// Resume a proposal waiter with nothing. Idempotent: the answering event
-    /// removes the waiter first, so a timeout that fires afterwards is a no-op
-    /// rather than a double resume.
-    private func abandonIdentityProposal(requestID: String) {
-        identityProposalsArmed.remove(requestID)
-        identityProposalAnswers.removeValue(forKey: requestID)
-        identityProposalWaiters.removeValue(forKey: requestID)?.resume(returning: nil)
-    }
-
-    /// Create the app outright, from choices the user has already seen.
+    /// There is no form: no brief, no name, no surface, no model picker. The
+    /// record is committed with `mode: .shell`, which writes
+    /// `scaffolded: false` and lays down NO scaffold; the agent proposes the
+    /// name and the surface inside the app's own conversation and
+    /// `LocalAppScaffold` lands the scaffolding only after the user confirms.
     ///
-    /// Creating BEFORE any conversation exists is the whole point: the app's
-    /// first conversation is opened in the app's own scope, so its cwd is the
-    /// app workspace. The previous flow ran an intake conversation in the
-    /// project scope and handed off afterwards, which meant every agent step
-    /// before the hand-off was rooted in the wrong directory.
-    func createApp(
-        brief: String,
-        name: String,
-        surface: LocalAppSurface,
-        gitEnabled: Bool = true,
-        modelOverride: String? = nil,
-        addWidget: Bool = false
-    ) async -> Bool {
-        let trimmed = brief.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            errorMessage = String(localized: "local_apps_error_brief_required")
-            return false
-        }
-        guard creationBrief == nil else {
+    /// `conversationID` is the conversation the user pressed "+" from. The
+    /// engine forks its history into the new workspace, so the interview
+    /// starts with whatever the user was already talking about; a fork that
+    /// has nothing to copy degrades to an empty anchor engine-side.
+    ///
+    /// Returns whether the command reached the engine — NOT whether the app
+    /// was created. The outcome arrives out of band on `AppCreated` /
+    /// `AppOperationFailed`, correlated by `request_id`.
+    func createShellApp(conversationID: String? = nil) async -> Bool {
+        guard pendingCreateRequestID == nil else {
             errorMessage = String(localized: "local_apps_error_create_in_progress")
             return false
         }
         #if canImport(engine_mobileFFI)
-            let trimmedModel = modelOverride?
+            let requestID = UUID().uuidString
+            let trimmedConversation = conversationID?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let workflowModel = trimmedModel.flatMap { $0.isEmpty ? nil : $0 }
-            // An empty name is not an error: `AppService::create_app` derives
-            // one from the brief, the same way `fallbackName` does.
-            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            creationBrief = trimmed
-            creationWantsWidget = addWidget
-            creationModelOverride = workflowModel
+            let conversation = trimmedConversation.flatMap { $0.isEmpty ? nil : $0 }
+            // Armed BEFORE the command goes out: `send` awaits the engine, and
+            // the engine can emit `AppCreated` from inside that call. Arming
+            // afterwards drops the event this whole mechanism exists to catch.
+            pendingCreateRequestID = requestID
+            armCreateResultTimeout(requestID: requestID)
             let succeeded = await send(
                 .createApp(
-                    name: trimmedName,
+                    // A shell has no name and no brief to send: both are what
+                    // the conversation is FOR. The engine writes a placeholder
+                    // name that no client is allowed to render (see
+                    // `LocalAppSummary.displayName`).
+                    name: "",
                     origin: .library,
-                    brief: trimmed,
-                    gitEnabled: gitEnabled,
-                    workflowModel: workflowModel,
-                    conversationId: nil,
-                    surface: LocalAppsProtocolAdapter.surfaceDto(surface)
+                    brief: "",
+                    gitEnabled: true,
+                    workflowModel: nil,
+                    conversationId: conversation,
+                    // The shape is decided when the scaffold lands, not now.
+                    surface: nil,
+                    mode: .shell,
+                    requestId: requestID
                 )
             )
-            if !succeeded {
-                creationBrief = nil
-                creationWantsWidget = false
-                creationModelOverride = nil
-            }
+            if !succeeded { clearPendingCreate(requestID: requestID) }
             return succeeded
         #else
             errorMessage = String(localized: "local_apps_error_engine_unavailable")
             return false
         #endif
+    }
+
+    /// Arm the stop-loss for one pending create.
+    private func armCreateResultTimeout(requestID: String) {
+        createResultTimeoutTask?.cancel()
+        let timeout = createResultTimeout
+        createResultTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            self?.reportUnknownCreateResult(requestID: requestID)
+        }
+    }
+
+    /// The stop-loss fired: the create never reported back. The app is very
+    /// likely in the library anyway, so the user is pointed at it rather than
+    /// told it failed.
+    private func reportUnknownCreateResult(requestID: String) {
+        guard pendingCreateRequestID == requestID else { return }
+        clearPendingCreate(requestID: requestID)
+        errorMessage = String(localized: "local_apps_creation_result_unknown")
+    }
+
+    /// Disarm the pending create — but ONLY if `requestID` is the one still in
+    /// flight. Every caller passes a key that came off the wire, so this guard
+    /// is what makes "ignore any event whose request id does not match" true
+    /// rather than merely intended.
+    private func clearPendingCreate(requestID: String) {
+        guard pendingCreateRequestID == requestID else { return }
+        pendingCreateRequestID = nil
+        createResultTimeoutTask?.cancel()
+        createResultTimeoutTask = nil
+    }
+
+    /// Arm the home-screen widget setup guide for one app.
+    ///
+    /// Reached from the app's detail screen. It used to be a toggle inside the
+    /// create form; deleting that form without rehoming this entry would have
+    /// removed the only way to put an app on the home screen.
+    ///
+    /// Refuses for a shell: an unscaffolded app is excluded from the widget
+    /// snapshot on purpose (see `makeWidgetSnapshot`), so the widget would
+    /// have nothing to show.
+    func requestWidgetSetup(appID: String) {
+        guard let app = app(id: appID), app.scaffolded else { return }
+        pendingWidgetSetup = PendingWidgetSetup(
+            appID: app.id,
+            appName: app.displayName
+        )
+        publishWidgetSnapshotNow()
     }
 
     /// Take the post-creation landing, if any. One-shot.
@@ -840,7 +803,7 @@ final class LocalAppsStore {
     #if canImport(engine_mobileFFI)
         private func handleAppEvent(_ event: AppEventDto) {
             switch event {
-            case let .appCreated(record):
+            case let .appCreated(record, requestId):
                 // The engine names the record it just committed, for BOTH
                 // creation paths. Emitted after `AppsChanged`, so the catalog
                 // already contains it.
@@ -850,22 +813,25 @@ final class LocalAppsStore {
                 // `RootView.switchScope` submits `cancelAndWait()` first — the
                 // landing would kill the very turn that produced the app. The
                 // library arms the landing and `RootView` walks in once the
-                // turn is done (immediately, for a create from the sheet,
-                // where there is no turn at all).
-                // Claim only the record this sheet asked for. An unkeyed
-                // claim opens whichever app committed first.
-                guard let claimed = creationBrief, claimed == record.brief else { break }
-                creationBrief = nil
+                // turn is done (immediately, for a "+" create, where there is
+                // no turn at all).
+                //
+                // Claim ONLY the create this client started, by the correlation
+                // key it generated. Every other `AppCreated` — an agent's
+                // create in another conversation, a create this store already
+                // resolved, anything arriving after a reconnect cleared the
+                // pending id — falls through to `break` and is ignored.
                 let summary = LocalAppsProtocolAdapter.app(record)
                 upsertApp(summary)
+                guard let pending = pendingCreateRequestID,
+                      let requestId,
+                      requestId == pending
+                else { break }
+                clearPendingCreate(requestID: pending)
                 createdAppID = summary.id
-                // The hand-off target. The engine minted the app's own session
-                // at creation; the build has to run THERE, because a workflow
-                // launched from the intake conversation inherits the project
-                // cwd and edits whatever sits in it. RootView fires this once
-                // the intake turn has finished — switching scope mid-turn
-                // submits `cancelAndWait()` and would kill the turn that just
-                // produced the app.
+                // The hand-off target: the app's own conversation, whose cwd is
+                // the app workspace. Everything the agent does for this app has
+                // to run THERE.
                 //
                 // HELD, not published: the pin is minted AFTER this event and
                 // arrives on `AppRecordChanged`, which the engine emits either
@@ -879,19 +845,8 @@ final class LocalAppsStore {
                 // already does via `landingAwaitingPin`.
                 landingAwaitingPin = CreatedAppLanding(
                     appID: summary.id,
-                    initSessionID: record.initSessionId,
-                    brief: summary.brief,
-                    modelOverride: creationModelOverride
+                    initSessionID: record.initSessionId
                 )
-                creationModelOverride = nil
-                if creationWantsWidget {
-                    creationWantsWidget = false
-                    pendingWidgetSetup = PendingWidgetSetup(
-                        appID: summary.id,
-                        appName: summary.name.isEmpty ? summary.brief : summary.name
-                    )
-                    publishWidgetSnapshotNow()
-                }
 
             case let .appDetailsChanged(details):
                 let summary = LocalAppsProtocolAdapter.app(details.app)
@@ -1144,10 +1099,18 @@ final class LocalAppsStore {
         apps.sort { $0.updatedAt > $1.updatedAt }
     }
 
+    /// The home-screen snapshot.
+    ///
+    /// Shells are EXCLUDED, not relabelled. A `scaffolded == false` app has an
+    /// engine placeholder for a name and nothing to launch, so relabelling it
+    /// would put an un-openable icon on the user's home screen — outside the
+    /// app, where none of the draft-card branches in this client can reach it.
+    /// It reappears on its own once the scaffold lands and the record change
+    /// republishes the snapshot.
     private func makeWidgetSnapshot() -> LocalAppWidgetSnapshot {
         LocalAppWidgetSnapshot(
             version: LocalAppWidgetSnapshot.currentVersion,
-            apps: apps.map { app in
+            apps: apps.filter(\.scaffolded).map { app in
                 LocalAppWidgetSnapshot.App(
                     id: app.id,
                     name: app.name,

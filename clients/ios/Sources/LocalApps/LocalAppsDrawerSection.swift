@@ -30,11 +30,15 @@ struct LocalAppsDrawerSection: View {
                             .frame(width: 30, height: 30)
                             .background(theme.accent.opacity(0.1), in: .rect(cornerRadius: 8))
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(app.name)
+                            // Same draft branch as the library card and the
+                            // detail header: a shell shows the localized "New
+                            // App" / "Creating…" pair, never its placeholder
+                            // name.
+                            Text(app.displayName)
                                 .font(.system(size: 13.5, weight: .semibold))
                                 .foregroundStyle(theme.text)
                                 .lineLimit(1)
-                            Text(app.workflow.label)
+                            Text(app.draftStatusLine ?? app.workflow.label)
                                 .font(.caption)
                                 .foregroundStyle(theme.text4)
                         }

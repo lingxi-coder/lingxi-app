@@ -2267,6 +2267,23 @@ mod tests {
             .await
             .expect("create");
         assert!(record.scaffolded, "the create+scaffold path commits scaffolded=true");
+        // `AppState::create_with_git` hardcodes `scaffolded: true` in its own
+        // literal (state.rs) — `assert!` above alone would still pass even if
+        // the `app.record.scaffolded = mode == CreateMode::Scaffolded;`
+        // assignment in `create_app_with_git_and_workflow_model_and_initializer`
+        // were deleted entirely, because the hardcoded default is also
+        // `true`. Cross-check against a Shell-mode sibling created in the
+        // SAME test: only the CreateMode-derived assignment can make the two
+        // differ, so this proves the flag tracks `mode`, not a constant.
+        let shell = h
+            .service
+            .create_app_with_mode(None, "", None, CreateMode::Shell)
+            .await
+            .expect("shell creation must accept an empty brief");
+        assert_ne!(
+            record.scaffolded, shell.scaffolded,
+            "scaffolded must be mode-derived: Scaffolded and Shell must disagree"
+        );
     }
 
     #[tokio::test]

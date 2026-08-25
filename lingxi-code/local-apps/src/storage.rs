@@ -1228,6 +1228,7 @@ mod tests {
                 "id": "../../escape",
                 "name": "evil",
                 "brief": "an evil app",
+                "scaffolded": true,
                 "createdAtMs": 1,
                 "updatedAtMs": 1,
                 "workflowState": "draft",
@@ -1237,6 +1238,16 @@ mod tests {
         std::fs::write(dir.path().join("apps/index.json"), body.to_string()).unwrap();
         let err = load_all(dir.path()).unwrap_err();
         assert_eq!(err.code(), AppErrorCode::StorageCorrupt);
+        // Pin the MESSAGE too, not just the error code: an unrelated
+        // deserialize failure (e.g. a missing required field) also comes
+        // back as `StorageCorrupt` and would let this test pass vacuously
+        // without ever reaching the `is_valid_app_id` guard it exists to
+        // pin (storage.rs's `apps/index.json lists invalid app id {:?}`).
+        assert!(
+            err.to_string().contains("invalid app id"),
+            "rejection must come from the invalid-id guard, not an unrelated \
+             deserialize failure: {err}"
+        );
     }
 
     /// Finding 7: `workspace_rel` itself is validated against its documented

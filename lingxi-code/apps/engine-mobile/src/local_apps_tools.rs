@@ -74,6 +74,13 @@ pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
     ("LocalAppInstallDeps", "install_dependencies", false),
     ("LocalAppRuntime", "manage_runtime", false),
     ("LocalAppCreate", "create", false),
+    // Lands the scaffold into an app the "+" button created as an empty SHELL
+    // (`AppRecord::scaffolded == false`): it stamps the manifest surface,
+    // writes the whole workspace source tree and overwrites the bootstrap
+    // `LINGXI.md`. Emphatically NOT read-only — `is_read_only` answers "did
+    // this observe without changing anything", and every byte of an app's
+    // initial source is written here.
+    ("LocalAppScaffold", "scaffold", false),
     ("LocalAppManifest", "update_manifest", false),
     ("LocalAppMutateData", "mutate_data", false),
     ("LocalAppActOnUi", "act_on_ui", false),
@@ -194,6 +201,13 @@ impl LocalAppTool {
                 | "LocalAppBackgroundStatus"
                 | "LocalAppBuild"
                 | "LocalAppRuntime"
+                // Allow-by-default so the shell conversation's ONE way out
+                // needs no prompt — but only inside the shell's own workspace.
+                // A builtin registers for EVERY session, so a global chat can
+                // see `LocalAppScaffold` and name any app id; without this row
+                // it could commit a name, a brief and an IMMUTABLE surface onto
+                // a stranger's app with no prompt at all.
+                | "LocalAppScaffold"
         )
     }
 }
@@ -681,6 +695,7 @@ mod tests {
                     | "LocalAppBackgroundStatus"
                     | "LocalAppBuild"
                     | "LocalAppRuntime"
+                    | "LocalAppScaffold"
             );
             let expected = if expected_allow {
                 permission::PromptDefault::AllowByDefault
@@ -850,5 +865,145 @@ mod tests {
         assert!(by_name["LocalAppQueryData"].is_read_only(&empty));
         assert!(!by_name["LocalAppBuild"].is_read_only(&empty));
         assert!(!by_name["LocalAppMutateData"].is_read_only(&empty));
+    }
+
+    /// The builtin must exist AND resolve to the `scaffold` provider
+    /// operation. `local_app_builtin_tools` uses `filter_map` against the
+    /// provider catalog, so a name registered without a matching catalog entry
+    /// yields FEWER tools rather than an error — the tool would simply not
+    /// exist, and the shell conversation would have no way out.
+    #[test]
+    fn scaffold_is_registered_and_maps_to_the_scaffold_operation() {
+        assert!(
+            LOCAL_APP_TOOLS
+                .iter()
+                .any(|&(name, operation, _)| name == "LocalAppScaffold" && operation == "scaffold"),
+            "the builtin must map to the `scaffold` provider operation"
+        );
+        let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
+        let built = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        let scaffold = built
+            .iter()
+            .find(|tool| tool.name() == "LocalAppScaffold")
+            .expect("LocalAppScaffold must be BUILT, not merely named in the table");
+        // The way out of an empty shell has to ride eagerly: the shell agent
+        // is told to call it by name, and a deferred tool would have to be
+        // found through ToolSearch first.
+        assert!(
+            !scaffold.should_defer(),
+            "the shell's only way out must be in the eager tool set"
+        );
+        assert!(
+            !scaffold.is_read_only(&serde_json::json!({})),
+            "scaffolding writes an app's entire initial source tree"
+        );
+    }
+
+    /// A global (non-app) conversation sees this builtin like every other, and
+    /// it takes `app_id` from model input. The surface it commits is
+    /// IMMUTABLE, so a silent auto-allow there would let an agent decide a
+    /// stranger app's shape with no prompt.
+    #[tokio::test]
+    async fn a_global_session_must_confirm_scaffold() {
+        let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
+        let tools = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        let scaffold = tools
+            .iter()
+            .find(|tool| tool.name() == "LocalAppScaffold")
+            .expect("LocalAppScaffold");
+        let decision = scaffold
+            .check_permissions(
+                &serde_json::json!({"app_id": "app-a", "name": "N", "brief": "b", "surface": "dom"}),
+                &tool_api::test_support::fresh_ctx(),
+            )
+            .await;
+        assert!(
+            matches!(decision, PermissionResult::Ask { .. }),
+            "a global session must be asked, got {decision:?}"
+        );
+    }
+
+    /// …and inside the shell's own workspace it must NOT prompt: the whole
+    /// point of the conversational create flow is that the user confirms the
+    /// name/brief/surface in the chat, not a second time in a permission
+    /// sheet.
+    #[tokio::test]
+    async fn a_workspace_session_keeps_auto_allow_for_scaffold() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("apps/app-a/workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let transport = Arc::new(LocalAppsMcpTransport::new(root.path().to_path_buf()));
+        let tools = local_app_builtin_tools(&transport, &workspace);
+        let scaffold = tools
+            .iter()
+            .find(|tool| tool.name() == "LocalAppScaffold")
+            .expect("LocalAppScaffold");
+        let decision = scaffold
+            .check_permissions(
+                &serde_json::json!({"app_id": "app-a", "name": "N", "brief": "b", "surface": "dom"}),
+                &tool_api::test_support::fresh_ctx(),
+            )
+            .await;
+        assert!(
+            matches!(decision, PermissionResult::Allow { .. }),
+            "the shell's own workspace must not prompt, got {decision:?}"
+        );
+    }
+
+    /// NAMING BAN. `local_apps_mcp` asserts the whole catalog's schemas carry
+    /// no `template`; this pins the same ban on the tool the model actually
+    /// sees, description included, so a description-only regression (which the
+    /// schema-only assertion cannot see) still fails.
+    #[tokio::test]
+    async fn the_scaffold_tool_avoids_the_banned_vocabulary() {
+        let transport = Arc::new(LocalAppsMcpTransport::new(std::path::PathBuf::from("/tmp")));
+        let built = local_app_builtin_tools(&transport, std::path::Path::new("/tmp"));
+        let scaffold = built
+            .iter()
+            .find(|tool| tool.name() == "LocalAppScaffold")
+            .expect("LocalAppScaffold");
+        let schema = scaffold.input_schema().to_string().to_lowercase();
+        // The five banned symbols, spelled out rather than counted.
+        for banned in [
+            "template",
+            "dashboard",
+            "crud_tracker",
+            "content_showcase",
+            "form_utility",
+        ] {
+            assert!(!schema.contains(banned), "schema names `{banned}`");
+        }
+        // `Tool::description` is async and input-aware; the constant text is
+        // what `LocalAppTool` stores, so read it through the public accessor.
+        let description = scaffold
+            .description(
+                &serde_json::json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
+            .await
+            .to_lowercase();
+        for banned in [
+            "template",
+            "dashboard",
+            "crud_tracker",
+            "content_showcase",
+            "form_utility",
+        ] {
+            assert!(
+                !description.contains(banned),
+                "description names `{banned}`: {description}"
+            );
+        }
+        // The surface vocabulary the whole flow is built on must actually
+        // reach the model.
+        let enum_values = scaffold.input_schema()["properties"]["surface"]["enum"]
+            .as_array()
+            .expect("surface is an enum")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(enum_values, ["dom", "canvas"]);
     }
 }

@@ -170,6 +170,31 @@ pub type InitSessionMinter = dyn Fn(
     + Send
     + Sync;
 
+/// Provider operations that stay reachable while an app is still an empty
+/// workspace (`AppRecord::scaffolded == false`).
+///
+/// ⚠️ These are PROVIDER OPERATIONS, not builtin tool names. `call()` receives
+/// `"scaffold"`, `"build"`, `"list"` — the builtin names (`LocalAppScaffold`,
+/// `LocalAppBuild`) never reach it, because `LocalAppTool::call` forwards
+/// `self.operation`. Spelling an entry here `LocalAppScaffold` would match
+/// nothing and gate the one way OUT of the shell, making it inescapable.
+///
+/// Why each is here:
+/// - `scaffold` — the way out; gating it is the deadlock above.
+/// - `list` / `get` — read-only orientation; an agent must be able to see the
+///   record it is being refused for.
+/// - `create` — DELIBERATE. An agent making a *second* app from a shell
+///   conversation is not the mistake this gate exists to catch; what it
+///   catches is building, installing into, running or driving a workspace
+///   that has no source tree yet.
+const SHELL_ALLOWED_OPERATIONS: &[&str] = &["scaffold", "list", "get", "create"];
+
+/// Stable machine-readable prefix on the shell gate's refusal.
+///
+/// The prose is Chinese and will be reworded; tests key on this instead, so
+/// "was this gated" never has to be inferred from copy.
+const SHELL_GATE_CODE: &str = "app_not_scaffolded";
+
 /// Principal scope for dynamic per-app MCP tools.
 ///
 /// The ordinary Conversation Agent uses the existing fixed app-management
@@ -801,6 +826,17 @@ impl LocalAppsMcpTransport {
                 },"required":["brief"],"additionalProperties":false}),
             ),
             Self::tool(
+                "scaffold",
+                "Commit the confirmed display name, one-line brief and interface shape onto an app the user created as an empty workspace, then lay down its source tree. Call this ONLY after the user has confirmed all three in the conversation; it is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. The shape is FIXED here and can never be changed: use \"canvas\" when the whole interface is one drawn surface that owns a frame loop — a game, a 3D scene, a live visualization — and \"dom\" for everything built from screens, lists and forms. Anything already written into the workspace is replaced.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"The display name the user confirmed."},
+                    "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"One line describing what the app does, as the user confirmed it."},
+                    "surface":{"type":"string","enum":["dom","canvas"],"description":"dom = an interface of screens, lists and forms; canvas = a single drawn surface owning a frame loop (games, 3D, live visualization). Immutable once committed."},
+                    "workflow_model":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_WORKFLOW_MODEL_BYTES,"description":"Optional model id to record for this app's own generation runs; omit to keep the device default."}
+                },"required":["app_id","name","brief","surface"],"additionalProperties":false}),
+            ),
+            Self::tool(
                 "manage_runtime",
                 "Start, stop, restart, open, suspend or resume a generated app through the host runtime manager.",
                 json!({"type":"object","properties":{"app_id":app_id.clone(),"action":{"enum":["start","stop","restart","open","suspend","resume"]}},"required":["app_id","action"],"additionalProperties":false}),
@@ -1155,6 +1191,58 @@ impl LocalAppsMcpTransport {
         if self.scope.is_app_scoped() && Self::parse_dynamic_tool(tool).is_none() {
             return Err(McpError::ToolNotFound(tool.into()));
         }
+        // ---- SHELL GATE ------------------------------------------------
+        //
+        // The "+" button now creates an empty workspace (`scaffolded ==
+        // false`) and drops the agent into a conversation inside it. Until
+        // `LocalAppScaffold` lands the scaffold there is no source tree, no
+        // surface stamped in the manifest and nothing to run — so a build, a
+        // dependency install, a runtime start or a UI inspection there does
+        // not fail informatively, it fails confusingly, and the agent's
+        // recovery is usually to start writing source that the scaffold is
+        // about to delete.
+        //
+        // It sits ABOVE the dynamic branch on purpose. `runtime_api_compatible`
+        // — the closest existing precedent — lives INSIDE that branch, so it
+        // guards only the app's own MCP namespace; the static `match tool`
+        // path has no equivalent check at all. Half a gate would leave every
+        // `LocalApp*` builtin (which all arrive on the static path) ungated,
+        // which is the entire population this gate exists for.
+        //
+        // Placement is also after the two scope checks above, so a foreign or
+        // out-of-scope namespace still answers `ToolNotFound` rather than
+        // having its existence confirmed by a gate message.
+        let (gate_operation, gate_app_id) = match Self::parse_dynamic_tool(tool) {
+            // In scope: the id is host-bound by the namespace.
+            Some((app_id, operation)) if self.scope.allows_dynamic_app(app_id) => {
+                (operation, Some(app_id))
+            }
+            // Out of scope: leave it to the branch below, which refuses
+            // without revealing whether the app exists.
+            Some((_, operation)) => (operation, None),
+            // Static path: `tool` IS the provider operation, and `app_id` is
+            // in the input — `LocalAppTool::call` injects it from the session
+            // cwd before dispatch, so "has an app_id" says nothing about
+            // whether the model named one.
+            None => (tool, input.get("app_id").and_then(Value::as_str)),
+        };
+        if !SHELL_ALLOWED_OPERATIONS.contains(&gate_operation) {
+            if let Some(app_id) = gate_app_id {
+                // An unreadable or unknown record is NOT this gate's business:
+                // the handler below produces the right error for it, and
+                // answering "no shape yet" for an app that does not exist
+                // would send the agent to `LocalAppScaffold` for nothing.
+                if let Ok(record) = service.record(app_id).await {
+                    if !record.scaffolded {
+                        return Ok(Self::tool_error(format!(
+                            "{SHELL_GATE_CODE}: 应用 `{app_id}` 还没有形态。\
+                             先与用户确认要做什么，再用 `LocalAppScaffold` \
+                             定下名称、简介与形态。"
+                        )));
+                    }
+                }
+            }
+        }
         if let Some((app_id, operation)) = Self::parse_dynamic_tool(tool) {
             if !self.scope.allows_dynamic_app(app_id) {
                 // Do not reveal whether a foreign app namespace exists.
@@ -1448,6 +1536,15 @@ impl LocalAppsMcpTransport {
                 }
                 Self::result(result)
             }
+            // The tool is REGISTERED (Task 7) before its behaviour lands
+            // (Task 8). A missing arm would fall through to the catch-all and
+            // answer `ToolNotFound` for a tool the model can plainly see in
+            // its eager tool set, and the shell contract explicitly tells it
+            // to call this one — so answer with a real, self-explaining error
+            // instead. When Task 8 lands, this arm is REPLACED, not extended.
+            "scaffold" => Self::app_error(local_apps::AppError::NotYetAvailable(
+                "this build registers the scaffolding operation but cannot run it yet".into(),
+            )),
             "manage_runtime" => match self.host()?.manage_runtime(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
@@ -2097,6 +2194,7 @@ mod tests {
                 "list",
                 "get",
                 "create",
+                "scaffold",
                 "manage_runtime",
                 "build",
                 "install_dependencies",
@@ -3248,5 +3346,198 @@ mod tests {
             transport.connect(&spec).await,
             Err(McpError::UnsupportedTransport(McpTransportKind::Stdio))
         ));
+    }
+
+    // ---- SHELL GATE (Task 10) -----------------------------------------
+
+    /// A transport over a real store holding ONE app created in `mode`.
+    ///
+    /// No host is attached on purpose: every gated operation must refuse
+    /// BEFORE it reaches the host, so a test that needed one would be
+    /// testing the wrong layer.
+    async fn transport_with_app(
+        mode: local_apps::CreateMode,
+    ) -> (TempDir, LocalAppsMcpTransport, String) {
+        let root = TempDir::new().expect("tempdir");
+        let service = Arc::new(
+            AppService::load(
+                root.path(),
+                Arc::new(FixedClock::new(1_700_000_000_000)),
+                Arc::new(NoopAppEventObserver),
+            )
+            .await
+            .expect("service"),
+        );
+        // A shell carries no brief yet — that is what the conversation is for.
+        let brief = match mode {
+            local_apps::CreateMode::Shell => "",
+            local_apps::CreateMode::Scaffolded => "a gate fixture app",
+        };
+        let record = service
+            .create_app_with_mode(None, brief, None, mode, None)
+            .await
+            .expect("create app");
+        assert_eq!(
+            record.scaffolded,
+            mode == local_apps::CreateMode::Scaffolded,
+            "the fixture must actually be in the state this test names"
+        );
+        let transport = LocalAppsMcpTransport::new(root.path().to_path_buf());
+        assert!(transport.attach_service(service).is_ok(), "attach service");
+        (root, transport, record.id)
+    }
+
+    /// Did the SHELL GATE refuse this, as opposed to the handler refusing for
+    /// its own reasons (absent host, missing argument, …)?
+    fn was_gated(outcome: &Result<McpToolResultDto, McpError>) -> bool {
+        match outcome {
+            Ok(result) => result.is_error && result.content.to_string().contains(SHELL_GATE_CODE),
+            Err(error) => error.to_string().contains(SHELL_GATE_CODE),
+        }
+    }
+
+    /// The set is DERIVED from the tool table, never counted by hand: a
+    /// hardcoded number goes stale the moment a builtin is added, and it goes
+    /// stale silently — the test keeps passing while the new operation runs
+    /// ungated on an empty workspace.
+    fn gated_operations() -> Vec<&'static str> {
+        crate::local_apps_tools::LOCAL_APP_TOOLS
+            .iter()
+            .map(|&(_, operation, _)| operation)
+            .filter(|operation| !SHELL_ALLOWED_OPERATIONS.contains(operation))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn every_non_allowlisted_operation_is_gated_on_a_shell() {
+        let (_root, transport, app_id) = transport_with_app(local_apps::CreateMode::Shell).await;
+        let gated = gated_operations();
+        assert!(
+            !gated.is_empty(),
+            "the gated set is derived from LOCAL_APP_TOOLS; an empty set means \
+             the derivation broke, not that there is nothing to gate"
+        );
+        for operation in gated {
+            let outcome = transport
+                .call(operation, json!({"app_id": app_id.clone()}))
+                .await;
+            assert!(
+                was_gated(&outcome),
+                "{operation} ran on an empty workspace: {outcome:?}"
+            );
+            let rendered = format!("{outcome:?}");
+            assert!(
+                rendered.contains("LocalAppScaffold"),
+                "the refusal must name the way out; operation={operation}, got {rendered}"
+            );
+            assert!(
+                rendered.contains(&app_id),
+                "the refusal must name the app it is about; operation={operation}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_allowlisted_operations_pass_the_gate_on_a_shell() {
+        let (_root, transport, app_id) = transport_with_app(local_apps::CreateMode::Shell).await;
+        for operation in SHELL_ALLOWED_OPERATIONS {
+            let outcome = transport
+                .call(operation, json!({"app_id": app_id.clone()}))
+                .await;
+            assert!(
+                !was_gated(&outcome),
+                "{operation} must reach its handler — it may still fail for its \
+                 own reasons: {outcome:?}"
+            );
+        }
+    }
+
+    /// If the allow-list were spelled with BUILTIN names (`LocalAppScaffold`)
+    /// instead of provider operations, `scaffold` would match nothing, the
+    /// shell's only way out would be gated, and the app would be permanently
+    /// stuck as an empty workspace. This is the test that catches that.
+    #[tokio::test]
+    async fn scaffold_itself_is_not_gated_because_the_gate_keys_on_the_operation() {
+        let (_root, transport, app_id) = transport_with_app(local_apps::CreateMode::Shell).await;
+        let outcome = transport
+            .call(
+                "scaffold",
+                json!({"app_id": app_id, "name": "A", "brief": "b", "surface": "dom"}),
+            )
+            .await;
+        assert!(
+            !was_gated(&outcome),
+            "the way out must not be gated: {outcome:?}"
+        );
+        assert!(
+            outcome.is_ok(),
+            "scaffold must answer with a tool result, not a transport failure: \
+             {outcome:?}"
+        );
+    }
+
+    /// Testing only the static `match tool` path misses half the surface: the
+    /// dynamic per-app namespace is a SECOND dispatch path with its own
+    /// checks, and `runtime_api_compatible` — the nearest precedent — guards
+    /// only that one. `data_query` is used because it is a real dynamic
+    /// operation; `app_<id>__build` is not one, so it would prove nothing
+    /// (`parse_dynamic_tool` returns `None` and the call lands in the static
+    /// catch-all as `ToolNotFound`).
+    #[tokio::test]
+    async fn the_gate_covers_the_dynamic_dispatch_path_too() {
+        let (_root, transport, app_id) = transport_with_app(local_apps::CreateMode::Shell).await;
+        let scoped = transport
+            .scoped_for_app(&app_id)
+            .expect("app-scoped transport");
+        assert!(
+            !SHELL_ALLOWED_OPERATIONS.contains(&"data_query"),
+            "this test is only meaningful for a gated operation"
+        );
+        let outcome = scoped
+            .call(
+                &format!("app_{app_id}__data_query"),
+                json!({"collection": "journal"}),
+            )
+            .await;
+        assert!(
+            was_gated(&outcome),
+            "the dynamic path must be gated as well: {outcome:?}"
+        );
+        assert!(
+            format!("{outcome:?}").contains("LocalAppScaffold"),
+            "got {outcome:?}"
+        );
+    }
+
+    /// The gate must be invisible once the app has a shape — otherwise it is
+    /// not a gate on the shell phase, it is a gate on everything.
+    #[tokio::test]
+    async fn a_formed_app_passes_the_gate_for_every_operation() {
+        let (_root, transport, app_id) =
+            transport_with_app(local_apps::CreateMode::Scaffolded).await;
+        for &(_, operation, _) in crate::local_apps_tools::LOCAL_APP_TOOLS {
+            let outcome = transport
+                .call(operation, json!({"app_id": app_id.clone()}))
+                .await;
+            assert!(
+                !was_gated(&outcome),
+                "{operation} was gated on a formed app: {outcome:?}"
+            );
+        }
+    }
+
+    /// An app id the store does not know must NOT be answered with "no shape
+    /// yet": that would send the agent to `LocalAppScaffold` with an id that
+    /// can never resolve, and it would confirm to a global conversation which
+    /// ids do not exist. The handler's own not-found error is the right one.
+    #[tokio::test]
+    async fn an_unknown_app_is_not_answered_by_the_shell_gate() {
+        let (_root, transport, _app_id) = transport_with_app(local_apps::CreateMode::Shell).await;
+        let outcome = transport.call("get", json!({"app_id": "zzzzzzzz"})).await;
+        assert!(!was_gated(&outcome), "got {outcome:?}");
+        let outcome = transport
+            .call("read_logs", json!({"app_id": "zzzzzzzz"}))
+            .await;
+        assert!(!was_gated(&outcome), "got {outcome:?}");
     }
 }

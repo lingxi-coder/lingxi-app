@@ -8,13 +8,18 @@
 //! side-effects), 21 `AllowByDefault` (read-only or agent-local) = 44 tools,
 //! plus one synthetic `<unknown>` fallback.
 //!
-//! MOBILE DIVERGENCE: 22 further `LocalApp*` rows for the first-party
+//! MOBILE DIVERGENCE: 23 further `LocalApp*` rows for the first-party
 //! local-app host operations (`engine_mobile::local_apps_tools`). They have no
 //! oracle counterpart — claude-code has no host-owned local-app surface — and
-//! are split by REVERSIBILITY: 11 `AllowByDefault` (read-only, plus the
-//! network-disabled build and the restartable local preview runtime),
-//! 11 `DenyByDefault` (user data, UI actuation, view capture, checkpoint
-//! restore, network).
+//! are split by REVERSIBILITY: 9 `AllowByDefault` (read-only, plus the
+//! network-disabled build, the restartable local preview runtime, and the
+//! shell-scaffolding commit), 14 `DenyByDefault` (user data, UI actuation,
+//! view capture, checkpoint restore, network).
+//!
+//! Both splits are asserted in
+//! `tests::the_counts_in_this_module_doc_are_the_counts_in_the_table` — this
+//! paragraph claimed "11 / 11" for what was in fact 8 / 14 until that test
+//! existed, and nothing failed.
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -28,7 +33,9 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     use PromptDefault::{AllowByDefault, DenyByDefault};
     let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(41);
 
-    // Allow-by-default tools ([Y/n]) — 20 entries.
+    // Allow-by-default tools ([Y/n]) — 21 entries. (It said 20 while there
+    // were 21, from before `ListAgents` was added; the count is asserted in
+    // `tests::the_counts_in_this_module_doc_are_the_counts_in_the_table` now.)
     m.insert("Agent", AllowByDefault);
     m.insert("AskUserQuestion", AllowByDefault);
     m.insert("Config", AllowByDefault);
@@ -58,7 +65,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("TodoWrite", AllowByDefault);
     m.insert("ToolSearch", AllowByDefault);
 
-    // Deny-by-default tools ([y/N]) — 22 entries.
+    // Deny-by-default tools ([y/N]) — 23 entries.
     m.insert("Bash", DenyByDefault);
     m.insert("Edit", DenyByDefault);
     m.insert("EnterWorktree", DenyByDefault);
@@ -108,6 +115,16 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // preview server. These two are the hot loop of the create flow.
     m.insert("LocalAppBuild", AllowByDefault);
     m.insert("LocalAppRuntime", AllowByDefault);
+    // The ONE way out of an app the "+" button created as an empty shell:
+    // until it succeeds, every build/dependency/runtime/UI operation on that
+    // app refuses. Allowed by default because the user has just confirmed the
+    // name, brief and shape IN THE CONVERSATION — a permission sheet on top of
+    // that confirmation asks the same question twice. The scope check is not
+    // waived, only the policy prompt: `LocalAppTool::check_permissions` still
+    // refines this to Ask in a session that is not bound to an app workspace,
+    // which is the case where the target id comes from the model rather than
+    // from the user's own workspace.
+    m.insert("LocalAppScaffold", AllowByDefault);
     // The library's create sheet does NOT come through this gate: it sends
     // `ClientCommand::CreateApp` and creates the app outright, before any
     // conversation exists (see `client_protocol::version`). So the ONLY caller
@@ -139,8 +156,8 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppBackgroundCancel", DenyByDefault);
     m.insert("LocalAppBackgroundRetry", DenyByDefault);
 
-    // 44 oracle-parity tools + 22 mobile local-app builtins.
-    debug_assert_eq!(m.len(), 66, "tool defaults table must list all 66 tools");
+    // 44 oracle-parity tools + 23 mobile local-app builtins.
+    debug_assert_eq!(m.len(), 67, "tool defaults table must list all 67 tools");
     m
 }
 
@@ -173,6 +190,8 @@ mod tests {
             "LocalAppBackgroundStatus",
             "LocalAppBuild",
             "LocalAppRuntime",
+            // The shell's only way out; the user confirmed it in the chat.
+            "LocalAppScaffold",
         ] {
             assert_eq!(
                 tool_default(name),
@@ -279,7 +298,38 @@ mod tests {
         let oracle = m.keys().filter(|k| !k.starts_with("LocalApp")).count();
         let mobile = m.keys().filter(|k| k.starts_with("LocalApp")).count();
         assert_eq!(oracle, 44, "oracle-parity tool count changed");
-        assert_eq!(mobile, 22, "local-app builtin count changed");
+        assert_eq!(mobile, 23, "local-app builtin count changed");
         assert_eq!(m.len(), oracle + mobile);
+    }
+
+    /// The module doc states four counts. Nothing checked them, and the mobile
+    /// split had silently rotted to "11 `AllowByDefault` / 11 `DenyByDefault`"
+    /// while the table actually held 8 / 14 — a claim of completeness the
+    /// module did not have, which is exactly the kind of thing a reviewer
+    /// reads and stops looking at.
+    #[test]
+    fn the_counts_in_this_module_doc_are_the_counts_in_the_table() {
+        let m = init_defaults();
+        let count = |mobile: bool, want: PromptDefault| {
+            m.iter()
+                .filter(|(name, value)| name.starts_with("LocalApp") == mobile && **value == want)
+                .count()
+        };
+        assert_eq!(
+            count(false, PromptDefault::DenyByDefault),
+            23,
+            "oracle deny"
+        );
+        assert_eq!(
+            count(false, PromptDefault::AllowByDefault),
+            21,
+            "oracle allow"
+        );
+        assert_eq!(
+            count(true, PromptDefault::AllowByDefault),
+            9,
+            "mobile allow"
+        );
+        assert_eq!(count(true, PromptDefault::DenyByDefault), 14, "mobile deny");
     }
 }

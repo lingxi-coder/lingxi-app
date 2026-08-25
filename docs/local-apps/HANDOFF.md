@@ -1,6 +1,6 @@
 # Local Apps v3 engineering handoff
 
-Last updated: 2026-08-17
+Last updated: 2026-08-24
 
 This document is the working handoff for LingXi's on-device local application feature. It describes the current implementation on `main`, the contracts that must remain stable, how to validate changes, and the known verification gaps.
 
@@ -8,12 +8,15 @@ This document is the working handoff for LingXi's on-device local application fe
 
 Local Apps lets the conversation agent create, edit, build, run, inspect, and checkpoint a React application inside the mobile product. The agent owns product design and source generation. The host owns storage, permissions, scaffold materialization, the production build, runtime lifecycle, native capabilities, and the bridge exposed to the page.
 
-The current architecture is deterministic. App creation starts from a host-generated pinned Vite scaffold, the agent edits source files only, and the host installs locked dependencies into that app's persistent workspace through the isolated mobile runtime before invoking the project-local Vite executable.
+The current architecture is deterministic, and creation commits in two steps rather than one. The library's "+" creates an EMPTY SHELL — a record with `scaffolded == false`, a workspace holding only `.lingxi/` and a guided `LINGXI.md`, and its own app-scoped conversation — and the agent interviews the user inside it. Only after the user confirms a display name, a one-line brief and a surface (`dom` or `canvas`) does `LocalAppScaffold` materialize the host-generated pinned Vite scaffold and flip `scaffolded` to `true`. `LocalAppCreate`, used from a conversation that is not an app's, still performs both steps in one call. After either path the agent edits source files only, and the host installs locked dependencies into that app's persistent workspace through the isolated mobile runtime before invoking the project-local Vite executable.
+
+The surface is decided once, by the user, and is immutable afterwards: the workspace on disk IS the scaffold, so an app that needs the other shape has to be created again.
 
 Non-goals:
 
 - Local Apps is not a general arbitrary-code sandbox API.
-- The MCP server does not install npm packages during creation or ask the agent to scaffold projects from the conversation.
+- The MCP server does not install npm packages during creation. `scaffold` asks the HOST to materialize the pinned scaffold; the agent never runs a scaffold tool of its own from the conversation.
+- The shell phase is not a draft state machine. `scaffolded` is one bool with two positions and no intermediate persisted step.
 - The production builder never enables network access.
 - A checkpoint restores source and lockfile state, not application data.
 - A mobile-sized browser viewport is not treated as proof of an iOS or Android presentation.
@@ -22,10 +25,15 @@ Non-goals:
 
 ```mermaid
 flowchart TD
-    U["User confirms app specification"] --> C["Conversation agent"]
+    N["User taps + in the library"] --> SH["local_apps MCP: create, mode = shell"]
+    SH --> E["Empty workspace, guided LINGXI.md, app-scoped session"]
+    E --> C["Conversation agent interviews the user"]
     C --> S["create-local-app skill"]
-    S --> M["local_apps MCP: create + update_manifest"]
-    S --> W["local-app-build workflow"]
+    S --> K{"User confirms name, brief and surface?"}
+    K -->|"not yet"| C
+    K -->|"confirmed"| SC["local_apps MCP: scaffold — wipe, seed, commit four fields"]
+    SC --> M["local_apps MCP: update_manifest"]
+    M --> W["local-app-build or local-canvas-build workflow"]
     W --> D["Design: frontend-design"]
     D --> G["Generate: source edits only"]
     G --> I["Host runs locked pnpm install into app-local workspace/node_modules"]
@@ -39,10 +47,16 @@ flowchart TD
     F -->|"no"| P["User-approved checkpoint"]
 ```
 
+The diagram is the conversational entry. The one-shot `LocalAppCreate` entry,
+used from a conversation that is not an app's, collapses `N` through `SC` into
+a single call and then stops there; the build runs later, from `M` onward,
+inside the app's own session.
+
 The important ownership boundary is:
 
 - The model proposes and writes app source.
-- The host creates the pinned Vite scaffold, installs locked dependencies per app, and performs fixed offline builds.
+- The USER settles the app's display name and its surface. The model proposes them from the interview; it never commits them on the user's behalf, because the surface cannot be revised afterwards.
+- The host creates the pinned Vite scaffold. For an app opened from the library's "+", it does so at `scaffold`, not at `create`. It also installs locked dependencies per app and performs fixed offline builds.
 - The agent does not run package-manager commands during creation.
 - The engine controls the runtime.
 - The native WebView is the authority for platform identity and host capability access.
@@ -56,7 +70,8 @@ The important ownership boundary is:
 | Workflow | `lingxi-code/tools/workflow/src/local_app_build_workflow.js` | Task-local fast/balanced/thorough Design → Generate source → Build → Verify; structured outputs; strategy-specific repair rounds |
 | Workflow registration/tests | `lingxi-code/tools/workflow/src/builtins.rs` | Built-in registration and real QuickJS regression tests |
 | MCP surface | `lingxi-code/apps/engine-mobile/src/local_apps_mcp.rs` | Fixed in-process `local_apps` tool catalog and input validation |
-| Host broker | `lingxi-code/apps/engine-mobile/src/local_apps_host.rs` | Runtime, build coordination, logs, checkpoints, native bridge permissions, UI inspection/actions |
+| Builtin tools | `lingxi-code/apps/engine-mobile/src/local_apps_tools.rs`, `lingxi-code/permission/src/defaults_per_tool.rs` | Model-facing builtin names, their provider operations, read-only flags, per-tool permission defaults and counted assertions |
+| Host broker | `lingxi-code/apps/engine-mobile/src/local_apps_host.rs` | Scaffold landing, guided and formal `LINGXI.md` contracts, runtime, build coordination, logs, checkpoints, native bridge permissions, UI inspection/actions |
 | Builder | `lingxi-code/apps/engine-mobile/src/local_apps_build.rs` | Vite validation, app-local dependency readiness, single-root build mounts, offline builds |
 | Mobile composition | `lingxi-code/apps/engine-mobile/src/lib.rs`, `host.rs`, `workflow_support.rs` | Registers the workflow, MCP transport, Shell, runtime, and FFI seams |
 | Shared domain | `lingxi-code/local-apps/src/` | Manifest, app/runtime records, SQLite data, permissions, mailbox, atomic storage, Git checkpoints |
@@ -70,11 +85,30 @@ The important ownership boundary is:
 
 ### Creation
 
-1. The client asks for a short brief and optional Git preference.
-2. The conversation agent confirms target OS/form factor, screens, navigation/back behavior, states, data collections, permissions, allowed domains, design direction, and image requirements.
-3. `mcp__local_apps__create` creates an unindexed private skeleton and materializes the pinned workspace scaffold before committing anything externally visible. `apps/index.json` is the durable commit point; only after it succeeds may the record enter memory or emit `AppsChanged`. If scaffold or index persistence fails, the unindexed directory is removed and the call fails without a visible app, compensating delete, or create/delete event pair.
-4. `mcp__local_apps__update_manifest` records collections, domains, capabilities, and confirmed device context before generated source depends on them.
-5. The agent invokes the `local-app-build` workflow once.
+There are two entries, and they commit different things. Both end at the same
+place: an app with `scaffolded == true`, a name, a brief, a surface, and a
+materialized workspace.
+
+**Conversational — the library's "+".** This is the default path on mobile.
+
+1. The client sends `CreateApp` with `mode = shell` and a `request_id` it can correlate the result with. No name, no brief, no surface: the client collects none of them, and the mode rejects a `surface` outright.
+2. `mcp__local_apps__create` commits a record with `scaffolded == false` and a workspace holding only `.lingxi/` and a guided `LINGXI.md`, then opens the app-scoped conversation on it. `apps/index.json` remains the durable commit point.
+3. While `scaffolded == false`, the MCP tool gate — keyed on the provider operation, at the top of `call()`, above both the static and the dynamic dispatch branches — admits only `scaffold`, `list`, `get`, and `create`. Every other operation refuses and names `LocalAppScaffold` as the way out.
+4. The agent interviews the user, then puts a proposed display name, one-line brief and surface into one `AskUserQuestion` round for confirmation or correction.
+5. On confirmation, `mcp__local_apps__scaffold` holds `storage::lock_app_build` across the whole landing: it wipes the editable surface, seeds the scaffold for the chosen surface, stamps the manifest, rewrites `LINGXI.md` with the formal contract rendered from the CONFIRMED name and brief, and only then commits `name`, `brief`, `workflow_model`, and `scaffolded = true` in one `with_app` transaction. Any failure before that commit persists none of the four and is retryable; the in-process reservation that excludes a concurrent `scaffold` is deliberately not persisted, so a killed process cannot brick a draft.
+6. `mcp__local_apps__update_manifest` records collections, domains, capabilities, and confirmed device context before generated source depends on them.
+7. The agent invokes `local-app-build` (`dom`) or `local-canvas-build` (`canvas`) once.
+
+**One-shot — `LocalAppCreate` from a conversation that is not an app's.**
+
+1. The conversation agent confirms target OS/form factor, screens, navigation/back behavior, states, data collections, permissions, allowed domains, design direction, image requirements, plus the name and surface.
+2. `mcp__local_apps__create` with `mode = scaffolded` requires a non-empty brief, creates an unindexed private skeleton, and materializes the pinned workspace scaffold before committing anything externally visible. `apps/index.json` is the durable commit point; only after it succeeds may the record enter memory or emit `AppsChanged`. If scaffold or index persistence fails, the unindexed directory is removed and the call fails without a visible app, compensating delete, or create/delete event pair. The record commits `scaffolded == true`.
+3. That call ENDS the work in that conversation. The build runs in the app's own session, which is rooted in the app workspace.
+
+`CreateMode` is the single decision point for the initial value of
+`AppRecord.scaffolded`, and `scaffolded` carries no serde default: a stored
+record missing the field fails to load rather than silently reading as a shell,
+because a shell is the one thing `scaffold` is allowed to wipe.
 
 The coordinator computes a complexity recommendation from the confirmed
 specification in the same turn and shows it in the existing confirmation
@@ -88,11 +122,13 @@ runtime start, preview URL, fatal smoke, and native data-roundtrip requirements.
 The choice is task-local workflow input, not persisted app state or a client
 protocol field.
 
-The persisted workflow is intentionally small: `Draft` or `Ready`. Fine-grained progress belongs to the conversation/workflow execution, not to a second durable generation state machine.
+The persisted workflow is intentionally small: `Draft` or `Ready`. `scaffolded` is orthogonal to it and is not a second generation state machine — it answers only "does this app have a shape yet", which is what the tool gate, `detect_build_target`, and the first-scaffold wipe each need to know. Fine-grained progress still belongs to the conversation/workflow execution.
 
 ### Scaffold and dependencies
 
-When a new local app is created, the host writes a pinned Vite scaffold into the workspace before the agent begins source editing. The scaffold is deterministic and is part of the creation path, not an npm workflow.
+The host, not the agent, writes the pinned Vite scaffold, and it always writes it before the agent begins source editing. Which call triggers that depends on the entry: `LocalAppCreate` does it inside creation, while an app opened from the library's "+" gets it at `LocalAppScaffold`, once the user has confirmed the surface. Either way the scaffold is deterministic and host-owned, not an npm workflow, and the surface picks which scaffold is materialized.
+
+A FIRST scaffold wipes the editable surface before seeding it, keeping `.lingxi/`, `LINGXI.md`, and `node_modules/`. A shell has no legitimate application source by definition, so this is what makes a shell an agent scribbled in still land a clean workspace; per-path overwrite would have left the leftovers behind. `restore_host_managed_files` re-pins host-managed files on the same seeding routine with the wipe switched OFF, and a second `LocalAppScaffold` on an already-scaffolded app is rejected — that combination is what keeps the wipe away from real source.
 
 The agent edits source files only. `package.json`, lockfiles, `index.html`, Vite configuration, `.lingxi/` metadata, source policy, and the three files under `lib/` supplied by the host remain host-controlled boundaries.
 
@@ -158,7 +194,7 @@ The in-process server key is fixed as `local_apps`; it is not loaded from projec
 Current tools:
 
 - `list`, `get`
-- `create`, `update_manifest`
+- `create`, `scaffold`, `update_manifest`
 - `build`, `manage_runtime`
 - `create_checkpoint`, `list_checkpoints`, `restore_checkpoint`
 - `query_data`, `mutate_data`
@@ -172,6 +208,9 @@ Current tools:
 
 Important constraints:
 
+- An app with `scaffolded == false` admits only `scaffold`, `list`, `get`, and `create`. The gate keys on the provider OPERATION, not on the builtin tool name, and sits above both the static `match tool` arm and the `parse_dynamic_tool` branch, so the app-scoped `<app_id>__<op>` namespace is gated too. `create` is deliberately on the allowlist: a second app is not the mistake this gate exists to prevent.
+- `scaffold` is the only way an app acquires a name, a brief, and a surface after a shell creation. It commits those three plus `scaffolded` in one transaction, and it is not idempotent by design — a second call on an already-scaffolded app is rejected, because landing a scaffold clears the editable surface.
+- Registering a local-app builtin means four synchronized edits, not one: the `LOCAL_APP_TOOLS` table, the exact-name assertion in `local_apps_mcp.rs`, the per-tool permission default and its counted `debug_assert_eq!`, and `requires_bound_session_for_auto_allow`. Missing the last one lets a global session call the tool without a prompt.
 - `inspect_ui` returns a structured DOM/accessibility snapshot and does not execute JavaScript.
 - `act_on_ui` accepts only click, fill, select, toggle, scroll, navigate, back, reload, pointer, and key. `pointer` takes `value` `"x,y"` or `"x,y,phase"` in CSS pixels (phase `tap`/`down`/`move`/`up`) and `key` takes `"<key>"` or `"<key>,phase"` (phase `press`/`down`/`up`); both exist for canvas/WebGL surfaces, which resolve no element for the selector-based actions. `capture_ui` is its own operation and returns a still image, not an `act_on_ui` action.
 - manifest capabilities are the closed wire enum `data_mutation`, `ui_control`, `camera`, `photo_library`, `microphone`, `location`, `notifications`, `clipboard`, `share`, `text_to_speech`, `files_read`, `files_write`, `device_status`, `haptics`, `deep_link`, `calendar`, `contacts`, `media`, `llm`, `agent_notify`, and `background_schedule`; `data` is invalid. Apps that register a system background flow must declare `background_schedule`. WebAssembly and Web Workers are not capabilities: the served CSP allows `'wasm-unsafe-eval'` and `blob:` workers for every app, because the policy already carries `'unsafe-inline'` and wasm is strictly weaker than the JavaScript that permits.
@@ -193,7 +232,7 @@ Important constraints:
   the next step before continuing, and records retryable versus terminal
   failures.
 
-When adding or changing a tool, update the Rust catalog, broker implementation, skill/workflow prompt, tests, client protocol if externally visible, protocol snapshots, and this document together.
+When adding or changing a tool, update the Rust catalog, broker implementation, the builtin table and its permission default, the shell allowlist if the tool must work before an app has a shape, skill/workflow prompt, tests, client protocol if externally visible, protocol snapshots, and this document together.
 
 ## 6. Manifest, storage, and checkpoints
 
@@ -307,7 +346,7 @@ The intended acceptance matrix is:
 | Layer | Required evidence |
 | --- | --- |
 | Workflow | Structured design/build/verification outputs; no repair after first success; repair → rebuild → restart → reverify; repaired URL propagated; successful build without URL rejected |
-| Creation | host-generated pinned Vite scaffold; source-only agent edits; no package install during creation |
+| Creation | shell mode commits `scaffolded == false` with an empty workspace and accepts an empty brief while scaffolded mode still rejects one; a record missing `scaffolded` fails to load; the shell tool gate refuses every operation outside the four-item allowlist on BOTH dispatch branches and names `LocalAppScaffold`; `scaffold` commits four fields atomically, renders the confirmed name/brief into `LINGXI.md`, and persists none of them on failure; a first scaffold wipes the editable surface; host-generated pinned Vite scaffold; source-only agent edits; no package install during creation |
 | Builder | Vite-only validation; workspace-local Vite executable; one writable build mount; memory budgets |
 | Checkpoint restore | source restore plus host-side dependency materialization; no package-manager reconciliation step |
 | Shared domain | manifest validation, atomic storage, runtime transitions, data bounds, checkpoint behavior |
@@ -385,6 +424,31 @@ Do not convert these gaps into claims of completed native QA.
 - Distinguish scaffold materialization failure from build failure.
 - Confirm the workflow is not trying to fetch packages during creation.
 
+### A tool refuses with "the app has no shape yet"
+
+That is the shell tool gate, not a fault. The app is still `scaffolded == false`
+because no `LocalAppScaffold` has landed. Settle the name, brief, and surface
+with the user and call `LocalAppScaffold`; do not retry the refused call and do
+not reach for the app-scoped `<app_id>__<op>` namespace, which is gated too.
+
+### The pinned session is still titled `untitled`
+
+`untitled` is the non-localized placeholder a shell record carries, and the
+pinned init session takes its title from `record.name`. `LocalAppScaffold`
+renames that session after it commits, and the boot backfill sweep reconciles a
+rename that failed. Both use the same predicate, and both refuse to touch a
+title the user set: the mobile placeholder is the `custom-title` record carrying
+`mobileEmptySession: 1`, and an ordinary `custom-title` written afterwards — by
+`/rename`, by a hook's `sessionTitle` — means hands off.
+
+### A conversationally created app never got its requirements
+
+Check `workspace/LINGXI.md`. It is the only channel that reaches the model every
+turn, it is written exactly once by the scaffold commit, and
+`restore_host_managed_files` does not re-pin it. If it renders `# Local App:
+untitled` with an empty brief, the contract was rendered from the pre-commit
+record instead of the confirmed one, and the interview's result is gone.
+
 ### Build fails
 
 - Read the bounded build log with `read_logs`.
@@ -419,6 +483,7 @@ Before merging a Local Apps change:
 - [ ] Keep the agent/host ownership boundary explicit.
 - [ ] Avoid new package-manager, scaffold, or Git MCP abstractions.
 - [ ] Preserve deterministic host-created scaffolds and source-only agent edits.
+- [ ] Keep the shell phase closed: a new local-app operation is gated unless it is deliberately added to the allowlist, and a new builtin lands all four registration edits.
 - [ ] Keep production build network disabled.
 - [ ] Validate single-root snapshot, path, and origin boundaries.
 - [ ] Update both native bridge implementations when the page API changes.
@@ -442,8 +507,10 @@ Before merging a Local Apps change:
 A change is done only when:
 
 - the confirmed user flow works through the conversation rather than a parallel designer UI;
+- the name and surface of a conversationally created app come from a user confirmation in that conversation, never from a native form filled in before the app exists and never from a model guess committed unasked;
 - generated source respects editable roots and uses `window.lingxi.v2`;
-- creation uses a host-generated pinned Vite scaffold and source-only agent edits;
+- creation uses a host-generated pinned Vite scaffold and source-only agent edits, whether the scaffold lands at `create` or at `scaffold`;
+- a shell can only leave the shell phase through `LocalAppScaffold`, and a failed landing leaves it retryable rather than half-committed;
 - the production build remains offline and reproducible;
 - the build uses a single writable app workspace and its local Vite executable;
 - runtime start/restart returns the preview actually verified;

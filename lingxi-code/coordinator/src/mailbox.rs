@@ -22,8 +22,16 @@ use tokio::sync::Notify;
 pub struct TeammateMessage {
     /// Who sent the message.
     pub from: MessageSender,
+    /// Model-visible sender name used by the teammate envelope. This preserves
+    /// display names instead of degrading teammate senders to UUIDs.
+    #[serde(default)]
+    pub from_name: String,
     /// Message content.
     pub content: String,
+    /// Optional concise summary rendered as the envelope's `summary=`
+    /// attribute. Ordinary string `SendMessage` calls require and preserve it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     /// Caller-assigned message ID for idempotency.
     pub message_id: String,
     /// Wall-clock send time.

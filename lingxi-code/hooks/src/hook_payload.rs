@@ -1270,7 +1270,7 @@ pub fn parse_response(
         Some(other) => {
             return Err(HookResponseParseError::UnknownDecision {
                 value: other.to_string(),
-            })
+            });
         }
     }
 
@@ -1408,7 +1408,7 @@ pub fn parse_response(
                 Some(other) => {
                     return Err(HookResponseParseError::UnknownPermissionDecision {
                         value: other.to_string(),
-                    })
+                    });
                 }
             }
         }

@@ -59,6 +59,10 @@ pub enum WorkerStatus {
 /// Registry of teammate workers owned by a coordinator session.
 pub struct TeamRegistry {
     workers: RwLock<HashMap<AgentId, WorkerAgent>>,
+    /// Handler transitions that arrived after activation but before `TeamCreate`
+    /// linked the handler-generated task id to its worker. Access always follows
+    /// the `workers` lock so linking and replay cannot miss each other.
+    pending_handler_statuses: RwLock<HashMap<String, WorkerStatus>>,
     /// The coordinator agent's ID (parent of all workers in this registry).
     pub coordinator_id: AgentId,
     /// Shared mailbox router.
@@ -77,6 +81,7 @@ impl TeamRegistry {
     pub fn new(coordinator_id: AgentId) -> Self {
         Self {
             workers: RwLock::new(HashMap::new()),
+            pending_handler_statuses: RwLock::new(HashMap::new()),
             coordinator_id,
             mailbox_router: Arc::new(MailboxRouter::new()),
             team_name: RwLock::new(None),
@@ -115,7 +120,14 @@ impl TeamRegistry {
 
     /// Remove a worker and unregister its mailbox.
     pub async fn delete_worker(&self, agent_id: &AgentId) {
-        self.workers.write().await.remove(agent_id);
+        {
+            let mut workers = self.workers.write().await;
+            workers.remove(agent_id);
+            let mut pending = self.pending_handler_statuses.write().await;
+            if workers.values().all(|worker| !worker.task_id.is_empty()) {
+                pending.clear();
+            }
+        }
         self.mailbox_router.unregister(agent_id).await;
     }
 
@@ -134,13 +146,91 @@ impl TeamRegistry {
         }
     }
 
+    /// Update a worker only while its current status is non-terminal.
+    ///
+    /// Team startup uses this to publish its initial derived status without
+    /// racing a concurrent handler failure and resurrecting that worker as
+    /// active. The check and write intentionally share one registry lock.
+    pub async fn update_status_if_nonterminal(&self, agent_id: &AgentId, status: WorkerStatus) {
+        if let Some(worker) = self.workers.write().await.get_mut(agent_id) {
+            if matches!(
+                &worker.status,
+                WorkerStatus::Completed | WorkerStatus::Failed { .. } | WorkerStatus::Killed
+            ) {
+                return;
+            }
+            worker.status = status;
+            worker.last_active_at = SystemTime::now();
+        }
+    }
+
+    /// Apply a lifecycle status emitted by a teammate handler.
+    ///
+    /// The first terminal state wins, except that a later `Failed` payload may
+    /// replace an earlier generic `Failed` sentinel with the real error reason.
+    /// The check and write share the registry lock so a concurrent kill cannot
+    /// be resurrected as `Failed`, `Completed`, or `Working`.
+    pub async fn update_status_from_handler(&self, agent_id: &AgentId, status: WorkerStatus) {
+        if let Some(worker) = self.workers.write().await.get_mut(agent_id) {
+            if apply_handler_transition(&mut worker.status, status) {
+                worker.last_active_at = SystemTime::now();
+            }
+        }
+    }
+
+    /// Apply a handler transition by task id, or retain it until `TeamCreate`
+    /// publishes the worker↔task link.
+    ///
+    /// Returns `true` when the task id already resolved to a worker. A transition
+    /// is buffered only while at least one unlinked worker exists; genuinely
+    /// unknown ids remain no-ops instead of growing an unbounded pending map.
+    pub async fn update_status_from_handler_by_task_id(
+        &self,
+        task_id: &str,
+        status: WorkerStatus,
+    ) -> bool {
+        if task_id.is_empty() {
+            return false;
+        }
+
+        let mut workers = self.workers.write().await;
+        if let Some(worker) = workers
+            .values_mut()
+            .find(|worker| worker.task_id == task_id)
+        {
+            if apply_handler_transition(&mut worker.status, status) {
+                worker.last_active_at = SystemTime::now();
+            }
+            return true;
+        }
+        if !workers.values().any(|worker| worker.task_id.is_empty()) {
+            return false;
+        }
+
+        let mut pending = self.pending_handler_statuses.write().await;
+        if let Some(current) = pending.get_mut(task_id) {
+            apply_handler_transition(current, status);
+        } else {
+            pending.insert(task_id.to_string(), status);
+        }
+        false
+    }
+
     /// Write back the handler-generated task id onto a worker.
     ///
     /// No-op (no panic) if no worker with `agent_id` is registered.
     pub async fn set_task_id(&self, agent_id: &AgentId, task_id: String) {
-        if let Some(worker) = self.workers.write().await.get_mut(agent_id) {
+        let mut workers = self.workers.write().await;
+        if let Some(worker) = workers.get_mut(agent_id) {
+            let mut pending = self.pending_handler_statuses.write().await;
+            if let Some(status) = pending.remove(&task_id) {
+                apply_handler_transition(&mut worker.status, status);
+            }
             worker.task_id = task_id;
             worker.last_active_at = SystemTime::now();
+            if workers.values().all(|worker| !worker.task_id.is_empty()) {
+                pending.clear();
+            }
         }
     }
 
@@ -182,6 +272,17 @@ impl TeamRegistry {
             .cloned()
     }
 
+    /// Resolve a worker by its [`AgentId`] — an O(1) map lookup.
+    ///
+    /// The sender-name / agent-type resolutions on the `SendMessage`,
+    /// `SyntheticOutput` and teammate-definition paths all key on exactly the
+    /// `AgentId` this map is indexed by. Going through [`Self::list`] there
+    /// deep-clones EVERY worker record (four owned `String`s apiece) just to
+    /// read one field off one of them, on every message.
+    pub async fn find_by_agent_id(&self, agent_id: &AgentId) -> Option<WorkerAgent> {
+        self.workers.read().await.get(agent_id).cloned()
+    }
+
     /// Set (or clear) the team name for this coordinator session.
     pub async fn set_team_name(&self, name: Option<String>) {
         *self.team_name.write().await = name;
@@ -213,6 +314,25 @@ impl TeamRegistry {
             .count();
         u32::try_from(count).unwrap_or(u32::MAX)
     }
+}
+
+/// Apply the handler lifecycle's first-terminal-wins rule to one status value.
+/// A `Failed`→`Failed` transition is the intentional sentinel→real-reason
+/// upgrade used by [`TeamRegistry::update_status_from_handler`].
+fn apply_handler_transition(current: &mut WorkerStatus, status: WorkerStatus) -> bool {
+    let current_is_terminal = matches!(
+        current,
+        WorkerStatus::Completed | WorkerStatus::Failed { .. } | WorkerStatus::Killed
+    );
+    let failed_reason_upgrade = matches!(
+        (&*current, &status),
+        (WorkerStatus::Failed { .. }, WorkerStatus::Failed { .. })
+    );
+    if current_is_terminal && !failed_reason_upgrade {
+        return false;
+    }
+    *current = status;
+    true
 }
 
 #[cfg(test)]
@@ -285,6 +405,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_status_does_not_overwrite_a_concurrent_terminal_status() {
+        let reg = TeamRegistry::new(AgentId::new());
+        let id = reg
+            .spawn_worker("writer".into(), "beta".into(), String::new())
+            .await
+            .unwrap();
+        reg.update_status(
+            &id,
+            WorkerStatus::Failed {
+                error: "provider failed".into(),
+            },
+        )
+        .await;
+
+        reg.update_status_if_nonterminal(
+            &id,
+            WorkerStatus::Working {
+                activity: "running".into(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            reg.list().await[0].status,
+            WorkerStatus::Failed {
+                error: "provider failed".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_status_preserves_killed_but_can_upgrade_a_failed_reason() {
+        let reg = TeamRegistry::new(AgentId::new());
+        let id = reg
+            .spawn_worker("writer".into(), "beta".into(), String::new())
+            .await
+            .unwrap();
+
+        reg.update_status(&id, WorkerStatus::Killed).await;
+        reg.update_status_from_handler(
+            &id,
+            WorkerStatus::Failed {
+                error: "late provider failure".into(),
+            },
+        )
+        .await;
+        assert_eq!(reg.list().await[0].status, WorkerStatus::Killed);
+
+        reg.update_status(
+            &id,
+            WorkerStatus::Failed {
+                error: "teammate task failed".into(),
+            },
+        )
+        .await;
+        reg.update_status_from_handler(
+            &id,
+            WorkerStatus::Failed {
+                error: "real provider reason".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            reg.list().await[0].status,
+            WorkerStatus::Failed {
+                error: "real provider reason".into()
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn find_by_task_id_roundtrip() {
         let reg = TeamRegistry::new(AgentId::new());
         let id = reg
@@ -304,6 +495,56 @@ mod tests {
 
         // Unknown id resolves to nothing.
         assert!(reg.find_by_task_id("nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn linking_last_unlinked_worker_clears_unmatched_pending_statuses() {
+        let reg = TeamRegistry::new(AgentId::new());
+        let id = reg
+            .spawn_worker("explorer".into(), "gamma".into(), String::new())
+            .await
+            .unwrap();
+
+        assert!(
+            !reg.update_status_from_handler_by_task_id(
+                "late-deleted-task",
+                WorkerStatus::Failed {
+                    error: "late failure".into(),
+                },
+            )
+            .await
+        );
+        assert_eq!(reg.pending_handler_statuses.read().await.len(), 1);
+
+        reg.set_task_id(&id, "actual-task".into()).await;
+
+        assert!(reg.pending_handler_statuses.read().await.is_empty());
+        assert_eq!(reg.list().await[0].status, WorkerStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn deleting_last_unlinked_worker_clears_unmatched_pending_statuses() {
+        let reg = TeamRegistry::new(AgentId::new());
+        let first = reg
+            .spawn_worker("explorer".into(), "alpha".into(), String::new())
+            .await
+            .unwrap();
+        let second = reg
+            .spawn_worker("writer".into(), "beta".into(), String::new())
+            .await
+            .unwrap();
+        reg.update_status_from_handler_by_task_id("late-deleted-task", WorkerStatus::Killed)
+            .await;
+
+        reg.delete_worker(&first).await;
+        assert_eq!(
+            reg.pending_handler_statuses.read().await.len(),
+            1,
+            "pending statuses remain while another worker can still link"
+        );
+
+        reg.delete_worker(&second).await;
+        assert!(reg.pending_handler_statuses.read().await.is_empty());
     }
 
     #[tokio::test]

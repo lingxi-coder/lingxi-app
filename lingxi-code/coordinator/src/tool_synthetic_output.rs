@@ -225,7 +225,13 @@ impl Tool for SyntheticOutputTool {
 
             let msg = TeammateMessage {
                 from: MessageSender::Teammate(worker_id),
+                from_name: self
+                    .team
+                    .find_by_agent_id(&worker_id)
+                    .await
+                    .map_or_else(|| worker_id.to_string(), |worker| worker.name),
                 content,
+                summary: None,
                 message_id: tool_api::util::ids::ulid_or_uuid(),
                 timestamp: SystemTime::now(),
                 request_id: None,

@@ -38,7 +38,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
-use hooks::teammate_idle_firer::{TeammateIdleFire, TeammateIdleFirer};
+use hooks::teammate_idle_firer::{TeammateIdleFire, TeammateIdleFirer, TeammateIdleOutcome};
 use hooks::HookExecutorImpl;
 
 /// Adapts the engine's hook executor to the `tasks` crate's `TeammateIdle` firer
@@ -73,7 +73,7 @@ impl OrchestratorTeammateIdleFirer {
 
 #[async_trait]
 impl TeammateIdleFirer for OrchestratorTeammateIdleFirer {
-    async fn fire(&self, fire: TeammateIdleFire) {
+    async fn fire(&self, fire: TeammateIdleFire) -> TeammateIdleOutcome {
         let event = HookEvent::TeammateIdle {
             teammate_name: fire.teammate_name,
             team_name: fire.team_name,
@@ -88,12 +88,28 @@ impl TeammateIdleFirer for OrchestratorTeammateIdleFirer {
             transcript_path: self.transcript_path.clone(),
             ..Default::default()
         };
-        // Best-effort: the executor never errors out of `execute`, so a
-        // misbehaving / absent hook degrades to a no-op and never disturbs the
-        // teammate's turn-set loop. The aggregate result is intentionally
-        // dropped — `TeammateIdle` is observational here (claude-code's blocking
-        // path lives in `stopHooks.ts`, not the leaf teammate handler).
-        let _ = self.hooks.execute(event, ctx).await;
+        let aggregate = self.hooks.execute(event, ctx).await;
+        let blocking_feedback = if matches!(
+            aggregate.decision,
+            Some(hooks::response::HookDecision::Block)
+        ) {
+            vec![format!(
+                "TeammateIdle hook feedback:\n{}",
+                aggregate.reason.as_deref().unwrap_or("Blocked by hook")
+            )]
+        } else {
+            Vec::new()
+        };
+        TeammateIdleOutcome {
+            prevent_continuation: aggregate.prevent_continuation,
+            reason: aggregate.prevent_continuation.then(|| {
+                aggregate
+                    .reason
+                    .unwrap_or_else(|| "TeammateIdle hook prevented continuation".to_string())
+            }),
+            blocking_feedback,
+            additional_contexts: aggregate.additional_contexts,
+        }
     }
 }
 
@@ -112,11 +128,12 @@ mod tests {
             PathBuf::from("/work/.t.jsonl"),
         );
         // Must not panic / hang.
-        firer
+        let outcome = firer
             .fire(TeammateIdleFire {
                 teammate_name: "buddy".into(),
                 team_name: "alpha".into(),
             })
             .await;
+        assert_eq!(outcome, TeammateIdleOutcome::default());
     }
 }

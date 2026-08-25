@@ -3,7 +3,7 @@
 //! [`AgentToolResolver`] projects the parent agent's tool set onto the child
 //! according to the child's [`AgentToolPolicy`], appends the per-agent MCP
 //! tools, drops the always-disallowed agent-tool set + the per-definition
-//! denylist, and then applies the read-only filter when the child runs in
+//! denylist, and then applies the canonical plan-safe filter when the child runs in
 //! [`AgentPermissionMode::Plan`]. See spec §10.8.
 //!
 //! ## Always-disallowed default drop (claude `ALL_AGENT_DISALLOWED_TOOLS`)
@@ -137,7 +137,7 @@ impl AgentToolResolver {
     /// 2. always-disallowed drop (`Agent`/`TaskOutput`/… gated by `USER_TYPE`);
     /// 3. per-definition `disallowed_tools` subtraction (base-name match);
     /// 4. append per-agent MCP tools (never filtered);
-    /// 5. Plan-mode read-only narrowing (LingXi-local last step).
+    /// 5. Plan-mode safe-tool narrowing (LingXi-local last step).
     ///
     /// ## `use_exact_tools` full bypass (claude `runAgent.ts:500-502`)
     ///
@@ -196,7 +196,7 @@ impl AgentToolResolver {
         // scopes inject the same `Read`/`Write`/`Edit` set. Injection happens
         // right after policy projection so the injected tools remain subject to
         // every downstream filter: an explicit `disallowedTools: [Write]` still
-        // wins (step 3), and Plan-mode read-only narrowing (step 5) still strips
+        // wins (step 3), and Plan-mode safe-tool narrowing (step 5) still strips
         // `Write`/`Edit` (keeping `Read`). The tools are pulled from the parent
         // pool (the memory agent's parent always exposes them); if the parent
         // pool lacks one, that tool is simply not injected.
@@ -260,14 +260,15 @@ impl AgentToolResolver {
         // `mcp__*` before any disallowed check) — append after the drops.
         tools.extend(agent_mcp_tools.iter().cloned());
 
-        // (5) Plan-mode read-only narrowing (LingXi-local last step; only
-        // further narrows, so leaving it last is byte-safe).
+        // (5) Plan-mode narrowing (LingXi-local last step; only further
+        // narrows, so leaving it last is byte-safe). Reuse permission's
+        // canonical safe-tool set (which includes teammate communication/task
+        // metadata) while preserving this resolver's existing read-only web
+        // tools, which are not part of the auto-mode classifier allowlist.
         if agent_def.permission_mode == AgentPermissionMode::Plan {
-            tools.retain(|t| {
-                matches!(
-                    t.name(),
-                    "Read" | "Grep" | "Glob" | "WebSearch" | "WebFetch"
-                )
+            tools.retain(|tool| {
+                permission::is_plan_safe_tool(tool.name())
+                    || matches!(tool.name(), "WebSearch" | "WebFetch")
             });
         }
         tools
@@ -392,6 +393,48 @@ pub async fn resolve_subagent_tools(
     Ok((schemas, allowed))
 }
 
+/// Add the tool capabilities every in-process teammate receives regardless of
+/// a custom agent definition's tool policy.
+///
+/// Claude Code 2.1.241 constructs teammate definitions as custom tools plus
+/// `SendMessage`, and (when the root surface exposes the complete task-list
+/// suite) `TaskCreate`/`TaskGet`/`TaskUpdate`/`TaskList`. The returned boolean is
+/// the oracle's `hasTaskListTools` gate used by auto-claim.
+pub fn augment_teammate_tool_policy(
+    registry: &tool_api::ToolRegistry,
+    definition: &mut AgentDefinition,
+) -> bool {
+    use tool_api::tool_trait::ToolStaticContext;
+
+    const SEND_MESSAGE: &str = "SendMessage";
+    const TASK_TOOLS: [&str; 4] = ["TaskCreate", "TaskGet", "TaskUpdate", "TaskList"];
+    let available: HashSet<String> = registry
+        .available_tools(&ToolStaticContext::default())
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect();
+    let has_task_list_tools = TASK_TOOLS.iter().all(|name| available.contains(*name));
+    let mandatory = std::iter::once(SEND_MESSAGE)
+        .filter(|name| available.contains(*name))
+        .chain(TASK_TOOLS.into_iter().filter(|_| has_task_list_tools))
+        .collect::<Vec<_>>();
+
+    match &mut definition.tools {
+        AgentToolPolicy::Explicit(names) => {
+            for name in mandatory {
+                if !names.iter().any(|existing| existing == name) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        AgentToolPolicy::Except(excluded) => {
+            excluded.retain(|name| !mandatory.contains(&name.as_str()));
+        }
+        AgentToolPolicy::All { .. } => {}
+    }
+    has_task_list_tools
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,6 +551,78 @@ mod tests {
         AgentToolPolicy::All {
             use_exact_tools: false,
         }
+    }
+
+    #[test]
+    fn teammate_policy_adds_send_message_and_complete_task_suite() {
+        let mut registry = tool_api::ToolRegistry::new();
+        for name in [
+            "Read",
+            "SendMessage",
+            "TaskCreate",
+            "TaskGet",
+            "TaskUpdate",
+            "TaskList",
+        ] {
+            registry.register_builtin(tool(name));
+        }
+        let mut definition = agent_def(AgentToolPolicy::Explicit(vec!["Read".into()]));
+
+        assert!(augment_teammate_tool_policy(&registry, &mut definition));
+        let AgentToolPolicy::Explicit(names) = definition.tools else {
+            panic!("expected explicit teammate tool policy");
+        };
+        assert_eq!(
+            names,
+            vec![
+                "Read".to_string(),
+                "SendMessage".to_string(),
+                "TaskCreate".to_string(),
+                "TaskGet".to_string(),
+                "TaskUpdate".to_string(),
+                "TaskList".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn teammate_policy_does_not_advertise_partial_task_suite() {
+        let mut registry = tool_api::ToolRegistry::new();
+        for name in ["Read", "SendMessage", "TaskList"] {
+            registry.register_builtin(tool(name));
+        }
+        let mut definition = agent_def(AgentToolPolicy::Explicit(vec!["Read".into()]));
+
+        assert!(!augment_teammate_tool_policy(&registry, &mut definition));
+        let AgentToolPolicy::Explicit(names) = definition.tools else {
+            panic!("expected explicit teammate tool policy");
+        };
+        assert_eq!(names, vec!["Read", "SendMessage"]);
+    }
+
+    #[test]
+    fn teammate_policy_removes_mandatory_tools_from_except_denylist() {
+        let mut registry = tool_api::ToolRegistry::new();
+        for name in [
+            "SendMessage",
+            "TaskCreate",
+            "TaskGet",
+            "TaskUpdate",
+            "TaskList",
+        ] {
+            registry.register_builtin(tool(name));
+        }
+        let mut definition = agent_def(AgentToolPolicy::Except(vec![
+            "Bash".into(),
+            "SendMessage".into(),
+            "TaskUpdate".into(),
+        ]));
+
+        assert!(augment_teammate_tool_policy(&registry, &mut definition));
+        let AgentToolPolicy::Except(excluded) = definition.tools else {
+            panic!("expected except teammate tool policy");
+        };
+        assert_eq!(excluded, vec!["Bash"]);
     }
 
     // ── pure core: all_agent_disallowed_tools(is_ant) ──
@@ -676,7 +791,7 @@ mod tests {
         assert_eq!(names(&resolved), vec!["Read".to_string()]);
     }
 
-    // ── resolve(): Plan-mode read-only narrowing still applies last ──
+    // ── resolve(): Plan-mode safe-tool narrowing still applies last ──
 
     #[test]
     fn plan_mode_readonly_narrowing_applies_last() {
@@ -688,11 +803,42 @@ mod tests {
         let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         let got = names(&resolved);
         // Agent dropped by the always-disallowed set; Bash dropped by the
-        // Plan-mode read-only narrowing; only Read+Grep survive.
+        // Plan-mode safe-tool narrowing; only Read+Grep survive from this pool.
         assert!(!got.contains(&"Agent".to_string()));
         assert!(!got.contains(&"Bash".to_string()));
         assert!(got.contains(&"Read".to_string()));
         assert!(got.contains(&"Grep".to_string()));
+    }
+
+    #[test]
+    fn plan_mode_keeps_teammate_communication_and_task_metadata_tools() {
+        let parent = pool(&[
+            "Read",
+            "Bash",
+            "SendMessage",
+            "TaskCreate",
+            "TaskGet",
+            "TaskUpdate",
+            "TaskList",
+        ]);
+        let def = AgentDefinition {
+            permission_mode: AgentPermissionMode::Plan,
+            ..agent_def(all_policy())
+        };
+
+        let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
+
+        assert_eq!(
+            names(&resolved),
+            vec![
+                "Read",
+                "SendMessage",
+                "TaskCreate",
+                "TaskGet",
+                "TaskUpdate",
+                "TaskList",
+            ]
+        );
     }
 
     #[test]
@@ -965,7 +1111,7 @@ mod tests {
 
     #[test]
     fn memory_injected_tools_respect_plan_mode_narrowing() {
-        // Plan-mode read-only narrowing still strips the injected Write/Edit while
+        // Plan-mode safe-tool narrowing still strips the injected Write/Edit while
         // keeping the read-only Read — memory writes do not bypass plan mode.
         let parent = pool(&["Read", "Write", "Edit", "Bash"]);
         let def = AgentDefinition {

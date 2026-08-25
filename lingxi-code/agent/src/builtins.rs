@@ -988,7 +988,11 @@ mod tests {
         got.sort_unstable();
         assert_eq!(
             got,
-            vec!["Agent".to_string(), "SendUserMessage".to_string(), "Workflow".to_string()],
+            vec![
+                "Agent".to_string(),
+                "SendUserMessage".to_string(),
+                "Workflow".to_string()
+            ],
             "disallowedTools must be [SendUserMessage, Agent, Workflow] (sorted: Agent, SendUserMessage, Workflow)"
         );
     }

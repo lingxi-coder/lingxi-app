@@ -2006,14 +2006,14 @@ impl Task for LocalWorkflowHandler {
                 })
                 .filter(|app_id| !app_id.is_empty())
                 .ok_or_else(|| {
-                    TaskError::Internal(
-                        format!("{workflow_id} requires a non-empty workflow args.app_id"),
-                    )
+                    TaskError::Internal(format!(
+                        "{workflow_id} requires a non-empty workflow args.app_id"
+                    ))
                 })?;
             let registry = self.workspace_leases.clone().ok_or_else(|| {
-                TaskError::Internal(
-                    format!("{workflow_id} requires a workspace permission lease registry"),
-                )
+                TaskError::Internal(format!(
+                    "{workflow_id} requires a workspace permission lease registry"
+                ))
             })?;
             let data_root = self.workspace_root.clone().ok_or_else(|| {
                 TaskError::Internal(format!("{workflow_id} requires an app data root"))

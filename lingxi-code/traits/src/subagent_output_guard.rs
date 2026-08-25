@@ -271,7 +271,15 @@ fn is_word_at(c: &[char], i: usize) -> bool {
 }
 
 /// JS `\s` (whitespace) — the ECMAScript whitespace + line-terminator set.
-fn is_js_space(ch: char) -> bool {
+///
+/// `pub` because the harness-envelope tag boundary rule (`[>\s/]|$`) is also
+/// enforced OUTSIDE this module — the teammate-message renderer in
+/// `tasks::handlers::in_process_teammate` escapes the same tag family before it
+/// reaches the model. Both sites must agree on what counts as whitespace: an
+/// ASCII-only predicate lets `<teammate-message\u{a0}>` through one and not the
+/// other.
+#[must_use]
+pub fn is_js_space(ch: char) -> bool {
     matches!(
         ch,
         '\t' | '\n' | '\u{0b}' | '\u{0c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'

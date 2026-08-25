@@ -8,16 +8,11 @@
 //! actually drive, and (re-)pushes the live active-worker count to the
 //! orchestrator-facing [`OutputStream`] after each state change.
 //!
-//! ## Lossy surface (by design)
-//!
-//! A *persistent* teammate emits [`TaskStatus::Completed`] at the end of every
-//! turn-set yet keeps running (it then parks awaiting the next message — see
-//! `tasks::handlers::in_process_teammate::terminal_status`). `Completed` is
-//! therefore NOT a terminal transition here: mapping it to
-//! [`WorkerStatus::Completed`] would prematurely flip a still-running worker to
-//! a terminal state and drop it from the active-worker count. Only `Failed` /
-//! `Killed` truly end the teammate, so only those (plus `Running`) drive a
-//! status transition.
+//! A persistent runner emits a `SubagentEvent::Completed` per turn-set, but the
+//! teammate handler deliberately does not forward those as `TaskStatus` values.
+//! Therefore a `TaskStatus::Completed` reaching this sink is an explicit
+//! terminal lifecycle decision (currently `TeammateIdle continue:false`) and
+//! must map to [`WorkerStatus::Completed`].
 
 use crate::team_registry::{TeamRegistry, WorkerStatus};
 use async_trait::async_trait;
@@ -56,8 +51,7 @@ impl CoordinatorStatusSink {
 
     /// Map a [`TaskStatus`] to the [`WorkerStatus`] it drives, if any.
     ///
-    /// `Pending`/`Completed` produce `None` (no transition — see the module
-    /// docs on the persistent-teammate `Completed` surface).
+    /// `Pending`/`Paused` produce no worker transition.
     fn worker_status_for(status: TaskStatus) -> Option<WorkerStatus> {
         match status {
             TaskStatus::Running => Some(WorkerStatus::Working {
@@ -67,9 +61,10 @@ impl CoordinatorStatusSink {
                 error: FAILED_ERROR.to_string(),
             }),
             TaskStatus::Killed => Some(WorkerStatus::Killed),
-            // No transition: `Pending` predates the worker link; `Completed` is
-            // emitted per turn-set by a still-running persistent teammate.
-            TaskStatus::Pending | TaskStatus::Paused | TaskStatus::Completed => None,
+            TaskStatus::Completed => Some(WorkerStatus::Completed),
+            // No transition: Pending predates the worker link and Paused has no
+            // teammate analogue.
+            TaskStatus::Pending | TaskStatus::Paused => None,
         }
     }
 }
@@ -80,18 +75,18 @@ impl CoordinatorStatusSink {
 const FAILURE_REASON_CAP: usize = 200;
 
 impl CoordinatorStatusSink {
-    /// Apply `status` to the worker linked to `task_id` (unknown ids are a
-    /// no-op) and push the freshly-computed active-worker count downstream.
+    /// Apply `status` to the worker linked to `task_id` and push the freshly
+    /// computed active-worker count downstream. A status arriving during the
+    /// activation→link window is retained by [`TeamRegistry`] and replayed when
+    /// `TeamCreate` publishes the task id; genuinely unknown ids remain a no-op.
     async fn apply(&self, task_id: &str, worker_status: WorkerStatus) {
-        // Resolve the worker keyed on the handler-generated task id. Unknown
-        // ids are a no-op (no panic) — the link may not be written back yet, or
-        // the worker may already have been deleted.
-        let Some(worker) = self.team.find_by_task_id(task_id).await else {
+        if !self
+            .team
+            .update_status_from_handler_by_task_id(task_id, worker_status)
+            .await
+        {
             return;
-        };
-        self.team
-            .update_status(&worker.agent_id, worker_status)
-            .await;
+        }
 
         // PUSH the freshly-computed active-worker count + team name downstream.
         let active = self.team.active_worker_count().await;
@@ -208,23 +203,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_does_not_transition() {
+    async fn completed_maps_to_terminal_completed() {
         let (team, _out, sink) = fixture("task-1").await;
 
         // First, transition to Working via Running.
         sink.set_status("task-1", TaskStatus::Running).await;
-        // A persistent teammate emits Completed per turn-set but keeps running:
-        // it must NOT flip the worker to a terminal status.
+        // Per-turn-set Completed events are filtered by the handler. A
+        // TaskStatus::Completed reaching this sink is therefore terminal.
         sink.set_status("task-1", TaskStatus::Completed).await;
 
         let workers = team.list().await;
-        assert_eq!(
-            status_of(&workers),
-            &WorkerStatus::Working {
-                activity: "running".into()
-            },
-            "Completed must leave the still-running worker in Working"
-        );
+        assert_eq!(status_of(&workers), &WorkerStatus::Completed);
     }
 
     /// cc 2.1.198 (M9): a teammate dying on an API error reports "failed" to
@@ -295,6 +284,31 @@ mod tests {
         let workers = team.list().await;
         assert_eq!(status_of(&workers), &WorkerStatus::Idle);
         assert_eq!(out.calls(), 0, "no emit for an unknown task id");
+    }
+
+    #[tokio::test]
+    async fn startup_failure_is_replayed_after_task_id_link() {
+        let team = Arc::new(TeamRegistry::new(AgentId::new()));
+        let agent_id = team
+            .spawn_worker("explorer".into(), "alpha".into(), String::new())
+            .await
+            .unwrap();
+        let output = Arc::new(SpyOutput::default());
+        let sink = CoordinatorStatusSink::new(team.clone(), output.clone());
+
+        sink.set_failed("task-startup", "provider allocation failed")
+            .await;
+        assert_eq!(status_of(&team.list().await), &WorkerStatus::Idle);
+        assert_eq!(output.calls(), 0, "an unlinked status is not pushed early");
+
+        team.set_task_id(&agent_id, "task-startup".into()).await;
+        assert_eq!(
+            status_of(&team.list().await),
+            &WorkerStatus::Failed {
+                error: "provider allocation failed".into()
+            },
+            "linking the handler task replays its retained failure reason"
+        );
     }
 
     #[tokio::test]

@@ -9,10 +9,11 @@
 //! The two are otherwise disconnected, so a routed message would sit unread.
 //!
 //! The pump is the bridge: one task per teammate that parks on the teammate's
-//! mailbox and, for each message, calls `spawn_seam.send_message(task_id, text)`
-//! — the Rust analogue of claude-code's `injectUserMessageToTeammate`. The
-//! mailbox's bounded `VecDeque` IS the pending-message queue (claude-code's
-//! `queuePendingMessage`); the pump drains it in FIFO order.
+//! mailbox, atomically drains every message currently pending, renders each
+//! envelope, joins the batch with `\n\n`, and calls
+//! `spawn_seam.send_message(task_id, text)` once — the Rust analogue of
+//! claude-code's `getPendingUserMessages().map(...).join("\n\n")`. The
+//! mailbox's bounded `VecDeque` IS the pending-message queue.
 //!
 //! ## Lifecycle / auto-resume divergence
 //!
@@ -36,14 +37,50 @@ use crate::mailbox::{TeammateMailbox, TeammateMessage};
 /// only a liveness floor, not a polling interval that risks dropping messages.
 const PUMP_PARK: Duration = Duration::from_secs(30);
 
-/// Extract the user-visible text a teammate should receive as a `UserMessage`
-/// from a [`TeammateMessage`]. The mailbox carries the already-rendered content
-/// (plain text for ordinary messages; a JSON blob for the structured
-/// shutdown / plan-approval handshake), so the payload is simply its `content`
-/// — mirroring what `injectUserMessageToTeammate` feeds the turn loop.
+/// Initial backoff for a transient registry/handler failure. The already-drained
+/// batch stays owned by the pump during this wait and is retried byte-for-byte.
+const DELIVERY_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Maximum retry backoff. A persistent `Internal` error must neither spin at
+/// 10Hz nor make the pump abandon a batch the mailbox already acknowledged.
+const DELIVERY_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Render the exact model-visible text for one mailbox message. Claude Code
+/// wraps every non-user sender in `<teammate-message>`, preserving the optional
+/// summary attribute; only an actual user-origin message stays raw.
 #[must_use]
 fn message_text(msg: &TeammateMessage) -> String {
-    msg.content.clone()
+    // One exhaustive match over the sender, so `User` is handled exactly once:
+    // it is the single path that skips BOTH the envelope and the tag escaping,
+    // and a second `User` arm below the early return read as a contradiction.
+    let fallback = match &msg.from {
+        crate::mailbox::MessageSender::User => return msg.content.clone(),
+        crate::mailbox::MessageSender::Coordinator => {
+            tasks::handlers::in_process_teammate::TEAM_LEAD_NAME.to_string()
+        }
+        crate::mailbox::MessageSender::Teammate(agent_id) => agent_id.to_string(),
+        crate::mailbox::MessageSender::System => "system".to_string(),
+    };
+    let from = if msg.from_name.is_empty() {
+        fallback.as_str()
+    } else {
+        msg.from_name.as_str()
+    };
+    tasks::handlers::in_process_teammate::teammate_message_envelope_with_summary(
+        from,
+        &msg.content,
+        msg.summary.as_deref(),
+    )
+}
+
+/// Render one atomically drained mailbox batch as the oracle's single next
+/// prompt. FIFO order and the two-line-feed separator are byte-significant.
+fn message_batch_text(messages: &[TeammateMessage]) -> String {
+    messages
+        .iter()
+        .map(message_text)
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Run the mailbox → runner pump loop for ONE teammate until the teammate is
@@ -56,17 +93,18 @@ fn message_text(msg: &TeammateMessage) -> String {
 ///
 /// Order of operations (drain-then-wait, so no message is lost between the
 /// mailbox being registered at spawn and the pump starting):
-/// 1. Drain any backlog already queued before the pump started, sending each in
-///    FIFO order. If a backlog send hits [`TeamSpawnError::Terminated`], the
+/// 1. Drain any backlog already queued before the pump started, sending it as
+///    one FIFO batch. If the backlog send hits [`TeamSpawnError::Terminated`], the
 ///    teammate is already gone → return immediately.
 /// 2. Park on `wait_for_message`; on a delivered message, send it. On a park
 ///    TIMEOUT, poll [`TeamSpawnSeam::is_alive`]: if the teammate has reached a
 ///    terminal state (or been evicted) — even though no message ever arrived to
 ///    surface `Terminated` — RETURN so the caller can unregister its mailbox.
 ///    Otherwise re-park (the loop continues).
-/// 3. Stop on the first `Terminated` from `send_message` (the teammate's runner
-///    dropped its receiver). Any OTHER error is logged and the loop continues —
-///    a transient internal error must not silently strand the teammate.
+/// 3. Stop on definitive `Terminated` / `NotFound` / `Unsupported` errors.
+///    Retain and retry the same batch on `Internal`, with capped exponential
+///    backoff, until the task is definitively gone. This preserves messages the
+///    mailbox already acknowledged without spinning on a persistent failure.
 pub async fn run_teammate_pump(
     mailbox: Arc<TeammateMailbox>,
     task_id: String,
@@ -84,14 +122,15 @@ async fn run_teammate_pump_inner(
     spawn_seam: Arc<dyn TeamSpawnSeam>,
     park: std::time::Duration,
 ) {
-    // 1. Drain-then-send the startup backlog in FIFO order.
-    for msg in mailbox.drain() {
-        if matches!(
-            deliver_one(&spawn_seam, &task_id, &msg).await,
+    // 1. Drain-then-send the startup backlog in one FIFO batch.
+    let backlog = mailbox.drain();
+    if !backlog.is_empty()
+        && matches!(
+            deliver_batch_reliably(&spawn_seam, &task_id, &backlog).await,
             DeliverOutcome::Stop
-        ) {
-            return;
-        }
+        )
+    {
+        return;
     }
 
     // 2. Park on the mailbox and pump each delivered message.
@@ -112,8 +151,13 @@ async fn run_teammate_pump_inner(
             }
             continue;
         };
+        // `Notify` coalesces wakeups. Draining here is therefore both required
+        // for liveness (no queued tail waits for the 30s timeout) and exact to
+        // Claude's read-all pending-message operation.
+        let mut batch = vec![msg];
+        batch.extend(mailbox.drain());
         if matches!(
-            deliver_one(&spawn_seam, &task_id, &msg).await,
+            deliver_batch_reliably(&spawn_seam, &task_id, &batch).await,
             DeliverOutcome::Stop
         ) {
             return;
@@ -123,21 +167,70 @@ async fn run_teammate_pump_inner(
 
 /// The outcome of trying to inject one message into the runner.
 enum DeliverOutcome {
-    /// Delivered (or a transient error was logged) — keep pumping.
+    /// Delivered — keep pumping.
     Continue,
+    /// A transient internal error occurred; retry the same retained batch.
+    Retry,
     /// The teammate is gone — the pump must stop.
     Stop,
 }
 
-/// Inject one message's text into the teammate's runner via the seam, mapping
-/// the seam's error space onto a pump decision.
-async fn deliver_one(
+/// Keep ownership of a drained batch until it is delivered or the teammate is
+/// definitively gone. This prevents an internal seam failure from silently
+/// discarding messages whose senders already observed mailbox delivery success.
+///
+/// The batch is rendered ONCE: the retry replays the same bytes, so
+/// re-running the envelope renderer per attempt would only re-allocate a
+/// string that is identical every time.
+async fn deliver_batch_reliably(
     spawn_seam: &Arc<dyn TeamSpawnSeam>,
     task_id: &str,
-    msg: &TeammateMessage,
+    messages: &[TeammateMessage],
 ) -> DeliverOutcome {
-    let text = message_text(msg);
-    match spawn_seam.send_message(task_id, text).await {
+    deliver_batch_with_backoff(
+        spawn_seam,
+        task_id,
+        messages,
+        DELIVERY_RETRY_INITIAL_BACKOFF,
+        DELIVERY_RETRY_MAX_BACKOFF,
+    )
+    .await
+}
+
+/// Retry helper parameterised for deterministic tests. Production always uses
+/// the bounded backoff constants above; a zero backoff lets tests cross the old
+/// finite-attempt threshold without sleeping for minutes.
+async fn deliver_batch_with_backoff(
+    spawn_seam: &Arc<dyn TeamSpawnSeam>,
+    task_id: &str,
+    messages: &[TeammateMessage],
+    initial_backoff: Duration,
+    max_backoff: Duration,
+) -> DeliverOutcome {
+    let text = message_batch_text(messages);
+    let mut backoff = initial_backoff.min(max_backoff);
+    loop {
+        match deliver_batch(spawn_seam, task_id, &text).await {
+            DeliverOutcome::Retry => {
+                if !spawn_seam.is_alive(task_id).await {
+                    return DeliverOutcome::Stop;
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = backoff.saturating_mul(2).min(max_backoff);
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// Inject one already-rendered batch into the teammate's runner via the seam,
+/// mapping the seam's error space onto a pump decision.
+async fn deliver_batch(
+    spawn_seam: &Arc<dyn TeamSpawnSeam>,
+    task_id: &str,
+    text: &str,
+) -> DeliverOutcome {
+    match spawn_seam.send_message(task_id, text.to_string()).await {
         Ok(()) => DeliverOutcome::Continue,
         // The teammate's runner is gone — stop pumping (no resume; Rust
         // teammates are persistent and only leave the loop on kill).
@@ -145,13 +238,16 @@ async fn deliver_one(
             tracing::debug!(task_id, "teammate pump: runner terminated, stopping pump");
             DeliverOutcome::Stop
         }
-        // A transient/internal failure: log and keep pumping rather than
-        // silently strand the teammate. `Unsupported` should never happen in
-        // production (the registry override supports the teammate handler), but
-        // if it does it is non-fatal to the loop.
-        Err(other) => {
-            tracing::warn!(task_id, error = %other, "teammate pump: send_message failed, continuing");
-            DeliverOutcome::Continue
+        Err(TeamSpawnError::Internal(error)) => {
+            tracing::warn!(task_id, %error, "teammate pump: transient send_message failure; retaining batch for retry");
+            DeliverOutcome::Retry
+        }
+        // These are permanent routing/configuration failures. Retrying forever
+        // cannot make the handler appear, so stop the pump and let its owner
+        // unregister the mailbox.
+        Err(TeamSpawnError::Unsupported(error) | TeamSpawnError::NotFound(error)) => {
+            tracing::warn!(task_id, %error, "teammate pump: permanent send_message failure; stopping");
+            DeliverOutcome::Stop
         }
     }
 }
@@ -199,6 +295,41 @@ mod tests {
         }
     }
 
+    struct FailThenSucceedSeam {
+        failures_before_success: usize,
+        attempts: AtomicUsize,
+        received: StdMutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl TeamSpawnSeam for FailThenSucceedSeam {
+        async fn spawn_teammate(
+            &self,
+            _agent_id: AgentId,
+            _name: String,
+            _team_name: String,
+            _description: String,
+        ) -> Result<String, TeamSpawnError> {
+            Ok(String::new())
+        }
+
+        async fn kill(&self, _task_id: &str) -> Result<(), TeamSpawnError> {
+            Ok(())
+        }
+
+        async fn send_message(
+            &self,
+            _task_id: &str,
+            message: String,
+        ) -> Result<(), TeamSpawnError> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) < self.failures_before_success {
+                return Err(TeamSpawnError::Internal("try again".into()));
+            }
+            self.received.lock().unwrap().push(message);
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl TeamSpawnSeam for RecordingSeam {
         async fn spawn_teammate(
@@ -234,11 +365,101 @@ mod tests {
     fn msg(content: &str) -> TeammateMessage {
         TeammateMessage {
             from: MessageSender::Coordinator,
+            from_name: "team-lead".to_string(),
             content: content.to_string(),
+            summary: None,
             message_id: format!("m-{content}"),
             timestamp: SystemTime::now(),
             request_id: None,
         }
+    }
+
+    #[test]
+    fn message_text_preserves_sender_and_summary_envelope_bytes() {
+        let mut message = msg("review the patch");
+        message.from = MessageSender::Teammate(AgentId::new());
+        message.from_name = "reviewer".to_string();
+        message.summary = Some("  patch review  ".to_string());
+        assert_eq!(
+            message_text(&message),
+            "<teammate-message teammate_id=\"reviewer\" summary=\"patch review\">\nreview the patch\n</teammate-message>"
+        );
+    }
+
+    #[test]
+    fn message_batch_joins_all_pending_messages_into_one_prompt() {
+        assert_eq!(
+            message_batch_text(&[msg("one"), msg("two")]),
+            format!(
+                "{}\n\n{}",
+                tasks::handlers::in_process_teammate::teammate_message_envelope("team-lead", "one",),
+                tasks::handlers::in_process_teammate::teammate_message_envelope("team-lead", "two",),
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_delivery_failure_retries_the_same_retained_batch() {
+        let mailbox = Arc::new(TeammateMailbox::new(AgentId::new()));
+        mailbox.deliver(msg("one")).unwrap();
+        mailbox.deliver(msg("two")).unwrap();
+        let seam = Arc::new(FailThenSucceedSeam {
+            failures_before_success: 1,
+            attempts: AtomicUsize::new(0),
+            received: StdMutex::new(Vec::new()),
+        });
+        let seam_dyn: Arc<dyn TeamSpawnSeam> = seam.clone();
+        let pump_mailbox = mailbox.clone();
+        let pump = tokio::spawn(async move {
+            run_teammate_pump_inner(
+                pump_mailbox,
+                "task-1".into(),
+                seam_dyn,
+                Duration::from_millis(5),
+            )
+            .await;
+        });
+
+        for _ in 0..200 {
+            if !seam.received.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(seam.attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            seam.received.lock().unwrap().as_slice(),
+            [message_batch_text(&[msg("one"), msg("two")])]
+        );
+        pump.abort();
+    }
+
+    #[tokio::test]
+    async fn retained_batch_survives_more_than_the_old_retry_limit() {
+        let messages = [msg("one"), msg("two")];
+        let seam = Arc::new(FailThenSucceedSeam {
+            failures_before_success: 31,
+            attempts: AtomicUsize::new(0),
+            received: StdMutex::new(Vec::new()),
+        });
+        let seam_dyn: Arc<dyn TeamSpawnSeam> = seam.clone();
+
+        let outcome = deliver_batch_with_backoff(
+            &seam_dyn,
+            "task-1",
+            &messages,
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await;
+
+        assert!(matches!(outcome, DeliverOutcome::Continue));
+        assert_eq!(seam.attempts.load(Ordering::SeqCst), 32);
+        assert_eq!(
+            seam.received.lock().unwrap().as_slice(),
+            [message_batch_text(&messages)],
+            "the originally drained batch remains owned until delivery succeeds"
+        );
     }
 
     /// Park-then-deliver: N messages delivered AFTER the pump starts arrive at
@@ -259,17 +480,27 @@ mod tests {
             mailbox.deliver(msg(c)).unwrap();
         }
 
-        // Wait until all three are observed (bounded retry to avoid a flake).
+        // The oracle drains the three pending messages as one next prompt.
         for _ in 0..200 {
-            if seam.received().len() == 3 {
+            if seam.received().len() == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        let expected = ["one", "two", "three"]
+            .into_iter()
+            .map(|content| {
+                tasks::handlers::in_process_teammate::teammate_message_envelope(
+                    "team-lead",
+                    content,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
         assert_eq!(
             seam.received(),
-            vec!["one".to_string(), "two".to_string(), "three".to_string()],
-            "messages delivered to the runner in FIFO order"
+            vec![expected],
+            "pending messages become one FIFO prompt"
         );
 
         pump.abort();
@@ -292,18 +523,38 @@ mod tests {
             run_teammate_pump(mb, "task-1".to_string(), seam_dyn).await;
         });
 
-        // Then add one more after startup.
-        mailbox.deliver(msg("c")).unwrap();
-
+        // Wait until the startup backlog has been drained as one prompt, then
+        // add one more message to exercise the post-startup path separately.
         for _ in 0..200 {
-            if seam.received().len() == 3 {
+            if seam.received().len() == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        mailbox.deliver(msg("c")).unwrap();
+
+        for _ in 0..200 {
+            if seam.received().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let backlog = ["a", "b"]
+            .into_iter()
+            .map(|content| {
+                tasks::handlers::in_process_teammate::teammate_message_envelope(
+                    "team-lead",
+                    content,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
         assert_eq!(
             seam.received(),
-            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            vec![
+                backlog,
+                tasks::handlers::in_process_teammate::teammate_message_envelope("team-lead", "c",),
+            ],
             "backlog drained first (FIFO), then the post-startup message"
         );
 
@@ -325,6 +576,12 @@ mod tests {
         });
 
         mailbox.deliver(msg("first")).unwrap();
+        for _ in 0..200 {
+            if seam.received().len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         mailbox.deliver(msg("second-triggers-terminate")).unwrap();
 
         // The pump's task future completes (returns) shortly after the
@@ -339,7 +596,15 @@ mod tests {
 
         // Exactly the first message reached the runner; the second triggered
         // the terminal stop and was not recorded.
-        assert_eq!(seam.received(), vec!["first".to_string()]);
+        assert_eq!(
+            seam.received(),
+            vec![
+                tasks::handlers::in_process_teammate::teammate_message_envelope(
+                    "team-lead",
+                    "first",
+                )
+            ]
+        );
     }
 
     /// A backlog whose FIRST send terminates stops the pump immediately
@@ -427,12 +692,27 @@ mod tests {
         // A message delivered after the re-parks still lands.
         mailbox.deliver(msg("late")).unwrap();
         for _ in 0..200 {
-            if seam.received() == vec!["late".to_string()] {
+            if seam.received()
+                == vec![
+                    tasks::handlers::in_process_teammate::teammate_message_envelope(
+                        "team-lead",
+                        "late",
+                    ),
+                ]
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert_eq!(seam.received(), vec!["late".to_string()]);
+        assert_eq!(
+            seam.received(),
+            vec![
+                tasks::handlers::in_process_teammate::teammate_message_envelope(
+                    "team-lead",
+                    "late",
+                )
+            ]
+        );
 
         pump.abort();
     }

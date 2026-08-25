@@ -242,6 +242,17 @@ impl SendMessageTool {
             .map_or(MessageSender::Coordinator, MessageSender::Teammate)
     }
 
+    /// Resolve the model-visible sender label carried by the teammate envelope.
+    async fn sender_name(&self, ctx: &ToolUseContext) -> String {
+        let Some(agent_id) = ctx.agent_id else {
+            return TEAM_LEAD_NAME.to_string();
+        };
+        self.team
+            .find_by_agent_id(&agent_id)
+            .await
+            .map_or_else(|| agent_id.to_string(), |worker| worker.name)
+    }
+
     /// Resolve a non-broadcast [`Address`] to a concrete recipient [`AgentId`].
     ///
     /// `Name` → registry lookup; `AgentId` → as-is. `Uds`/`Bridge`/`Broadcast`
@@ -284,6 +295,7 @@ impl SendMessageTool {
     async fn handle_broadcast(
         &self,
         content: String,
+        summary: String,
         ctx: &ToolUseContext,
     ) -> Result<ToolCallResult, ToolError> {
         let sender_id = ctx.agent_id;
@@ -304,11 +316,14 @@ impl SendMessageTool {
         }
 
         let from = Self::sender_from(ctx);
+        let from_name = self.sender_name(ctx).await;
         let mut delivered: Vec<String> = Vec::with_capacity(recipients.len());
         for w in &recipients {
             let msg = TeammateMessage {
                 from: from.clone(),
+                from_name: from_name.clone(),
                 content: content.clone(),
+                summary: Some(summary.clone()),
                 message_id: tool_api::util::ids::ulid_or_uuid(),
                 timestamp: SystemTime::now(),
                 request_id: None,
@@ -353,7 +368,9 @@ impl SendMessageTool {
 
         let msg = TeammateMessage {
             from: Self::sender_from(ctx),
+            from_name: self.sender_name(ctx).await,
             content,
+            summary: None,
             message_id: tool_api::util::ids::ulid_or_uuid(),
             timestamp: SystemTime::now(),
             request_id: Some(request_id.clone()),
@@ -394,7 +411,9 @@ impl SendMessageTool {
 
         let msg = TeammateMessage {
             from: Self::sender_from(ctx),
+            from_name: self.sender_name(ctx).await,
             content,
+            summary: None,
             message_id: tool_api::util::ids::ulid_or_uuid(),
             timestamp: SystemTime::now(),
             request_id: Some(request_id.clone()),
@@ -416,12 +435,7 @@ impl SendMessageTool {
         // knows the teammate is going away — same sequence, different host.
         if approve {
             if let Some(agent_id) = ctx.agent_id {
-                let worker = self
-                    .team
-                    .list()
-                    .await
-                    .into_iter()
-                    .find(|w| w.agent_id == agent_id);
+                let worker = self.team.find_by_agent_id(&agent_id).await;
                 if let (Some(seam), Some(worker)) = (&self.spawn_seam, &worker) {
                     if !worker.task_id.is_empty() {
                         // Best-effort: a kill failure does not fail the response send.
@@ -468,7 +482,9 @@ impl SendMessageTool {
                             &leader,
                             TeammateMessage {
                                 from: Self::sender_from(ctx),
+                                from_name: self.sender_name(ctx).await,
                                 content: frame,
+                                summary: None,
                                 message_id: tool_api::util::ids::ulid_or_uuid(),
                                 timestamp: SystemTime::now(),
                                 request_id: Some(request_id.clone()),
@@ -526,7 +542,9 @@ impl SendMessageTool {
 
         let msg = TeammateMessage {
             from: Self::sender_from(ctx),
+            from_name: self.sender_name(ctx).await,
             content,
+            summary: None,
             message_id: tool_api::util::ids::ulid_or_uuid(),
             timestamp: SystemTime::now(),
             request_id: Some(request_id.clone()),
@@ -724,13 +742,16 @@ impl Tool for SendMessageTool {
                     "summary is required when message is a string".into(),
                 ));
             }
+            let summary = summary.expect("validated above").trim().to_string();
             return match addr {
-                Address::Broadcast => self.handle_broadcast(s.clone(), &ctx).await,
+                Address::Broadcast => self.handle_broadcast(s.clone(), summary, &ctx).await,
                 ref a => {
                     let to_id = self.resolve_recipient(a).await?;
                     let msg = TeammateMessage {
                         from: Self::sender_from(&ctx),
+                        from_name: self.sender_name(&ctx).await,
                         content: s.clone(),
+                        summary: Some(summary),
                         message_id: tool_api::util::ids::ulid_or_uuid(),
                         timestamp: SystemTime::now(),
                         request_id: None,

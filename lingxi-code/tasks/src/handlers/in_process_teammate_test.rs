@@ -5,7 +5,7 @@ use super::*;
 use std::collections::HashMap as StdHashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 
 use test_harness::mocks::MockRuntimeSpawner;
@@ -98,6 +98,45 @@ struct ScriptedApiClient {
     responses: StdMutex<VecDeque<Result<llm_client::LlmResponse, String>>>,
     calls: AtomicUsize,
 }
+
+/// Holds the first provider request open so a test can prove inbound teammate
+/// messages queue instead of cancelling/reissuing that in-flight request.
+struct GatedApiClient {
+    calls: AtomicUsize,
+    first_started: tokio::sync::Semaphore,
+    release_first: tokio::sync::Semaphore,
+    histories: StdMutex<Vec<Vec<protocol::ConversationMessage>>>,
+}
+
+impl GatedApiClient {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            first_started: tokio::sync::Semaphore::new(0),
+            release_first: tokio::sync::Semaphore::new(0),
+            histories: StdMutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl SubagentApiClient for GatedApiClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.histories.lock().unwrap().push(messages);
+        if call == 0 {
+            self.first_started.add_permits(1);
+            self.release_first.acquire().await.unwrap().forget();
+        }
+        Ok(text_response(if call == 0 { "first" } else { "second" }))
+    }
+}
 impl ScriptedApiClient {
     fn new(texts: Vec<&str>) -> Arc<Self> {
         let responses = texts
@@ -161,6 +200,7 @@ fn text_response(text: &str) -> llm_client::LlmResponse {
 
 #[derive(Default)]
 struct RecordingSink {
+    requires_activation: AtomicBool,
     statuses: StdMutex<Vec<(String, TaskStatus)>>,
     /// Failure reasons received through the `set_failed` seam (cc 2.1.198:
     /// the failed idle notification's `failureReason` to the lead).
@@ -168,6 +208,10 @@ struct RecordingSink {
 }
 #[async_trait]
 impl TaskStatusSink for RecordingSink {
+    fn requires_explicit_activation(&self) -> bool {
+        self.requires_activation.load(Ordering::SeqCst)
+    }
+
     async fn set_status(&self, task_id: &str, status: TaskStatus) {
         self.statuses
             .lock()
@@ -183,6 +227,10 @@ impl TaskStatusSink for RecordingSink {
     }
 }
 impl RecordingSink {
+    fn require_activation(&self) {
+        self.requires_activation.store(true, Ordering::SeqCst);
+    }
+
     fn last_status(&self) -> Option<TaskStatus> {
         self.statuses.lock().unwrap().last().map(|(_, s)| *s)
     }
@@ -198,16 +246,51 @@ impl RecordingSink {
 #[derive(Default)]
 struct RecordingIdleFirer {
     fires: StdMutex<Vec<hooks::TeammateIdleFire>>,
+    outcomes: StdMutex<VecDeque<hooks::TeammateIdleOutcome>>,
 }
 #[async_trait]
 impl hooks::TeammateIdleFirer for RecordingIdleFirer {
-    async fn fire(&self, fire: hooks::TeammateIdleFire) {
+    async fn fire(&self, fire: hooks::TeammateIdleFire) -> hooks::TeammateIdleOutcome {
         self.fires.lock().unwrap().push(fire);
+        self.outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default()
     }
 }
 impl RecordingIdleFirer {
     fn fires(&self) -> Vec<hooks::TeammateIdleFire> {
         self.fires.lock().unwrap().clone()
+    }
+    fn push_outcome(&self, outcome: hooks::TeammateIdleOutcome) {
+        self.outcomes.lock().unwrap().push_back(outcome);
+    }
+}
+
+struct GatedIdleFirer {
+    started: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+impl GatedIdleFirer {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            started: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl hooks::TeammateIdleFirer for GatedIdleFirer {
+    async fn fire(&self, _fire: hooks::TeammateIdleFire) -> hooks::TeammateIdleOutcome {
+        self.started.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+        hooks::TeammateIdleOutcome {
+            blocking_feedback: vec!["TeammateIdle hook feedback:\ncontinue".into()],
+            ..Default::default()
+        }
     }
 }
 
@@ -294,9 +377,38 @@ async fn await_spool<F: Fn(&str) -> bool>(
         if pred(&body) {
             return body;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     fs.read_file(spool, None, None).await.unwrap().content
+}
+
+/// Wait for the activated worker to publish its task-list claim.
+async fn await_claim(
+    store: &task_store::TodoStore,
+    task_id: &str,
+    owner: &str,
+) -> task_store::TodoTask {
+    for _ in 0..400 {
+        if let Some(task) = store.get(task_id).await {
+            if task.owner.as_deref() == Some(owner) && task.status == engine::TodoState::InProgress
+            {
+                return task;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("task {task_id} was not claimed by {owner}");
+}
+
+/// Wait for terminal cleanup to remove the handler's live control block.
+async fn await_entry_removed(handler: &InProcessTeammateHandler, task_id: &str) {
+    for _ in 0..400 {
+        if !handler.entries.lock().await.contains_key(task_id) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("teammate entry {task_id} was not removed");
 }
 
 // ---- Tests --------------------------------------------------------------
@@ -315,11 +427,45 @@ fn model_test_handler(default_model: Option<&str>) -> InProcessTeammateHandler {
     }
 }
 
+struct StaticSystemPromptRenderer(&'static str);
+
+#[async_trait]
+impl TeammateSystemPromptRenderer for StaticSystemPromptRenderer {
+    async fn render_default_system_prompt(&self) -> String {
+        self.0.to_string()
+    }
+}
+
+#[tokio::test]
+async fn build_context_renders_default_addendum_then_custom_prompt() {
+    let handler = model_test_handler(None).with_system_prompt_renderer(Arc::new(
+        StaticSystemPromptRenderer("BASE DEFAULT PROMPT\n"),
+    ));
+    let mut def = DefaultTeammateDefinition
+        .resolve(&protocol::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    def.system_prompt = Some("CUSTOM AGENT PROMPT".to_string());
+
+    let ctx = handler
+        .build_context(protocol::AgentId::new(), "lead", "alpha", "task", def)
+        .await
+        .unwrap();
+    let expected = format!(
+        "BASE DEFAULT PROMPT\n{TEAMMATE_SYSTEM_PROMPT_ADDENDUM}\n\n# Custom Agent Instructions\nCUSTOM AGENT PROMPT"
+    );
+    assert_eq!(
+        ctx.rendered_system_prompt.as_deref(),
+        Some(expected.as_str())
+    );
+}
+
 #[tokio::test]
 async fn build_context_carries_owning_session_interactivity() {
     let handler = model_test_handler(None).with_session_interactive(false);
     let def = DefaultTeammateDefinition
         .resolve(&protocol::AgentId::new(), "lead")
+        .await
         .unwrap();
     let ctx = handler
         .build_context(protocol::AgentId::new(), "lead", "alpha", "task", def)
@@ -339,6 +485,7 @@ async fn build_context_resolves_inherit_to_default_model() {
     let handler = model_test_handler(Some("claude-opus-4-7"));
     let def = DefaultTeammateDefinition
         .resolve(&protocol::AgentId::new(), "lead")
+        .await
         .unwrap();
     let ctx = handler
         .build_context(
@@ -357,9 +504,12 @@ async fn build_context_resolves_inherit_to_default_model() {
     // `TeammateContext.agentName` / `.teamName`).
     assert_eq!(ctx.agent_name.as_deref(), Some("lead"));
     assert_eq!(ctx.team_name.as_deref(), Some("alpha"));
-    // The TeamCreate description becomes the teammate's first user message.
+    // The TeamCreate description becomes a team-lead teammate message.
     assert_eq!(ctx.prompt_messages.len(), 1);
-    assert_eq!(ctx.prompt_messages[0].text_content(), "go research");
+    assert_eq!(
+        ctx.prompt_messages[0].text_content(),
+        "<teammate-message teammate_id=\"team-lead\">\ngo research\n</teammate-message>"
+    );
 }
 
 // Full teammate parity (P1): the handler inherits a budget enforcer, seeds
@@ -386,6 +536,7 @@ async fn build_context_wires_budget_description_and_tool_resolution() {
         .with_tool_registry(Arc::new(agent::ToolRegistry::new()));
     let def = DefaultTeammateDefinition
         .resolve(&protocol::AgentId::new(), "lead")
+        .await
         .unwrap();
     let ctx = handler
         .build_context(
@@ -402,9 +553,12 @@ async fn build_context_wires_budget_description_and_tool_resolution() {
         ctx.budget.is_some(),
         "teammate must inherit the budget enforcer"
     );
-    // Description seeded as the first user message (was empty before).
+    // Description seeded through the canonical team-lead envelope.
     assert_eq!(ctx.prompt_messages.len(), 1);
-    assert_eq!(ctx.prompt_messages[0].text_content(), "do the task");
+    assert_eq!(
+        ctx.prompt_messages[0].text_content(),
+        "<teammate-message teammate_id=\"team-lead\">\ndo the task\n</teammate-message>"
+    );
     // The resolver ran (empty registry ⇒ empty pool, but the path is wired —
     // no panic, and the allow-list mirrors the advertised set).
     assert_eq!(ctx.tool_schemas.len(), ctx.allowed_tools.len());
@@ -416,6 +570,7 @@ async fn build_context_without_default_model_leaves_model_raw() {
     let handler = model_test_handler(None);
     let def = DefaultTeammateDefinition
         .resolve(&protocol::AgentId::new(), "lead")
+        .await
         .unwrap();
     let ctx = handler
         .build_context(protocol::AgentId::new(), "lead", "", "", def)
@@ -460,6 +615,7 @@ async fn build_context_opusplan_plan_mode_resolves_inherit_to_opus() {
         .with_model_setting("opusplan");
     let def = DefaultTeammateDefinition
         .resolve(&protocol::AgentId::new(), "lead")
+        .await
         .unwrap();
     let ctx = handler
         .build_context(protocol::AgentId::new(), "lead", "", "", def)
@@ -489,6 +645,7 @@ async fn build_context_opusplan_default_mode_returns_resolved_parent() {
         .with_model_setting("opusplan");
     let def = DefaultTeammateDefinition
         .resolve(&protocol::AgentId::new(), "lead")
+        .await
         .unwrap();
     let ctx = handler
         .build_context(protocol::AgentId::new(), "lead", "", "", def)
@@ -560,6 +717,41 @@ async fn non_teammate_input_is_rejected() {
         )
         .await;
     assert!(matches!(res, Err(TaskError::Internal(_))));
+}
+
+#[tokio::test]
+async fn explicit_activation_prevents_provider_and_status_work_before_commit() {
+    let api = ScriptedApiClient::new(vec!["answer one"]);
+    let api_handle = api.clone();
+    let (dir, fs, rt, handler, sink) = make_handler_with_sink(api);
+    sink.require_activation();
+    let c = ctx(fs.clone(), rt);
+    let mut handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: String::new(),
+                description: "work".into(),
+            },
+            c.clone(),
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(api_handle.call_count(), 0, "provider must wait for commit");
+    assert!(sink.statuses.lock().unwrap().is_empty());
+
+    handle.activate();
+    let spool = dir.path().join(format!("{}.output", handle.task_id));
+    let body = await_spool(&fs, spool.to_str().unwrap(), |body| {
+        body.contains("answer one")
+    })
+    .await;
+    assert!(body.contains("answer one"));
+    assert!(api_handle.call_count() >= 1);
+    handler.kill(&handle.task_id, c).await.unwrap();
 }
 
 #[tokio::test]
@@ -708,13 +900,11 @@ async fn failed_turn_set_reports_error_reason_through_set_failed() {
     );
 }
 
-/// `send_message` to a teammate that was already killed (slot deallocated +
-/// entry removed) is `NotFound`; and a message routed to a slot whose runner
-/// has terminated (its receiver dropped) surfaces `TerminatedTask`. We drive
-/// the latter by killing the slot via the pool directly so the handler's
-/// entry still exists but the underlying slot is gone.
+/// Once an out-of-band runner exit reaches the handler worker, terminal cleanup
+/// removes both the pool slot and the live control block. Later messages must
+/// observe the teammate as absent rather than targeting a stale entry.
 #[tokio::test]
-async fn send_message_after_runner_terminated_is_terminated_task() {
+async fn send_message_after_runner_terminated_is_not_found() {
     let api = ScriptedApiClient::new(vec!["answer one"]);
     let (dir, fs, rt, handler) = make_handler(api);
     let c = ctx(fs.clone(), rt.clone());
@@ -737,10 +927,9 @@ async fn send_message_after_runner_terminated_is_terminated_task() {
     let spool_str = spool.to_str().unwrap().to_string();
     await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
 
-    // Tear down the underlying slot out-of-band (UserExit so the runner
-    // drops its receiver), WITHOUT removing the handler's entry. The
-    // handler still has a control block, so send_message looks the slot up
-    // and finds the inbound channel closed -> AgentGone -> TerminatedTask.
+    // Tear down the underlying slot out-of-band. The streaming worker observes
+    // the closed output channel and performs the same terminal cleanup as any
+    // other runner exit.
     let aid = handler
         .entries
         .lock()
@@ -765,14 +954,15 @@ async fn send_message_after_runner_terminated_is_terminated_task() {
         }
         tokio::task::yield_now().await;
     }
+    await_entry_removed(&handler, &h.task_id).await;
 
     let err = handler
         .send_message(&h.task_id, "are you there?".into(), c)
         .await
         .unwrap_err();
     assert!(
-        matches!(err, TaskError::TerminatedTask),
-        "send to a terminated runner maps to TerminatedTask; got {err:?}"
+        matches!(err, TaskError::NotFound(_)),
+        "terminal cleanup removes the stale teammate entry; got {err:?}"
     );
 }
 
@@ -814,7 +1004,7 @@ async fn await_fires(firer: &Arc<RecordingIdleFirer>, n: usize) -> Vec<hooks::Te
         if fires.len() >= n {
             return fires;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     firer.fires()
 }
@@ -902,6 +1092,293 @@ async fn no_idle_firer_is_a_noop() {
     );
 
     handler.kill(&h.task_id, c).await.unwrap();
+}
+
+#[test]
+fn idle_hook_follow_up_preserves_feedback_and_additional_context_bytes() {
+    let outcome = hooks::TeammateIdleOutcome {
+        blocking_feedback: vec!["TeammateIdle hook feedback:\nkeep working".into()],
+        additional_contexts: vec!["inspect the failing test".into(), "then rerun it".into()],
+        ..Default::default()
+    };
+    assert_eq!(
+        teammate_idle_follow_up(&outcome).as_deref(),
+        Some(
+            "TeammateIdle hook feedback:\nkeep working\n\n<system-reminder>\nTeammateIdle hook additional context: inspect the failing test\nthen rerun it\n</system-reminder>"
+        )
+    );
+}
+
+#[tokio::test]
+async fn blocking_idle_hook_feedback_drives_one_follow_up_turn() {
+    let api = ScriptedApiClient::new(vec!["answer one", "answer two"]);
+    let (dir, fs, rt, handler, firer) = make_handler_with_idle_firer(api);
+    firer.push_outcome(hooks::TeammateIdleOutcome {
+        blocking_feedback: vec!["TeammateIdle hook feedback:\nkeep working".into()],
+        ..Default::default()
+    });
+    let c = ctx(fs.clone(), rt);
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: String::new(),
+                description: String::new(),
+            },
+            c.clone(),
+        )
+        .await
+        .unwrap();
+    let spool = dir.path().join(format!("{}.output", handle.task_id));
+    let body = await_spool(&fs, spool.to_str().unwrap(), |body| {
+        body.contains("answer two")
+    })
+    .await;
+    assert!(
+        body.contains("answer two"),
+        "blocking feedback must re-wake the teammate"
+    );
+    handler.kill(&handle.task_id, c).await.unwrap();
+}
+
+#[tokio::test]
+async fn idle_hook_prevent_continuation_terminates_the_teammate() {
+    let api = ScriptedApiClient::new(vec!["answer one"]);
+    let dir = tempfile::tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let output = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let pool = Arc::new(StateMachinePool::new(
+        runtime.clone() as Arc<dyn RuntimeSpawner>,
+        8,
+    ));
+    let sink = Arc::new(RecordingSink::default());
+    let firer = Arc::new(RecordingIdleFirer::default());
+    firer.push_outcome(hooks::TeammateIdleOutcome {
+        prevent_continuation: true,
+        reason: Some("stop now".into()),
+        ..Default::default()
+    });
+    let handler = InProcessTeammateHandler::new(pool, output, api)
+        .with_status_sink(sink.clone())
+        .with_teammate_idle_firer(firer);
+    let c = ctx(fs, runtime);
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: String::new(),
+                description: String::new(),
+            },
+            c.clone(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(await_terminal(&sink).await, Some(TaskStatus::Completed));
+    await_entry_removed(&handler, &handle.task_id).await;
+    let error = handler
+        .send_message(&handle.task_id, "too late".into(), c.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, TaskError::NotFound(_)));
+    handler.kill(&handle.task_id, c).await.unwrap();
+}
+
+#[tokio::test]
+async fn hook_follow_up_injection_failure_cleans_status_entry_and_pool_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let output = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let pool = Arc::new(StateMachinePool::new(
+        runtime.clone() as Arc<dyn RuntimeSpawner>,
+        8,
+    ));
+    let sink = Arc::new(RecordingSink::default());
+    let firer = GatedIdleFirer::new();
+    let handler = InProcessTeammateHandler::new(
+        pool.clone(),
+        output,
+        ScriptedApiClient::new(vec!["answer one"]),
+    )
+    .with_status_sink(sink.clone())
+    .with_teammate_idle_firer(firer.clone());
+    let agent_id = protocol::AgentId::new();
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id,
+                name: "buddy".into(),
+                team_name: String::new(),
+                description: "work".into(),
+            },
+            ctx(fs, runtime),
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), firer.started.acquire())
+        .await
+        .expect("idle hook starts")
+        .unwrap()
+        .forget();
+    pool.deallocate(&agent_id).await.unwrap();
+    firer.release.add_permits(1);
+
+    assert_eq!(await_terminal(&sink).await, Some(TaskStatus::Failed));
+    for _ in 0..200 {
+        if handler.entries.lock().await.is_empty() && pool.slot_count().await == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(handler.entries.lock().await.is_empty());
+    assert_eq!(pool.slot_count().await, 0);
+    assert!(matches!(
+        handler
+            .send_message(
+                &handle.task_id,
+                "too late".into(),
+                ctx(
+                    Arc::new(InMemoryFs::new()),
+                    Arc::new(MockRuntimeSpawner::default()),
+                ),
+            )
+            .await,
+        Err(TaskError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn explicit_kill_during_idle_hook_is_not_overwritten_by_late_feedback() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let output = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let pool = Arc::new(StateMachinePool::new(
+        runtime.clone() as Arc<dyn RuntimeSpawner>,
+        8,
+    ));
+    let sink = Arc::new(RecordingSink::default());
+    let firer = GatedIdleFirer::new();
+    let handler =
+        InProcessTeammateHandler::new(pool, output, ScriptedApiClient::new(vec!["answer one"]))
+            .with_status_sink(sink.clone())
+            .with_teammate_idle_firer(firer.clone());
+    let c = ctx(fs, runtime);
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: String::new(),
+                description: "work".into(),
+            },
+            c.clone(),
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), firer.started.acquire())
+        .await
+        .expect("idle hook starts")
+        .unwrap()
+        .forget();
+    handler.kill(&handle.task_id, c).await.unwrap();
+    assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
+
+    firer.release.add_permits(1);
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(
+        sink.last_status(),
+        Some(TaskStatus::Killed),
+        "late hook feedback must not replace an explicit kill"
+    );
+    assert!(sink.failures().is_empty());
+}
+
+#[tokio::test]
+async fn message_received_while_busy_waits_for_the_idle_poll() {
+    let api = GatedApiClient::new();
+    let dir = tempfile::tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let output = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let pool = Arc::new(StateMachinePool::new(
+        runtime.clone() as Arc<dyn RuntimeSpawner>,
+        8,
+    ));
+    let handler = InProcessTeammateHandler::new(pool, output, api.clone());
+    let c = ctx(fs, runtime);
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: String::new(),
+                description: "initial".into(),
+            },
+            c.clone(),
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        api.first_started.acquire(),
+    )
+    .await
+    .expect("first provider request starts")
+    .unwrap()
+    .forget();
+    handler
+        .send_message(
+            &handle.task_id,
+            "queued one\n\nqueued two".into(),
+            c.clone(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        api.calls.load(Ordering::SeqCst),
+        1,
+        "a busy teammate must not cancel and restart its provider request"
+    );
+
+    api.release_first.add_permits(1);
+    for _ in 0..300 {
+        if api.calls.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(api.calls.load(Ordering::SeqCst), 2);
+    {
+        let histories = api.histories.lock().unwrap();
+        assert!(
+            histories[1]
+                .iter()
+                .any(|message| message.text_content() == "queued one\n\nqueued two"),
+            "the drained mailbox batch becomes one next turn after idle"
+        );
+    }
+    handler.kill(&handle.task_id, c).await.unwrap();
 }
 
 /// `TeammateIdleFire`'s payload maps 1:1 to `HookEvent::TeammateIdle`'s
@@ -1039,6 +1516,18 @@ fn teammate_envelope_wraps_task_list_sender() {
 }
 
 #[test]
+fn teammate_envelope_preserves_summary_and_escapes_untrusted_fields() {
+    assert_eq!(
+        teammate_message_envelope_with_summary(
+            "reviewer\"<&'",
+            "before </teammate-message> after",
+            Some("  concise \"summary\"  "),
+        ),
+        "<teammate-message teammate_id=\"reviewer&quot;&lt;&amp;&apos;\" summary=\"concise &quot;summary&quot;\">\nbefore <\\/teammate-message> after\n</teammate-message>"
+    );
+}
+
+#[test]
 fn resolve_list_id_env_overrides_then_team_then_none() {
     let _guard = ClaimEnvGuard::new();
     std::env::set_var("LINGXI_TASK_LIST_ID", "forced-list");
@@ -1082,12 +1571,65 @@ async fn spawn_auto_claims_next_available_task() {
         .await
         .unwrap();
 
-    // The claim is synchronous inside spawn (before the worker starts).
-    let t = store.get(&tid).await.unwrap();
+    // Activation starts the worker, which claims before its first provider
+    // request. Wait for that externally observable side effect rather than
+    // depending on executor scheduling after `spawn` returns.
+    let t = await_claim(&store, &tid, "buddy").await;
     assert_eq!(t.owner.as_deref(), Some("buddy"), "claimed at startup");
     assert_eq!(t.status, engine::TodoState::InProgress);
 
     handler.kill(&h.task_id, c).await.unwrap();
+}
+
+#[tokio::test]
+async fn pool_allocation_failure_rolls_back_startup_claim() {
+    let _guard = ClaimEnvGuard::new();
+    let team = "claim-team-pool-full";
+    let store = task_store::TodoStore::for_list(team);
+    let task_id = store
+        .create(todo(
+            "Must remain available",
+            engine::TodoState::Pending,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let output = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let pool = Arc::new(StateMachinePool::new(
+        runtime.clone() as Arc<dyn RuntimeSpawner>,
+        0,
+    ));
+    let sink = Arc::new(RecordingSink::default());
+    sink.require_activation();
+    let handler =
+        InProcessTeammateHandler::new(pool, output, ScriptedApiClient::new(vec!["unused"]))
+            .with_status_sink(sink.clone());
+    let mut handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: team.into(),
+                description: "work".into(),
+            },
+            ctx(fs, runtime),
+        )
+        .await
+        .unwrap();
+
+    handle.activate();
+    assert_eq!(await_terminal(&sink).await, Some(TaskStatus::Failed));
+    let task = store.get(&task_id).await.unwrap();
+    assert_eq!(task.owner, None, "failed startup must release the claim");
+    assert_eq!(task.status, engine::TodoState::Pending);
+    assert!(handler.entries.lock().await.is_empty());
 }
 
 /// Embedded hosts inject an app-private config home for the Task* tools and
@@ -1121,7 +1663,7 @@ async fn spawn_auto_claims_next_available_task_from_injected_config_home() {
         .await
         .unwrap();
 
-    let t = store.get(&tid).await.unwrap();
+    let t = await_claim(&store, &tid, "buddy").await;
     assert_eq!(
         t.owner.as_deref(),
         Some("buddy"),

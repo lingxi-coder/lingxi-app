@@ -18,6 +18,7 @@ pub mod remote_agent;
 pub use dream::DreamHandler;
 pub use in_process_teammate::{
     DefaultTeammateDefinition, InProcessTeammateHandler, TeammateDefinitionResolver,
+    TeammateSystemPromptRenderer,
 };
 pub use local_agent::LocalAgentHandler;
 pub use local_bash::{LocalBashHandler, NoopStatusSink, TaskStatusSink};

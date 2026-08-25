@@ -537,7 +537,9 @@ mod tests {
                 &agent_id,
                 crate::mailbox::TeammateMessage {
                     from: crate::mailbox::MessageSender::Coordinator,
+                    from_name: "team-lead".into(),
                     content: "ping".into(),
+                    summary: None,
                     message_id: "m1".into(),
                     timestamp: std::time::SystemTime::now(),
                     request_id: None,

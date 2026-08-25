@@ -742,7 +742,9 @@ mod tests {
                 &launch.agent_id,
                 TeammateMessage {
                     from: MessageSender::Coordinator,
+                    from_name: "team-lead".to_string(),
                     content: "die".to_string(),
+                    summary: None,
                     message_id: "m-1".to_string(),
                     timestamp: std::time::SystemTime::now(),
                     request_id: None,

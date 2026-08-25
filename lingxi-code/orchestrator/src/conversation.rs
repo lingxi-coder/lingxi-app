@@ -11677,6 +11677,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.effective_system_prompt().await
     }
 
+    /// Assemble the live default system prompt without applying the main
+    /// thread's `--system-prompt` / adopted-agent overrides.
+    ///
+    /// In-process teammates use the same default prompt builder as Claude Code,
+    /// then append their teammate addendum and optional custom agent prompt.
+    /// Keeping this as a read-only renderer avoids copying the dynamic cwd/git/
+    /// memory/tool assembly into the task-handler leaf.
+    pub async fn assemble_default_system_prompt_preview(&self) -> String {
+        self.build_system_prompt().await
+    }
+
     /// Adopt a `--agent`-resolved definition for the MAIN conversation loop
     /// (claude-code `bde(agentDef.agentType)` + `mainThreadAgentDefinition`).
     /// Called ONCE at startup by the composition root when `--agent` resolves to

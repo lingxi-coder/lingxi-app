@@ -922,6 +922,26 @@ async fn non_terminal_and_killed_transitions_do_not_fire() {
 }
 
 #[tokio::test]
+async fn first_terminal_status_is_absorbing() {
+    let (_d, registry, firer, task_id) = registry_with_firer("x").await;
+
+    registry
+        .set_status(&task_id, TaskStatus::Killed)
+        .await
+        .unwrap();
+    let updated = registry
+        .set_status(&task_id, TaskStatus::Failed)
+        .await
+        .unwrap();
+
+    assert_eq!(updated.base().status, TaskStatus::Killed);
+    assert!(
+        firer.recorded().is_empty(),
+        "a late failure must not overwrite Killed or fire TaskCompleted"
+    );
+}
+
+#[tokio::test]
 async fn no_firer_registered_is_a_noop() {
     // The default registry holds no firer: a terminal transition must still
     // succeed and simply not fire anything (the strict no-op contract).
@@ -996,6 +1016,70 @@ struct ActivationOrderingHandler {
     created_firer: Arc<RecordingCreatedFirer>,
     activated: Arc<std::sync::atomic::AtomicBool>,
     publication_check: Arc<dyn Fn() + Send + Sync>,
+}
+
+struct GatedCreatedFirer {
+    started: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+impl GatedCreatedFirer {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        })
+    }
+}
+
+#[async_trait]
+impl hooks::TaskCreatedFirer for GatedCreatedFirer {
+    async fn fire(&self, _fire: hooks::TaskCreatedFire) {
+        self.started.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .expect("release semaphore remains open")
+            .forget();
+    }
+}
+
+struct CancellationActivationHandler {
+    task_id: String,
+    activated: Arc<std::sync::atomic::AtomicBool>,
+    cleanup_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Task for CancellationActivationHandler {
+    fn name(&self) -> &str {
+        "cancellation-activation"
+    }
+
+    fn task_type(&self) -> TaskType {
+        TaskType::LocalAgent
+    }
+
+    async fn spawn(
+        &self,
+        _input: TaskSpawnInput,
+        _ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
+        let activated = self.activated.clone();
+        let cleanup_calls = self.cleanup_calls.clone();
+        let cleanup = Arc::new(move || {
+            cleanup_calls.fetch_add(1, Ordering::SeqCst);
+        }) as Arc<dyn Fn() + Send + Sync>;
+        Ok(
+            TaskHandle::new(self.task_id.clone(), Some(cleanup)).with_activation(move || {
+                activated.store(true, Ordering::SeqCst);
+            }),
+        )
+    }
+
+    async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1156,6 +1240,74 @@ async fn spawn_activates_worker_only_after_full_registration_and_task_created() 
         activated.load(Ordering::SeqCst),
         "registry activates the prepared worker before returning"
     );
+}
+
+#[tokio::test]
+async fn cancelling_spawn_during_task_created_rolls_back_every_publication() {
+    let dir = tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let firer = GatedCreatedFirer::new();
+    let activated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cleanup_calls = Arc::new(AtomicUsize::new(0));
+    let mut registry =
+        TaskRegistry::new(runtime, fs, out_mgr).with_task_created_firer(firer.clone());
+    registry.register_handler(
+        TaskType::LocalAgent,
+        Arc::new(CancellationActivationHandler {
+            task_id: "acancel1".into(),
+            activated: activated.clone(),
+            cleanup_calls: cleanup_calls.clone(),
+        }),
+    );
+    let registry = Arc::new(registry);
+    let input = local_agent_input_with_creator("researcher", "alpha");
+    let expected_alias = match &input {
+        TaskSpawnInput::LocalAgent { agent_id, .. } => agent_id.to_string(),
+        _ => unreachable!(),
+    };
+
+    let spawn = tokio::spawn({
+        let registry = registry.clone();
+        async move {
+            registry
+                .spawn(TaskType::LocalAgent, input, "cancel me".into())
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), firer.started.acquire())
+        .await
+        .expect("TaskCreated hook starts")
+        .unwrap()
+        .forget();
+    assert!(
+        registry.get("acancel1").await.is_some(),
+        "the hook runs only after the task row is published"
+    );
+    assert_eq!(
+        registry.resolve_task_id(&expected_alias).await.as_deref(),
+        Some("acancel1")
+    );
+
+    spawn.abort();
+    assert!(spawn.await.unwrap_err().is_cancelled());
+
+    for _ in 0..200 {
+        if registry.get("acancel1").await.is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(registry.get("acancel1").await.is_none());
+    assert!(!registry.spawned.read().await.contains_key("acancel1"));
+    assert!(!registry.cleanups.lock().await.contains_key("acancel1"));
+    assert_eq!(registry.resolve_task_id(&expected_alias).await, None);
+    assert!(!activated.load(Ordering::SeqCst));
+    assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -2059,7 +2211,9 @@ async fn find_nonterminal_local_app_workflows_covers_the_canvas_build_too() {
     // An unrelated workflow against the same app must still not count, so the
     // guard widened to the sibling build rather than to everything.
     let (_d2, other) = make_registry();
-    other.insert_state_for_test(mk("w-other", "some-other-workflow")).await;
+    other
+        .insert_state_for_test(mk("w-other", "some-other-workflow"))
+        .await;
     assert!(
         other
             .find_nonterminal_local_app_workflows("canvas-app")

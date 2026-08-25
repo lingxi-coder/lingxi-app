@@ -1365,6 +1365,189 @@ impl traits::tool_invoker::ToolInvoker for DeferredToolInvoker {
     }
 }
 
+/// Late-bound teammate system-prompt renderer. The weak reference avoids the
+/// cycle `orchestrator -> tools -> task registry -> teammate handler ->
+/// orchestrator` while still rebuilding dynamic cwd/git/memory sections for
+/// every teammate spawn.
+struct OrchestratorTeammatePromptRenderer {
+    orchestrator: std::sync::Weak<ConversationOrchestrator>,
+}
+
+/// Resolve the coordinator worker's declared `agent_type` against the live
+/// catalog. The spawn seam only carries the worker id + display name, so the
+/// team registry is the authoritative bridge between those identities. Unknown
+/// types retain the permissive built-in fallback.
+struct CoordinatorTeammateDefinitionResolver {
+    team: Arc<coordinator::TeamRegistry>,
+    catalog: Arc<RwLock<Vec<agent::AgentDefinition>>>,
+}
+
+#[async_trait::async_trait]
+impl tasks::handlers::TeammateDefinitionResolver for CoordinatorTeammateDefinitionResolver {
+    async fn resolve(
+        &self,
+        agent_id: &protocol::AgentId,
+        display_name: &str,
+    ) -> Option<agent::AgentDefinition> {
+        let agent_type = self
+            .team
+            .find_by_agent_id(agent_id)
+            .await
+            .map_or_else(|| display_name.to_string(), |worker| worker.agent_type);
+        if let Some(definition) = self
+            .catalog
+            .read()
+            .await
+            .iter()
+            .find(|definition| definition.agent_type == agent_type)
+            .cloned()
+        {
+            return Some(definition);
+        }
+        tasks::handlers::TeammateDefinitionResolver::resolve(
+            &tasks::handlers::DefaultTeammateDefinition,
+            agent_id,
+            &agent_type,
+        )
+        .await
+    }
+}
+
+#[async_trait::async_trait]
+impl tasks::handlers::TeammateSystemPromptRenderer for OrchestratorTeammatePromptRenderer {
+    async fn render_default_system_prompt(&self) -> String {
+        match self.orchestrator.upgrade() {
+            Some(orchestrator) => orchestrator.assemble_default_system_prompt_preview().await,
+            None => String::new(),
+        }
+    }
+}
+
+/// Fan out teammate status transitions to both the durable task row and the
+/// coordinator's worker registry. The task-row leg is load-bearing for
+/// `TeamSpawnSeam::is_alive`; without it a terminal teammate leaves its mailbox
+/// pump believing the retained task row is still Running.
+struct TeammateStatusFanout {
+    task_registry: Arc<tasks::registry_status_sink::RegistryStatusSink>,
+    coordinator: Arc<coordinator::CoordinatorStatusSink>,
+}
+
+#[async_trait::async_trait]
+impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
+    fn requires_explicit_activation(&self) -> bool {
+        tasks::handlers::TaskStatusSink::requires_explicit_activation(self.task_registry.as_ref())
+    }
+
+    async fn set_status(&self, task_id: &str, status: tasks::TaskStatus) {
+        tasks::handlers::TaskStatusSink::set_status(self.task_registry.as_ref(), task_id, status)
+            .await;
+        tasks::handlers::TaskStatusSink::set_status(self.coordinator.as_ref(), task_id, status)
+            .await;
+    }
+
+    async fn set_failed(&self, task_id: &str, error: &str) {
+        tasks::handlers::TaskStatusSink::set_failed(self.task_registry.as_ref(), task_id, error)
+            .await;
+        tasks::handlers::TaskStatusSink::set_failed(self.coordinator.as_ref(), task_id, error)
+            .await;
+    }
+
+    // ── The remaining `TaskStatusSink` surface ──────────────────────────────
+    //
+    // `RegistryStatusSink` overrides every method below; `CoordinatorStatusSink`
+    // takes the trait default for all of them. Leaving them unimplemented here
+    // would silently swap the registry's real answers for the trait defaults
+    // (`is_registered` ⇒ `true`, `is_terminal` ⇒ `false`) the moment the
+    // teammate handler starts calling them — a decorator that forgets what the
+    // decorated type already did. Side-effecting methods fan out to both legs;
+    // the two lifecycle QUERIES resolve against the durable task row, which is
+    // the only leg that stores one.
+
+    async fn set_exit_code(&self, task_id: &str, exit_code: i32) {
+        tasks::handlers::TaskStatusSink::set_exit_code(
+            self.task_registry.as_ref(),
+            task_id,
+            exit_code,
+        )
+        .await;
+        tasks::handlers::TaskStatusSink::set_exit_code(
+            self.coordinator.as_ref(),
+            task_id,
+            exit_code,
+        )
+        .await;
+    }
+
+    async fn set_pid(&self, task_id: &str, pid: u32) {
+        tasks::handlers::TaskStatusSink::set_pid(self.task_registry.as_ref(), task_id, pid).await;
+        tasks::handlers::TaskStatusSink::set_pid(self.coordinator.as_ref(), task_id, pid).await;
+    }
+
+    async fn notify_rest(
+        &self,
+        task_id: &str,
+        result: Option<String>,
+        usage: Option<traits::task_registry::AgentRunUsage>,
+    ) {
+        tasks::handlers::TaskStatusSink::notify_rest(
+            self.task_registry.as_ref(),
+            task_id,
+            result.clone(),
+            usage.clone(),
+        )
+        .await;
+        tasks::handlers::TaskStatusSink::notify_rest(
+            self.coordinator.as_ref(),
+            task_id,
+            result,
+            usage,
+        )
+        .await;
+    }
+
+    async fn set_agent_outcome(
+        &self,
+        task_id: &str,
+        outcome: traits::task_registry::AgentTerminalOutcome,
+    ) {
+        tasks::handlers::TaskStatusSink::set_agent_outcome(
+            self.task_registry.as_ref(),
+            task_id,
+            outcome.clone(),
+        )
+        .await;
+        tasks::handlers::TaskStatusSink::set_agent_outcome(
+            self.coordinator.as_ref(),
+            task_id,
+            outcome,
+        )
+        .await;
+    }
+
+    async fn notify_monitor_event(&self, task_id: &str, event: &str) {
+        tasks::handlers::TaskStatusSink::notify_monitor_event(
+            self.task_registry.as_ref(),
+            task_id,
+            event,
+        )
+        .await;
+        tasks::handlers::TaskStatusSink::notify_monitor_event(
+            self.coordinator.as_ref(),
+            task_id,
+            event,
+        )
+        .await;
+    }
+
+    async fn is_registered(&self, task_id: &str) -> bool {
+        tasks::handlers::TaskStatusSink::is_registered(self.task_registry.as_ref(), task_id).await
+    }
+
+    async fn is_terminal(&self, task_id: &str) -> bool {
+        tasks::handlers::TaskStatusSink::is_terminal(self.task_registry.as_ref(), task_id).await
+    }
+}
+
 /// Desktop engine knobs.
 ///
 /// Intentionally small in P6 — it grows as P8/P9 fold skills + commands and a
@@ -7718,14 +7901,19 @@ pub async fn build(
     //        lock), but that registry is assembled AFTER this point (its
     //        `BuiltinToolContext` carries `task_registry.clone()`). The deferred
     //        invoker is injected now and bound to the real `RegistryToolInvoker`
-    //        once `tools` exists (5.5a). Definition resolution relies on the
-    //        handler default `DefaultTeammateDefinition` (permissive) — we do NOT
-    //        attach a catalog-backed resolver, which would return `None` for the
-    //        team-lead name and silently fail every spawn.
+    //        once `tools` exists (5.5a). Definition resolution maps the worker
+    //        id back to its declared `agent_type`, then resolves the live
+    //        catalog; unknown types retain the permissive fallback.
     let coordinator_sink = Arc::new(coordinator::CoordinatorStatusSink::new(
         coordinator.clone(),
         output.clone(),
     ));
+    let teammate_registry_status_sink =
+        Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    let teammate_status_sink = Arc::new(TeammateStatusFanout {
+        task_registry: teammate_registry_status_sink.clone(),
+        coordinator: coordinator_sink,
+    });
     let teammate_invoker = Arc::new(DeferredToolInvoker::new());
     let teammate_pool = Arc::new(agent::StateMachinePool::new(
         Arc::new(PosixRuntime::new()),
@@ -7739,6 +7927,10 @@ pub async fn build(
     // Keep teammate auto-claim on the same host-owned task-store root as the
     // Task* tools and orchestrator reminders.
     .with_config_home(cfg.lingxi_home.clone())
+    .with_definitions(Arc::new(CoordinatorTeammateDefinitionResolver {
+        team: coordinator.clone(),
+        catalog: agent_catalog.clone(),
+    }))
     .with_tool_invoker(teammate_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>)
     // Anchor the teammate's `AgentModel::Inherit` / family aliases to the parent
     // model — the same seam the `PoolSubagentSpawner` gets above. #15: resolve
@@ -7757,7 +7949,7 @@ pub async fn build(
     .with_permission_mode(cfg.permission_mode)
     .with_model_setting(model_setting_for_spawns.clone())
     .with_session_interactive(interactive_session)
-    .with_status_sink(coordinator_sink as Arc<dyn tasks::handlers::TaskStatusSink>)
+    .with_status_sink(teammate_status_sink as Arc<dyn tasks::handlers::TaskStatusSink>)
     // Fire the `TeammateIdle` hook (claude-code `executeTeammateIdleHooks`,
     // `stopHooks.ts:403`) each time a teammate finishes a turn-set and parks
     // awaiting the next message ("about to go idle"). The firer wraps the SAME
@@ -7786,6 +7978,7 @@ pub async fn build(
     let teammate_skill_loader_cell = teammate_handler.skill_loader_handle();
     let teammate_tool_wide_deny_cell = teammate_handler.tool_wide_deny_names_handle();
     let teammate_strict_plugin_hooks_cell = teammate_handler.strict_plugin_only_hooks_handle();
+    let teammate_system_prompt_renderer_cell = teammate_handler.system_prompt_renderer_handle();
     let _ = teammate_strict_plugin_hooks_cell.set(strict_plugin_only_hooks);
     task_registry_inner.register_handler(
         tasks::TaskType::InProcessTeammate,
@@ -7950,6 +8143,8 @@ pub async fn build(
     );
 
     let task_registry = Arc::new(task_registry_inner);
+    teammate_registry_status_sink
+        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
 
     // (5.46f) Bind the deferred LocalAgent status sink now that the registry
     //         `Arc` exists: the persistent agent's `set_status` / `notify_rest`
@@ -9257,6 +9452,14 @@ pub async fn build(
     };
     let orch = Arc::new(orch_builder);
     async_hook_response_buffer.attach_rewake_target(&orch);
+
+    // The task registry had to be completed before the orchestrator existed.
+    // Bind the teammate's live default-prompt renderer now through a Weak so
+    // the ownership graph remains acyclic.
+    let _ =
+        teammate_system_prompt_renderer_cell.set(Arc::new(OrchestratorTeammatePromptRenderer {
+            orchestrator: Arc::downgrade(&orch),
+        }));
 
     // Fill the hook-attachment sink's cell now that the orchestrator (and its
     // JSONL writer) exists, so every hook run from here on persists its one

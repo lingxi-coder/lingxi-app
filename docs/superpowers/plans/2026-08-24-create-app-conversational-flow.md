@@ -537,6 +537,15 @@ git commit -m "Carry a create request_id through the service-layer AppCreated em
   - `ClientEvent::AppOperationFailed { app_id, code, message, request_id: Option<String> }`
   - `CLIENT_PROTOCOL_VERSION = "8.0.0"`，`blessed_major.txt = 8`
 
+🚨 **本 Task 会打破 `local_apps_bridge.rs` 的构建，而最省事的修法正是要防的那个 bug。**
+给 `AppEventDto::AppCreated` 加 `request_id` 会让 `local_apps_bridge.rs:218` 的结构体字面量
+变成非穷尽 ⇒ 编译错误 ⇒ 必须动它。**写 `request_id: None` 能编过、测试全绿、每台设备从此
+在每个 `AppCreated` 上看到 `null`**，「+」永远匹配不到自己创建的应用。
+⇒ 本 Task 必须把它接成真正的透传（`AppEvent::AppCreated.request_id` → DTO），并让
+`every_app_event_arm_lowers_field_exact` 里那条 `AppCreated` 用例的期望值从
+`None` 改成 `Some("req-1")`。⛔ 那条用例的输入端就是 `Some("req-1")`，把期望写成 `None`
+不是「让它编过」，是**把 bug 钉成正确行为**。
+
 ⚠️ **`version_guard_test.rs` 的 `current_contract_index()` 是手写字符串字面量表。** 删枚举变体后代码**照样编过**，覆盖锚点只是抽样 ⇒ 不删表里那 7 行（`put("ClientEvent::AppIdentityProposed"…)` ≈ `:337-340`、`put("ClientCommand::ProposeAppIdentity"…)` ≈ `:599`），守卫**看不见删除**，8.0.0 不会被强制。同文件另有三处结构体字面量要补 `scaffolded`。行号会漂，实现前重新 grep。
 
 - [ ] **Step 1: 先让守卫见红——删表行，不删代码**
@@ -668,7 +677,34 @@ async fn a_shell_record_lowers_with_scaffolded_false() {
     let dto = crate::local_apps_bridge::lower_record(&record);
     assert!(!dto.scaffolded, "lower_record is a pure mapping — no extra IO");
 }
+
+// 🚨 必须有这一条。`lower_record` 不是 `lower_app_event`——上面那条测的是记录映射，
+// 挡不住事件上的 request_id 被丢掉。
+#[test]
+fn lower_app_event_passes_request_id_through_on_app_created() {
+    let event = AppEvent::AppCreated {
+        record: sample_record(),
+        request_id: Some("req-1".into()),
+    };
+    let lowered = crate::local_apps_bridge::lower_app_event(event).expect("lowered");
+    match lowered {
+        ClientEvent::AppEvent { event: AppEventDto::AppCreated { request_id, .. }, .. } => {
+            assert_eq!(
+                request_id.as_deref(),
+                Some("req-1"),
+                "a dropped correlation key here means the + button never opens the new app"
+            );
+        }
+        other => panic!("expected AppCreated, got {other:?}"),
+    }
+}
 ```
+
+⚠️ **本 Task 之前，`lower_app_event` 里是 `request_id: _`**（Task 3 为了保持工作区可编译留下的
+刻意存根，DTO 那时还没有这个字段）。它编译干净、没有任何测试覆盖，是典型的
+「命名了、算出来了、但从没接线」。Task 4 已要求把它接通；本 Task 用上面这条测试**证明**它接通了。
+⛔ 不要相信 `every_app_event_arm_lowers_field_exact` 的注释说它覆盖了每个变体——
+那句话在 Task 3 之前是假的（六个变体只列了五个，缺的正是 `AppCreated`）。
 
 - [ ] **Step 2: 跑测试确认红**
 
@@ -724,6 +760,31 @@ Run: `cd lingxi-code && cargo test -p engine-mobile --all-features shell_mode 2>
 ```
 
 `local_apps_bridge.rs`：`lower_record` 补 `scaffolded: record.scaffolded`（纯映射，**无额外 IO**）；`lower_app_event` 透传 `request_id`。
+
+🚨 **Task 4 交接过来的两个「字段存在但恒为 None」的存根，本 Task 必须各自接线并各配一条测试。**
+它们和 §D.1 里那个已经踩过的坑是同一个形状：编译干净、测试全绿、线上恒 `null`。
+
+1. **`ClientEvent::AppOperationFailed.request_id` 目前没有任何生产者。** `emit_failure` 一律发
+   `None`，Task 4 只加了字段。⇒ 创建失败时客户端**认领不到自己的失败**，只能等 30 秒超时，
+   用户看到的是「创建结果未知，请在应用库确认」而不是真正的错误原因。
+   本 Task 要让创建失败路径把 `request_id` 带上，并加测试：
+   ```rust
+   #[tokio::test]
+   async fn a_failed_shell_create_reports_the_request_id_the_client_sent() {
+       let h = mobile_host().await;
+       h.fail_next_create();
+       h.create_shell_app(Some("req-9")).await.expect_err("must fail");
+       let failed = h.take_client_events().await.into_iter().find_map(|e| match e {
+           ClientEvent::AppOperationFailed { request_id, .. } => Some(request_id),
+           _ => None,
+       }).expect("AppOperationFailed must be emitted");
+       assert_eq!(failed.as_deref(), Some("req-9"), "否则客户端只能靠超时兜底");
+   }
+   ```
+2. **`CreateApp.mode` 被接收但被忽略**（Task 4 写成 `mode: _mode` 加了指示性注释）。本 Task 的
+   分叉就是消费它的地方。测试必须证明**两个分支各自生效**：`Shell` 落 `scaffolded == false`
+   且工作区无源码，`Scaffolded` 落 `scaffolded == true` 且脚手架已落地。⛔ 只测 `Shell`
+   等于没证明 `mode` 真的被读了——`_mode` 的行为和「永远走 Shell」在只测 Shell 时无法区分。
 
 - [ ] **Step 4: 跑测试确认绿**
 

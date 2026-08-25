@@ -106,6 +106,79 @@ struct RestPayload {
 
 type TaskCleanup = Arc<dyn Fn() + Send + Sync>;
 
+/// Cancellation guard for the registry publication → TaskCreated → activation
+/// handoff in [`TaskRegistry::spawn`].
+///
+/// Once the handler has prepared a worker, any cancellation before activation
+/// must stop that worker and remove every registry artifact already published.
+/// The cleanup hook is synchronous; Tokio-owned maps are removed on the current
+/// runtime because `Drop` itself cannot await their locks.
+struct SpawnPublicationGuard {
+    task_id: String,
+    tasks: Arc<RwLock<HashMap<String, TaskState>>>,
+    spawned: Arc<RwLock<HashMap<String, TaskType>>>,
+    cleanups: Arc<tokio::sync::Mutex<HashMap<String, TaskCleanup>>>,
+    aliases: Arc<RwLock<HashMap<String, String>>>,
+    cleanup: Option<TaskCleanup>,
+    armed: bool,
+}
+
+impl SpawnPublicationGuard {
+    fn new(registry: &TaskRegistry, task_id: String, cleanup: Option<TaskCleanup>) -> Self {
+        Self {
+            task_id,
+            tasks: registry.tasks.clone(),
+            spawned: registry.spawned.clone(),
+            cleanups: registry.cleanups.clone(),
+            aliases: registry.aliases.clone(),
+            cleanup,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+        self.cleanup = None;
+    }
+}
+
+impl Drop for SpawnPublicationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        // Stop handler-owned work immediately. The hook is idempotent and may
+        // itself schedule async pool teardown on the current runtime.
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+
+        let task_id = self.task_id.clone();
+        let tasks = self.tasks.clone();
+        let spawned = self.spawned.clone();
+        let cleanups = self.cleanups.clone();
+        let aliases = self.aliases.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::error!(task_id, "task spawn cancelled without a Tokio runtime; registry rollback could not be scheduled");
+            return;
+        };
+        drop(runtime.spawn(async move {
+            // Match publication lock order. Holding the task write lock while
+            // removing secondary indexes prevents readers from observing a row
+            // whose route/cleanup is only partially rolled back.
+            let mut task_rows = tasks.write().await;
+            let mut routes = spawned.write().await;
+            let mut cleanup_rows = cleanups.lock().await;
+            let mut alias_rows = aliases.write().await;
+            task_rows.remove(&task_id);
+            routes.remove(&task_id);
+            cleanup_rows.remove(&task_id);
+            alias_rows.retain(|_, canonical| canonical != &task_id);
+        }));
+    }
+}
+
 /// Durable handoff fields used to rebuild a checkpointed workflow after the
 /// host process restarts. The workflow is registered as `Paused`; no worker is
 /// spawned until the user explicitly invokes `Workflow` with its run id.
@@ -613,6 +686,7 @@ impl TaskRegistry {
         let mut handle = handler.spawn(input.clone(), ctx).await?;
         let id = handle.task_id.clone();
         let cleanup = handle.cleanup.clone();
+        let mut publication_guard = SpawnPublicationGuard::new(self, id.clone(), cleanup.clone());
 
         // 3. Recover the spool path the handler ALREADY allocated (the path is a
         //    deterministic function of the id) and insert the typed state built
@@ -685,6 +759,7 @@ impl TaskRegistry {
         // prepared worker exits without starting. No await follows activation,
         // so callers cannot observe a partially committed successful spawn.
         handle.activate();
+        publication_guard.disarm();
 
         Ok(id)
     }
@@ -1064,6 +1139,12 @@ impl TaskRegistry {
             let entry = map
                 .get_mut(&task_id)
                 .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+            // Task lifecycle is absorbing at the first terminal transition.
+            // In particular, a late handler failure must not overwrite an
+            // explicit kill (or fire TaskCompleted after Killed already won).
+            if entry.base().status.is_terminal() {
+                return Ok(entry.clone());
+            }
             match entry {
                 TaskState::LocalBash(b) => b.base.status = status,
                 TaskState::LocalAgent(a) => a.base.status = status,

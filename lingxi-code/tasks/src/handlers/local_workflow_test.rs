@@ -2281,7 +2281,9 @@ async fn telemetry_phase_completed_suppressed_for_inline_workflow() {
 
     let events = sink.events().await;
     assert!(
-        !events.iter().any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
+        !events
+            .iter()
+            .any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
         "tengu_workflow_phase_completed must NOT fire for inline workflows (oracle §7); events: {events:?}"
     );
 }
@@ -2324,7 +2326,9 @@ async fn telemetry_phase_completed_suppressed_for_script_path_workflow() {
 
     let events = sink.events().await;
     assert!(
-        !events.iter().any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
+        !events
+            .iter()
+            .any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
         "tengu_workflow_phase_completed must NOT fire for scriptPath workflows (oracle §7); events: {events:?}"
     );
 }
@@ -2364,7 +2368,9 @@ async fn telemetry_phase_completed_suppressed_when_no_telemetry_ctx() {
 
     let events = sink.events().await;
     assert!(
-        !events.iter().any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
+        !events
+            .iter()
+            .any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
         "tengu_workflow_phase_completed must NOT fire when phase_telemetry_ctx is None; events: {events:?}"
     );
 }

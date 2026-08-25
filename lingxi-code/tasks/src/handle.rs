@@ -34,7 +34,7 @@ fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
         other => {
             return Err(TaskRegistryError::InvalidInput(format!(
                 "unknown task_type '{other}'"
-            )))
+            )));
         }
     })
 }
@@ -64,7 +64,7 @@ fn status_from_wire(s: &str) -> Result<TaskStatus, TaskRegistryError> {
         other => {
             return Err(TaskRegistryError::InvalidInput(format!(
                 "unknown status '{other}'"
-            )))
+            )));
         }
     })
 }

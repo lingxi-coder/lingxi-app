@@ -7773,8 +7773,7 @@ mod persist_with_parent_tests {
             .collect();
 
         assert_eq!(
-            uuids_1,
-            uuids_2,
+            uuids_1, uuids_2,
             "same turn id / content / position should deterministically derive identical block uuids"
         );
         assert_ne!(
@@ -10290,24 +10289,22 @@ mod goal_checkin_wiring_tests {
             orch.goal_checkin_idle_running.load(Ordering::SeqCst),
             "deferral should arm the idle loop"
         );
-        assert!(
-            orch.goal_checkin_idle_task
-                .lock()
-                .expect("goal checkin idle task")
-                .is_some()
-        );
+        assert!(orch
+            .goal_checkin_idle_task
+            .lock()
+            .expect("goal checkin idle task")
+            .is_some());
 
         assert!(!orch.goal_checkin_pass(&[]).await);
         assert!(
             !orch.goal_checkin_idle_running.load(Ordering::SeqCst),
             "clearing the stretch should drop the running marker"
         );
-        assert!(
-            orch.goal_checkin_idle_task
-                .lock()
-                .expect("goal checkin idle task")
-                .is_none()
-        );
+        assert!(orch
+            .goal_checkin_idle_task
+            .lock()
+            .expect("goal checkin idle task")
+            .is_none());
     }
 
     #[tokio::test]
@@ -10322,9 +10319,7 @@ mod goal_checkin_wiring_tests {
             state.deferred_since = Some(0);
         }
 
-        let first_generation = orch
-            .goal_checkin_idle_generation
-            .load(Ordering::SeqCst);
+        let first_generation = orch.goal_checkin_idle_generation.load(Ordering::SeqCst);
         orch.sync_goal_checkin_idle_task().await;
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while orch.goal_checkin_idle_running.load(Ordering::SeqCst) {
@@ -10350,9 +10345,7 @@ mod goal_checkin_wiring_tests {
             state.deferred_since = Some(0);
         }
         orch.stop_hook_snapshot = Some(Arc::new(GoalStopSnapshot));
-        let second_generation = orch
-            .goal_checkin_idle_generation
-            .load(Ordering::SeqCst);
+        let second_generation = orch.goal_checkin_idle_generation.load(Ordering::SeqCst);
         orch.sync_goal_checkin_idle_task().await;
         assert!(orch.goal_checkin_idle_running.load(Ordering::SeqCst));
         assert!(

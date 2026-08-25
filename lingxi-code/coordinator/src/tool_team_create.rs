@@ -92,8 +92,9 @@ pub struct TeamCreateTool {
     /// `call()` emits the live active-worker count through this so every client
     /// learns `active_workers > 0` deterministically — independent of the
     /// teammate's own racy startup `Running` emit (which is dispatched on a
-    /// concurrent task and can fire before the link is written, leaving a
-    /// status sink keyed on the not-yet-written `task_id` unable to resolve it).
+    /// concurrent task and can fire before the link is written). The registry
+    /// retains that transition, but this tool still owns the first deterministic
+    /// client-facing status push after the task id is linked.
     output: Arc<dyn OutputStream>,
     /// Optional analytics bus for `tengu_team_created`. `None` (the default for
     /// tests) ⇒ the event is logged via `tracing` only. Threaded additively so
@@ -445,9 +446,16 @@ impl Tool for TeamCreateTool {
         if let Some(runtime) = &self.runtime {
             if let Some(mailbox) = self.team.mailbox_router.get(&agent_id).await {
                 let seam = self.spawn_seam.clone();
+                let mailbox_router = self.team.mailbox_router.clone();
+                let pump_agent_id = agent_id;
                 let pump_task_id = task_id.clone();
                 let pump = Box::pin(async move {
                     crate::teammate_pump::run_teammate_pump(mailbox, pump_task_id, seam).await;
+                    // A stopped pump can no longer drain this route. Remove both
+                    // the id-keyed mailbox and the display-name index so later
+                    // SendMessage calls fail visibly instead of queueing into a
+                    // permanently undrained inbox.
+                    mailbox_router.unregister(&pump_agent_id).await;
                 });
                 // A spawn failure (runtime shutting down) is non-fatal to the
                 // TeamCreate itself — the teammate is already started; only its
@@ -542,20 +550,32 @@ impl Tool for TeamCreateTool {
         //     so the count is authoritative. We drive it from the tool rather
         //     than relying on the teammate's own startup `Running` emit: that
         //     emit runs on a CONCURRENT runtime task and can fire before this
-        //     `call()` writes the link (step 4), in which case the
-        //     `CoordinatorStatusSink` — keyed on the still-unwritten `task_id` —
-        //     silently drops it and no client ever learns `active_workers > 0`.
+        //     `call()` writes the link (step 4). The registry retains and replays
+        //     that transition, but it cannot push a resolved coordinator status
+        //     before the link exists; this deterministic push closes that window.
         //     The sink remains authoritative for the later terminal transitions
         //     (`Failed` / `Killed`) and their pushes; this initial push is
         //     idempotent w.r.t. a sink `Running` that happens to land afterward
         //     (same count).
+        let initial_status = if self.spawn_seam.is_alive(&task_id).await {
+            WorkerStatus::Working {
+                activity: "running".to_string(),
+            }
+        } else {
+            // The activation-gated worker may still fail between registry
+            // commit and this task-id link. `set_task_id` replays any detailed
+            // handler status retained during that window; this generic value is
+            // only the fallback when no detailed transition was observed.
+            WorkerStatus::Failed {
+                error: "teammate terminated during startup".to_string(),
+            }
+        };
+        // The terminal status sink can race this startup projection after the
+        // liveness read. Keep the check-and-write atomic inside TeamRegistry so
+        // a detailed Failed/Completed/Killed state can never be resurrected as
+        // Working (or overwritten by the generic startup failure).
         self.team
-            .update_status(
-                &agent_id,
-                WorkerStatus::Working {
-                    activity: "running".to_string(),
-                },
-            )
+            .update_status_if_nonterminal(&agent_id, initial_status)
             .await;
         let active = self.team.active_worker_count().await;
         let pushed_team = self.team.team_name().await;
@@ -644,6 +664,7 @@ mod tests {
     struct RecordingSeam {
         task_id: String,
         spawns: AtomicUsize,
+        terminate_on_send: std::sync::atomic::AtomicBool,
         last_args: Mutex<Option<(AgentId, String, String, String)>>,
         injected: Mutex<Vec<String>>,
     }
@@ -653,9 +674,13 @@ mod tests {
             Self {
                 task_id: task_id.into(),
                 spawns: AtomicUsize::new(0),
+                terminate_on_send: std::sync::atomic::AtomicBool::new(false),
                 last_args: Mutex::new(None),
                 injected: Mutex::new(Vec::new()),
             }
+        }
+        fn terminate_on_send(&self) {
+            self.terminate_on_send.store(true, Ordering::SeqCst);
         }
         fn injected(&self) -> Vec<String> {
             self.injected.lock().unwrap().clone()
@@ -683,6 +708,9 @@ mod tests {
             _task_id: &str,
             message: String,
         ) -> Result<(), traits::team_spawn::TeamSpawnError> {
+            if self.terminate_on_send.load(Ordering::SeqCst) {
+                return Err(traits::team_spawn::TeamSpawnError::Terminated);
+            }
             self.injected.lock().unwrap().push(message);
             Ok(())
         }
@@ -1281,7 +1309,9 @@ mod tests {
         mailbox
             .deliver(crate::mailbox::TeammateMessage {
                 from: crate::mailbox::MessageSender::Coordinator,
+                from_name: "team-lead".into(),
                 content: "pick up the new task".into(),
+                summary: None,
                 message_id: "m-1".into(),
                 timestamp: std::time::SystemTime::now(),
                 request_id: None,
@@ -1298,8 +1328,78 @@ mod tests {
         }
         assert_eq!(
             seam.injected(),
-            vec!["pick up the new task".to_string()],
+            vec![
+                tasks::handlers::in_process_teammate::teammate_message_envelope(
+                    "team-lead",
+                    "pick up the new task",
+                )
+            ],
             "the pump drained the routed message into the runner via the seam"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_pump_unregisters_mailbox_and_name_route() {
+        let seam = Arc::new(RecordingSeam::new("handler-task-stopped-pump"));
+        seam.terminate_on_send();
+        let (tool, registry, _mode, _tmp) = make_tool_with_seam(seam);
+        let spawner = TestSpawner::new();
+        let tool = tool.with_runtime(spawner as Arc<dyn traits::RuntimeSpawner>);
+
+        tool.call(
+            json!({ "team_name": "alpha", "agent_type": "researcher" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("TeamCreate must succeed");
+
+        let worker = registry
+            .list()
+            .await
+            .into_iter()
+            .next()
+            .expect("one worker");
+        let mailbox = registry
+            .mailbox_router
+            .get(&worker.agent_id)
+            .await
+            .expect("mailbox starts registered");
+        mailbox
+            .deliver(crate::mailbox::TeammateMessage {
+                from: crate::mailbox::MessageSender::Coordinator,
+                from_name: "team-lead".into(),
+                content: "wake a terminated teammate".into(),
+                summary: None,
+                message_id: "m-stop".into(),
+                timestamp: std::time::SystemTime::now(),
+                request_id: None,
+            })
+            .expect("message reaches the live route");
+
+        for _ in 0..200 {
+            if registry
+                .mailbox_router
+                .get(&worker.agent_id)
+                .await
+                .is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            registry
+                .mailbox_router
+                .get(&worker.agent_id)
+                .await
+                .is_none(),
+            "a stopped pump must remove its undrained mailbox route"
+        );
+        assert_eq!(
+            registry.mailbox_router.resolve_name(&worker.name).await,
+            None,
+            "pump shutdown must also remove the display-name route"
         );
     }
 
@@ -1330,7 +1430,9 @@ mod tests {
         mailbox
             .deliver(crate::mailbox::TeammateMessage {
                 from: crate::mailbox::MessageSender::Coordinator,
+                from_name: "team-lead".into(),
                 content: "unread".into(),
+                summary: None,
                 message_id: "m-1".into(),
                 timestamp: std::time::SystemTime::now(),
                 request_id: None,

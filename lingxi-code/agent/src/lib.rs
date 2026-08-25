@@ -71,7 +71,7 @@ pub use observer::{
     build_observer_launch, propagation_for_spawn, validate_observer_graph, ObserverLaunchPlan,
     ObserverPropagation, ObserverValidationError, DEFAULT_OBSERVER_FANOUT_DEPTH,
 };
-pub use tool_resolver::resolve_subagent_tools;
+pub use tool_resolver::{augment_teammate_tool_policy, resolve_subagent_tools};
 pub use traits::fork_subagent::{
     build_child_message, build_forked_messages, build_worktree_notice, is_fork_subagent_enabled,
     is_in_fork_child, FORK_SUBAGENT_TYPE,

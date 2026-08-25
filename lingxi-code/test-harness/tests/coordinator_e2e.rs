@@ -16,7 +16,9 @@ async fn coordinator_routes_message_to_worker() {
 
     let msg = TeammateMessage {
         from: MessageSender::Coordinator,
+        from_name: "team-lead".into(),
         content: "go".into(),
+        summary: None,
         message_id: "m1".into(),
         timestamp: std::time::SystemTime::now(),
         request_id: None,
@@ -40,7 +42,9 @@ async fn route_to_unknown_worker_errors() {
             &AgentId::new(),
             TeammateMessage {
                 from: MessageSender::Coordinator,
+                from_name: "team-lead".into(),
                 content: String::new(),
+                summary: None,
                 message_id: String::new(),
                 timestamp: std::time::SystemTime::now(),
                 request_id: None,

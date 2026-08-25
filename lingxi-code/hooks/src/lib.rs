@@ -76,5 +76,7 @@ pub use response::{
 pub use ssrf_guard::{DnsResolver, IpRange, SsrfError, SsrfGuard};
 pub use task_completed_firer::{OptionalTaskCompletedFirer, TaskCompletedFire, TaskCompletedFirer};
 pub use task_created_firer::{OptionalTaskCreatedFirer, TaskCreatedFire, TaskCreatedFirer};
-pub use teammate_idle_firer::{OptionalTeammateIdleFirer, TeammateIdleFire, TeammateIdleFirer};
+pub use teammate_idle_firer::{
+    OptionalTeammateIdleFirer, TeammateIdleFire, TeammateIdleFirer, TeammateIdleOutcome,
+};
 pub use watcher_rebinder::{OptionalWatcherRebinder, WatcherRebinder};

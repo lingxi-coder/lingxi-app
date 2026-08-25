@@ -31,7 +31,7 @@
 //! matches the TS `requestTeammateShutdown` (cooperative) → `kill` (hard)
 //! ordering.
 //!
-//! ## Swarm auto-claim (oracle 2.1.223 `zvb`/`Vvb`/`rIp`)
+//! ## Swarm auto-claim (oracle 2.1.241 `zvb`/`Vvb`/`rIp`)
 //!
 //! A teammate auto-claims work from the shared task list at two moments,
 //! mirroring the oracle's in-process runner:
@@ -39,17 +39,12 @@
 //! 1. **Startup** (`if(!standalone) await rIp(...)` before the loop): the
 //!    claim's side effect only — the returned prompt is discarded because the
 //!    TeamCreate description already seeded the first message.
-//! 2. **While parked**: a 500ms tick (active only between turn-sets) runs
-//!    [`check_and_claim_next_task`]; a claimed task's [`claimed_task_prompt`]
-//!    is self-injected as the next user message wearing the
-//!    `<teammate-message teammate_id="task-list">` envelope.
-//!
-//! Bounded ordering divergence vs the oracle: the oracle's poll loop checks
-//! the mailbox STRICTLY BEFORE the task list in each 500ms iteration; the
-//! port's mailbox pump injects independently of this worker, so a mailbox
-//! message and a claimed-task prompt can land back-to-back in either order.
-//! The runner queues both, so the worst case is one turn of delay for the
-//! claimed prompt — accepted, not worth serializing two independent pumps.
+//! 2. **While parked**: one 500ms tick first consumes a queued mailbox message,
+//!    then (only when none exists) runs [`check_and_claim_next_task`]. A claimed
+//!    task's [`claimed_task_prompt`] is self-injected wearing the
+//!    `<teammate-message teammate_id="task-list">` envelope. This preserves the
+//!    oracle's strict mailbox-before-task-list ordering and prevents a message
+//!    arriving during a model request from cancelling that request.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -68,7 +63,7 @@ use agent::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
 };
 use agent::display::{AgentColor, AgentDisplay};
-use agent::pool::{PoolError, StateMachinePool};
+use agent::pool::StateMachinePool;
 // `PermissionMode` is re-exported from the `agent` crate (which depends on
 // `permission`) so `tasks` can reference it without a new `permission` dep.
 use agent::resolve_agent_model;
@@ -80,15 +75,30 @@ use agent::SubagentApiClient;
 /// prefix.
 const HANDLER_NAME: &str = "in_process_teammate";
 
-/// The idle-poll cadence of the oracle's in-process runner (2.1.223 `Kvb`
+/// The idle-poll cadence of the oracle's in-process runner (2.1.241 `Kvb`
 /// polls its mailbox + task list every 500ms while the teammate is parked).
 const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-// ── Swarm auto-claim (oracle 2.1.223 `zvb` / `Vvb` / `rIp`, in-process runner) ──
+/// Keep at most one already-drained mailbox batch behind the outer bounded
+/// mailbox. This prevents the two queues from multiplying their capacities.
+const PENDING_MESSAGE_CAPACITY: usize = 1;
+
+/// Canonical sender for the lead's initial assignment and direct messages.
+pub const TEAM_LEAD_NAME: &str = "team-lead";
+
+/// Exact Claude Code 2.1.241 teammate-only system-prompt suffix. The leading
+/// and trailing line feeds are load-bearing: the default system prompt already
+/// ends in one LF, so direct concatenation produces one blank-line boundary.
+pub const TEAMMATE_SYSTEM_PROMPT_ADDENDUM: &str = "\n# Agent Teammate Communication\n\
+IMPORTANT: You are running as an agent in a team. To communicate with anyone on your team, use the SendMessage tool with `to: \"<name>\"` to send messages to specific teammates.\n\
+Just writing a response in text is not visible to others on your team - you MUST use the SendMessage tool.\n\
+The user interacts primarily with the team lead. Your work is coordinated through the task system and teammate messaging.\n";
+
+// ── Swarm auto-claim (oracle 2.1.241 `zvb` / `Vvb` / `rIp`, in-process runner) ──
 
 /// Pick the next auto-claimable task: the FIRST (the list is id-ascending)
 /// task that is `pending`, unowned, and whose every blocker is completed or
-/// absent. 1:1 port of oracle `zvb` (2.1.223 @251671996) — note the owner test
+/// absent. 1:1 port of oracle `zvb` (2.1.241) — note the owner test
 /// is JS-falsy (`if(r.owner)return!1`), so an empty-string owner counts as
 /// unowned.
 pub(crate) fn pick_next_task(tasks: &[task_store::TodoTask]) -> Option<&task_store::TodoTask> {
@@ -109,7 +119,7 @@ pub(crate) fn pick_next_task(tasks: &[task_store::TodoTask]) -> Option<&task_sto
 }
 
 /// Build the injected prompt for an auto-claimed task. 1:1 port of oracle
-/// `Vvb` (2.1.223 @251672219). Byte-exact quirks locked by the segment table:
+/// `Vvb` (2.1.241). Byte-exact quirks locked by the segment table:
 /// a trailing SPACE after the colon at end-of-line, and a leading space
 /// before the subject (`` `…task #${id}: \n\n ${subject}` ``); the
 /// description (when non-empty) follows after a blank line.
@@ -124,13 +134,137 @@ pub(crate) fn claimed_task_prompt(task: &task_store::TodoTask) -> String {
     t
 }
 
-/// Wrap an inter-agent message in the `<teammate-message>` envelope the
-/// runner injects for every non-`user` sender. Minimal port of oracle `$Tr`
-/// (2.1.223 @248033882, tag const `$W = "teammate-message"` @240126609) for
-/// the `from:"task-list"` path: no `color=` / `summary=` attributes (the
-/// task-list sender passes neither).
-pub(crate) fn teammate_message_envelope(from: &str, text: &str) -> String {
-    format!("<teammate-message teammate_id=\"{from}\">\n{text}\n</teammate-message>")
+/// Escape an XML attribute exactly like the oracle's `Hd`: `&`, `<`, `>`,
+/// double quote, then apostrophe.
+///
+/// Single pass. The chained-`replace` spelling is byte-equivalent (escaping `&`
+/// first is what keeps the entities it introduces from being re-escaped) but
+/// allocates a fresh `String` and re-scans the whole input five times even when
+/// nothing matches — and this runs twice per teammate message.
+fn escape_xml_attribute(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Neutralize literal teammate-envelope tags inside untrusted message text.
+///
+/// Same rule as `traits::subagent_output_guard`'s harness-envelope neutralizer
+/// (whose tag list already contains `teammate-message`): `<` before an optional
+/// `/`, the tag name case-insensitively, then `>` / `/` / whitespace / end-of-
+/// input becomes `<\`. The boundary predicate is IMPORTED from there rather than
+/// re-spelled — an ASCII-only `is_ascii_whitespace` would let
+/// `<teammate-message\u{a0}>` (NBSP) and `</teammate-message\u{2028}>` through
+/// here while the sibling guard escapes them.
+fn escape_teammate_tags(text: &str) -> String {
+    const TAG: &str = "teammate-message";
+    let mut out = String::with_capacity(text.len());
+    let mut start = 0;
+    // `match_indices` yields guaranteed char-boundary byte offsets, and `<` is
+    // ASCII so it can never occur inside a multi-byte sequence.
+    for (index, _) in text.match_indices('<') {
+        let rest = &text[index + 1..];
+        let name = rest.strip_prefix('/').unwrap_or(rest);
+        let Some(suffix) = name
+            .as_bytes()
+            .get(..TAG.len())
+            .filter(|prefix| prefix.eq_ignore_ascii_case(TAG.as_bytes()))
+            // The 16 matched bytes are ASCII, so `TAG.len()` is a char boundary.
+            .map(|_| &name[TAG.len()..])
+        else {
+            continue;
+        };
+        if suffix
+            .chars()
+            .next()
+            .is_none_or(|c| c == '>' || c == '/' || traits::subagent_output_guard::is_js_space(c))
+        {
+            out.push_str(&text[start..=index]);
+            out.push('\\');
+            start = index + 1;
+        }
+    }
+    out.push_str(&text[start..]);
+    out
+}
+
+/// Wrap an inter-agent message in the exact `<teammate-message>` envelope used
+/// by Claude Code 2.1.241. `summary` keeps its first line, trims it, caps it at
+/// 200 UTF-16 code units, and is omitted when empty (`dge` / `l5f`).
+pub fn teammate_message_envelope_with_summary(
+    from: &str,
+    text: &str,
+    summary: Option<&str>,
+) -> String {
+    let summary = summary
+        .map(|value| value.split('\n').next().unwrap_or_default().trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let mut utf16_units = 0;
+            value
+                .chars()
+                .take_while(|character| {
+                    let next = utf16_units + character.len_utf16();
+                    if next > 200 {
+                        return false;
+                    }
+                    utf16_units = next;
+                    true
+                })
+                .collect::<String>()
+        });
+    let summary_attr = summary.as_deref().map_or_else(String::new, |value| {
+        format!(" summary=\"{}\"", escape_xml_attribute(value))
+    });
+    format!(
+        "<teammate-message teammate_id=\"{}\"{}>\n{}\n</teammate-message>",
+        escape_xml_attribute(from),
+        summary_attr,
+        escape_teammate_tags(text)
+    )
+}
+
+/// Convenience wrapper for senders that carry no summary (task-list and the
+/// initial team-lead assignment).
+#[must_use]
+pub fn teammate_message_envelope(from: &str, text: &str) -> String {
+    teammate_message_envelope_with_summary(from, text, None)
+}
+
+/// Narrow async seam used by the task leaf to obtain the host's freshly
+/// assembled default system prompt without depending on the orchestrator.
+#[async_trait]
+pub trait TeammateSystemPromptRenderer: Send + Sync {
+    /// Render the default (not main-thread overridden) system prompt.
+    async fn render_default_system_prompt(&self) -> String;
+}
+
+fn render_teammate_system_prompt(base: &str, custom: Option<&str>) -> Arc<str> {
+    let custom = custom.filter(|value| !value.is_empty());
+    let mut rendered = String::with_capacity(
+        base.len()
+            + TEAMMATE_SYSTEM_PROMPT_ADDENDUM.len()
+            + custom.map_or(0, |value| value.len() + 31),
+    );
+    rendered.push_str(base);
+    if !base.is_empty() && !base.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered.push_str(TEAMMATE_SYSTEM_PROMPT_ADDENDUM);
+    if let Some(custom) = custom {
+        rendered.push_str("\n\n# Custom Agent Instructions\n");
+        rendered.push_str(custom);
+    }
+    Arc::from(rendered)
 }
 
 /// Resolve the task-list id a teammate's auto-claim reads.
@@ -139,7 +273,7 @@ pub(crate) fn teammate_message_envelope(from: &str, text: &str) -> String {
 /// SAME first two levels as the Task tools' `resolve_task_list_id`, so the
 /// lead's TaskCreate and the teammate's auto-claim always see one list.
 ///
-/// // ORACLE QUIRK (2.1.223 @251678388): the oracle passes
+/// // ORACLE QUIRK (2.1.241): the oracle passes
 /// `t.parentSessionId` here, but `initializeSessionTeam` has RENAMED the
 /// session task dir to the team-name dir by then, so the oracle's auto-claim
 /// reads a stale (usually empty) directory whenever teamName ≠ sessionId.
@@ -161,8 +295,15 @@ pub(crate) fn resolve_teammate_list_id(team_name: &str) -> Option<String> {
     Some(team_name.to_string())
 }
 
+/// One successful claim plus the exact prompt that should wake the teammate.
+#[derive(Debug, Clone)]
+pub(crate) struct ClaimedTask {
+    task_id: String,
+    prompt: String,
+}
+
 /// Check the shared task list and atomically claim the next available task.
-/// 1:1 port of oracle `rIp` (2.1.223 @251672343): list → [`pick_next_task`]
+/// 1:1 port of oracle `rIp` (2.1.241): list → [`pick_next_task`]
 /// → [`task_store::TodoStore::claim_task`] → mark `in_progress` → return the
 /// [`claimed_task_prompt`] text. `None` when there is nothing claimable, the
 /// claim loses a race, or any store error occurs (all logged with the
@@ -171,7 +312,7 @@ pub(crate) async fn check_and_claim_next_task(
     config_home: Option<&std::path::Path>,
     list_id: &str,
     agent_name: &str,
-) -> Option<String> {
+) -> Option<ClaimedTask> {
     let store = config_home.map_or_else(
         || task_store::TodoStore::for_list(list_id),
         |home| task_store::TodoStore::for_list_at(home, list_id),
@@ -197,7 +338,35 @@ pub(crate) async fn check_and_claim_next_task(
         target: "lingxi_tasks::in_process_teammate",
         "[inProcessRunner] Claimed task #{}: {}", next.id, next.subject
     );
-    Some(claimed_task_prompt(&next))
+    Some(ClaimedTask {
+        task_id: next.id.clone(),
+        prompt: claimed_task_prompt(&next),
+    })
+}
+
+/// Undo a claim only while it is still the exact untouched claim this runner
+/// made. The owner/status guards prevent a late failure from overwriting work
+/// that was reassigned or completed concurrently.
+async fn rollback_claimed_task(
+    config_home: Option<&std::path::Path>,
+    list_id: &str,
+    agent_name: &str,
+    task_id: &str,
+) {
+    let store = config_home.map_or_else(
+        || task_store::TodoStore::for_list(list_id),
+        |home| task_store::TodoStore::for_list_at(home, list_id),
+    );
+    let _ = store
+        .update(task_id, |task| {
+            if task.owner.as_deref() == Some(agent_name)
+                && task.status == engine::TodoState::InProgress
+            {
+                task.owner = None;
+                task.status = engine::TodoState::Pending;
+            }
+        })
+        .await;
 }
 
 /// Resolves the static [`AgentDefinition`] for a teammate spawn.
@@ -208,18 +377,20 @@ pub(crate) async fn check_and_claim_next_task(
 /// over the host's loaded agent registry; [`DefaultTeammateDefinition`] makes
 /// the handler usable standalone (and in unit tests) by synthesizing a
 /// permissive built-in definition.
+#[async_trait]
 pub trait TeammateDefinitionResolver: Send + Sync {
     /// Resolve the definition for the teammate identified by `agent_id` /
     /// `name`. Returns `None` when no such definition exists.
-    fn resolve(&self, agent_id: &protocol::AgentId, name: &str) -> Option<AgentDefinition>;
+    async fn resolve(&self, agent_id: &protocol::AgentId, name: &str) -> Option<AgentDefinition>;
 }
 
 /// Default resolver that synthesizes a permissive built-in definition. Lets the
 /// handler run without a wired agent catalog (tests / standalone use).
 pub struct DefaultTeammateDefinition;
 
+#[async_trait]
 impl TeammateDefinitionResolver for DefaultTeammateDefinition {
-    fn resolve(&self, _agent_id: &protocol::AgentId, name: &str) -> Option<AgentDefinition> {
+    async fn resolve(&self, _agent_id: &protocol::AgentId, name: &str) -> Option<AgentDefinition> {
         Some(AgentDefinition {
             agent_type: name.to_string(),
             when_to_use: String::new(),
@@ -261,6 +432,10 @@ struct TeammateEntry {
     /// naturally when `out_rx` closes (the slot's runner future drops its
     /// sender on deallocate); the flag is the belt-and-braces fast path.
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Coordinator-mailbox messages wait here until the teammate is idle. Only
+    /// one drained mailbox batch may sit behind the outer 100-message inbox, so
+    /// the two buffering layers cannot multiply to 10,000 pending messages.
+    pending_messages: tokio::sync::mpsc::Sender<String>,
 }
 
 /// Handler for [`TaskType::InProcessTeammate`].
@@ -347,6 +522,9 @@ pub struct InProcessTeammateHandler {
     /// `TaskStatusSink` decoupling: the `tasks` leaf cannot reach a live hook
     /// executor, so it calls through this narrow trait instead.
     teammate_idle_firer: hooks::OptionalTeammateIdleFirer,
+    /// Host-owned renderer for the default main system prompt. The teammate
+    /// appends its canonical addendum and optional custom agent prompt.
+    system_prompt_renderer: Arc<OnceLock<Arc<dyn TeammateSystemPromptRenderer>>>,
     /// `task_id` → control block, so `send_message` / `kill` can find the slot.
     entries: Arc<Mutex<HashMap<String, TeammateEntry>>>,
 }
@@ -383,6 +561,7 @@ impl InProcessTeammateHandler {
             hook_cwd: std::path::PathBuf::new(),
             status_sink: Arc::new(NoopStatusSink),
             teammate_idle_firer: None,
+            system_prompt_renderer: Arc::new(OnceLock::new()),
             entries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -541,6 +720,27 @@ impl InProcessTeammateHandler {
         self
     }
 
+    /// Attach the host's live default-system-prompt renderer. Production uses a
+    /// weak orchestrator adapter to avoid a registry/orchestrator reference
+    /// cycle; tests can inject a static renderer.
+    #[must_use]
+    pub fn with_system_prompt_renderer(
+        self,
+        renderer: Arc<dyn TeammateSystemPromptRenderer>,
+    ) -> Self {
+        let _ = self.system_prompt_renderer.set(renderer);
+        self
+    }
+
+    /// Return the set-once renderer cell for composition roots whose
+    /// orchestrator is constructed after the task registry.
+    #[must_use]
+    pub fn system_prompt_renderer_handle(
+        &self,
+    ) -> Arc<OnceLock<Arc<dyn TeammateSystemPromptRenderer>>> {
+        self.system_prompt_renderer.clone()
+    }
+
     /// Build the persistent [`SubagentContext`] for a spawn.
     ///
     /// `name` is the teammate's DISPLAY name and `team_name` the coordinator
@@ -578,6 +778,8 @@ impl InProcessTeammateHandler {
         // `tool_use`; the dispatch allow-list guards what the inherited invoker runs.
         let (tool_schemas, allowed_tools) = match self.tool_registry.get() {
             Some(registry) => {
+                let _has_task_list_tools =
+                    agent::augment_teammate_tool_policy(registry, &mut definition);
                 let empty: Vec<String> = Vec::new();
                 let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
                 agent::resolve_subagent_tools(
@@ -592,18 +794,28 @@ impl InProcessTeammateHandler {
             }
             None => (Vec::new(), Vec::new()),
         };
-        // The TeamCreate description IS the teammate's initial task (claude-code
-        // the team lead's purpose): seed it as the first user message so the
-        // teammate has work to do, not just chat. Empty ⇒ no seed message (parks
-        // awaiting the first injected message — prior behavior).
+        // The TeamCreate description is the lead's initial assignment. Claude
+        // Code runs it through the same teammate-message renderer as mailbox
+        // input, with `from:"team-lead"`; a raw user message changes both the
+        // prompt bytes and the trust boundary.
         let prompt_messages = if description.is_empty() {
             vec![]
         } else {
             vec![protocol::ConversationMessage::user(
                 protocol::MessageId::new(),
-                description.to_string(),
+                teammate_message_envelope(TEAM_LEAD_NAME, description),
             )]
         };
+        // Oracle order: freshly assembled default prompt, exact teammate
+        // addendum, then an optional `# Custom Agent Instructions` section.
+        // A standalone/test handler without a renderer still receives the
+        // teammate addendum; production always wires the live renderer.
+        let base_system_prompt = match self.system_prompt_renderer.get() {
+            Some(renderer) => renderer.render_default_system_prompt().await,
+            None => String::new(),
+        };
+        let rendered_system_prompt =
+            render_teammate_system_prompt(&base_system_prompt, definition.system_prompt.as_deref());
         let icon = definition.icon.clone();
         Ok(SubagentContext {
             agent_id,
@@ -636,7 +848,7 @@ impl InProcessTeammateHandler {
             transcript_subdir: "/tmp".into(),
             transcript_fs: None,
             resumed_history: None,
-            rendered_system_prompt: None,
+            rendered_system_prompt: Some(rendered_system_prompt),
             mobile_runtime_environment_reminder: None,
             mobile_runtime_workspace_reminder: None,
             content_replacement_state: None,
@@ -726,6 +938,20 @@ fn is_idle_event(ev: &SubagentEvent) -> bool {
     matches!(ev, SubagentEvent::Completed { .. })
 }
 
+/// Render the model-visible continuation content from one `TeammateIdle` hook
+/// result. Blocking feedback is already the oracle's exact bare meta-message
+/// text; `additionalContext` uses the generic hook `<system-reminder>` form.
+fn teammate_idle_follow_up(outcome: &hooks::TeammateIdleOutcome) -> Option<String> {
+    let mut messages = outcome.blocking_feedback.clone();
+    if !outcome.additional_contexts.is_empty() {
+        messages.push(format!(
+            "<system-reminder>\nTeammateIdle hook additional context: {}\n</system-reminder>",
+            outcome.additional_contexts.join("\n")
+        ));
+    }
+    (!messages.is_empty()).then(|| messages.join("\n\n"))
+}
+
 #[async_trait]
 impl Task for InProcessTeammateHandler {
     fn name(&self) -> &str {
@@ -767,34 +993,37 @@ impl Task for InProcessTeammateHandler {
             .to_string();
 
         // 3. Resolve the definition and build a persistent SubagentContext.
-        let definition = self.definitions.resolve(&agent_id, &name).ok_or_else(|| {
-            TaskError::Internal(format!("no agent definition for teammate {name}"))
-        })?;
+        let definition = self
+            .definitions
+            .resolve(&agent_id, &name)
+            .await
+            .ok_or_else(|| {
+                TaskError::Internal(format!("no agent definition for teammate {name}"))
+            })?;
         let subagent_ctx = self
             .build_context(agent_id, &name, &team_name, &description, definition)
             .await?;
+        // `hasTaskListTools` gates both auto-claim call sites upstream. An
+        // unwired standalone/test handler keeps the legacy assumption that the
+        // suite exists; production always has the registry and checks the
+        // actual resolved allow-list.
+        const TASK_LIST_TOOLS: [&str; 4] = ["TaskCreate", "TaskGet", "TaskUpdate", "TaskList"];
+        let has_task_list_tools = self.tool_registry.get().is_none()
+            || TASK_LIST_TOOLS
+                .iter()
+                .all(|name| subagent_ctx.allowed_tools.iter().any(|tool| tool == name));
 
-        // 4. Allocate the slot — the pool spawns the persistent runner and
-        //    hands back the outbound SubagentEvent stream.
-        let (aid, mut out_rx) = self
-            .pool
-            .allocate(subagent_ctx)
-            .await
-            .map_err(|e| TaskError::Internal(e.to_string()))?;
-
-        // 4b. Startup auto-claim (oracle `if(!standalone) await rIp(...)`
-        //     before the runner loop, 2.1.223 @251678388): claim the next
-        //     available task as a SIDE EFFECT ONLY — the oracle discards the
-        //     returned prompt here because the TeamCreate description already
-        //     seeded the first message. A teamless spawn (`None` list id) is
-        //     the standalone analogue and skips.
-        let claim_list_id = resolve_teammate_list_id(&team_name);
+        // 4. Resolve startup auto-claim configuration. The actual claim and
+        //    pool allocation happen inside the activation-gated worker below:
+        //    no task is claimed and no provider request starts before the
+        //    registry publishes its row/route/cleanup transaction.
+        let claim_list_id = has_task_list_tools
+            .then(|| resolve_teammate_list_id(&team_name))
+            .flatten();
         let claim_config_home = self.config_home.clone();
-        if let Some(list_id) = &claim_list_id {
-            let _ = check_and_claim_next_task(self.config_home.as_deref(), list_id, &name).await;
-        }
 
-        // 5. Spawn the streaming worker through the runtime (never tokio::spawn
+        // 5. Spawn the activation-gated streaming worker through the runtime
+        //    (never tokio::spawn
         //    — D17). It pumps out_rx -> spool, one line per event, and reports
         //    terminal status. It stops on Failed / Killed or when out_rx closes
         //    (the slot's runner dropped its sender on deallocate); it does NOT
@@ -818,9 +1047,88 @@ impl Task for InProcessTeammateHandler {
         // slot id let the worker self-inject a claimed task's prompt as the
         // next user message, exactly like the mailbox path.
         let claim_pool = self.pool.clone();
-        let claim_agent_id = aid;
+        let claim_agent_id = agent_id;
         let claim_name = name.clone();
+        let (pending_messages, mut pending_message_rx) =
+            tokio::sync::mpsc::channel(PENDING_MESSAGE_CAPACITY);
+        let worker_entries = self.entries.clone();
+        let (activation_tx, activation_rx) = if status_sink.requires_explicit_activation() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let worker = Box::pin(async move {
+            if let Some(activation_rx) = activation_rx {
+                if activation_rx.await.is_err() {
+                    stop_loop.store(true, std::sync::atomic::Ordering::Release);
+                    worker_entries.lock().await.remove(&worker_task_id);
+                    return;
+                }
+            }
+            if stop_loop.load(std::sync::atomic::Ordering::Acquire) {
+                worker_entries.lock().await.remove(&worker_task_id);
+                return;
+            }
+
+            // Oracle startup order: claim before the first provider request,
+            // but only after the registry commit point. Keep the claim token so
+            // a subsequent pool-allocation failure can conditionally undo it.
+            let startup_claim = match &claim_list_id {
+                Some(list_id) => {
+                    check_and_claim_next_task(claim_config_home.as_deref(), list_id, &claim_name)
+                        .await
+                }
+                None => None,
+            };
+            if stop_loop.load(std::sync::atomic::Ordering::Acquire) {
+                if let (Some(list_id), Some(claimed)) = (&claim_list_id, &startup_claim) {
+                    rollback_claimed_task(
+                        claim_config_home.as_deref(),
+                        list_id,
+                        &claim_name,
+                        &claimed.task_id,
+                    )
+                    .await;
+                }
+                worker_entries.lock().await.remove(&worker_task_id);
+                return;
+            }
+
+            let (_aid, mut out_rx) = match claim_pool.allocate(subagent_ctx).await {
+                Ok(slot) => slot,
+                Err(error) => {
+                    if let (Some(list_id), Some(claimed)) = (&claim_list_id, &startup_claim) {
+                        rollback_claimed_task(
+                            claim_config_home.as_deref(),
+                            list_id,
+                            &claim_name,
+                            &claimed.task_id,
+                        )
+                        .await;
+                    }
+                    status_sink
+                        .set_failed(&worker_task_id, &error.to_string())
+                        .await;
+                    stop_loop.store(true, std::sync::atomic::Ordering::Release);
+                    worker_entries.lock().await.remove(&worker_task_id);
+                    return;
+                }
+            };
+            if stop_loop.load(std::sync::atomic::Ordering::Acquire) {
+                if let (Some(list_id), Some(claimed)) = (&claim_list_id, &startup_claim) {
+                    rollback_claimed_task(
+                        claim_config_home.as_deref(),
+                        list_id,
+                        &claim_name,
+                        &claimed.task_id,
+                    )
+                    .await;
+                }
+                let _ = claim_pool.deallocate(&claim_agent_id).await;
+                worker_entries.lock().await.remove(&worker_task_id);
+                return;
+            }
             status_sink
                 .set_status(&worker_task_id, TaskStatus::Running)
                 .await;
@@ -833,48 +1141,106 @@ impl Task for InProcessTeammateHandler {
                 let ev = tokio::select! {
                     ev = out_rx.recv() => match ev {
                         Some(ev) => ev,
-                        None => break, // slot dropped its sender (deallocate)
+                        None => {
+                            if !stop_loop.load(std::sync::atomic::Ordering::Acquire) {
+                                status_sink
+                                    .set_failed(&worker_task_id, "teammate runner closed unexpectedly")
+                                    .await;
+                            }
+                            break;
+                        }
                     },
                     _ = tick.tick(), if idle => {
-                        // Idle auto-claim (oracle poll loop @251675509: after
-                        // the mailbox check, `let g=await rIp(i, agentName);
-                        // if(g)return{type:"new_message", message:g,
-                        // from:"task-list"}`). The claimed prompt is injected
-                        // as the next user message wearing the task-list
-                        // teammate envelope; the mailbox pump injects its own
-                        // messages independently (the port's bounded ordering
-                        // divergence — documented in the module header).
+                        // One oracle-aligned idle poll: pending user messages
+                        // STRICTLY before task-list auto-claim. `send_message`
+                        // only fills this bounded queue, so a message received
+                        // while the model is busy cannot cancel the request.
                         if stop_loop.load(std::sync::atomic::Ordering::SeqCst) {
                             break;
                         }
-                        if let Some(list_id) = &claim_list_id {
-                            if let Some(prompt) =
-                                check_and_claim_next_task(
+                        let next_message = match pending_message_rx.try_recv() {
+                            Ok(message) => {
+                                let mut messages = vec![message];
+                                while let Ok(message) = pending_message_rx.try_recv() {
+                                    messages.push(message);
+                                }
+                                Some((messages.join("\n\n"), None))
+                            }
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                                match &claim_list_id {
+                                    Some(list_id) => check_and_claim_next_task(
+                                        claim_config_home.as_deref(),
+                                        list_id,
+                                        &claim_name,
+                                    )
+                                    .await
+                                    .map(|claimed| {
+                                        let content = teammate_message_envelope(
+                                            "task-list",
+                                            &claimed.prompt,
+                                        );
+                                        (content, Some(claimed.task_id))
+                                    }),
+                                    None => None,
+                                }
+                            }
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                        };
+                        // Claiming and mailbox dequeueing both cross await/
+                        // scheduling boundaries. A concurrent explicit kill
+                        // owns termination; release any just-won claim and do
+                        // not reinterpret the missing pool slot as a failure.
+                        if stop_loop.load(std::sync::atomic::Ordering::Acquire) {
+                            if let (Some(list_id), Some((_, Some(task_id)))) =
+                                (&claim_list_id, next_message.as_ref())
+                            {
+                                rollback_claimed_task(
                                     claim_config_home.as_deref(),
                                     list_id,
                                     &claim_name,
+                                    task_id,
+                                )
+                                .await;
+                            }
+                            break;
+                        }
+                        if let Some((content, claimed_task_id)) = next_message {
+                            match claim_pool
+                                .send_event(
+                                    &claim_agent_id,
+                                    engine::Event::UserMessage {
+                                        message_id: protocol::MessageId::new(),
+                                        request_id: protocol::RequestId::new(),
+                                        content,
+                                    },
                                 )
                                 .await
                             {
-                                let content =
-                                    teammate_message_envelope("task-list", &prompt);
-                                let sent = claim_pool
-                                    .send_event(
-                                        &claim_agent_id,
-                                        engine::Event::UserMessage {
-                                            message_id: protocol::MessageId::new(),
-                                            request_id: protocol::RequestId::new(),
-                                            content,
-                                        },
-                                    )
-                                    .await;
-                                match sent {
-                                    Ok(()) => idle = false,
-                                    Err(e) => tracing::warn!(
+                                Ok(()) => idle = false,
+                                Err(e) => {
+                                    if let (Some(list_id), Some(task_id)) =
+                                        (&claim_list_id, claimed_task_id.as_deref())
+                                    {
+                                        rollback_claimed_task(
+                                            claim_config_home.as_deref(),
+                                            list_id,
+                                            &claim_name,
+                                            task_id,
+                                        )
+                                        .await;
+                                    }
+                                    if stop_loop.load(std::sync::atomic::Ordering::Acquire) {
+                                        break;
+                                    }
+                                    tracing::warn!(
                                         target: "lingxi_tasks::in_process_teammate",
                                         error = %e,
-                                        "task-list claim injection failed; slot gone?"
-                                    ),
+                                        "idle message injection failed; terminating teammate worker"
+                                    );
+                                    status_sink
+                                        .set_failed(&worker_task_id, &e.to_string())
+                                        .await;
+                                    break;
                                 }
                             }
                         }
@@ -900,23 +1266,72 @@ impl Task for InProcessTeammateHandler {
                         spool, error = %e, "spool append failed"
                     );
                 }
-                // A completed (but non-terminal) turn-set is the "about to go
-                // idle" moment: the runner is about to park awaiting the next
-                // message. Fire the `TeammateIdle` hook best-effort — claude-code
-                // `executeTeammateIdleHooks` (`stopHooks.ts:403`). No firer wired
-                // => no-op (byte-identical to the pre-firer build).
+                // A completed turn-set is the "about to go idle" moment. Hook
+                // blocking feedback/additional context re-wakes the teammate;
+                // `continue:false` ends it; only a no-op result opens the poll
+                // window.
                 if is_idle_event(&ev) {
-                    if let Some(firer) = &idle_firer {
-                        firer
-                            .fire(hooks::TeammateIdleFire {
-                                teammate_name: idle_name.clone(),
-                                team_name: idle_team_name.clone(),
-                            })
-                            .await;
+                    let outcome = match &idle_firer {
+                        Some(firer) => {
+                            firer
+                                .fire(hooks::TeammateIdleFire {
+                                    teammate_name: idle_name.clone(),
+                                    team_name: idle_team_name.clone(),
+                                })
+                                .await
+                        }
+                        None => hooks::TeammateIdleOutcome::default(),
+                    };
+                    // The hook can block while an explicit kill tears down the
+                    // runner. Once kill has set the stop flag, none of the hook
+                    // outcomes may publish a competing terminal status or try
+                    // to re-wake the removed slot.
+                    if stop_loop.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
                     }
-                    // Open the idle-poll window (oracle: the parked runner's
-                    // 500ms mailbox/task-list poll).
-                    idle = true;
+                    if outcome.prevent_continuation {
+                        status_sink
+                            .set_status(&worker_task_id, TaskStatus::Completed)
+                            .await;
+                        stop_loop.store(true, std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                    if outcome.should_continue_working() {
+                        let content = teammate_idle_follow_up(&outcome)
+                            .expect("continue-working outcome has model-visible content");
+                        match claim_pool
+                            .send_event(
+                                &claim_agent_id,
+                                engine::Event::UserMessage {
+                                    message_id: protocol::MessageId::new(),
+                                    request_id: protocol::RequestId::new(),
+                                    content,
+                                },
+                            )
+                            .await
+                        {
+                            Ok(()) => idle = false,
+                            Err(e) => {
+                                if stop_loop.load(std::sync::atomic::Ordering::Acquire) {
+                                    break;
+                                }
+                                tracing::warn!(
+                                    target: "lingxi_tasks::in_process_teammate",
+                                    error = %e,
+                                    "TeammateIdle feedback injection failed"
+                                );
+                                status_sink
+                                    .set_failed(&worker_task_id, &e.to_string())
+                                    .await;
+                                break;
+                            }
+                        }
+                    } else {
+                        // No hook intervention: open the oracle's 500ms
+                        // mailbox/task-list poll window.
+                        idle = true;
+                        tick.reset();
+                    }
                 }
                 if let Some(status) = terminal_status(&ev) {
                     // Failed / Killed end the teammate; a per-turn-set Completed
@@ -936,21 +1351,31 @@ impl Task for InProcessTeammateHandler {
                     break;
                 }
             }
+            stop_loop.store(true, std::sync::atomic::Ordering::Release);
+            let _ = claim_pool.deallocate(&claim_agent_id).await;
+            worker_entries.lock().await.remove(&worker_task_id);
         });
 
-        ctx.runtime
-            .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
-            .await
-            .map_err(|e| TaskError::Internal(e.to_string()))?;
-
-        // 6. Record the control block.
+        // Publish the control block before the runtime can execute the worker,
+        // so an immediate terminal result cannot race a stale entry back in.
         self.entries.lock().await.insert(
             task_id.clone(),
             TeammateEntry {
-                agent_id: aid,
+                agent_id,
                 stop: stop.clone(),
+                pending_messages,
             },
         );
+
+        if let Err(error) = ctx
+            .runtime
+            .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
+            .await
+        {
+            self.entries.lock().await.remove(&task_id);
+            let _ = self.pool.deallocate(&agent_id).await;
+            return Err(TaskError::Internal(error.to_string()));
+        }
 
         // 7. Cleanup seam: synchronous, so it cannot await, but it must still
         //    release the pool slot. Remove the live entry, stop the streaming
@@ -977,7 +1402,13 @@ impl Task for InProcessTeammateHandler {
             }
         });
 
-        Ok(TaskHandle::new(task_id, Some(cleanup)))
+        let handle = TaskHandle::new(task_id, Some(cleanup));
+        Ok(match activation_tx {
+            Some(activation_tx) => handle.with_activation(move || {
+                let _ = activation_tx.send(());
+            }),
+            None => handle,
+        })
     }
 
     fn supports_messages(&self) -> bool {
@@ -990,35 +1421,27 @@ impl Task for InProcessTeammateHandler {
         message: String,
         _ctx: TaskContext,
     ) -> Result<(), TaskError> {
-        // Look up the live slot. An unknown id means the teammate was never
-        // spawned (or was already killed and removed).
-        let agent_id = {
+        // Look up the live bounded pending-message queue. An unknown id means
+        // the teammate was never spawned or already terminated.
+        let (pending_messages, stop) = {
             let entries = self.entries.lock().await;
             entries
                 .get(task_id)
-                .map(|e| e.agent_id)
+                .map(|entry| (entry.pending_messages.clone(), entry.stop.clone()))
                 .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?
         };
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(TaskError::TerminatedTask);
+        }
 
-        // Route the typed text into the running agent. The runner's persist-mode
-        // recv() picks it up, appends it to history, and runs the next turn-set
-        // — the Rust analogue of injectUserMessageToTeammate.
-        self.pool
-            .send_event(
-                &agent_id,
-                engine::Event::UserMessage {
-                    message_id: protocol::MessageId::new(),
-                    request_id: protocol::RequestId::new(),
-                    content: message,
-                },
-            )
+        // Upstream only consumes pending user messages after the current query
+        // loop stops. Queue here; the handler's single 500ms idle poll drains
+        // this before considering task-list auto-claim. Awaiting a full channel
+        // backpressures the outer mailbox rather than dropping messages.
+        pending_messages
+            .send(message)
             .await
-            .map_err(|e| match e {
-                // The slot is gone (runner dropped its receiver) ⇒ the task is
-                // effectively terminated — mirror the TS drop-when-terminal guard.
-                PoolError::AgentGone | PoolError::NoSuchAgent => TaskError::TerminatedTask,
-                other => TaskError::Internal(other.to_string()),
-            })
+            .map_err(|_| TaskError::TerminatedTask)
     }
 
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
@@ -1028,11 +1451,18 @@ impl Task for InProcessTeammateHandler {
         let Some(entry) = entry else {
             return Ok(());
         };
-
         // Cooperative stop first: give the runner a chance to emit a clean
         // Killed (which the streaming worker spools) before the hard cancel.
         // A send failure (slot already gone) is non-fatal — proceed to
         // deallocate, which is itself idempotent.
+        //
+        // ⚠️ The stop flag MUST NOT be raised before this point. The worker's
+        // event loop tests `stop_loop` immediately after `out_rx.recv()` and
+        // BEFORE `output_manager.append(...)` / `terminal_status(&ev)`, so a
+        // flag raised first makes the worker drop the very `Killed` (or
+        // `Failed { error }`) event this cooperative stop exists to collect —
+        // the terminal line never reaches the spool and a real failure reason is
+        // replaced by a generic `Killed`.
         let _ = self
             .pool
             .send_event(&entry.agent_id, engine::Event::UserExit)
@@ -1041,7 +1471,10 @@ impl Task for InProcessTeammateHandler {
         // Stop the streaming worker, then hard-cancel the slot (deallocate
         // cancels the run_subagent task). out_rx closes when the slot drops, so
         // the worker would exit on its own too; the flag is the fast path.
-        entry.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Raised BEFORE `deallocate` so the worker reads the closed `out_rx` as
+        // an intentional teardown rather than reporting
+        // `set_failed("teammate runner closed unexpectedly")`.
+        entry.stop.store(true, std::sync::atomic::Ordering::Release);
         self.pool
             .deallocate(&entry.agent_id)
             .await

@@ -73,7 +73,9 @@ impl MailboxRouterHandle for MailboxRouter {
 
         let teammate_msg = TeammateMessage {
             from,
+            from_name: from_agent.to_string(),
             content: message.content,
+            summary: None,
             message_id: message.message_id,
             timestamp: message.timestamp,
             request_id: None,
@@ -113,7 +115,9 @@ impl MailboxRouterHandle for MailboxRouter {
             }
             let teammate_msg = TeammateMessage {
                 from: sender_id.map_or(MessageSender::Coordinator, MessageSender::Teammate),
+                from_name: from_agent.to_string(),
                 content: message.content.clone(),
+                summary: None,
                 message_id: message.message_id.clone(),
                 timestamp: message.timestamp,
                 request_id: None,

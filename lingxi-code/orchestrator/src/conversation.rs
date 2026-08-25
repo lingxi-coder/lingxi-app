@@ -12027,15 +12027,6 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .and_then(|message| Self::text_content(&message))
     }
 
-    /// Build the per-turn system prompt by gathering cwd / git / file
-    /// tree / memory / tool-name context and calling
-    /// [`crate::prompt::assemble_system_prompt`]. Bypassed when
-    /// `OrchestratorConfig::system_prompt_override` is `Some(_)`.
-    /// Build the per-turn [`crate::prompt::SystemPromptContext`] (cwd / env /
-    /// git / tools / memory / …). Shared by [`Self::build_system_prompt`] and
-    /// [`Self::additional_context_message`] — the latter re-emits the env block
-    /// in the first user message when `--exclude-dynamic-system-prompt-sections`
-    /// is set, so the construction (and its env-field probes) lives in ONE place.
     /// PathAtlas S3: map the model-visible session cwd to the directory the
     /// prompt-side filesystem probes must actually read.
     ///
@@ -12057,6 +12048,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
     }
 
+    /// Build the per-turn system prompt by gathering cwd / git / file
+    /// tree / memory / tool-name context and calling
+    /// [`crate::prompt::assemble_system_prompt`]. Bypassed when
+    /// `OrchestratorConfig::system_prompt_override` is `Some(_)`.
+    /// Build the per-turn [`crate::prompt::SystemPromptContext`] (cwd / env /
+    /// git / tools / memory / …). Shared by [`Self::build_system_prompt`] and
+    /// [`Self::additional_context_message`] — the latter re-emits the env block
+    /// in the first user message when `--exclude-dynamic-system-prompt-sections`
+    /// is set, so the construction (and its env-field probes) lives in ONE place.
     async fn build_prompt_context(&self) -> crate::prompt::SystemPromptContext {
         use crate::prompt::{file_tree, git_status, SystemPromptContext};
 

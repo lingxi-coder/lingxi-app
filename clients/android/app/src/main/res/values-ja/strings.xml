@@ -1708,4 +1708,8 @@
     <string name="local_apps_error_create_in_progress">別のローカルアプリを作成中です。しばらくお待ちください。</string>
     <string name="local_apps_error_workflow_model_unavailable">選択した Workflow モデルは利用できなくなりました。別のモデルを選択してください。</string>
     <string name="local_apps_widget_pin_unavailable">このランチャーは Widget の自動追加に対応していません。後で手動で追加してください。</string>
+    <string name="local_apps_draft_card_title">新しいアプリ</string>
+    <string name="local_apps_draft_card_subtitle">作成中</string>
+    <string name="local_apps_creation_result_unknown">作成結果が不明です。アプリライブラリで確認してください。</string>
+    <string name="local_apps_widget_add">ホーム画面に Widget を追加</string>
 </resources>

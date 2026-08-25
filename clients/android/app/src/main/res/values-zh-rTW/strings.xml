@@ -1708,4 +1708,8 @@
     <string name="local_apps_error_create_in_progress">已有一個本地應用正在建立中，請稍候。</string>
     <string name="local_apps_error_workflow_model_unavailable">所選 Workflow 模型已無法使用，請重新選擇。</string>
     <string name="local_apps_widget_pin_unavailable">目前的啟動器不支援自動新增 Widget，請稍後手動新增。</string>
+    <string name="local_apps_draft_card_title">新應用</string>
+    <string name="local_apps_draft_card_subtitle">建立中</string>
+    <string name="local_apps_creation_result_unknown">建立結果未知，請在應用庫確認。</string>
+    <string name="local_apps_widget_add">新增到主畫面 Widget</string>
 </resources>

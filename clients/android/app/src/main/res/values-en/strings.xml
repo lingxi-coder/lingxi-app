@@ -1714,4 +1714,8 @@
     <string name="local_apps_error_create_in_progress">Another local app is still being created. Please wait.</string>
     <string name="local_apps_error_workflow_model_unavailable">The selected workflow model is no longer available. Choose another model.</string>
     <string name="local_apps_widget_pin_unavailable">This launcher cannot add Widgets automatically. Add it manually later.</string>
+    <string name="local_apps_draft_card_title">New App</string>
+    <string name="local_apps_draft_card_subtitle">Creating…</string>
+    <string name="local_apps_creation_result_unknown">The creation result is unknown. Check your app library.</string>
+    <string name="local_apps_widget_add">Add Widget to Home Screen</string>
 </resources>

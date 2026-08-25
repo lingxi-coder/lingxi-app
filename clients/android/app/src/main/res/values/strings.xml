@@ -1714,6 +1714,10 @@
     <string name="local_apps_error_create_in_progress">已有一个本地应用正在创建中，请稍候。</string>
     <string name="local_apps_error_workflow_model_unavailable">所选 Workflow 模型已不可用，请重新选择。</string>
     <string name="local_apps_widget_pin_unavailable">当前启动器不支持自动添加 Widget，请稍后手动添加。</string>
+    <string name="local_apps_draft_card_title">新应用</string>
+    <string name="local_apps_draft_card_subtitle">创建中</string>
+    <string name="local_apps_creation_result_unknown">创建结果未知，请在应用库确认。</string>
+    <string name="local_apps_widget_add">添加到主屏幕 Widget</string>
     <string name="settings_cancel">取消</string>
     <string name="settings_permission_mode_accept_edits">自动接受编辑</string>
     <string name="settings_permission_mode_accept_edits_detail">自动允许安全的文件编辑，其他操作仍会询问。</string>

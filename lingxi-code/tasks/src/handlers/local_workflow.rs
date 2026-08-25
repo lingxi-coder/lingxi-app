@@ -106,6 +106,16 @@ fn local_app_workspace_root(data_root: &std::path::Path, app_id: &str) -> std::p
     data_root.join("apps").join(app_id).join("workspace")
 }
 
+/// Whether this workflow builds a local app and therefore must hold that app's
+/// workspace lease for its whole run.
+///
+/// Named rather than inlined so the branch is reachable from a test: the only
+/// other way in is `spawn`, which needs a lease registry, a data root and a
+/// live runtime, so the predicate would otherwise be covered only indirectly.
+fn requires_workspace_lease(workflow_id: &str) -> bool {
+    crate::LOCAL_APP_BUILD_WORKFLOWS.contains(&workflow_id)
+}
+
 /// claude-code `k6a` — the per-run lifetime cap on real `agent()` spawns. The
 /// 1001st spawn is refused via the throw channel so the prelude rejects the
 /// `agent()` promise with `WorkflowAgentCapError` (a runaway-loop backstop).
@@ -1984,7 +1994,7 @@ impl Task for LocalWorkflowHandler {
         // workspace. Do this validation before allocating task/spool state so
         // a malformed scope cannot start a prompt-heavy workflow with a
         // generic cwd or leave an orphaned spool file behind.
-        let workspace_lease = if workflow_id == "local-app-build" {
+        let workspace_lease = if requires_workspace_lease(workflow_id.as_str()) {
             let app_id = workflow_args
                 .as_deref()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
@@ -1997,16 +2007,16 @@ impl Task for LocalWorkflowHandler {
                 .filter(|app_id| !app_id.is_empty())
                 .ok_or_else(|| {
                     TaskError::Internal(
-                        "local-app-build requires a non-empty workflow args.app_id".into(),
+                        format!("{workflow_id} requires a non-empty workflow args.app_id"),
                     )
                 })?;
             let registry = self.workspace_leases.clone().ok_or_else(|| {
                 TaskError::Internal(
-                    "local-app-build requires a workspace permission lease registry".into(),
+                    format!("{workflow_id} requires a workspace permission lease registry"),
                 )
             })?;
             let data_root = self.workspace_root.clone().ok_or_else(|| {
-                TaskError::Internal("local-app-build requires an app data root".into())
+                TaskError::Internal(format!("{workflow_id} requires an app data root"))
             })?;
             // AppService's persisted invariant is exactly
             // `apps/<id>/workspace`. Keep this derivation here, at the point

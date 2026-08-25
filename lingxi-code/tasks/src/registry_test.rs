@@ -1908,6 +1908,69 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
     );
 }
 
+/// A canvas app's build runs under `local-canvas-build`, a sibling of the
+/// routed `local-app-build`. Keying the delete guard on the routed name alone
+/// meant a canvas app could be DELETED WHILE ITS BUILD WAS RUNNING -- and
+/// nothing failed, because a guard that does not recognise the workflow simply
+/// finds no reason to object.
+#[tokio::test]
+async fn find_nonterminal_local_app_workflows_covers_the_canvas_build_too() {
+    use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
+
+    let (_d, registry) = make_registry();
+    let mk = |id: &str, workflow_id: &str| {
+        TaskState::LocalWorkflow(LocalWorkflowTaskState {
+            base: TaskStateBase {
+                id: id.into(),
+                task_type: TaskType::LocalWorkflow,
+                status: TaskStatus::Running,
+                description: "local app build".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+            },
+            session_uuid: None,
+            workflow_id: workflow_id.into(),
+            script: String::new(),
+            resume_from_run_id: None,
+            args: Some(serde_json::json!({"app_id": "canvas-app"}).to_string()),
+            run_id: Some(format!("wf_{id}")),
+            script_path: None,
+            transcript_dir: None,
+            current_step: 0,
+        })
+    };
+
+    registry
+        .insert_state_for_test(mk("w-canvas", "local-canvas-build"))
+        .await;
+    assert_eq!(
+        registry
+            .find_nonterminal_local_app_workflows("canvas-app")
+            .await,
+        vec!["w-canvas"],
+        "a running local-canvas-build must block deleting its app"
+    );
+
+    // An unrelated workflow against the same app must still not count, so the
+    // guard widened to the sibling build rather than to everything.
+    let (_d2, other) = make_registry();
+    other.insert_state_for_test(mk("w-other", "some-other-workflow")).await;
+    assert!(
+        other
+            .find_nonterminal_local_app_workflows("canvas-app")
+            .await
+            .is_empty(),
+        "only local-app BUILD workflows may hold an app open"
+    );
+}
+
 #[tokio::test]
 async fn adopted_workflow_is_registered_as_paused_and_keeps_resume_metadata() {
     let (_d, registry) = make_registry();

@@ -793,7 +793,8 @@ impl TaskRegistry {
             .filter_map(|(task_id, state)| match state {
                 TaskState::LocalWorkflow(workflow)
                     if !workflow.base.status.is_terminal()
-                        && workflow.workflow_id == "local-app-build"
+                        && crate::LOCAL_APP_BUILD_WORKFLOWS
+                            .contains(&workflow.workflow_id.as_str())
                         && workflow
                             .args
                             .as_deref()

@@ -236,7 +236,10 @@ where
 /// routed one, and keying this on `"local-app-build"` alone would have made a
 /// canvas app silently ignore the model the user picked for it — with nothing
 /// failing, because the default is simply not applied.
-const LOCAL_APP_BUILD_WORKFLOWS: &[&str] = &["local-app-build", "local-canvas-build"];
+/// ⚠️ `tasks::LOCAL_APP_BUILD_WORKFLOWS` is the twin of this list, for the
+/// lease and delete guards. `engine-mobile`'s
+/// `local_app_build_workflow_sets_agree` pins the two equal.
+pub const LOCAL_APP_BUILD_WORKFLOWS: &[&str] = &["local-app-build", "local-canvas-build"];
 
 /// Apply the configured local-app workflow model as a DEFAULT for the local-app
 /// build workflows. An explicit `args.model` wins and is never overwritten.

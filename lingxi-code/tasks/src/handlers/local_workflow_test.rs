@@ -33,6 +33,21 @@ fn local_app_workflow_lease_root_is_derived_from_the_requested_app() {
     );
 }
 
+/// The lease is what stops a build from borrowing the session cwd or another
+/// app's workspace. A canvas build needs it for the same reason a routed build
+/// does, and keying the branch on `"local-app-build"` alone left canvas builds
+/// running with NO lease at all.
+#[test]
+fn both_local_app_build_workflows_require_a_workspace_lease() {
+    assert!(requires_workspace_lease("local-app-build"));
+    assert!(
+        requires_workspace_lease("local-canvas-build"),
+        "the drawn-surface build writes the same workspace and needs the same lease"
+    );
+    assert!(!requires_workspace_lease("some-other-workflow"));
+    assert!(!requires_workspace_lease(""));
+}
+
 // ---- Echo SubagentSpawner: `agent(p)` → "echo:p" (records prompts) ------
 
 #[derive(Default)]

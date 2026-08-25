@@ -763,9 +763,20 @@ fn collect_workspace_inputs(
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        // `.lingxi` holds the service's OWN documents (`app.json`,
+        // `design-spec.json`, `app.manifest.json`) -- application STATE, not
+        // generated source. `local-apps/src/checkpoints.rs` already keeps them
+        // out of source snapshots with three cooperating rules for exactly that
+        // reason; the build key is the fourth place that must agree.
+        //
+        // It is load-bearing, not tidiness: `MetadataMirror` rewrites
+        // `app.json` on every persist and each build mints a fresh
+        // `last_build_id`, so leaving `.lingxi` in the key means every build
+        // churns one of its own inputs -- `build_cache_hit` can then never hit
+        // and every device build is a full Vite rebuild.
         if matches!(
             name.as_ref(),
-            ".git" | ".lingxi-build-state" | "node_modules" | "dist"
+            ".git" | ".lingxi" | ".lingxi-build-state" | "node_modules" | "dist"
         ) {
             continue;
         }
@@ -2661,5 +2672,89 @@ mod tests {
         assert!(foundation.contains("--ion-safe-area-top: var(--safe-area-top)"));
         assert!(foundation.contains("--safe-area-top: env(safe-area-inset-top"));
         assert!(foundation.contains("prefers-reduced-motion"));
+    }
+
+    /// `.lingxi` holds the service's own state, and `MetadataMirror` rewrites
+    /// `app.json` on EVERY persist -- each build minting a fresh
+    /// `last_build_id`. Left in the key, a build therefore churns one of its
+    /// own inputs and `build_cache_hit` can never hit again.
+    ///
+    /// The failure is silent: builds stay correct, they are just never cached,
+    /// so nothing goes red on device -- it only gets slow. Phase 3's own
+    /// acceptance test (two no-op builds => `last_build_id` changes,
+    /// `last_output_change_id` does not) passes in this broken state too, which
+    /// is why this regression has to gate both phases.
+    #[test]
+    fn build_key_ignores_service_state_written_under_dot_lingxi() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(workspace.join("app")).expect("workspace");
+        fs::create_dir_all(workspace.join(".lingxi")).expect("state dir");
+        fs::write(workspace.join("app/main.jsx"), "export default 'one';").expect("source");
+        fs::write(
+            workspace.join(".lingxi/app.json"),
+            r#"{"last_build_id":"build-1"}"#,
+        )
+        .expect("record");
+        let dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
+
+        let first = workspace_build_key(
+            &workspace,
+            &dependency,
+            LocalAppBuildTarget::ViteReactStaticV1,
+        )
+        .expect("first key");
+
+        // Exactly what a build does to its own record on the way out.
+        fs::write(
+            workspace.join(".lingxi/app.json"),
+            r#"{"last_build_id":"build-2"}"#,
+        )
+        .expect("rewritten record");
+        let second = workspace_build_key(
+            &workspace,
+            &dependency,
+            LocalAppBuildTarget::ViteReactStaticV1,
+        )
+        .expect("second key");
+        assert_eq!(
+            first, second,
+            "a rewritten .lingxi/app.json must not invalidate the build key -- \
+             if it does, build_cache_hit never hits and every build is a full rebuild"
+        );
+
+        // The skip must be scoped to service state, not a blanket dotfile
+        // amnesty: real source still has to invalidate.
+        fs::write(workspace.join("app/main.jsx"), "export default 'two';").expect("changed");
+        let third = workspace_build_key(
+            &workspace,
+            &dependency,
+            LocalAppBuildTarget::ViteReactStaticV1,
+        )
+        .expect("third key");
+        assert_ne!(first, third, "changed source must still invalidate the key");
+    }
+
+    /// The lease/delete guards (`tasks`) and the `workflowModel` default
+    /// (`tool-workflow`) each keep their own list of the local-app build
+    /// workflows, because the two crates share no natural home -- their only
+    /// common dependencies are the QuickJS runtime and `traits`.
+    ///
+    /// This crate depends on BOTH, so it is the only place the two can be
+    /// compared. Add a third build workflow to one list and this fails until
+    /// the other knows about it.
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn local_app_build_workflow_sets_agree() {
+        assert_eq!(
+            tasks::LOCAL_APP_BUILD_WORKFLOWS,
+            tool_workflow::LOCAL_APP_BUILD_WORKFLOWS,
+            "the lease/delete guard list and the workflowModel list must name \
+             the same build workflows"
+        );
+        assert!(
+            tasks::LOCAL_APP_BUILD_WORKFLOWS.contains(&"local-canvas-build"),
+            "the drawn-surface build is a local-app build"
+        );
     }
 }

@@ -189,6 +189,40 @@ pub struct TaskHandle {
     pub task_id: String,
     /// Optional cleanup hook to run on task termination.
     pub cleanup: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// One-shot worker activation owned by the registry handoff. Dropping an
+    /// unactivated handle cancels handlers whose callback owns a readiness
+    /// sender, so a cancelled registry spawn cannot launch partial work.
+    activation: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl TaskHandle {
+    /// Construct an immediately-runnable handle with no activation barrier.
+    pub fn new(task_id: impl Into<String>, cleanup: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
+        Self {
+            task_id: task_id.into(),
+            cleanup,
+            activation: None,
+        }
+    }
+
+    /// Attach a one-shot activation invoked only after the registry has fully
+    /// installed state, routing, cleanup, aliases, and creation hooks.
+    #[must_use]
+    pub fn with_activation<F>(mut self, activation: F) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.activation = Some(Box::new(activation));
+        self
+    }
+
+    /// Release the prepared worker exactly once. Handles without a barrier are
+    /// already runnable, so this is a no-op for legacy handlers.
+    pub fn activate(&mut self) {
+        if let Some(activation) = self.activation.take() {
+            activation();
+        }
+    }
 }
 
 /// Errors produced by [`Task`] operations.

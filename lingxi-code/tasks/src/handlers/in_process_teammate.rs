@@ -977,10 +977,7 @@ impl Task for InProcessTeammateHandler {
             }
         });
 
-        Ok(TaskHandle {
-            task_id,
-            cleanup: Some(cleanup),
-        })
+        Ok(TaskHandle::new(task_id, Some(cleanup)))
     }
 
     fn supports_messages(&self) -> bool {

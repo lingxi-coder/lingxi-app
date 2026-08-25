@@ -7800,11 +7800,13 @@ pub async fn build(
     //        needs `tools` (built after this point), so a `DeferredToolInvoker` is
     //        injected now and bound to the real invoker at (5.5a) below.
     let dream_invoker = Arc::new(DeferredToolInvoker::new());
+    let dream_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
     tasks::registry::register_dream_handler(
         &mut task_registry_inner,
         subagent_spawner.clone(),
         dream_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
+        dream_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
     );
 
     // (5.46d) T15: register the `LocalAgent` handler so `TaskType::LocalAgent`
@@ -7954,6 +7956,8 @@ pub async fn build(
     //         now reach `task_registry`, so terminal + per-rest notifications
     //         surface through `take_pending_task_notifications`.
     local_agent_status_sink
+        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+    dream_status_sink
         .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
     // (M8 cc2.1.198) Bind the deferred LocalBash sink too: the bash worker's
     // terminal `set_status` / `set_exit_code` now reach `task_registry`, so a

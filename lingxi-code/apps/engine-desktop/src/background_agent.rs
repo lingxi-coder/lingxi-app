@@ -240,6 +240,10 @@ impl SubagentSpawner for BackgroundAgentSpawner {
     ) -> Result<AsyncLaunch, SubagentSpawnError> {
         self.spawn_async_with_id(agent_id, request, inherit).await
     }
+
+    async fn concurrent_subagent_count(&self) -> usize {
+        self.inner.concurrent_subagent_count().await
+    }
 }
 
 #[cfg(test)]
@@ -296,10 +300,7 @@ mod tests {
             {
                 *self.seen_backgrounded.lock().unwrap() = Some(is_backgrounded);
             }
-            Ok(TaskHandle {
-                task_id: "a-bg-test-1".to_string(),
-                cleanup: None,
-            })
+            Ok(TaskHandle::new("a-bg-test-1", None))
         }
         async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
             self.killed_ids.lock().unwrap().push(task_id.to_string());
@@ -383,6 +384,25 @@ mod tests {
             _inherit: SubagentInheritance,
         ) -> Result<SubagentResult, SubagentSpawnError> {
             Err(SubagentSpawnError::Internal("inert".into()))
+        }
+    }
+
+    struct CountingSpawner {
+        count: usize,
+    }
+
+    #[async_trait]
+    impl SubagentSpawner for CountingSpawner {
+        async fn spawn(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            Err(SubagentSpawnError::Internal("counting".into()))
+        }
+
+        async fn concurrent_subagent_count(&self) -> usize {
+            self.count
         }
     }
 
@@ -514,6 +534,27 @@ mod tests {
             "output_file is the spawned task's spool path: {}",
             launch.output_file
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_subagent_count_delegates_to_inner_spawner() {
+        let runtime: Arc<dyn RuntimeSpawner> = Arc::new(MockRuntimeSpawner::default());
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(PosixFileSystem::new(PathBuf::from(dir.path())));
+        let output_manager = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+
+        let deco = BackgroundAgentSpawner {
+            inner: Arc::new(CountingSpawner { count: 7 }),
+            registry: Arc::new(TaskRegistry::new(runtime.clone(), fs, output_manager)),
+            mailbox_router: Arc::new(MailboxRouter::new()),
+            runtime,
+            subagents_dir: None,
+        };
+
+        assert_eq!(deco.concurrent_subagent_count().await, 7);
     }
 
     /// A `context: fork` skill's permission scoping is persisted beside the new

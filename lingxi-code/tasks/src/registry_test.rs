@@ -158,10 +158,7 @@ impl Task for RecordingHandler {
                 count.fetch_add(1, Ordering::SeqCst);
             }) as Arc<dyn Fn() + Send + Sync>
         });
-        Ok(TaskHandle {
-            task_id: self.task_id.clone(),
-            cleanup,
-        })
+        Ok(TaskHandle::new(self.task_id.clone(), cleanup))
     }
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
         if self
@@ -628,10 +625,7 @@ impl Task for MsgRecordingHandler {
         _input: TaskSpawnInput,
         _ctx: TaskContext,
     ) -> Result<TaskHandle, TaskError> {
-        Ok(TaskHandle {
-            task_id: self.task_id.clone(),
-            cleanup: None,
-        })
+        Ok(TaskHandle::new(self.task_id.clone(), None))
     }
     async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
         Ok(())
@@ -997,6 +991,51 @@ impl hooks::TaskCreatedFirer for RecordingCreatedFirer {
     }
 }
 
+struct ActivationOrderingHandler {
+    task_id: String,
+    created_firer: Arc<RecordingCreatedFirer>,
+    activated: Arc<std::sync::atomic::AtomicBool>,
+    publication_check: Arc<dyn Fn() + Send + Sync>,
+}
+
+#[async_trait]
+impl Task for ActivationOrderingHandler {
+    fn name(&self) -> &str {
+        "activation-ordering"
+    }
+
+    fn task_type(&self) -> TaskType {
+        TaskType::LocalAgent
+    }
+
+    async fn spawn(
+        &self,
+        _input: TaskSpawnInput,
+        _ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
+        let task_id = self.task_id.clone();
+        let created_firer = self.created_firer.clone();
+        let activated = self.activated.clone();
+        let publication_check = self.publication_check.clone();
+        let cleanup = Arc::new(|| {}) as Arc<dyn Fn() + Send + Sync>;
+        Ok(
+            TaskHandle::new(task_id, Some(cleanup)).with_activation(move || {
+                assert_eq!(
+                    created_firer.recorded().len(),
+                    1,
+                    "worker activation must follow TaskCreated"
+                );
+                publication_check();
+                activated.store(true, Ordering::SeqCst);
+            }),
+        )
+    }
+
+    async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        Ok(())
+    }
+}
+
 fn registry_with_created_firer() -> (tempfile::TempDir, TaskRegistry, Arc<RecordingCreatedFirer>) {
     let dir = tempdir().unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
@@ -1058,6 +1097,65 @@ async fn spawn_also_fires_task_created() {
     assert_eq!(recorded[0].task_id, task_id);
     assert_eq!(recorded[0].task_subject, "InProcessTeammate");
     assert_eq!(recorded[0].task_description.as_deref(), Some("a teammate"));
+}
+
+#[tokio::test]
+async fn spawn_activates_worker_only_after_full_registration_and_task_created() {
+    let (_d, mut registry, firer) = registry_with_created_firer();
+    let activated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let input = local_agent_input_with_creator("researcher", "alpha");
+    let expected_alias = match &input {
+        TaskSpawnInput::LocalAgent { agent_id, .. } => agent_id.to_string(),
+        _ => unreachable!(),
+    };
+    let tasks = registry.tasks.clone();
+    let spawned = registry.spawned.clone();
+    let cleanups = registry.cleanups.clone();
+    let aliases = registry.aliases.clone();
+    let publication_check = Arc::new(move || {
+        assert!(tasks
+            .try_read()
+            .expect("task publication lock released before activation")
+            .contains_key("aactivate"));
+        assert_eq!(
+            spawned
+                .try_read()
+                .expect("spawn-route lock released before activation")
+                .get("aactivate"),
+            Some(&TaskType::LocalAgent)
+        );
+        assert!(cleanups
+            .try_lock()
+            .expect("cleanup lock released before activation")
+            .contains_key("aactivate"));
+        assert_eq!(
+            aliases
+                .try_read()
+                .expect("alias lock released before activation")
+                .get(&expected_alias)
+                .map(String::as_str),
+            Some("aactivate")
+        );
+    });
+    registry.register_handler(
+        TaskType::LocalAgent,
+        Arc::new(ActivationOrderingHandler {
+            task_id: "aactivate".into(),
+            created_firer: firer,
+            activated: activated.clone(),
+            publication_check,
+        }),
+    );
+
+    registry
+        .spawn(TaskType::LocalAgent, input, "activation ordering".into())
+        .await
+        .unwrap();
+
+    assert!(
+        activated.load(Ordering::SeqCst),
+        "registry activates the prepared worker before returning"
+    );
 }
 
 #[tokio::test]
@@ -1234,10 +1332,10 @@ impl crate::task_trait::Task for AllocatingHandler {
             .append_file_no_follow(path.to_str().unwrap(), "spawned worker output\n")
             .await
             .map_err(|e| TaskError::Io(e.to_string()))?;
-        Ok(crate::task_trait::TaskHandle {
-            task_id: self.task_id.clone(),
-            cleanup: None,
-        })
+        Ok(crate::task_trait::TaskHandle::new(
+            self.task_id.clone(),
+            None,
+        ))
     }
     async fn kill(
         &self,

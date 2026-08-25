@@ -89,6 +89,14 @@ const HANDLER_NAME: &str = "local_bash";
 /// the handler usable standalone (and in unit tests).
 #[async_trait]
 pub trait TaskStatusSink: Send + Sync {
+    /// Whether handler workers must remain prepared-but-paused until their
+    /// returned [`TaskHandle`](crate::task_trait::TaskHandle) is activated by
+    /// the owning registry. Registry-backed sinks opt in; standalone/test sinks
+    /// keep the historical immediate-start behavior by default.
+    fn requires_explicit_activation(&self) -> bool {
+        false
+    }
+
     /// Record the task's final status. Called exactly once per task on
     /// completion, failure, timeout, or kill.
     async fn set_status(&self, task_id: &str, status: TaskStatus);
@@ -463,10 +471,7 @@ impl Task for LocalBashHandler {
             }
         });
 
-        Ok(TaskHandle {
-            task_id,
-            cleanup: Some(cleanup),
-        })
+        Ok(TaskHandle::new(task_id, Some(cleanup)))
     }
 
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {

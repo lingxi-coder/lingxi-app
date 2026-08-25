@@ -10,7 +10,7 @@ use crate::handlers::{
 use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
 use crate::state::{TaskState, TaskStateBase, TaskStatus};
-use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
+use crate::task_trait::{Task, TaskContext, TaskError, TaskSpawnInput};
 use agent::{StateMachinePool, SubagentApiClient};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -304,12 +304,6 @@ impl TaskRegistry {
             .await
             .insert(alias, task_id.to_string());
         Ok(())
-    }
-
-    async fn register_spawn_aliases(&self, task_id: &str, input: &TaskSpawnInput) {
-        for alias in aliases_for_spawn(input) {
-            let _ = self.register_task_alias(task_id, alias).await;
-        }
     }
 
     /// Create a new task entry. Allocates the output file and returns the
@@ -609,16 +603,16 @@ impl TaskRegistry {
             .clone();
 
         // 2. Dispatch to the handler. The handler allocates its OWN spool +
-        //    `task_id` and starts the real worker; the returned id is the one
-        //    callers (and `kill`) key on.
+        //    `task_id` and prepares the real worker; the returned id is the one
+        //    callers (and `kill`) key on. Handlers with an activation barrier
+        //    do not start external work until the commit point below.
         let ctx = TaskContext {
             fs: self.fs.clone(),
             runtime: self.runtime.clone(),
         };
-        let TaskHandle {
-            task_id: id,
-            cleanup,
-        } = handler.spawn(input.clone(), ctx).await?;
+        let mut handle = handler.spawn(input.clone(), ctx).await?;
+        let id = handle.task_id.clone();
+        let cleanup = handle.cleanup.clone();
 
         // 3. Recover the spool path the handler ALREADY allocated (the path is a
         //    deterministic function of the id) and insert the typed state built
@@ -654,15 +648,29 @@ impl TaskRegistry {
             creator_team_name: None,
         };
         let state = state_for_spawn(base, &input);
-        self.tasks.write().await.insert(id.clone(), state);
-        self.register_spawn_aliases(&id, &input).await;
+        // 4. Publish every registry artifact as one transaction from the point
+        //    of view of task readers. Holding the task write lock while the
+        //    secondary guards are acquired prevents `list` / `get` / `kill`
+        //    from observing a row before its handler route and cleanup exist.
+        //    All guards are acquired before the first insert, so cancellation
+        //    while waiting for a guard leaves no partial registry artifacts.
+        let spawn_aliases = aliases_for_spawn(&input);
+        {
+            let mut tasks = self.tasks.write().await;
+            let mut spawned = self.spawned.write().await;
+            let mut cleanups = self.cleanups.lock().await;
+            let mut aliases = self.aliases.write().await;
 
-        // 4. Record the handler-spawned id so `kill` dispatches teardown back
-        //    to the owning handler (it manages its own runtime task; the
-        //    registry holds no `BackgroundTaskHandle` for it).
-        self.spawned.write().await.insert(id.clone(), task_type);
-        if let Some(cleanup) = cleanup {
-            self.cleanups.lock().await.insert(id.clone(), cleanup);
+            tasks.insert(id.clone(), state);
+            spawned.insert(id.clone(), task_type);
+            if let Some(cleanup) = cleanup {
+                cleanups.insert(id.clone(), cleanup);
+            }
+            for alias in spawn_aliases {
+                if !alias.is_empty() && alias != id {
+                    aliases.insert(alias, id.clone());
+                }
+            }
         }
 
         // Best-effort `TaskCreated` fire — the production task-creation path
@@ -671,6 +679,12 @@ impl TaskRegistry {
         // registered.
         self.fire_task_created(&id, task_type, &description_for_hook)
             .await;
+
+        // This is the commit point for handler-owned workers. Before this line,
+        // dropping the registry future drops the unconsumed activation and the
+        // prepared worker exits without starting. No await follows activation,
+        // so callers cannot observe a partially committed successful spawn.
+        handle.activate();
 
         Ok(id)
     }
@@ -1828,11 +1842,11 @@ pub fn register_self_contained_handlers(
 /// `tool_invoker` + `budget` are passed through *unchanged* (cloning the `Arc`
 /// preserves pointer identity, which the recursion-lock + budget-aggregation
 /// invariants rely on). The spool [`TaskOutputManager`] is shared with the
-/// registry's own (`reg.output_manager`). Both handlers default their narrow
-/// status-sink seam; callers needing the registry-status adapter can build the
-/// handlers directly and `register_handler` them instead. The subagent type
-/// arrives already resolved on the [`crate::task_trait::TaskSpawnInput::LocalAgent`]
-/// variant, so no resolver injection is needed here.
+/// registry's own (`reg.output_manager`). `status_sink` is the deferred
+/// registry adapter used both for lifecycle writeback and for the LocalAgent
+/// activation barrier. The subagent type arrives already resolved on the
+/// [`crate::task_trait::TaskSpawnInput::LocalAgent`] variant, so no resolver
+/// injection is needed here.
 ///
 /// Call this *before* the registry is wrapped in an [`Arc`] — registration
 /// takes `&mut self`.
@@ -1843,16 +1857,20 @@ pub fn register_agent_handlers(
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
     api_client: Arc<dyn SubagentApiClient>,
+    status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
 ) {
     let output_manager = reg.output_manager.clone();
     reg.register_handler(
         TaskType::LocalAgent,
-        Arc::new(LocalAgentHandler::new(
-            spawner,
-            tool_invoker.clone(),
-            budget,
-            output_manager.clone(),
-        )),
+        Arc::new(
+            LocalAgentHandler::new(
+                spawner,
+                tool_invoker.clone(),
+                budget,
+                output_manager.clone(),
+            )
+            .with_status_sink(status_sink),
+        ),
     );
     reg.register_handler(
         TaskType::InProcessTeammate,
@@ -1888,16 +1906,15 @@ pub fn register_dream_handler(
     spawner: Arc<dyn SubagentSpawner>,
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
+    status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
 ) {
     let output_manager = reg.output_manager.clone();
     reg.register_handler(
         TaskType::Dream,
-        Arc::new(DreamHandler::new(
-            spawner,
-            tool_invoker,
-            budget,
-            output_manager,
-        )),
+        Arc::new(
+            DreamHandler::new(spawner, tool_invoker, budget, output_manager)
+                .with_status_sink(status_sink),
+        ),
     );
 }
 

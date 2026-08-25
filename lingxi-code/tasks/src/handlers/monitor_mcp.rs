@@ -325,10 +325,7 @@ impl Task for MonitorMcpHandler {
             cleanup_stop.store(true, Ordering::SeqCst);
         });
 
-        Ok(TaskHandle {
-            task_id,
-            cleanup: Some(cleanup),
-        })
+        Ok(TaskHandle::new(task_id, Some(cleanup)))
     }
 
     async fn kill(&self, task_id: &str, ctx: TaskContext) -> Result<(), TaskError> {

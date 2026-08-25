@@ -396,6 +396,12 @@ impl Task for LocalAgentHandler {
         let agent_ids = self.agent_ids.clone();
         let fork_names = self.fork_names.clone();
         let parked_store = self.parked_store.clone();
+        let (activation_tx, activation_rx) = if status_sink.requires_explicit_activation() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let worker: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
             if is_backgrounded && streaming.is_some() {
                 // ── PERSISTENT / resumable path (local_agent "comes to rest"). ──
@@ -406,6 +412,18 @@ impl Task for LocalAgentHandler {
                 // evicted). Terminal only on Failed / Killed / channel-close.
                 let streaming = streaming.expect("is_some checked");
                 Box::pin(async move {
+                    if let Some(activation_rx) = activation_rx {
+                        if activation_rx.await.is_err() {
+                            if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
+                            {
+                                let _ =
+                                    traits::worktree::agent_worktree_result(mgr.as_ref(), handle)
+                                        .await;
+                            }
+                            workers.lock().await.remove(&worker_task_id);
+                            return;
+                        }
+                    }
                     status_sink
                         .set_status(&worker_task_id, TaskStatus::Running)
                         .await;
@@ -583,6 +601,18 @@ impl Task for LocalAgentHandler {
                 })
             } else {
                 Box::pin(async move {
+                    if let Some(activation_rx) = activation_rx {
+                        if activation_rx.await.is_err() {
+                            if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
+                            {
+                                let _ =
+                                    traits::worktree::agent_worktree_result(mgr.as_ref(), handle)
+                                        .await;
+                            }
+                            workers.lock().await.remove(&worker_task_id);
+                            return;
+                        }
+                    }
                     status_sink
                         .set_status(&worker_task_id, TaskStatus::Running)
                         .await;
@@ -742,9 +772,12 @@ impl Task for LocalAgentHandler {
             }
         });
 
-        Ok(TaskHandle {
-            task_id,
-            cleanup: Some(cleanup),
+        let handle = TaskHandle::new(task_id, Some(cleanup));
+        Ok(match activation_tx {
+            Some(activation_tx) => handle.with_activation(move || {
+                let _ = activation_tx.send(());
+            }),
+            None => handle,
         })
     }
 
@@ -1172,6 +1205,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         statuses: StdMutex<Vec<(String, TaskStatus)>>,
+        explicit_activation: bool,
         rest_count: StdMutex<usize>,
         last_rest: StdMutex<Option<(Option<String>, Option<traits::task_registry::AgentRunUsage>)>>,
         /// The terminal notification payload, and the call ORDER relative to the
@@ -1182,6 +1216,10 @@ mod tests {
     }
     #[async_trait]
     impl TaskStatusSink for RecordingSink {
+        fn requires_explicit_activation(&self) -> bool {
+            self.explicit_activation
+        }
+
         async fn set_status(&self, task_id: &str, status: TaskStatus) {
             if status.is_terminal() {
                 self.calls.lock().unwrap().push("status");
@@ -1505,6 +1543,81 @@ mod tests {
             persistent.send_message("ghost", "hi".into(), ctx).await,
             Err(TaskError::TerminatedTask)
         ));
+    }
+
+    #[tokio::test]
+    async fn worker_waits_for_registry_publication_before_starting_subagent() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!({ "answer": "ready" }), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink {
+            explicit_activation: true,
+            ..Default::default()
+        });
+        let handler = make_handler(spawner.clone(), mgr, sink.clone());
+
+        let mut handle = handler
+            .spawn(local_agent_input("wait for registry"), make_ctx(fs))
+            .await
+            .expect("handler schedules the worker");
+
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            spawner.request().is_none(),
+            "the subagent must not start before TaskRegistry publishes its row"
+        );
+        assert_eq!(
+            sink.last_status(),
+            None,
+            "status updates must not race ahead of registry publication"
+        );
+
+        handle.activate();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(status) = sink.last_status() {
+                    if status.is_terminal() {
+                        break status;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker should proceed once the registry row exists");
+        assert_eq!(status, TaskStatus::Completed);
+        assert!(spawner.request().is_some());
+    }
+
+    #[tokio::test]
+    async fn dropping_unactivated_handle_cancels_prepared_subagent() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!({ "unused": true }), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink {
+            explicit_activation: true,
+            ..Default::default()
+        });
+        let handler = make_handler(spawner.clone(), mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        let handle = handler
+            .spawn(local_agent_input("cancel before commit"), make_ctx(fs))
+            .await
+            .expect("handler prepares the worker");
+        drop(handle);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !workers.lock().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the activation owner stops the prepared worker");
+        assert!(spawner.request().is_none());
+        assert_eq!(sink.last_status(), None);
     }
 
     #[tokio::test]

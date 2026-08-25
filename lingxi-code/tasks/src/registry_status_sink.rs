@@ -48,6 +48,10 @@ impl RegistryStatusSink {
 
 #[async_trait]
 impl TaskStatusSink for RegistryStatusSink {
+    fn requires_explicit_activation(&self) -> bool {
+        true
+    }
+
     async fn set_status(&self, task_id: &str, status: TaskStatus) {
         if let Some(reg) = self.registry.get() {
             // Best-effort: a status write for a since-evicted task is a benign

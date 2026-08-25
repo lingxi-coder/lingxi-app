@@ -1,11 +1,11 @@
 //! Task scheduling and tracking primitives.
 //!
 //! See spec §6.6 (Tasks subsystem). This crate provides:
-//! - The polymorphic [`state::TaskState`] union (7 variants).
+//! - The polymorphic [`state::TaskState`] union (9 variants).
 //! - The generic [`task_trait::Task`] handler interface.
 //! - [`registry::TaskRegistry`] for tracking running tasks.
 //! - [`output_manager::TaskOutputManager`] for sandboxed task spool files.
-//! - Per-type handler stubs under [`handlers`] (full impls land in M2).
+//! - Per-type task handlers under [`handlers`].
 
 #![forbid(unsafe_code)]
 

@@ -387,6 +387,32 @@ pub struct CronScheduler {
     tick_handle: Mutex<Option<traits::BackgroundTaskHandle>>,
 }
 
+struct ClaimedCronJob {
+    spawn_input: TaskSpawnInput,
+    rollback: ClaimRollback,
+}
+
+enum ClaimRollback {
+    Session {
+        before_task: CronTaskDef,
+        before_session_task: Option<SessionCronTask>,
+        claimed_task: Option<CronTaskDef>,
+        claimed_session_task: Option<SessionCronTask>,
+    },
+    Durable {
+        project_root: PathBuf,
+        authoritative: CronTaskDef,
+        before_body: String,
+        claimed_body: String,
+    },
+}
+
+impl ClaimedCronJob {
+    fn into_parts(self) -> (TaskSpawnInput, ClaimRollback) {
+        (self.spawn_input, self.rollback)
+    }
+}
+
 impl CronScheduler {
     /// Construct a new scheduler over the single project tasks file
     /// `<project_root>/.lingxi/scheduled_tasks.json` (1:1 with claude-code
@@ -626,13 +652,15 @@ impl CronScheduler {
     async fn process_due_ids(&self, now: SystemTime, due_ids: Vec<String>) {
         for id in due_ids {
             if self.session_tasks.read().await.contains_key(&id) {
-                if let Some(task_input) = self.claim_in_memory_due_job(&id, now).await {
+                if let Some(claimed_job) = self.claim_in_memory_due_job(&id, now).await {
+                    let (task_input, rollback) = claimed_job.into_parts();
                     if let Err(e) = self
                         .task_registry
-                        .create(TaskType::Dream, task_input, format!("cron: {id}"))
+                        .spawn(TaskType::Dream, task_input, format!("cron: {id}"))
                         .await
                     {
-                        tracing::error!("cron task {id} create failed: {e}");
+                        tracing::error!("cron task {id} spawn failed: {e}");
+                        self.rollback_claim(id.as_str(), rollback).await;
                     }
                 }
                 continue;
@@ -660,13 +688,15 @@ impl CronScheduler {
             // Re-read the authoritative state after lock acquisition and
             // claim the run BEFORE launch so a peer that already persisted
             // `lastFiredAt`/deletion suppresses this stale due snapshot.
-            if let Some(task_input) = self.claim_due_job_if_still_due(&id, now).await {
+            if let Some(claimed_job) = self.claim_due_job_if_still_due(&id, now).await {
+                let (task_input, rollback) = claimed_job.into_parts();
                 if let Err(e) = self
                     .task_registry
-                    .create(TaskType::Dream, task_input, format!("cron: {id}"))
+                    .spawn(TaskType::Dream, task_input, format!("cron: {id}"))
                     .await
                 {
-                    tracing::error!("cron task {id} create failed: {e}");
+                    tracing::error!("cron task {id} spawn failed: {e}");
+                    self.rollback_claim(id.as_str(), rollback).await;
                 }
             }
 
@@ -715,7 +745,7 @@ impl CronScheduler {
         &self,
         id: &str,
         now: SystemTime,
-    ) -> Option<TaskSpawnInput> {
+    ) -> Option<ClaimedCronJob> {
         let local = { self.tasks.read().await.get(id).cloned()? };
 
         let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
@@ -815,10 +845,20 @@ impl CronScheduler {
 
         self.apply_claimed_task_state(&authoritative, now, expires_after_fire)
             .await
+            .map(|spawn_input| ClaimedCronJob {
+                spawn_input,
+                rollback: ClaimRollback::Durable {
+                    project_root: project_root.to_path_buf(),
+                    authoritative,
+                    before_body: body,
+                    claimed_body: updated,
+                },
+            })
     }
 
-    async fn claim_in_memory_due_job(&self, id: &str, now: SystemTime) -> Option<TaskSpawnInput> {
+    async fn claim_in_memory_due_job(&self, id: &str, now: SystemTime) -> Option<ClaimedCronJob> {
         let mut tasks = self.tasks.write().await;
+        let original_task = tasks.get(id).cloned()?;
         let prompt = {
             let task = tasks.get(id)?;
             if !is_job_due(task, now) {
@@ -834,11 +874,14 @@ impl CronScheduler {
             tasks.remove(id);
         }
         let mut session_tasks = self.session_tasks.write().await;
+        let original_session_task = session_tasks.get(id).cloned();
         if remove_after_fire {
             session_tasks.remove(id);
         } else if let Some(task) = session_tasks.get_mut(id) {
             task.last_fired_at = Some(now);
         }
+        let claimed_task = tasks.get(id).cloned();
+        let claimed_session_task = session_tasks.get(id).cloned();
         if expires_after_fire {
             tracing::info!(
                 event = "tengu_scheduled_task_expired",
@@ -846,9 +889,17 @@ impl CronScheduler {
                 "cron job fired its final run after exceeding the recurring max age"
             );
         }
-        Some(TaskSpawnInput::Dream {
-            prompt,
-            max_iterations: None,
+        Some(ClaimedCronJob {
+            spawn_input: TaskSpawnInput::Dream {
+                prompt,
+                max_iterations: None,
+            },
+            rollback: ClaimRollback::Session {
+                before_task: original_task,
+                before_session_task: original_session_task,
+                claimed_task,
+                claimed_session_task,
+            },
         })
     }
 
@@ -888,6 +939,135 @@ impl CronScheduler {
             prompt: authoritative.prompt.clone(),
             max_iterations: None,
         })
+    }
+
+    async fn rollback_claim(&self, id: &str, rollback: ClaimRollback) {
+        match rollback {
+            ClaimRollback::Session {
+                before_task,
+                before_session_task,
+                claimed_task,
+                claimed_session_task,
+            } => {
+                self.restore_session_claim(
+                    id,
+                    before_task,
+                    before_session_task,
+                    claimed_task,
+                    claimed_session_task,
+                )
+                .await;
+            }
+            ClaimRollback::Durable {
+                project_root,
+                authoritative,
+                before_body,
+                claimed_body,
+            } => {
+                self.rollback_durable_claim(
+                    id,
+                    &project_root,
+                    authoritative,
+                    &before_body,
+                    &claimed_body,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn restore_session_claim(
+        &self,
+        id: &str,
+        before_task: CronTaskDef,
+        before_session_task: Option<SessionCronTask>,
+        claimed_task: Option<CronTaskDef>,
+        claimed_session_task: Option<SessionCronTask>,
+    ) {
+        let mut tasks = self.tasks.write().await;
+        let mut session_tasks = self.session_tasks.write().await;
+
+        let task_unchanged = cron_task_option_matches(tasks.get(id), claimed_task.as_ref());
+        let session_unchanged = session_tasks.get(id) == claimed_session_task.as_ref();
+        if !task_unchanged || !session_unchanged {
+            tracing::warn!("cron job {id} skip session rollback because state changed after claim");
+            return;
+        }
+
+        tasks.insert(id.to_string(), before_task);
+        if let Some(session_task) = before_session_task {
+            session_tasks.insert(id.to_string(), session_task);
+        } else {
+            session_tasks.remove(id);
+        }
+    }
+
+    async fn rollback_durable_claim(
+        &self,
+        id: &str,
+        project_root: &Path,
+        authoritative: CronTaskDef,
+        before_body: &str,
+        claimed_body: &str,
+    ) {
+        let _process_guard = crate::lock_cron_file().await;
+        let Ok(_file_guard) =
+            crate::tasks_file::lock_scheduled_tasks(self.fs.as_ref(), project_root).await
+        else {
+            tracing::warn!("cron job {id} failed to re-lock scheduled tasks during rollback");
+            return;
+        };
+
+        let current_body =
+            match crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await {
+                Ok(body) => body,
+                Err(error) => {
+                    tracing::warn!(
+                        "cron job {id} failed to read scheduled tasks during rollback: {error}"
+                    );
+                    return;
+                }
+            };
+        if current_body != claimed_body {
+            tracing::warn!(
+                "cron job {id} skip rollback because authoritative state changed after claim"
+            );
+            return;
+        }
+        if let Err(error) =
+            crate::tasks_file::write_tasks_body(self.fs.as_ref(), project_root, before_body).await
+        {
+            tracing::warn!(
+                "cron job {id} failed to restore scheduled tasks after spawn error: {error}"
+            );
+            return;
+        }
+
+        self.restore_authoritative_task(authoritative).await;
+    }
+
+    async fn restore_authoritative_task(&self, authoritative: CronTaskDef) {
+        self.tasks
+            .write()
+            .await
+            .insert(authoritative.id.clone(), authoritative);
+    }
+}
+
+fn cron_task_option_matches(left: Option<&CronTaskDef>, right: Option<&CronTaskDef>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.id == right.id
+                && left.schedule.raw == right.schedule.raw
+                && left.prompt == right.prompt
+                && left.agent_type == right.agent_type
+                && left.last_run == right.last_run
+                && left.enabled == right.enabled
+                && left.created_at == right.created_at
+                && left.recurring == right.recurring
+        }
+        _ => false,
     }
 }
 
@@ -1259,10 +1439,13 @@ mod scheduler_tick_tests {
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
     use tasks::output_manager::TaskOutputManager;
     use tasks::registry::TaskRegistry;
+    use tasks::task_trait::{Task, TaskContext, TaskError, TaskHandle};
+    use tasks::{TaskSpawnInput, TaskType};
     use traits::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
     use traits::{BackgroundTaskHandle, Clock, FileSystem, RuntimeError, RuntimeSpawner};
 
@@ -1293,15 +1476,6 @@ mod scheduler_tick_tests {
 
         async fn get(&self, path: &str) -> Option<String> {
             self.files.lock().await.get(path).cloned()
-        }
-
-        async fn count_suffix(&self, suffix: &str) -> usize {
-            self.files
-                .lock()
-                .await
-                .keys()
-                .filter(|path| path.ends_with(suffix))
-                .count()
         }
     }
 
@@ -1440,6 +1614,122 @@ mod scheduler_tick_tests {
         ))
     }
 
+    struct RecordingDreamHandler {
+        spawns: AtomicUsize,
+    }
+
+    impl RecordingDreamHandler {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                spawns: AtomicUsize::new(0),
+            })
+        }
+
+        fn spawn_count(&self) -> usize {
+            self.spawns.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Task for RecordingDreamHandler {
+        fn name(&self) -> &str {
+            "recording_dream"
+        }
+
+        fn task_type(&self) -> TaskType {
+            TaskType::Dream
+        }
+
+        async fn spawn(
+            &self,
+            input: TaskSpawnInput,
+            _ctx: TaskContext,
+        ) -> Result<TaskHandle, TaskError> {
+            if !matches!(input, TaskSpawnInput::Dream { .. }) {
+                return Err(TaskError::Internal(format!(
+                    "unexpected input for dream handler: {input:?}"
+                )));
+            }
+            let seq = self.spawns.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(TaskHandle::new(format!("d{seq:08}"), None))
+        }
+
+        async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+            Ok(())
+        }
+    }
+
+    fn registry_with_dream_handler(
+        fs: Arc<dyn FileSystem>,
+    ) -> (Arc<TaskRegistry>, Arc<RecordingDreamHandler>) {
+        let mut registry = TaskRegistry::new(
+            Arc::new(UnusedRuntime),
+            fs.clone(),
+            Arc::new(TaskOutputManager::new(PathBuf::from(OUTPUT_DIR), fs)),
+        );
+        let handler = RecordingDreamHandler::new();
+        registry.register_handler(TaskType::Dream, handler.clone());
+        (Arc::new(registry), handler)
+    }
+
+    struct FailingDreamHandler {
+        attempts: AtomicUsize,
+    }
+
+    impl FailingDreamHandler {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                attempts: AtomicUsize::new(0),
+            })
+        }
+
+        fn attempt_count(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Task for FailingDreamHandler {
+        fn name(&self) -> &str {
+            "failing_dream"
+        }
+
+        fn task_type(&self) -> TaskType {
+            TaskType::Dream
+        }
+
+        async fn spawn(
+            &self,
+            input: TaskSpawnInput,
+            _ctx: TaskContext,
+        ) -> Result<TaskHandle, TaskError> {
+            if !matches!(input, TaskSpawnInput::Dream { .. }) {
+                return Err(TaskError::Internal(format!(
+                    "unexpected input for dream handler: {input:?}"
+                )));
+            }
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            Err(TaskError::Internal("boom".into()))
+        }
+
+        async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+            Ok(())
+        }
+    }
+
+    fn registry_with_failing_dream_handler(
+        fs: Arc<dyn FileSystem>,
+    ) -> (Arc<TaskRegistry>, Arc<FailingDreamHandler>) {
+        let mut registry = TaskRegistry::new(
+            Arc::new(UnusedRuntime),
+            fs.clone(),
+            Arc::new(TaskOutputManager::new(PathBuf::from(OUTPUT_DIR), fs)),
+        );
+        let handler = FailingDreamHandler::new();
+        registry.register_handler(TaskType::Dream, handler.clone());
+        (Arc::new(registry), handler)
+    }
+
     fn scheduler(
         registry: Arc<TaskRegistry>,
         fs: Arc<dyn FileSystem>,
@@ -1462,9 +1752,11 @@ mod scheduler_tick_tests {
         );
         let fs = MemFs::with(TASKS_PATH, &body);
         let clock = FixedClock::at_secs(NOW);
+        let (registry_a, handler_a) = registry_with_dream_handler(fs.clone());
+        let (registry_b, handler_b) = registry_with_dream_handler(fs.clone());
 
-        let scheduler_a = scheduler(registry(fs.clone()), fs.clone(), clock.clone());
-        let scheduler_b = scheduler(registry(fs.clone()), fs.clone(), clock.clone());
+        let scheduler_a = scheduler(registry_a, fs.clone(), clock.clone());
+        let scheduler_b = scheduler(registry_b, fs.clone(), clock.clone());
 
         scheduler_a.load_persisted().await;
         scheduler_b.load_persisted().await;
@@ -1484,9 +1776,9 @@ mod scheduler_tick_tests {
             .await;
 
         assert_eq!(
-            fs.count_suffix(".output").await,
+            handler_a.spawn_count() + handler_b.spawn_count(),
             1,
-            "the stale second scheduler snapshot must not create a duplicate task"
+            "the stale second scheduler snapshot must not execute a duplicate dream handler"
         );
 
         let after = crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap());
@@ -1513,7 +1805,8 @@ mod scheduler_tick_tests {
         );
         let fs = MemFs::with(TASKS_PATH, &body);
         let clock = FixedClock::at_secs(NOW);
-        let scheduler = scheduler(registry(fs.clone()), fs.clone(), clock.clone());
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
         scheduler.load_persisted().await;
         let stale_due_ids = vec!["d22222222".to_string()];
         fs.files
@@ -1524,9 +1817,9 @@ mod scheduler_tick_tests {
         scheduler.process_due_ids(clock.now(), stale_due_ids).await;
 
         assert_eq!(
-            fs.count_suffix(".output").await,
+            handler.spawn_count(),
             0,
-            "corrupt durable state must fail closed instead of running stale memory"
+            "corrupt durable state must fail closed instead of running stale memory through the dream handler"
         );
     }
 
@@ -1534,7 +1827,8 @@ mod scheduler_tick_tests {
     async fn session_one_shot_is_listed_claimed_and_removed_without_disk_state() {
         let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
         let clock = FixedClock::at_secs(NOW);
-        let scheduler = scheduler(registry(fs.clone()), fs.clone(), clock.clone());
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
         scheduler
             .register_tool_job(
                 SessionCronTask {
@@ -1553,6 +1847,7 @@ mod scheduler_tick_tests {
 
         assert_eq!(scheduler.session_jobs().await.len(), 1);
         scheduler.tick().await;
+        assert_eq!(handler.spawn_count(), 1);
         assert!(scheduler.session_jobs().await.is_empty());
         assert!(!scheduler.tasks.read().await.contains_key("dsession1"));
         let persisted = crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap());
@@ -1563,7 +1858,8 @@ mod scheduler_tick_tests {
     async fn session_recurring_claim_updates_memory_and_owner_guards_delete() {
         let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
         let clock = FixedClock::at_secs(NOW);
-        let scheduler = scheduler(registry(fs.clone()), fs, clock.clone());
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs, clock.clone());
         scheduler
             .register_tool_job(
                 SessionCronTask {
@@ -1586,6 +1882,7 @@ mod scheduler_tick_tests {
                 .await
         );
         scheduler.tick().await;
+        assert_eq!(handler.spawn_count(), 1);
         let jobs = scheduler.session_jobs().await;
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].last_fired_at, Some(clock.now()));
@@ -1598,10 +1895,208 @@ mod scheduler_tick_tests {
     }
 
     #[tokio::test]
+    async fn session_one_shot_spawn_failure_restores_claimed_state() {
+        let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, handler) = registry_with_failing_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
+        scheduler
+            .register_tool_job(
+                SessionCronTask {
+                    id: "dsession_fail_once".into(),
+                    cron: "* * * * *".into(),
+                    prompt: "wake".into(),
+                    created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120),
+                    last_fired_at: None,
+                    recurring: false,
+                    owner: Some("agent:one".into()),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+
+        scheduler.tick().await;
+
+        assert_eq!(handler.attempt_count(), 1);
+        let jobs = scheduler.session_jobs().await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].last_fired_at, None);
+        assert!(scheduler
+            .tasks
+            .read()
+            .await
+            .contains_key("dsession_fail_once"));
+        assert_eq!(
+            crate::tasks_file::parse_tasks(&fs.get(TASKS_PATH).await.unwrap())
+                .tasks
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn session_recurring_spawn_failure_restores_last_fired_at() {
+        let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, handler) = registry_with_failing_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs, clock.clone());
+        let previous_fire = SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120);
+        scheduler
+            .register_tool_job(
+                SessionCronTask {
+                    id: "dsession_fail_repeat".into(),
+                    cron: "* * * * *".into(),
+                    prompt: "repeat".into(),
+                    created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 240),
+                    last_fired_at: Some(previous_fire),
+                    recurring: true,
+                    owner: Some("agent:one".into()),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+
+        scheduler.tick().await;
+
+        assert_eq!(handler.attempt_count(), 1);
+        let jobs = scheduler.session_jobs().await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].last_fired_at, Some(previous_fire));
+        assert_eq!(
+            scheduler
+                .tasks
+                .read()
+                .await
+                .get("dsession_fail_repeat")
+                .and_then(|task| task.last_run),
+            Some(previous_fire)
+        );
+    }
+
+    #[tokio::test]
+    async fn session_spawn_failure_does_not_overwrite_concurrent_job_edit() {
+        let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, _handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs, clock.clone());
+        scheduler
+            .register_tool_job(
+                SessionCronTask {
+                    id: "dsession_edit".into(),
+                    cron: "* * * * *".into(),
+                    prompt: "before".into(),
+                    created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120),
+                    last_fired_at: None,
+                    recurring: true,
+                    owner: Some("agent:one".into()),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+
+        let claimed = scheduler
+            .claim_in_memory_due_job("dsession_edit", clock.now())
+            .await
+            .expect("job should be claimable");
+        scheduler
+            .register_tool_job(
+                SessionCronTask {
+                    id: "dsession_edit".into(),
+                    cron: "*/5 * * * *".into(),
+                    prompt: "edited while spawn was pending".into(),
+                    created_at: clock.now(),
+                    last_fired_at: None,
+                    recurring: true,
+                    owner: Some("agent:two".into()),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+
+        let (_, rollback) = claimed.into_parts();
+        scheduler.rollback_claim("dsession_edit", rollback).await;
+
+        let jobs = scheduler.session_jobs().await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].prompt, "edited while spawn was pending");
+        assert_eq!(jobs[0].owner.as_deref(), Some("agent:two"));
+        assert_eq!(
+            scheduler
+                .tasks
+                .read()
+                .await
+                .get("dsession_edit")
+                .map(|task| task.prompt.as_str()),
+            Some("edited while spawn was pending")
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_one_shot_spawn_failure_restores_original_file_body() {
+        let created_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"dfailonce","cron":"* * * * *","prompt":"hello","createdAt":{created_ms}}}]}}"#
+        );
+        let fs = MemFs::with(TASKS_PATH, &body);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, handler) = registry_with_failing_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
+        scheduler.load_persisted().await;
+
+        scheduler.tick().await;
+
+        assert_eq!(handler.attempt_count(), 1);
+        assert_eq!(fs.get(TASKS_PATH).await.unwrap(), body);
+        assert_eq!(
+            scheduler
+                .tasks
+                .read()
+                .await
+                .get("dfailonce")
+                .and_then(|task| task.last_run),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_recurring_spawn_failure_restores_original_body_and_last_run() {
+        let created_ms = (NOW - 240) * 1000;
+        let last_fired_ms = (NOW - 120) * 1000;
+        let body = format!(
+            r#"{{"tasks":[{{"id":"dfailrecur","cron":"* * * * *","prompt":"hello","createdAt":{created_ms},"lastFiredAt":{last_fired_ms},"recurring":true}}]}}"#
+        );
+        let fs = MemFs::with(TASKS_PATH, &body);
+        let clock = FixedClock::at_secs(NOW);
+        let (registry, handler) = registry_with_failing_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
+        scheduler.load_persisted().await;
+        let previous_fire = SystemTime::UNIX_EPOCH + Duration::from_secs(NOW - 120);
+
+        scheduler.tick().await;
+
+        assert_eq!(handler.attempt_count(), 1);
+        assert_eq!(fs.get(TASKS_PATH).await.unwrap(), body);
+        assert_eq!(
+            scheduler
+                .tasks
+                .read()
+                .await
+                .get("dfailrecur")
+                .and_then(|task| task.last_run),
+            Some(previous_fire)
+        );
+    }
+
+    #[tokio::test]
     async fn aged_session_recurring_fires_once_then_expires() {
         let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
         let clock = FixedClock::at_secs(NOW);
-        let scheduler = scheduler(registry(fs.clone()), fs.clone(), clock.clone());
+        let (registry, handler) = registry_with_dream_handler(fs.clone());
+        let scheduler = scheduler(registry, fs.clone(), clock.clone());
         scheduler
             .register_tool_job(
                 SessionCronTask {
@@ -1621,9 +2116,9 @@ mod scheduler_tick_tests {
 
         scheduler.tick().await;
 
+        assert_eq!(handler.spawn_count(), 1);
         assert!(scheduler.session_jobs().await.is_empty());
         assert!(!scheduler.tasks.read().await.contains_key("00000000"));
-        assert_eq!(fs.count_suffix(".output").await, 1);
     }
 
     #[tokio::test]

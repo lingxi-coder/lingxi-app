@@ -354,7 +354,19 @@ impl Task for DreamHandler {
         let output_manager = self.output_manager.clone();
         let worker_spool_path = spool_path.clone();
         let worker_task_id = task_id.clone();
+        let (activation_tx, activation_rx) = if status_sink.requires_explicit_activation() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let worker = Box::pin(async move {
+            if let Some(activation_rx) = activation_rx {
+                if activation_rx.await.is_err() {
+                    workers.lock().await.remove(&worker_task_id);
+                    return;
+                }
+            }
             status_sink
                 .set_status(&worker_task_id, TaskStatus::Running)
                 .await;
@@ -395,6 +407,10 @@ impl Task for DreamHandler {
             workers.lock().await.remove(&worker_task_id);
         });
 
+        // Serialize runtime scheduling with insertion of the cancel record. A
+        // standalone sink is registered immediately, so a canned/failed spawn
+        // can otherwise remove its record before this method inserts it.
+        let mut workers = self.workers.lock().await;
         let bg_handle = ctx
             .runtime
             .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
@@ -403,13 +419,14 @@ impl Task for DreamHandler {
 
         // Record the worker-cancel handle (+ the runtime that minted it) so
         // kill / drain can cancel the in-flight worker without a fresh ctx.
-        self.workers.lock().await.insert(
+        workers.insert(
             task_id.clone(),
             WorkerCancel {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
             },
         );
+        drop(workers);
 
         // 6. Build the synchronous cleanup seam (claude-code `registerCleanup`
         //    parity). The closure cannot await, so it moves any live cancel
@@ -432,9 +449,12 @@ impl Task for DreamHandler {
             }
         });
 
-        Ok(TaskHandle {
-            task_id,
-            cleanup: Some(cleanup),
+        let handle = TaskHandle::new(task_id, Some(cleanup));
+        Ok(match activation_tx {
+            Some(activation_tx) => handle.with_activation(move || {
+                let _ = activation_tx.send(());
+            }),
+            None => handle,
         })
     }
 
@@ -684,9 +704,14 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         statuses: StdMutex<Vec<(String, TaskStatus)>>,
+        explicit_activation: bool,
     }
     #[async_trait]
     impl TaskStatusSink for RecordingSink {
+        fn requires_explicit_activation(&self) -> bool {
+            self.explicit_activation
+        }
+
         async fn set_status(&self, task_id: &str, status: TaskStatus) {
             self.statuses
                 .lock()
@@ -776,6 +801,77 @@ mod tests {
             Err(other) => panic!("expected Internal, got {other:?}"),
             Ok(_) => panic!("non-Dream input must be rejected"),
         }
+    }
+
+    #[tokio::test]
+    async fn worker_waits_for_registry_publication_before_starting_dream() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Err("pool full".into()));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink {
+            explicit_activation: true,
+            ..Default::default()
+        });
+        let handler = make_handler(spawner.clone(), mgr, sink.clone());
+
+        let mut handle = handler
+            .spawn(dream_input("scheduled dream"), make_ctx(fs))
+            .await
+            .expect("handler schedules the dream worker");
+
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            spawner.request().is_none(),
+            "Dream must not consume a pool slot before its registry row exists"
+        );
+        assert_eq!(sink.last_status(), None);
+
+        handle.activate();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(status) = sink.last_status() {
+                    if status.is_terminal() {
+                        break status;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dream worker should proceed after registry publication");
+        assert_eq!(status, TaskStatus::Failed);
+        assert!(spawner.request().is_some());
+    }
+
+    #[tokio::test]
+    async fn dropping_unactivated_handle_cancels_prepared_dream() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!("unused"), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink {
+            explicit_activation: true,
+            ..Default::default()
+        });
+        let handler = make_handler(spawner.clone(), mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        let handle = handler
+            .spawn(dream_input("cancel before commit"), make_ctx(fs))
+            .await
+            .expect("handler prepares the dream worker");
+        drop(handle);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !workers.lock().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the activation owner stops the prepared dream");
+        assert!(spawner.request().is_none());
+        assert_eq!(sink.last_status(), None);
     }
 
     #[tokio::test]

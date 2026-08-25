@@ -441,10 +441,7 @@ impl Task for MonitorHandler {
 
         let cleanup_cancel = cancel;
         let cleanup: Arc<dyn Fn() + Send + Sync> = Arc::new(move || cleanup_cancel.cancel());
-        Ok(TaskHandle {
-            task_id,
-            cleanup: Some(cleanup),
-        })
+        Ok(TaskHandle::new(task_id, Some(cleanup)))
     }
 
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {

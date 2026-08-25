@@ -379,7 +379,7 @@ TS 侧（`clients/shared/src/protocol.ts:851`）同步加字段。⛔ **该文�
 
 **先决条件：§0 必须已修。** 否则本节写的文件到不了模型手里。
 
-**引导版**——在 `CreateApp{surface: None}` 的 initializer 里写入 `workspace/LINGXI.md`。此时 `layout.initialize()` 已跑过，工作区目录存在。
+**引导版**——在 `CreateApp{mode: Shell}` 的 initializer 里写入 `workspace/LINGXI.md`（该模式下 `surface` 必须为 `None` 且不调用 `scaffold_app_value`，见 §B.1）。此时 `layout.initialize()` 已跑过，工作区目录存在。
 
 内容要点（正式版会整体覆盖）：
 - 这个应用刚创建，**还没有形态**，工作区是空的。
@@ -609,15 +609,27 @@ Phase 1 是当前 design 的后续里程碑，不是 §0-§H 的合并阻塞项�
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum AppRuntimeProfile {
+    #[serde(rename = "react_dom")]
     ReactDom,
+    #[serde(rename = "canvas_2d")]
     Canvas2d,
+    #[serde(rename = "three_3d")]
     Three3d,
+    #[serde(rename = "phaser_2d")]
     Phaser2d,
+    #[serde(rename = "babylon_3d")]
     Babylon3d,
 }
 ```
+
+⚠️ **必须逐变体 `rename`，不能用 `rename_all = "snake_case"`。** serde 的 `SnakeCase` 只在**大写字母**前插下划线，**数字不断词** ⇒ `Canvas2d` → `canvas2d`、`Three3d` → `three3d`、`Phaser2d` → `phaser2d`、`Babylon3d` → `babylon3d`，五个里四个与本节全篇（映射表、推荐表、依赖表、workflow 路由、测试）用的 `canvas_2d` / `three_3d` / `phaser_2d` / `babylon_3d` **对不上**；只有 `ReactDom → react_dom` 碰巧正确。现有 `AppSurface` 的 `Dom` / `Canvas` 不含数字，所以这个坑至今没暴露过。
+
+两种走法都会坏：直接 serde 反序列化则按表写的 `"canvas_2d"` 被拒为 unknown variant，五分之四的 profile 创建全挂；另写手写 `parse()/as_str()`（`AppSurface` 就是这个范式）则**入参/receipt/SBOM 用 `canvas_2d`、manifest 落盘字节是 `canvas2d`**，同一个值两套拼写。
+
+⛔ **发现晚了就改不动了**：profile 进 `AppManifest::hash()`（`manifest.rs:460` 序列化整个结构体）且首次 scaffold 后不可修改，改拼写会改掉每个带 profile 应用的 hash，`AppDataStore::ensure_manifest`（`data.rs:597`）随即对**所有数据读写**报 `database manifest mismatch`——正是 §C.1.4 要防的那类损坏。
+
+**持久拼写以本节映射表为准。** §I.7.1 的 `godot_2d` / `godot_3d` 落 Rust enum 时同一个坑，一并逐变体 `rename`。
 
 `AppManifest` 追加以下字段；serde 形状是兼容性契约的一部分，不能省略：
 
@@ -650,9 +662,17 @@ profile 到 surface 的映射是公共不变量：
 | 有 profile、无 surface | 由上表派生 surface，走对应 profile scaffold |
 | profile 与 surface 都有且一致 | 接受，profile 是权威值 |
 | profile 与 surface 冲突 | 在写记录/manifest 前返回校验错误 |
-| 只有 surface | 旧客户端兼容路径，继续创建 legacy v1 scaffold，不擅自挑选引擎 |
+| 只有 surface | **按映射表反查到 engine-free 的 profile**（`dom` → `react_dom`，`canvas` → `canvas_2d`）并持久化 |
+| profile 与 surface 都缺省 | 同上：归一成 `surface = dom` ⇒ `react_dom` |
 
-新客户端始终发送 profile；旧客户端继续使用 surface-only 路径。不能把 surface-only 的 `canvas` 自动升级成 `canvas_2d` 或 `three_3d`，否则会隐式替换旧 lockfile 和依赖树。
+⚠️ **切法是「新建 vs 既存」，不是「新客户端 vs 旧客户端」。** 初稿把 surface-only 归给「旧客户端兼容路径 ⇒ 创建 legacy v1 scaffold」，有两处错：
+
+1. **默认调用就走这条路。** `LocalAppCreate{brief:"一个待办清单"}` 里 `runtime_profile` 可选、`surface` 也可选且 schema 写着 `Defaults to "dom"`，dispatch 归一成 `AppSurface::Dom`（`local_apps_mcp.rs:1316`）。于是**每一次默认创建**都落进 legacy v1；而 §I.4 规定 Full 包只带 engine-free base seed、v1 lock 不再拥有 bundled seed ⇒ 首次构建必须联网解析全套依赖。`scripts/mobile-linux/build-local-app-node-modules.sh` 开头写明它存在的理由正是消灭这个回归（「every device resolved the same 169 packages over the network on first `create_local_app`」）。
+2. **`LocalAppCreate` 没有「旧客户端」。** 它是编进同一个二进制的 builtin，schema 与 `include_str!` 打包的 `SKILL.md` 随引擎一起升级，不存在版本落后的调用方。
+
+「不能把 surface-only 的 `canvas` 自动升级」这条理由只对**已经装好依赖树的既存应用**成立——新建应用根本没有旧 lockfile 可被替换。因此：**Phase 1 之后任何新建都必须落一个 profile**；「继续读 v1 lock、不推断不回填」只保留给**已经存在**的无 profile 应用（§I.2 的 legacy 读取规则）。
+
+⇒ §I.4 的 schema 描述同批修正：`surface` 的 `Defaults to "dom"` 要改成说明它只在缺 `runtime_profile` 时用于反查 profile。
 
 Phase 1 不让生成代理直接决定对话式创建的最终 profile。§C.1 的 `LocalAppScaffold` 入参改为 `{app_id, name, brief, profile_confirmation_id, workflow_model?}`；host 用 `profile_confirmation_id` 读取用户在 §I.3 亲自选择的 profile 并派生 surface，schema 不再接受可覆盖它的 `runtime_profile` / `surface`。`LocalAppScaffold` 提交时一次性写入 receipt 绑定的 profile 和派生 surface，仍以 `record.scaffolded = true` 为最后 commit point。`LocalAppCreate` 的直接创建兼容矩阵保持上表行为，不复用这张对话 receipt。
 
@@ -701,10 +721,13 @@ profile 创建后不可修改：
 
 `LocalAppConfirmRuntimeProfile` 返回 `{selected_profile, profile_confirmation_id}`。receipt 是 host 进程内保存的不可预测随机 id，绑定 `app_id + selected_profile`，有效期固定 10 分钟：
 
-- `LocalAppScaffold` 在取得 §C.1 的进程内 scaffold 预留后校验并 claim receipt；过期、跨 app、未知或已消费 receipt 一律拒绝；
+- **每个 `app_id` 同时只允许一张未消费 receipt**：签发新 receipt 时**原子作废**该 app 此前所有未消费的 receipt（实现成 per-app 单槽，而不是 id → receipt 的映射）；
+- `LocalAppScaffold` 在取得 §C.1 的进程内 scaffold 预留后校验并 claim receipt；过期、跨 app、未知、已消费或**已被更新的确认取代（superseded）**的 receipt 一律拒绝；
 - manifest/profile 提交成功后消费 receipt；落地失败则释放 claim，只要仍在 TTL 内即可重试；
 - receipt 不落盘，进程重启后失效，用户重新确认即可；这不会把草稿变砖；
 - schema 不接受另一个 profile，所以代理无法把用户选的 `phaser_2d` 换成 `babylon_3d`。
+
+⚠️ **单槽那条是「代理不能改写选择」成立的必要条件，不是锦上添花。** 没有它，重放旧回执就能绕过整条防线：用户先选 `phaser_2d`（receipt A），改主意再选 `babylon_3d`（receipt B），代理提交仍在 TTL 内的 A —— A 既没过期、也没跨 app、更没被消费，四条拒绝理由一条都不占，**被接受**，应用永久钉成用户已经否决的引擎（profile 提交后不可修改）。「schema 不接受另一个 profile」只堵住了**参数注入**，堵不住**回执选择**：代理根本不需要伪造 profile 字符串。
 
 若落地在 `record.scaffolded = true` 之前失败且 receipt 随后过期/重启失效，用户可以重新确认其他 profile；此时必须再次断言 `scaffolded == false` 且不存在 data store，并按 §C.0 清空后重写暂存 manifest/files。只有 `scaffolded = true` 的 commit 之后 profile 才进入不可变期。
 
@@ -836,6 +859,9 @@ workflow 路由保持两条：
 - `runtime_profile` 与 `surface` 在 data store 打开前一次性写定；已有数据库时替换任一字段都被拒。
 - 无 profile 的 v1 manifest 使用 `skip_serializing_if`：load 后的 canonical JSON/hash 与加字段前 fixture 完全一致，已有 SQLite 继续打开；`surface == None` 仍保持原不可重建拒绝。
 - `LocalAppRuntimeProfiles.download_status` 分别覆盖 ready snapshot、精确 engine-free bundled seed 与没有可验证离线树；查询本身不访问网络、不修改 app/snapshot/store。
+- **持久拼写钉死**：对五个 profile 各序列化一次 manifest，断言字节里出现的正是映射表中的 `react_dom` / `canvas_2d` / `three_3d` / `phaser_2d` / `babylon_3d`。这条同时钉住 serde 侧与手写 `parse()/as_str()` 侧不漂移——⛔ 用 `rename_all` 会让其中四条直接红（见 §I.2）。
+- **默认创建仍命中 engine-free base seed**：不带 `runtime_profile`（`surface` 也缺省）的 `LocalAppCreate` 在**无网络**设备上完成首次依赖安装与构建，并断言落盘 profile 是 `react_dom`；`surface: "canvas"` 无 profile 的同款用例落 `canvas_2d`。
+- **superseded receipt 被拒**：对同一个 app 连续确认两次（先 `phaser_2d` 后 `babylon_3d`），提交**第一张** receipt 必须被拒，且成功提交后落盘的是用户第二次的选择。
 - host-native picker 的用户选择与 receipt 绑定：跨 app、过期、伪造、重复消费和 receipt/profile 覆盖均被拒；落地失败释放 claim，成功提交后消费；进程重启后要求重新确认。另测一次 pre-commit 失败后重新确认其他 profile：仅在 `scaffolded == false` 且无 data store 时允许清空重写，commit 后永远拒绝。
 - 五种 Web profile 均能创建、frozen pnpm install、production build、启动和重建。
 - 无 profile 的 legacy DOM、Canvas 和 Three.js v1 fixtures 继续走原 scaffold/lock 并通过原测试；加载不会回填 profile。
@@ -1011,3 +1037,15 @@ Phase 2 先新增一份独立 NativeGame design/threat model，再在 desktop ho
 2. 本方案继续先 bless 8.0.0；verification Phase 3 必须在 8.0.0 与 profile-aware 代码上 rebase，不能从 major 7 独立 bless。
 3. `LINGXI.md` resolver 归本方案 §0；canvas workflow lease/delete guard 与 `.lingxi` build-key 归 verification Phase 1。两份文档只允许一个实现 owner，另一份保留进入断言与回归测试。
 4. 增加 downstream freshness rule：以后本方案修改 post-create seam 时，同一变更必须更新 master order 和 verification 的上游契约/阶段/测试/状态表，并由真实 create 路径的 compatibility test 防止下游继续使用旧 flow。
+
+### 第十一轮（对抗式复审 Codex 改稿，2026-08-24）
+八个攻击面（供应链 / manifest-协议 / workflow 身份 / picker-receipt / Godot-desktop / 跨文档 / §0-§H 回归 / 可执行性），每条指控再交给默认反驳的代理。**34 条指控，4 条存活**，全部已修；§0-§H 只留下一处陈旧引用，其余存活项都在新增的 §I：
+
+| 存活项 | 处置 |
+|---|---|
+| **P1** `rename_all = "snake_case"` 数字不断词 ⇒ 五个 profile 里四个的持久拼写与全文对不上 | §I.2 改为逐变体 `#[serde(rename = "...")]` 并写明理由；§I.8 加一条「序列化字节等于映射表」的断言（用 `rename_all` 会让其中四条直接红）。⛔ 该值进 `AppManifest::hash()` 且 scaffold 后不可改，发现晚了就会撞上 §C.1.4 那类数据损坏 |
+| **P1** 兼容矩阵缺「profile 与 surface 都缺省」一行，而那正是默认 `LocalAppCreate{brief}` | 矩阵切法从「新客户端 vs 旧客户端」改为「新建 vs 既存」：新建一律反查到 engine-free profile，legacy 读取规则只保留给既存无 profile 应用。否则每次默认创建都退回含 `three` 的 v1 lock、首次构建必须联网——正是 `build-local-app-node-modules.sh` 存在的理由要消灭的回归 |
+| **P1** 重新确认不作废旧 receipt ⇒ 代理可重放用户已否决的选择 | 改为 per-app 单槽：签发新 receipt 原子作废旧的，拒绝清单加 superseded，§I.8 加连续确认两次的用例。「schema 不接受另一个 profile」只堵参数注入，堵不住回执选择 |
+| **P2** §C.3 仍用第六轮已废弃的 `CreateApp{surface: None}` 当判据 | 改为 `CreateApp{mode: Shell}` |
+
+**一条降级为建议、未改文档**：§I 是本文件里的第二个项目，而 §E/§F/§G 通篇只覆盖 §0-§H、§I 另有 §I.8/§I.9 两份平行清单 ⇒「本方案要改哪些文件 / 通过验收 / 先 bless 8.0.0」各有两个答案。反驳代理指出该结构是 §I.1 明确设计的（Phase 1 不是合并阻塞项、§I 自带清单），这条辩护成立，故仅记录建议：可抽成独立 design 并挂进 `2026-08-24-local-app-implementation-order.md`。**待人工决定。**

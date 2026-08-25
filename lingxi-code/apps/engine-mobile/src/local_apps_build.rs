@@ -187,13 +187,96 @@ fn source_files(target: LocalAppBuildTarget) -> &'static [(&'static str, &'stati
     }
 }
 
+/// Read `apps/<id>/workspace/.lingxi/app.json` — the app-scoped mirror of the
+/// whole [`local_apps::AppRecord`], written next to the workspace it describes.
+///
+/// This is the only record fact reachable from an [`AppLayout`] alone, and it is
+/// a legitimate one to read: `storage::repair_torn_commit` makes the mirror
+/// AUTHORITATIVE over `apps/index.json` when a crash tears a commit, so it is
+/// the persisted truth rather than a guess. That is categorically different from
+/// sniffing `package.json` or `vite.config.mjs`, which the scaffold itself
+/// rewrites before every build (see [`detect_build_target`]).
+fn load_record_mirror(layout: &AppLayout) -> Result<local_apps::AppRecord, AppError> {
+    let relative = local_apps::storage::metadata_rel(layout.app_id());
+    let path = layout.root().join(&relative);
+    let body = std::fs::read_to_string(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AppError::StorageCorrupt(format!(
+                "{} is missing. Every app writes this record mirror before its workspace is \
+                 initialized, so its absence means the app directory is torn or was created \
+                 outside the app store.",
+                relative.display()
+            ))
+        } else {
+            AppError::Io(format!("read {}: {error}", relative.display()))
+        }
+    })?;
+    let mirror: local_apps::storage::AppMetadataFile = serde_json::from_str(&body)
+        .map_err(|error| AppError::StorageCorrupt(format!("{}: {error}", relative.display())))?;
+    if mirror.app.id != layout.app_id() {
+        return Err(AppError::StorageCorrupt(format!(
+            "{} mirrors app id {:?} but sits in the directory of {:?}",
+            relative.display(),
+            mirror.app.id,
+            layout.app_id()
+        )));
+    }
+    Ok(mirror.app)
+}
+
+/// Write `apps/<id>/workspace/.lingxi/app.json` back.
+///
+/// Only [`scaffold_workspace`] uses this, and only to flip `scaffolded`: the
+/// index copy of the record belongs to `AppService`, and the mirror is the half
+/// a service-less caller can still keep consistent.
+fn save_record_mirror(layout: &AppLayout, record: &local_apps::AppRecord) -> Result<(), AppError> {
+    let relative = local_apps::storage::metadata_rel(layout.app_id());
+    let path = layout.root().join(&relative);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| AppError::Io(format!("create {}: {error}", parent.display())))?;
+    }
+    let mirror = local_apps::storage::AppMetadataFile {
+        schema_version: local_apps::APPS_SCHEMA_VERSION,
+        app: record.clone(),
+    };
+    let mut body = serde_json::to_string_pretty(&mirror)
+        .map_err(|error| AppError::Io(format!("serialize {}: {error}", relative.display())))?;
+    body.push('\n');
+    std::fs::write(&path, body)
+        .map_err(|error| AppError::Io(format!("write {}: {error}", relative.display())))
+}
+
 /// Which scaffold this workspace was built from.
 ///
-/// The MANIFEST is the authority, not the files on disk. Sniffing the workspace
-/// would be circular: `package.json` and `vite.config.mjs` are exactly the files
-/// `restore_host_managed_files` rewrites from the compiled-in template before
-/// every build, so a mis-detection would repin the wrong scaffold and then read
-/// its own output back as confirmation.
+/// The RECORD and the MANIFEST decide together, and the files on disk do not get
+/// a vote. Sniffing the workspace would be circular: `package.json` and
+/// `vite.config.mjs` are exactly the files `restore_host_managed_files` rewrites
+/// from the compiled-in template before every build, so a mis-detection would
+/// repin the wrong scaffold and then read its own output back as confirmation.
+///
+/// The judgement is on the COMBINATION of two independently-persisted fields —
+/// `AppRecord.scaffolded` (the record mirror) and `AppManifest.surface` — and
+/// the pair is checked as a pair, never field by field:
+///
+/// | `scaffolded` | `surface` | verdict |
+/// |---|---|---|
+/// | `false` | `None` | an unformed shell: refuse and name `LocalAppScaffold` |
+/// | `true` | `Some(s)` | build `s` |
+/// | `false` | `Some(_)` | no writer produces this — storage corruption |
+/// | `true` | `None` | no writer produces this — storage corruption |
+///
+/// ⚠️ Returning `from_surface(s)` the moment `surface` is `Some(_)` would be the
+/// same code for the happy path and would pass every happy-path test, but a
+/// torn record — scaffold committed the manifest, crashed before the index and
+/// the mirror — would then build straight past the shell gate and hand the user
+/// a workspace whose record still says it was never given a shape. The two
+/// corrupt rows exist so that never happens silently.
+///
+/// The pre-split "manifest with no surface" refusal this replaced is gone
+/// because the shape it described can no longer load: `AppRecord.scaffolded`
+/// carries no serde default, so a store written before it fails at
+/// `storage::load_all` and never reaches a build.
 pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTarget, AppError> {
     let workspace = layout.root().join(layout.workspace_rel());
     if workspace.join("next.config.mjs").is_file() {
@@ -203,21 +286,39 @@ pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTar
         ));
     }
 
-    let manifest = local_apps::load_manifest(layout)?;
-    // An app created before the scaffold split has no recorded surface, and its
-    // source imports a component set that no longer exists. Rebuilding it would
-    // fail deep in Vite with a module-resolution error naming a file nobody
-    // recognises, so say the real thing here instead.
-    manifest
-        .surface
-        .map(LocalAppBuildTarget::from_surface)
-        .ok_or_else(|| {
-            AppError::InvalidRequest(
-            "this app was created with a scaffold that has been removed, so it can no longer be \
-             rebuilt. Its existing build keeps running; create a new app to continue development."
+    let scaffolded = load_record_mirror(layout)?.scaffolded;
+    let surface = local_apps::load_manifest(layout)?.surface;
+
+    match (scaffolded, surface) {
+        (true, Some(surface)) => Ok(LocalAppBuildTarget::from_surface(surface)),
+        // The `+` button lands one of these: a record, a workspace and a
+        // conversation, but no shape. There is nothing to build yet, and the
+        // agent reading this error is the one holding the fix.
+        (false, None) => Err(AppError::InvalidRequest(
+            "this app has no shape yet — it was created as an empty shell and nothing has been \
+             scaffolded into its workspace. Agree a name and a surface (\"dom\" for a routed, \
+             multi-screen interface, \"canvas\" for a single drawn surface) with the user, then \
+             call LocalAppScaffold to lay the scaffold down. Building only becomes possible after \
+             that."
                 .into(),
-        )
-        })
+        )),
+        (false, Some(surface)) => Err(AppError::StorageCorrupt(format!(
+            "app {}: the record says this workspace was never scaffolded, but the manifest \
+             already records the {:?} surface. No path in this version of the engine writes that \
+             combination, so the app store is torn — most likely a scaffold that committed the \
+             manifest and then crashed. Refusing to build rather than guessing which half is \
+             right.",
+            layout.app_id(),
+            surface.as_str()
+        ))),
+        (true, None) => Err(AppError::StorageCorrupt(format!(
+            "app {}: the record says this workspace is scaffolded, but the manifest records no \
+             surface, so there is no way to tell which scaffold its source was seeded from. No \
+             path in this version of the engine writes that combination; the app store is torn or \
+             the manifest was overwritten. Refusing to build rather than guessing a scaffold.",
+            layout.app_id()
+        ))),
+    }
 }
 
 /// The subset of [`VITE_LOCKED_FILES`] the host re-pins from its compiled-in
@@ -395,6 +496,25 @@ pub(crate) fn scaffold_workspace(
     let mut manifest = local_apps::AppManifest::for_new_app(layout.app_id(), layout.app_id());
     manifest.surface = Some(target.surface());
     local_apps::save_manifest(layout, &manifest)?;
+    // And stamp the record mirror the same way, for the same reason:
+    // `detect_build_target` judges the PAIR (`scaffolded`, `surface`), so a
+    // workspace that received only half the stamp is a torn record by
+    // construction and would refuse to build. An existing mirror is amended in
+    // place rather than replaced — the record carries the user's name, brief and
+    // ids, and only `scaffolded` is this function's to change.
+    let mut record = load_record_mirror(layout).unwrap_or_else(|_| {
+        local_apps::AppState::create_with_git(
+            layout.app_id().to_string(),
+            layout.app_id().to_string(),
+            layout.app_id().to_string(),
+            None,
+            false,
+            now_ms(),
+        )
+        .record
+    });
+    record.scaffolded = true;
+    save_record_mirror(layout, &record)?;
     scaffold_workspace_initialized(layout, target, true)
 }
 
@@ -1989,60 +2109,235 @@ mod tests {
         }
     }
 
-    /// The MANIFEST decides the scaffold, and the files on disk do not get a
-    /// vote.
+    /// Materialize the two persisted facts `detect_build_target` judges, and
+    /// nothing else.
+    ///
+    /// Deliberately NOT built on `scaffold_workspace`: that helper stamps the
+    /// record mirror and the manifest CONSISTENTLY, so it cannot express the
+    /// two torn rows this suite exists to pin. Written by hand, each half can
+    /// disagree with the other.
+    fn layout_with(
+        root: &Path,
+        scaffolded: bool,
+        surface: Option<local_apps::AppSurface>,
+    ) -> AppLayout {
+        let layout = AppLayout::new(root, "aaaa1111").expect("layout");
+        layout.initialize().expect("initialize");
+
+        let mut record = local_apps::AppState::create_with_git(
+            "aaaa1111".to_string(),
+            "Fixture".to_string(),
+            "a fixture app".to_string(),
+            None,
+            false,
+            1_700_000_000_000,
+        )
+        .record;
+        record.scaffolded = scaffolded;
+        save_record_mirror(&layout, &record).expect("record mirror");
+
+        let mut manifest = local_apps::AppManifest::for_new_app("aaaa1111", "Fixture");
+        manifest.surface = surface;
+        local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        layout
+    }
+
+    /// The `+` button lands exactly this: a record and a workspace, no shape.
+    /// The refusal has to name the tool that gives it one, because the reader is
+    /// the agent holding the conversation.
+    #[test]
+    fn an_unscaffolded_shell_says_to_define_the_surface_first() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = layout_with(root.path(), false, None);
+
+        let error = detect_build_target(&layout).expect_err("a shell has nothing to build");
+        assert!(
+            error.to_string().contains("LocalAppScaffold"),
+            "the refusal must name the tool that lands a shape: {error:?}"
+        );
+        assert!(
+            matches!(error, AppError::InvalidRequest(_)),
+            "an unformed shell is a legitimate state, not corruption: {error:?}"
+        );
+    }
+
+    /// The ORDERING nail.
+    ///
+    /// An implementation that returns `from_surface(s)` as soon as `surface` is
+    /// `Some(_)` passes every happy-path test and every shell test above, and
+    /// goes green on this row too — by building a workspace whose own record
+    /// says it was never given a shape. Only the pair judgement catches it.
+    #[test]
+    fn an_unscaffolded_record_with_a_surface_does_not_bypass_the_shell_gate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = layout_with(root.path(), false, Some(local_apps::AppSurface::Dom));
+
+        let error = detect_build_target(&layout)
+            .expect_err("a torn record must not build, whatever its manifest says");
+        assert!(
+            matches!(error, AppError::StorageCorrupt(_)),
+            "no path in this version writes scaffolded=false with a surface: {error:?}"
+        );
+        assert!(
+            error.to_string().contains("torn"),
+            "the refusal must say the store disagrees with itself: {error:?}"
+        );
+    }
+
+    /// The other torn row. Distinct from the shell above: the workspace HAS a
+    /// seeded source tree, so refusing with "call LocalAppScaffold" would send
+    /// the agent to wipe the user's app.
+    #[test]
+    fn a_scaffolded_record_without_a_surface_is_corruption_not_a_shell() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = layout_with(root.path(), true, None);
+
+        let error = detect_build_target(&layout).expect_err("no scaffold can be inferred");
+        assert!(
+            matches!(error, AppError::StorageCorrupt(_)),
+            "no path in this version writes scaffolded=true without a surface: {error:?}"
+        );
+        assert!(
+            !error.to_string().contains("LocalAppScaffold"),
+            "this app already has source; it must not be sent back through the scaffold: {error:?}"
+        );
+    }
+
+    /// The only buildable row, once per surface. Both are asserted because a
+    /// `from_surface` that collapsed to one target would otherwise pass.
+    #[test]
+    fn a_formed_app_resolves_to_the_target_its_surface_names() {
+        let dom_root = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            detect_build_target(&layout_with(
+                dom_root.path(),
+                true,
+                Some(local_apps::AppSurface::Dom)
+            ))
+            .expect("dom surface"),
+            LocalAppBuildTarget::ViteReactStaticV1
+        );
+
+        let canvas_root = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            detect_build_target(&layout_with(
+                canvas_root.path(),
+                true,
+                Some(local_apps::AppSurface::Canvas)
+            ))
+            .expect("canvas surface"),
+            LocalAppBuildTarget::ViteReactCanvasV1
+        );
+    }
+
+    /// The RECORD and the MANIFEST decide the scaffold; the files on disk do
+    /// not get a vote.
     ///
     /// Sniffing `vite.config.mjs` is what this used to do, and it was circular:
     /// that file is re-pinned from the compiled-in scaffold before every build,
     /// so a mis-detection would write one scaffold's infrastructure and then
     /// read its own output back as proof it guessed right.
     #[test]
-    fn the_manifest_decides_the_scaffold_and_a_pre_split_app_is_rejected() {
+    fn a_stray_vite_marker_cannot_talk_the_builder_out_of_the_recorded_surface() {
         let root = tempfile::tempdir().expect("tempdir");
-        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        layout.initialize().expect("initialize");
-
-        let mut manifest = local_apps::AppManifest::for_new_app("aaaa1111", "Fixture");
-        local_apps::save_manifest(&layout, &manifest).expect("manifest without a surface");
-        let error = detect_build_target(&layout)
-            .expect_err("an app created before the scaffold split cannot be rebuilt");
-        assert!(
-            error.to_string().contains("create a new app"),
-            "the refusal must tell the user what to do instead: {error:?}"
-        );
-
-        manifest.surface = Some(local_apps::AppSurface::Dom);
-        local_apps::save_manifest(&layout, &manifest).expect("dom manifest");
-        assert_eq!(
-            detect_build_target(&layout).expect("dom surface"),
-            LocalAppBuildTarget::ViteReactStaticV1
-        );
-
-        manifest.surface = Some(local_apps::AppSurface::Canvas);
-        local_apps::save_manifest(&layout, &manifest).expect("canvas manifest");
-        assert_eq!(
-            detect_build_target(&layout).expect("canvas surface"),
-            LocalAppBuildTarget::ViteReactCanvasV1
-        );
-
-        // A stray Vite config must NOT be able to talk the builder out of the
-        // recorded surface — that is the circularity above.
+        let layout = layout_with(root.path(), true, Some(local_apps::AppSurface::Canvas));
         let workspace = layout.root().join(layout.workspace_rel());
+
         fs::write(workspace.join("vite.config.mjs"), "export default {};").expect("Vite marker");
         assert_eq!(
             detect_build_target(&layout).expect("canvas surface survives a Vite marker"),
             LocalAppBuildTarget::ViteReactCanvasV1
         );
+    }
 
-        // The legacy Next rejection still precedes everything.
-        fs::write(workspace.join("next.config.mjs"), "export default {};").expect("Next marker");
-        let error = detect_build_target(&layout).expect_err("legacy Next marker must be rejected");
+    /// The legacy Next rejection precedes the combination judgement — on a
+    /// buildable app AND on a shell, because "first" is only meaningful if it
+    /// beats a row that would otherwise have answered.
+    #[test]
+    fn the_legacy_next_marker_is_rejected_before_the_combination_is_read() {
+        for (scaffolded, surface) in [
+            (true, Some(local_apps::AppSurface::Dom)),
+            (false, None),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let layout = layout_with(root.path(), scaffolded, surface);
+            let workspace = layout.root().join(layout.workspace_rel());
+            fs::write(workspace.join("next.config.mjs"), "export default {};")
+                .expect("Next marker");
+
+            let error =
+                detect_build_target(&layout).expect_err("legacy Next marker must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("local apps now support Vite only"),
+                "scaffolded={scaffolded}: {error:?}"
+            );
+        }
+    }
+
+    /// The mirror is the only place `scaffolded` is readable from a layout. If
+    /// it is gone, "is this a shell?" has no answer — and answering "yes"
+    /// would offer to re-scaffold over a formed app's source.
+    #[test]
+    fn a_missing_record_mirror_is_corruption_rather_than_an_assumed_shell() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = layout_with(root.path(), true, Some(local_apps::AppSurface::Dom));
+        fs::remove_file(
+            layout
+                .root()
+                .join(local_apps::storage::metadata_rel(layout.app_id())),
+        )
+        .expect("remove the mirror");
+
+        let error = detect_build_target(&layout).expect_err("no record, no verdict");
         assert!(
-            error
-                .to_string()
-                .contains("local apps now support Vite only"),
-            "{error:?}"
+            matches!(error, AppError::StorageCorrupt(_)),
+            "a missing mirror must not be read as a shell: {error:?}"
         );
+    }
+
+    /// `scaffold_workspace` writes BOTH halves of the pair, so the workspace it
+    /// materializes is buildable. Stamping only the manifest — which is what it
+    /// used to do — now produces the `false + Some(_)` torn row, so this pins
+    /// the two writers together rather than restating the detection rule.
+    #[test]
+    fn scaffold_workspace_stamps_both_halves_of_the_pair() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactCanvasV1).expect("scaffold");
+
+        assert!(
+            load_record_mirror(&layout).expect("record mirror").scaffolded,
+            "the scaffold is the moment the app gets its shape"
+        );
+        assert_eq!(
+            detect_build_target(&layout).expect("a scaffolded workspace is buildable"),
+            LocalAppBuildTarget::ViteReactCanvasV1
+        );
+    }
+
+    /// `scaffold_workspace` amends the record it finds; it does not replace it.
+    /// Overwriting would drop the user's name and brief — the two fields the
+    /// conversational create flow spends the whole interview collecting.
+    #[test]
+    fn scaffold_workspace_keeps_the_record_it_finds_and_only_flips_scaffolded() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = layout_with(root.path(), false, None);
+        let mut before = load_record_mirror(&layout).expect("record mirror");
+        before.name = "Tide Clock".to_string();
+        before.brief = "shows the local tide".to_string();
+        save_record_mirror(&layout, &before).expect("named record");
+
+        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1).expect("scaffold");
+
+        let after = load_record_mirror(&layout).expect("record mirror");
+        assert_eq!(after.name, "Tide Clock", "the interviewed name must survive");
+        assert_eq!(
+            after.brief, "shows the local tide",
+            "the interviewed brief must survive"
+        );
+        assert!(after.scaffolded, "and the shape must now be recorded");
     }
 
     #[test]

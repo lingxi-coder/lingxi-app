@@ -210,7 +210,12 @@ pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
         }),
         // `request_id` is dropped here, not yet forwarded: the wire DTO has
         // no `AppEventDto::AppCreated.request_id` field until Task 4 adds
-        // it, and Task 5 is what wires this arm through to it.
+        // it, and Task 5 is what wires this arm through to it. When that
+        // field exists, this arm MUST become `request_id: Some(request_id)`
+        // (forwarded, not `None`) — the `AppCreated` case in
+        // `every_app_event_arm_lowers_field_exact` below feeds this arm a
+        // `Some("req-1")` input specifically so that leaving `None` here
+        // fails that test instead of shipping a silent drop.
         AppEvent::AppCreated {
             record,
             request_id: _,
@@ -692,9 +697,14 @@ mod tests {
     }
 
     /// W4: exact field mapping for EVERY `lower_app_event` arm (one pair per
-    /// `AppEvent` variant). The expectation side uses exhaustive struct
-    /// literals with a distinct value per field, so a transposed or dropped
-    /// field fails here instead of shipping silently.
+    /// `AppEvent` variant — six of them; count against the `AppEvent` enum
+    /// itself, not this comment). The expectation side uses exhaustive
+    /// struct literals with a distinct value per field, so a transposed or
+    /// dropped field fails here instead of shipping silently — PROVIDED the
+    /// variant has a case below. This list is hand-maintained, not
+    /// compiler-checked, and it already drifted once: `AppCreated` was
+    /// missing for a full review cycle while this comment kept claiming
+    /// completeness. Don't trust the claim on faith; verify the count.
     #[test]
     fn every_app_event_arm_lowers_field_exact() {
         let record = AppRecord {
@@ -737,6 +747,28 @@ mod tests {
                 },
                 ClientEvent::AppsChanged {
                     apps: vec![record_dto.clone()],
+                },
+            ),
+            (
+                // `AppEventDto::AppCreated` has no `request_id` field yet
+                // (Task 4 adds it) — the expected literal below can't name
+                // the field until then, and today's `lower_app_event` arm
+                // drops it via `request_id: _` (see the comment there). The
+                // INPUT deliberately carries `Some("req-1")`, not `None`:
+                // once the DTO gains the field, this expected struct
+                // literal becomes non-exhaustive and forces whoever adds it
+                // to consciously write `request_id: Some("req-1".into())`
+                // here. Writing `None` would compile and pass, but it would
+                // be asserting the exact silent drop this test exists to
+                // catch — don't do that.
+                AppEvent::AppCreated {
+                    record: record.clone(),
+                    request_id: Some("req-1".into()),
+                },
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppCreated {
+                        record: record_dto.clone(),
+                    },
                 },
             ),
             (
@@ -803,12 +835,16 @@ mod tests {
                 },
             ),
         ];
-        // Every `AppEvent` variant appears exactly once above. That
-        // completeness is hand-maintained: a genuinely NEW `AppEvent`
+        // As of this writing, every `AppEvent` variant appears exactly once
+        // above (6 variants, 6 cases — count them). That completeness is
+        // hand-maintained, NOT compiler-enforced: a genuinely NEW `AppEvent`
         // variant forces a compile error into `lower_app_event`'s match, but
         // that compile error does NOT, by itself, force a new pair into this
-        // list. Whoever adds the next variant should add a case here too,
-        // but the compiler will not make them.
+        // list — and it does not re-verify this comment either. This exact
+        // list already drifted once (missing `AppCreated`) while both this
+        // comment and the doc comment above it kept asserting completeness,
+        // and nothing here failed. Whoever adds the next variant must add a
+        // case here too and recount — do not take this comment's word for it.
         for (domain, expected) in cases {
             assert_eq!(lower_app_event(domain), Some(expected));
         }

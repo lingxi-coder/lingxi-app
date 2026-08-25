@@ -9179,7 +9179,7 @@ pub fn build_mobile_engine(
 /// workspace — history follows the user, the source session stays put; a
 /// library create (or a fork that fails, e.g. an empty source) anchors an
 /// empty mobile session instead. Returns the minted uuid; the caller pins it
-async fn mint_app_init_session(
+pub(crate) async fn mint_app_init_session(
     lingxi_home: &std::path::Path,
     source_cwd: &str,
     data_root: &std::path::Path,
@@ -9225,6 +9225,269 @@ async fn mint_app_init_session(
         .await
         .map_err(|error| format!("anchor app init session: {error}"))?;
     Ok(init_id)
+}
+
+/// The boot backfill sweep, as a named function so it has a test.
+///
+/// Walks every app record once per launch. Per record, in this order:
+/// 1. migrate/merge a session catalog stranded under a drifted directory name;
+/// 2. re-anchor a pinned init session whose transcript file is gone;
+/// 3. reconcile a pinned init session still carrying the shell placeholder
+///    title (the retry behind `LocalAppScaffold`'s immediate rename);
+/// 4. for a record with NO pin at all, mint one and set it (set-once, so a
+///    concurrent `CreateApp` arbitrates and the loser drops its file).
+///
+/// Every step is best-effort per app — a failure is logged and re-attempted on
+/// the next launch, which is what makes each of them genuinely retryable
+/// rather than merely described as such.
+///
+/// Steps 1-3 run for EVERY record; step 4 is the only one gated on the pin
+/// being absent, and step 3 deliberately runs before that gate because every
+/// record it can help already has a pin.
+pub(crate) async fn run_app_boot_backfill_sweep(
+    backfill_home: std::path::PathBuf,
+    backfill_cwd: String,
+    backfill_root: std::path::PathBuf,
+    backfill_fs: Arc<dyn traits::FileSystem>,
+    backfill_service: Arc<local_apps::AppService>,
+) {
+    for record in backfill_service.records().await {
+        // Self-heal the app's catalog location FIRST. Two
+        // real-world drifts strand it: (a) an app reinstall
+        // changes the iOS data-container UUID, so the old
+        // absolute-path key never matches again; (b) the
+        // `/var` vs `/private/var` symlink split minted the
+        // catalog under one spelling while resume looked
+        // under the other. Expected dir = today's CANONICAL
+        // spelling; any older dir whose name ends with this
+        // app's workspace suffix is renamed onto it.
+        {
+            let workspace_cwd =
+                canonical_cwd_string(&backfill_root.join(&record.workspace_rel));
+            let projects = backfill_home.join("projects");
+            let expected = projects
+                .join(session::jsonl::path::project_dir_name(&workspace_cwd));
+            let suffix = format!("-apps-{}-workspace", record.id);
+            // There can be MORE than one drifted directory —
+            // the two documented drifts compound (an old
+            // container UUID AND the pre-canonical `/var`
+            // spelling). Collect them all: migrating only the
+            // first `read_dir` yields would orphan the rest
+            // permanently, because the rename makes
+            // `expected` exist and this block never runs
+            // again.
+            let mut drifted: Vec<std::path::PathBuf> =
+                match std::fs::read_dir(&projects) {
+                    Ok(entries) => entries
+                        .flatten()
+                        .filter(|entry| {
+                            entry.file_name().to_string_lossy().ends_with(&suffix)
+                                && entry.path() != expected
+                                && entry.path().is_dir()
+                        })
+                        .map(|entry| entry.path())
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+            let init_file_name = record
+                .init_session_id
+                .as_deref()
+                .map(|id| format!("{id}.jsonl"));
+            if !drifted.is_empty() && !expected.exists() {
+                // Promote the candidate that actually HOLDS
+                // the pinned init session: a chat-origin app
+                // forked its whole transcript there, and an
+                // arbitrary `read_dir` winner would bury it.
+                let base_index = init_file_name
+                    .as_deref()
+                    .and_then(|file| {
+                        drifted.iter().position(|dir| dir.join(file).exists())
+                    })
+                    .unwrap_or(0);
+                let base = drifted.remove(base_index);
+                match std::fs::rename(&base, &expected) {
+                    Ok(()) => tracing::info!(
+                        app_id = %record.id,
+                        from = %base.display(),
+                        "migrated drifted app session catalog"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(
+                            app_id = %record.id,
+                            error = %error,
+                            "app catalog migration rename failed; merging instead"
+                        );
+                        // Keep it in the merge set rather than
+                        // dropping it on the floor.
+                        drifted.push(base);
+                    }
+                }
+            }
+            // Fold every remaining drifted catalog into the
+            // expected one. Moves are per-file and NEVER
+            // overwrite, so a name collision leaves both
+            // copies on disk instead of destroying one.
+            for dir in drifted {
+                if std::fs::create_dir_all(&expected).is_err() {
+                    break;
+                }
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let target = expected.join(entry.file_name());
+                    if target.exists() {
+                        continue;
+                    }
+                    if let Err(error) = std::fs::rename(entry.path(), &target) {
+                        tracing::warn!(
+                            app_id = %record.id,
+                            error = %error,
+                            "app catalog merge failed for one session"
+                        );
+                    }
+                }
+                // Only removes it when the merge emptied it.
+                let _ = std::fs::remove_dir(&dir);
+                tracing::info!(
+                    app_id = %record.id,
+                    from = %dir.display(),
+                    "merged drifted app session catalog"
+                );
+            }
+            // A pinned init session whose file is STILL
+            // missing after migration (deleted container,
+            // partial restore) gets re-anchored in place so
+            // resume always has a target. This runs LAST, and
+            // only on genuine absence: re-anchoring over a
+            // catalog that still had the real transcript
+            // would replace the user's history with an empty
+            // session AND make the migration above
+            // unreachable forever.
+            if let Some(init_id) = record.init_session_id.as_deref() {
+                let expected_file = expected.join(format!("{init_id}.jsonl"));
+                if !expected_file.exists() {
+                    if let Err(error) = std::fs::create_dir_all(&expected) {
+                        tracing::warn!(
+                            app_id = %record.id,
+                            error = %error,
+                            "app catalog dir create failed"
+                        );
+                    } else {
+                        let writer = session::jsonl::writer::JsonlWriter::new(
+                            expected_file,
+                            backfill_fs.clone(),
+                        );
+                        if let Err(error) = writer
+                            .append_mobile_empty_session(init_id, &record.name)
+                            .await
+                        {
+                            tracing::warn!(
+                                app_id = %record.id,
+                                error = %error,
+                                "init-session re-anchor failed"
+                            );
+                        } else {
+                            tracing::info!(
+                                app_id = %record.id,
+                                "re-anchored missing init session"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Reconcile the pinned init session's TITLE. This is the retry that
+        // makes `LocalAppScaffold`'s immediate rename recoverable: that rename
+        // runs after the scaffold has already committed and is deliberately
+        // not rolled back on failure, so without a trigger here a title left
+        // reading `untitled` would stay that way for the life of the app.
+        //
+        // ⚠️ It runs BEFORE the `init_session_id.is_some()` early-continue
+        // below, because every record it can help is one that already HAS a
+        // pin — putting it after that `continue` would make it dead code.
+        //
+        // It shares one predicate with the immediate rename
+        // (`reconcile_app_init_session_title`), so neither can decide
+        // differently about whether the user renamed the session themselves.
+        match crate::local_apps_host::reconcile_app_init_session_title(
+            &backfill_home,
+            &backfill_root,
+            backfill_fs.clone(),
+            &record,
+        )
+        .await
+        {
+            Ok(true) => tracing::info!(
+                app_id = %record.id,
+                "boot sweep reconciled a pinned init-session title"
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                app_id = %record.id,
+                %error,
+                "boot sweep init-session title reconciliation failed"
+            ),
+        }
+        if record.init_session_id.is_some() {
+            continue;
+        }
+        // Re-read before minting: `record` is a snapshot from
+        // the list at the top of this sweep, and a CreateApp
+        // landing in between commits its record BEFORE it
+        // pins. Trusting the snapshot makes both paths mint an
+        // anchor for the same app; the pin arbitrates and the
+        // loser cleans up, but the app's session list would
+        // still show the loser's row until it does.
+        let record = match backfill_service.record(&record.id).await {
+            Ok(fresh) if fresh.init_session_id.is_none() => fresh,
+            _ => continue,
+        };
+        match mint_app_init_session(
+            &backfill_home,
+            &backfill_cwd,
+            &backfill_root,
+            backfill_fs.clone(),
+            &record,
+        )
+        .await
+        {
+            Ok(init_id) => {
+                if let Err(error) = backfill_service
+                    .set_init_session(&record.id, &init_id)
+                    .await
+                {
+                    // The mint is only half a transaction: an
+                    // unpinned session file is unreachable
+                    // (nothing references it) and this sweep
+                    // would mint ANOTHER one — for a
+                    // chat-origin app, a full transcript copy
+                    // — on every single boot. Drop the orphan
+                    // so the retry stays bounded. The same
+                    // cleanup on the CreateApp path settles
+                    // the race between the two: whoever loses
+                    // `set_init_session` takes its file back.
+                    let removed = remove_app_session_file(
+                        &backfill_home,
+                        &backfill_root,
+                        &record,
+                        &init_id,
+                    );
+                    tracing::warn!(
+                        app_id = %record.id,
+                        error = %error,
+                        orphan_removed = removed,
+                        "init-session backfill pin failed"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
+                app_id = %record.id,
+                error = %error,
+                "init-session backfill mint failed"
+            ),
+        }
+    }
 }
 
 fn mobile_apps_data_root(cfg: &MobileConfig) -> std::path::PathBuf {
@@ -9405,6 +9668,19 @@ pub fn build_mobile_engine_inner(
             tracing::warn!("local-apps host environment was already attached");
         }
     }
+    // Where an app's pinned init session lives, so `LocalAppScaffold` can
+    // rename it out of the shell placeholder the moment the app is formed.
+    // The broker already knows the apps data root; `lingxi_home` and the
+    // filesystem are the composition root's to hand over.
+    if local_apps_host
+        .attach_session_catalog(crate::local_apps_host::SessionCatalog {
+            lingxi_home: firer_cfg.lingxi_home.clone(),
+            fs: fs.clone(),
+        })
+        .is_err()
+    {
+        tracing::warn!("local-apps session catalog was already attached");
+    }
     match &local_apps {
         Ok(service) => {
             if inner
@@ -9414,226 +9690,18 @@ pub fn build_mobile_engine_inner(
             {
                 tracing::warn!("local-apps MCP service was already attached");
             }
-            // v3 Phase 4: backfill missing init-session pins for apps that
-            // predate the anchor (chat-origin records even get their history
-            // forked in when the source still exists; anything else anchors
-            // empty). Runs as a background sweep on the shared worker
-            // runtime (this builder is sync); best-effort per app — a
-            // failure retries next boot.
-            {
-                let backfill_home = firer_cfg.lingxi_home.clone();
-                let backfill_cwd = firer_cfg.cwd.to_string_lossy().to_string();
-                let backfill_root = mobile_apps_data_root(&firer_cfg);
-                let backfill_fs = fs.clone();
-                let backfill_service = service.clone();
-                crate::local_apps_profile::worker_runtime().spawn(async move {
-                    for record in backfill_service.records().await {
-                        // Self-heal the app's catalog location FIRST. Two
-                        // real-world drifts strand it: (a) an app reinstall
-                        // changes the iOS data-container UUID, so the old
-                        // absolute-path key never matches again; (b) the
-                        // `/var` vs `/private/var` symlink split minted the
-                        // catalog under one spelling while resume looked
-                        // under the other. Expected dir = today's CANONICAL
-                        // spelling; any older dir whose name ends with this
-                        // app's workspace suffix is renamed onto it.
-                        {
-                            let workspace_cwd =
-                                canonical_cwd_string(&backfill_root.join(&record.workspace_rel));
-                            let projects = backfill_home.join("projects");
-                            let expected = projects
-                                .join(session::jsonl::path::project_dir_name(&workspace_cwd));
-                            let suffix = format!("-apps-{}-workspace", record.id);
-                            // There can be MORE than one drifted directory —
-                            // the two documented drifts compound (an old
-                            // container UUID AND the pre-canonical `/var`
-                            // spelling). Collect them all: migrating only the
-                            // first `read_dir` yields would orphan the rest
-                            // permanently, because the rename makes
-                            // `expected` exist and this block never runs
-                            // again.
-                            let mut drifted: Vec<std::path::PathBuf> =
-                                match std::fs::read_dir(&projects) {
-                                    Ok(entries) => entries
-                                        .flatten()
-                                        .filter(|entry| {
-                                            entry.file_name().to_string_lossy().ends_with(&suffix)
-                                                && entry.path() != expected
-                                                && entry.path().is_dir()
-                                        })
-                                        .map(|entry| entry.path())
-                                        .collect(),
-                                    Err(_) => Vec::new(),
-                                };
-                            let init_file_name = record
-                                .init_session_id
-                                .as_deref()
-                                .map(|id| format!("{id}.jsonl"));
-                            if !drifted.is_empty() && !expected.exists() {
-                                // Promote the candidate that actually HOLDS
-                                // the pinned init session: a chat-origin app
-                                // forked its whole transcript there, and an
-                                // arbitrary `read_dir` winner would bury it.
-                                let base_index = init_file_name
-                                    .as_deref()
-                                    .and_then(|file| {
-                                        drifted.iter().position(|dir| dir.join(file).exists())
-                                    })
-                                    .unwrap_or(0);
-                                let base = drifted.remove(base_index);
-                                match std::fs::rename(&base, &expected) {
-                                    Ok(()) => tracing::info!(
-                                        app_id = %record.id,
-                                        from = %base.display(),
-                                        "migrated drifted app session catalog"
-                                    ),
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            app_id = %record.id,
-                                            error = %error,
-                                            "app catalog migration rename failed; merging instead"
-                                        );
-                                        // Keep it in the merge set rather than
-                                        // dropping it on the floor.
-                                        drifted.push(base);
-                                    }
-                                }
-                            }
-                            // Fold every remaining drifted catalog into the
-                            // expected one. Moves are per-file and NEVER
-                            // overwrite, so a name collision leaves both
-                            // copies on disk instead of destroying one.
-                            for dir in drifted {
-                                if std::fs::create_dir_all(&expected).is_err() {
-                                    break;
-                                }
-                                let Ok(entries) = std::fs::read_dir(&dir) else {
-                                    continue;
-                                };
-                                for entry in entries.flatten() {
-                                    let target = expected.join(entry.file_name());
-                                    if target.exists() {
-                                        continue;
-                                    }
-                                    if let Err(error) = std::fs::rename(entry.path(), &target) {
-                                        tracing::warn!(
-                                            app_id = %record.id,
-                                            error = %error,
-                                            "app catalog merge failed for one session"
-                                        );
-                                    }
-                                }
-                                // Only removes it when the merge emptied it.
-                                let _ = std::fs::remove_dir(&dir);
-                                tracing::info!(
-                                    app_id = %record.id,
-                                    from = %dir.display(),
-                                    "merged drifted app session catalog"
-                                );
-                            }
-                            // A pinned init session whose file is STILL
-                            // missing after migration (deleted container,
-                            // partial restore) gets re-anchored in place so
-                            // resume always has a target. This runs LAST, and
-                            // only on genuine absence: re-anchoring over a
-                            // catalog that still had the real transcript
-                            // would replace the user's history with an empty
-                            // session AND make the migration above
-                            // unreachable forever.
-                            if let Some(init_id) = record.init_session_id.as_deref() {
-                                let expected_file = expected.join(format!("{init_id}.jsonl"));
-                                if !expected_file.exists() {
-                                    if let Err(error) = std::fs::create_dir_all(&expected) {
-                                        tracing::warn!(
-                                            app_id = %record.id,
-                                            error = %error,
-                                            "app catalog dir create failed"
-                                        );
-                                    } else {
-                                        let writer = session::jsonl::writer::JsonlWriter::new(
-                                            expected_file,
-                                            backfill_fs.clone(),
-                                        );
-                                        if let Err(error) = writer
-                                            .append_mobile_empty_session(init_id, &record.name)
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                app_id = %record.id,
-                                                error = %error,
-                                                "init-session re-anchor failed"
-                                            );
-                                        } else {
-                                            tracing::info!(
-                                                app_id = %record.id,
-                                                "re-anchored missing init session"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if record.init_session_id.is_some() {
-                            continue;
-                        }
-                        // Re-read before minting: `record` is a snapshot from
-                        // the list at the top of this sweep, and a CreateApp
-                        // landing in between commits its record BEFORE it
-                        // pins. Trusting the snapshot makes both paths mint an
-                        // anchor for the same app; the pin arbitrates and the
-                        // loser cleans up, but the app's session list would
-                        // still show the loser's row until it does.
-                        let record = match backfill_service.record(&record.id).await {
-                            Ok(fresh) if fresh.init_session_id.is_none() => fresh,
-                            _ => continue,
-                        };
-                        match mint_app_init_session(
-                            &backfill_home,
-                            &backfill_cwd,
-                            &backfill_root,
-                            backfill_fs.clone(),
-                            &record,
-                        )
-                        .await
-                        {
-                            Ok(init_id) => {
-                                if let Err(error) = backfill_service
-                                    .set_init_session(&record.id, &init_id)
-                                    .await
-                                {
-                                    // The mint is only half a transaction: an
-                                    // unpinned session file is unreachable
-                                    // (nothing references it) and this sweep
-                                    // would mint ANOTHER one — for a
-                                    // chat-origin app, a full transcript copy
-                                    // — on every single boot. Drop the orphan
-                                    // so the retry stays bounded. The same
-                                    // cleanup on the CreateApp path settles
-                                    // the race between the two: whoever loses
-                                    // `set_init_session` takes its file back.
-                                    let removed = remove_app_session_file(
-                                        &backfill_home,
-                                        &backfill_root,
-                                        &record,
-                                        &init_id,
-                                    );
-                                    tracing::warn!(
-                                        app_id = %record.id,
-                                        error = %error,
-                                        orphan_removed = removed,
-                                        "init-session backfill pin failed"
-                                    );
-                                }
-                            }
-                            Err(error) => tracing::warn!(
-                                app_id = %record.id,
-                                error = %error,
-                                "init-session backfill mint failed"
-                            ),
-                        }
-                    }
-                });
-            }
+            // v3 Phase 4: repair init-session pins, drifted catalogs and
+            // placeholder titles for every app. Runs as a background sweep on
+            // the shared worker runtime (this builder is sync); see
+            // `run_app_boot_backfill_sweep` for what it repairs and why each
+            // repair is retried rather than rolled back.
+            crate::local_apps_profile::worker_runtime().spawn(run_app_boot_backfill_sweep(
+                firer_cfg.lingxi_home.clone(),
+                firer_cfg.cwd.to_string_lossy().to_string(),
+                mobile_apps_data_root(&firer_cfg),
+                fs.clone(),
+                service.clone(),
+            ));
         }
         Err(error) => {
             tracing::warn!(

@@ -456,6 +456,168 @@ pub(crate) fn remove_app_session_file(
     std::fs::remove_file(path).is_ok()
 }
 
+/// Where a session this host minted for an app lives on disk. The one spelling
+/// [`remove_app_session_file`] and [`reconcile_app_init_session_title`] both
+/// derive their path from, so they can never disagree about which file is the
+/// app's pinned init session.
+fn app_session_file(
+    lingxi_home: &std::path::Path,
+    data_root: &std::path::Path,
+    record: &local_apps::AppRecord,
+    session_id: &str,
+) -> std::path::PathBuf {
+    let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
+    lingxi_home
+        .join("projects")
+        .join(session::jsonl::path::project_dir_name(&workspace_cwd))
+        .join(format!("{session_id}.jsonl"))
+}
+
+/// The session-catalog facts the `LocalAppScaffold` commit point needs in order
+/// to rename an app's pinned init session: where transcripts live
+/// (`<lingxi_home>/projects/…`) and the filesystem that reads and appends them.
+///
+/// Attached by the engine builder, which owns both. `self.root` is already the
+/// apps data root, so `lingxi_home` is the only path the broker is missing —
+/// and it is deliberately passed rather than re-derived from `root`, because
+/// `mobile_apps_data_root` degrades to `cwd` when `lingxi_home` has no usable
+/// parent, and inverting that guess would point the rename at the wrong
+/// catalog on exactly the configuration that already went wrong.
+#[derive(Clone)]
+pub(crate) struct SessionCatalog {
+    /// The engine's per-profile data dir — `projects/` hangs off it.
+    pub(crate) lingxi_home: std::path::PathBuf,
+    /// The filesystem transcripts are read and appended through.
+    pub(crate) fs: Arc<dyn traits::FileSystem>,
+}
+
+/// The latest effective `custom-title` for `session_id` in a transcript: the
+/// title it resolves to, and whether that record still carries mobile's own
+/// `mobileEmptySession` marker.
+///
+/// "Latest effective" mirrors [`session::jsonl::reader`] exactly: it folds
+/// every `custom-title` line whose `sessionId` matches into one map slot, so
+/// the LAST one on disk wins, and a record whose `customTitle` is not a string
+/// is skipped (the reader's `and_then(Value::as_str)` drops it too).
+fn latest_custom_title(transcript: &str, session_id: &str) -> Option<(String, bool)> {
+    let mut latest = None;
+    for line in transcript.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("custom-title") {
+            continue;
+        }
+        if value.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+            continue;
+        }
+        let Some(title) = value.get("customTitle").and_then(Value::as_str) else {
+            continue;
+        };
+        let mobile_marker =
+            value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1);
+        latest = Some((title.to_string(), mobile_marker));
+    }
+    latest
+}
+
+/// Whether this session's title is still one MOBILE wrote, i.e. the user has
+/// never renamed it.
+///
+/// ⚠️ The title TEXT cannot decide this and must never be used to.
+/// `/rename` (`orchestrator`'s `append_custom_title`), a hook's `sessionTitle`
+/// and mobile's own placeholder anchor all write the SAME `custom-title`
+/// channel with the same shape; the only discriminator is the extra
+/// `"mobileEmptySession":1` field that
+/// [`session::jsonl::writer::JsonlWriter::append_mobile_empty_session`] adds.
+/// Last record wins, so one ordinary `custom-title` anywhere after the anchor
+/// turns this `false` and keeps it `false` forever — which is the point.
+///
+/// Known cases where this declines for a session the user never touched. The
+/// bias is deliberate and one-directional: a false negative costs a stale
+/// title, a false positive overwrites something a user typed.
+/// - a transcript with no `custom-title` at all — nothing this host anchored,
+///   so nothing for it to reconcile;
+/// - a transcript long enough to have tripped the writer's 32 KiB metadata
+///   re-append backstop, which re-emits the adopted title as a PLAIN
+///   `custom-title` without the marker;
+/// - a CHAT-ORIGIN app, whose init session is forked by
+///   `session::branch::create_branch_to_cwd`. That fork writes its own
+///   unmarked `custom-title` (from `record.name`, i.e. the placeholder), so a
+///   chat-origin shell keeps its `untitled` session title. Closing that would
+///   mean either marking a forked, non-empty session as a mobile empty session
+///   — which is what `mobileEmptySession` means elsewhere — or reasoning from
+///   the title text, which is exactly what this function exists to avoid. It
+///   is left open rather than papered over.
+pub(crate) fn latest_custom_title_is_mobile_placeholder(
+    transcript: &str,
+    session_id: &str,
+) -> bool {
+    latest_custom_title(transcript, session_id).is_some_and(|(_, marker)| marker)
+}
+
+/// The ONE reconciliation between an app's pinned init session title and
+/// `record.name`, shared by the `LocalAppScaffold` commit point (which calls it
+/// immediately) and the boot backfill sweep (which is the retry that makes a
+/// failed immediate rename recoverable rather than permanent).
+///
+/// The full predicate, all three clauses required:
+/// 1. `record.scaffolded` — an app still in its interview is SUPPOSED to read
+///    `untitled`; renaming it early would put a real name in the library on a
+///    record that still opens the interview.
+/// 2. the latest `custom-title` still carries `mobileEmptySession: 1`
+///    ([`latest_custom_title_is_mobile_placeholder`]) — the user has not
+///    renamed this session.
+/// 3. that title differs from `record.name` — otherwise there is nothing to do,
+///    and this is also what makes the boot sweep idempotent.
+///
+/// The rename is written with `append_mobile_empty_session` again, KEEPING the
+/// marker: the user still has not renamed anything, so a later `/rename` must
+/// still be able to take precedence over a subsequent reconcile.
+///
+/// Returns `Ok(true)` when a rename was written, `Ok(false)` when the predicate
+/// declined. A missing transcript is `Ok(false)`, not an error — the sweep's
+/// re-anchor step, which runs before this one, writes `record.name` directly.
+pub(crate) async fn reconcile_app_init_session_title(
+    lingxi_home: &std::path::Path,
+    data_root: &std::path::Path,
+    fs: Arc<dyn traits::FileSystem>,
+    record: &local_apps::AppRecord,
+) -> Result<bool, String> {
+    // Clause 1. Today no production state can reach this with a name that
+    // differs from the session title — a shell is minted with `record.name`,
+    // and `record.name` cannot change before the scaffold commits — so the
+    // guard is unobservable through the app paths. It is still load-bearing as
+    // a specification, and
+    // `reconciliation_waits_for_the_scaffold_commit_before_renaming` pins it
+    // directly so it cannot be deleted as dead code: a record that is still in
+    // its interview must keep showing the placeholder, whatever its name says.
+    if !record.scaffolded {
+        return Ok(false);
+    }
+    let Some(init_id) = record.init_session_id.as_deref() else {
+        return Ok(false);
+    };
+    let path = app_session_file(lingxi_home, data_root, record, init_id);
+    let Some(path_str) = path.to_str() else {
+        return Err(format!("init-session path is not UTF-8: {}", path.display()));
+    };
+    let Ok(file) = fs.read_file(path_str, None, None).await else {
+        return Ok(false);
+    };
+    let Some((title, mobile_marker)) = latest_custom_title(&file.content, init_id) else {
+        return Ok(false);
+    };
+    if !mobile_marker || title == record.name {
+        return Ok(false);
+    }
+    session::jsonl::writer::JsonlWriter::new(path, fs)
+        .append_mobile_empty_session(init_id, &record.name)
+        .await
+        .map_err(|error| format!("rename pinned init session: {error}"))?;
+    Ok(true)
+}
+
 /// What to tell the agent immediately after an app is created.
 ///
 /// It must NOT say "build it now". A create happens in a conversation that is
@@ -615,6 +777,14 @@ pub(crate) struct LocalAppsHostBroker {
     /// released by [`ScaffoldReservation::drop`], which cannot await, and the
     /// set is only ever insert/remove — no lock is ever held across an await.
     scaffold_reservations: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Where an app's pinned init session lives, so the §C.1 step 4 commit can
+    /// rename it out of its `untitled` placeholder. See [`SessionCatalog`].
+    ///
+    /// Optional on purpose: a broker built without it (every unit-test root
+    /// that has no session catalog at all) simply skips the immediate rename,
+    /// and the boot backfill sweep — which is handed `lingxi_home` and the
+    /// filesystem directly — still reconciles the title on the next launch.
+    session_catalog: OnceLock<SessionCatalog>,
     next_request_id: AtomicU64,
 }
 
@@ -675,6 +845,7 @@ impl LocalAppsHostBroker {
             scaffold_reservations: Arc::new(std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
+            session_catalog: OnceLock::new(),
             next_request_id: AtomicU64::new(1),
         });
         // The one place an `Arc<Self>` exists; the exit watchers downgrade
@@ -740,6 +911,16 @@ impl LocalAppsHostBroker {
         environment: traits::MobileHostEnvironment,
     ) -> Result<(), traits::MobileHostEnvironment> {
         self.host_environment.set(environment)
+    }
+
+    /// Bind the session catalog the scaffold commit renames the pinned init
+    /// session in. Set once, at the same composition-root call site as
+    /// [`Self::attach_host_environment`].
+    pub(crate) fn attach_session_catalog(
+        &self,
+        catalog: SessionCatalog,
+    ) -> Result<(), SessionCatalog> {
+        self.session_catalog.set(catalog)
     }
 
     /// The confirmed native target for apps generated on this host.
@@ -3359,6 +3540,41 @@ impl LocalAppsHostBroker {
             .await;
         drop(build_lock);
         let committed = committed.map_err(|error| error.to_string())?;
+
+        // STEP 5 — the pinned init session's title, AFTER the commit and
+        // deliberately outside it. The interview ran in a session titled
+        // `untitled` (the shell's placeholder name, minted into a PERSISTED
+        // session directory), and that title is what the user's session list
+        // shows forever otherwise.
+        //
+        // ⚠️ A failure here is logged and NOT rolled back. The scaffold has
+        // already committed — the app is formed, its workspace is seeded and
+        // its record says so — and unwinding that because a metadata line did
+        // not append would destroy real work over a cosmetic field. What makes
+        // that acceptable is that the boot backfill sweep runs the SAME
+        // reconciliation on every launch, so a title left behind here is
+        // repaired rather than stranded.
+        if let Some(catalog) = self.session_catalog.get() {
+            match reconcile_app_init_session_title(
+                &catalog.lingxi_home,
+                &self.root,
+                catalog.fs.clone(),
+                &committed,
+            )
+            .await
+            {
+                Ok(true) => tracing::info!(
+                    app_id = %committed.id,
+                    "renamed the pinned init session after scaffold"
+                ),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    app_id = %committed.id,
+                    %error,
+                    "pinned init-session rename failed; boot reconciliation will retry"
+                ),
+            }
+        }
         Ok(json!({
             "app": committed,
             "next_step": scaffold_next_step_guidance(),
@@ -8753,5 +8969,290 @@ mod tests {
                 .expect("the accept failure is preserved")
                 .contains("stopped accepting connections"));
         });
+    }
+
+    // ------------------------------------------------------------------
+    // Task 9: the pinned init session's title.
+    //
+    // A shell app's init session is minted while `record.name` is still the
+    // `untitled` placeholder, and that title lands in a PERSISTED session
+    // directory. Scaffolding renames it — but only when the user has not
+    // renamed it first, and the boot sweep must apply the SAME rule.
+    // ------------------------------------------------------------------
+
+    /// A shell app with a pinned init session, plus everything needed to read
+    /// and rewrite that session's title.
+    struct PinnedShell {
+        root: TempDir,
+        service: Arc<AppService>,
+        broker: Arc<LocalAppsHostBroker>,
+        lingxi_home: PathBuf,
+        fs: Arc<dyn traits::FileSystem>,
+        app_id: String,
+        init_session_id: String,
+        /// Captured at creation so the transcript path is derived exactly the
+        /// way production derives it, from the record's own workspace.
+        workspace_rel: String,
+    }
+
+    impl PinnedShell {
+        fn transcript(&self) -> PathBuf {
+            self.lingxi_home
+                .join("projects")
+                .join(session::jsonl::path::project_dir_name(&canonical_cwd_string(
+                    &self.root.path().join(&self.workspace_rel),
+                )))
+                .join(format!("{}.jsonl", self.init_session_id))
+        }
+
+        /// The title the session catalog would resolve for this session.
+        fn title(&self) -> String {
+            let transcript =
+                fs::read_to_string(self.transcript()).expect("read the pinned transcript");
+            latest_custom_title(&transcript, &self.init_session_id)
+                .expect("the pinned session always carries a custom-title")
+                .0
+        }
+
+        /// The user renaming the session themselves — `/rename`'s channel
+        /// (`append_custom_title`), which carries NO `mobileEmptySession`.
+        async fn user_rename(&self, title: &str) {
+            session::jsonl::writer::JsonlWriter::new(self.transcript(), self.fs.clone())
+                .append_custom_title(&self.init_session_id, title)
+                .await
+                .expect("user rename");
+        }
+
+        async fn scaffold(&self, name: &str) -> Result<Value, String> {
+            self.broker
+                .scaffold_shell_app_value(json!({
+                    "app_id": self.app_id,
+                    "name": name,
+                    "brief": "a confirmed brief",
+                    "surface": "canvas",
+                }))
+                .await
+        }
+
+        async fn run_boot_backfill_sweep(&self) {
+            crate::host::run_app_boot_backfill_sweep(
+                self.lingxi_home.clone(),
+                self.root.path().to_string_lossy().to_string(),
+                self.root.path().to_path_buf(),
+                self.fs.clone(),
+                self.service.clone(),
+            )
+            .await;
+        }
+    }
+
+    /// The "+" button's state: an unscaffolded shell whose pinned init session
+    /// is titled with the `untitled` placeholder.
+    async fn pinned_shell() -> PinnedShell {
+        let root = TempDir::new().expect("tempdir");
+        let lingxi_home = root.path().join(".lingxi");
+        fs::create_dir_all(&lingxi_home).expect("create lingxi home");
+        let fs_impl: Arc<dyn traits::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(root.path().to_path_buf()),
+        );
+        let service = test_service(&root).await;
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            Arc::new(NoopClientEventSink),
+            None,
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        assert!(broker
+            .attach_session_catalog(SessionCatalog {
+                lingxi_home: lingxi_home.clone(),
+                fs: fs_impl.clone(),
+            })
+            .is_ok());
+
+        let record = service
+            .create_app_with_mode(None, "", None, local_apps::CreateMode::Shell, None)
+            .await
+            .expect("create the shell app");
+        assert!(!record.scaffolded);
+        assert_eq!(record.name, local_apps::PLACEHOLDER_APP_NAME);
+
+        let init_session_id = crate::host::mint_app_init_session(
+            &lingxi_home,
+            &root.path().to_string_lossy(),
+            root.path(),
+            fs_impl.clone(),
+            &record,
+        )
+        .await
+        .expect("mint the pinned init session");
+        service
+            .set_init_session(&record.id, &init_session_id)
+            .await
+            .expect("pin the init session");
+
+        let shell = PinnedShell {
+            root,
+            service,
+            broker,
+            lingxi_home,
+            fs: fs_impl,
+            app_id: record.id,
+            init_session_id,
+            workspace_rel: record.workspace_rel.clone(),
+        };
+        // The defect this task exists for: the placeholder is already on disk.
+        assert_eq!(shell.title(), local_apps::PLACEHOLDER_APP_NAME);
+        shell
+    }
+
+    #[tokio::test]
+    async fn scaffold_renames_the_pinned_session_when_the_user_never_renamed_it() {
+        let shell = pinned_shell().await;
+
+        shell.scaffold("打飞机").await.expect("scaffold");
+
+        assert_eq!(shell.title(), "打飞机");
+    }
+
+    /// A rename that fails is only "retryable" if something actually retries
+    /// it. The scaffold has already committed by then and is NOT rolled back,
+    /// so the boot sweep is the whole of that guarantee.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_boot_sweep_reconciles_a_title_a_failed_rename_left_behind() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let shell = pinned_shell().await;
+        // Make the append genuinely fail: a read-only transcript cannot be
+        // opened for append. This is the real failure path, not a skipped one.
+        let transcript = shell.transcript();
+        fs::set_permissions(&transcript, fs::Permissions::from_mode(0o444))
+            .expect("make the transcript read-only");
+
+        shell
+            .scaffold("打飞机")
+            .await
+            .expect("a failed rename must not roll the scaffold back");
+
+        fs::set_permissions(&transcript, fs::Permissions::from_mode(0o644))
+            .expect("restore the transcript");
+        assert_eq!(
+            shell.title(),
+            local_apps::PLACEHOLDER_APP_NAME,
+            "the rename really did fail, so the retry has something to repair"
+        );
+        assert!(
+            shell
+                .service
+                .record(&shell.app_id)
+                .await
+                .expect("record")
+                .scaffolded,
+            "the scaffold itself committed"
+        );
+
+        shell.run_boot_backfill_sweep().await;
+
+        assert_eq!(
+            shell.title(),
+            "打飞机",
+            "a failed rename must have a real trigger that fixes it later"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_immediate_rename_never_clobbers_a_user_rename() {
+        let shell = pinned_shell().await;
+        shell.user_rename("我的宝贝项目").await;
+
+        shell.scaffold("打飞机").await.expect("scaffold");
+
+        assert_eq!(shell.title(), "我的宝贝项目");
+    }
+
+    #[tokio::test]
+    async fn the_boot_sweep_never_clobbers_a_user_rename_either() {
+        let shell = pinned_shell().await;
+        shell.user_rename("我的宝贝项目").await;
+        shell.scaffold("打飞机").await.expect("scaffold");
+
+        shell.run_boot_backfill_sweep().await;
+
+        assert_eq!(shell.title(), "我的宝贝项目");
+    }
+
+    /// Clause 1 of the predicate, pinned directly: an app still in its
+    /// interview keeps the placeholder title even when its record already
+    /// carries a real name. Driven through `reconcile_app_init_session_title`
+    /// rather than a whole scaffold, because the app paths cannot currently
+    /// produce this state — the point is that the rule survives a refactor
+    /// that lets them.
+    #[tokio::test]
+    async fn reconciliation_waits_for_the_scaffold_commit_before_renaming() {
+        let shell = pinned_shell().await;
+        let mut record = shell.service.record(&shell.app_id).await.expect("record");
+        record.name = "打飞机".into();
+        assert!(!record.scaffolded);
+
+        let renamed = reconcile_app_init_session_title(
+            &shell.lingxi_home,
+            shell.root.path(),
+            shell.fs.clone(),
+            &record,
+        )
+        .await
+        .expect("reconcile");
+
+        assert!(!renamed, "an unscaffolded shell is not renamed");
+        assert_eq!(shell.title(), local_apps::PLACEHOLDER_APP_NAME);
+
+        // The same record, one field later: the commit is the only thing that
+        // was missing.
+        record.scaffolded = true;
+        assert!(reconcile_app_init_session_title(
+            &shell.lingxi_home,
+            shell.root.path(),
+            shell.fs.clone(),
+            &record,
+        )
+        .await
+        .expect("reconcile"));
+        assert_eq!(shell.title(), "打飞机");
+    }
+
+    /// The discriminator, stated as a unit: three writers share the
+    /// `custom-title` channel and only one of them marks its records.
+    #[test]
+    fn only_the_mobile_marker_distinguishes_a_placeholder_from_a_user_rename() {
+        let session = "11111111-2222-3333-4444-555555555555";
+        let anchor =
+            format!(r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}","mobileEmptySession":1}}"#);
+        let renamed =
+            format!(r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}"}}"#);
+        let other_session =
+            r#"{"type":"custom-title","customTitle":"elsewhere","sessionId":"99999999-2222-3333-4444-555555555555"}"#;
+
+        assert!(latest_custom_title_is_mobile_placeholder(&anchor, session));
+        // Same TITLE TEXT, no marker — a user who renamed the session to the
+        // placeholder string is still a user rename.
+        assert!(!latest_custom_title_is_mobile_placeholder(&renamed, session));
+        // Last effective record wins, in both directions.
+        assert!(!latest_custom_title_is_mobile_placeholder(
+            &format!("{anchor}\n{renamed}"),
+            session
+        ));
+        assert!(latest_custom_title_is_mobile_placeholder(
+            &format!("{renamed}\n{anchor}"),
+            session
+        ));
+        // A record for another session never decides this one.
+        assert!(latest_custom_title_is_mobile_placeholder(
+            &format!("{anchor}\n{other_session}"),
+            session
+        ));
+        // Nothing this host anchored: leave it alone.
+        assert!(!latest_custom_title_is_mobile_placeholder("", session));
     }
 }

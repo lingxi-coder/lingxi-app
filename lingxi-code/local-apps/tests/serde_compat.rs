@@ -193,6 +193,7 @@ fn expected_states() -> Vec<AppState> {
             brief: "a ready fixture app with a full runtime record".to_string(),
             workflow_model: None,
             git_enabled: true,
+            scaffolded: true,
             created_at_ms: T0,
             updated_at_ms: T0 + 100,
             workflow_state: AppWorkflowState::Ready,
@@ -219,6 +220,7 @@ fn expected_states() -> Vec<AppState> {
             brief: "a minimal fixture app without git".to_string(),
             workflow_model: None,
             git_enabled: false,
+            scaffolded: true,
             created_at_ms: T0,
             updated_at_ms: T0,
             workflow_state: AppWorkflowState::Draft,
@@ -383,11 +385,16 @@ fn a_legacy_pipeline_store_loads_as_draft_and_ignores_stale_docs() {
     std::fs::create_dir_all(app_dir.join("workspace/.lingxi")).expect("mkdir");
 
     // A legacy record mid-pipeline, exactly as a pre-v3 build persisted it.
+    // This fixture is about the WORKFLOW-STATE migration (mid-pipeline
+    // strings collapsing to `draft`), which is orthogonal to `scaffolded`'s
+    // own no-default invariant (pinned separately below) — so it carries a
+    // `scaffolded` value like any other current-shape record would.
     let legacy_record = r#"{
     "id": "legacy01",
     "name": "Legacy Habits",
     "brief": "a legacy pipeline app",
     "gitEnabled": true,
+    "scaffolded": true,
     "createdAtMs": 1753000000000,
     "updatedAtMs": 1753000000700,
     "workflowState": "awaiting_preview_confirmation",
@@ -528,5 +535,27 @@ fn a_legacy_pipeline_store_loads_as_draft_and_ignores_stale_docs() {
     assert_eq!(
         std::fs::read_to_string(app_dir.join("workspace/.lingxi/app.json")).unwrap(),
         mirror_before
+    );
+}
+
+#[test]
+fn a_record_without_scaffolded_fails_to_load_instead_of_defaulting_to_a_shell() {
+    // §A.1 clean-install: a missing field is an unsupported old store, NOT a
+    // shell. Silently defaulting to `false` would let the next LocalAppScaffold
+    // WIPE a real app's source (§C.0.1 clears the editable surface).
+    //
+    // Every OTHER required field is present under its real wire spelling
+    // (`AppRecord` is `#[serde(rename_all = "camelCase")]`) so `scaffolded`
+    // is the only thing that can be missing — otherwise serde's derived
+    // error names whichever required field it hits first, which would not
+    // necessarily be `scaffolded`.
+    let json = r#"{"id":"legacy","name":"Legacy","brief":"b","gitEnabled":true,
+        "createdAtMs":1,"updatedAtMs":1,"workflowState":"draft",
+        "workspaceRel":"apps/legacy/workspace"}"#;
+    let err = serde_json::from_str::<AppRecord>(json)
+        .expect_err("a record without `scaffolded` must not load");
+    assert!(
+        err.to_string().contains("scaffolded"),
+        "the error must name the missing field; got {err}"
     );
 }

@@ -9,6 +9,7 @@
     "updatedAtMs": 1753000000100,
     "workflowState": "ready",
     "conversationId": "conv-fixture-1",
-    "workspaceRel": "apps/aaaa1111/workspace"
+    "workspaceRel": "apps/aaaa1111/workspace",
+    "scaffolded": true
   }
 }

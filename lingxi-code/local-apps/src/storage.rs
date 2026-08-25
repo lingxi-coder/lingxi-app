@@ -1260,6 +1260,7 @@ mod tests {
                     "id": "aaaa1111",
                     "name": "sneaky",
                     "brief": "a sneaky app",
+                    "scaffolded": true,
                     "createdAtMs": 1,
                     "updatedAtMs": 1,
                     "workflowState": "draft",

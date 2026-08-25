@@ -106,6 +106,12 @@ impl AppState {
                 workflow_state: AppWorkflowState::Draft,
                 conversation_id,
                 workspace_rel,
+                // Every direct caller of this constructor (seed/test
+                // helpers plus the service's Scaffolded-mode path) builds an
+                // already-formed app. `AppService`'s Shell mode is the one
+                // exception and overwrites this to `false` right after
+                // construction — see `CreateMode` in `service.rs`.
+                scaffolded: true,
             },
             runtime: AppRuntimeRecord {
                 schema_version: APPS_SCHEMA_VERSION,

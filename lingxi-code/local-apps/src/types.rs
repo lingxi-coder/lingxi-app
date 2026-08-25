@@ -177,6 +177,19 @@ pub struct AppRecord {
     /// Workspace directory relative to the data root, always
     /// `apps/<id>/workspace` with forward slashes.
     pub workspace_rel: String,
+    /// 工作区里是否已经落下脚手架。
+    ///
+    /// 每一条新记录都显式写入；缺字段是无效的旧 store（§A.1），不是空壳判据。
+    ///
+    /// 三个写入点，缺一不可：
+    ///   1. `CreateMode::Shell` 在构造记录时写 `false`；
+    ///   2. `CreateMode::Scaffolded`（`LocalAppCreate` 的 create+scaffold 路径）
+    ///      在构造记录时写 `true`；
+    ///   3. `LocalAppScaffold` 的提交点把 `false` 翻成 `true`。
+    ///
+    /// ⛔ 不要加 `#[serde(default)]`：缺字段必须加载失败并提示清除开发数据，
+    /// 而不是静默变成一个可以被 `LocalAppScaffold` 清空的 shell。
+    pub scaffolded: bool,
 }
 
 /// Why a checkpoint was recorded.
@@ -335,6 +348,7 @@ mod tests {
             brief: "Track daily habits".into(),
             workflow_model: None,
             git_enabled: true,
+            scaffolded: true,
             created_at_ms: 1_700_000_000_000,
             updated_at_ms: 1_700_000_000_001,
             workflow_state: AppWorkflowState::Draft,
@@ -348,6 +362,7 @@ mod tests {
         assert!(json.contains("\"workspaceRel\":\"apps/abc123/workspace\""));
         assert!(json.contains("\"brief\":\"Track daily habits\""));
         assert!(json.contains("\"gitEnabled\":true"));
+        assert!(json.contains("\"scaffolded\":true"));
         assert!(!json.contains("conversationId"));
         let back: AppRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, record);
@@ -359,6 +374,7 @@ mod tests {
             "id": "abc123",
             "name": "Habits",
             "brief": "Track daily habits",
+            "scaffolded": true,
             "createdAtMs": 1,
             "updatedAtMs": 2,
             "workflowState": "awaiting_preview_confirmation",

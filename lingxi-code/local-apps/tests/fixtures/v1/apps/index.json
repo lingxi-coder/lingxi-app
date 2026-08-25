@@ -10,7 +10,8 @@
       "updatedAtMs": 1753000000100,
       "workflowState": "ready",
       "conversationId": "conv-fixture-1",
-      "workspaceRel": "apps/aaaa1111/workspace"
+      "workspaceRel": "apps/aaaa1111/workspace",
+      "scaffolded": true
     },
     {
       "id": "bbbb2222",
@@ -20,7 +21,8 @@
       "createdAtMs": 1753000000000,
       "updatedAtMs": 1753000000000,
       "workflowState": "draft",
-      "workspaceRel": "apps/bbbb2222/workspace"
+      "workspaceRel": "apps/bbbb2222/workspace",
+      "scaffolded": true
     }
   ]
 }

@@ -77,6 +77,24 @@ pub const MAX_CONVERSATION_ID_BYTES: usize = 128;
 /// Maximum text value length in bytes (also the runtime `last_error` cap).
 pub const MAX_TEXT_VALUE_BYTES: usize = 20_000;
 
+/// Placeholder name for a [`CreateMode::Shell`] app created from an empty
+/// brief. **Not localized** — a client only ever renders it while
+/// `scaffolded == false`, and never surfaces it as real app content.
+pub const PLACEHOLDER_APP_NAME: &str = "untitled";
+
+/// Creation mode — the single decision point for `AppRecord.scaffolded`'s
+/// initial value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateMode {
+    /// The empty shell the "+" button creates: the brief may be empty, and
+    /// the record is written with `scaffolded: false`.
+    Shell,
+    /// Create + scaffold in one step (the `LocalAppCreate` tool path): the
+    /// brief must be non-empty (today's invariant, preserved), and the
+    /// record is written with `scaffolded: true`.
+    Scaffolded,
+}
+
 fn ensure_within(what: &str, len: usize, max: usize) -> Result<(), AppError> {
     if len <= max {
         Ok(())
@@ -828,6 +846,28 @@ impl AppService {
             .await
     }
 
+    /// Create a new app record in the given [`CreateMode`], with no Git/model
+    /// overrides and no pre-commit initializer — the shortest wrapper, and
+    /// the one [`CreateMode::Shell`] callers (the "+" button) use.
+    pub async fn create_app_with_mode(
+        &self,
+        name: Option<&str>,
+        brief: &str,
+        conversation_id: Option<String>,
+        mode: CreateMode,
+    ) -> Result<AppRecord, AppError> {
+        self.create_app_with_git_and_workflow_model_and_initializer(
+            name,
+            brief,
+            conversation_id,
+            crate::types::DEFAULT_GIT_VERSION_CONTROL,
+            None,
+            mode,
+            |_| async { Ok(()) },
+        )
+        .await
+    }
+
     /// Create a new app record and run a pre-commit initializer after the
     /// private on-disk skeleton exists but BEFORE the index/memory/event
     /// commit makes the app visible.
@@ -848,6 +888,7 @@ impl AppService {
             conversation_id,
             crate::types::DEFAULT_GIT_VERSION_CONTROL,
             None,
+            CreateMode::Scaffolded,
             initializer,
         )
         .await
@@ -867,6 +908,7 @@ impl AppService {
             conversation_id,
             git_enabled,
             None,
+            CreateMode::Scaffolded,
             |_| async { Ok(()) },
         )
         .await
@@ -887,6 +929,7 @@ impl AppService {
             conversation_id,
             git_enabled,
             workflow_model,
+            CreateMode::Scaffolded,
             |_| async { Ok(()) },
         )
         .await
@@ -902,6 +945,7 @@ impl AppService {
         conversation_id: Option<String>,
         git_enabled: bool,
         workflow_model: Option<&str>,
+        mode: CreateMode,
         initializer: F,
     ) -> Result<AppRecord, AppError>
     where
@@ -909,7 +953,7 @@ impl AppService {
         Fut: Future<Output = Result<(), AppError>> + Send + 'static,
     {
         let trimmed_brief = brief.trim();
-        if trimmed_brief.is_empty() {
+        if mode == CreateMode::Scaffolded && trimmed_brief.is_empty() {
             return Err(AppError::InvalidRequest(
                 "app brief must not be empty".into(),
             ));
@@ -923,7 +967,14 @@ impl AppService {
                 ensure_within("app name", candidate.len(), MAX_NAME_BYTES)?;
                 candidate.to_string()
             }
-            None => trimmed_brief.chars().take(24).collect(),
+            None => {
+                let derived: String = trimmed_brief.chars().take(24).collect();
+                if derived.is_empty() {
+                    PLACEHOLDER_APP_NAME.to_string()
+                } else {
+                    derived
+                }
+            }
         };
         if let Some(conversation_id) = &conversation_id {
             ensure_within(
@@ -969,6 +1020,7 @@ impl AppService {
                     );
                     let app_id = app.record.id.clone();
                     app.record.workflow_model = workflow_model;
+                    app.record.scaffolded = mode == CreateMode::Scaffolded;
                     let layout = AppLayout::new(root.clone(), app.record.id.clone())?;
                     let prepared: Result<AppState, AppError> = (|| {
                         // Per-app files first; the index entry is the commit
@@ -2173,6 +2225,48 @@ mod tests {
             .create_app(Some("Notes"), "   ", None)
             .await
             .expect_err("an empty brief is rejected");
+    }
+
+    #[tokio::test]
+    async fn shell_mode_accepts_an_empty_brief_and_records_an_unscaffolded_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app_with_mode(None, "", None, CreateMode::Shell)
+            .await
+            .expect("shell creation must accept an empty brief");
+        assert!(!record.scaffolded, "a shell is not scaffolded");
+        assert_eq!(record.brief, "");
+        assert_eq!(record.name, "untitled", "empty brief falls back to the placeholder");
+    }
+
+    #[tokio::test]
+    async fn scaffolded_mode_still_rejects_an_empty_brief() {
+        // The old invariant must NOT be collateral damage of the Shell relaxation.
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let err = h
+            .service
+            .create_app_with_mode(None, "   ", None, CreateMode::Scaffolded)
+            .await
+            .expect_err("Scaffolded mode keeps rejecting an empty brief");
+        assert!(
+            matches!(&err, AppError::InvalidRequest(m) if m.contains("brief")),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scaffolded_mode_records_a_scaffolded_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let record = h
+            .service
+            .create_app_with_mode(None, "a todo list", None, CreateMode::Scaffolded)
+            .await
+            .expect("create");
+        assert!(record.scaffolded, "the create+scaffold path commits scaffolded=true");
     }
 
     #[tokio::test]

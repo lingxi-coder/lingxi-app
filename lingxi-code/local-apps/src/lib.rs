@@ -75,7 +75,7 @@ pub use runtime_v2::{
     MAX_AGENT_MAX_BRIDGE_CALLS, MAX_AGENT_MAX_MCP_CALLS, MAX_AGENT_MAX_TOKENS, MAX_AGENT_MAX_TURNS,
     MAX_AGENT_MAX_WALL_MS, RUNTIME_API_MAJOR, RUNTIME_API_VERSION, RUNTIME_CONTRACT_SCHEMA_VERSION,
 };
-pub use service::AppService;
+pub use service::{AppService, CreateMode, PLACEHOLDER_APP_NAME};
 pub use state::{runtime_transition_allowed, AppState};
 pub use types::{
     AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppRecord,

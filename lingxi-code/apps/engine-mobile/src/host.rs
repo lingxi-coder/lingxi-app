@@ -5794,6 +5794,7 @@ impl MobileEngineHandle {
                 conversation_id,
                 git_enabled,
                 workflow_model.as_deref(),
+                local_apps::CreateMode::Scaffolded,
                 move |record| {
                     let host = Arc::clone(&scaffold_host);
                     async move {

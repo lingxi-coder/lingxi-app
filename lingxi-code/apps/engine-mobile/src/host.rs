@@ -13549,6 +13549,57 @@ mod tests {
         });
     }
 
+    /// 🚨 The SCAFFOLDED branch echoes the key too.
+    ///
+    /// Two different tests already cover the shell half (`AppCreated` on a
+    /// `Shell` create) and the failure half, and neither one touches this arm:
+    /// the handler calls the service TWICE, once per branch, and each call site
+    /// passes `request_id` independently. A later edit that `None`s out this
+    /// one would compile, would leave every other test in this file green, and
+    /// would silently break correlation for whatever sends `Scaffolded`.
+    ///
+    /// That is the "wired today, `None` after some refactor, nothing notices"
+    /// shape this plan has been bitten by repeatedly. One test closes it.
+    ///
+    /// ⚠️ Reachability, recorded honestly rather than implied by this test's
+    /// existence: after Tasks 13/14 land, NO shipping client sends
+    /// `mode: Scaffolded` — both create entry points become `Shell`, and the
+    /// agent's `LocalAppCreate` tool calls `AppService` directly
+    /// (`local_apps_mcp.rs`), never this handler. The variant remains part of
+    /// the blessed 8.0.0 wire and this arm remains the only thing that would
+    /// serve it, which is exactly why it is pinned rather than deleted.
+    #[test]
+    fn a_scaffolded_create_echoes_the_request_id_on_app_created() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let events = submit_create(
+                &handle,
+                &listener,
+                "Tracker",
+                "a habit tracker",
+                None,
+                AppCreateModeDto::Scaffolded,
+                Some("req-3"),
+            )
+            .await;
+            let (record, request_id) =
+                created_row(&events).expect("a Scaffolded create must announce AppCreated");
+            assert!(
+                record.scaffolded,
+                "sanity: this must be the Scaffolded arm, not the Shell one: {record:?}"
+            );
+            assert_eq!(
+                request_id.as_deref(),
+                Some("req-3"),
+                "the Scaffolded branch must echo the caller's key verbatim — it is the \
+                 same field the Shell branch echoes, and nothing else in this file \
+                 would notice it going constant-None here"
+            );
+        });
+    }
+
     /// 🚨 BOTH branches, in one test, on purpose.
     ///
     /// `mode` was received and ignored (`mode: _mode`) until this handler

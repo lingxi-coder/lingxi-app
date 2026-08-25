@@ -208,7 +208,13 @@ pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
         AppEvent::AppsChanged { apps } => Some(ClientEvent::AppsChanged {
             apps: lower_records(&apps),
         }),
-        AppEvent::AppCreated { record } => Some(ClientEvent::AppEvent {
+        // `request_id` is dropped here, not yet forwarded: the wire DTO has
+        // no `AppEventDto::AppCreated.request_id` field until Task 4 adds
+        // it, and Task 5 is what wires this arm through to it.
+        AppEvent::AppCreated {
+            record,
+            request_id: _,
+        } => Some(ClientEvent::AppEvent {
             event: AppEventDto::AppCreated {
                 record: lower_record(&record),
             },

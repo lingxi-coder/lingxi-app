@@ -1353,6 +1353,9 @@ impl LocalAppsMcpTransport {
                         git_enabled,
                         workflow_model.as_deref(),
                         local_apps::CreateMode::Scaffolded,
+                        // The `LocalAppCreate` tool path has no request to
+                        // correlate — see `local-apps::AppEvent::AppCreated`.
+                        None,
                         move |record| {
                             let host = Arc::clone(&initializer_host);
                             async move {

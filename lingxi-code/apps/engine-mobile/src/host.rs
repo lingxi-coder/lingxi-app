@@ -5795,6 +5795,9 @@ impl MobileEngineHandle {
                 git_enabled,
                 workflow_model.as_deref(),
                 local_apps::CreateMode::Scaffolded,
+                // No request to correlate yet on this handler — Task 5 gives
+                // the `CreateApp` host handler a real `request_id`.
+                None,
                 move |record| {
                     let host = Arc::clone(&scaffold_host);
                     async move {

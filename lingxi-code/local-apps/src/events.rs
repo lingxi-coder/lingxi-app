@@ -33,6 +33,10 @@ pub enum AppEvent {
     AppCreated {
         /// The freshly committed record.
         record: AppRecord,
+        /// Correlation key from the originating `CreateApp`, echoed verbatim.
+        /// `None` for creations that had no request to correlate (the
+        /// `LocalAppCreate` tool path).
+        request_id: Option<String>,
     },
     /// One app record changed without requiring a full catalog snapshot.
     RecordChanged {

@@ -855,6 +855,7 @@ impl AppService {
         brief: &str,
         conversation_id: Option<String>,
         mode: CreateMode,
+        request_id: Option<String>,
     ) -> Result<AppRecord, AppError> {
         self.create_app_with_git_and_workflow_model_and_initializer(
             name,
@@ -863,6 +864,7 @@ impl AppService {
             crate::types::DEFAULT_GIT_VERSION_CONTROL,
             None,
             mode,
+            request_id,
             |_| async { Ok(()) },
         )
         .await
@@ -889,6 +891,7 @@ impl AppService {
             crate::types::DEFAULT_GIT_VERSION_CONTROL,
             None,
             CreateMode::Scaffolded,
+            None,
             initializer,
         )
         .await
@@ -909,6 +912,7 @@ impl AppService {
             git_enabled,
             None,
             CreateMode::Scaffolded,
+            None,
             |_| async { Ok(()) },
         )
         .await
@@ -930,6 +934,7 @@ impl AppService {
             git_enabled,
             workflow_model,
             CreateMode::Scaffolded,
+            None,
             |_| async { Ok(()) },
         )
         .await
@@ -946,6 +951,7 @@ impl AppService {
         git_enabled: bool,
         workflow_model: Option<&str>,
         mode: CreateMode,
+        request_id: Option<String>,
         initializer: F,
     ) -> Result<AppRecord, AppError>
     where
@@ -1111,6 +1117,7 @@ impl AppService {
                     AppEvent::AppsChanged { apps: records },
                     AppEvent::AppCreated {
                         record: record.clone(),
+                        request_id,
                     },
                 ],
             );
@@ -1428,7 +1435,7 @@ mod tests {
                 &events[..],
                 [
                     AppEvent::AppsChanged { apps },
-                    AppEvent::AppCreated { record: created }
+                    AppEvent::AppCreated { record: created, .. }
                 ] if apps.len() == 1 && created.id == apps[0].id
             ),
             "create emits the catalog, then names the new record: {events:?}"
@@ -2233,7 +2240,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app_with_mode(None, "", None, CreateMode::Shell)
+            .create_app_with_mode(None, "", None, CreateMode::Shell, None)
             .await
             .expect("shell creation must accept an empty brief");
         assert!(!record.scaffolded, "a shell is not scaffolded");
@@ -2248,7 +2255,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let err = h
             .service
-            .create_app_with_mode(None, "   ", None, CreateMode::Scaffolded)
+            .create_app_with_mode(None, "   ", None, CreateMode::Scaffolded, None)
             .await
             .expect_err("Scaffolded mode keeps rejecting an empty brief");
         assert!(
@@ -2263,7 +2270,7 @@ mod tests {
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app_with_mode(None, "a todo list", None, CreateMode::Scaffolded)
+            .create_app_with_mode(None, "a todo list", None, CreateMode::Scaffolded, None)
             .await
             .expect("create");
         assert!(record.scaffolded, "the create+scaffold path commits scaffolded=true");
@@ -2277,13 +2284,60 @@ mod tests {
         // differ, so this proves the flag tracks `mode`, not a constant.
         let shell = h
             .service
-            .create_app_with_mode(None, "", None, CreateMode::Shell)
+            .create_app_with_mode(None, "", None, CreateMode::Shell, None)
             .await
             .expect("shell creation must accept an empty brief");
         assert_ne!(
             record.scaffolded, shell.scaffolded,
             "scaffolded must be mode-derived: Scaffolded and Shell must disagree"
         );
+    }
+
+    #[tokio::test]
+    async fn app_created_carries_the_request_id_the_caller_passed() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let _ = h
+            .service
+            .create_app_with_mode(None, "", None, CreateMode::Shell, Some("req-7".into()))
+            .await
+            .expect("create");
+        let created = h
+            .take_events()
+            .await
+            .into_iter()
+            .find_map(|e| match e {
+                AppEvent::AppCreated { request_id, .. } => Some(request_id),
+                _ => None,
+            })
+            .expect("AppCreated must be emitted");
+        assert_eq!(
+            created.as_deref(),
+            Some("req-7"),
+            "the correlation key must survive the service-layer emission, \
+             not just the host handler"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_default_wrappers_emit_app_created_without_a_request_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let _ = h
+            .service
+            .create_app(None, "a todo list", None)
+            .await
+            .expect("create");
+        let created = h
+            .take_events()
+            .await
+            .into_iter()
+            .find_map(|e| match e {
+                AppEvent::AppCreated { request_id, .. } => Some(request_id),
+                _ => None,
+            })
+            .expect("AppCreated must be emitted");
+        assert_eq!(created, None, "LocalAppCreate's path has no request to correlate");
     }
 
     #[tokio::test]
@@ -2460,7 +2514,8 @@ mod tests {
             vec![
                 AppEvent::AppsChanged { apps: apps.clone() },
                 AppEvent::AppCreated {
-                    record: apps[0].clone()
+                    record: apps[0].clone(),
+                    request_id: None,
                 }
             ]
         );

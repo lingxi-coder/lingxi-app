@@ -3449,8 +3449,20 @@ impl LocalAppsHostBroker {
 /// already carries — so a region crop costs no DTO change. Shape and
 /// finiteness are checked here; CLAMPING to the viewport happens on the
 /// client, which is the only side that knows the real viewport.
+///
+/// That split is why a NEGATIVE origin is accepted and forwarded verbatim.
+/// `getBoundingClientRect().top` is negative for anything scrolled above the
+/// fold, so `inspect_ui`'s `elements[].rect` routinely reports one — and
+/// "inspect, take an element's rect, capture it" is the most natural flow the
+/// two tools have. Refusing it here would also make the clients' own clamping
+/// (`intersection` on iOS, `coerceIn` in `cropSourceRect` on Android)
+/// unreachable code.
 fn capture_ui_value(input: &Value) -> Result<Option<String>, String> {
-    let Some(rect) = input.get("rect") else {
+    // An explicit `"rect": null` is a model's way of saying "not applicable",
+    // i.e. capture the whole view. `.get` answers `Some(Value::Null)` for it,
+    // so without this filter the absent-rect guard never fires and every field
+    // lookup below fails — a hard tool error for a routine, well-meant input.
+    let Some(rect) = input.get("rect").filter(|value| !value.is_null()) else {
         return Ok(None);
     };
     // Keep the original `Value` alongside its `f64` reading: shape/range
@@ -3462,10 +3474,12 @@ fn capture_ui_value(input: &Value) -> Result<Option<String>, String> {
             .and_then(|value| value.as_f64().filter(|n| n.is_finite()).map(|n| (value, n)))
             .ok_or_else(|| format!("capture_ui rect.{name} must be a finite number"))
     };
-    let ((x, xn), (y, yn), (w, wn), (h, hn)) =
+    // The origin's numeric reading is deliberately discarded: `field` already
+    // proved it finite, and its SIGN is not this layer's business (see above).
+    let ((x, _), (y, _), (w, wn), (h, hn)) =
         (field("x")?, field("y")?, field("width")?, field("height")?);
-    if xn < 0.0 || yn < 0.0 || wn <= 0.0 || hn <= 0.0 {
-        return Err("capture_ui rect must have non-negative origin and positive size".into());
+    if wn <= 0.0 || hn <= 0.0 {
+        return Err("capture_ui rect must have positive width and height".into());
     }
     Ok(Some(
         json!({ "rect": { "x": x, "y": y, "width": w, "height": h } }).to_string(),
@@ -3629,8 +3643,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .record(&app_id)
             .await
             .map_err(|e| e.to_string())?;
-        // No `target`: a capture is of the whole view, and a selector would
-        // imply an element crop the native side does not do.
+        // No `target`: an element crop is expressed as `rect` (see
+        // `capture_ui_value`), which the native side DOES honour, so a
+        // selector here would be a second, redundant way to say the same
+        // thing — with no way to report which one won.
         self.request_ui(AppUiRequestDto {
             request_id: self.request_id("app-ui"),
             app_id,
@@ -6479,14 +6495,61 @@ mod tests {
     }
 
     #[test]
-    fn capture_rejects_a_non_finite_or_non_positive_rect() {
+    fn capture_rejects_a_malformed_or_non_positive_size_rect() {
         for bad in [
             json!({ "x": 0, "y": 0, "width": 0, "height": 10 }),
-            json!({ "x": -1, "y": 0, "width": 10, "height": 10 }),
+            json!({ "x": 0, "y": 0, "width": 10, "height": -5 }),
+            // Not a number at all: the finiteness filter is what rejects this,
+            // and it is the check that must survive the negative-origin one
+            // being dropped below.
+            json!({ "x": "0", "y": 0, "width": 10, "height": 10 }),
+            json!({ "x": 0, "y": 0, "width": 10 }),
         ] {
             let out = capture_ui_value(&json!({ "app_id": "demo", "rect": bad }));
             assert!(out.is_err(), "invalid rect must be refused host-side: {bad}");
         }
+    }
+
+    /// A NEGATIVE origin is the common case, not an error.
+    ///
+    /// `getBoundingClientRect().top` is negative for anything scrolled above
+    /// the fold, and that is exactly what `inspect_ui`'s `elements[].rect`
+    /// hands the agent — so "inspect, take an element's rect, capture it"
+    /// produced a hard tool error on the most natural flow there is. Clamping
+    /// belongs to the client, which is the only side that knows the real
+    /// viewport (`intersection` on iOS, `coerceIn` in `cropSourceRect` on
+    /// Android); a host-side refusal made that client code unreachable.
+    #[test]
+    fn capture_accepts_a_negative_origin_and_leaves_clamping_to_the_client() {
+        let value = capture_ui_value(&json!({
+            "app_id": "demo",
+            "rect": { "x": -50, "y": -40.5, "width": 200, "height": 150 }
+        }))
+        .expect("a scrolled-above-the-fold element rect must not be refused")
+        .expect("a rect must produce a value payload");
+        let parsed: Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(
+            parsed["rect"]["x"], -50,
+            "the origin must reach the client UNCHANGED so the client can clamp it"
+        );
+        assert_eq!(parsed["rect"]["y"], -40.5);
+        assert_eq!(parsed["rect"]["width"], 200);
+    }
+
+    /// An explicit `"rect": null` means "not applicable", which is a WHOLE-VIEW
+    /// capture — not a malformed request.
+    ///
+    /// `input.get("rect")` answers `Some(Value::Null)` for it, so the
+    /// absent-rect guard never fired and every field lookup below then failed,
+    /// turning a routine model habit into a hard tool error.
+    #[test]
+    fn capture_treats_an_explicit_null_rect_as_a_whole_view_capture() {
+        let value = capture_ui_value(&json!({ "app_id": "demo", "rect": Value::Null }))
+            .expect("an explicit null rect is not malformed");
+        assert_eq!(
+            value, None,
+            "an explicit null must collapse to the same no-value payload as an absent rect"
+        );
     }
 
     #[tokio::test]

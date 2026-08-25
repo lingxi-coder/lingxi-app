@@ -916,9 +916,12 @@ internal fun buildLocalAppUiExecutionScript(requestJson: String): String =
             // `.length` counts UTF-16 code units, and CJK text is 1 unit but
             // 3 bytes per character, so a length-only check could call a
             // payload "safe" at roughly a third of its real size.
+            // `window.TextEncoder` is page-controllable, so this uses the
+            // reference the document-start bootstrap captured before page code
+            // ran; falling back to the global only where no bootstrap ran.
             const BUDGET = 200 * 1024;
             const truncated = out.truncated;
-            const size = () => new TextEncoder().encode(JSON.stringify(out)).length;
+            const size = () => new (window.__lingxiTextEncoder || TextEncoder)().encode(JSON.stringify(out)).length;
             for (const seg of ['elements', 'canvases', 'runtimeErrors']) {
               if (size() <= BUDGET) break;
               if (seg === 'elements') out.elements = out.elements.slice(0, 50);
@@ -1746,6 +1749,16 @@ private const val LINGXI_V1_BOOTSTRAP_TEMPLATE = """
           } catch (ignored) { /* never let the ledger break the page */ }
           return nativeConsoleError.apply(console, arguments);
         };
+      }
+      // Same trick, same reason, for TextEncoder: the inspect snapshot's byte
+      // budget measures with it, and `window.TextEncoder` is page-controllable,
+      // so an app that shadows it made snapshot() THROW where the old
+      // `.length` could not — killing inspect_ui outright. Capture the real
+      // one here, at document-start, before any page code has run.
+      // Non-writable and non-configurable (defineProperty's defaults), so the
+      // page cannot take it back afterwards either.
+      if (!window.__lingxiTextEncoder) {
+        Object.defineProperty(window, '__lingxiTextEncoder', { value: window.TextEncoder });
       }
   const installCsp = () => {
     if (!document.head || document.head.querySelector('meta[data-lingxi-csp]')) return false;

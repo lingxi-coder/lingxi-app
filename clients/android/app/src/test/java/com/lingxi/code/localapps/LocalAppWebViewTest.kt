@@ -300,10 +300,87 @@ class LocalAppWebViewTest {
             "for (const seg of ['elements', 'canvases', 'runtimeErrors'])",
             "truncated.push(seg)",
             "truncated: []",
-            "new TextEncoder().encode(JSON.stringify(out)).length",
+            // Still TextEncoder (not `.length`), but through the reference the
+            // bootstrap captured before page code could shadow it.
+            "new (window.__lingxiTextEncoder || TextEncoder)().encode(JSON.stringify(out)).length",
         ).forEach { token ->
             assertTrue("missing payload budget: $token", script.contains(token))
         }
+    }
+
+    /**
+     * Final review, finding 5 — Android twin of iOS
+     * `testDocumentStartCapturesTextEncoderBeforeThePageCanShadowIt`.
+     *
+     * `size()` calls `new TextEncoder()` at snapshot time and
+     * `window.TextEncoder` is PAGE-CONTROLLABLE, so an app that shadows it made
+     * `snapshot()` throw and took `inspect_ui` down with it — strictly worse
+     * than the `.length` measurement it replaced, which could not throw. The
+     * bootstrap's console hook already solved this class by binding the real
+     * function at document-start; this pins the same treatment for
+     * `TextEncoder`, on both halves: the capture and the use.
+     *
+     * The injected JavaScript is byte-identical to iOS's by construction, so
+     * the exact same two tokens are pinned on both platforms.
+     */
+    @Test
+    fun `document start captures TextEncoder before the page can shadow it`() {
+        val bootstrap = buildLingxiV1Bootstrap("phone")
+        listOf(
+            "Object.defineProperty(window, '__lingxiTextEncoder', { value: window.TextEncoder });",
+            "if (!window.__lingxiTextEncoder) {",
+        ).forEach { token ->
+            assertTrue("missing captured TextEncoder: $token", bootstrap.contains(token))
+        }
+        assertFalse(
+            "the snapshot budget must not reach for the page-controllable global",
+            buildLocalAppUiExecutionScript("""{"action":"inspect"}""")
+                .contains("new TextEncoder().encode(JSON.stringify(out))"),
+        )
+    }
+
+    /**
+     * Final review, finding 2 — Android twin of iOS
+     * `testCaptureViewClampsANegativeOriginInsteadOfRefusingIt`.
+     *
+     * A NEGATIVE origin is the single most common crop an agent will compute,
+     * because `inspect_ui`'s `elements[].rect` reports
+     * `getBoundingClientRect().top`, which is negative for anything scrolled
+     * above the fold. The engine host used to refuse it outright
+     * (`x < 0 || y < 0` in `capture_ui_value`), which made this clamp
+     * unreachable; with that gone, the client must clamp to the viewport and
+     * report the CLAMPED region.
+     *
+     * Same numbers as the iOS test — `(-50, -40, 200, 150)` against a
+     * 393x852 viewport at density 1 clamps to `(0, 0, 150, 110)`, with BOTH
+     * axes negative in the one request so a one-axis bug cannot hide behind
+     * the other being right. As with the other geometry tests in this file,
+     * this pins the helper `captureFrame` actually calls (no instrumented
+     * harness exists for a live `WebView`/`PixelCopy` here), and reproduces
+     * `finishCapture`'s own `left / density` reporting arithmetic to pin the
+     * reported `capture_rect` values.
+     */
+    @Test
+    fun `crop source rect clamps a negative origin to the viewport instead of refusing it`() {
+        val density = 1f
+        val src = cropSourceRect(
+            LocalAppCssRect(x = -50.0, y = -40.0, width = 200.0, height = 150.0),
+            density = density,
+            viewWidthPx = 393,
+            viewHeightPx = 852,
+        )
+        assertFalse("a partly-above-the-fold crop must still capture something", src.isEmpty())
+        assertEquals(0, src.left)
+        assertEquals(0, src.top)
+        assertEquals(150, src.width()) // -50 + 200: the visible part, not the requested 200
+        assertEquals(110, src.height()) // -40 + 150: the visible part, not the requested 150
+
+        // What `finishCapture` writes into `capture_rect`, off this same
+        // `localCrop` — the CLAMPED region, never the request.
+        assertEquals(0.0, src.left / density.toDouble(), 0.0001)
+        assertEquals(0.0, src.top / density.toDouble(), 0.0001)
+        assertEquals(150.0, src.width() / density.toDouble(), 0.0001)
+        assertEquals(110.0, src.height() / density.toDouble(), 0.0001)
     }
 
     @Test

@@ -1496,9 +1496,10 @@ impl LocalAppsMcpTransport {
             },
             "capture_ui" => match self.host()?.capture_ui(input).await {
                 Ok(mut value) => {
-                    // The host hands back `{image:{data,mime_type}, …}`. Split
-                    // the frame out of the JSON so it can ride as a real image
-                    // block; whatever else the host attached stays structured.
+                    // The host hands back `{image:{data,mime_type,width,height}, …}`.
+                    // Split the frame out of the JSON so it can ride as a real
+                    // image block; whatever else the host attached stays
+                    // structured.
                     let image = value
                         .as_object_mut()
                         .and_then(|object| object.remove("image"));
@@ -1514,6 +1515,30 @@ impl LocalAppsMcpTransport {
                                     "capture_ui returned an empty frame; the app view may not be on screen",
                                 )
                             } else {
+                                // The BASE64 must not survive the split (it
+                                // would be paid for twice), but the frame's own
+                                // PIXEL SIZE must: it is the only thing that
+                                // converts a coordinate read off the picture
+                                // back into the CSS pixels `act_on_ui` takes,
+                                // and for a CROP it is the denominator of
+                                // `capture_rect.x + ix * capture_rect.width /
+                                // image_width` (the formula
+                                // `skills/frontend-qa/SKILL.md` hands the
+                                // agent). Re-inserted as flat siblings rather
+                                // than a trimmed `image` object so no reader
+                                // has to guess whether `image` still carries
+                                // the data.
+                                if let Some(object) = value.as_object_mut() {
+                                    for (source, target) in
+                                        [("width", "image_width"), ("height", "image_height")]
+                                    {
+                                        if let Some(pixels) =
+                                            image.get(source).filter(|value| value.is_number())
+                                        {
+                                            object.insert(target.into(), pixels.clone());
+                                        }
+                                    }
+                                }
                                 Self::image_result(data, mime, value)
                             }
                         }
@@ -2846,6 +2871,56 @@ mod tests {
             structured.get("image").is_none(),
             "the frame must be MOVED out of the structured JSON, not copied — \
              leaving it would send the base64 twice and pay for it twice"
+        );
+    }
+
+    /// The frame's OWN pixel size must SURVIVE the split that moves the image
+    /// out of the structured JSON.
+    ///
+    /// `image.width`/`image.height` are the only numbers that convert a
+    /// coordinate the model reads off the picture back into the CSS pixels
+    /// `act_on_ui`'s `pointer` takes. Dropping the whole `image` object took
+    /// them with it, so `skills/frontend-qa/SKILL.md`'s inversion formula
+    /// named a key the caller never receives: the agent then guesses a scale,
+    /// the derived tap lands somewhere else, and the call still answers
+    /// `ok: true`. They ride as `image_width`/`image_height` siblings rather
+    /// than a re-inserted `image` object precisely so the base64 is not sent
+    /// twice.
+    #[tokio::test]
+    async fn capture_ui_keeps_the_frames_pixel_size_after_the_image_is_split_out() {
+        const DATA: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        assert!(transport
+            .attach_host(Arc::new(FrameHost {
+                frame: Some(json!({
+                    "data": DATA,
+                    "mime_type": "image/jpeg",
+                    "width": 354,
+                    "height": 222,
+                })),
+            }))
+            .is_ok());
+
+        let result = transport
+            .call(
+                "capture_ui",
+                json!({"app_id": "abcd1234", "rect": {"x": 0, "y": 0, "width": 118, "height": 74}}),
+            )
+            .await
+            .expect("capture_ui");
+
+        assert!(!result.is_error, "a captured frame is not an error");
+        let structured = result.structured_content.expect("structured metadata");
+        assert_eq!(
+            structured["image_width"], 354,
+            "without the frame's pixel width a cropped capture cannot be mapped back to CSS \
+             pixels: {structured}"
+        );
+        assert_eq!(structured["image_height"], 222, "got {structured}");
+        assert!(
+            structured.get("image").is_none(),
+            "the dimensions ride as siblings; the base64 must NOT come back with them"
         );
     }
 

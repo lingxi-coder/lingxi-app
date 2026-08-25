@@ -409,10 +409,36 @@ final class LocalAppsStoreTests: XCTestCase {
             "for (const seg of ['elements', 'canvases', 'runtimeErrors'])",
             "truncated.push(seg)",
             "truncated: []",
-            "new TextEncoder().encode(JSON.stringify(out)).length",
+            // Still TextEncoder (not `.length`), but through the reference the
+            // bootstrap captured before page code could shadow it.
+            "new (window.__lingxiTextEncoder || TextEncoder)().encode(JSON.stringify(out)).length",
         ] {
             XCTAssertTrue(source.contains(token), "missing payload budget: \(token)")
         }
+    }
+
+    /// Final review, finding 5 — `size()` calls `new TextEncoder()` at snapshot
+    /// time, and `window.TextEncoder` is PAGE-CONTROLLABLE. An app that shadows
+    /// it made `snapshot()` throw, so `inspect_ui` returned an error for the
+    /// whole app instead of a snapshot — a strictly worse failure than the
+    /// `.length` measurement it replaced, which could not throw at all.
+    ///
+    /// The ledger above already solved this class by binding `console.error`
+    /// at document-start; this pins the same treatment for `TextEncoder`, on
+    /// both halves: the capture in the bootstrap and the USE in the snapshot.
+    func testDocumentStartCapturesTextEncoderBeforeThePageCanShadowIt() {
+        let bootstrap = LocalAppWebViewRepresentable.bridgeSourceTemplate
+        for token in [
+            "Object.defineProperty(window, '__lingxiTextEncoder', { value: window.TextEncoder });",
+            "if (!window.__lingxiTextEncoder) {",
+        ] {
+            XCTAssertTrue(bootstrap.contains(token), "missing captured TextEncoder: \(token)")
+        }
+        XCTAssertFalse(
+            LocalAppWebViewController.executionSource(requestJSON: "{}")
+                .contains("new TextEncoder().encode(JSON.stringify(out))"),
+            "the snapshot budget must not reach for the page-controllable global"
+        )
     }
 
     /// The conversation-scope cwd (`RootView.makeSource(scope: .localApp(id))`)
@@ -1719,6 +1745,105 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(captureRect["y"] as? Double, 800)
             XCTAssertEqual(captureRect["width"] as? Double, 93, "393 - 300: the CLAMPED width, not the requested 200")
             XCTAssertEqual(captureRect["height"] as? Double, 52, "852 - 800: the CLAMPED height, not the requested 200")
+        }
+
+        /// Final review, finding 2 — a NEGATIVE origin is the single most
+        /// common crop an agent will compute, because `inspect_ui`'s
+        /// `elements[].rect` reports `getBoundingClientRect().top`, which is
+        /// negative for anything scrolled above the fold. The host used to
+        /// refuse it outright (`x < 0 || y < 0`), which made this clamp
+        /// unreachable; with that gone, the client must do what it was always
+        /// built to do — clamp to the viewport and REPORT the clamped region,
+        /// never refuse and never silently widen back to the whole frame.
+        ///
+        /// `(-50, -40, 200, 150)` ∩ `(0, 0, 393, 852)` = `(0, 0, 150, 110)`,
+        /// verified by running `CGRect.intersection` directly rather than
+        /// assuming it. Both axes are negative in the same request, so a
+        /// one-axis bug cannot hide behind the other being right.
+        func testCaptureViewClampsANegativeOriginInsteadOfRefusingIt() async throws {
+            let (controller, webView, window) = makeComposedCaptureController()
+            defer { window.isHidden = true }
+            webView.loadHTMLString(
+                #"<body style="margin:0;background:#3366ff"><div id="ready">hi</div></body>"#,
+                baseURL: URL(string: "http://127.0.0.1:43123")
+            )
+            try await waitForElement("ready", in: webView)
+
+            let result = await captureUntilComposited(controller, request: AppUiRequestDto(
+                requestId: "capture-negative-origin",
+                appId: "tracker",
+                action: .captureView,
+                target: nil,
+                value: #"{"rect":{"x":-50,"y":-40,"width":200,"height":150}}"#
+            ))
+            XCTAssertNil(
+                result.error,
+                "a scrolled-above-the-fold element rect must be clamped, not refused: \(result.error ?? "?")"
+            )
+            guard let resultJSON = result.resultJSON,
+                  let data = resultJSON.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let captureRect = object["capture_rect"] as? [String: Any]
+            else { return XCTFail("expected capture_rect in the result, got \(result.resultJSON ?? "nil")") }
+            XCTAssertEqual(captureRect["x"] as? Double, 0, "a negative x must be clamped to the viewport edge")
+            XCTAssertEqual(captureRect["y"] as? Double, 0, "a negative y must be clamped to the viewport edge")
+            XCTAssertEqual(captureRect["width"] as? Double, 150, "-50 + 200: the visible part, not the requested 200")
+            XCTAssertEqual(captureRect["height"] as? Double, 110, "-40 + 150: the visible part, not the requested 150")
+        }
+
+        /// Final review, finding 5 — LIVE proof (not a token match) that a page
+        /// shadowing `window.TextEncoder` no longer takes `inspect_ui` down
+        /// with it.
+        ///
+        /// The bootstrap is evaluated FIRST (as `WKUserScript(injectionTime:
+        /// .atDocumentStart)` does in production — verified by reading the
+        /// `WKUserScript` construction in `LocalAppWebView.swift`), then the
+        /// "page" replaces the global with a constructor that throws. Before
+        /// the fix, `snapshot()`'s `new TextEncoder()` would run that throwing
+        /// constructor inside `executionSource`'s `try` and the whole inspect
+        /// would come back an error.
+        func testInspectSurvivesAPageThatShadowsTextEncoder() async throws {
+            let broker = LocalAppBridgeBroker(appID: "tracker")
+            let controller = LocalAppWebViewController(appID: "tracker", broker: broker)
+            let webView = WKWebView()
+            controller.webView = webView
+            webView.loadHTMLString(
+                #"<button id="go">中文按钮文字标签</button>"#,
+                baseURL: URL(string: "http://127.0.0.1:43123")
+            )
+            try await waitForElement("go", in: webView)
+
+            _ = try await webView.evaluateJavaScript(LocalAppWebViewRepresentable.bridgeSource(formFactor: "iphone"))
+            let captured = try await webView.evaluateJavaScript(
+                "typeof window.__lingxiTextEncoder === 'function'"
+            ) as? Bool
+            XCTAssertEqual(captured, true, "the bootstrap must capture TextEncoder or the probe below proves nothing")
+
+            // The page takes the global away, exactly as an app bundling its own
+            // polyfill (or a hostile one) can.
+            _ = try await webView.evaluateJavaScript(
+                "window.TextEncoder = function () { throw new Error('page shadowed TextEncoder'); }; true"
+            )
+            let shadowed = try await webView.evaluateJavaScript(
+                "(() => { try { new TextEncoder(); return 'alive'; } catch (e) { return e.message; } })()"
+            ) as? String
+            XCTAssertEqual(
+                shadowed, "page shadowed TextEncoder",
+                "the shadow must actually take effect, or this test cannot fail"
+            )
+
+            let inspect = await controller.execute(request: AppUiRequestDto(
+                requestId: "inspect-shadowed",
+                appId: "tracker",
+                action: .inspect,
+                target: nil,
+                value: nil
+            ))
+            XCTAssertNil(inspect.error, "a page-shadowed TextEncoder must not kill inspect_ui: \(inspect.error ?? "?")")
+            XCTAssertTrue(
+                inspect.resultJSON?.contains("中文按钮文字标签") == true,
+                "got \(inspect.resultJSON ?? "nil")"
+            )
         }
 
         private func waitUntil(_ description: String, _ condition: () -> Bool) async throws {

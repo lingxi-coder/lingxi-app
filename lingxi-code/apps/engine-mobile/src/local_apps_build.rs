@@ -395,7 +395,7 @@ pub(crate) fn scaffold_workspace(
     let mut manifest = local_apps::AppManifest::for_new_app(layout.app_id(), layout.app_id());
     manifest.surface = Some(target.surface());
     local_apps::save_manifest(layout, &manifest)?;
-    scaffold_workspace_initialized(layout, target)
+    scaffold_workspace_initialized(layout, target, true)
 }
 
 /// Materialize the pinned template after the enclosing create transaction has
@@ -406,16 +406,148 @@ pub(crate) fn scaffold_workspace(
 /// the workspace exists, so there is nothing on disk to detect from. The caller
 /// has already recorded the choice on the manifest, which is what every later
 /// build reads back.
+///
+/// `first_scaffold` says whether this call is the moment the app GETS its
+/// shape. It is the boundary between two opposite duties and there is no third
+/// case:
+///
+/// - `true` — the workspace is a shell, so nothing in it is the user's app yet.
+///   The editable surface is WIPED before the seed lands (see
+///   [`wipe_editable_surface`]).
+/// - `false` — the app is already formed, so `app/`, `src/` and anything else
+///   outside the host-managed set is the USER'S work. Nothing is wiped and the
+///   seed does not overwrite what is already there.
 pub(crate) fn scaffold_workspace_initialized(
     layout: &AppLayout,
     target: LocalAppBuildTarget,
+    first_scaffold: bool,
 ) -> Result<(), AppError> {
     let workspace = layout.root().join(layout.workspace_rel());
+    if first_scaffold {
+        wipe_editable_surface(&workspace)?;
+    }
     for (relative, bytes) in VITE_LOCKED_FILES {
         write_file(&workspace, relative, bytes, true)?;
     }
     for (relative, bytes) in source_files(target) {
-        write_file(&workspace, relative, bytes, false)?;
+        write_file(&workspace, relative, bytes, first_scaffold)?;
+    }
+    Ok(())
+}
+
+/// The workspace entries a first scaffold KEEPS. Everything else at the
+/// workspace top level is removed.
+///
+/// Not a taste judgement: this is exactly the set of top-level names that
+/// `permission::workspace_lease::host_owned_relative` refuses to let an app's
+/// `Edit(./**)` grant reach. Every OTHER top-level entry is agent-writable, so
+/// on a first scaffold it can only be code written before the user confirmed
+/// anything — which is precisely what must not reach the real app.
+///
+/// `.git` is deliberately absent. It is not host-owned, so a checkpoint taken
+/// during the interview would carry those same pre-confirmation bytes and
+/// `LocalAppCheckpointRestore` would put them back. The first scaffold is where
+/// a formed app's history starts.
+const FIRST_SCAFFOLD_PRESERVED: &[&str] = &[
+    // The service's own documents, including the manifest whose `surface` the
+    // caller has already stamped and which every later build reads back.
+    local_apps::storage::APP_STATE_DIR,
+    // The workspace contract. The caller rewrites it right after this returns;
+    // keeping it means the workspace is never momentarily without one.
+    "LINGXI.md",
+    // The installed dependency tree. Re-installing it costs minutes on device
+    // and it is byte-identical for every app built from the same locked set.
+    "node_modules",
+];
+
+/// Empty the workspace of everything except [`FIRST_SCAFFOLD_PRESERVED`].
+///
+/// §C.0.1. A shell app has no legitimate application source by definition, so
+/// wiping is safe — and it is what makes the retry path safe too: every attempt
+/// starts from clean ground.
+///
+/// Per-path `overwrite = true` is NOT enough, and the reason is specific. Vite
+/// resolves `.js` BEFORE `.jsx` in `DEFAULT_EXTENSIONS`, the pinned template
+/// sets no `resolve.extensions` override, and every import in it is
+/// extensionless. A pre-written `app/app.js` therefore WINS resolution over the
+/// seeded `app/app.jsx`, and `copy_workspace_tree` carries it into the build
+/// root — the seed is on disk and never executed. Overwriting the seed's own
+/// paths does nothing about a file at a path the seed does not occupy.
+fn wipe_editable_surface(workspace: &Path) -> Result<(), AppError> {
+    // Prove the target BEFORE removing anything: `remove_dir_all` cannot be
+    // undone, and the two ways this could be pointed somewhere else are both
+    // cheap to rule out.
+    //
+    // A REAL directory, never a symlink, so nothing outside the app tree can be
+    // reached through the workspace root itself. `write_file` makes the same
+    // check via `ensure_safe_file_parent`, but it runs AFTER this one — leaning
+    // on it would mean the tree was already gone by the time it fired.
+    let metadata = std::fs::symlink_metadata(workspace).map_err(|error| {
+        AppError::Io(format!(
+            "inspect app workspace {}: {error}",
+            workspace.display()
+        ))
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(AppError::InvalidRequest(format!(
+            "refusing to scaffold over {}: an initialized app workspace is a real directory",
+            workspace.display()
+        )));
+    }
+    // And carrying `.lingxi/`, which `AppLayout::initialize` creates and which
+    // both callers have therefore already produced. A path that is wrong or
+    // empty deletes nothing instead of being emptied.
+    let state_dir = workspace.join(local_apps::storage::APP_STATE_DIR);
+    let is_initialized = std::fs::symlink_metadata(&state_dir)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if !is_initialized {
+        return Err(AppError::InvalidRequest(format!(
+            "refusing to scaffold over {}: not an initialized app workspace, {} is missing",
+            workspace.display(),
+            local_apps::storage::APP_STATE_DIR
+        )));
+    }
+
+    for entry in std::fs::read_dir(workspace).map_err(|error| {
+        AppError::Io(format!(
+            "read app workspace {}: {error}",
+            workspace.display()
+        ))
+    })? {
+        let entry =
+            entry.map_err(|error| AppError::Io(format!("read app workspace entry: {error}")))?;
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| FIRST_SCAFFOLD_PRESERVED.contains(&name))
+        {
+            continue;
+        }
+        let path = entry.path();
+        // `symlink_metadata`, not `metadata`: a symlink to a directory must be
+        // UNLINKED, not handed to `remove_dir_all`, which would empty a tree
+        // the workspace merely points at.
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            AppError::Io(format!(
+                "inspect pre-scaffold workspace entry {}: {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            std::fs::remove_dir_all(&path).map_err(|error| {
+                AppError::Io(format!(
+                    "remove pre-scaffold directory {}: {error}",
+                    path.display()
+                ))
+            })?;
+        } else {
+            std::fs::remove_file(&path).map_err(|error| {
+                AppError::Io(format!(
+                    "remove pre-scaffold file {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
     }
     Ok(())
 }
@@ -2195,6 +2327,258 @@ mod tests {
         assert!(gitignore.lines().any(|line| line == "node_modules/"));
         assert!(gitignore.lines().any(|line| line == "dist/"));
         assert!(!gitignore.lines().any(|line| line == "package-lock.json"));
+    }
+
+    /// A workspace in the state a SHELL app is in when its interview ends: the
+    /// layout is initialized, the service has already written the manifest into
+    /// `workspace/.lingxi/`, the guided contract is at the workspace root, and
+    /// there is no application source.
+    fn shell_layout(root: &Path) -> AppLayout {
+        let layout = AppLayout::new(root, "aaaa1111").expect("layout");
+        let manifest = local_apps::AppManifest::for_new_app(layout.app_id(), layout.app_id());
+        local_apps::save_manifest(&layout, &manifest).expect("save manifest");
+        let workspace = layout.root().join(layout.workspace_rel());
+        fs::write(workspace.join("LINGXI.md"), "# guided contract").expect("guided contract");
+        layout
+    }
+
+    /// A workspace that has ALREADY been formed: the seed has landed once, so
+    /// everything under `app/` and `src/` is the user's app from here on.
+    fn formed_layout(root: &Path) -> AppLayout {
+        let layout = shell_layout(root);
+        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1).expect("first scaffold");
+        layout
+    }
+
+    fn write_workspace_file(workspace: &Path, relative: &str, bytes: &[u8]) {
+        let path = workspace.join(relative);
+        fs::create_dir_all(path.parent().expect("relative path has a parent"))
+            .expect("create parent");
+        fs::write(&path, bytes).expect("write workspace file");
+    }
+
+    /// §C.0.1. Per-path `overwrite = true` is NOT enough, and this test is
+    /// shaped around exactly why: Vite's `DEFAULT_EXTENSIONS` resolves `.js`
+    /// BEFORE `.jsx`, the template pins no `resolve.extensions` override, and
+    /// every import in it is extensionless. A pre-written `app/app.js` therefore
+    /// WINS resolution over the seeded `app/app.jsx`, and `copy_workspace_tree`
+    /// carries it into the build root. Overwriting the seed's own nine paths
+    /// does nothing about a file at a path the seed does not occupy.
+    #[test]
+    fn a_first_scaffold_wipes_the_editable_surface_before_seeding() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = shell_layout(root.path());
+        let workspace = layout.root().join(layout.workspace_rel());
+        // Three pre-written files: two same-path different-extension shadows,
+        // and one rogue file at a path the seed never occupies.
+        write_workspace_file(
+            &workspace,
+            "app/app.js",
+            b"// shadow that would WIN Vite resolution",
+        );
+        write_workspace_file(
+            &workspace,
+            "lib/lingxi-provider.js",
+            b"// shadow of a host-managed file",
+        );
+        write_workspace_file(&workspace, "app/screens/rogue.jsx", b"// not in the seed");
+        write_workspace_file(&workspace, "node_modules/.keep", b"");
+
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
+            .expect("scaffold");
+
+        assert!(
+            !workspace.join("app/app.js").exists(),
+            "extension shadow must be gone"
+        );
+        assert!(
+            !workspace.join("lib/lingxi-provider.js").exists(),
+            "host-managed shadow must be gone"
+        );
+        assert!(
+            !workspace.join("app/screens/rogue.jsx").exists(),
+            "rogue source must be gone"
+        );
+        assert!(workspace.join(".lingxi").is_dir(), ".lingxi is preserved");
+        // Not just the directory — `.lingxi/` is on the seed's own path list
+        // (`.lingxi/source-policy.json`), so writing the seed would recreate an
+        // EMPTY one. The manifest is the thing that must survive: it carries
+        // the `surface` stamp every later build reads back.
+        assert!(
+            local_apps::load_manifest(&layout).is_ok(),
+            ".lingxi/ keeps the service's own documents, not just its name"
+        );
+        assert!(
+            workspace.join("node_modules/.keep").exists(),
+            "node_modules is preserved"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("LINGXI.md")).expect("contract"),
+            "# guided contract",
+            "LINGXI.md is preserved"
+        );
+        assert!(
+            workspace.join("app/app.jsx").is_file(),
+            "the seed landed"
+        );
+    }
+
+    #[test]
+    fn a_first_scaffold_overwrites_a_pre_written_seed_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = shell_layout(root.path());
+        let workspace = layout.root().join(layout.workspace_rel());
+        write_workspace_file(
+            &workspace,
+            "app/screens/home-screen.jsx",
+            b"// squatted by the agent",
+        );
+
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
+            .expect("scaffold");
+
+        let landed = fs::read(workspace.join("app/screens/home-screen.jsx")).expect("read");
+        assert_ne!(
+            landed,
+            b"// squatted by the agent".to_vec(),
+            "the seed must win"
+        );
+    }
+
+    /// The boundary that must not move. A formed app's `app/` and `src/` are the
+    /// USER'S work; the only reason wiping a shell is safe is that a shell has
+    /// no legitimate application source. Anything that re-pins the scaffold over
+    /// an app that already has a shape passes `first_scaffold = false`.
+    #[test]
+    fn a_repin_never_wipes_a_formed_app() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = formed_layout(root.path());
+        let workspace = layout.root().join(layout.workspace_rel());
+        write_workspace_file(
+            &workspace,
+            "app/screens/user-written.jsx",
+            b"// the user's own code",
+        );
+        fs::write(workspace.join("app/globals.css"), "/* the user's own css */")
+            .expect("edit a seed path");
+
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, false)
+            .expect("repin");
+
+        assert!(
+            workspace.join("app/screens/user-written.jsx").exists(),
+            "a formed app's source must survive a repin"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("app/globals.css")).expect("globals"),
+            "/* the user's own css */",
+            "a repin must not revert an edited seed file either"
+        );
+    }
+
+    /// A checkpoint taken during the interview would carry the very bytes the
+    /// wipe exists to destroy, and `LocalAppCheckpointRestore` would put them
+    /// back. `.git` is not in `host_owned_relative`, so it is agent-reachable
+    /// and goes with the rest of the editable surface.
+    #[test]
+    fn a_first_scaffold_wipes_pre_confirmation_history_and_build_state() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = shell_layout(root.path());
+        let workspace = layout.root().join(layout.workspace_rel());
+        write_workspace_file(&workspace, ".git/objects/pre-confirmation", b"squatted history");
+        write_workspace_file(&workspace, ".lingxi-build-state/build-output/dist/index.html", b"stale");
+
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
+            .expect("scaffold");
+
+        assert!(
+            !workspace.join(".git").exists(),
+            "a checkpoint history written before confirmation must be gone"
+        );
+        assert!(
+            !workspace.join(".lingxi-build-state").exists(),
+            "build state produced from pre-confirmation source must be gone"
+        );
+    }
+
+    /// Fail safe: the wipe refuses a path that is not an initialized app
+    /// workspace instead of emptying whatever it was handed.
+    #[test]
+    fn a_first_scaffold_refuses_a_path_that_is_not_an_initialized_workspace() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
+        let workspace = layout.root().join(layout.workspace_rel());
+        fs::create_dir_all(&workspace).expect("bare workspace");
+        write_workspace_file(&workspace, "keep-me.txt", b"not ours to delete");
+
+        let error = scaffold_workspace_initialized(
+            &layout,
+            LocalAppBuildTarget::ViteReactStaticV1,
+            true,
+        )
+        .expect_err("an uninitialized workspace must not be wiped");
+
+        assert!(
+            format!("{error}").contains("initialized app workspace"),
+            "the refusal must name what it checked; got {error}"
+        );
+        assert!(
+            workspace.join("keep-me.txt").exists(),
+            "nothing may be deleted once the wipe has refused"
+        );
+    }
+
+    /// The wipe runs BEFORE the first `write_file`, so it cannot lean on
+    /// `ensure_safe_file_parent`'s own symlinked-root check: by the time that
+    /// runs, a `remove_dir_all` would already have emptied the symlink target.
+    #[cfg(unix)]
+    #[test]
+    fn a_first_scaffold_refuses_a_symlinked_workspace_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
+        let workspace = layout.root().join(layout.workspace_rel());
+        let outside = root.path().join("outside");
+        fs::create_dir_all(outside.join(".lingxi")).expect("outside app state");
+        fs::write(outside.join("precious.txt"), "someone else's tree").expect("outside file");
+        fs::create_dir_all(workspace.parent().expect("app dir")).expect("app dir");
+        std::os::unix::fs::symlink(&outside, &workspace).expect("symlink workspace");
+
+        let error =
+            scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
+                .expect_err("a symlinked workspace root must be refused");
+
+        assert!(
+            outside.join("precious.txt").exists(),
+            "the symlink target must not be emptied; got {error}"
+        );
+    }
+
+    /// A symlink INSIDE the workspace is removed as a link. Deciding
+    /// file-vs-directory from `metadata` instead of `symlink_metadata` would
+    /// hand a symlinked directory to `remove_dir_all` and delete a tree the
+    /// workspace only points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_first_scaffold_unlinks_a_symlinked_entry_without_following_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = shell_layout(root.path());
+        let workspace = layout.root().join(layout.workspace_rel());
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside).expect("outside dir");
+        fs::write(outside.join("precious.txt"), "someone else's tree").expect("outside file");
+        std::os::unix::fs::symlink(&outside, workspace.join("vendor")).expect("symlink vendor");
+
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
+            .expect("scaffold");
+
+        assert!(
+            fs::symlink_metadata(workspace.join("vendor")).is_err(),
+            "the symlink itself must be removed"
+        );
+        assert!(
+            outside.join("precious.txt").exists(),
+            "the wipe must not follow a symlink out of the workspace"
+        );
     }
 
     #[cfg(unix)]

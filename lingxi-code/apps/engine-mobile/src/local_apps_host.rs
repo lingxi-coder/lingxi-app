@@ -3251,7 +3251,7 @@ impl LocalAppsHostBroker {
             build_preview = build_preview,
         );
         tokio::task::spawn_blocking(move || {
-            crate::local_apps_build::scaffold_workspace_initialized(&layout, target)?;
+            crate::local_apps_build::scaffold_workspace_initialized(&layout, target, true)?;
             std::fs::write(workspace.join("LINGXI.md"), context).map_err(|error| {
                 local_apps::AppError::Io(format!("write workspace LINGXI.md: {error}"))
             })

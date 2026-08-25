@@ -65,6 +65,16 @@ impl LocalAppBuildTarget {
     }
 
     /// The manifest value this target is recorded as.
+    ///
+    /// ⛔ TEST-ONLY, and the gate is the point. Production never derives a
+    /// surface FROM a target: the surface is the input the user confirmed and
+    /// `from_surface` is the only direction that runs. The inverse exists so
+    /// [`scaffold_workspace`] can stamp a test workspace with the same pair a
+    /// real create writes. Leaving it ungated would put a function in the
+    /// shipped binary that nothing on any production path calls — the exact
+    /// shape this plan has been bitten by five times — and would let a future
+    /// caller reach for it instead of carrying the confirmed surface through.
+    #[cfg(test)]
     fn surface(self) -> local_apps::AppSurface {
         match self {
             Self::ViteReactStaticV1 => local_apps::AppSurface::Dom,
@@ -226,9 +236,17 @@ fn load_record_mirror(layout: &AppLayout) -> Result<local_apps::AppRecord, AppEr
 
 /// Write `apps/<id>/workspace/.lingxi/app.json` back.
 ///
-/// Only [`scaffold_workspace`] uses this, and only to flip `scaffolded`: the
-/// index copy of the record belongs to `AppService`, and the mirror is the half
-/// a service-less caller can still keep consistent.
+/// ⛔ TEST-ONLY. Only [`scaffold_workspace`] uses this, and only to flip
+/// `scaffolded`.
+///
+/// In production this half is NOT this module's to write, and the `cfg` is
+/// what enforces that. `AppService::with_app` persists the record through
+/// `storage::save_app_files_steps`, whose `MetadataMirror` step writes exactly
+/// this file whenever `record` changed — so `commit_scaffold` already lands
+/// the mirror `detect_build_target` later reads back. A second writer here
+/// would be a second source of truth for the same bytes, racing the service's
+/// own rollback ordering.
+#[cfg(test)]
 fn save_record_mirror(layout: &AppLayout, record: &local_apps::AppRecord) -> Result<(), AppError> {
     let relative = local_apps::storage::metadata_rel(layout.app_id());
     let path = layout.root().join(&relative);
@@ -482,6 +500,24 @@ pub(crate) struct LocalAppBuilder<'a> {
 
 /// Materialize the repository-verified Vite scaffold directly into a fresh
 /// workspace so app creation does not depend on `npm create`.
+///
+/// ⛔ TEST-ONLY — this is a FIXTURE BUILDER, not a production entry point, and
+/// the `cfg` gate is deliberate rather than incidental. Both real callers
+/// (`scaffold_app_value` for `CreateMode::Scaffolded`, `land_scaffold` for
+/// `LocalAppScaffold`) go straight to [`scaffold_workspace_initialized`],
+/// because by then the enclosing create/scaffold transaction has already
+/// initialized the layout, stamped `manifest.surface`, and — at its commit
+/// point — flipped `AppRecord.scaffolded` and written the record mirror
+/// through `AppService`. This function re-does those three steps WITHOUT a
+/// service so a unit test can reach the same on-disk state; running it in
+/// production would write the manifest and the mirror behind the service's
+/// back.
+///
+/// If you find yourself wanting to call this from a non-test path, the answer
+/// is `scaffold_workspace_initialized` plus the transaction that owns the
+/// record — and the compiler will tell you so, which is why the gate is here
+/// and not only in this comment.
+#[cfg(test)]
 pub(crate) fn scaffold_workspace(
     layout: &AppLayout,
     target: LocalAppBuildTarget,

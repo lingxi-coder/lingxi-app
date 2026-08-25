@@ -5636,11 +5636,21 @@ impl MobileEngineHandle {
     /// can never overtake the domain events of its own cause (e.g.
     /// `AppDesignConflict` always precedes the `revision_conflict` failure).
     ///
-    /// Emits with NO correlation key. That is correct for the app commands
-    /// that carry none — every one of them except `CreateApp`, which has a
-    /// client-generated `request_id` and must use
-    /// [`Self::emit_app_failure_for_request`] instead so the client that
+    /// Emits with NO correlation key. That is correct for every command that
+    /// reaches this function today, because `CreateApp` — the one app command
+    /// that both carries a client-generated `request_id` AND reports its
+    /// failures as `AppOperationFailed` — must use
+    /// [`Self::emit_app_failure_for_request`] instead, so the client that
     /// started the creation can claim its own failure.
+    ///
+    /// ⚠️ "The only app command with a correlation key" would be FALSE and is
+    /// deliberately not what this says. `ResolveAppUiRequest` and
+    /// `ResolveAppCapabilityRequest` each carry a `request_id` too; they are
+    /// not exceptions only because neither reports failure as an event at all
+    /// — an unmatched id is a `tracing::debug!` line and nothing else. If
+    /// either ever grows a client-visible failure, it needs
+    /// `emit_app_failure_for_request`, not this function, and this comment is
+    /// not evidence that it does not.
     async fn emit_app_failure(&self, app_id: Option<String>, error: &AppError) {
         self.emit_app_failure_for_request(app_id, error, None).await;
     }

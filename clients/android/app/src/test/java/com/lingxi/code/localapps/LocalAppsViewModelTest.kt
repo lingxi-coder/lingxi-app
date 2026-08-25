@@ -33,6 +33,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -46,6 +48,37 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LocalAppsViewModelTest {
+
+    /**
+     * Unwind `Dispatchers.Main` at the end of a test — the DRAIN FIRST, then
+     * the reset. Every `finally` in this file calls this and none of them
+     * calls `Dispatchers.resetMain()` directly.
+     *
+     * ⚠️ The order is the whole point, and getting it wrong does not fail on
+     * what the test asserts. `LocalAppsViewModel.createShellApp` arms a
+     * stop-loss — `viewModelScope.launch { delay(CREATE_RESULT_TIMEOUT_MS) }`,
+     * i.e. a task scheduled on `Dispatchers.Main` — and a test that leaves a
+     * create unresolved (or resolves one and starts another) still has that
+     * task in the scheduler when its body returns. `runTest` then drains the
+     * scheduler as part of its OWN teardown, which runs AFTER this `finally`.
+     * Dispatching that task onto a Main the `finally` has already unset throws
+     *
+     *     IllegalStateException: Dispatchers.Main was accessed when the
+     *     platform dispatcher was absent and the test dispatcher was unset
+     *
+     * — a harness error attributed to the test, with no assertion involved.
+     * Five tests here failed exactly that way, all of them create-flow tests,
+     * and the production stop-loss they tripped over is deliberate: a sibling
+     * test (`a landed create is not timed out afterwards`) exists to assert it.
+     *
+     * `advanceUntilIdle()` cannot weaken anything: it runs after the body's
+     * assertions have already been evaluated. It only lets the armed timeout
+     * complete while Main is still installed.
+     */
+    private fun TestScope.releaseMain() {
+        advanceUntilIdle()
+        Dispatchers.resetMain()
+    }
 
     private class RecordingSource : ConversationSource {
         private val events = MutableSharedFlow<ClientEvent>(extraBufferCapacity = 32)
@@ -141,7 +174,7 @@ class LocalAppsViewModelTest {
                 create.requestId?.isNotBlank() == true,
             )
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -179,7 +212,7 @@ class LocalAppsViewModelTest {
             assertTrue(first?.isNotBlank() == true)
             assertTrue("the second create must not reuse the first key", first != second)
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -227,7 +260,7 @@ class LocalAppsViewModelTest {
             assertEquals("session-9", landing.initSessionId)
             job.cancel()
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -275,7 +308,7 @@ class LocalAppsViewModelTest {
             assertEquals("ours", landings.single().appId)
             job.cancel()
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -305,7 +338,7 @@ class LocalAppsViewModelTest {
             assertTrue("a key-less create belongs to nobody here", landings.isEmpty())
             job.cancel()
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -342,7 +375,7 @@ class LocalAppsViewModelTest {
             assertNull("no pin was minted", landing.initSessionId)
             job.cancel()
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -387,7 +420,7 @@ class LocalAppsViewModelTest {
             assertTrue("a timed-out claim is gone, not merely quiet", landings.isEmpty())
             job.cancel()
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -421,7 +454,7 @@ class LocalAppsViewModelTest {
 
             assertNull("a landed create has nothing to time out", viewModel.uiState.value.error)
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -461,7 +494,7 @@ class LocalAppsViewModelTest {
                 source.commands.filterIsInstance<ClientCommand.CreateApp>().size,
             )
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -516,7 +549,7 @@ class LocalAppsViewModelTest {
             assertEquals("ours", landings.single().appId)
             job.cancel()
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -562,7 +595,7 @@ class LocalAppsViewModelTest {
             assertTrue("nothing may be claimed after a reconnect", landings.isEmpty())
             job.cancel()
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -593,7 +626,7 @@ class LocalAppsViewModelTest {
                 viewModel.uiState.value.error?.isNotBlank() == true,
             )
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -631,7 +664,7 @@ class LocalAppsViewModelTest {
                 snapshots.published.last().map { it.id },
             )
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -673,7 +706,7 @@ class LocalAppsViewModelTest {
             assertEquals(listOf("formed"), pins)
             pinJob.cancel()
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -703,7 +736,7 @@ class LocalAppsViewModelTest {
             assertEquals(APP_ID, listRequest.appId)
             assertNull("the first page starts at the catalog head", listRequest.offset)
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -743,7 +776,7 @@ class LocalAppsViewModelTest {
             assertTrue(page.rows.first().isInit)
             assertNull("no further page exists", page.nextOffset)
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -810,7 +843,7 @@ class LocalAppsViewModelTest {
                 viewModel.uiState.value.appSessions[APP_ID]?.rows?.map { it.uuid },
             )
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -832,7 +865,7 @@ class LocalAppsViewModelTest {
             runCurrent()
             assertEquals(LocalAppWorkflow.Ready, viewModel.uiState.value.apps.single().workflow)
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -869,7 +902,7 @@ class LocalAppsViewModelTest {
             runCurrent()
             assertEquals(emptySet<String>(), cleanup.snapshots.last())
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -894,7 +927,7 @@ class LocalAppsViewModelTest {
             assertTrue(cleanup.prepared.isEmpty())
             assertEquals(emptySet<String>(), cleanup.snapshots.last())
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -920,7 +953,7 @@ class LocalAppsViewModelTest {
             assertEquals(listOf(APP_ID), cleanup.cancelled)
             assertEquals("delete rejected", viewModel.uiState.value.error)
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -945,7 +978,7 @@ class LocalAppsViewModelTest {
             assertTrue(source.commands.none { it is ClientCommand.DeleteApp })
             assertTrue(viewModel.uiState.value.error?.isNotBlank() == true)
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -999,7 +1032,7 @@ class LocalAppsViewModelTest {
                 viewModel.uiState.value.appSessions[APP_ID],
             )
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -1039,7 +1072,7 @@ class LocalAppsViewModelTest {
                 source.commands.filterIsInstance<ClientCommand.ResolveAppCapabilityRequest>().map { it.requestId },
             )
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -1085,7 +1118,7 @@ class LocalAppsViewModelTest {
             assertEquals("operation_unsupported", localFailure?.errorCode)
             assertTrue(source.commands.none { it is ClientCommand.ExecuteAppBridgeRequest })
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -1131,7 +1164,7 @@ class LocalAppsViewModelTest {
                 ),
             )
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -1226,7 +1259,7 @@ class LocalAppsViewModelTest {
             assertEquals("ui-2", viewModel.uiState.value.pendingUiAction?.requestId)
             assertNull(viewModel.uiState.value.pendingAuthorization)
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -1296,7 +1329,7 @@ class LocalAppsViewModelTest {
                 viewModel.uiState.value.pendingUiAction?.action,
             )
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 
@@ -1380,7 +1413,7 @@ class LocalAppsViewModelTest {
             assertNull(noopResolution.resultJson)
             assertEquals("WebView UI automation returned no result", noopResolution.error)
         } finally {
-            Dispatchers.resetMain()
+            releaseMain()
         }
     }
 

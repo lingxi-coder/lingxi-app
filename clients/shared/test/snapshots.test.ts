@@ -1383,6 +1383,50 @@ test('background task app events mirror the Rust wire contract', () => {
   });
 });
 
+// `app_created` has no golden snapshot, so nothing under `snapshots/event/`
+// reaches its branch in `validateAppEvent` — without this test the guard for
+// the create-flow correlation key is dead code that always "passes".
+test('app_created carries a full record and an optional correlation key', () => {
+  const record = {
+    id: 'abc12345',
+    name: 'Habits',
+    brief: 'A daily habit tracker',
+    git_enabled: true,
+    created_at_ms: 1750000000000,
+    updated_at_ms: 1750000000001,
+    workflow_state: 'draft',
+    workspace_rel: 'apps/abc12345/workspace',
+    scaffolded: false,
+  };
+
+  // The "+" button's own creation: the key it sent comes back verbatim, and it
+  // arrives through the real `app_event` envelope, not just the inner helper.
+  validateEvent('app_event(app_created)', {
+    type: 'app_event',
+    event: { type: 'app_created', record, request_id: 'req-1' },
+  });
+
+  // An agent-driven create has no client request behind it — the key is
+  // absent, and absent is legal.
+  validateAppEvent({ type: 'app_created', record });
+
+  // …but a PRESENT key must be a string. This is what stops the branch from
+  // being vacuous: without the `isString` check the case below would pass.
+  assert.throws(
+    () => validateAppEvent({ type: 'app_created', record, request_id: 42 }),
+    /request_id|falsy/,
+    'a non-string correlation key must be rejected',
+  );
+
+  // `scaffolded` is REQUIRED on the record — a shell that omits it must not
+  // slip through as a formed app.
+  const { scaffolded: _dropped, ...withoutScaffolded } = record;
+  assert.throws(
+    () => validateAppEvent({ type: 'app_created', record: withoutScaffolded }),
+    'a record without `scaffolded` must be rejected',
+  );
+});
+
 test('message block_set snapshot parses as MessageDto', () => {
   validateMessage(loadSnapshot('message', 'block_set.json'));
 });

@@ -15,15 +15,38 @@
 //! changed value). It is checked in at `snapshots/contract_index.json` and is
 //! the SAME kind of frozen, auditable artifact as the F1-08 goldens.
 //!
-//! ## How the index is built
+//! ## How the index is built — and what it does NOT cover
 //!
-//! `current_contract_index()` is a hand-authored, exhaustive description of the
-//! contract maintained ALONGSIDE the DTOs. A compile-time exhaustiveness anchor
-//! ([`contract_index_covers_every_dto`]) constructs one value of every contract
-//! type so that adding a DTO without indexing it cannot pass review unnoticed —
-//! the constructor won't compile until the new type exists, and the
-//! `current_contract_matches_index_or_version_bumped` guard then flags the
-//! missing index key on first run.
+//! `current_contract_index()` is a HAND-MAINTAINED table of string literals
+//! kept alongside the DTOs. It is **not exhaustive**, and nothing makes it so.
+//! Read the next three paragraphs before you trust a green run here.
+//!
+//! **A leaf that is absent from BOTH the table and the checked-in index is
+//! invisible to this guard.** [`classify`] / [`breaking_entries`] walk the keys
+//! of the CHECKED-IN index and ask what became of each one; a key that was
+//! never written down has nothing to become. And when table and index agree,
+//! `current_contract_matches_index_or_version_bumped` returns early without
+//! diffing at all. So removing, renaming or retyping an unindexed field is a
+//! BREAKING wire change that ships green and unbumped. The guard's promise is
+//! "no breaking change to an INDEXED leaf without a major bump" — not "no
+//! breaking change".
+//!
+//! **This is not hypothetical.** Verified at the 8.0.0 bless: 19 of the 118
+//! `pub struct`/`pub enum` types declared in `src/` carry no index rows of
+//! their own — among them `PermissionOwnerDto`, `PermissionResolutionDto`,
+//! `AttachmentDto`, `AppSessionRowDto` and the whole `AskUserQuestion*` family,
+//! even though `ClientEvent::AskUserQuestion` is a live variant. Backfilling
+//! them is a deliberately PARKED work item, not an oversight to fix in passing;
+//! what is not acceptable is a header that claims coverage this table does not
+//! have, because that is what stops a reviewer from checking.
+//!
+//! **The compile-time anchor ([`contract_index_covers_every_dto`]) forces
+//! awareness only for the types and enum variants it ACTUALLY CONSTRUCTS.** It
+//! is a hand-maintained list too. Constructing a value there means a removed or
+//! renamed type/variant breaks THIS file's compile, so it cannot vanish
+//! silently; a type absent from that list gets no such protection. When you add
+//! a DTO or a variant, add it to BOTH the table and the anchor — and when you
+//! rely on the anchor, check that the thing you care about is really in it.
 //!
 //! ## Regenerating the index
 //!
@@ -2285,9 +2308,16 @@ fn contract_index_covers_every_dto() {
         reason: String::new(),
     };
     let _app_authorization_decision = AppAuthorizationDecisionDto::AllowOnce;
-    // One value per `AppEventDto` variant: the envelope is a single
-    // `ClientEvent::AppEvent`, so nothing else forces these ten tags to
-    // exist.
+    // One value per `AppEventDto` variant — TWELVE of them; count against the
+    // enum in `local_apps.rs`, not against this comment. The envelope is a
+    // single `ClientEvent::AppEvent`, so nothing else in this file forces these
+    // tags to exist, and a variant omitted here is a variant whose rename the
+    // guard cannot see: the hand table would keep `put`-ing the old key, the
+    // checked-in index would still carry it, `breaking_entries` would be empty,
+    // and a BREAKING wire rename would ship green. This list already drifted
+    // once — it said "ten" while `AppBackgroundTaskChanged` and `AppCreated`
+    // were missing, `AppCreated` being the variant carrying the create-flow
+    // correlation key. Add the arm here whenever you add a variant.
     let _app_events: Vec<AppEventDto> = vec![
         AppEventDto::AppDetailsChanged {
             details: app_details,
@@ -2349,6 +2379,30 @@ fn contract_index_covers_every_dto() {
                 instructions: String::new(),
                 reason: String::new(),
             },
+        },
+        AppEventDto::AppBackgroundTaskChanged {
+            app_id: String::new(),
+            task_id: String::new(),
+            status: String::new(),
+            result_json: None,
+            error: None,
+            retryable: false,
+        },
+        AppEventDto::AppCreated {
+            record: AppRecordDto {
+                id: String::new(),
+                name: String::new(),
+                brief: String::new(),
+                git_enabled: false,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                workflow_state: AppWorkflowStateDto::Draft,
+                conversation_id: None,
+                init_session_id: None,
+                workspace_rel: String::new(),
+                scaffolded: false,
+            },
+            request_id: None,
         },
     ];
 

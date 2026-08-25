@@ -43,7 +43,8 @@ use client_adapter::{
     PermissionRequestSink, TurnWrapper,
 };
 use client_protocol::commands::{
-    ClientCommand, ListingKindDto as ProtocolListingKind, ProviderCredentialSecretDto,
+    AppCreateModeDto, ClientCommand, ListingKindDto as ProtocolListingKind,
+    ProviderCredentialSecretDto,
 };
 use client_protocol::controls::{
     ControlDisabledReasonDto, ConversationControlsDto, PermissionControlStateDto,
@@ -5634,10 +5635,31 @@ impl MobileEngineHandle {
     /// the queue flushes its emission tasks first, so the synthesized failure
     /// can never overtake the domain events of its own cause (e.g.
     /// `AppDesignConflict` always precedes the `revision_conflict` failure).
+    ///
+    /// Emits with NO correlation key. That is correct for the app commands
+    /// that carry none — every one of them except `CreateApp`, which has a
+    /// client-generated `request_id` and must use
+    /// [`Self::emit_app_failure_for_request`] instead so the client that
+    /// started the creation can claim its own failure.
     async fn emit_app_failure(&self, app_id: Option<String>, error: &AppError) {
+        self.emit_app_failure_for_request(app_id, error, None).await;
+    }
+
+    /// [`Self::emit_app_failure`] for a command that DOES carry a correlation
+    /// key: the key rides the failure event verbatim.
+    ///
+    /// Without this the client cannot tell its own failed `CreateApp` from
+    /// anyone else's, so it waits out its 30-second timeout and shows
+    /// "创建结果未知，请在应用库确认" instead of the real reason.
+    async fn emit_app_failure_for_request(
+        &self,
+        app_id: Option<String>,
+        error: &AppError,
+        request_id: Option<String>,
+    ) {
         let service = self.local_apps.as_ref().ok().cloned();
         self.app_emissions
-            .emit_failure(service.as_deref(), app_id, error)
+            .emit_failure(service.as_deref(), app_id, error, request_id)
             .await;
     }
 
@@ -5682,6 +5704,7 @@ impl MobileEngineHandle {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_create_app(
         &self,
         name: &str,
@@ -5691,9 +5714,20 @@ impl MobileEngineHandle {
         workflow_model: Option<String>,
         conversation_id: Option<String>,
         surface: Option<AppSurfaceDto>,
+        mode: AppCreateModeDto,
+        request_id: Option<String>,
     ) {
-        let Some(service) = self.local_apps_or_report(None).await else {
-            return;
+        let service = match &self.local_apps {
+            Ok(service) => service.clone(),
+            // Not `local_apps_or_report`: the boot-load failure is still THIS
+            // request's failure, so it has to carry the correlation key too.
+            // A client that only sees a key-less `storage_corrupt` sits out
+            // its create timeout.
+            Err(error) => {
+                self.emit_app_failure_for_request(None, error, request_id)
+                    .await;
+                return;
+            }
         };
         // Raising the origin is fallible like every other inbound DTO raise
         // (W1): an unknown `#[non_exhaustive]` future origin must fail typed
@@ -5701,7 +5735,8 @@ impl MobileEngineHandle {
         let origin = match crate::local_apps_bridge::raise_origin(origin) {
             Ok(origin) => origin,
             Err(error) => {
-                self.emit_app_failure(None, &error).await;
+                self.emit_app_failure_for_request(None, &error, request_id)
+                    .await;
                 return;
             }
         };
@@ -5718,37 +5753,95 @@ impl MobileEngineHandle {
         // like every other inbound DTO raise — an unknown `#[non_exhaustive]`
         // future surface must fail typed rather than launder into a routed
         // create.
-        let surface = match surface.map(crate::local_apps_bridge::raise_surface) {
-            Some(Ok(surface)) => surface,
+        let raised_surface = match surface.map(crate::local_apps_bridge::raise_surface) {
+            Some(Ok(surface)) => Some(surface),
             Some(Err(error)) => {
-                self.emit_app_failure(None, &error).await;
+                self.emit_app_failure_for_request(None, &error, request_id)
+                    .await;
                 return;
             }
-            None => local_apps::AppSurface::Dom,
+            None => None,
         };
+        // `commands.rs`'s `name` is a REQUIRED `String`, so a client with no
+        // name to offer sends `""`, never nil — the "+" button does exactly
+        // that. The service layer's vocabulary for "no name" is `None`, and
+        // this is the one hop between them. (`AppService` also filters a blank
+        // name itself, so this is belt and braces rather than the only guard;
+        // it is here so the handler states which vocabulary it is speaking.)
+        let name = Some(name.trim()).filter(|name| !name.is_empty());
         let scaffold_host = Arc::clone(&self.local_apps_host);
-        match service
-            .create_app_with_git_and_workflow_model_and_initializer(
-                Some(name),
-                brief,
-                conversation_id,
-                git_enabled,
-                workflow_model.as_deref(),
-                local_apps::CreateMode::Scaffolded,
-                // No request to correlate yet on this handler — Task 5 gives
-                // the `CreateApp` host handler a real `request_id`.
-                None,
-                move |record| {
-                    let host = Arc::clone(&scaffold_host);
-                    async move {
-                        host.scaffold_app_value(&record, surface)
-                            .await
-                            .map_err(local_apps::AppError::Io)
-                    }
-                },
-            )
-            .await
-        {
+        // THE fork. `mode` is read here and nowhere else, and each branch
+        // decides both the record's `scaffolded` flag (via `CreateMode`) and
+        // what the pre-commit initializer materializes in the workspace.
+        // Matched exhaustively: `AppCreateModeDto` is not `#[non_exhaustive]`,
+        // so a future mode is a compile error here rather than a silent
+        // fall-through into one of today's two paths.
+        let created = match mode {
+            // The "+" button: an empty shell. No scaffold, no surface — the
+            // shape is decided when `LocalAppScaffold` lands (§B.1) — and the
+            // workspace gets the GUIDED contract telling the agent to
+            // interview the user instead of writing code it is about to lose.
+            AppCreateModeDto::Shell => {
+                if raised_surface.is_some() {
+                    self.emit_app_failure_for_request(
+                        None,
+                        &local_apps::AppError::InvalidRequest(
+                            "a shell create must not name a surface; the surface is decided \
+                             when LocalAppScaffold lands"
+                                .into(),
+                        ),
+                        request_id,
+                    )
+                    .await;
+                    return;
+                }
+                service
+                    .create_app_with_git_and_workflow_model_and_initializer(
+                        name,
+                        brief,
+                        conversation_id,
+                        git_enabled,
+                        workflow_model.as_deref(),
+                        local_apps::CreateMode::Shell,
+                        request_id.clone(),
+                        move |record| {
+                            let host = Arc::clone(&scaffold_host);
+                            async move {
+                                host.write_guided_contract_value(&record)
+                                    .await
+                                    .map_err(local_apps::AppError::Io)
+                            }
+                        },
+                    )
+                    .await
+            }
+            // Create + scaffold in one step: today's path, unchanged except
+            // that the correlation key is now real instead of the `None` stub
+            // the protocol bump left behind.
+            AppCreateModeDto::Scaffolded => {
+                let surface = raised_surface.unwrap_or(local_apps::AppSurface::Dom);
+                service
+                    .create_app_with_git_and_workflow_model_and_initializer(
+                        name,
+                        brief,
+                        conversation_id,
+                        git_enabled,
+                        workflow_model.as_deref(),
+                        local_apps::CreateMode::Scaffolded,
+                        request_id.clone(),
+                        move |record| {
+                            let host = Arc::clone(&scaffold_host);
+                            async move {
+                                host.scaffold_app_value(&record, surface)
+                                    .await
+                                    .map_err(local_apps::AppError::Io)
+                            }
+                        },
+                    )
+                    .await
+            }
+        };
+        match created {
             Ok(record) => {
                 // v3 Phase 4: pin the init session (fork the source chat, or
                 // anchor an empty one). Session pinning remains best-effort;
@@ -5803,7 +5896,13 @@ impl MobileEngineHandle {
                     let _ = service.announce_record(&record.id).await;
                 }
             }
-            Err(error) => self.emit_app_failure(None, &error).await,
+            // The service-raised failure is still the CLIENT's failure: echo
+            // the key it sent so it can stop waiting on a create that will
+            // never land.
+            Err(error) => {
+                self.emit_app_failure_for_request(None, &error, request_id)
+                    .await;
+            }
         }
     }
 
@@ -6757,14 +6856,14 @@ impl MobileEngineHandle {
                 self.handle_get_app_details(app_id).await;
                 Ok(())
             }
-            // ⚠️ `mode` and `request_id` are NOT forwarded yet. Protocol
-            // 8.0.0 adds them; the create-flow task is what forks this handler
-            // on the mode and threads the correlation key through to the
-            // success/failure events. Bound to `_`-prefixed names rather than
-            // matched with `..` so this drop stays greppable and so the arm
-            // breaks again if either field is renamed. Until that task lands
-            // EVERY create is treated as `Scaffolded` — which is today's
-            // behaviour, and is why no client sends `Shell` yet.
+            // `mode` FORKS the handler (`Shell` = the empty shell the "+"
+            // button creates, `Scaffolded` = create + scaffold in one step) and
+            // `request_id` rides both outcomes — the `AppCreated` event and,
+            // when the create fails, the `AppOperationFailed` event — so the
+            // client that started this creation recognises its own result.
+            // Neither is optional plumbing: without the fork every create is a
+            // scaffolded one, and without the key a failing create leaves the
+            // client waiting out a 30-second timeout.
             ClientCommand::CreateApp {
                 name,
                 origin,
@@ -6773,8 +6872,8 @@ impl MobileEngineHandle {
                 workflow_model,
                 conversation_id,
                 surface,
-                mode: _mode,
-                request_id: _request_id,
+                mode,
+                request_id,
             } => {
                 self.handle_create_app(
                     &name,
@@ -6784,6 +6883,8 @@ impl MobileEngineHandle {
                     workflow_model,
                     conversation_id,
                     surface,
+                    mode,
+                    request_id,
                 )
                 .await;
                 Ok(())
@@ -13164,6 +13265,355 @@ mod tests {
                     .iter()
                     .any(|event| matches!(event, Ev::AppsChanged { .. })),
                 "a corrupt store must never masquerade as an (empty) app list"
+            );
+        });
+    }
+
+    // ── Create-flow: `CreateApp{mode}` forks shell vs scaffolded ───────────
+
+    /// Submit one `CreateApp` and return every event it produced.
+    ///
+    /// Deliberately takes `name` as a `&str` (never an `Option`): the wire
+    /// field is a required `String` and the "+" button sends `""`, so a helper
+    /// that offered `None` would test a payload no client can send.
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_create(
+        handle: &MobileEngineHandle,
+        listener: &FakeListener,
+        name: &str,
+        brief: &str,
+        surface: Option<client_protocol::local_apps::AppSurfaceDto>,
+        mode: AppCreateModeDto,
+        request_id: Option<&str>,
+    ) -> Vec<Ev> {
+        handle
+            .submit(ClientCommand::CreateApp {
+                name: name.into(),
+                origin: AppCreateOriginDto::Library,
+                brief: brief.into(),
+                git_enabled: true,
+                workflow_model: None,
+                conversation_id: None,
+                surface,
+                mode,
+                request_id: request_id.map(str::to_string),
+            })
+            .await
+            .expect("submit(CreateApp) must not be a transport error");
+        drain_events(handle, listener).await
+    }
+
+    /// The `AppCreated` row (record + correlation key) from a create's events.
+    fn created_row(
+        events: &[Ev],
+    ) -> Option<(
+        client_protocol::local_apps::AppRecordDto,
+        Option<String>,
+    )> {
+        events.iter().find_map(|event| match event {
+            Ev::AppEvent {
+                event: AppEventDto::AppCreated { record, request_id },
+            } => Some((record.clone(), request_id.clone())),
+            _ => None,
+        })
+    }
+
+    /// The first `AppOperationFailed` in a create's events.
+    fn first_failure(events: &[Ev]) -> Option<(AppErrorCodeDto, String, Option<String>)> {
+        events.iter().find_map(|event| match event {
+            Ev::AppOperationFailed {
+                code,
+                message,
+                request_id,
+                ..
+            } => Some((*code, message.clone(), request_id.clone())),
+            _ => None,
+        })
+    }
+
+    /// `CreateApp{mode: Shell}` lands an UNFORMED app: `scaffolded == false`,
+    /// a workspace holding only the private `.lingxi/` state dir plus the
+    /// GUIDED contract, and no application source at all.
+    ///
+    /// ⚠️ The source check is a per-path absence, NOT an exact directory
+    /// listing: `git_enabled` defaults true and `layout.initialize()` may put
+    /// a `.git` in the workspace, so an equality assertion would fail for a
+    /// reason that has nothing to do with the property under test. The form
+    /// below still fails the moment a scaffold leaks in — which is what this
+    /// test is for.
+    #[test]
+    fn create_app_in_shell_mode_leaves_an_empty_workspace_with_the_guided_contract() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            // The "+" button's exact payload: empty name, empty brief, no
+            // surface, `Shell`, and its own correlation key.
+            let events =
+                submit_create(&handle, &listener, "", "", None, AppCreateModeDto::Shell, Some("req-1"))
+                    .await;
+            let (record, request_id) =
+                created_row(&events).expect("a Shell create must announce AppCreated");
+            assert_eq!(
+                request_id.as_deref(),
+                Some("req-1"),
+                "the client that pressed + recognises its own creation by this key"
+            );
+            assert!(
+                !record.scaffolded,
+                "a Shell create must land an UNFORMED record: {record:?}"
+            );
+            assert_eq!(
+                record.name,
+                local_apps::PLACEHOLDER_APP_NAME,
+                "an empty wire name plus an empty brief derives the placeholder"
+            );
+
+            let workspace = tmp
+                .path()
+                .join("apps")
+                .join(&record.id)
+                .join("workspace");
+            assert!(
+                workspace.join(".lingxi").is_dir(),
+                "layout.initialize() must have run before the initializer"
+            );
+            assert!(
+                workspace.join("LINGXI.md").is_file(),
+                "the shell workspace must carry the guided contract"
+            );
+            for leaked in ["app", "src", "package.json", "vite.config.mjs", "index.html"] {
+                assert!(
+                    !workspace.join(leaked).exists(),
+                    "a shell workspace must hold no application source; found {leaked}"
+                );
+            }
+
+            let contract =
+                std::fs::read_to_string(workspace.join("LINGXI.md")).expect("guided contract");
+            assert!(
+                contract.contains("LocalAppScaffold"),
+                "the contract must name the one useful tool: {contract}"
+            );
+            assert!(
+                contract.contains("会在脚手架落地时被删除"),
+                "the contract must warn that pre-confirmation source is wiped: {contract}"
+            );
+            assert!(
+                contract.contains(&record.id),
+                "the contract must bind the workspace to its app id so the agent \
+                 can call LocalAppScaffold without rediscovering it: {contract}"
+            );
+        });
+    }
+
+    /// A shape is decided when the scaffold lands, never before (§B.1), so a
+    /// `Shell` create that names a `surface` is REJECTED — it must not quietly
+    /// land a shell with the surface dropped on the floor.
+    #[test]
+    fn create_app_in_shell_mode_rejects_a_surface() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let events = submit_create(
+                &handle,
+                &listener,
+                "",
+                "",
+                Some(client_protocol::local_apps::AppSurfaceDto::Dom),
+                AppCreateModeDto::Shell,
+                Some("req-2"),
+            )
+            .await;
+            let (code, message, request_id) = first_failure(&events)
+                .unwrap_or_else(|| panic!("a Shell create that names a surface must fail typed, got {events:?}"));
+            assert_eq!(code, AppErrorCodeDto::InvalidRequest);
+            assert!(
+                message.contains("surface"),
+                "the failure must name the offending field, got {message}"
+            );
+            assert_eq!(
+                request_id.as_deref(),
+                Some("req-2"),
+                "even the pre-service rejection is the client's own failure"
+            );
+            assert!(
+                created_row(&events).is_none(),
+                "a rejected create must not land a record: {events:?}"
+            );
+        });
+    }
+
+    /// The record a `Shell` create commits lowers with `scaffolded == false`.
+    /// `lower_record` is a PURE mapping — proving it end-to-end here (real
+    /// service record in, DTO out) is what rules out a lowering that reads
+    /// the flag off something other than the record.
+    #[test]
+    fn a_shell_record_lowers_with_scaffolded_false() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let events =
+                submit_create(&handle, &listener, "", "", None, AppCreateModeDto::Shell, None).await;
+            let (row, _) = created_row(&events).expect("a Shell create must announce AppCreated");
+            let record = handle
+                .local_apps()
+                .expect("local-apps service")
+                .record(&row.id)
+                .await
+                .expect("the committed record");
+            let dto = crate::local_apps_bridge::lower_record(&record);
+            assert!(
+                !dto.scaffolded,
+                "lower_record must carry the shell's own flag — no extra IO"
+            );
+        });
+    }
+
+    /// 🚨 `lower_record` is NOT `lower_app_event`: the test above pins the
+    /// record mapping and cannot stop the correlation key being dropped off
+    /// the EVENT. This one pins the event.
+    #[test]
+    fn lower_app_event_passes_request_id_through_on_app_created() {
+        let record = local_apps::AppRecord {
+            id: "app00001".into(),
+            name: "Habits".into(),
+            brief: "a habit tracker".into(),
+            workflow_model: None,
+            git_enabled: true,
+            scaffolded: false,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            workflow_state: local_apps::AppWorkflowState::Draft,
+            conversation_id: None,
+            init_session_id: None,
+            workspace_rel: "apps/app00001/workspace".into(),
+        };
+        let lowered = crate::local_apps_bridge::lower_app_event(local_apps::AppEvent::AppCreated {
+            record,
+            request_id: Some("req-1".into()),
+        })
+        .expect("AppCreated always has a wire representation");
+        match lowered {
+            Ev::AppEvent {
+                event: AppEventDto::AppCreated { request_id, .. },
+            } => {
+                assert_eq!(
+                    request_id.as_deref(),
+                    Some("req-1"),
+                    "a dropped correlation key here means the + button never opens the new app"
+                );
+            }
+            other => panic!("expected AppCreated, got {other:?}"),
+        }
+    }
+
+    /// 🚨 A FAILED create must carry the client's own `request_id`.
+    ///
+    /// `ClientEvent::AppOperationFailed.request_id` had no producer at all
+    /// before this handler threaded one through: the field existed and was
+    /// unconditionally `None`. A client that cannot claim its own failure
+    /// waits out a 30-second timeout and shows "创建结果未知" instead of the
+    /// real reason.
+    ///
+    /// The failure is raised INSIDE `AppService` (an over-long name trips
+    /// `ensure_within`), so this also proves the key survives the deep path,
+    /// not just the handler's own early returns.
+    #[test]
+    fn a_failed_shell_create_reports_the_request_id_the_client_sent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let too_long = "n".repeat(local_apps::service::MAX_NAME_BYTES + 1);
+            let events = submit_create(
+                &handle,
+                &listener,
+                &too_long,
+                "",
+                None,
+                AppCreateModeDto::Shell,
+                Some("req-9"),
+            )
+            .await;
+            let (code, message, request_id) = first_failure(&events)
+                .unwrap_or_else(|| panic!("AppOperationFailed must be emitted, got {events:?}"));
+            assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message}");
+            assert_eq!(
+                request_id.as_deref(),
+                Some("req-9"),
+                "否则客户端只能靠超时兜底"
+            );
+        });
+    }
+
+    /// 🚨 BOTH branches, in one test, on purpose.
+    ///
+    /// `mode` was received and ignored (`mode: _mode`) until this handler
+    /// forked on it. Testing `Shell` alone cannot tell "the handler reads the
+    /// mode" apart from "the handler always takes the Shell path" — those are
+    /// different programs. Pinning the two outcomes against each other is what
+    /// makes the read observable.
+    #[test]
+    fn create_app_forks_on_the_mode_in_both_directions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let shell = submit_create(
+                &handle,
+                &listener,
+                "",
+                "",
+                None,
+                AppCreateModeDto::Shell,
+                None,
+            )
+            .await;
+            let (shell_record, _) = created_row(&shell).expect("Shell create announces AppCreated");
+            let shell_workspace = tmp
+                .path()
+                .join("apps")
+                .join(&shell_record.id)
+                .join("workspace");
+
+            // A `Scaffolded` create needs a non-empty brief — that invariant
+            // survives untouched on this branch (§A.3).
+            let scaffolded = submit_create(
+                &handle,
+                &listener,
+                "Tracker",
+                "a habit tracker",
+                None,
+                AppCreateModeDto::Scaffolded,
+                None,
+            )
+            .await;
+            let (scaffolded_record, _) =
+                created_row(&scaffolded).expect("Scaffolded create announces AppCreated");
+            let scaffolded_workspace = tmp
+                .path()
+                .join("apps")
+                .join(&scaffolded_record.id)
+                .join("workspace");
+
+            assert!(
+                !shell_record.scaffolded,
+                "Shell lands unformed: {shell_record:?}"
+            );
+            assert!(
+                scaffolded_record.scaffolded,
+                "Scaffolded lands formed: {scaffolded_record:?}"
+            );
+            assert!(
+                !shell_workspace.join("package.json").exists(),
+                "the Shell branch must lay down no scaffold"
+            );
+            assert!(
+                scaffolded_workspace.join("package.json").is_file(),
+                "the Scaffolded branch must lay the scaffold down"
             );
         });
     }

@@ -3110,6 +3110,40 @@ impl LocalAppsHostBroker {
             .await;
     }
 
+    /// Write the GUIDED workspace contract for a `CreateMode::Shell` app —
+    /// the pre-commit initializer of the "+" button's create.
+    ///
+    /// This is the SHELL twin of [`Self::scaffold_app_value`], and the
+    /// difference is the whole point: it lays down no source, stamps no
+    /// surface, and touches nothing but `workspace/LINGXI.md`. A shell has no
+    /// shape yet, so there is nothing to scaffold; what it needs is a contract
+    /// that sends the agent to interview the user.
+    ///
+    /// Runs inside the create transaction, after `layout.initialize()` (so the
+    /// workspace directory exists) and BEFORE the index commit that makes the
+    /// app visible — an initializer failure rolls the whole create back, so an
+    /// app can never become visible with an empty workspace and no contract.
+    ///
+    /// ⚠️ `workspace/LINGXI.md` is the ONE channel that reaches the model on
+    /// every turn (it is auto-loaded by the memory hierarchy for any session
+    /// rooted in this workspace). If this file is missing, the interview never
+    /// starts: the agent sees an empty directory, assumes a normal app, and
+    /// starts writing source that `LocalAppScaffold` is going to delete.
+    pub(crate) async fn write_guided_contract_value(
+        &self,
+        record: &local_apps::AppRecord,
+    ) -> Result<(), String> {
+        let layout = self.layout(&record.id)?;
+        let workspace = layout.root().join(layout.workspace_rel());
+        let contract = guided_workspace_contract(record);
+        tokio::task::spawn_blocking(move || {
+            std::fs::write(workspace.join("LINGXI.md"), contract)
+                .map_err(|error| format!("write guided workspace LINGXI.md: {error}"))
+        })
+        .await
+        .map_err(|error| format!("join guided contract worker: {error}"))?
+    }
+
     /// Initialize the host-owned metadata and repository-verified Vite
     /// scaffold for a freshly created app.
     pub(crate) async fn scaffold_app_value(
@@ -3248,6 +3282,47 @@ impl LocalAppsHostBroker {
         }
         Ok(())
     }
+}
+
+/// The GUIDED workspace contract: what a `CreateMode::Shell` app's
+/// `workspace/LINGXI.md` says before the app has a shape.
+///
+/// Written by [`LocalAppsHostBroker::write_guided_contract_value`] and
+/// OVERWRITTEN wholesale by the formal contract `scaffold_app_value` renders
+/// once `LocalAppScaffold` lands — the two never coexist, so this text does not
+/// have to compose with the formal one and deliberately does not try.
+///
+/// Every clause is load-bearing:
+///
+/// - the app id, because an agent in this workspace has no other authoritative
+///   source for it and the tool gate's own message is keyed on it;
+/// - "任何源文件都会被删除", because the first scaffold WIPES the editable
+///   surface (§C.0.1). An agent that writes code here does not merely waste the
+///   turn, it loses work it believes it has done;
+/// - "只有 `LocalAppScaffold` 对你有意义", because every other local-app tool
+///   is gated off for an unformed app and will refuse;
+/// - the surface vocabulary, because the surface is IMMUTABLE once scaffolded,
+///   so it is the one decision the user has to make before anything is written.
+fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
+    format!(
+        "# Local App（新建，尚未定形态）\n\n\
+         这个应用刚刚创建，**还没有形态**，工作区是空的。\n\n\
+         这个工作区已经绑定到本地应用 `{id}`。把 `{id}` 当作权威：不要调 `LocalAppList` 或 \
+         `LocalAppGet` 去重新发现或确认它，也不要再调一次 `LocalAppCreate`。\n\n\
+         你现在的任务是引导用户，不是写代码。**你现在写下的任何源文件都会在脚手架落地时被删除**，\
+         写了也是白写。\n\n\
+         本地应用工具里，此刻只有 `LocalAppScaffold` 对你有意义；构建、安装依赖、运行时、\
+         界面检查那一类都会拒绝你并告诉你原因。问需求用 `AskUserQuestion`。\n\n\
+         步骤：\n\
+         1. 先问用户想做什么。\n\
+         2. 据回答推断意图，用 `AskUserQuestion` 把提议的**名称**与**形态**交给用户确认或修改：\n\
+         \u{20}  - `dom` —— 多屏界面（表单、列表、页面导航）\n\
+         \u{20}  - `canvas` —— 单一绘制面（游戏、3D、可视化）\n\
+         3. 用户确认后调 `LocalAppScaffold`（`app_id` 用 `{id}`）。\n\
+         4. 重读本文件，按新合约继续。\n\n\
+         形态一旦落地不可更改，所以必须让用户确认，不要自作主张。\n",
+        id = record.id,
+    )
 }
 
 impl LocalAppsHostBroker {

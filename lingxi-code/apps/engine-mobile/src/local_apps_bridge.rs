@@ -130,11 +130,21 @@ impl AppEmissionQueue {
     /// alive, `flush_events` first waits for the emission tasks of every
     /// previously completed call (whose `on_event` enqueues ran under the
     /// emission-order guard), so a failure can never overtake its own cause.
+    ///
+    /// `request_id` is the correlation key of the CLIENT COMMAND this failure
+    /// belongs to, echoed verbatim. It is a REQUIRED argument rather than an
+    /// internal `None` on purpose: the field spent one protocol version with
+    /// no producer at all, and a caller that has a request in scope must be
+    /// forced to say so instead of silently inheriting an absent key. `None`
+    /// is the honest answer only for a failure no client command started (the
+    /// agent-tool create path, the boot backfill) or for a command that
+    /// carries no correlation key of its own.
     pub(crate) async fn emit_failure(
         &self,
         service: Option<&AppService>,
         app_id: Option<String>,
         error: &AppError,
+        request_id: Option<String>,
     ) {
         if let Some(service) = service {
             service.flush_events().await;
@@ -143,16 +153,7 @@ impl AppEmissionQueue {
             app_id,
             code: lower_error_code(error.code()),
             message: error.to_string(),
-            // NOT WIRED: this helper is reached from `emit_app_failure`,
-            // which has no originating request in scope — every app command
-            // funnels through it. Protocol 8.0.0 added the field so a failing
-            // `CreateApp` can be matched by the client that started it; making
-            // that true needs the `request_id` threaded from the CreateApp
-            // handler down to here, which is the create-flow task's business,
-            // not the protocol bump's. Until then a client that gets a failure
-            // sees `null` and must fall back to the app-id/message. ⚠️ Do not
-            // read this `None` as "the correlation key is meant to be absent".
-            request_id: None,
+            request_id,
         });
     }
 

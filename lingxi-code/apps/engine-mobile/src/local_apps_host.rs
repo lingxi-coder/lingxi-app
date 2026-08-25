@@ -658,17 +658,6 @@ impl LocalAppsHostBroker {
         self.llm.set(llm)
     }
 
-    /// The profile's CURRENT model, read fresh through the swap cell.
-    ///
-    /// Never cache the returned `Arc`: `profile_apps` replaces the cell's
-    /// contents on every reconnect, so a holder would keep authenticating as a
-    /// credential that may since have rotated out — with no error and no log
-    /// (see [`crate::local_apps_profile::SharedLlm`]). `None` before the
-    /// profile has loaded.
-    pub(crate) fn current_llm(&self) -> Option<Arc<crate::local_apps_llm::LocalAppsLlm>> {
-        self.llm.get().map(|cell| cell.current())
-    }
-
     /// Bind the native host facts. Set once, at the same composition-root
     /// call site as [`Self::attach_agent_executor`].
     pub(crate) fn attach_host_environment(

@@ -623,7 +623,7 @@ final class LocalAppWebViewController {
                 //
                 // In CSS pixels, which is the unit `pointer` takes, for a
                 // WHOLE-VIEW capture (no `capture_rect` in this result): divide an
-                // image coordinate by `image.width / viewport.width`. That ratio
+                // image coordinate by `image_width / viewport.width`. That ratio
                 // is *only* valid when `image` and `viewport` describe the same
                 // origin — true for the whole view, false for a crop, and the
                 // existing whole-view downscale means a smaller `image` than
@@ -651,8 +651,14 @@ final class LocalAppWebViewController {
             // offset (the crop is not anchored at the view's origin). The correct
             // conversion, in CSS pixels, replaces `viewport` with `capture_rect`
             // as the ratio's base AND adds its origin back in:
-            //   CSS_x = capture_rect.x + imageX * capture_rect.width / image.width
-            //   CSS_y = capture_rect.y + imageY * capture_rect.height / image.height
+            //   CSS_x = capture_rect.x + imageX * capture_rect.width / image_width
+            //   CSS_y = capture_rect.y + imageY * capture_rect.height / image_height
+            // `image_width`/`image_height` are FLAT SIBLINGS in the result, not
+            // `image.width` -- the engine moves the whole `image` object out to
+            // send the frame as an image block (`local_apps_mcp.rs`, the
+            // `capture_ui` arm) and re-inserts only these two numbers, so the
+            // base64 is never paid for twice. Dropping them again would leave
+            // the formula above naming a key the model never receives.
             // (`skills/frontend-qa/SKILL.md` carries this same formula for the
             // agent, since a formula that lives only in this comment is a formula
             // the model calling this tool never sees.)

@@ -40,8 +40,12 @@ For those apps:
   fixed pixel budget on the rest of the screen. A rect that hangs off the edge
   of the screen is fine, including a NEGATIVE `x`/`y` — which is exactly what
   `LocalAppInspectUi` reports for an element scrolled above the fold — because
-  the client clamps it to the viewport rather than refusing it. Only a
-  zero-or-negative `width`/`height`, or a rect with no overlap with the
+  the client clamps it to the viewport rather than refusing it. ⚠️ The two
+  shapes are NOT interchangeable: `LocalAppInspectUi` emits `rect` as a
+  4-element ARRAY `[left, top, width, height]`, while `LocalAppCaptureUi`
+  requires an OBJECT `{x, y, width, height}`. Transpose it; passing the array
+  through unconverted fails with `capture_ui rect.x must be a finite number`.
+  Only a zero-or-negative `width`/`height`, or a rect with no overlap with the
   viewport at all, is an error. When a crop was requested, the result
   additionally carries `capture_rect` (`{x, y, width, height}`, CSS pixels):
   the region actually captured AFTER clamping, which can differ from the
@@ -60,14 +64,17 @@ For those apps:
   offset.** `LocalAppInspectUi`'s `elements[].rect` and `canvases[].rect` are
   measured against the layout viewport, while `LocalAppCaptureUi` consumes
   `rect` (and reports `capture_rect`) in the native view's own coordinates.
-  Pinch-zoom is on by default in the app WebView, and the shipped template
-  sets only `initial-scale=1.0` — no `user-scalable=no`, no `maximum-scale` —
-  so a user (or a stray gesture during QA) can put the page at a scale where
-  feeding an inspect rect straight into a crop captures the wrong region, with
-  no error. `LocalAppInspectUi`'s `viewport.scale`, `viewport.offsetLeft` and
+  The shipped template sets only `initial-scale=1.0` — no `user-scalable=no`,
+  no `maximum-scale` — so nothing in the page prevents a zoom. Whether a user
+  can actually reach one is platform-specific: pinch-zoom works on iOS, while
+  Android leaves `builtInZoomControls` off and the client never enables it. So
+  on iOS a stray gesture during QA can put the page at a scale where feeding an
+  inspect rect straight into a crop captures the wrong region, with no error.
+  `LocalAppInspectUi`'s `viewport.scale`, `viewport.offsetLeft` and
   `viewport.offsetTop` are how you detect that: pass an inspect rect through to
-  a crop only when `scale` is 1 and both offsets are 0, and otherwise capture
-  the whole view and read coordinates off `viewport` instead of cropping.
+  a crop (transposed to the object form above) only when `scale` is 1 and both
+  offsets are 0, and otherwise capture the whole view and read coordinates off
+  `viewport` instead of cropping.
 - `LocalAppActOnUi` with `action: "pointer"` drives it — `value` is `"x,y"` or
   `"x,y,phase"` in CSS pixels, phase `tap` (default), `down`, `move` or `up`.
   `click` cannot reach a canvas: it resolves an element by selector/role/name,

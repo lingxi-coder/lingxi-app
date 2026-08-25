@@ -12036,6 +12036,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// [`Self::additional_context_message`] — the latter re-emits the env block
     /// in the first user message when `--exclude-dynamic-system-prompt-sections`
     /// is set, so the construction (and its env-field probes) lives in ONE place.
+    /// PathAtlas S3: map the model-visible session cwd to the directory the
+    /// prompt-side filesystem probes must actually read.
+    ///
+    /// On mobile the session cwd is a mobile-linux GUEST path
+    /// (`engine-mobile`'s `model_cwd` comes from `workspace_mount.guest_path`),
+    /// so probing it verbatim reads a directory that does not exist on the
+    /// host. Desktop never installs a resolver, so `probe_cwd == cwd` there —
+    /// byte-identical (INERT INVARIANT).
+    ///
+    /// Both prompt-side memory readers go through here: the system prompt
+    /// ([`Self::build_prompt_context`]) and the per-turn `claudeMd` context
+    /// message ([`Self::additional_context_message`]). Keeping ONE derivation
+    /// is the point — the second reader having its own (raw, unresolved) copy
+    /// is what kept every mobile workspace `LINGXI.md` out of the model.
+    fn prompt_probe_cwd(&self, cwd: &std::path::Path) -> std::path::PathBuf {
+        match &self.prompt_probe_cwd_resolver {
+            Some(resolver) => resolver(cwd),
+            None => cwd.to_path_buf(),
+        }
+    }
+
     async fn build_prompt_context(&self) -> crate::prompt::SystemPromptContext {
         use crate::prompt::{file_tree, git_status, SystemPromptContext};
 
@@ -12056,10 +12077,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // env block's `Primary working directory:` keeps displaying the
         // guest path the model actually uses. Desktop never sets the
         // resolver, so `probe_cwd == cwd` there — byte-identical.
-        let probe_cwd = match &self.prompt_probe_cwd_resolver {
-            Some(resolver) => resolver(&cwd),
-            None => cwd.clone(),
-        };
+        let probe_cwd = self.prompt_probe_cwd(&cwd);
         // The `<env>` model-identity line ("You are powered by the model named
         // …") must reflect the CURRENT model, not the launch model. `/model`
         // switches update `session.model` (see `OrchestratorHandle::switch_model`
@@ -12267,7 +12285,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // is already recomputed fresh every turn (no cache), but reading the
         // frozen field would still show the pre-swap directory's LINGXI.md
         // files after `EnterWorktree`.
-        let memory_files = self.memory.load(&self.session_cwd.cwd()).await;
+        //
+        // PathAtlas S3: probe the HOST directory backing the (possibly guest)
+        // session cwd — same hop `build_prompt_context` makes. This message is
+        // the ONLY render path for the memory block (`prompt/mod.rs` no longer
+        // splices it into the system prompt), so reading the raw guest path
+        // here meant a mobile workspace `LINGXI.md` reached the model NOWHERE.
+        let probe_cwd = self.prompt_probe_cwd(&self.session_cwd.cwd());
+        let memory_files = self.memory.load(&probe_cwd).await;
         let lingxi_md = crate::prompt::memory_block::format(&memory_files);
 
         // Build the entries in claude-code insertion order; each is `# key\nvalue`.

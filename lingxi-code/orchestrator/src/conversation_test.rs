@@ -2548,6 +2548,95 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             "a new session re-seeds the start date to today"
         );
     }
+
+    // ------------------------------------------------------------------
+    // PathAtlas S3 (mobile-linux): the `claudeMd` memory block must be
+    // probed at the HOST directory backing the guest session cwd.
+    //
+    // `additional_context_message` is the ONLY render path for the memory
+    // block (`prompt/mod.rs` no longer splices it into the system prompt),
+    // and on mobile `session_cwd` holds the GUEST path
+    // (`engine-mobile/src/host.rs`: `model_cwd` comes from
+    // `workspace_mount.guest_path`). Loading memory at that raw guest path
+    // means a workspace `LINGXI.md` never reaches the model at all.
+    // `build_prompt_context` already hops guest→host through
+    // `prompt_probe_cwd_resolver`; this message must use the same
+    // coordinate.
+    // ------------------------------------------------------------------
+
+    fn orch_with_provider(
+        memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
+    ) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            memory,
+            std::env::temp_dir(),
+        )
+    }
+
+    #[tokio::test]
+    async fn claude_md_is_probed_at_the_host_dir_behind_a_guest_session_cwd() {
+        let host = tempfile::tempdir().expect("tempdir");
+        let host_root = host.path().to_path_buf();
+        std::fs::write(
+            host_root.join("LINGXI.md"),
+            "MARKER-host-probed-workspace-contract",
+        )
+        .expect("seed LINGXI.md");
+
+        // The guest path the model sees. It does NOT exist on the host, which
+        // is exactly why probing it directly yields nothing.
+        let guest = std::path::PathBuf::from("/workspace/app-pathatlas-s3-probe");
+
+        let resolver_root = host_root.clone();
+        let orch = orch_with_provider(Arc::new(crate::prompt::RealMemoryHierarchyProvider))
+            .with_session_cwd(tool_api::SessionCwd::new(guest.clone(), Vec::new()))
+            .with_prompt_probe_cwd_resolver(Arc::new(move |_path: &std::path::Path| {
+                resolver_root.clone()
+            }));
+
+        let body = text(&orch.additional_context_message().await.expect("present"));
+        assert!(
+            body.contains("MARKER-host-probed-workspace-contract"),
+            "workspace LINGXI.md must reach the model; body was:\n{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "Contents of {}",
+                host_root.join("LINGXI.md").display()
+            )),
+            "the memory block must name the HOST path; body was:\n{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_md_without_a_resolver_still_probes_the_session_cwd() {
+        // Desktop INERT INVARIANT: no resolver installed ⇒ `probe_cwd == cwd`,
+        // so the memory block is byte-identical to before the guest→host hop.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("LINGXI.md"),
+            "MARKER-desktop-session-cwd-probe",
+        )
+        .expect("seed LINGXI.md");
+
+        let orch = orch_with_provider(Arc::new(crate::prompt::RealMemoryHierarchyProvider))
+            .with_session_cwd(tool_api::SessionCwd::new(
+                root.path().to_path_buf(),
+                Vec::new(),
+            ));
+
+        let body = text(&orch.additional_context_message().await.expect("present"));
+        assert!(
+            body.contains("MARKER-desktop-session-cwd-probe"),
+            "no-resolver path must keep probing the session cwd; body was:\n{body}"
+        );
+    }
 }
 
 // ============================================================================

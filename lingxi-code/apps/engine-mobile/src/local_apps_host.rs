@@ -311,6 +311,59 @@ impl Drop for PortLease {
     }
 }
 
+/// One app's in-flight `LocalAppScaffold` slot — §C.1 step 1's reservation.
+///
+/// Taken before validation and held until the transaction leaves by ANY path,
+/// including a panic, because `Drop` is what releases it. Straight-line
+/// cleanup after the awaits is not enough: the transaction's future is dropped
+/// whenever the connection is torn down mid-call, while the broker outlives it
+/// in the process-wide profile cache, and a leaked slot would make every later
+/// scaffold of that app answer `scaffold_in_flight` for the life of the
+/// process — bricking the very draft the reservation exists to protect.
+///
+/// It excludes a second `LocalAppScaffold` for the same app and NOTHING else.
+/// A concurrent `DeleteApp` is excluded by `storage::lock_app_build`, which
+/// the transaction holds across the landing and the commit.
+struct ScaffoldReservation {
+    app_id: String,
+    slots: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+impl ScaffoldReservation {
+    /// Reserve `app_id`, or refuse because another scaffold already holds it.
+    ///
+    /// A poisoned mutex is RECOVERED rather than propagated: the only code
+    /// that ever holds this lock is the insert here and the remove in `Drop`,
+    /// so poisoning can only have come from a panic elsewhere in the process,
+    /// and treating it as "no app can ever be scaffolded again" would be a
+    /// worse failure than the one that poisoned it.
+    fn take(
+        slots: &Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+        app_id: &str,
+    ) -> Result<Self, String> {
+        let mut held = slots.lock().unwrap_or_else(|error| error.into_inner());
+        if !held.insert(app_id.to_string()) {
+            return Err(format!(
+                "scaffold_in_flight: app {app_id} already has a scaffold in progress"
+            ));
+        }
+        drop(held);
+        Ok(Self {
+            app_id: app_id.to_string(),
+            slots: Arc::clone(slots),
+        })
+    }
+}
+
+impl Drop for ScaffoldReservation {
+    fn drop(&mut self) {
+        self.slots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.app_id);
+    }
+}
+
 // The `device.*` operations of the bridge — capture / pick / record / locate
 // / notify. A CHILD module (not a sibling) so it reaches the broker's private
 // fields and `authorize_declared_capability` without widening their
@@ -543,6 +596,25 @@ pub(crate) struct LocalAppsHostBroker {
     /// Serializes dependency snapshot publication/materialization per lock
     /// digest so concurrent app creates do not run the same install twice.
     dependency_snapshot_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// App ids with a `LocalAppScaffold` transaction in flight — §C.1 step 1.
+    ///
+    /// ⛔ IN-PROCESS ONLY, and deliberately so. The obvious alternative — a
+    /// persistent set-once field in the style of `AppService::set_init_session`
+    /// — is WRONG here: a reservation that reaches disk survives the process
+    /// being killed mid-transaction, and nothing ever clears it, so the draft
+    /// is bricked forever. That is the exact opposite of §C.1 step 4's
+    /// retry-safety. The engine is one process on device, so an in-process set
+    /// is sufficient; after a restart the set is empty and `scaffolded` is
+    /// still `false`, so the retry simply works.
+    ///
+    /// `AppService::with_app` cannot hold this either: its guard lives only as
+    /// long as its own completion task, while steps 2-4 run entirely outside
+    /// that lock.
+    ///
+    /// A std mutex behind an `Arc` on purpose, like `llm_inflight`: the slot is
+    /// released by [`ScaffoldReservation::drop`], which cannot await, and the
+    /// set is only ever insert/remove — no lock is ever held across an await.
+    scaffold_reservations: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     next_request_id: AtomicU64,
 }
 
@@ -600,6 +672,9 @@ impl LocalAppsHostBroker {
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
             port_allocation: Mutex::new(()),
             dependency_snapshot_locks: Mutex::new(HashMap::new()),
+            scaffold_reservations: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             next_request_id: AtomicU64::new(1),
         });
         // The one place an `Arc<Self>` exists; the exit watchers downgrade
@@ -3163,93 +3238,7 @@ impl LocalAppsHostBroker {
         // prompt plumbing. It sits OUTSIDE the writable roots, so the agent
         // cannot edit its own contract.
         let workspace = layout.root().join(layout.workspace_rel());
-        // Two scaffolds, two contracts. The shared clauses are repeated rather
-        // than composed: this text is the agent's whole picture of the
-        // workspace, and a reader that has to assemble it from fragments is how
-        // "edit home-screen.jsx" survived into a workspace that has no such
-        // file.
-        let setup_path = match surface {
-            local_apps::AppSurface::Dom => "- This app's surface is `dom`, so its build workflow is `local-app-build`. The surface is fixed at creation and is NOT readable from any tool result — this line is where you learn it, so do not infer it from the source and do not launch the other workflow.\n\
-             - This workspace already contains the repository-verified Vite + Ionic foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
-             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
-             - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
-             - The UI kit is Ionic. Import components from `@ionic/react`; never from `@ionic/core/components`, which cannot be bundled here. There is no Tailwind: use Ionic's CSS variables and its utility classes (`ion-padding`, `ion-margin`, `ion-text-center`, `ion-justify-content-*`, `ion-hide-*`), and put anything else in `app/globals.css`.\n\
-             - Routing is `IonRouterOutlet` with react-router 6 `Routes`/`Route`. Every routed screen must render `IonPage` as its ROOT element, or the outlet has nothing to animate and the platform back gesture does not attach. Navigate with `routerLink`, not an onClick handler.\n\
-             - The platform look is chosen for you: the checked-in provider calls `setupIonicReact` with the host's OS, so components already render iOS or Material chrome. Do not branch on the user agent and do not hard-code one platform's metrics.\n\
-             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n",
-            local_apps::AppSurface::Canvas => "- This app's surface is `canvas`, so its build workflow is `local-canvas-build` — NOT `local-app-build`. The surface is fixed at creation and is NOT readable from any tool result, so this line is where you learn it. `local-app-build` designs a screen hierarchy this workspace does not have and gates on a data round-trip a drawn app answers `not_applicable`, so it would verify nothing.\n\
-             - This workspace already contains the repository-verified Vite + Ionic foundation, scaffolded for a single DRAWN SURFACE rather than a set of screens. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
-             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
-             - Default editable entry points are `app/screens/game-screen.jsx`, `src/game/frame-loop.js`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
-             - There is NO router: this app is one surface plus overlays. Menus, pause and game-over are Ionic components layered on top of the canvas, not separate pages.\n\
-             - Own the frame loop through the checked-in `createFrameLoop` helper: it sizes the drawing buffer to the device pixel ratio, resizes on rotation and iPad multitasking, clamps the first frame after a resume, and cancels itself on unmount. Start it in an effect and stop it in that effect's cleanup.\n\
-             - Keep per-frame simulation state in a ref, NOT in the store. Pushing positions through React re-renders the tree every frame and turns the app into a slideshow; the store is for the phase machine, the score and settings.\n\
-             - 2D needs no dependency. For 3D, `three` is in the locked set: import it directly and drive the renderer from your own loop. Nothing outside the locked set can be installed, so do not design around a game engine, a physics library, or a WebGL wrapper that is not there.\n\
-             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n",
-        };
-        // `format!`, not a bare `&str`: this string is interpolated into the
-        // enclosing `format!` as a VALUE, so its own `{{` and `{id}` would be
-        // copied through verbatim and the agent would read a malformed example
-        // of the one call it is required to make.
-        let build_preview = format!(
-            "- `LocalAppBuild {{\"app_id\":\"{id}\"}}` — offline `vite build` \
-             (30-minute budget). The host waits for the app-local dependency state, mounts \
-             the workspace as the sole writable `LocalAppBuild` root, runs the workspace's own \
-             `node_modules/vite`, writes into private build-state, and serves only the promoted \
-             `build/store/dist/`.\n",
-            id = record.id,
-        );
-        let context = format!(
-            "# Local App: {name} ({id})\n\n\
-             Brief: {brief}\n\n\
-             ## Workspace contract\n\
-             - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `LocalAppList` or `LocalAppGet` to rediscover or confirm it, and do not call `LocalAppCreate` again.\n\
-             - Edit ONLY app-owned files under `app/`, `src/`, `lib/`, `styles/`, `public/`.\n\
-             {setup_path}\
-             - The page reaches host data/network/device ONLY through `window.lingxi.v2` \
-             (see `lib/lingxi-bridge.js`).\n\
-             - Declare data collections / network domains / capabilities through \
-             `LocalAppManifest` BEFORE the page relies on them; runtime \
-             authorization still prompts the user. Every collection is `{{id,name,fields}}`; every field is `{{id,label,kind,required?,enumOptions?}}`; IDs use lower snake_case. Never declare host-owned `recordId`, `revision`, `createdAtMs`, or `updatedAtMs` as fields. Repair and retry any rejected manifest before building.\n\
-             - If a material requirement is unresolved, call `AskUserQuestion` so the native client presents its sheet. Never leave unresolved questions in ordinary assistant text; when the brief and device context are sufficient, infer and continue.\n\n\
-             ## Build & preview\n\
-             {build_preview}\
-             - `LocalAppRuntime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
-             — serve the built output and return the preview url.\n\
-             - `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"build\"}}` — build log.\n\
-             - `LocalAppInstallDeps {{\"app_id\":\"{id}\",\"wait\":true}}` \
-             — dependency state; `lastError` names why an install failed.\n\n\
-             ### When a build fails\n\
-             `LocalAppBuild` is the ONLY build path in this workspace, so \
-             do NOT try a different build command, package manager, or scaffold tool — \
-             there is nothing else to fall back to and improvising cannot succeed. Instead:\n\
-             1. Read the failure: `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"build\"}}`.\n\
-             2. A `not yet available` build means dependencies are not ready. Call \
-             `LocalAppInstallDeps {{\"app_id\":\"{id}\",\"wait\":true}}` and read \
-             its `lastError`.\n\
-             3. If the cause is your source, fix it and build again.\n\
-             4. If the cause is the HOST — a missing toolchain, a failed dependency install, \
-             an unavailable runtime — report it to the user and stop. Those cannot be worked \
-             around from inside this workspace, and retrying will not clear them.\n\n\
-             ## Verify\n\
-             - `LocalAppInspectUi` / `LocalAppActOnUi` — read and drive \
-             the running preview.\n\
-             - `LocalAppCaptureUi {{\"app_id\":\"{id}\"}}` — a still image of the preview. \
-             Use it when the DOM cannot describe what the app is showing: a canvas or WebGL \
-             surface has no inspectable elements, so `LocalAppInspectUi` returns an empty \
-             list whether the app is drawing correctly, drawing nothing, or has crashed.\n\
-             - `LocalAppQueryData {{\"app_id\":\"{id}\",\"collection\":\"<collection_id>\"}}` \
-             — after a UI write, confirm the value reached native storage: it must appear in \
-             `records[].document`. A value that exists only in page state is NOT persistence.\n\
-             - `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"runtime\"}}` — runtime log.\n\
-             - After the user confirms a working state, record it with \
-             `LocalAppCheckpointCreate`.\n",
-            name = record.name,
-            id = record.id,
-            brief = record.brief,
-            setup_path = setup_path,
-            build_preview = build_preview,
-        );
+        let context = formal_workspace_contract(record, surface);
         tokio::task::spawn_blocking(move || {
             crate::local_apps_build::scaffold_workspace_initialized(&layout, target, true)?;
             std::fs::write(workspace.join("LINGXI.md"), context).map_err(|error| {
@@ -3271,6 +3260,337 @@ impl LocalAppsHostBroker {
         }
         Ok(())
     }
+
+    /// `LocalAppScaffold` — the transaction that turns the "+" button's empty
+    /// shell into a formed app. §C.1.
+    ///
+    /// The STEP ORDER below is the specification, not an implementation
+    /// detail. Each step's comment says what it is protecting.
+    ///
+    /// Nothing this call does is visible in the catalog until step 4 returns
+    /// `Ok`: any earlier failure leaves `scaffolded == false` and none of
+    /// `name` / `brief` / `workflow_model` persisted, the reservation released
+    /// by its guard, the build lock released with it, and the app retryable.
+    /// The retry is safe precisely because a first scaffold WIPES the editable
+    /// surface, so every attempt starts from clean ground (§C.0.1).
+    pub(crate) async fn scaffold_shell_app_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        // STEP 1 — reserve, in process, before ANYTHING else, so a second
+        // concurrent call is refused rather than racing this one into the same
+        // workspace. Held until every path out of this function, `Drop`
+        // included. See [`ScaffoldReservation`] for why it must never persist.
+        let _reservation = ScaffoldReservation::take(&self.scaffold_reservations, &app_id)?;
+
+        // STEP 2 — validate. Every bound is re-checked here and again in
+        // `AppService::commit_scaffold`: the MCP schema's `maxLength` is a
+        // hint to the model, not an enforcement point, and this path also
+        // refuses before touching the workspace rather than after seeding it.
+        let name = confirmed_field(&input, "name")?.to_string();
+        if name.len() > local_apps::service::MAX_NAME_BYTES {
+            return Err(format!(
+                "invalid_argument: name is {} bytes (limit {})",
+                name.len(),
+                local_apps::service::MAX_NAME_BYTES
+            ));
+        }
+        let brief = confirmed_field(&input, "brief")?.to_string();
+        if brief.len() > local_apps::service::MAX_BRIEF_BYTES {
+            return Err(format!(
+                "invalid_argument: brief is {} bytes (limit {})",
+                brief.len(),
+                local_apps::service::MAX_BRIEF_BYTES
+            ));
+        }
+        let surface = local_apps::AppSurface::parse(required_string(&input, "surface")?)
+            .map_err(|error| format!("invalid_argument: {error}"))?;
+        let workflow_model = match input.get("workflow_model") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let model = value
+                    .as_str()
+                    .ok_or_else(|| "invalid_argument: workflow_model must be a string".to_string())?
+                    .trim();
+                if model.is_empty() {
+                    None
+                } else if model.len() > local_apps::service::MAX_WORKFLOW_MODEL_BYTES {
+                    return Err(format!(
+                        "invalid_argument: workflow_model is {} bytes (limit {})",
+                        model.len(),
+                        local_apps::service::MAX_WORKFLOW_MODEL_BYTES
+                    ));
+                } else {
+                    Some(model.to_string())
+                }
+            }
+        };
+
+        let service = self.service()?;
+        let record = service
+            .record(&app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        // A formed app is refused BEFORE the landing, not only by the commit
+        // point's CAS: its workspace holds the user's own source and step 3
+        // would wipe it before the CAS ever ran.
+        if record.scaffolded {
+            return Err(format!(
+                "app {app_id} is already scaffolded; its shape and name were fixed when it was \
+                 formed and cannot be changed"
+            ));
+        }
+
+        // STEP 3 — land. NOTHING here is persisted to the record: `proposed`
+        // is a stack value, and the four fields it carries reach disk only at
+        // step 4. Half-committing `name` here would put a record in the user's
+        // library under a real name that still opens the interview.
+        let mut proposed = record.clone();
+        proposed.name = name.clone();
+        proposed.brief = brief.clone();
+        if let Some(model) = &workflow_model {
+            proposed.workflow_model = Some(model.clone());
+        }
+        let build_lock = self.land_scaffold(&proposed, surface).await?;
+
+        // STEP 4 — the commit point, still under the build lock so a delete
+        // cannot land between the files and the record. ONE `with_app`
+        // closure, set-once on `scaffolded`.
+        let committed = service
+            .commit_scaffold(&app_id, &name, &brief, workflow_model.as_deref())
+            .await;
+        drop(build_lock);
+        let committed = committed.map_err(|error| error.to_string())?;
+        Ok(json!({
+            "app": committed,
+            "next_step": scaffold_next_step_guidance(),
+        }))
+    }
+
+    /// §C.1 step 3: everything that reaches DISK, under `lock_app_build` from
+    /// the first byte, with the lock handed back to the caller still held.
+    ///
+    /// ⚠️ The lock is not optional and the in-process reservation is not a
+    /// substitute. `lock_app_build`'s own contract is that a caller holds it
+    /// for the COMPLETE operation that mutates an app's workspace tree, and
+    /// physical deletion takes the SAME lock (`storage::trash_app_dir` via
+    /// `lock_app_build_if_present`). The reservation excludes another
+    /// `LocalAppScaffold`; it does not exclude a concurrent `DeleteApp`, which
+    /// renames the app directory into `.trash` while the seed is still being
+    /// written — leaving files under a path nothing indexes and nothing
+    /// reclaims. Returning the guard, rather than dropping it here, is what
+    /// keeps it held across the commit point.
+    ///
+    /// ⚠️ `manifest.surface` is stamped BEFORE any file is written, and
+    /// `record.scaffolded` is written LAST (step 4). The opposite orders are
+    /// both deliberate and must not be "harmonised": stamping the manifest
+    /// first means a crash between the two leaves an app that can be
+    /// scaffolded again rather than one that cannot, while `scaffolded` is the
+    /// outer completion flag and must not claim a landing that did not finish.
+    async fn land_scaffold(
+        &self,
+        proposed: &local_apps::AppRecord,
+        surface: local_apps::AppSurface,
+    ) -> Result<traits::rooted_fs::RootedFileLock, String> {
+        let layout = self.layout(&proposed.id)?;
+        let target = crate::local_apps_build::LocalAppBuildTarget::from_surface(surface);
+        // Rendered from the PROPOSED record — the confirmed name and brief.
+        // Rendering it from the creation record writes `# Local App: untitled`
+        // with an empty brief, permanently: see `formal_workspace_contract`.
+        let context = formal_workspace_contract(proposed, surface);
+        let name = proposed.name.clone();
+        let device_context = self.host_device_context();
+        let root = self.root.clone();
+        let app_id = proposed.id.clone();
+        tokio::task::spawn_blocking(
+            move || -> Result<traits::rooted_fs::RootedFileLock, String> {
+                // 3a — the lock, first, and held until the caller drops it.
+                let build_lock = local_apps::storage::lock_app_build(&root, &app_id)
+                    .map_err(|error| error.to_string())?;
+                // 3c — the manifest's `surface` and `name`, under the §C.1.4
+                // invariant.
+                stamp_scaffold_identity(&layout, &name, surface)?;
+                // 3d — wipe the editable surface, then seed it. `true` is the
+                // first-scaffold flag: everything an agent wrote during the
+                // interview is removed before the seed lands, because a
+                // pre-written `app/app.js` would out-resolve the seeded
+                // `app/app.jsx` and the seed would become dead code.
+                crate::local_apps_build::scaffold_workspace_initialized(&layout, target, true)
+                    .map_err(|error| error.to_string())?;
+                // 3e — the formal contract, overwriting the guided one.
+                let workspace = layout.root().join(layout.workspace_rel());
+                std::fs::write(workspace.join("LINGXI.md"), context)
+                    .map_err(|error| format!("write workspace LINGXI.md: {error}"))?;
+                // The native target, on the same manifest, so a formed app
+                // carries it whether or not the agent ever calls
+                // `LocalAppManifest`. Same first-write window as the name.
+                if let Some(device_context) = device_context {
+                    let mut manifest =
+                        local_apps::load_manifest(&layout).map_err(|error| error.to_string())?;
+                    manifest.device_context = Some(device_context);
+                    local_apps::save_manifest(&layout, &manifest)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(build_lock)
+            },
+        )
+        .await
+        .map_err(|error| format!("join scaffold landing worker: {error}"))?
+    }
+}
+
+/// Write the app's identity onto its manifest — `surface` and `name` — under
+/// the §C.1.4 hash invariant.
+///
+/// ⛔ FIRST WRITE ONLY. `AppManifest::hash()` serialises the WHOLE struct
+/// INCLUDING `name`, and `AppDataStore::ensure_manifest` compares that hash
+/// against the SQLite `_lingxi_schema.manifest_hash` row. Changing `name`
+/// after a data store exists therefore breaks EVERY subsequent data read and
+/// write with "database manifest mismatch" — silent, total, user-visible data
+/// loss. A freshly created shell is safe because it has no collections, so
+/// `AppDataStore::open` (which is what writes that row) has never run and the
+/// database file does not exist. That is asserted here rather than assumed.
+///
+/// This is the real reason renaming an app is not offered, and this function
+/// must NEVER be generalised into a rename path.
+fn stamp_scaffold_identity(
+    layout: &AppLayout,
+    name: &str,
+    surface: local_apps::AppSurface,
+) -> Result<(), String> {
+    let database = layout.database_path();
+    if database.exists() {
+        return Err(format!(
+            "app {} already has a database at {}; writing manifest.name now would change \
+             AppManifest::hash() and make every later data read and write fail with a database \
+             manifest mismatch",
+            layout.app_id(),
+            database.display()
+        ));
+    }
+    let mut manifest = local_apps::load_manifest(layout).map_err(|error| error.to_string())?;
+    manifest.surface = Some(surface);
+    manifest.name = name.to_string();
+    local_apps::save_manifest(layout, &manifest).map_err(|error| error.to_string())
+}
+
+/// What to tell the agent immediately after `LocalAppScaffold` commits.
+///
+/// Unlike [`create_next_step_guidance`], this one runs in a session that IS
+/// rooted in the app's workspace — that is the whole point of the shell flow —
+/// so the correct next move is to re-read the contract that has just been
+/// rewritten under it and continue there, not to hand off to another session.
+fn scaffold_next_step_guidance() -> String {
+    "The app now has its shape and its source tree. Re-read this workspace's LINGXI.md before \
+     doing anything else: it has been REPLACED by the formal contract for the surface you just \
+     committed, and it names the editable entry points, the host-managed files you must not \
+     touch, and the build workflow for this surface. Anything written into the workspace before \
+     this call is gone, as the guided contract said it would be. Do not create a second \
+     scaffold, do not run a package manager, and do not call LocalAppScaffold again — the shape \
+     and the name are now fixed."
+        .into()
+}
+
+/// Render the FORMAL workspace contract — the `workspace/LINGXI.md` a
+/// formed app carries, and the twin of [`guided_workspace_contract`].
+///
+/// ⚠️ `record` is the identity the contract SPEAKS. On the `LocalAppScaffold`
+/// path the caller must pass the PROPOSED record (the confirmed name and
+/// brief), not the one creation wrote: the shell was created as `untitled`
+/// with an empty brief, this file is written exactly ONCE (it is absent from
+/// `restore_host_managed_files`, and a second scaffold is refused), and it is
+/// the only channel that reaches the model on every turn. Render it from the
+/// creation record and the whole interview is lost in the one artefact meant
+/// to carry it.
+fn formal_workspace_contract(
+    record: &local_apps::AppRecord,
+    surface: local_apps::AppSurface,
+) -> String {
+    // Two scaffolds, two contracts. The shared clauses are repeated rather
+    // than composed: this text is the agent's whole picture of the
+    // workspace, and a reader that has to assemble it from fragments is how
+    // "edit home-screen.jsx" survived into a workspace that has no such
+    // file.
+    let setup_path = match surface {
+        local_apps::AppSurface::Dom => "- This app's surface is `dom`, so its build workflow is `local-app-build`. The surface is fixed at creation and is NOT readable from any tool result — this line is where you learn it, so do not infer it from the source and do not launch the other workflow.\n\
+         - This workspace already contains the repository-verified Vite + Ionic foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
+         - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
+         - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
+         - The UI kit is Ionic. Import components from `@ionic/react`; never from `@ionic/core/components`, which cannot be bundled here. There is no Tailwind: use Ionic's CSS variables and its utility classes (`ion-padding`, `ion-margin`, `ion-text-center`, `ion-justify-content-*`, `ion-hide-*`), and put anything else in `app/globals.css`.\n\
+         - Routing is `IonRouterOutlet` with react-router 6 `Routes`/`Route`. Every routed screen must render `IonPage` as its ROOT element, or the outlet has nothing to animate and the platform back gesture does not attach. Navigate with `routerLink`, not an onClick handler.\n\
+         - The platform look is chosen for you: the checked-in provider calls `setupIonicReact` with the host's OS, so components already render iOS or Material chrome. Do not branch on the user agent and do not hard-code one platform's metrics.\n\
+         - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n",
+        local_apps::AppSurface::Canvas => "- This app's surface is `canvas`, so its build workflow is `local-canvas-build` — NOT `local-app-build`. The surface is fixed at creation and is NOT readable from any tool result, so this line is where you learn it. `local-app-build` designs a screen hierarchy this workspace does not have and gates on a data round-trip a drawn app answers `not_applicable`, so it would verify nothing.\n\
+         - This workspace already contains the repository-verified Vite + Ionic foundation, scaffolded for a single DRAWN SURFACE rather than a set of screens. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
+         - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
+         - Default editable entry points are `app/screens/game-screen.jsx`, `src/game/frame-loop.js`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
+         - There is NO router: this app is one surface plus overlays. Menus, pause and game-over are Ionic components layered on top of the canvas, not separate pages.\n\
+         - Own the frame loop through the checked-in `createFrameLoop` helper: it sizes the drawing buffer to the device pixel ratio, resizes on rotation and iPad multitasking, clamps the first frame after a resume, and cancels itself on unmount. Start it in an effect and stop it in that effect's cleanup.\n\
+         - Keep per-frame simulation state in a ref, NOT in the store. Pushing positions through React re-renders the tree every frame and turns the app into a slideshow; the store is for the phase machine, the score and settings.\n\
+         - 2D needs no dependency. For 3D, `three` is in the locked set: import it directly and drive the renderer from your own loop. Nothing outside the locked set can be installed, so do not design around a game engine, a physics library, or a WebGL wrapper that is not there.\n\
+         - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n",
+    };
+    // `format!`, not a bare `&str`: this string is interpolated into the
+    // enclosing `format!` as a VALUE, so its own `{{` and `{id}` would be
+    // copied through verbatim and the agent would read a malformed example
+    // of the one call it is required to make.
+    let build_preview = format!(
+        "- `LocalAppBuild {{\"app_id\":\"{id}\"}}` — offline `vite build` \
+         (30-minute budget). The host waits for the app-local dependency state, mounts \
+         the workspace as the sole writable `LocalAppBuild` root, runs the workspace's own \
+         `node_modules/vite`, writes into private build-state, and serves only the promoted \
+         `build/store/dist/`.\n",
+        id = record.id,
+    );
+    format!(
+        "# Local App: {name} ({id})\n\n\
+         Brief: {brief}\n\n\
+         ## Workspace contract\n\
+         - This workspace is already bound to local app `{id}`. Treat `{id}` as authoritative; do not call `LocalAppList` or `LocalAppGet` to rediscover or confirm it, and do not call `LocalAppCreate` again.\n\
+         - Edit ONLY app-owned files under `app/`, `src/`, `lib/`, `styles/`, `public/`.\n\
+         {setup_path}\
+         - The page reaches host data/network/device ONLY through `window.lingxi.v2` \
+         (see `lib/lingxi-bridge.js`).\n\
+         - Declare data collections / network domains / capabilities through \
+         `LocalAppManifest` BEFORE the page relies on them; runtime \
+         authorization still prompts the user. Every collection is `{{id,name,fields}}`; every field is `{{id,label,kind,required?,enumOptions?}}`; IDs use lower snake_case. Never declare host-owned `recordId`, `revision`, `createdAtMs`, or `updatedAtMs` as fields. Repair and retry any rejected manifest before building.\n\
+         - If a material requirement is unresolved, call `AskUserQuestion` so the native client presents its sheet. Never leave unresolved questions in ordinary assistant text; when the brief and device context are sufficient, infer and continue.\n\n\
+         ## Build & preview\n\
+         {build_preview}\
+         - `LocalAppRuntime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
+         — serve the built output and return the preview url.\n\
+         - `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"build\"}}` — build log.\n\
+         - `LocalAppInstallDeps {{\"app_id\":\"{id}\",\"wait\":true}}` \
+         — dependency state; `lastError` names why an install failed.\n\n\
+         ### When a build fails\n\
+         `LocalAppBuild` is the ONLY build path in this workspace, so \
+         do NOT try a different build command, package manager, or scaffold tool — \
+         there is nothing else to fall back to and improvising cannot succeed. Instead:\n\
+         1. Read the failure: `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"build\"}}`.\n\
+         2. A `not yet available` build means dependencies are not ready. Call \
+         `LocalAppInstallDeps {{\"app_id\":\"{id}\",\"wait\":true}}` and read \
+         its `lastError`.\n\
+         3. If the cause is your source, fix it and build again.\n\
+         4. If the cause is the HOST — a missing toolchain, a failed dependency install, \
+         an unavailable runtime — report it to the user and stop. Those cannot be worked \
+         around from inside this workspace, and retrying will not clear them.\n\n\
+         ## Verify\n\
+         - `LocalAppInspectUi` / `LocalAppActOnUi` — read and drive \
+         the running preview.\n\
+         - `LocalAppCaptureUi {{\"app_id\":\"{id}\"}}` — a still image of the preview. \
+         Use it when the DOM cannot describe what the app is showing: a canvas or WebGL \
+         surface has no inspectable elements, so `LocalAppInspectUi` returns an empty \
+         list whether the app is drawing correctly, drawing nothing, or has crashed.\n\
+         - `LocalAppQueryData {{\"app_id\":\"{id}\",\"collection\":\"<collection_id>\"}}` \
+         — after a UI write, confirm the value reached native storage: it must appear in \
+         `records[].document`. A value that exists only in page state is NOT persistence.\n\
+         - `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"runtime\"}}` — runtime log.\n\
+         - After the user confirms a working state, record it with \
+         `LocalAppCheckpointCreate`.\n",
+        name = record.name,
+        id = record.id,
+        brief = record.brief,
+        setup_path = setup_path,
+        build_preview = build_preview,
+    )
 }
 
 /// The GUIDED workspace contract: what a `CreateMode::Shell` app's
@@ -4069,9 +4389,27 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.scaffold_app_value(&record, surface).await
     }
 
+    async fn scaffold_shell_app(&self, input: Value) -> Result<Value, String> {
+        self.scaffold_shell_app_value(input).await
+    }
+
     async fn emit_create_failure(&self, error: &local_apps::AppError) {
         LocalAppsHostBroker::emit_create_failure(self, error).await;
     }
+}
+
+/// One of `LocalAppScaffold`'s confirmed identity fields, trimmed.
+///
+/// ⚠️ There is deliberately no `is_empty()` check on the RESULT.
+/// [`required_string`] already refuses a missing value, a non-string and a
+/// whitespace-only string, so §C.1 step 2's "non-empty" half is enforced
+/// there; re-testing it after `.trim()` here would be a branch that can never
+/// be taken. This wrapper exists only to say which FIELD was wrong, because
+/// `required_string`'s own message does not name the tool's vocabulary.
+fn confirmed_field<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
+    required_string(input, key)
+        .map(str::trim)
+        .map_err(|_| format!("invalid_argument: {key} must be a non-empty string"))
 }
 
 fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -5966,6 +6304,486 @@ mod tests {
             .create_next_step()
             .contains("Do not recreate the app scaffold"));
         assert!(broker.create_next_step().contains("pnpm install"));
+    }
+
+    // ---- §C.1 `LocalAppScaffold` — the create transaction --------------
+
+    /// The "+" button's shell, exactly as `host.rs` creates one: no brief, no
+    /// surface, `scaffolded == false`, and the GUIDED workspace contract on
+    /// disk so a test can prove the formal one replaced it.
+    async fn shell_app_fixture(
+        broker: &Arc<LocalAppsHostBroker>,
+        service: &Arc<AppService>,
+    ) -> local_apps::AppRecord {
+        let record = service
+            .create_app_with_mode(None, "", None, local_apps::CreateMode::Shell, None)
+            .await
+            .expect("create shell app");
+        assert!(
+            !record.scaffolded,
+            "the fixture must actually be the state these tests name"
+        );
+        assert_eq!(record.name, local_apps::service::PLACEHOLDER_APP_NAME);
+        assert_eq!(record.brief, "");
+        broker
+            .write_guided_contract_value(&record)
+            .await
+            .expect("write the guided contract");
+        record
+    }
+
+    fn scaffold_input(app_id: &str, name: &str, brief: &str, surface: &str) -> Value {
+        json!({
+            "app_id": app_id,
+            "name": name,
+            "brief": brief,
+            "surface": surface,
+        })
+    }
+
+    fn workspace_of(root: &TempDir, app_id: &str) -> PathBuf {
+        let layout =
+            AppLayout::new(root.path().to_path_buf(), app_id.to_string()).expect("layout");
+        root.path().join(layout.workspace_rel())
+    }
+
+    /// Break the LAST step of the landing (§C.1 step 3e, the formal
+    /// `LINGXI.md`) by putting a DIRECTORY where that file must be written.
+    ///
+    /// Chosen deliberately over corrupting an earlier step: it lets every
+    /// preceding step SUCCEED, so the atomicity tests below prove the commit
+    /// point held even when the landing got all the way to its final write —
+    /// the interleaving a half-commit would actually survive. `LINGXI.md` is
+    /// in `FIRST_SCAFFOLD_PRESERVED`, so the wipe leaves the directory alone.
+    fn break_the_final_landing_step(root: &TempDir, app_id: &str) {
+        let contract = workspace_of(root, app_id).join("LINGXI.md");
+        let _ = fs::remove_file(&contract);
+        fs::create_dir_all(contract.join("occupied")).expect("occupy the contract path");
+    }
+
+    fn repair_the_final_landing_step(root: &TempDir, app_id: &str) {
+        let contract = workspace_of(root, app_id).join("LINGXI.md");
+        fs::remove_dir_all(&contract).expect("free the contract path");
+    }
+
+    /// The whole point of the flow: what the user confirmed in the interview
+    /// reaches BOTH the record and `LINGXI.md`.
+    ///
+    /// The contract assertions are not decoration. `workspace/LINGXI.md` is
+    /// written exactly once and is the only channel that reaches the model on
+    /// every turn; rendering it from the CREATION record instead of the
+    /// proposed one writes `# Local App: untitled` with an empty brief and
+    /// loses the entire interview, permanently, while every record assertion
+    /// above still passes.
+    #[tokio::test]
+    async fn scaffold_commits_all_four_fields_and_writes_the_formal_contract() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let guided = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+            .expect("read the guided contract");
+        assert!(
+            guided.contains("尚未定形态"),
+            "the fixture must start on the guided contract: {guided}"
+        );
+
+        let mut input = scaffold_input(&shell.id, "打飞机", "一个竖版射击小游戏", "canvas");
+        input["workflow_model"] = json!("anthropic/claude-opus-4");
+        let value = broker
+            .scaffold_shell_app_value(input)
+            .await
+            .expect("scaffold");
+
+        let record = service.record(&shell.id).await.expect("record");
+        assert!(record.scaffolded, "the commit point must have run");
+        assert_eq!(record.name, "打飞机");
+        assert_eq!(record.brief, "一个竖版射击小游戏");
+        assert_eq!(
+            record.workflow_model.as_deref(),
+            Some("anthropic/claude-opus-4"),
+            "the confirmed workflow model must be persisted by the same commit"
+        );
+        assert_eq!(
+            value.get("app").and_then(|app| app.get("scaffolded")),
+            Some(&json!(true)),
+            "the tool result must echo the COMMITTED record: {value}"
+        );
+        let next_step = value
+            .get("next_step")
+            .and_then(Value::as_str)
+            .expect("the result must carry a next step");
+        assert!(
+            next_step.contains("LINGXI.md"),
+            "the agent must be sent back to the contract that just replaced              the guided one: {next_step}"
+        );
+
+        let contract = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+            .expect("read the formal contract");
+        assert!(
+            contract.contains("# Local App: 打飞机"),
+            "must render the CONFIRMED name, not `untitled`: {contract}"
+        );
+        assert!(
+            contract.contains("Brief: 一个竖版射击小游戏"),
+            "must render the CONFIRMED brief: {contract}"
+        );
+        assert!(
+            !contract.contains("尚未定形态"),
+            "the guided contract must be overwritten, not appended to"
+        );
+        assert!(
+            contract.contains("local-canvas-build"),
+            "the contract must be the one for the CONFIRMED surface: {contract}"
+        );
+
+        // The surface is on the manifest, and the seed is the canvas one.
+        let layout =
+            AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let manifest = load_manifest(&layout).expect("manifest");
+        assert_eq!(manifest.surface, Some(local_apps::AppSurface::Canvas));
+        assert_eq!(manifest.name, "打飞机");
+        assert!(workspace_of(&root, &shell.id)
+            .join("app/screens/game-screen.jsx")
+            .is_file());
+    }
+
+    /// `workflow_model` is OPTIONAL, and omitting it must PRESERVE whatever
+    /// the create carried rather than clearing it — a shell create can already
+    /// name a model, and a scaffold that simply did not mention one must not
+    /// drop the user's choice.
+    #[tokio::test]
+    async fn omitting_the_workflow_model_preserves_the_one_the_create_chose() {
+        let (_root, service, broker) = create_broker(false, None).await;
+        let record = service
+            .create_app_with_git_and_workflow_model_and_initializer(
+                None,
+                "",
+                None,
+                false,
+                Some("openai/gpt-5"),
+                local_apps::CreateMode::Shell,
+                None,
+                |_| async { Ok(()) },
+            )
+            .await
+            .expect("create shell app with a model");
+        assert_eq!(record.workflow_model.as_deref(), Some("openai/gpt-5"));
+
+        broker
+            .scaffold_shell_app_value(scaffold_input(&record.id, "A", "b", "dom"))
+            .await
+            .expect("scaffold");
+
+        let after = service.record(&record.id).await.expect("record");
+        assert_eq!(
+            after.workflow_model.as_deref(),
+            Some("openai/gpt-5"),
+            "an omitted workflow_model must not clear the create-time choice"
+        );
+    }
+
+    /// §C.1 step 4. A landing failure must leave the record EXACTLY as the
+    /// create wrote it. The half-commit this forbids — a real name with
+    /// `scaffolded == false` — is the worst of both states: the user sees a
+    /// finished-looking app in the library that still opens the interview.
+    #[tokio::test]
+    async fn a_failed_landing_persists_none_of_the_four_fields() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        break_the_final_landing_step(&root, &shell.id);
+
+        let mut input = scaffold_input(&shell.id, "打飞机", "一个竖版射击小游戏", "canvas");
+        input["workflow_model"] = json!("anthropic/claude-opus-4");
+        let error = broker
+            .scaffold_shell_app_value(input)
+            .await
+            .expect_err("the landing must fail");
+        assert!(
+            error.contains("LINGXI.md"),
+            "the failure must name the step that broke, not something else: {error}"
+        );
+
+        let after = service.record(&shell.id).await.expect("record");
+        assert!(!after.scaffolded, "the commit point never ran");
+        assert_eq!(
+            after.name,
+            local_apps::service::PLACEHOLDER_APP_NAME,
+            "the name must NOT be half-committed"
+        );
+        assert_eq!(after.brief, "", "the brief must NOT be half-committed");
+        assert_eq!(
+            after.workflow_model, None,
+            "the workflow model must NOT be half-committed"
+        );
+    }
+
+    /// The reservation is IN-PROCESS and RAII. Had it been modelled on
+    /// `set_init_session` — a set-once write to a PERSISTENT field — this
+    /// retry would be refused forever and the draft would be bricked.
+    #[tokio::test]
+    async fn the_reservation_is_released_on_the_failure_path_so_a_retry_can_land() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        break_the_final_landing_step(&root, &shell.id);
+        broker
+            .scaffold_shell_app_value(scaffold_input(&shell.id, "打飞机", "b", "canvas"))
+            .await
+            .expect_err("the first attempt must fail");
+        repair_the_final_landing_step(&root, &shell.id);
+
+        broker
+            .scaffold_shell_app_value(scaffold_input(&shell.id, "打飞机", "b", "canvas"))
+            .await
+            .expect("the retry must land");
+
+        let after = service.record(&shell.id).await.expect("record");
+        assert!(after.scaffolded);
+        assert_eq!(after.name, "打飞机");
+    }
+
+    /// §C.1 step 1. Two scaffolds of the same app: exactly one wins, and the
+    /// loser is refused BY THE RESERVATION — asserted on the stable
+    /// `scaffold_in_flight` prefix so the test cannot pass because the second
+    /// call failed for some unrelated reason.
+    #[tokio::test]
+    async fn two_concurrent_scaffolds_reject_the_second_at_the_in_process_reservation() {
+        let (_root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let (first, second) = tokio::join!(
+            broker.scaffold_shell_app_value(scaffold_input(&shell.id, "A", "b", "dom")),
+            broker.scaffold_shell_app_value(scaffold_input(&shell.id, "B", "b", "dom")),
+        );
+        assert!(
+            first.is_ok() ^ second.is_ok(),
+            "exactly one must win: {first:?} / {second:?}"
+        );
+        let refusal = first.err().or(second.err()).expect("one must be refused");
+        assert!(
+            refusal.contains("scaffold_in_flight"),
+            "the loser must be stopped by the reservation, not by anything else: {refusal}"
+        );
+    }
+
+    /// An OUTCOME test for scaffold-versus-delete: whichever wins, the delete
+    /// completes, no record survives, and no directory is left behind.
+    ///
+    /// ⚠️ Honest about what it does NOT prove: it does not discriminate on
+    /// `lock_app_build`. Removing the lock entirely leaves this test green,
+    /// because on a wall-clock race the delete finishes the whole trash
+    /// removal before the landing's first write and `wipe_editable_surface`
+    /// then refuses a workspace that is not there. The orphan the lock
+    /// prevents needs the delete to land INSIDE the seed loop, a window no
+    /// timing-based test can be made to hit reliably. What actually pins the
+    /// lock is
+    /// [`the_landing_takes_the_build_lock_first_and_hands_it_back_held`].
+    #[tokio::test]
+    async fn a_concurrent_delete_cannot_orphan_a_scaffold_in_flight() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let app_dir = root.path().join("apps").join(&shell.id);
+        assert!(app_dir.is_dir(), "the fixture must exist to be raced");
+
+        let (scaffolded, deleted) = tokio::join!(
+            broker.scaffold_shell_app_value(scaffold_input(&shell.id, "A", "b", "dom")),
+            service.delete_app(&shell.id),
+        );
+        deleted.expect("the delete must complete");
+        assert!(
+            service.record(&shell.id).await.is_err(),
+            "a completed delete must leave no record, however the scaffold ended: {scaffolded:?}"
+        );
+        assert!(
+            !app_dir.exists(),
+            "no orphan workspace may survive the delete (scaffold outcome: {scaffolded:?})"
+        );
+    }
+
+    /// §C.1 step 3a, and the discriminating test for it: the landing takes
+    /// `lock_app_build` BEFORE it touches anything, and the guard it hands
+    /// back is still held — which is what keeps a concurrent delete out of
+    /// both the seed loop and the window before the commit point.
+    ///
+    /// A landing that took no lock would sail past a contender that already
+    /// holds it, and the first timeout below would not fire.
+    #[tokio::test]
+    async fn the_landing_takes_the_build_lock_first_and_hands_it_back_held() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let mut proposed = shell.clone();
+        proposed.name = "A".into();
+        proposed.brief = "b".into();
+
+        let contend = |root: PathBuf, app_id: String| {
+            tokio::task::spawn_blocking(move || {
+                local_apps::storage::lock_app_build(&root, &app_id)
+            })
+        };
+        let contender = contend(root.path().to_path_buf(), shell.id.clone())
+            .await
+            .expect("join the contender")
+            .expect("the contender must get the lock first");
+
+        let landing = tokio::spawn({
+            let broker = Arc::clone(&broker);
+            async move {
+                broker
+                    .land_scaffold(&proposed, local_apps::AppSurface::Dom)
+                    .await
+            }
+        });
+        let mut landing = landing;
+        assert!(
+            timeout(Duration::from_millis(400), &mut landing)
+                .await
+                .is_err(),
+            "the landing must WAIT for the build lock before it writes anything"
+        );
+        assert!(
+            !workspace_of(&root, &shell.id)
+                .join("app/app.jsx")
+                .exists(),
+            "and it must not have seeded while it was waiting"
+        );
+
+        drop(contender);
+        let held = timeout(Duration::from_secs(30), landing)
+            .await
+            .expect("the landing must proceed once the lock is free")
+            .expect("join the landing")
+            .expect("the landing must succeed");
+        assert!(workspace_of(&root, &shell.id).join("app/app.jsx").is_file());
+
+        assert!(
+            timeout(
+                Duration::from_millis(400),
+                contend(root.path().to_path_buf(), shell.id.clone()),
+            )
+            .await
+            .is_err(),
+            "the landing must STILL hold the lock when it returns, so the \
+             commit point runs under it"
+        );
+        drop(held);
+        timeout(
+            Duration::from_secs(30),
+            contend(root.path().to_path_buf(), shell.id.clone()),
+        )
+        .await
+        .expect("the lock must become free once the landing's guard drops")
+        .expect("join the contender")
+        .expect("acquire the freed build lock");
+    }
+
+    /// A formed app is refused. Its workspace holds the user's own source and
+    /// a second landing WIPES the editable surface before seeding, so this
+    /// refusal is what stands between a stray tool call and the user's work.
+    #[tokio::test]
+    async fn scaffolding_a_formed_app_is_rejected() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(scaffold_input(&shell.id, "A", "b", "dom"))
+            .await
+            .expect("the first scaffold must land");
+        let workspace = workspace_of(&root, &shell.id);
+        fs::write(workspace.join("app/screens/mine.jsx"), b"// the user's own work")
+            .expect("write user source");
+
+        let error = broker
+            .scaffold_shell_app_value(scaffold_input(&shell.id, "B", "b", "dom"))
+            .await
+            .expect_err("the second scaffold must be rejected");
+        assert!(error.contains("already"), "got {error}");
+
+        assert!(
+            workspace.join("app/screens/mine.jsx").is_file(),
+            "the refusal must have happened BEFORE the wipe"
+        );
+        let after = service.record(&shell.id).await.expect("record");
+        assert_eq!(after.name, "A", "the committed name must be untouched");
+        let contract =
+            fs::read_to_string(workspace.join("LINGXI.md")).expect("read the contract");
+        assert!(
+            contract.contains("# Local App: A"),
+            "the one-and-only contract must be untouched: {contract}"
+        );
+    }
+
+    /// §C.1 step 2, and it must refuse BEFORE touching the workspace: an
+    /// invalid argument may not cost the user the interview's workspace.
+    #[tokio::test]
+    async fn scaffold_rejects_an_empty_brief_and_an_unknown_surface() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        for (name, brief, surface, expected) in [
+            ("A", "   ", "dom", "brief must be a non-empty string"),
+            ("   ", "b", "dom", "name must be a non-empty string"),
+            ("A", "b", "webgl", "unknown app surface"),
+        ] {
+            let error = broker
+                .scaffold_shell_app_value(scaffold_input(&shell.id, name, brief, surface))
+                .await
+                .expect_err("must be rejected");
+            assert!(
+                error.contains(expected),
+                "expected {expected:?} in {error:?}"
+            );
+        }
+        let over_long = "x".repeat(local_apps::service::MAX_NAME_BYTES + 1);
+        let error = broker
+            .scaffold_shell_app_value(scaffold_input(&shell.id, &over_long, "b", "dom"))
+            .await
+            .expect_err("an over-long name must be rejected");
+        assert!(error.contains("limit"), "got {error}");
+
+        let after = service.record(&shell.id).await.expect("record");
+        assert!(!after.scaffolded);
+        let contract = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+            .expect("read the contract");
+        assert!(
+            contract.contains("尚未定形态"),
+            "a rejected argument must not have touched the workspace: {contract}"
+        );
+    }
+
+    /// §C.1.4. `AppManifest::hash()` serialises the WHOLE struct INCLUDING
+    /// `name`, and `AppDataStore::ensure_manifest` compares it against the
+    /// SQLite `_lingxi_schema.manifest_hash`. Writing `name` after a store
+    /// exists breaks EVERY data read and write with "database manifest
+    /// mismatch" — which is why the first landing is the only write window,
+    /// and why renaming an app is not offered at all.
+    #[tokio::test]
+    async fn the_manifest_name_may_only_be_written_before_any_database_exists() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let layout =
+            AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        assert!(
+            !layout.database_path().exists(),
+            "the write window is exactly 'no data store yet'"
+        );
+
+        broker
+            .scaffold_shell_app_value(scaffold_input(&shell.id, "A", "b", "dom"))
+            .await
+            .expect("the first landing must be allowed to write the name");
+        assert_eq!(load_manifest(&layout).expect("manifest").name, "A");
+
+        let opened = layout.clone();
+        tokio::task::spawn_blocking(move || AppDataStore::open(opened).map(|_| ()))
+            .await
+            .expect("join data store worker")
+            .expect("open the app data store");
+        assert!(layout.database_path().exists(), "the store must be on disk");
+
+        let error = stamp_scaffold_identity(&layout, "B", local_apps::AppSurface::Dom)
+            .expect_err("a name rewrite after the store exists must be refused");
+        assert!(error.contains("database"), "got {error}");
+        assert_eq!(
+            load_manifest(&layout).expect("manifest").name,
+            "A",
+            "the refusal must have happened before the write"
+        );
     }
 
     /// `create_app_fixture` with a CHOSEN id, for the one test whose exercised

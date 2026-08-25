@@ -698,10 +698,6 @@ impl AppService {
         Ok(self.record(app_id).await?.git_enabled)
     }
 
-    /// Stamp the app `ready` — the host calls this after the first successful
-    /// offline build (v3: the objective "this app has runnable output"
-    /// signal; there is no preview-approval gate anymore). Idempotent: an
-    /// already-ready app is a no-op with no event.
     /// Pin the app's init session (bare uuid). Set-once: the anchor is the
     /// app's durable "set-up conversation" identity, so a second call with a
     /// DIFFERENT id is rejected (idempotent for the same id). The engine
@@ -734,6 +730,91 @@ impl AppService {
         Ok(())
     }
 
+    /// The COMMIT POINT of `LocalAppScaffold` (§C.1 step 4, §C.1.5): write
+    /// `name`, `brief`, `workflow_model` and `scaffolded = true` in ONE
+    /// [`Self::with_app`] closure.
+    ///
+    /// Why one closure and not four setters: everything the host does before
+    /// this call — stamping `manifest.surface`/`manifest.name`, wiping the
+    /// editable surface, seeding the source tree, writing the formal
+    /// `LINGXI.md` — is re-doable and invisible to the catalog. This call is
+    /// the first and only moment any of it becomes visible. A half-commit
+    /// (name persisted, `scaffolded` still `false`) would leave a record the
+    /// user sees in the library under a real name that still opens the
+    /// interview: the worst of both states.
+    ///
+    /// Set-once CAS on `scaffolded`, the same paradigm as
+    /// [`Self::set_init_session`]: an app that is already formed is REJECTED,
+    /// never re-scaffolded. Its workspace holds the user's own source and a
+    /// second landing would wipe it (§C.0.1).
+    ///
+    /// `workflow_model = None` PRESERVES the record's current value instead of
+    /// clearing it. The tool's `workflow_model` is optional ("omit to keep the
+    /// device default"), and a shell create can already carry a client-chosen
+    /// model; a scaffold that simply did not mention one must not drop it.
+    ///
+    /// `git_enabled` is deliberately NOT writable here (§C.1.5): it is fixed
+    /// at create time and the workspace's Git history depends on it.
+    pub async fn commit_scaffold(
+        &self,
+        app_id: &str,
+        name: &str,
+        brief: &str,
+        workflow_model: Option<&str>,
+    ) -> Result<AppRecord, AppError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AppError::InvalidRequest("app name must not be empty".into()));
+        }
+        ensure_within("app name", name.len(), MAX_NAME_BYTES)?;
+        let brief = brief.trim();
+        if brief.is_empty() {
+            return Err(AppError::InvalidRequest(
+                "app brief must not be empty".into(),
+            ));
+        }
+        ensure_within("app brief", brief.len(), MAX_BRIEF_BYTES)?;
+        let workflow_model = workflow_model
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(|model| {
+                ensure_within("workflow model", model.len(), MAX_WORKFLOW_MODEL_BYTES)?;
+                Ok::<_, AppError>(model.to_string())
+            })
+            .transpose()?;
+        let name = name.to_string();
+        let brief = brief.to_string();
+        self.with_app(app_id, move |app, now| {
+            if app.record.scaffolded {
+                return (
+                    Err(AppError::InvalidRequest(format!(
+                        "app {} is already scaffolded",
+                        app.record.id
+                    ))),
+                    Vec::new(),
+                );
+            }
+            app.record.name = name;
+            app.record.brief = brief;
+            if let Some(model) = workflow_model {
+                app.record.workflow_model = Some(model);
+            }
+            app.record.scaffolded = true;
+            app.record.updated_at_ms = now;
+            (
+                Ok(app.record.clone()),
+                vec![AppEvent::RecordChanged {
+                    record: app.record.clone(),
+                }],
+            )
+        })
+        .await
+    }
+
+    /// Stamp the app `ready` — the host calls this after the first successful
+    /// offline build (v3: the objective "this app has runnable output"
+    /// signal; there is no preview-approval gate anymore). Idempotent: an
+    /// already-ready app is a no-op with no event.
     pub async fn mark_ready(&self, app_id: &str) -> Result<(), AppError> {
         self.with_app(app_id, |app, now| {
             if app.record.workflow_state == AppWorkflowState::Ready {
@@ -2002,6 +2083,132 @@ mod tests {
             AppWorkflowState::Ready,
             "a legacy checkpoint's tracked .lingxi blobs must not rewind the mirror"
         );
+    }
+
+    /// §C.1.5 / §C.1 step 4. The four fields land TOGETHER or not at all, and
+    /// the commit emits the single-record update a client needs to redraw the
+    /// library entry without reloading the whole catalog.
+    #[tokio::test]
+    async fn commit_scaffold_writes_the_four_fields_in_one_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let shell = h
+            .service
+            .create_app_with_mode(None, "", None, CreateMode::Shell, None)
+            .await
+            .unwrap();
+        assert!(!shell.scaffolded);
+        assert_eq!(shell.name, PLACEHOLDER_APP_NAME);
+        let _ = h.take_events().await;
+
+        let committed = h
+            .service
+            .commit_scaffold(&shell.id, "  打飞机  ", "  一个竖版射击小游戏  ", Some("openai/gpt-5"))
+            .await
+            .unwrap();
+        assert!(committed.scaffolded);
+        assert_eq!(committed.name, "打飞机", "the name is stored trimmed");
+        assert_eq!(committed.brief, "一个竖版射击小游戏");
+        assert_eq!(committed.workflow_model.as_deref(), Some("openai/gpt-5"));
+
+        // Durable, not just in memory.
+        let reloaded = reload_service(&h.service).await;
+        let after = reloaded.record(&shell.id).await.unwrap();
+        assert!(after.scaffolded);
+        assert_eq!(after.name, "打飞机");
+        assert_eq!(after.brief, "一个竖版射击小游戏");
+        assert_eq!(after.workflow_model.as_deref(), Some("openai/gpt-5"));
+
+        let events = h.take_events().await;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AppEvent::RecordChanged { record } if record.id == shell.id && record.scaffolded
+            )),
+            "the commit must announce the formed record: {events:?}"
+        );
+    }
+
+    /// Set-once CAS, the same paradigm as `set_init_session`: a formed app is
+    /// refused, and the refusal changes nothing.
+    #[tokio::test]
+    async fn commit_scaffold_refuses_an_already_scaffolded_app() {
+        let service = test_service().await;
+        let shell = service
+            .create_app_with_mode(None, "", None, CreateMode::Shell, None)
+            .await
+            .unwrap();
+        service
+            .commit_scaffold(&shell.id, "A", "b", None)
+            .await
+            .unwrap();
+        let error = service
+            .commit_scaffold(&shell.id, "B", "c", None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), AppErrorCode::InvalidRequest);
+        assert!(error.to_string().contains("already"), "got {error}");
+        let after = service.record(&shell.id).await.unwrap();
+        assert_eq!(after.name, "A", "the refusal must change nothing");
+        assert_eq!(after.brief, "b");
+    }
+
+    /// `workflow_model = None` means "the caller did not name one", NOT
+    /// "clear it". A shell create can already carry a client-chosen model and
+    /// a scaffold that simply omitted the field must not drop it.
+    #[tokio::test]
+    async fn commit_scaffold_preserves_a_workflow_model_it_was_not_given() {
+        let service = test_service().await;
+        let shell = service
+            .create_app_with_git_and_workflow_model_and_initializer(
+                None,
+                "",
+                None,
+                false,
+                Some("openai/gpt-5"),
+                CreateMode::Shell,
+                None,
+                |_| async { Ok(()) },
+            )
+            .await
+            .unwrap();
+        let committed = service
+            .commit_scaffold(&shell.id, "A", "b", None)
+            .await
+            .unwrap();
+        assert_eq!(committed.workflow_model.as_deref(), Some("openai/gpt-5"));
+    }
+
+    /// The validation branches are the service's own, not the host's: this is
+    /// a public API and the host's trimming is not its guarantee.
+    #[tokio::test]
+    async fn commit_scaffold_enforces_its_own_field_bounds() {
+        let service = test_service().await;
+        let shell = service
+            .create_app_with_mode(None, "", None, CreateMode::Shell, None)
+            .await
+            .unwrap();
+        let over_long_model = "m".repeat(MAX_WORKFLOW_MODEL_BYTES + 1);
+        for (name, brief, model) in [
+            ("   ", "b", None),
+            ("A", "   ", None),
+            (&"x".repeat(MAX_NAME_BYTES + 1)[..], "b", None),
+            ("A", &"y".repeat(MAX_BRIEF_BYTES + 1)[..], None),
+            ("A", "b", Some(&over_long_model[..])),
+        ] {
+            let error = service
+                .commit_scaffold(&shell.id, name, brief, model)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), AppErrorCode::InvalidRequest);
+        }
+        let after = service.record(&shell.id).await.unwrap();
+        assert!(
+            !after.scaffolded,
+            "a rejected commit must leave the shell a shell"
+        );
+        assert_eq!(after.name, PLACEHOLDER_APP_NAME);
+        assert_eq!(after.brief, "");
     }
 
     #[tokio::test]

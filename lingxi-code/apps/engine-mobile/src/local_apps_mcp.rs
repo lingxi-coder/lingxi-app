@@ -149,6 +149,19 @@ pub trait LocalAppsMcpHost: Send + Sync {
         surface: local_apps::AppSurface,
     ) -> Result<(), String>;
 
+    /// Run the whole `LocalAppScaffold` transaction (§C.1) for an app the
+    /// user created as an empty shell: reserve, validate, land the manifest
+    /// stamp / wiped-and-seeded source tree / formal `LINGXI.md` under the
+    /// build lock, then commit `name`, `brief`, `workflow_model` and
+    /// `scaffolded = true` in one write.
+    ///
+    /// ⛔ Deliberately has NO default implementation. A default returning
+    /// "unavailable" would compile for every host and leave the one way OUT of
+    /// the shell permanently refusing on any host that forgot to override it —
+    /// and a shell whose scaffold refuses is an app the user can never form.
+    /// Every host must answer this one explicitly.
+    async fn scaffold_shell_app(&self, input: Value) -> Result<Value, String>;
+
     /// Tell the client that an agent-driven create failed, so a client-side
     /// "creating…" state has something to disarm it.
     async fn emit_create_failure(&self, error: &AppError);
@@ -1536,15 +1549,16 @@ impl LocalAppsMcpTransport {
                 }
                 Self::result(result)
             }
-            // The tool is REGISTERED (Task 7) before its behaviour lands
-            // (Task 8). A missing arm would fall through to the catch-all and
-            // answer `ToolNotFound` for a tool the model can plainly see in
-            // its eager tool set, and the shell contract explicitly tells it
-            // to call this one — so answer with a real, self-explaining error
-            // instead. When Task 8 lands, this arm is REPLACED, not extended.
-            "scaffold" => Self::app_error(local_apps::AppError::NotYetAvailable(
-                "this build registers the scaffolding operation but cannot run it yet".into(),
-            )),
+            // The one way out of an empty shell, and the only local-app
+            // operation besides `list` / `get` / `create` that stays reachable
+            // while `scaffolded == false` (see `SHELL_ALLOWED_OPERATIONS`).
+            // The whole transaction lives on the host: it needs the app
+            // layout, the build lock and the workspace seed, none of which
+            // this layer has.
+            "scaffold" => match self.host()?.scaffold_shell_app(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
             "manage_runtime" => match self.host()?.manage_runtime(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
@@ -2925,6 +2939,9 @@ mod tests {
         ) -> Result<(), String> {
             unreachable!("not exercised by these tests")
         }
+        async fn scaffold_shell_app(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
+        }
         async fn emit_create_failure(&self, _error: &AppError) {}
     }
 
@@ -3102,6 +3119,9 @@ mod tests {
         ) -> Result<(), String> {
             self.calls.lock().expect("lock").push(record.id);
             self.failure.map_or(Ok(()), |message| Err(message.into()))
+        }
+        async fn scaffold_shell_app(&self, _input: Value) -> Result<Value, String> {
+            unreachable!("not exercised by these tests")
         }
         async fn emit_create_failure(&self, _error: &AppError) {}
     }
@@ -3357,7 +3377,7 @@ mod tests {
     /// testing the wrong layer.
     async fn transport_with_app(
         mode: local_apps::CreateMode,
-    ) -> (TempDir, LocalAppsMcpTransport, String) {
+    ) -> (TempDir, LocalAppsMcpTransport, Arc<AppService>, String) {
         let root = TempDir::new().expect("tempdir");
         let service = Arc::new(
             AppService::load(
@@ -3383,8 +3403,40 @@ mod tests {
             "the fixture must actually be in the state this test names"
         );
         let transport = LocalAppsMcpTransport::new(root.path().to_path_buf());
-        assert!(transport.attach_service(service).is_ok(), "attach service");
-        (root, transport, record.id)
+        assert!(
+            transport.attach_service(Arc::clone(&service)).is_ok(),
+            "attach service"
+        );
+        (root, transport, service, record.id)
+    }
+
+    /// Attach a REAL host broker over the fixture's root, sharing its service.
+    ///
+    /// Deliberately opt-in rather than folded into [`transport_with_app`]: a
+    /// broker turns every ungated operation into real host work — starting
+    /// runtimes, queueing installs, running Git — which the gate tests neither
+    /// want nor assert on. Only the test that has to prove `scaffold` reaches
+    /// a working implementation takes it.
+    fn attach_real_host(
+        transport: &LocalAppsMcpTransport,
+        root: &TempDir,
+        service: Arc<AppService>,
+    ) {
+        let broker = crate::local_apps_host::LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            client_adapter::MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+        assert!(
+            broker.attach_service(service).is_ok(),
+            "attach the broker's service"
+        );
+        assert!(
+            transport.attach_host(broker).is_ok(),
+            "attach the broker as the MCP host"
+        );
     }
 
     /// Did the SHELL GATE refuse this, as opposed to the handler refusing for
@@ -3410,7 +3462,8 @@ mod tests {
 
     #[tokio::test]
     async fn every_non_allowlisted_operation_is_gated_on_a_shell() {
-        let (_root, transport, app_id) = transport_with_app(local_apps::CreateMode::Shell).await;
+        let (_root, transport, _service, app_id) =
+            transport_with_app(local_apps::CreateMode::Shell).await;
         let gated = gated_operations();
         assert!(
             !gated.is_empty(),
@@ -3439,7 +3492,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_allowlisted_operations_pass_the_gate_on_a_shell() {
-        let (_root, transport, app_id) = transport_with_app(local_apps::CreateMode::Shell).await;
+        let (_root, transport, _service, app_id) =
+            transport_with_app(local_apps::CreateMode::Shell).await;
         for operation in SHELL_ALLOWED_OPERATIONS {
             let outcome = transport
                 .call(operation, json!({"app_id": app_id.clone()}))
@@ -3458,7 +3512,13 @@ mod tests {
     /// stuck as an empty workspace. This is the test that catches that.
     #[tokio::test]
     async fn scaffold_itself_is_not_gated_because_the_gate_keys_on_the_operation() {
-        let (_root, transport, app_id) = transport_with_app(local_apps::CreateMode::Shell).await;
+        let (root, transport, service, app_id) =
+            transport_with_app(local_apps::CreateMode::Shell).await;
+        // A REAL host, because "not gated" alone would still be satisfied by an
+        // arm that dispatches into nothing. The assertion below is that the
+        // shell's only way out actually WORKS end to end through this
+        // transport.
+        attach_real_host(&transport, &root, Arc::clone(&service));
         let outcome = transport
             .call(
                 "scaffold",
@@ -3474,6 +3534,11 @@ mod tests {
             "scaffold must answer with a tool result, not a transport failure: \
              {outcome:?}"
         );
+        assert!(
+            service.record(&app_id).await.expect("record").scaffolded,
+            "the call must have run the real transaction, not merely been \
+             allowed past the gate"
+        );
     }
 
     /// Testing only the static `match tool` path misses half the surface: the
@@ -3485,7 +3550,8 @@ mod tests {
     /// catch-all as `ToolNotFound`).
     #[tokio::test]
     async fn the_gate_covers_the_dynamic_dispatch_path_too() {
-        let (_root, transport, app_id) = transport_with_app(local_apps::CreateMode::Shell).await;
+        let (_root, transport, _service, app_id) =
+            transport_with_app(local_apps::CreateMode::Shell).await;
         let scoped = transport
             .scoped_for_app(&app_id)
             .expect("app-scoped transport");
@@ -3513,7 +3579,7 @@ mod tests {
     /// not a gate on the shell phase, it is a gate on everything.
     #[tokio::test]
     async fn a_formed_app_passes_the_gate_for_every_operation() {
-        let (_root, transport, app_id) =
+        let (_root, transport, _service, app_id) =
             transport_with_app(local_apps::CreateMode::Scaffolded).await;
         for &(_, operation, _) in crate::local_apps_tools::LOCAL_APP_TOOLS {
             let outcome = transport
@@ -3532,7 +3598,8 @@ mod tests {
     /// ids do not exist. The handler's own not-found error is the right one.
     #[tokio::test]
     async fn an_unknown_app_is_not_answered_by_the_shell_gate() {
-        let (_root, transport, _app_id) = transport_with_app(local_apps::CreateMode::Shell).await;
+        let (_root, transport, _service, _app_id) =
+            transport_with_app(local_apps::CreateMode::Shell).await;
         let outcome = transport.call("get", json!({"app_id": "zzzzzzzz"})).await;
         assert!(!was_gated(&outcome), "got {outcome:?}");
         let outcome = transport

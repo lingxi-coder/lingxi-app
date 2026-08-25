@@ -48,4 +48,19 @@
     <!-- New: drawer app-scope section. -->
     <string name="drawer_app_scope_label">应用 · %1$s</string>
     <string name="drawer_app_sessions_empty">这个应用还没有会话。</string>
+    <!--
+      Kickoff sent into a brand-new shell app's pinned conversation.
+
+      TEMPORARY HOME. Plan task 15b adds this key to clients/translations/*.json
+      and regenerates values*/strings.xml for all five locales; when it does, it
+      MUST delete this entry (and the values-en/ twin) or the resource merger
+      will fail on the duplicate — that duplicate is this file's documented
+      tripwire, not a surprise. It lives here today only so the Android module
+      keeps compiling between task 14 and task 15b.
+
+      Placeholder-free on purpose: a shell has no brief to interpolate, and the
+      retired local_apps_init_kickoff told the agent the shape and the name were
+      already fixed — which is exactly what this conversation exists to decide.
+    -->
+    <string name="local_apps_kickoff">我想做一个新的本地应用。</string>
 </resources>

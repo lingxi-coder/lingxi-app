@@ -20,7 +20,6 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -31,7 +30,6 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -54,9 +52,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -70,9 +65,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lingxi.code.R
-import com.lingxi.code.components.ModelDetailsDialog
-import com.lingxi.code.components.ModelDetailsInfoButton
-import com.lingxi.code.model.ModelOption
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
@@ -99,10 +91,6 @@ fun LocalAppsRoute(
         onOpenDrawer = onOpenDrawer,
         onExternalNavigation = onExternalNavigation,
         onOpenAppSession = onOpenAppSession,
-        onProposeIdentity = { brief ->
-            val proposal = viewModel.proposeIdentity(brief)
-            proposal.name to proposal.surface
-        },
         modifier = modifier,
     )
 }
@@ -115,21 +103,12 @@ fun LocalAppsScreen(
     onExternalNavigation: (String) -> Unit,
     modifier: Modifier = Modifier,
     onOpenAppSession: (appId: String, session: LocalAppSessionRow?) -> Unit = { _, _ -> },
-    /**
-     * Asks the host to name and shape an app from a brief. Defaulted to the
-     * same derivation the host falls back to, so a preview or a test that does
-     * not wire it still renders a usable sheet.
-     */
-    onProposeIdentity: suspend (String) -> Pair<String, LocalAppSurface> = { brief ->
-        brief.trim().take(24) to LocalAppSurface.DOM
-    },
 ) {
     Box(modifier.fillMaxSize()) {
         when (val destination = state.destination) {
             LocalAppsDestination.Library -> LocalAppsLibraryScreen(
                 state = state,
                 onAction = onAction,
-                onProposeIdentity = onProposeIdentity,
                 onOpenDrawer = onOpenDrawer,
             )
 
@@ -204,11 +183,7 @@ private fun LocalAppsLibraryScreen(
     state: LocalAppsUiState,
     onAction: (LocalAppsAction) -> Unit,
     onOpenDrawer: () -> Unit,
-    onProposeIdentity: suspend (String) -> Pair<String, LocalAppSurface>,
 ) {
-    // Pure Compose-local UI state — there is no dedicated create destination;
-    // the dialog collects only a one-line brief (mirrors iOS's LocalAppCreateView).
-    var showCreateDialog by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -222,7 +197,10 @@ private fun LocalAppsLibraryScreen(
                     IconButton(onClick = { onAction(LocalAppsAction.Refresh) }) {
                         Icon(Icons.Rounded.Refresh, contentDescription = stringResource(R.string.local_apps_refresh))
                     }
-                    IconButton(onClick = { onAction(LocalAppsAction.Create); showCreateDialog = true }) {
+                    // No form. The button creates an empty shell app and the
+                    // conversation that follows is where its shape, its name and
+                    // its requirements get settled.
+                    IconButton(onClick = { onAction(LocalAppsAction.Create) }) {
                         Icon(Icons.Rounded.Add, contentDescription = stringResource(R.string.local_apps_create))
                     }
                 },
@@ -249,10 +227,9 @@ private fun LocalAppsLibraryScreen(
                     CircularProgressIndicator()
                 }
 
-                state.filteredApps.isEmpty() -> EmptyApps(onCreate = {
-                    onAction(LocalAppsAction.Create)
-                    showCreateDialog = true
-                })
+                state.filteredApps.isEmpty() -> EmptyApps(
+                    onCreate = { onAction(LocalAppsAction.Create) },
+                )
 
                 else -> LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -266,351 +243,7 @@ private fun LocalAppsLibraryScreen(
             }
         }
     }
-    if (showCreateDialog) {
-        CreateAppDialog(
-            models = state.workflowModels,
-            currentModelId = state.currentWorkflowModelId,
-            proposeIdentity = onProposeIdentity,
-            onDismiss = { showCreateDialog = false },
-            onCreate = { brief, name, surface, gitEnabled, workflowModel, addWidget ->
-                onAction(
-                    LocalAppsAction.CreateFromBrief(
-                        brief = brief,
-                        name = name,
-                        surface = surface,
-                        gitEnabled = gitEnabled,
-                        workflowModel = workflowModel,
-                        addWidget = addWidget,
-                    ),
-                )
-                showCreateDialog = false
-            },
-        )
-    }
 }
-
-/**
- * The create sheet: a one-line brief, then a name and a surface to confirm.
- *
- * Two steps, in ONE dialog, because both of the second step's fields are fixed
- * at creation — a surface is immutable once scaffolded and apps have no rename —
- * so neither may be decided by something the user never saw. The host proposes
- * both from the brief (`ProposeAppIdentity`, one headless model call, no
- * conversation); this dialog shows the proposal and gives the user the last
- * word.
- */
-@Composable
-private fun CreateAppDialog(
-    models: List<ModelOption>,
-    currentModelId: String?,
-    proposeIdentity: suspend (String) -> Pair<String, LocalAppSurface>,
-    onDismiss: () -> Unit,
-    onCreate: (String, String, LocalAppSurface, Boolean, String?, Boolean) -> Unit,
-) {
-    var brief by remember { mutableStateOf("") }
-    var confirmingIdentity by remember { mutableStateOf(false) }
-    var proposing by remember { mutableStateOf(false) }
-    var name by remember { mutableStateOf("") }
-    var surface by remember { mutableStateOf(LocalAppSurface.DOM) }
-    var gitEnabled by remember { mutableStateOf(true) }
-    var workflowModel by remember { mutableStateOf<String?>(null) }
-    var addWidget by remember { mutableStateOf(false) }
-    val dialogScope = rememberCoroutineScope()
-    LaunchedEffect(models, workflowModel) {
-        if (workflowModel != null && models.none { it.id == workflowModel }) {
-            workflowModel = null
-        }
-    }
-    if (confirmingIdentity) {
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            title = { Text(stringResource(R.string.local_apps_create)) },
-            text = {
-                Column {
-                    OutlinedTextField(
-                        value = name,
-                        onValueChange = { name = it },
-                        label = { Text(stringResource(R.string.local_apps_create_name_label)) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Text(
-                        stringResource(R.string.local_apps_create_name_hint),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
-                    Text(
-                        stringResource(R.string.local_apps_create_surface_section),
-                        style = MaterialTheme.typography.labelLarge,
-                        modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
-                    )
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        LocalAppSurface.entries.forEachIndexed { index, option ->
-                            SegmentedButton(
-                                selected = surface == option,
-                                onClick = { surface = option },
-                                shape = SegmentedButtonDefaults.itemShape(
-                                    index = index,
-                                    count = LocalAppSurface.entries.size,
-                                ),
-                            ) {
-                                Text(stringResource(option.labelRes()))
-                            }
-                        }
-                    }
-                    Text(
-                        stringResource(surface.detailRes()),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
-                    Text(
-                        stringResource(R.string.local_apps_create_surface_immutable),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        onCreate(brief, name, surface, gitEnabled, workflowModel, addWidget)
-                    },
-                ) {
-                    Text(stringResource(R.string.local_apps_create_and_design))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingIdentity = false }) {
-                    Text(stringResource(R.string.local_apps_create_back))
-                }
-            },
-        )
-        return
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.local_apps_create)) },
-        text = {
-            Column {
-                OutlinedTextField(
-                    value = brief,
-                    onValueChange = { brief = it },
-                    label = { Text(stringResource(R.string.local_apps_create_brief_label)) },
-                    minLines = 3,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Text(
-                    stringResource(R.string.local_apps_create_brief_hint),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
-                Text(
-                    stringResource(R.string.local_apps_create_model_section),
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
-                )
-                WorkflowModelSelector(
-                    models = models,
-                    currentModelId = currentModelId,
-                    selectedModelId = workflowModel,
-                    onSelected = { workflowModel = it },
-                )
-                Text(
-                    stringResource(R.string.local_apps_create_model_detail),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
-                Row(
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                ) {
-                    Checkbox(
-                        checked = gitEnabled,
-                        onCheckedChange = { gitEnabled = it },
-                    )
-                    Text(stringResource(R.string.local_apps_create_git_version_control))
-                }
-                Row(
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                ) {
-                    Checkbox(
-                        checked = addWidget,
-                        onCheckedChange = { addWidget = it },
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(stringResource(R.string.local_apps_create_add_widget))
-                        Text(
-                            stringResource(R.string.local_apps_create_add_widget_detail),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                enabled = canSubmitBrief(brief) && !proposing,
-                onClick = {
-                    proposing = true
-                    dialogScope.launch {
-                        // Advances even when the proposal is the derived
-                        // fallback: the fields are editable, so an unreachable
-                        // model costs a moment of typing rather than blocking
-                        // the create outright.
-                        val (proposedName, proposedSurface) = proposeIdentity(brief)
-                        name = proposedName
-                        surface = proposedSurface
-                        proposing = false
-                        confirmingIdentity = true
-                    }
-                },
-            ) {
-                Text(
-                    stringResource(
-                        if (proposing) R.string.local_apps_create_naming else R.string.local_apps_create_next,
-                    ),
-                )
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
-    )
-}
-
-private fun LocalAppSurface.labelRes(): Int = when (this) {
-    LocalAppSurface.DOM -> R.string.local_apps_surface_dom
-    LocalAppSurface.CANVAS -> R.string.local_apps_surface_canvas
-}
-
-private fun LocalAppSurface.detailRes(): Int = when (this) {
-    LocalAppSurface.DOM -> R.string.local_apps_surface_dom_detail
-    LocalAppSurface.CANVAS -> R.string.local_apps_surface_canvas_detail
-}
-
-@Composable
-private fun WorkflowModelSelector(
-    models: List<ModelOption>,
-    currentModelId: String?,
-    selectedModelId: String?,
-    onSelected: (String?) -> Unit,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    var selectedDetails by remember { mutableStateOf<com.lingxi.code.model.CatalogModelDetails?>(null) }
-    val selectedModel = models.firstOrNull { it.id == selectedModelId }
-    val currentModel = models.firstOrNull { it.id == currentModelId }
-    val followCurrent = stringResource(R.string.local_apps_create_model_follow_current)
-    val selectionLabel = selectedModel?.let(::workflowModelOptionLabel)
-        ?: listOfNotNull(followCurrent, currentModel?.name).joinToString(" · ")
-
-    Box(Modifier.fillMaxWidth()) {
-        OutlinedButton(
-            onClick = { expanded = true },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(
-                text = selectionLabel,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Icon(
-                Icons.Rounded.KeyboardArrowDown,
-                contentDescription = stringResource(R.string.local_apps_create_model_label),
-            )
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            DropdownMenuItem(
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            listOfNotNull(followCurrent, currentModel?.name).joinToString(" · "),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        currentModel?.metadata?.summaryItems
-                            ?.takeIf { it.isNotEmpty() }
-                            ?.joinToString(" · ")
-                            ?.let { summary ->
-                                Text(
-                                    text = summary,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                    }
-                },
-                onClick = {
-                    onSelected(null)
-                    expanded = false
-                },
-            )
-            models.forEach { model ->
-                DropdownMenuItem(
-                    text = {
-                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(
-                                workflowModelOptionLabel(model),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            model.metadata.summaryItems
-                                .takeIf { it.isNotEmpty() }
-                                ?.joinToString(" · ")
-                                ?.let { summary ->
-                                    Text(
-                                        text = summary,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                        }
-                    },
-                    trailingIcon = {
-                        model.details?.let { details ->
-                            ModelDetailsInfoButton(onClick = { selectedDetails = details })
-                        }
-                    },
-                    onClick = {
-                        onSelected(model.id)
-                        expanded = false
-                    },
-                )
-            }
-        }
-        selectedDetails?.let { details ->
-            ModelDetailsDialog(details = details, onDismiss = { selectedDetails = null })
-        }
-    }
-}
-
-internal fun workflowModelOptionLabel(model: ModelOption): String =
-    listOf(model.name, model.providerName)
-        .filter(String::isNotBlank)
-        .joinToString(" · ")
-
-/**
- * The create screen's one and only input — a documented count, not a UI
- * probe: [CreateAppDialog] above declares exactly one [OutlinedTextField]
- * (the brief), with no separate name field alongside it.
- */
-internal fun createScreenInputCount(): Int = 1
-
-/** Whether [brief] is non-blank enough to submit — mirrors `AppService::create_app`'s own empty check server-side (belt-and-suspenders, not the only gate). */
-internal fun canSubmitBrief(brief: String): Boolean = brief.isNotBlank()
 
 @Composable
 private fun RuntimeModeBanner(mode: LocalAppRuntimeMode) {
@@ -666,10 +299,26 @@ private fun EmptyApps(onCreate: () -> Unit) {
     }
 }
 
+/**
+ * One library row.
+ *
+ * A DRAFT (`scaffolded == false`) renders the localized 「新应用」/「创建中」 pair
+ * instead of its stored identity — [localAppCardText] is the single predicate,
+ * shared with every other render point, and it is what keeps the engine's
+ * non-localized `"untitled"` placeholder and the empty brief off this screen.
+ * Tapping still opens the app (its pinned conversation is exactly where the
+ * user needs to be) and deleting still works.
+ */
 @Composable
 private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit) {
     var menuExpanded by remember(app.id) { mutableStateOf(false) }
     var confirmDelete by remember(app.id) { mutableStateOf(false) }
+    val draftTitle = stringResource(R.string.local_apps_draft_card_title)
+    val cardText = localAppCardText(
+        app = app,
+        draftTitle = draftTitle,
+        draftSubtitle = stringResource(R.string.local_apps_draft_card_subtitle),
+    )
     Card(
         onClick = { onAction(LocalAppsAction.OpenApp(app.id)) },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -678,9 +327,9 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(app.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(cardText.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        app.brief,
+                        cardText.subtitle,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -693,6 +342,21 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
                         Icon(Icons.Rounded.MoreVert, contentDescription = stringResource(R.string.local_apps_card_menu_a11y))
                     }
                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        // The permanent home for the home-screen Widget request.
+                        // It used to exist ONLY as a checkbox inside the create
+                        // dialog, so deleting that dialog without moving it here
+                        // would silently retire the feature. Hidden for a draft:
+                        // a shell is excluded from the widget snapshot, so its
+                        // widget would be an empty, un-openable tile.
+                        if (app.scaffolded) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.local_apps_widget_add)) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onAction(LocalAppsAction.RequestWidget(app.id))
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.local_apps_delete), color = MaterialTheme.colorScheme.error) },
                             onClick = { menuExpanded = false; confirmDelete = true },
@@ -729,7 +393,14 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            title = { Text(stringResource(R.string.local_apps_delete_confirm, app.name)) },
+            title = {
+                Text(
+                    stringResource(
+                        R.string.local_apps_delete_confirm,
+                        localAppDisplayName(app, draftTitle, fallback = app.id),
+                    ),
+                )
+            },
             text = { Text(stringResource(R.string.local_apps_delete_confirm_detail)) },
             confirmButton = {
                 Button(onClick = {
@@ -759,7 +430,11 @@ private fun LocalAppPreviewScreen(
     Scaffold(
         topBar = {
             LocalAppsTopBar(
-                app?.name ?: stringResource(R.string.local_apps_preview_title),
+                localAppDisplayName(
+                    app,
+                    draftTitle = stringResource(R.string.local_apps_draft_card_title),
+                    fallback = stringResource(R.string.local_apps_preview_title),
+                ),
                 onBack = { onAction(LocalAppsAction.Back) },
             )
         },
@@ -805,7 +480,11 @@ private fun LocalAppDetailsScreen(
     Scaffold(
         topBar = {
             LocalAppsTopBar(
-                app?.name ?: stringResource(R.string.local_apps_detail_title),
+                localAppDisplayName(
+                    app,
+                    draftTitle = stringResource(R.string.local_apps_draft_card_title),
+                    fallback = stringResource(R.string.local_apps_detail_title),
+                ),
                 onBack = { onAction(LocalAppsAction.Back) },
             )
         },

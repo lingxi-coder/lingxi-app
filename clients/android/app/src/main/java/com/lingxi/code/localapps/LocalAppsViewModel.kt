@@ -9,6 +9,7 @@ import com.lingxi.code.bindings.AppAuthorizationDecisionDto
 import com.lingxi.code.bindings.AppBridgeOperationDto
 import com.lingxi.code.bindings.AppBridgeRequestDto
 import com.lingxi.code.bindings.AppCapabilityKindDto
+import com.lingxi.code.bindings.AppCreateModeDto
 import com.lingxi.code.bindings.AppCreateOriginDto
 import com.lingxi.code.bindings.AppDataFieldDto
 import com.lingxi.code.bindings.AppDataFieldTypeDto
@@ -19,7 +20,6 @@ import com.lingxi.code.bindings.AppRuntimeModeDto
 import com.lingxi.code.bindings.AppRuntimeStateDto
 import com.lingxi.code.bindings.AppSessionKindDto
 import com.lingxi.code.bindings.AppSessionRowDto
-import com.lingxi.code.bindings.AppSurfaceDto
 import com.lingxi.code.bindings.AppUiActionKindDto
 import com.lingxi.code.bindings.AppUiRequestDto
 import com.lingxi.code.bindings.AppWorkflowStateDto
@@ -29,23 +29,20 @@ import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.localapps.widget.LocalAppWidgetSnapshotSync
 import com.lingxi.code.localapps.widget.NoopLocalAppWidgetSnapshotSync
 import com.lingxi.code.model.DefaultSessionCatalogStrings
-import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.model.SessionCatalogStrings
 import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.async
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
-import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 import org.json.JSONObject
 
@@ -81,46 +78,43 @@ class LocalAppsViewModel(
     private var source: ConversationSource? = null
 
     /**
-     * The host's answer to `ProposeAppIdentity` — a create sheet's editable
-     * defaults, never an authority. Both fields are fixed at creation (a
-     * surface is immutable once scaffolded and apps have no rename), so the
-     * sheet shows them and the user gets the last word.
-     */
-    data class AppIdentityProposal(
-        val name: String,
-        val surface: LocalAppSurface,
-    )
-
-    /**
      * Where a freshly created app hands the user off: into the app's OWN
      * conversation, whose cwd is the app workspace.
      *
      * [initSessionId] is null when the engine's best-effort init-session mint
      * failed. Landing on a fresh conversation is still correct — the SCOPE, not
      * the session, is what roots the agent in the app workspace.
+     *
+     * Carries no brief any more: the "+" button creates a shell with an EMPTY
+     * brief, and the kickoff it sends is a placeholder-free sentence.
      */
     data class CreatedAppLanding(
         val appId: String,
         val initSessionId: String?,
-        val brief: String,
     )
 
     /**
-     * The brief of the create this sheet submitted and has not yet seen land.
+     * The `request_id` of the `CreateApp` this session sent and has not yet
+     * seen resolve — the correlation key the whole hand-off hangs on.
      *
-     * KEYED, not a bare flag. `AppCreated` carries no correlator back to the
-     * client that asked, and an agent in another conversation can commit its own
-     * `LocalAppCreate` in the same window — claiming that record would open
-     * someone else's app and leave this one with no landing at all.
+     * A one-shot boolean is NOT sufficient and was explicitly rejected: the
+     * engine emits `AppCreated` for BOTH creation paths, so under a concurrent
+     * agent-driven create a flag would claim someone else's record and hijack
+     * the user into the wrong session. The previous code worked around that by
+     * matching the brief EXACTLY, which this flow cannot do — a shell's brief is
+     * the empty string, identical for every create ever made.
      *
-     * The match is EXACT, not inferred: create-first sends the user's own
-     * sentence and `AppService::create_app` stores it verbatim (both ends trim).
-     * The deferred flow genuinely could not do this — the agent rewrote the
-     * brief before creating anything — which is why an earlier version gave up
-     * and used a bare count.
+     * Events whose `request_id` does not match this are IGNORED, including
+     * events carrying no key at all (an agent-tool create, a backfill).
      */
-    private var creationBrief: String? = null
-    private var pendingWidgetPin = false
+    private var pendingCreateRequestId: String? = null
+
+    /**
+     * Stop-loss for [pendingCreateRequestId]; see [CREATE_RESULT_TIMEOUT_MS].
+     * Cancelled whenever the pending create is cleared, so a create that
+     * resolves normally cannot be "timed out" by a stale job afterwards.
+     */
+    private var pendingCreateTimeout: Job? = null
     private val widgetPinRequestChannel = Channel<String>(Channel.BUFFERED)
     val widgetPinRequests = widgetPinRequestChannel.receiveAsFlow()
     private val createdAppLandingChannel = Channel<CreatedAppLanding>(Channel.BUFFERED)
@@ -138,16 +132,6 @@ class LocalAppsViewModel(
      */
     private var landingAwaitingPin: CreatedAppLanding? = null
 
-    /**
-     * Answers to `ProposeAppIdentity`, tagged with the request id they belong
-     * to. Tagged rather than a single slot so a sheet that was retyped and
-     * re-submitted resolves its OWN answer instead of adopting the stale one.
-     *
-     * `extraBufferCapacity` so a reply that lands before the asker starts
-     * collecting is not dropped by a rendezvous.
-     */
-    private val identityProposals =
-        MutableSharedFlow<Pair<String, AppIdentityProposal>>(extraBufferCapacity = 8)
     private val pendingCapabilityKinds = mutableMapOf<String, AppCapabilityKindDto>()
     private val queuedAuthorizations = ArrayDeque<LocalAppAuthorizationRequest>()
     private val uiControlGrants = mutableMapOf<String, LocalAppAuthorizationDecision>()
@@ -167,35 +151,42 @@ class LocalAppsViewModel(
         viewModelScope.launch {
             sourceFlow.collectLatest { bound ->
                 source = bound
-                // The create claim does NOT survive a scope switch. `AppCreated`
-                // is a one-shot event on the source `collectLatest` just
-                // cancelled, so a create still in flight when the user picks
-                // another project can never resolve its claim — and nothing else
-                // clears these. Left armed, `creationBrief` is a permanent latch
+                // The create claim does NOT survive a scope switch or a
+                // reconnect. `AppCreated` is a one-shot event on the source
+                // `collectLatest` just cancelled, so a create still in flight
+                // can never resolve its claim here — and nothing else clears
+                // it. Left armed, `pendingCreateRequestId` is a permanent latch
                 // on an Activity-scoped ViewModel: every later create is refused
-                // with `local_apps_error_create_in_progress`. The app itself is
-                // still created; only this session's landing is lost, and the
-                // snapshot request below shows it in the catalog regardless.
-                creationBrief = null
-                pendingWidgetPin = false
+                // with `local_apps_error_create_in_progress`.
+                //
+                // Reporting it is the other half of the contract: after a
+                // reconnect this client must NOT claim an unmatched event, so
+                // the honest outcome is "the result is unknown, check the app
+                // library" — the app usually IS there, which is why the copy
+                // says to look rather than to retry.
+                val abandonedCreate = pendingCreateRequestId != null
+                clearPendingCreate()
                 landingAwaitingPin = null
-                _uiState.update { it.copy(loading = true, error = null) }
+                _uiState.update {
+                    it.copy(
+                        loading = true,
+                        // Set INSIDE this update, not via `error(...)` after it:
+                        // this same update clears `error`, so a message raised
+                        // before it would be wiped and one raised after it would
+                        // race the snapshot reply.
+                        error = if (abandonedCreate) {
+                            strings.resolve(
+                                R.string.local_apps_creation_result_unknown,
+                                "创建结果未知，请在应用库确认。",
+                            )
+                        } else {
+                            null
+                        },
+                    )
+                }
                 coroutineScope {
                     launch(start = CoroutineStart.UNDISPATCHED) {
                         bound.clientEvents.collect(::reduce)
-                    }
-                    launch(start = CoroutineStart.UNDISPATCHED) {
-                        bound.modelState.collect { engine ->
-                            _uiState.update {
-                                it.copy(
-                                    workflowModels = EngineModelCatalog.options(
-                                        engine.available,
-                                        engine.details,
-                                    ),
-                                    currentWorkflowModelId = engine.active.takeIf(String::isNotBlank),
-                                )
-                            }
-                        }
                     }
                     launch { requestSnapshots(bound) }
                 }
@@ -214,17 +205,9 @@ class LocalAppsViewModel(
     fun onAction(action: LocalAppsAction) {
         when (action) {
             LocalAppsAction.Refresh -> submit { requestSnapshots(it) }
-            LocalAppsAction.Create -> _uiState.update { it.copy(createName = "") }
+            LocalAppsAction.Create -> createShellApp()
             is LocalAppsAction.Search -> _uiState.update { it.copy(query = action.query) }
-            is LocalAppsAction.ChangeCreateName -> _uiState.update { it.copy(createName = action.name) }
-            is LocalAppsAction.CreateFromBrief -> createFromBrief(
-                brief = action.brief,
-                name = action.name,
-                surface = action.surface,
-                gitEnabled = action.gitEnabled,
-                workflowModel = action.workflowModel,
-                addWidget = action.addWidget,
-            )
+            is LocalAppsAction.RequestWidget -> requestWidgetPin(action.appId)
             is LocalAppsAction.OpenApp -> openApp(action.appId)
             is LocalAppsAction.LoadAppSessions -> requestSessions(action.appId, action.offset)
             is LocalAppsAction.StartRuntime -> startRuntimeIfNeeded(action.appId)
@@ -275,35 +258,32 @@ class LocalAppsViewModel(
     }
 
     /**
-     * `brief` is REQUIRED on the wire (it seeds the agent conversation the
-     * engine starts for the new app) and `name` is sent EMPTY, every time:
-     * `AppService::create_app` derives a display name from the brief whenever
-     * the caller's name is blank, so there is no client-side name to collect
-     * or fabricate (mirrors iOS's `LocalAppsStore.createApp(brief:)`).
+     * The 「+」 button: create an empty SHELL app and hand the user into its own
+     * conversation.
+     *
+     * Everything the old create form collected is now settled by talking to the
+     * agent, so this sends the neutral values the engine itself documents for
+     * that case:
+     *
+     * - `mode = SHELL` — the record is written with `scaffolded = false` and NO
+     *   scaffold is laid down. `LocalAppScaffold` lands the shape later.
+     * - `surface = null` — required by the wire in shell mode (`host.rs` fails
+     *   a shell create that names one); the shape is not known yet.
+     * - `name = ""` / `brief = ""` — the service derives nothing from either and
+     *   stores its `"untitled"` placeholder, which no surface renders (see
+     *   [localAppCardText]).
+     * - `conversationId = null` — a LIBRARY-origin create binds no conversation:
+     *   `AppCreateOrigin::conversation_binding` (`local_apps_bridge.rs`) returns
+     *   `None` for `Library` regardless of what is sent, so passing the current
+     *   session id here would be a value the engine provably discards.
+     * - `gitEnabled = true` — the wire's own documented default
+     *   (`default_git_version_control`), which is what the deleted checkbox
+     *   started at.
+     * - `workflowModel = null` — follow the session model; there is no picker
+     *   any more and no other caller of that field on Android.
      */
-    private fun createFromBrief(
-        brief: String,
-        name: String,
-        surface: LocalAppSurface,
-        gitEnabled: Boolean,
-        workflowModel: String?,
-        addWidget: Boolean,
-    ) {
-        val trimmedBrief = brief.trim()
-        if (trimmedBrief.isEmpty()) return
-        val selectedModel = workflowModel?.trim()?.takeIf(String::isNotEmpty)
-        if (selectedModel != null && _uiState.value.workflowModels.none { it.id == selectedModel }) {
-            // An explicit selection must still belong to the engine's live catalog.
-            // Do not silently turn a stale/forged id into "follow current".
-            error(
-                strings.resolve(
-                    R.string.local_apps_error_workflow_model_unavailable,
-                    "所选 Workflow 模型已不可用，请重新选择。",
-                ),
-            )
-            return
-        }
-        if (creationBrief != null) {
+    private fun createShellApp() {
+        if (pendingCreateRequestId != null) {
             error(
                 strings.resolve(
                     R.string.local_apps_error_create_in_progress,
@@ -312,28 +292,91 @@ class LocalAppsViewModel(
             )
             return
         }
-        // Creates the app OUTRIGHT, before any conversation exists. That is the
-        // whole point: the app's first conversation opens in the app's own
-        // scope, so its cwd is the app workspace from the first message. The
-        // previous flow ran an intake conversation in the project scope and
-        // handed off afterwards, which left every step before the hand-off
-        // rooted in the wrong directory.
-        creationBrief = trimmedBrief
-        pendingWidgetPin = addWidget
+        if (source == null) {
+            // `submit` returns silently when nothing is bound, which would make
+            // the 「+」 button look dead. Say so instead — same treatment
+            // `startRuntimeIfNeeded` gives an absent engine.
+            error(
+                strings.resolve(
+                    R.string.local_apps_error_engine_unavailable,
+                    "此构建未包含本地应用引擎。",
+                ),
+            )
+            return
+        }
+        val requestId = UUID.randomUUID().toString()
+        pendingCreateRequestId = requestId
+        armCreateTimeout(requestId)
         submit(
             ClientCommand.CreateApp(
-                name = name.trim(),
+                name = "",
                 origin = AppCreateOriginDto.LIBRARY,
-                brief = trimmedBrief,
-                gitEnabled = gitEnabled,
-                workflowModel = selectedModel,
+                brief = "",
+                gitEnabled = true,
+                workflowModel = null,
                 conversationId = null,
-                surface = surface.toDto(),
+                surface = null,
+                mode = AppCreateModeDto.SHELL,
+                requestId = requestId,
             ),
         ) {
-            creationBrief = null
-            pendingWidgetPin = false
+            // The command never reached the engine, so no event will ever carry
+            // this key. Releasing here (rather than waiting out the timeout)
+            // keeps the button usable; `submit` raises the failure itself.
+            clearPendingCreate()
         }
+    }
+
+    /**
+     * Ask Android to pin a home-screen Widget for an existing, SCAFFOLDED app.
+     *
+     * Gated on `scaffolded`, not merely on existence: a shell is excluded from
+     * the widget snapshot ([appsForWidgetSnapshot]), so a widget pinned for one
+     * would render an empty tile bound to an id the snapshot never mentions.
+     */
+    private fun requestWidgetPin(appId: String) {
+        val app = _uiState.value.apps.firstOrNull { it.id == appId } ?: return
+        if (!app.scaffolded) return
+        widgetPinRequestChannel.trySend(appId)
+    }
+
+    /**
+     * Arm the stop-loss for one pending create.
+     *
+     * The create itself is a local file operation, but it also mints a pinned
+     * session, so a cold device can be slow; [CREATE_RESULT_TIMEOUT_MS] is a
+     * ceiling, not an expectation. Expiring only tells the user the outcome is
+     * unknown — the app is very likely in the library either way — and above all
+     * it releases the claim so the next event cannot be matched against a key
+     * whose UI moment has passed.
+     */
+    private fun armCreateTimeout(requestId: String) {
+        pendingCreateTimeout?.cancel()
+        pendingCreateTimeout = viewModelScope.launch {
+            delay(CREATE_RESULT_TIMEOUT_MS)
+            // Re-check the key rather than trusting the job's own liveness: a
+            // create that resolved and was immediately followed by another one
+            // must not be timed out by the previous job.
+            if (pendingCreateRequestId != requestId) return@launch
+            // Released by hand rather than through `clearPendingCreate()`: this
+            // coroutine IS the stop-loss, and that helper would cancel the job
+            // currently executing this line.
+            pendingCreateRequestId = null
+            pendingCreateTimeout = null
+            error(
+                strings.resolve(
+                    R.string.local_apps_creation_result_unknown,
+                    "创建结果未知，请在应用库确认。",
+                ),
+            )
+        }
+    }
+
+    /** Release the create claim and its stop-loss together — always both. */
+    private fun clearPendingCreate() {
+        pendingCreateRequestId = null
+        pendingCreateTimeout?.cancel()
+        pendingCreateTimeout = null
     }
 
     /**
@@ -594,18 +637,6 @@ class LocalAppsViewModel(
         when (event) {
             is ClientEvent.AppsChanged -> reduceApps(event)
             is ClientEvent.AppEvent -> reduceAppEvent(event.event)
-            is ClientEvent.AppIdentityProposed -> {
-                // Delivered to the ONE waiter that asked. An id with no waiter
-                // is a proposal whose sheet already timed out or was dismissed;
-                // dropping it is correct, and adopting it would overwrite a
-                // name the user has since typed.
-                identityProposals.tryEmit(
-                    event.requestId to AppIdentityProposal(
-                        name = event.name,
-                        surface = event.surface.toUiSurface(),
-                    ),
-                )
-            }
             is ClientEvent.AppWorkflowChanged -> updateApp(event.appId) {
                 it.copy(workflow = event.state.toUiWorkflow())
             }
@@ -632,13 +663,22 @@ class LocalAppsViewModel(
                 }
             }
             is ClientEvent.AppOperationFailed -> {
+                // Every app-operation failure is user-visible; that is unchanged.
                 error(event.message)
-                // CreateApp failures carry no app id. Fail-closed: drop
-                // in-flight create claims so a later AppsChanged cannot pin
-                // or open the wrong app. Per-app failures keep their claims.
-                if (event.appId == null) {
-                    creationBrief = null
-                    pendingWidgetPin = false
+                // Releasing the create claim, though, is KEYED. The engine
+                // echoes the originating `request_id` on failure precisely so
+                // this client can tell its own failed create from any other
+                // app operation's. A key-less failure (one the engine
+                // synthesized with no originating request) releases NOTHING —
+                // the old "any global failure disarms the create" rule was an
+                // unkeyed claim in the other direction, and with two creation
+                // paths live it would drop a still-valid claim on a failure
+                // that had nothing to do with it. If the engine ever fails our
+                // create without echoing the key, the 30s stop-loss is what
+                // releases it.
+                val failedRequestId = event.requestId
+                if (failedRequestId != null && failedRequestId == pendingCreateRequestId) {
+                    clearPendingCreate()
                 }
             }
             else -> Unit
@@ -798,25 +838,26 @@ class LocalAppsViewModel(
             is AppEventDto.AppAgentEventPosted -> Unit
             is AppEventDto.AppBackgroundTaskChanged -> Unit
             is AppEventDto.AppCreated -> {
-                // The engine names the record it just committed, for BOTH create
-                // paths. Emitted after `AppsChanged`, so the catalog this opens
-                // into already contains it.
-                // Claim only the record this sheet asked for. An unkeyed
-                // claim opens whichever app committed first.
-                if (creationBrief != null && creationBrief == event.record.brief) {
-                    creationBrief = null
+                // The engine names the record it just committed, for BOTH
+                // create paths, and echoes the originating `request_id`.
+                // Emitted after `AppsChanged`, so the catalog this opens into
+                // already contains the record.
+                //
+                // Claim ONLY on an exact key match. A record created by an
+                // agent elsewhere arrives here with a different key or none at
+                // all; claiming it would open someone else's app and leave this
+                // create with no landing.
+                val createdRequestId = event.requestId
+                val pending = pendingCreateRequestId
+                if (createdRequestId != null && pending != null && createdRequestId == pending) {
+                    clearPendingCreate()
                     openApp(event.record.id)
                     // Arm the hand-off; the init-session pin is minted AFTER
                     // this event and arrives on `AppRecordChanged`.
                     landingAwaitingPin = CreatedAppLanding(
                         appId = event.record.id,
                         initSessionId = event.record.initSessionId,
-                        brief = event.record.brief,
                     )
-                    if (pendingWidgetPin) {
-                        pendingWidgetPin = false
-                        widgetPinRequestChannel.trySend(event.record.id)
-                    }
                 }
             }
             is AppEventDto.AppProfileProposal -> _uiState.update { state ->
@@ -1029,57 +1070,16 @@ class LocalAppsViewModel(
         }
     }
 
+    /**
+     * Republish the home-screen widget snapshot.
+     *
+     * Shells are filtered out here, at the ONE place the snapshot is produced,
+     * rather than at each of the four call sites — see [appsForWidgetSnapshot]
+     * for why exclusion (not relabelling) is the right treatment.
+     */
     private fun publishWidgetSnapshot() {
-        widgetSnapshotSync.publish(_uiState.value.apps)
+        widgetSnapshotSync.publish(appsForWidgetSnapshot(_uiState.value.apps))
     }
-
-    /**
-     * Ask the host to name and shape an app from the brief, WITHOUT creating
-     * anything.
-     *
-     * Never fails: an unreachable engine, a refused command or a lost event all
-     * yield the same derived defaults the host itself falls back to. Both fields
-     * are editable in the sheet, so a bad proposal costs a correction, not a
-     * create.
-     */
-    suspend fun proposeIdentity(brief: String): AppIdentityProposal {
-        val trimmed = brief.trim()
-        val fallback = AppIdentityProposal(fallbackName(trimmed), LocalAppSurface.DOM)
-        if (trimmed.isEmpty()) return fallback
-        val bound = source ?: return fallback
-        val requestId = UUID.randomUUID().toString()
-        return coroutineScope {
-            // Collect BEFORE submitting: the reply is an ordinary client event,
-            // and starting the collector afterwards is a race the buffer alone
-            // should not have to cover.
-            val reply = async {
-                withTimeoutOrNull(IDENTITY_PROPOSAL_TIMEOUT_MS) {
-                    identityProposals.first { it.first == requestId }.second
-                }
-            }
-            val submitted = runCatching {
-                bound.submitClientCommand(
-                    ClientCommand.ProposeAppIdentity(requestId = requestId, brief = trimmed),
-                )
-            }.isSuccess
-            if (!submitted) {
-                reply.cancel()
-                fallback
-            } else {
-                reply.await() ?: fallback
-            }
-        }
-    }
-
-    /**
-     * The name shown when no proposal arrives.
-     *
-     * Deliberately the SAME derivation `AppService::create_app` applies to a
-     * blank name (the brief's first 24 CHARACTERS, never bytes — a byte cut
-     * would split a CJK codepoint), so the field the user sees is what they
-     * would have got anyway.
-     */
-    private fun fallbackName(brief: String): String = brief.trim().take(24)
 
     private fun submit(command: ClientCommand, onFailure: (() -> Unit)? = null) {
         submit(onFailure = onFailure) { it.submitClientCommand(command) }
@@ -1108,13 +1108,22 @@ class LocalAppsViewModel(
 
     companion object {
         /**
-         * How long the sheet waits for a proposal before showing its own
-         * defaults. A ceiling, not an expectation: this is one short model
-         * call. It exists so a dropped event cannot leave the sheet spinning
-         * with no way forward — the fields it would have filled are editable
-         * either way. Mirrors iOS's `identityProposalTimeout`.
+         * How long a `CreateApp` may stay unresolved before this client stops
+         * waiting for its `request_id` (iOS's `createResultTimeout`).
+         *
+         * A NEW constant, deliberately not anchored to the 20s
+         * `IDENTITY_PROPOSAL_TIMEOUT_MS` it replaces: that one was sized for a
+         * single model call and is deleted with the rest of the proposal
+         * feature. 30s is sized for what a create actually does — local file
+         * work, plus minting a pinned session (and, for a chat-origin create,
+         * forking the source conversation's history), which can be slow on a
+         * cold device.
+         *
+         * Expiring is stop-loss, not a verdict: the app has almost certainly
+         * been created, which is why the copy sends the user to the library
+         * instead of asking them to retry.
          */
-        internal const val IDENTITY_PROPOSAL_TIMEOUT_MS = 20_000L
+        internal const val CREATE_RESULT_TIMEOUT_MS = 30_000L
         private const val MAX_QUEUED_AUTHORIZATIONS = 8
 
         fun factory(
@@ -1208,29 +1217,6 @@ private fun AppWorkflowStateDto.toUiWorkflow(): LocalAppWorkflow = when (this) {
     AppWorkflowStateDto.READY -> LocalAppWorkflow.Ready
 }
 
-/** The create sheet's surface choice lowered to the wire enum. */
-private fun LocalAppSurface.toDto(): AppSurfaceDto = when (this) {
-    LocalAppSurface.DOM -> AppSurfaceDto.DOM
-    LocalAppSurface.CANVAS -> AppSurfaceDto.CANVAS
-}
-
-/**
- * The host's proposed surface raised to the UI model.
- *
- * `AppSurfaceDto` is `#[non_exhaustive]`, so an engine newer than this build can
- * name a surface this client has no picker row for. Falling back to `DOM` keeps
- * the sheet usable — and the user can still change it — where a crash or an
- * empty picker could not.
- */
-private fun AppSurfaceDto.toUiSurface(): LocalAppSurface = when (this) {
-    AppSurfaceDto.DOM -> LocalAppSurface.DOM
-    AppSurfaceDto.CANVAS -> LocalAppSurface.CANVAS
-    // The fallback the KDoc above promises, and the twin of iOS's
-    // `@unknown default: .dom`. Without it this `when` is only as exhaustive
-    // as the bindings it was compiled against.
-    else -> LocalAppSurface.DOM
-}
-
 private fun AppRuntimeStateDto.toUiRuntime(): LocalAppRuntimeState = when (this) {
     AppRuntimeStateDto.STOPPED -> LocalAppRuntimeState.Stopped
     AppRuntimeStateDto.STARTING -> LocalAppRuntimeState.Starting
@@ -1266,6 +1252,10 @@ private fun AppRecordDto.toUiApp(
     updatedAtMs = updatedAtMs.toLong(),
     workspaceRel = workspaceRel,
     initSessionId = initSessionId,
+    // The one hop where the wire's shell/formed fact becomes a UI fact. Every
+    // draft branch in this module reads it from here and nowhere else — no
+    // surface re-derives "is this a draft" by sniffing the name or the brief.
+    scaffolded = scaffolded,
 )
 
 private fun AppCapabilityKindDto.authorizationTitle(

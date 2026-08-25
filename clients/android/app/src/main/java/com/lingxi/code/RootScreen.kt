@@ -101,6 +101,7 @@ import com.lingxi.code.localapps.LocalAppsAction
 import com.lingxi.code.localapps.LocalAppsDestination
 import com.lingxi.code.localapps.LocalAppsRoute
 import com.lingxi.code.localapps.LocalAppsViewModel
+import com.lingxi.code.localapps.localAppDisplayName
 import com.lingxi.code.localapps.localAppWorkspace
 import com.lingxi.code.localapps.localAppsStrings
 import com.lingxi.code.localapps.widget.AndroidLocalAppWidgetSnapshotSync
@@ -700,9 +701,11 @@ fun RootScreen(
                             it.sessionReady && !it.sessionTransitioning && it.session.id.isNotBlank()
                         }
                     }?.let {
-                        chatViewModel.send(
-                            context.getString(R.string.local_apps_init_kickoff, landing.brief),
-                        )
+                        // Placeholder-free copy: a shell has no brief to
+                        // interpolate, and the old text told the agent the
+                        // shape and the name were "already fixed", which is
+                        // exactly what the conversation now exists to decide.
+                        chatViewModel.send(context.getString(R.string.local_apps_kickoff))
                     }
                 }
             }
@@ -755,8 +758,18 @@ fun RootScreen(
         if (persistedScope is ConversationScope.LocalApp) {
             appScopeRestoreAttempted = true
             val lastSessionId = scopeStore.read(persistedScope.persistenceKey())?.lastActiveSessionId
+            // A draft restores under its localized placeholder title, never
+            // under the engine's `"untitled"` — same predicate as the library
+            // card and the drawer header.
             val appName = localAppsViewModel.uiState.value.apps
-                .firstOrNull { it.id == persistedScope.appId }?.name
+                .firstOrNull { it.id == persistedScope.appId }
+                ?.let {
+                    localAppDisplayName(
+                        it,
+                        draftTitle = context.getString(R.string.local_apps_draft_card_title),
+                        fallback = persistedScope.appId,
+                    )
+                }
             switchEngineScope(
                 engineScope = persistedScope,
                 project = null,
@@ -1035,8 +1048,11 @@ fun RootScreen(
                         appScope = (sourceScope as? ConversationScope.LocalApp)?.let { active ->
                             DrawerAppScope(
                                 appId = active.appId,
-                                appName = localAppsState.apps.firstOrNull { it.id == active.appId }?.name
-                                    ?: active.appId,
+                                appName = localAppDisplayName(
+                                    localAppsState.apps.firstOrNull { it.id == active.appId },
+                                    draftTitle = context.getString(R.string.local_apps_draft_card_title),
+                                    fallback = active.appId,
+                                ),
                                 sessions = localAppsState.appSessions[active.appId]?.rows.orEmpty().map { row ->
                                     SessionRow(
                                         uuid = row.uuid,

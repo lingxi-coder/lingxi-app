@@ -2,7 +2,6 @@ package com.lingxi.code.localapps
 
 import android.content.Context
 import androidx.compose.runtime.Immutable
-import com.lingxi.code.model.ModelOption
 
 /**
  * Resolves a localized string for localapps-package code that runs OUTSIDE a
@@ -50,7 +49,79 @@ data class LocalAppItem(
      * one. Listed first in the session catalog with an 「初始化」 badge.
      */
     val initSessionId: String? = null,
+    /**
+     * Whether the app's scaffold has landed — the mirror of the wire
+     * `AppRecordDto.scaffolded`.
+     *
+     * `false` is the empty SHELL the "+" button creates before the user has
+     * confirmed anything: its [name] is the engine's non-localized `"untitled"`
+     * placeholder and its [brief] is empty. Every surface that would render
+     * either one branches on this through [localAppCardText] /
+     * [localAppDisplayName], and the home-screen widget snapshot drops such an
+     * app outright ([appsForWidgetSnapshot]).
+     *
+     * Deliberately has NO default, mirroring the wire field's "REQUIRED with no
+     * serde default": a default would let a construction site silently mint a
+     * shell as a formed app, and the placeholder would leak from wherever that
+     * site feeds.
+     */
+    val scaffolded: Boolean,
 )
+
+/** Title and subtitle a library card renders for one app. */
+@Immutable
+data class LocalAppCardText(val title: String, val subtitle: String)
+
+/**
+ * What a library card renders for [app] — the ONE draft predicate.
+ *
+ * A shell ([LocalAppItem.scaffolded] `== false`) has no identity yet: the
+ * engine stored the non-localized `"untitled"` placeholder as its name and an
+ * empty brief, so rendering either leaks something the user never chose. Every
+ * other render point ([localAppDisplayName]) and the widget snapshot
+ * ([appsForWidgetSnapshot]) branch on the same field, so there is no second
+ * derivation of "is this a draft" to drift out of step.
+ *
+ * [draftTitle] / [draftSubtitle] are passed in (rather than resolved here) so
+ * this stays a pure function that JVM unit tests can call with no `Context`.
+ */
+internal fun localAppCardText(
+    app: LocalAppItem,
+    draftTitle: String,
+    draftSubtitle: String,
+): LocalAppCardText = if (app.scaffolded) {
+    LocalAppCardText(title = app.name, subtitle = app.brief)
+} else {
+    LocalAppCardText(title = draftTitle, subtitle = draftSubtitle)
+}
+
+/**
+ * The name to show for [app] anywhere a single label is rendered — top bars,
+ * the delete confirmation, the drawer's app-scope header.
+ *
+ * [fallback] covers "the catalog does not know this app (yet)", which is not
+ * the same case as a draft and must not borrow the draft copy.
+ */
+internal fun localAppDisplayName(
+    app: LocalAppItem?,
+    draftTitle: String,
+    fallback: String,
+): String = when {
+    app == null -> fallback
+    !app.scaffolded -> draftTitle
+    else -> app.name
+}
+
+/**
+ * The apps that may appear in the home-screen widget snapshot.
+ *
+ * A shell is EXCLUDED, not relabelled: it has no scaffold, so its widget would
+ * be an un-openable icon captioned with the `"untitled"` placeholder sitting on
+ * the user's home screen. Excluding it also keeps the widget DTO free of a new
+ * field it would otherwise need in order to say "this one is a draft".
+ */
+internal fun appsForWidgetSnapshot(apps: List<LocalAppItem>): List<LocalAppItem> =
+    apps.filter(LocalAppItem::scaffolded)
 
 /**
  * Workflow state of an app — mirrors the v3 wire `AppWorkflowStateDto`, which
@@ -62,14 +133,6 @@ enum class LocalAppWorkflow { Draft, Ready }
 enum class LocalAppRuntimeState { Stopped, Starting, Running, Stopping, Failed }
 
 enum class LocalAppRuntimeMode { StaticExport, ViteStatic }
-
-/**
- * Which shape an app draws — the UI mirror of protocol 7.0.0's `AppSurfaceDto`.
- * Chosen in the create sheet and IMMUTABLE afterwards: the scaffold is laid down
- * at creation, so this is the one field the sheet must get in front of the user
- * rather than infer silently.
- */
-enum class LocalAppSurface { DOM, CANVAS }
 
 @Immutable
 data class LocalAppRuntime(
@@ -220,11 +283,6 @@ data class LocalAppsUiState(
     val apps: List<LocalAppItem> = emptyList(),
     val destination: LocalAppsDestination = LocalAppsDestination.Library,
     val query: String = "",
-    val createName: String = "",
-    /** Real provider-qualified model rows reported by the active engine. */
-    val workflowModels: List<ModelOption> = emptyList(),
-    /** Active provider-qualified model reference; null until the engine reports it. */
-    val currentWorkflowModelId: String? = null,
     val details: Map<String, LocalAppDetails> = emptyMap(),
     /**
      * Per-app workspace-scoped session catalogs — the accumulated
@@ -241,9 +299,19 @@ data class LocalAppsUiState(
     val error: String? = null,
     val distributionMode: LocalAppRuntimeMode,
 ) {
+    /**
+     * The library rows for the current [query].
+     *
+     * A draft is listed while the search box is empty and drops out as soon as
+     * the user types: its stored name is the `"untitled"` placeholder, so
+     * matching on it would both surface the placeholder indirectly (「为什么搜
+     * unt 出来一张『新应用』卡片」) and pretend a shell has a searchable
+     * identity it has not been given yet.
+     */
     val filteredApps: List<LocalAppItem>
         get() = apps.filter { app ->
-            query.isBlank() || app.name.contains(query.trim(), ignoreCase = true)
+            query.isBlank() ||
+                (app.scaffolded && app.name.contains(query.trim(), ignoreCase = true))
         }
 
     /** The app's live preview url — the runtime's loopback url once running. */
@@ -253,21 +321,24 @@ data class LocalAppsUiState(
 
 sealed interface LocalAppsAction {
     data object Refresh : LocalAppsAction
+
+    /**
+     * The 「+」 button. Creates an empty SHELL app immediately and hands the
+     * user into its own conversation — there is no form: the shape, the name
+     * and the requirements are settled by talking to the agent, and
+     * `LocalAppScaffold` lands the scaffold once the user confirms.
+     */
     data object Create : LocalAppsAction
     data class Search(val query: String) : LocalAppsAction
-    data class ChangeCreateName(val name: String) : LocalAppsAction
-    /** Creates a new app from a one-line brief, with a confirmed name and shape. */
-    data class CreateFromBrief(
-        val brief: String,
-        /** Empty lets `AppService::create_app` derive one from the brief. */
-        val name: String = "",
-        val surface: LocalAppSurface = LocalAppSurface.DOM,
-        val gitEnabled: Boolean = true,
-        /** Null follows the current conversation; otherwise a provider-qualified catalog id. */
-        val workflowModel: String? = null,
-        /** Requests a home-screen Widget after the app record is created. */
-        val addWidget: Boolean = false,
-    ) : LocalAppsAction
+
+    /**
+     * Ask Android to pin a home-screen Widget for an EXISTING app.
+     *
+     * The permanent home for a request that used to live only as a checkbox
+     * inside the create dialog. Deleting that dialog without this would quietly
+     * remove the feature: nothing else in the app sets `pendingWidgetPin`.
+     */
+    data class RequestWidget(val appId: String) : LocalAppsAction
     data class OpenApp(val appId: String) : LocalAppsAction
     /**
      * (Re)load one page of the app's session catalog. `offset == null` asks

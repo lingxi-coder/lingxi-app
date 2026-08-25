@@ -10,8 +10,8 @@ class LocalAppsContractTest {
     ) = LocalAppsUiState(
         loading = false,
         apps = listOf(
-            LocalAppItem("a", "客户跟进", brief = "记录客户跟进情况", workflow = LocalAppWorkflow.Ready, updatedAtMs = 2),
-            LocalAppItem("b", "运营看板", brief = "运营数据看板", workflow = LocalAppWorkflow.Draft, updatedAtMs = 1),
+            LocalAppItem("a", "客户跟进", brief = "记录客户跟进情况", workflow = LocalAppWorkflow.Ready, updatedAtMs = 2, scaffolded = true),
+            LocalAppItem("b", "运营看板", brief = "运营数据看板", workflow = LocalAppWorkflow.Draft, updatedAtMs = 1, scaffolded = true),
         ),
         query = query,
         distributionMode = LocalAppRuntimeMode.StaticExport,
@@ -21,6 +21,35 @@ class LocalAppsContractTest {
     fun `filteredApps narrows by name search`() {
         assertEquals(listOf("a"), state(query = "客户").filteredApps.map { it.id })
         assertEquals(emptyList<LocalAppItem>(), state(query = "不存在").filteredApps)
+    }
+
+    /**
+     * A shell is listed while the box is empty and drops out once the user
+     * types — its stored name is the engine's `"untitled"` placeholder, so
+     * matching on it would surface that placeholder indirectly and pretend a
+     * shell has a searchable identity it has not been given yet.
+     */
+    @Test
+    fun `a draft is listed unfiltered but never matches a search`() {
+        val withDraft = state().copy(
+            apps = state().apps + LocalAppItem(
+                id = "shell",
+                name = "untitled",
+                brief = "",
+                workflow = LocalAppWorkflow.Draft,
+                updatedAtMs = 3,
+                scaffolded = false,
+            ),
+        )
+
+        assertEquals(
+            listOf("a", "b", "shell"),
+            withDraft.filteredApps.map { it.id },
+        )
+        assertEquals(
+            emptyList<String>(),
+            withDraft.copy(query = "untitled").filteredApps.map { it.id },
+        )
     }
 
     @Test
@@ -33,6 +62,7 @@ class LocalAppsContractTest {
             updatedAtMs = 0,
             workspaceRel = "apps/a/workspace",
             initSessionId = "11111111-1111-4111-8111-111111111111",
+            scaffolded = true,
         )
         assertEquals("一个记事本 app", item.brief)
         assertEquals("apps/a/workspace", item.workspaceRel)
@@ -59,6 +89,7 @@ class LocalAppsContractTest {
                     LocalAppWorkflow.Ready,
                     runtime = running,
                     updatedAtMs = 2,
+                    scaffolded = true,
                 ),
             ),
         )

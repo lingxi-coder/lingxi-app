@@ -3,13 +3,13 @@ package com.lingxi.code.localapps
 import com.lingxi.code.bindings.AppAuthorizationDecisionDto
 import com.lingxi.code.bindings.AppBridgeResponseDto
 import com.lingxi.code.bindings.AppCapabilityKindDto
+import com.lingxi.code.bindings.AppCreateModeDto
 import com.lingxi.code.bindings.AppCreateOriginDto
 import com.lingxi.code.bindings.AppErrorCodeDto
 import com.lingxi.code.bindings.AppCapabilityRequestDto
 import com.lingxi.code.bindings.AppRecordDto
 import com.lingxi.code.bindings.AppSessionKindDto
 import com.lingxi.code.bindings.AppSessionRowDto
-import com.lingxi.code.bindings.AppSurfaceDto
 import com.lingxi.code.bindings.AppUiActionKindDto
 import com.lingxi.code.bindings.AppUiRequestDto
 import com.lingxi.code.bindings.AppUiTargetDto
@@ -18,10 +18,10 @@ import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.AppEventDto
 import com.lingxi.code.conversation.ConversationSource
+import com.lingxi.code.localapps.widget.LocalAppWidgetSnapshotSync
 import com.lingxi.code.conversation.ReplyEvent
 import com.lingxi.code.model.EngineModelState
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -68,6 +68,15 @@ class LocalAppsViewModelTest {
         }
     }
 
+    /** Captures every widget-snapshot publish so exclusions can be asserted. */
+    private class RecordingWidgetSnapshotSync : LocalAppWidgetSnapshotSync {
+        val published = mutableListOf<List<LocalAppItem>>()
+
+        override fun publish(apps: List<LocalAppItem>) {
+            published += apps
+        }
+    }
+
     private class RecordingWebStorageCleanup : LocalAppWebStorageCleanup {
         val prepared = mutableListOf<Pair<String, String?>>()
         val snapshots = mutableListOf<Set<String>>()
@@ -93,14 +102,16 @@ class LocalAppsViewModelTest {
         }
     }
 
-    /// The create sheet creates the app OUTRIGHT, carrying the name and the
-    /// surface the user confirmed.
+    /// The 「+」 button creates an empty SHELL and carries a correlation key.
     ///
-    /// Both are fixed at creation — a surface is immutable once scaffolded and
-    /// apps have no rename — so neither may be left to a value the user never
-    /// saw, and neither may travel through the model.
+    /// Every value here is load-bearing. `mode = SHELL` is the fork that decides
+    /// `scaffolded = false`; `surface = null` is mandatory in that mode (the
+    /// engine rejects a shell create that names one); an empty `name`/`brief`
+    /// is what makes the record a blank the conversation fills in; and
+    /// `requestId` is the only thing that will identify this create's outcome
+    /// among the events of every other creation path.
     @Test
-    fun `create sends CreateApp with the confirmed name and surface`() = runTest {
+    fun `the plus button creates a shell carrying a request id`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -110,102 +121,37 @@ class LocalAppsViewModelTest {
             )
             runCurrent()
 
-            val brief = "一个能记录每天喝水量的小工具，支持提醒和每周汇总"
-            viewModel.onAction(
-                LocalAppsAction.CreateFromBrief(
-                    brief = brief,
-                    name = "喝水记录",
-                    surface = LocalAppSurface.CANVAS,
-                    gitEnabled = false,
-                    addWidget = true,
-                ),
-            )
+            viewModel.onAction(LocalAppsAction.Create)
             runCurrent()
 
             val create = source.commands.filterIsInstance<ClientCommand.CreateApp>().single()
-            assertEquals("the brief must reach the engine verbatim", brief, create.brief)
-            assertEquals("喝水记录", create.name)
-            assertEquals(AppSurfaceDto.CANVAS, create.surface)
-            assertEquals(false, create.gitEnabled)
+            assertEquals(AppCreateModeDto.SHELL, create.mode)
+            assertNull("a shell create must not name a surface", create.surface)
+            assertEquals("", create.name)
+            assertEquals("", create.brief)
             assertEquals(AppCreateOriginDto.LIBRARY, create.origin)
+            assertEquals(true, create.gitEnabled)
+            assertNull(create.workflowModel)
             assertNull(
-                "a library create binds no conversation — none exists yet",
+                "a library create binds no conversation — the engine discards one anyway",
                 create.conversationId,
             )
+            assertTrue(
+                "the create must carry a correlation key, not an empty slot",
+                create.requestId?.isNotBlank() == true,
+            )
         } finally {
             Dispatchers.resetMain()
         }
     }
 
-    /// The routed shape is the default a sheet sends when the user changed
-    /// nothing, and it is what an absent surface would have meant anyway.
-    @Test
-    fun `create defaults to the routed surface`() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        try {
-            val source = RecordingSource()
-            val viewModel = LocalAppsViewModel(
-                sourceFlow = MutableStateFlow<ConversationSource>(source),
-                distributionChannel = "store",
-            )
-            runCurrent()
-
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("一个记事本"))
-            runCurrent()
-
-            val create = source.commands.filterIsInstance<ClientCommand.CreateApp>().single()
-            assertEquals(AppSurfaceDto.DOM, create.surface)
-        } finally {
-            Dispatchers.resetMain()
-        }
-    }
-
-    /// `ProposeAppIdentity` is a REAL command, and its answer is routed back to
-    /// the ONE caller that asked.
-    @Test
-    fun `proposeIdentity asks the host and adopts the answer`() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        try {
-            val source = RecordingSource()
-            val viewModel = LocalAppsViewModel(
-                sourceFlow = MutableStateFlow<ConversationSource>(source),
-                distributionChannel = "store",
-            )
-            runCurrent()
-
-            val answer = async { viewModel.proposeIdentity("一个打砖块游戏") }
-            runCurrent()
-
-            // Reply on the request id the view model actually sent. Echoing a
-            // fabricated one would let this pass against a view model that
-            // never correlates at all.
-            val ask = source.commands
-                .filterIsInstance<ClientCommand.ProposeAppIdentity>()
-                .single()
-            assertEquals("一个打砖块游戏", ask.brief)
-            source.emit(
-                ClientEvent.AppIdentityProposed(
-                    requestId = ask.requestId,
-                    name = "打砖块",
-                    surface = AppSurfaceDto.CANVAS,
-                ),
-            )
-            runCurrent()
-
-            val proposal = answer.await()
-            assertEquals("打砖块", proposal.name)
-            assertEquals(LocalAppSurface.CANVAS, proposal.surface)
-        } finally {
-            Dispatchers.resetMain()
-        }
-    }
-
-    /// An answer for a DIFFERENT request must not resolve this one.
+    /// The key must be FRESH per create, not a constant.
     ///
-    /// A sheet that was retyped and re-submitted has a stale proposal in
-    /// flight; adopting it would name the app after the abandoned brief.
+    /// A key computed once (or hard-coded) would still match its own event and
+    /// pass every single-create test here, while making the second create in a
+    /// session claimable by the first one's leftovers.
     @Test
-    fun `proposeIdentity falls back rather than adopt another request's answer`() = runTest {
+    fun `each create generates a new request id`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -215,31 +161,29 @@ class LocalAppsViewModelTest {
             )
             runCurrent()
 
-            val answer = async { viewModel.proposeIdentity("一个记事本") }
+            viewModel.onAction(LocalAppsAction.Create)
             runCurrent()
-            source.emit(
-                ClientEvent.AppIdentityProposed(
-                    requestId = "somebody-elses",
-                    name = "别的应用",
-                    surface = AppSurfaceDto.CANVAS,
-                ),
-            )
-            runCurrent()
-            // Nothing resolves it, so the timeout does — the same derived
-            // default the host itself falls back to.
-            advanceTimeBy(LocalAppsViewModel.IDENTITY_PROPOSAL_TIMEOUT_MS + 1)
+            val first = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+            // Resolve the first one so the second is not refused as in-flight.
+            val created = appRecord(id = "first", scaffolded = false)
+            source.emit(ClientEvent.AppsChanged(listOf(created)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, first)))
             runCurrent()
 
-            val proposal = answer.await()
-            assertEquals("一个记事本", proposal.name)
-            assertEquals(LocalAppSurface.DOM, proposal.surface)
+            viewModel.onAction(LocalAppsAction.Create)
+            runCurrent()
+            val second = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .last().requestId
+
+            assertTrue(first?.isNotBlank() == true)
+            assertTrue("the second create must not reuse the first key", first != second)
         } finally {
             Dispatchers.resetMain()
         }
     }
 
-    /// The hand-off into the app's own conversation arms on `AppCreated` and is
-    /// completed by the pin that arrives afterwards.
+    /// The hand-off arms on a KEY-MATCHED `AppCreated` and completes on the pin.
     ///
     /// `AppCreated` is emitted inside the create transaction and the init
     /// session is minted AFTER it, so the record on the create event never
@@ -247,7 +191,7 @@ class LocalAppsViewModelTest {
     /// hand-off unreachable — the agent stayed in a conversation rooted outside
     /// the app and every build failed on the workspace.
     @Test
-    fun `the landing arms on AppCreated and takes the pin from the record update`() = runTest {
+    fun `a matching AppCreated arms the landing and the record update brings the pin`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -259,32 +203,27 @@ class LocalAppsViewModelTest {
             val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
             val job = launch { viewModel.createdAppLandings.collect { landings += it } }
 
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("一个记事本"))
+            viewModel.onAction(LocalAppsAction.Create)
             runCurrent()
-            // `initSessionId = null` is what the ENGINE actually sends here:
-            // `AppCreated` is emitted inside the create transaction and the pin
-            // is minted afterwards. The shared fixture defaults it to a uuid,
-            // which would let this pass against a view model that only ever
-            // read the create event.
-            val created = appRecord(id = "notes", name = "记事本", brief = "一个记事本")
-                .copy(initSessionId = null)
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+            // `initSessionId = null` is what the ENGINE actually sends here.
+            val created = appRecord(id = "shell", scaffolded = false).copy(initSessionId = null)
             source.emit(ClientEvent.AppsChanged(listOf(created)))
-            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, requestId)))
             runCurrent()
 
             assertTrue("AppCreated alone must not land: the pin is not minted yet", landings.isEmpty())
 
             source.emit(
                 ClientEvent.AppEvent(
-                    AppEventDto.AppRecordChanged(
-                        created.copy(initSessionId = "session-9"),
-                    ),
+                    AppEventDto.AppRecordChanged(created.copy(initSessionId = "session-9")),
                 ),
             )
             runCurrent()
 
             val landing = landings.single()
-            assertEquals("notes", landing.appId)
+            assertEquals("shell", landing.appId)
             assertEquals("session-9", landing.initSessionId)
             job.cancel()
         } finally {
@@ -292,14 +231,14 @@ class LocalAppsViewModelTest {
         }
     }
 
-    /// A create committed by an AGENT in another conversation must not be
-    /// claimed by this sheet.
+    /// An `AppCreated` for a DIFFERENT request must be ignored outright.
     ///
-    /// `AppCreated` carries no correlator back to the client that asked, so an
-    /// unkeyed claim opens whichever app committed first — the user lands in
-    /// someone else's app and their own create never lands at all.
+    /// The engine emits this event for BOTH creation paths, so an agent
+    /// committing its own `LocalAppCreate` in this window is routine. Claiming
+    /// it would open someone else's app and leave this create with no landing —
+    /// which is exactly why a one-shot boolean was rejected for this job.
     @Test
-    fun `another conversation's create is not claimed by the sheet`() = runTest {
+    fun `an AppCreated for another request is ignored`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -311,26 +250,59 @@ class LocalAppsViewModelTest {
             val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
             val job = launch { viewModel.createdAppLandings.collect { landings += it } }
 
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("我的记事本"))
+            viewModel.onAction(LocalAppsAction.Create)
             runCurrent()
+            val mine = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
 
-            // The agent's app commits first.
-            val theirs = appRecord(id = "theirs", brief = "代理自己的应用")
-                .copy(initSessionId = null)
+            val theirs = appRecord(id = "theirs").copy(initSessionId = null)
             source.emit(ClientEvent.AppsChanged(listOf(theirs)))
-            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(theirs)))
+            source.emit(
+                ClientEvent.AppEvent(AppEventDto.AppCreated(theirs, "somebody-elses-request")),
+            )
             source.emit(ClientEvent.AppEvent(AppEventDto.AppRecordChanged(theirs)))
             runCurrent()
-            assertTrue("not this sheet's app", landings.isEmpty())
+            assertTrue("not this session's create", landings.isEmpty())
 
-            // Mine commits afterwards and is still claimable.
-            val mine = appRecord(id = "mine", brief = "我的记事本").copy(initSessionId = null)
-            source.emit(ClientEvent.AppsChanged(listOf(theirs, mine)))
-            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(mine)))
-            source.emit(ClientEvent.AppEvent(AppEventDto.AppRecordChanged(mine)))
+            // Mine arrives afterwards and is still claimable — the claim was
+            // not consumed by the impostor.
+            val ours = appRecord(id = "ours", scaffolded = false).copy(initSessionId = null)
+            source.emit(ClientEvent.AppsChanged(listOf(theirs, ours)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(ours, mine)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppRecordChanged(ours)))
             runCurrent()
 
-            assertEquals("mine", landings.single().appId)
+            assertEquals("ours", landings.single().appId)
+            job.cancel()
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /// A create with NO key at all (an agent-tool create, a backfill) is not
+    /// this session's, and a null key must not be read as a wildcard.
+    @Test
+    fun `an AppCreated with no request id is ignored`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
+            val job = launch { viewModel.createdAppLandings.collect { landings += it } }
+
+            viewModel.onAction(LocalAppsAction.Create)
+            runCurrent()
+            val unkeyed = appRecord(id = "agent-made").copy(initSessionId = null)
+            source.emit(ClientEvent.AppsChanged(listOf(unkeyed)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(unkeyed, null)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppRecordChanged(unkeyed)))
+            runCurrent()
+
+            assertTrue("a key-less create belongs to nobody here", landings.isEmpty())
             job.cancel()
         } finally {
             Dispatchers.resetMain()
@@ -355,20 +327,18 @@ class LocalAppsViewModelTest {
             val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
             val job = launch { viewModel.createdAppLandings.collect { landings += it } }
 
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("一个记事本"))
+            viewModel.onAction(LocalAppsAction.Create)
             runCurrent()
-            // No pin on either event — the engine announces the record anyway
-            // when the best-effort mint fails, and that announcement is what
-            // the hand-off rides.
-            val created = appRecord(id = "notes", name = "记事本", brief = "一个记事本")
-                .copy(initSessionId = null)
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+            val created = appRecord(id = "shell", scaffolded = false).copy(initSessionId = null)
             source.emit(ClientEvent.AppsChanged(listOf(created)))
-            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, requestId)))
             source.emit(ClientEvent.AppEvent(AppEventDto.AppRecordChanged(created)))
             runCurrent()
 
             val landing = landings.single()
-            assertEquals("notes", landing.appId)
+            assertEquals("shell", landing.appId)
             assertNull("no pin was minted", landing.initSessionId)
             job.cancel()
         } finally {
@@ -376,19 +346,58 @@ class LocalAppsViewModelTest {
         }
     }
 
-    /// `AppCreated` names the record the engine just committed, and the claim
-    /// is keyed on the brief the sheet sent.
-    ///
-    /// A previous version pinned `brief = "AGENT REWROTE THIS"` to encode the
-    /// deferred flow, where the agent rewrote the brief before creating
-    /// anything and matching on it was therefore impossible. Create-first
-    /// reverses that: the sheet sends the user's own sentence and
-    /// `AppService::create_app` stores it verbatim, so the match is exact — and
-    /// it has to be, because `AppCreated` carries no correlator and a
-    /// concurrent agent-driven create would otherwise be claimed instead
-    /// (see `another conversation's create is not claimed by the sheet`).
+    /// The stop-loss. After 30 seconds the claim is released and the user is
+    /// told the outcome is unknown — never that the create failed, because the
+    /// app has almost certainly been created.
     @Test
-    fun `AppCreated opens the new app and fires the widget pin`() = runTest {
+    fun `an unresolved create times out and reports the result as unknown`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
+            val job = launch { viewModel.createdAppLandings.collect { landings += it } }
+
+            viewModel.onAction(LocalAppsAction.Create)
+            runCurrent()
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+
+            advanceTimeBy(LocalAppsViewModel.CREATE_RESULT_TIMEOUT_MS - 1)
+            runCurrent()
+            assertNull("the claim must survive right up to the deadline", viewModel.uiState.value.error)
+
+            advanceTimeBy(2)
+            runCurrent()
+            assertEquals(
+                "创建结果未知，请在应用库确认。",
+                viewModel.uiState.value.error,
+            )
+
+            // And the released claim must not be re-claimable by a late event.
+            val late = appRecord(id = "late", scaffolded = false).copy(initSessionId = null)
+            source.emit(ClientEvent.AppsChanged(listOf(late)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(late, requestId)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppRecordChanged(late)))
+            runCurrent()
+            assertTrue("a timed-out claim is gone, not merely quiet", landings.isEmpty())
+            job.cancel()
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /// A create that LANDED must not be "timed out" afterwards.
+    ///
+    /// The timeout is a coroutine armed at submit time; if clearing the claim
+    /// did not also cancel it, every successful create would raise a bogus
+    /// "result unknown" banner thirty seconds later.
+    @Test
+    fun `a landed create is not timed out afterwards`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -398,29 +407,27 @@ class LocalAppsViewModelTest {
             )
             runCurrent()
 
-            viewModel.onAction(
-                LocalAppsAction.CreateFromBrief("一个带桌面快捷入口的记事本", addWidget = true),
-            )
+            viewModel.onAction(LocalAppsAction.Create)
             runCurrent()
-            val created = appRecord(
-                id = "widget-app", name = "喝水记录", brief = "一个带桌面快捷入口的记事本",
-            )
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+            val created = appRecord(id = "shell", scaffolded = false).copy(initSessionId = null)
             source.emit(ClientEvent.AppsChanged(listOf(created)))
-            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, requestId)))
             runCurrent()
 
-            assertEquals("widget-app", viewModel.widgetPinRequests.first())
+            advanceTimeBy(LocalAppsViewModel.CREATE_RESULT_TIMEOUT_MS * 2)
+            runCurrent()
+
+            assertNull("a landed create has nothing to time out", viewModel.uiState.value.error)
         } finally {
             Dispatchers.resetMain()
         }
     }
 
-    /// An app that simply APPEARS is not the one this session asked for.
-    ///
-    /// Another device, a background flow, or the agent creating a second app can
-    /// all put a new row in the catalog. Only `AppCreated` claims one.
+    /// A failure carrying OUR key releases the claim (and is shown).
     @Test
-    fun `a new app that arrives without AppCreated is not claimed`() = runTest {
+    fun `a failure with the matching request id releases the create`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -430,70 +437,42 @@ class LocalAppsViewModelTest {
             )
             runCurrent()
 
-            val pins = mutableListOf<String>()
-            val pinJob = launch { viewModel.widgetPinRequests.collect { pins += it } }
-
-            val brief = "一个带桌面快捷入口的记事本"
-            viewModel.onAction(LocalAppsAction.CreateFromBrief(brief, addWidget = true))
+            viewModel.onAction(LocalAppsAction.Create)
             runCurrent()
-            source.emit(
-                ClientEvent.AppsChanged(listOf(appRecord(id = "someone-elses", brief = brief))),
-            )
-            runCurrent()
-
-            assertTrue(
-                "a catalog row alone must not be claimed, however well its brief matches",
-                pins.isEmpty(),
-            )
-            pinJob.cancel()
-        } finally {
-            Dispatchers.resetMain()
-        }
-    }
-
-    /// A global failure has to disarm the claim, or the sheet stays wedged: the
-    /// agent-driven create emits no client event of its own on failure, so this
-    /// is the only signal that can release it.
-    @Test
-    fun `a global operation failure disarms the in-flight create`() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        try {
-            val source = RecordingSource()
-            val viewModel = LocalAppsViewModel(
-                sourceFlow = MutableStateFlow<ConversationSource>(source),
-                distributionChannel = "store",
-            )
-            runCurrent()
-
-            val pins = mutableListOf<String>()
-            val pinJob = launch { viewModel.widgetPinRequests.collect { pins += it } }
-
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("一个记事本", addWidget = true))
-            runCurrent()
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
             source.emit(
                 ClientEvent.AppOperationFailed(
                     appId = null,
                     code = AppErrorCodeDto.WORKFLOW_STATE_INVALID,
                     message = "创建失败",
+                    requestId = requestId,
                 ),
             )
             runCurrent()
-            val later = appRecord(id = "assistant-app", brief = "别的应用")
-            source.emit(ClientEvent.AppsChanged(listOf(later)))
-            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(later)))
-            runCurrent()
+            assertEquals("创建失败", viewModel.uiState.value.error)
 
-            assertTrue("a disarmed create must not pin a later app", pins.isEmpty())
-            pinJob.cancel()
+            // Released, so the next create is accepted rather than refused as
+            // "one already in flight".
+            viewModel.onAction(LocalAppsAction.Create)
+            runCurrent()
+            assertEquals(
+                2,
+                source.commands.filterIsInstance<ClientCommand.CreateApp>().size,
+            )
         } finally {
             Dispatchers.resetMain()
         }
     }
 
-    /// A PER-APP failure belongs to some other app and must leave this claim
-    /// alone.
+    /// A failure that is not ours must leave the claim alone.
+    ///
+    /// This replaces the old "any global failure disarms the create" rule,
+    /// which was an unkeyed claim in the other direction: with two creation
+    /// paths live, an unrelated failure would drop a still-valid claim and the
+    /// user's own app would never open.
     @Test
-    fun `a per-app operation failure does not disarm an in-flight create`() = runTest {
+    fun `a failure for another request leaves the create claimable`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -502,30 +481,94 @@ class LocalAppsViewModelTest {
                 distributionChannel = "store",
             )
             runCurrent()
+            val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
+            val job = launch { viewModel.createdAppLandings.collect { landings += it } }
 
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("一个记事本", addWidget = true))
+            viewModel.onAction(LocalAppsAction.Create)
             runCurrent()
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
             source.emit(
                 ClientEvent.AppOperationFailed(
                     appId = "another-app",
                     code = AppErrorCodeDto.WORKFLOW_STATE_INVALID,
                     message = "别的应用失败了",
+                    requestId = "somebody-elses-request",
+                ),
+            )
+            // A key-less failure the engine synthesized is likewise not ours.
+            source.emit(
+                ClientEvent.AppOperationFailed(
+                    appId = null,
+                    code = AppErrorCodeDto.WORKFLOW_STATE_INVALID,
+                    message = "无主的失败",
+                    requestId = null,
                 ),
             )
             runCurrent()
-            val created = appRecord(id = "mine", brief = "一个记事本")
+
+            val created = appRecord(id = "ours", scaffolded = false).copy(initSessionId = null)
             source.emit(ClientEvent.AppsChanged(listOf(created)))
-            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, requestId)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppRecordChanged(created)))
             runCurrent()
 
-            assertEquals("mine", viewModel.widgetPinRequests.first())
+            assertEquals("ours", landings.single().appId)
+            job.cancel()
         } finally {
             Dispatchers.resetMain()
         }
     }
 
+    /// A reconnect (or a scope switch) clears the claim and says so.
+    ///
+    /// The create event is one-shot on the source that was just cancelled, so
+    /// the claim can never resolve. Nothing may be claimed after a reconnect —
+    /// not even an event carrying the old key, which is what this asserts.
     @Test
-    fun `a second create while one is in flight is rejected`() = runTest {
+    fun `a reconnect clears the pending create and never claims afterwards`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val first = RecordingSource()
+            val sources = MutableStateFlow<ConversationSource>(first)
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = sources,
+                distributionChannel = "store",
+            )
+            runCurrent()
+            val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
+            val job = launch { viewModel.createdAppLandings.collect { landings += it } }
+
+            viewModel.onAction(LocalAppsAction.Create)
+            runCurrent()
+            val requestId = first.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+
+            val second = RecordingSource()
+            sources.value = second
+            runCurrent()
+
+            assertEquals(
+                "创建结果未知，请在应用库确认。",
+                viewModel.uiState.value.error,
+            )
+
+            val created = appRecord(id = "shell", scaffolded = false).copy(initSessionId = null)
+            second.emit(ClientEvent.AppsChanged(listOf(created)))
+            second.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, requestId)))
+            second.emit(ClientEvent.AppEvent(AppEventDto.AppRecordChanged(created)))
+            runCurrent()
+
+            assertTrue("nothing may be claimed after a reconnect", landings.isEmpty())
+            job.cancel()
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    /// One create at a time; the refusal is visible, not silent.
+    @Test
+    fun `a second create while one is in flight is refused`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -535,84 +578,100 @@ class LocalAppsViewModelTest {
             )
             runCurrent()
 
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("第一个"))
+            viewModel.onAction(LocalAppsAction.Create)
             runCurrent()
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("第二个"))
+            viewModel.onAction(LocalAppsAction.Create)
             runCurrent()
 
-            val creates = source.commands.filterIsInstance<ClientCommand.CreateApp>()
-            assertEquals("only one create may be in flight at a time", 1, creates.size)
-            assertEquals("第一个", creates.single().brief)
+            assertEquals(
+                "only one create may be in flight at a time",
+                1,
+                source.commands.filterIsInstance<ClientCommand.CreateApp>().size,
+            )
+            assertTrue(
+                "the refusal has to be visible, not silent",
+                viewModel.uiState.value.error?.isNotBlank() == true,
+            )
         } finally {
             Dispatchers.resetMain()
         }
     }
 
-    /**
-     * The POSITIVE half of the workflow-model contract. Without it the only
-     * surviving assertion is the rejection below, which still holds when the
-     * field is dropped ENTIRELY — so a refactor that stopped forwarding the
-     * user's chosen build model would ship green, and every build would
-     * silently fall back to the session default. The value must arrive
-     * provider-QUALIFIED: a bare wire id in this slot is a 404 at the provider.
-     */
+    /// A shell must never reach the home screen.
+    ///
+    /// The snapshot is what the widget renders from, so a shell in it becomes a
+    /// tile captioned with the engine's `"untitled"` placeholder that opens
+    /// nothing. This asserts the exclusion at the ViewModel's ONE publish point,
+    /// which every catalog mutation funnels through.
     @Test
-    fun `create app forwards an explicit provider-qualified workflow model`() = runTest {
+    fun `the widget snapshot excludes shells`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
-            val source = RecordingSource().apply {
-                models.value = EngineModelState(
-                    available = listOf("deepseek/deepseek-v3.2", "anthropic/claude-sonnet-4-6"),
-                    active = "deepseek/deepseek-v3.2",
-                )
-            }
+            val source = RecordingSource()
+            val snapshots = RecordingWidgetSnapshotSync()
             val viewModel = LocalAppsViewModel(
                 sourceFlow = MutableStateFlow<ConversationSource>(source),
                 distributionChannel = "store",
+                widgetSnapshotSync = snapshots,
             )
             runCurrent()
 
-            viewModel.onAction(
-                LocalAppsAction.CreateFromBrief(
-                    brief = "一个小游戏",
-                    workflowModel = "anthropic/claude-sonnet-4-6",
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(
+                        appRecord(id = "formed", scaffolded = true),
+                        appRecord(id = "shell", name = "untitled", brief = "", scaffolded = false),
+                    ),
                 ),
             )
             runCurrent()
 
-            val create = source.commands.filterIsInstance<ClientCommand.CreateApp>().single()
-            assertEquals("anthropic/claude-sonnet-4-6", create.workflowModel)
+            assertEquals(
+                listOf("formed"),
+                snapshots.published.last().map { it.id },
+            )
         } finally {
             Dispatchers.resetMain()
         }
     }
 
+    /// The widget request's permanent home: an action on an existing app.
+    ///
+    /// It used to exist ONLY as a checkbox inside the create dialog, so without
+    /// this the feature would have been retired along with the form. A shell is
+    /// refused for the same reason it is left out of the snapshot.
     @Test
-    fun `create app rejects an explicit model that is not in the live catalog`() = runTest {
+    fun `RequestWidget pins a formed app and refuses a shell`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
-            val source = RecordingSource().apply {
-                models.value = EngineModelState(
-                    available = listOf("deepseek/deepseek-v3.2"),
-                    active = "deepseek/deepseek-v3.2",
-                )
-            }
+            val source = RecordingSource()
             val viewModel = LocalAppsViewModel(
                 sourceFlow = MutableStateFlow<ConversationSource>(source),
                 distributionChannel = "store",
             )
             runCurrent()
+            val pins = mutableListOf<String>()
+            val pinJob = launch { viewModel.widgetPinRequests.collect { pins += it } }
 
-            viewModel.onAction(
-                LocalAppsAction.CreateFromBrief(
-                    brief = "一个小游戏",
-                    workflowModel = "anthropic/removed-model",
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(
+                        appRecord(id = "formed", scaffolded = true),
+                        appRecord(id = "shell", scaffolded = false),
+                    ),
                 ),
             )
             runCurrent()
 
-            assertTrue(source.commands.none { it is ClientCommand.CreateApp })
-            assertTrue(viewModel.uiState.value.error?.isNotBlank() == true)
+            viewModel.onAction(LocalAppsAction.RequestWidget("shell"))
+            viewModel.onAction(LocalAppsAction.RequestWidget("does-not-exist"))
+            runCurrent()
+            assertTrue("neither a shell nor a stranger may be pinned", pins.isEmpty())
+
+            viewModel.onAction(LocalAppsAction.RequestWidget("formed"))
+            runCurrent()
+            assertEquals(listOf("formed"), pins)
+            pinJob.cancel()
         } finally {
             Dispatchers.resetMain()
         }
@@ -1325,51 +1384,6 @@ class LocalAppsViewModelTest {
         }
     }
 
-    /**
-     * Concurrent creates are rejected (same as iOS). The first claim still
-     * opens Details/Sessions; a later unrelated app must not steal landing.
-     */
-    /// The second create is REFUSED, not queued.
-    ///
-    /// This used to assert that two briefs could be in flight without clobbering
-    /// each other's claim — a shape that only made sense while claims were keyed
-    /// by brief string. There is one intake at a time now, and the engine names
-    /// the record it creates, so there is nothing left to clobber.
-    @Test
-    fun `a second create in flight is refused and leaves the first intact`() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        try {
-            val source = RecordingSource()
-            val viewModel = LocalAppsViewModel(
-                sourceFlow = MutableStateFlow<ConversationSource>(source),
-                distributionChannel = "store",
-            )
-            runCurrent()
-
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("第一个应用", addWidget = true))
-            runCurrent()
-            viewModel.onAction(LocalAppsAction.CreateFromBrief("第二个应用", addWidget = false))
-            runCurrent()
-
-            val creates = source.commands.filterIsInstance<ClientCommand.CreateApp>()
-            assertEquals(1, creates.size)
-            assertEquals("第一个应用", creates.single().brief)
-            assertTrue(
-                "the refusal has to be visible, not silent",
-                viewModel.uiState.value.error?.isNotBlank() == true,
-            )
-
-            // The first claim still owns the widget it asked for.
-            val created = appRecord(id = "first-app", brief = "第一个应用")
-            source.emit(ClientEvent.AppsChanged(listOf(created)))
-            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created)))
-            runCurrent()
-            assertEquals("first-app", viewModel.widgetPinRequests.first())
-        } finally {
-            Dispatchers.resetMain()
-        }
-    }
-
     private fun sessionRow(
         uuid: String,
         title: String,
@@ -1387,6 +1401,12 @@ class LocalAppsViewModelTest {
         name: String = "客户跟进",
         workflow: AppWorkflowStateDto = AppWorkflowStateDto.DRAFT,
         brief: String = "记录客户跟进情况",
+        /**
+         * Defaults to a FORMED app, matching the fixture's populated name and
+         * brief. A shell fixture has to say so — and should also blank the two
+         * fields, the way the engine's shell record actually looks.
+         */
+        scaffolded: Boolean = true,
     ) = AppRecordDto(
         id = id,
         name = name,
@@ -1398,6 +1418,7 @@ class LocalAppsViewModelTest {
         conversationId = null,
         initSessionId = "00000000-0000-4000-8000-00000000$id".take(36),
         workspaceRel = "apps/$id/workspace",
+        scaffolded = scaffolded,
     )
 
     private companion object {

@@ -26,4 +26,5 @@
     <string name="chat_task_status_cancelled">Background task %1$s cancelled</string>
     <string name="drawer_app_scope_label">App · %1$s</string>
     <string name="drawer_app_sessions_empty">This app has no sessions yet.</string>
+    <string name="local_apps_kickoff">I want to build a new local app.</string>
 </resources>

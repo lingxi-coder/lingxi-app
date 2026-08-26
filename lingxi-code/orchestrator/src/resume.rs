@@ -464,7 +464,12 @@ fn build_state_from_jsonl(
         }
     }
     flush_pending_assistant(&mut state, pending_assistant.take());
-    (state, last_uuid, resume_runtime_metadata(messages))
+    let runtime_metadata = resume_runtime_metadata(messages);
+    if transcript_has_open_plan_segment(messages) {
+        state.plan_mode = true;
+        state.plan_reminder_shown = false;
+    }
+    (state, last_uuid, runtime_metadata)
 }
 
 fn hook_attachment_message_for_api(
@@ -832,6 +837,149 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
     }
 }
 
+/// Claude Code 2.1.246 `uy`: recover whether the transcript ended inside an
+/// open plan-mode segment. The reverse walk gives newer explicit non-plan user
+/// modes precedence over older plan markers and treats only successful
+/// Enter/ExitPlanMode tool results as state transitions.
+fn transcript_has_open_plan_segment(messages: &[JsonlMessage]) -> bool {
+    let mut duplicate_tool_uses = HashSet::new();
+    let mut seen_tool_uses = HashSet::new();
+    for message in messages {
+        if message.message_type != "assistant" {
+            continue;
+        }
+        let Some(content) = message.message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            if let Some(id) = block.get("id").and_then(Value::as_str) {
+                if !seen_tool_uses.insert(id.to_string()) {
+                    duplicate_tool_uses.insert(id.to_string());
+                }
+            }
+        }
+    }
+
+    let mut successful_tool_results = HashSet::new();
+    let mut failed_tool_results = HashSet::new();
+    let mut newer_non_plan_mode = false;
+    for message in messages.iter().rev() {
+        if message.message_type == "attachment" {
+            match message
+                .extra
+                .get("attachment")
+                .and_then(|attachment| attachment.get("type"))
+                .and_then(Value::as_str)
+            {
+                Some("plan_mode" | "plan_mode_reentry") => return !newer_non_plan_mode,
+                Some("plan_mode_exit") => return false,
+                _ => {}
+            }
+            continue;
+        }
+
+        if message.message_type == "assistant" {
+            let Some(content) = message.message.get("content").and_then(Value::as_array) else {
+                continue;
+            };
+            for block in content.iter().rev() {
+                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                    continue;
+                }
+                let Some(id) = block.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(name) = block.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                if name == "ExitPlanMode"
+                    && successful_tool_results.contains(id)
+                    && !failed_tool_results.contains(id)
+                    && !duplicate_tool_uses.contains(id)
+                {
+                    return false;
+                }
+                if name == "EnterPlanMode"
+                    && successful_tool_results.contains(id)
+                    && (!failed_tool_results.contains(id) || duplicate_tool_uses.contains(id))
+                {
+                    return !newer_non_plan_mode;
+                }
+            }
+            continue;
+        }
+
+        if message.message_type != "user" {
+            continue;
+        }
+        if let Some(content) = message.message.get("content").and_then(Value::as_array) {
+            let mut had_tool_result = false;
+            for block in content {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
+                }
+                had_tool_result = true;
+                let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if block
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    failed_tool_results.insert(id.to_string());
+                } else {
+                    successful_tool_results.insert(id.to_string());
+                }
+            }
+            if had_tool_result {
+                continue;
+            }
+        }
+
+        let text = message
+            .message
+            .get("content")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                message
+                    .message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .and_then(|content| {
+                        content.iter().find_map(|block| {
+                            (block.get("type").and_then(Value::as_str) == Some("text"))
+                                .then(|| block.get("text").and_then(Value::as_str))
+                                .flatten()
+                        })
+                    })
+            });
+        if text.is_some_and(|text| {
+            text.trim_start()
+                .starts_with("<command-name>/plan</command-name>")
+        }) {
+            return !newer_non_plan_mode;
+        }
+        match message.extra.get("permissionMode").and_then(Value::as_str) {
+            Some("plan") => return !newer_non_plan_mode,
+            Some(_)
+                if !message
+                    .extra
+                    .get("isMeta")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false) =>
+            {
+                newer_non_plan_mode = true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Best-effort extraction of `content` from a JSONL `message` payload.
 ///
 /// claude-code stores `message.content` as either:
@@ -865,12 +1013,15 @@ impl ConversationOrchestrator {
     /// writer for the target session before adopting its history.
     pub async fn restore_resume_runtime_metadata(&self, messages: &[JsonlMessage]) {
         let metadata = resume_runtime_metadata(messages);
-        self.compaction_cumulative_dropped_tokens.store(
-            metadata.cumulative_dropped_tokens,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        *self.compaction_tracking.lock().await = metadata.compaction_tracking;
+        self.compaction_runtime
+            .compaction_cumulative_dropped_tokens
+            .store(
+                metadata.cumulative_dropped_tokens,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        *self.compaction_runtime.compaction_tracking.lock().await = metadata.compaction_tracking;
         *self
+            .transcript
             .post_compact_skill_attachments
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -931,27 +1082,32 @@ impl ConversationOrchestrator {
         // A transcript-inherited effort must remain inheritable if this
         // runtime later hot-resumes another session. Only the caller's
         // pre-resume launch choice pins the value.
-        orch.current_effort_explicit
+        orch.model_runtime
+            .current_effort_explicit
             .store(effort_was_explicit, std::sync::atomic::Ordering::Release);
         // Override the auto-generated session + chain pointer with the
         // replayed values. Both fields are `pub(crate)` so this is allowed
         // from a sibling module in the same crate.
         orch.session = Arc::new(Mutex::new(replayed.state));
-        orch.last_jsonl_uuid = Arc::new(Mutex::new(
+        orch.transcript.last_jsonl_uuid = Arc::new(Mutex::new(
             replayed.last_message_uuid.map(|u| u.to_string()),
         ));
-        orch.compaction_cumulative_dropped_tokens.store(
-            replayed.runtime_metadata.cumulative_dropped_tokens,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        orch.compaction_tracking = Mutex::new(replayed.runtime_metadata.compaction_tracking);
+        orch.compaction_runtime
+            .compaction_cumulative_dropped_tokens
+            .store(
+                replayed.runtime_metadata.cumulative_dropped_tokens,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        orch.compaction_runtime.compaction_tracking =
+            Mutex::new(replayed.runtime_metadata.compaction_tracking);
         *orch
+            .transcript
             .post_compact_skill_attachments
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             post_compact_skill_attachments_from_messages(&replayed.messages);
         if let Some(writer) = jsonl_writer {
-            orch.jsonl_writer = Some(writer);
+            orch.transcript.jsonl_writer = Some(writer);
         }
         orch.sync_active_goal_stop_hook_for_current_state().await;
         if !replayed.runtime_metadata.deferred_tools.is_empty() {

@@ -190,6 +190,13 @@ struct ResumingHandle {
             traits::ResumeRuntimeSnapshot,
         )>,
     >,
+    resume_context: Mutex<Option<(Option<String>, bool)>>,
+    permission_mode: Mutex<Option<String>>,
+    plan_mode: Mutex<bool>,
+    operation_log: Mutex<Vec<String>>,
+    resume_error: Mutex<Option<String>>,
+    permission_mode_error: Mutex<Option<String>>,
+    plan_mode_error: Mutex<Option<String>>,
 }
 
 impl ResumingHandle {
@@ -197,7 +204,46 @@ impl ResumingHandle {
         Self {
             session_id: protocol::SessionId::new(),
             resumed: Mutex::new(None),
+            resume_context: Mutex::new(None),
+            permission_mode: Mutex::new(Some("default".to_string())),
+            plan_mode: Mutex::new(false),
+            operation_log: Mutex::new(Vec::new()),
+            resume_error: Mutex::new(None),
+            permission_mode_error: Mutex::new(None),
+            plan_mode_error: Mutex::new(None),
         }
+    }
+
+    async fn set_current_permission_mode(&self, mode: &str) {
+        *self.permission_mode.lock().await = Some(mode.to_string());
+    }
+
+    async fn set_current_plan_mode(&self, on: bool) {
+        *self.plan_mode.lock().await = on;
+    }
+
+    async fn set_resume_error(&self, reason: &str) {
+        *self.resume_error.lock().await = Some(reason.to_string());
+    }
+
+    async fn set_plan_mode_error(&self, reason: &str) {
+        *self.plan_mode_error.lock().await = Some(reason.to_string());
+    }
+
+    async fn set_permission_mode_error(&self, reason: &str) {
+        *self.permission_mode_error.lock().await = Some(reason.to_string());
+    }
+
+    async fn operation_log(&self) -> Vec<String> {
+        self.operation_log.lock().await.clone()
+    }
+
+    async fn current_permission_mode(&self) -> Option<String> {
+        self.permission_mode.lock().await.clone()
+    }
+
+    async fn current_plan_mode(&self) -> bool {
+        *self.plan_mode.lock().await
     }
 }
 
@@ -249,6 +295,34 @@ impl traits::OrchestratorHandle for ResumingHandle {
     async fn list_available_models(&self) -> Vec<String> {
         Vec::new()
     }
+    async fn plan_mode(&self) -> bool {
+        *self.plan_mode.lock().await
+    }
+    async fn set_plan_mode(&self, on: bool) -> Result<(), HandleError> {
+        self.operation_log
+            .lock()
+            .await
+            .push(format!("set_plan_mode:{on}"));
+        if let Some(reason) = self.plan_mode_error.lock().await.take() {
+            return Err(HandleError::ActionFailed(reason));
+        }
+        *self.plan_mode.lock().await = on;
+        Ok(())
+    }
+    async fn permission_mode(&self) -> Option<String> {
+        self.permission_mode.lock().await.clone()
+    }
+    async fn set_permission_mode(&self, mode: &str) -> Result<(), HandleError> {
+        self.operation_log
+            .lock()
+            .await
+            .push(format!("set_permission_mode:{mode}"));
+        if let Some(reason) = self.permission_mode_error.lock().await.take() {
+            return Err(HandleError::ActionFailed(reason));
+        }
+        *self.permission_mode.lock().await = Some(mode.to_string());
+        Ok(())
+    }
     async fn resume_session(
         &self,
         session_id: protocol::SessionId,
@@ -257,6 +331,16 @@ impl traits::OrchestratorHandle for ResumingHandle {
         active_goal: Option<traits::ActiveGoalSnapshot>,
         runtime: traits::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
+        self.operation_log
+            .lock()
+            .await
+            .push("resume_session".to_string());
+        let permission_mode = self.permission_mode.lock().await.clone();
+        let plan_mode = *self.plan_mode.lock().await;
+        *self.resume_context.lock().await = Some((permission_mode, plan_mode));
+        if let Some(reason) = self.resume_error.lock().await.take() {
+            return Err(HandleError::ActionFailed(reason));
+        }
         *self.resumed.lock().await =
             Some((session_id, history, last_jsonl_uuid, active_goal, runtime));
         Ok(())
@@ -474,6 +558,86 @@ fn seed_replay_session(root: &std::path::Path) -> String {
     std::fs::write(
         project_dir.join(format!("{session_id}.jsonl")),
         format!("{boundary}\n{user}\n{assistant}\n"),
+    )
+    .unwrap();
+    session_id
+}
+
+fn seed_plan_replay_session(root: &std::path::Path) -> String {
+    let cwd = root.to_string_lossy().into_owned();
+    let project_dir = root
+        .join(".lingxi")
+        .join("projects")
+        .join(session::jsonl::project_dir_name(&cwd));
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let session_id = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa".to_string();
+    let boundary_id = "dddddddd-4444-4444-8444-dddddddddddd";
+    let summary_id = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+    let assistant_id = "cccccccc-3333-4333-8333-cccccccccccc";
+    let user_id = "eeeeeeee-5555-4555-8555-eeeeeeeeeeee";
+    let boundary = serde_json::json!({
+        "type": "system",
+        "subtype": "compact_boundary",
+        "uuid": boundary_id,
+        "parentUuid": serde_json::Value::Null,
+        "logicalParentUuid": serde_json::Value::Null,
+        "sessionId": session_id,
+        "timestamp": "2026-05-25T12:00:00.000Z",
+        "cwd": cwd,
+        "version": "0.9.0",
+        "isSidechain": false,
+        "content": "Conversation compacted",
+        "level": "info",
+        "compactMetadata": {
+            "cumulativeDroppedTokens": 4321,
+            "preCompactDiscoveredTools": ["DeferredTool"]
+        }
+    });
+    let summary = serde_json::json!({
+        "type": "user",
+        "uuid": summary_id,
+        "parentUuid": boundary_id,
+        "sessionId": session_id,
+        "timestamp": "2026-05-25T12:00:01.000Z",
+        "cwd": cwd,
+        "version": "0.9.0",
+        "isSidechain": false,
+        "userType": "external",
+        "isCompactSummary": true,
+        "isVisibleInTranscriptOnly": true,
+        "message": {"role": "user", "content": "resume from disk"}
+    });
+    let assistant = serde_json::json!({
+        "type": "assistant",
+        "uuid": assistant_id,
+        "parentUuid": summary_id,
+        "sessionId": session_id,
+        "timestamp": "2026-05-25T12:00:02.000Z",
+        "cwd": cwd,
+        "version": "0.9.0",
+        "isSidechain": false,
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "restored"}],
+            "model": "claude-opus-4-1"
+        },
+        "effort": "high"
+    });
+    let user = serde_json::json!({
+        "type": "user",
+        "uuid": user_id,
+        "parentUuid": assistant_id,
+        "sessionId": session_id,
+        "timestamp": "2026-08-25T12:00:03.000Z",
+        "cwd": cwd,
+        "version": "0.12.0",
+        "isSidechain": false,
+        "permissionMode": "plan",
+        "message": {"role": "user", "content": "keep planning"}
+    });
+    std::fs::write(
+        project_dir.join(format!("{session_id}.jsonl")),
+        format!("{boundary}\n{summary}\n{assistant}\n{user}\n"),
     )
     .unwrap();
     session_id
@@ -1528,6 +1692,220 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
         )),
         "the folded summary must survive into a CompactBoundary block"
     );
+}
+
+#[tokio::test]
+async fn resume_session_sets_plan_state_before_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let session_id = seed_plan_replay_session(root.path());
+    let handle = Arc::new(ResumingHandle::new());
+    handle.set_current_permission_mode("acceptEdits").await;
+    let cwd = root.path().to_string_lossy().into_owned();
+    let router = EngineCommandRouter::new(
+        handle.clone() as Arc<dyn traits::OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        None,
+        None,
+    )
+    .with_session_store(SessionStoreContext::new(
+        root.path().join(".lingxi"),
+        cwd,
+        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+    ));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::ResumeSession {
+                session_id: session_id.clone(),
+                cwd: None,
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        handle.operation_log().await,
+        vec![
+            "set_permission_mode:plan".to_string(),
+            "set_plan_mode:true".to_string(),
+            "resume_session".to_string(),
+        ]
+    );
+    assert_eq!(
+        *handle.resume_context.lock().await,
+        Some((Some("plan".to_string()), true))
+    );
+    assert_eq!(
+        handle.current_permission_mode().await.as_deref(),
+        Some("plan")
+    );
+    assert!(handle.current_plan_mode().await);
+    assert!(matches!(
+        sink.events().await.as_slice(),
+        [ClientEvent::SessionResumed { .. }]
+    ));
+}
+
+#[tokio::test]
+async fn resume_session_rolls_back_plan_preset_when_plan_mode_enable_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let session_id = seed_plan_replay_session(root.path());
+    let handle = Arc::new(ResumingHandle::new());
+    handle.set_current_permission_mode("acceptEdits").await;
+    handle.set_plan_mode_error("plan latch failed").await;
+    let cwd = root.path().to_string_lossy().into_owned();
+    let router = EngineCommandRouter::new(
+        handle.clone() as Arc<dyn traits::OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        None,
+        None,
+    )
+    .with_session_store(SessionStoreContext::new(
+        root.path().join(".lingxi"),
+        cwd,
+        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+    ));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::ResumeSession {
+                session_id,
+                cwd: None,
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        handle.operation_log().await,
+        vec![
+            "set_permission_mode:plan".to_string(),
+            "set_plan_mode:true".to_string(),
+            "set_permission_mode:acceptEdits".to_string(),
+        ]
+    );
+    assert!(handle.resume_context.lock().await.is_none());
+    assert_eq!(
+        handle.current_permission_mode().await.as_deref(),
+        Some("acceptEdits")
+    );
+    assert!(!handle.current_plan_mode().await);
+    assert!(matches!(
+        sink.events().await.as_slice(),
+        [ClientEvent::Error { message, .. }] if message.contains("resume plan mode failed")
+    ));
+}
+
+#[tokio::test]
+async fn resume_session_does_not_adopt_when_plan_permission_preset_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let session_id = seed_plan_replay_session(root.path());
+    let handle = Arc::new(ResumingHandle::new());
+    handle.set_current_permission_mode("acceptEdits").await;
+    handle.set_current_plan_mode(true).await;
+    handle.set_permission_mode_error("plan gate failed").await;
+    let cwd = root.path().to_string_lossy().into_owned();
+    let router = EngineCommandRouter::new(
+        handle.clone() as Arc<dyn traits::OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        None,
+        None,
+    )
+    .with_session_store(SessionStoreContext::new(
+        root.path().join(".lingxi"),
+        cwd,
+        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+    ));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::ResumeSession {
+                session_id,
+                cwd: None,
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        handle.operation_log().await,
+        vec!["set_permission_mode:plan".to_string()]
+    );
+    assert!(handle.resume_context.lock().await.is_none());
+    assert_eq!(
+        handle.current_permission_mode().await.as_deref(),
+        Some("acceptEdits")
+    );
+    assert!(handle.current_plan_mode().await);
+    assert!(matches!(
+        sink.events().await.as_slice(),
+        [ClientEvent::Error { message, .. }]
+            if message.contains("resume plan permission mode failed")
+    ));
+}
+
+#[tokio::test]
+async fn resume_session_rolls_back_plan_state_when_replay_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let session_id = seed_plan_replay_session(root.path());
+    let handle = Arc::new(ResumingHandle::new());
+    handle.set_current_permission_mode("acceptEdits").await;
+    handle.set_current_plan_mode(false).await;
+    handle.set_resume_error("resume replay failed").await;
+    let cwd = root.path().to_string_lossy().into_owned();
+    let router = EngineCommandRouter::new(
+        handle.clone() as Arc<dyn traits::OrchestratorHandle>,
+        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
+        Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+        None,
+        None,
+    )
+    .with_session_store(SessionStoreContext::new(
+        root.path().join(".lingxi"),
+        cwd,
+        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+    ));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::ResumeSession {
+                session_id,
+                cwd: None,
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        handle.operation_log().await,
+        vec![
+            "set_permission_mode:plan".to_string(),
+            "set_plan_mode:true".to_string(),
+            "resume_session".to_string(),
+            "set_plan_mode:false".to_string(),
+            "set_permission_mode:acceptEdits".to_string(),
+        ]
+    );
+    assert_eq!(
+        *handle.resume_context.lock().await,
+        Some((Some("plan".to_string()), true))
+    );
+    assert_eq!(
+        handle.current_permission_mode().await.as_deref(),
+        Some("acceptEdits")
+    );
+    assert!(!handle.current_plan_mode().await);
+    assert!(matches!(
+        sink.events().await.as_slice(),
+        [ClientEvent::Error { message, .. }] if message.contains("resume_session failed")
+    ));
 }
 
 // ── End-to-end: routing over the real WebSocket transport ─────────────────────

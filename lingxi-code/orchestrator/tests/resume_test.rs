@@ -169,6 +169,59 @@ fn resume_restores_effort_compaction_counters_and_rapid_refill_tracking() {
 }
 
 #[test]
+fn resume_detects_an_open_plan_segment_from_the_latest_user_permission_mode() {
+    let sid = Uuid::new_v4();
+    let messages = vec![serde_json::from_value(json!({
+        "type":"user", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+        "sessionId":sid.to_string(), "timestamp":"2026-08-25T00:00:00.000Z",
+        "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+        "permissionMode":"plan",
+        "message":{"role":"user","content":"keep planning"}
+    }))
+    .unwrap()];
+
+    let state = state_from_messages(sid, &messages);
+    assert!(state.plan_mode);
+}
+
+#[test]
+fn resume_does_not_reenter_a_plan_segment_after_a_successful_exit() {
+    let sid = Uuid::new_v4();
+    let tool_use_id = "toolu_exit_plan";
+    let messages = vec![
+        serde_json::from_value(json!({
+            "type":"user", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-08-25T00:00:00.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "permissionMode":"plan",
+            "message":{"role":"user","content":"finish the plan"}
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "type":"assistant", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-08-25T00:00:01.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"assistant","content":[{
+                "type":"tool_use","id":tool_use_id,"name":"ExitPlanMode","input":{}
+            }]}
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "type":"user", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-08-25T00:00:02.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"user","content":[{
+                "type":"tool_result","tool_use_id":tool_use_id,"content":"Plan approved","is_error":false
+            }]}
+        }))
+        .unwrap(),
+    ];
+
+    let state = state_from_messages(sid, &messages);
+    assert!(!state.plan_mode);
+}
+
+#[test]
 fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
     let sid = Uuid::new_v4();
     let line = |value: serde_json::Value| serde_json::from_value(value).unwrap();

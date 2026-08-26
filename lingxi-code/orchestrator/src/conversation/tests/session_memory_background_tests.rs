@@ -1,0 +1,153 @@
+use super::*;
+use crate::test_support::{
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+};
+use async_trait::async_trait;
+use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+use std::sync::Arc;
+use tokio::sync::Notify;
+use tool_api::context::ToolUseOptions;
+
+struct TokioRuntime;
+
+#[async_trait]
+impl traits::RuntimeSpawner for TokioRuntime {
+    async fn spawn(
+        &self,
+        name: &str,
+        task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+        tokio::spawn(task);
+        Ok(traits::BackgroundTaskHandle {
+            task_name: name.to_string(),
+            task_id: 0,
+        })
+    }
+
+    async fn sleep(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
+    }
+
+    async fn cancel(
+        &self,
+        _handle: &traits::BackgroundTaskHandle,
+    ) -> Result<(), traits::RuntimeError> {
+        Ok(())
+    }
+}
+
+struct BlockingSideQuery {
+    started: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl SideQueryClient for BlockingSideQuery {
+    async fn query(&self, _request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+        self.started.notify_waiters();
+        self.release.notified().await;
+        Ok(SideQueryResponse {
+            text: Some("durable notes from the old session".to_string()),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: Some("end_turn".to_string()),
+            retry_count: 0,
+        })
+    }
+}
+
+fn cache_safe_params() -> sidequery::CacheSafeParams {
+    sidequery::CacheSafeParams {
+        system_prompt: Arc::from("SYS"),
+        user_context: std::collections::HashMap::new(),
+        system_context: std::collections::HashMap::new(),
+        tool_use_options: ToolUseOptions {
+            debug: false,
+            verbose: false,
+            main_loop_model: "haiku".to_string(),
+            model_profile: None,
+            max_budget_nano_usd: None,
+            mcp_clients: vec![],
+            is_non_interactive_session: false,
+            custom_system_prompt: None,
+            append_system_prompt: None,
+        },
+        fork_context_messages: Vec::new(),
+        transcript_path: None,
+        generation: 0,
+    }
+}
+
+#[tokio::test]
+async fn clear_does_not_wait_for_network_extraction_or_commit_stale_result() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = Arc::new(BlockingSideQuery {
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(client.clone(), "haiku".to_string()),
+    );
+    let handle = Arc::new(SessionMemoryHandle {
+        extractor: tokio::sync::Mutex::new(memory::session_memory::SessionMemoryExtractor::new(
+            memory::session_memory::SessionMemoryConfig {
+                enabled: true,
+                initialization_threshold: 0,
+                update_threshold: 0,
+                extraction_model: "haiku".to_string(),
+            },
+        )),
+        runner,
+        config_home: dir.path().to_path_buf(),
+        runtime: Arc::new(TokioRuntime),
+        in_flight: std::sync::atomic::AtomicBool::new(false),
+        generation: std::sync::atomic::AtomicU64::new(0),
+    });
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    slot.save(cache_safe_params()).await;
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_cache_safe_slot(slot)
+    .with_session_memory(handle.clone());
+    let old_session_id = orch.session.lock().await.session_id.to_string();
+    let stale_path = memory::session_memory::session_memory_path(dir.path(), &old_session_id);
+
+    let started = client.started.notified();
+    orch.maybe_extract_session_memory().await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), started)
+        .await
+        .expect("background extraction started");
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        traits::OrchestratorHandle::clear_session(&orch),
+    )
+    .await
+    .expect("clear must not wait for the side query")
+    .expect("clear succeeds");
+    assert!(!stale_path.exists());
+
+    client.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while handle.in_flight.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stale extraction finished");
+    assert!(
+        !stale_path.exists(),
+        "an extraction invalidated by clear must not write its old-session file"
+    );
+    assert!(!handle.extractor.lock().await.is_initialized());
+}

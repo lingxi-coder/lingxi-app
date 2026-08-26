@@ -279,6 +279,7 @@ const TOOL_RESULT_HEAD_EXTRA: &[&str] = &[
     "mcpMeta",
     "toolEndsTurn",
     "sourceToolAssistantUUID",
+    "permissionMode",
 ];
 
 /// `extra` keys the `subtype:"compact_boundary"` SYSTEM head consumes —
@@ -762,6 +763,20 @@ mod tool_result_head_tests {
                 && i_ends < i_src
                 && i_src < i_trailer,
             "claude order is toolUseResult < toolDenialKind < mcpMeta < toolEndsTurn < sourceToolAssistantUUID < trailer, got {s}"
+        );
+    }
+
+    #[test]
+    fn permission_mode_follows_source_uuid_before_the_common_trailer() {
+        let mut m = base();
+        m.extra
+            .insert("sourceToolAssistantUUID".into(), json!("a-uuid"));
+        m.extra.insert("permissionMode".into(), json!("plan"));
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(
+            s.find("sourceToolAssistantUUID").unwrap() < s.find("permissionMode").unwrap()
+                && s.find("permissionMode").unwrap() < s.find("userType").unwrap(),
+            "Claude order is sourceToolAssistantUUID < permissionMode < trailer, got {s}"
         );
     }
 

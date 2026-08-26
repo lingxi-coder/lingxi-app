@@ -1263,7 +1263,7 @@ mod read_file_state_tests {
     /// tools' population is simulated with a direct `set`).
     fn seed(orch: &ConversationOrchestrator, path: PathBuf) {
         tool_api::read_file_state::set(
-            &orch.read_state_map,
+            &orch.prompt_runtime.read_state_map,
             path,
             tool_api::read_file_state::ReadFileEntry {
                 content: String::new(),
@@ -1294,7 +1294,12 @@ mod read_file_state_tests {
         // A fresh orchestrator has an empty read-state registry, so `/files`
         // renders the "No files in context" branch.
         let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
-        assert!(orch.read_state_map.lock().unwrap().is_empty());
+        assert!(orch
+            .prompt_runtime
+            .read_state_map
+            .lock()
+            .unwrap()
+            .is_empty());
         assert!(orch.files_in_context().await.is_empty());
     }
 
@@ -1304,9 +1309,9 @@ mod read_file_state_tests {
         // holds in `read_state_map` is what the file tools' `BuiltinToolContext`
         // share, so a `readFileState.set` performed against a clone of that
         // `Arc` (as the real `FileReadTool` does) is visible through
-        // `orch.read_state_map` AND surfaces in `/files`.
+        // `orch.prompt_runtime.read_state_map` AND surfaces in `/files`.
         let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
-        let shared = orch.read_state_map.clone();
+        let shared = orch.prompt_runtime.read_state_map.clone();
         tool_api::read_file_state::set(
             &shared,
             PathBuf::from("/tmp/a.txt"),
@@ -1321,7 +1326,7 @@ mod read_file_state_tests {
             },
         );
         let entry = tool_api::read_file_state::get(
-            &orch.read_state_map,
+            &orch.prompt_runtime.read_state_map,
             std::path::Path::new("/tmp/a.txt"),
         )
         .expect("orchestrator registry sees the shared-Arc set");
@@ -1426,7 +1431,7 @@ mod read_file_state_tests {
         std::fs::write(&old_path, "fn old() {}\n").expect("write old.rs");
         std::fs::write(&new_path, "fn fresh() {}\n").expect("write new.rs");
         tool_api::read_file_state::set(
-            &orch.read_state_map,
+            &orch.prompt_runtime.read_state_map,
             old_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: "fn old() {}\n".into(),
@@ -1439,7 +1444,7 @@ mod read_file_state_tests {
             },
         );
         tool_api::read_file_state::set(
-            &orch.read_state_map,
+            &orch.prompt_runtime.read_state_map,
             new_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: "fn fresh() {}\n".into(),
@@ -1456,7 +1461,11 @@ mod read_file_state_tests {
 
         // The read-state registry is cleared post-compact (`readFileState.clear`).
         assert!(
-            orch.read_state_map.lock().unwrap().is_empty(),
+            orch.prompt_runtime
+                .read_state_map
+                .lock()
+                .unwrap()
+                .is_empty(),
             "read_state_map must be cleared after compaction"
         );
 
@@ -1510,7 +1519,7 @@ mod read_file_state_tests {
         let orch =
             orch_with_tools(PathBuf::from("/tmp"), vec![]).with_read_state_map(shared.clone());
         assert!(
-            Arc::ptr_eq(&orch.read_state_map, &shared),
+            Arc::ptr_eq(&orch.prompt_runtime.read_state_map, &shared),
             "with_read_state_map must adopt the shared Arc, not keep the default"
         );
         // A set through the composition-root handle is visible on the
@@ -1530,7 +1539,7 @@ mod read_file_state_tests {
         );
         assert!(
             tool_api::read_file_state::get(
-                &orch.read_state_map,
+                &orch.prompt_runtime.read_state_map,
                 std::path::Path::new("/tmp/wired.txt")
             )
             .is_some(),
@@ -1605,7 +1614,11 @@ mod read_file_state_tests {
 
         // The shared map is drained/cleared post-compact.
         assert!(
-            orch.read_state_map.lock().unwrap().is_empty(),
+            orch.prompt_runtime
+                .read_state_map
+                .lock()
+                .unwrap()
+                .is_empty(),
             "shared read_state_map must be cleared after compaction"
         );
 
@@ -5767,7 +5780,8 @@ mod compaction_failure_hint_tests {
     async fn a_recorded_compact_failure_is_rendered_once() {
         let output = Arc::new(MockOutputStream::new());
         let orch = orch_with_output(output.clone());
-        orch.compaction_tracking
+        orch.compaction_runtime
+            .compaction_tracking
             .lock()
             .await
             .last_compact_failure_detail = Some("summarizer 500\nstack frame".to_string());

@@ -98,7 +98,11 @@ fn memdir_index_notice_for_tool(
     if is_error || !matches!(tool_name, "Write" | "Edit" | "MultiEdit") {
         return None;
     }
-    let memdir = orch.memory_prefetch.as_ref()?.user_memdir()?;
+    let memdir = orch
+        .prompt_runtime
+        .memory_prefetch
+        .as_ref()?
+        .user_memdir()?;
     let memory_index = canonical_or_normalize(&memdir.join("MEMORY.md"));
     let target = resolve_tool_file_path(tool_input, &orch.current_cwd())?;
     if canonical_or_normalize(&target) != memory_index {
@@ -760,7 +764,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // round-trip and the REAL retry count (`last_retry_count()`, the adapter's
     // `RetryState::attempt`) instead of the previous hardcoded `Duration::ZERO`
     // / `0`. claude-code's cost recorder receives both.
-    if let Some(tracker) = orch.cost_tracker.as_ref() {
+    if let Some(tracker) = orch.model_runtime.cost_tracker.as_ref() {
         let usage = crate::cost_wiring::llm_usage_to_cost_usage(&response.usage);
         let cache_read = response.usage.billable_tokens.cache_read;
         let cache_create = response.usage.billable_tokens.cache_write;
@@ -776,14 +780,14 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 cache_read,
                 cache_create,
                 false, // is_batch_request — M6 always false
-                orch.analytics_bus.as_ref(),
+                orch.model_runtime.analytics_bus.as_ref(),
             )
             .await;
         // strict-parity (2.1.195): fire `tengu_api_success` on the per-request
         // success path (claude `j("tengu_api_success", {...})`). The port-only
         // `tengu_cost_recorded` event was dropped. request id / stop reason /
         // provider live on the orchestrator, so we emit directly here.
-        if let Some(bus) = orch.analytics_bus.as_ref() {
+        if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
             #[allow(clippy::cast_possible_truncation)]
             let dur_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
             cost::emit_api_success(
@@ -822,7 +826,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             )
             .await;
         }
-        orch.api_calls_recorded
+        orch.model_runtime
+            .api_calls_recorded
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -1233,7 +1238,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // it off THIS iteration's `precomputeOutcome`), so clear any leftover before
     // the preempt — a failure recorded for an earlier call must never colour
     // this call's prompt-too-long surface.
-    orch.compaction_tracking
+    orch.compaction_runtime
+        .compaction_tracking
         .lock()
         .await
         .last_compact_failure_detail = None;
@@ -1468,7 +1474,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // the established recovery chain; the staged queue is now empty, so the
     // drain is naturally one-shot.
     if compaction::is_context_collapse_enabled() {
-        if let Some(compactor) = orch.compaction.as_ref() {
+        if let Some(compactor) = orch.compaction_runtime.compaction.as_ref() {
             let raw_history = {
                 let session = orch.session.lock().await;
                 session.history.clone()
@@ -1543,7 +1549,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     }
 
     // (4) Reactive-compact fallback: one full compact, then retry once more.
-    if let Some(compactor) = orch.compaction.clone() {
+    if let Some(compactor) = orch.compaction_runtime.compaction.clone() {
         let (snapshot, last_assistant_at) = {
             let s = orch.session.lock().await;
             (s.history.clone(), s.message_timing.last_assistant_at)
@@ -1573,7 +1579,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         // into `record_compaction_usage` would inflate /cost's API duration.
         let api_started = std::time::Instant::now();
         let compact_result = {
-            let mut tracking = orch.compaction_tracking.lock().await;
+            let mut tracking = orch.compaction_runtime.compaction_tracking.lock().await;
             compactor
                 .process_iteration_tracked_with_instructions_and_timing(
                     snapshot,
@@ -1593,7 +1599,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
         // once, and cleared on entry to this fn, so it can never leak into a
         // later turn's preempt.
         if let Err(err) = &compact_result {
-            orch.compaction_tracking
+            orch.compaction_runtime
+                .compaction_tracking
                 .lock()
                 .await
                 .last_compact_failure_detail = Some(err.to_string());
@@ -1609,7 +1616,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
             // binary's reactive arm (`bin/claude.exe` offset 202942256).
             if result.rapid_refill_breaker_tripped {
                 let turns_since = {
-                    let tracking = orch.compaction_tracking.lock().await;
+                    let tracking = orch.compaction_runtime.compaction_tracking.lock().await;
                     i64::from(tracking.turn_counter)
                 };
                 orch.fire_rapid_refill_breaker_telemetry_reactive(
@@ -2018,6 +2025,7 @@ pub(crate) async fn clear_goal_after_unrecoverable_error(
 
 pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> MessageId {
     let compact_failure = orch
+        .compaction_runtime
         .compaction_tracking
         .lock()
         .await
@@ -2409,7 +2417,7 @@ pub(crate) async fn surface_model_error(
     error_text: &str,
     env: ApiErrorEnvelope,
 ) -> MessageId {
-    if let Some(bus) = orch.analytics_bus.as_ref() {
+    if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
         let mut metadata = telemetry::LogEventMetadata::new();
         metadata.insert(
             "queryChainId".into(),
@@ -3051,7 +3059,7 @@ async fn apply_tool_result_persistence(
     use crate::tool_result_persistence as trp;
 
     if tool_result_is_blank(&content, content_blocks) {
-        if let Some(bus) = orch.analytics_bus.as_ref() {
+        if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
             let mut metadata = telemetry::LogEventMetadata::new();
             metadata.insert(
                 "toolName".into(),
@@ -3139,7 +3147,7 @@ async fn apply_tool_result_persistence(
         &persisted.preview,
         persisted.has_more,
     );
-    if let Some(bus) = orch.analytics_bus.as_ref() {
+    if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
         #[allow(clippy::cast_possible_wrap)]
         fn int(v: usize) -> telemetry::AnalyticsValue {
             telemetry::AnalyticsValue::Int(i64::try_from(v).unwrap_or(i64::MAX))
@@ -3521,6 +3529,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             (s.session_id, s.plan_mode)
         };
         let transcript_path = orch
+            .transcript
             .jsonl_writer
             .as_ref()
             .map(|w| w.path().to_path_buf())
@@ -3536,7 +3545,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // prompt id, shared with the JSONL `user` lines and the OTel `prompt.id`
         // attribute, so a PreToolUse/PostToolUse hook's output joins to OTel
         // events at prompt grain.
-        let prompt_id = orch.current_prompt_id.lock().await.clone();
+        let prompt_id = orch.prompt_runtime.current_prompt_id.lock().await.clone();
         let hook_ctx = HookContext {
             session_id,
             cwd: orch.current_cwd(),
@@ -4814,7 +4823,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // (code-change stats for /usage — claude-code `Bhn(added, removed)`)
         // Only file-edit tools (Edit/Write/MultiEdit) put a `structuredPatch`
         // in their result data; sum its +/- lines into the session counters.
-        accumulate_code_change(&emit_payload, orch.cost_tracker.as_ref()).await;
+        accumulate_code_change(&emit_payload, orch.model_runtime.cost_tracker.as_ref()).await;
 
         // NOTE: the read-file-state registry (`context.readFileState`, backing
         // `/files`, conditional-rule matching, and the relevant-memory dedup) is
@@ -4885,7 +4894,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let mut post_additional_contexts = post_agg.additional_contexts.clone();
         if let Some(notice) = memdir_index_notice_for_tool(orch, &name, &effective_input, is_error)
         {
-            if let Some(bus) = orch.analytics_bus.as_ref() {
+            if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
                 let mut metadata = telemetry::LogEventMetadata::new();
                 metadata.insert(
                     "over_cap".into(),
@@ -5413,6 +5422,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             (s.session_id, s.plan_mode)
         };
         let transcript_path = orch
+            .transcript
             .jsonl_writer
             .as_ref()
             .map(|w| w.path().to_path_buf())
@@ -6378,7 +6388,8 @@ mod interrupted_denial_stamp_tests {
             "an aborted tool must emit exactly one `interrupted` denial frame"
         );
         assert_eq!(
-            orch.tool_denial_kinds
+            orch.transcript
+                .tool_denial_kinds
                 .lock()
                 .await
                 .get(&id.to_string())
@@ -6404,7 +6415,7 @@ mod interrupted_denial_stamp_tests {
             out.denial_snapshot().await.is_empty(),
             "a plain tool failure must not carry a toolDenialKind"
         );
-        assert!(orch.tool_denial_kinds.lock().await.is_empty());
+        assert!(orch.transcript.tool_denial_kinds.lock().await.is_empty());
     }
 }
 

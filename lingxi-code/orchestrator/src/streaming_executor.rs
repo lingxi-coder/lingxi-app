@@ -16,6 +16,10 @@ use tool_api::ContextModifier;
 /// off by default in claude-code, so it is not appended.
 const REJECT_MESSAGE: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
 
+/// Claude Code 2.1.246 `J6`: MCP calls aborted before a response must not be
+/// normalized into the generic empty-result sentinel.
+const MCP_INTERRUPTED_MESSAGE: &str = "The tool call was interrupted before a result was received. It may or may not have completed on the server — verify before assuming it succeeded, and retry if needed.";
+
 /// Result of one `dispatch_tool_uses_tracked` call routed through the executor:
 /// the single result block + the tool's injected messages + context modifiers.
 type DispatchOutcome = Result<
@@ -59,10 +63,29 @@ pub(crate) fn synthetic_tool_use_result(reason: AbortReason) -> serde_json::Valu
     )
 }
 
+pub(crate) fn synthetic_tool_use_result_for_tool(
+    reason: AbortReason,
+    is_mcp: bool,
+) -> serde_json::Value {
+    if reason == AbortReason::UserInterrupted && is_mcp {
+        return serde_json::Value::String(format!("Error: {MCP_INTERRUPTED_MESSAGE}"));
+    }
+    synthetic_tool_use_result(reason)
+}
+
 /// Build the synthetic `tool_result` for a cancelled tool (TS
 /// `createSyntheticErrorMessage`). `provider_tool_use_id` is left `None` —
 /// the caller copies the tracked tool's `provider_id` in before persisting.
+#[cfg(test)]
 pub(crate) fn synthetic_error_block(tool_use_id: ToolUseId, reason: AbortReason) -> ContentBlock {
+    synthetic_error_block_for_tool(tool_use_id, reason, false)
+}
+
+fn synthetic_error_block_for_tool(
+    tool_use_id: ToolUseId,
+    reason: AbortReason,
+    is_mcp: bool,
+) -> ContentBlock {
     let content = match reason {
         AbortReason::StreamingFallback => {
             "<tool_use_error>Error: Streaming fallback - tool execution discarded</tool_use_error>"
@@ -72,6 +95,7 @@ pub(crate) fn synthetic_error_block(tool_use_id: ToolUseId, reason: AbortReason)
         // here — NOT `<tool_use_error>`-wrapped — with is_error: true. This is the
         // faithful text; the `UserInterrupted` reason itself is only produced once
         // the user-ESC / per-tool cancellation path is wired in a later sub-task.
+        AbortReason::UserInterrupted if is_mcp => format!("Error: {MCP_INTERRUPTED_MESSAGE}"),
         AbortReason::UserInterrupted => REJECT_MESSAGE.to_string(),
     };
     ContentBlock::ToolResult {
@@ -483,10 +507,22 @@ impl<'a> StreamingToolExecutor<'a> {
             // `toolDenialKind:"user-rejected"` to the `user_interrupted`
             // synthetic (@232972524) and NO kind to `streaming_fallback` /
             // `conversation_ended`, so follow the block that actually survives.
+            let is_mcp = self
+                .orch
+                .tools
+                .find_by_name(&self.tools[i].name)
+                .is_some_and(|tool| tool.is_mcp());
             match reason {
                 AbortReason::UserInterrupted => {
                     self.orch
-                        .record_tool_denial_kind(&self.tools[i].id, "user-rejected")
+                        .record_tool_denial_kind(
+                            &self.tools[i].id,
+                            if is_mcp {
+                                "interrupted"
+                            } else {
+                                "user-rejected"
+                            },
+                        )
                         .await;
                 }
                 AbortReason::StreamingFallback => {
@@ -498,9 +534,13 @@ impl<'a> StreamingToolExecutor<'a> {
             // literal instead. `record_tool_use_result` overwrites, so this both
             // corrects the value and prevents a stale entry.
             self.orch
-                .record_tool_use_result(&self.tools[i].id, synthetic_tool_use_result(reason))
+                .record_tool_use_result(
+                    &self.tools[i].id,
+                    synthetic_tool_use_result_for_tool(reason, is_mcp),
+                )
                 .await;
-            let mut block = synthetic_error_block(self.tools[i].id.clone(), reason);
+            let mut block =
+                synthetic_error_block_for_tool(self.tools[i].id.clone(), reason, is_mcp);
             set_provider_id(&mut block, self.tools[i].provider_id.clone());
             self.tools[i].result = Some(block);
             // A cancelled tool yields ONLY the synthetic — its injected msgs/modifiers are dropped.
@@ -563,7 +603,7 @@ impl<'a> StreamingToolExecutor<'a> {
     /// NOT `#[must_use]`: `streaming_executor_test.rs` calls this as a bare
     /// statement to assert only the synthetic block, and that file is owned by
     /// a concurrent session.
-    pub(crate) fn apply_abort_to_pending(&mut self) -> Vec<(ToolUseId, AbortReason)> {
+    pub(crate) fn apply_abort_to_pending(&mut self) -> Vec<(ToolUseId, AbortReason, bool)> {
         let mut substituted = Vec::new();
         for i in 0..self.tools.len() {
             if !matches!(self.tools[i].status, ToolStatus::Queued) || self.tools[i].result.is_some()
@@ -577,8 +617,14 @@ impl<'a> StreamingToolExecutor<'a> {
             let Some(reason) = self.abort_reason_for(i) else {
                 continue;
             };
-            substituted.push((self.tools[i].id.clone(), reason));
-            let mut block = synthetic_error_block(self.tools[i].id.clone(), reason);
+            let is_mcp = self
+                .orch
+                .tools
+                .find_by_name(&self.tools[i].name)
+                .is_some_and(|tool| tool.is_mcp());
+            substituted.push((self.tools[i].id.clone(), reason, is_mcp));
+            let mut block =
+                synthetic_error_block_for_tool(self.tools[i].id.clone(), reason, is_mcp);
             set_provider_id(&mut block, self.tools[i].provider_id.clone());
             self.tools[i].result = Some(block);
             self.tools[i].status = ToolStatus::Completed;
@@ -603,14 +649,21 @@ impl<'a> StreamingToolExecutor<'a> {
         &mut self,
     ) -> Result<Vec<ContentBlock>, crate::error::OrchestratorError> {
         loop {
-            for (id, reason) in self.apply_abort_to_pending() {
+            for (id, reason, is_mcp) in self.apply_abort_to_pending() {
                 if reason == AbortReason::UserInterrupted {
                     self.orch
-                        .record_tool_denial_kind(&id, "user-rejected")
+                        .record_tool_denial_kind(
+                            &id,
+                            if is_mcp {
+                                "interrupted"
+                            } else {
+                                "user-rejected"
+                            },
+                        )
                         .await;
                 }
                 self.orch
-                    .record_tool_use_result(&id, synthetic_tool_use_result(reason))
+                    .record_tool_use_result(&id, synthetic_tool_use_result_for_tool(reason, is_mcp))
                     .await;
             }
             self.process_queue();
@@ -885,7 +938,8 @@ mod synthetic_denial_kind_tests {
         };
         assert_eq!(content, REJECT_MESSAGE, "synthetic must survive");
         assert_eq!(
-            orch.tool_denial_kinds
+            orch.transcript
+                .tool_denial_kinds
                 .lock()
                 .await
                 .get(&id.to_string())
@@ -908,6 +962,7 @@ mod synthetic_denial_kind_tests {
         let _ = exec.run_to_completion().await.unwrap();
         assert!(
             !orch
+                .transcript
                 .tool_denial_kinds
                 .lock()
                 .await
@@ -941,7 +996,8 @@ mod synthetic_denial_kind_tests {
         };
         assert_eq!(content, REJECT_MESSAGE, "queued tool gets the synthetic");
         assert_eq!(
-            orch.tool_denial_kinds
+            orch.transcript
+                .tool_denial_kinds
                 .lock()
                 .await
                 .get(&id.to_string())

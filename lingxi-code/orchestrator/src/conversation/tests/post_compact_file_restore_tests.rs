@@ -1,0 +1,613 @@
+use super::*;
+use crate::test_support::{
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+};
+use crate::OrchestratorConfig;
+use std::sync::Arc;
+use tool_api::read_file_state::{set, ReadFileEntry};
+use tool_api::registry::ToolRegistry;
+
+fn stale_entry(content: &str) -> ReadFileEntry {
+    ReadFileEntry {
+        content: content.to_string(),
+        mtime_ms: 1,
+        offset: None,
+        limit: None,
+        from_read: true,
+        seeded_from_context: false,
+        is_partial_view: false,
+    }
+}
+
+/// Serialize + clean the process-global invoked-skill registry so these
+/// tests (which now exercise the skill arm too) don't see rows registered by
+/// a parallel test. Resets on acquire AND on drop (under the lock) so no row
+/// leaks past the test. Hold the returned guard for the whole test body.
+struct RegistryGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+impl Drop for RegistryGuard {
+    fn drop(&mut self) {
+        compaction::invoked_skills::reset_for_test();
+    }
+}
+fn registry_guard() -> RegistryGuard {
+    let g = compaction::invoked_skills::TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    compaction::invoked_skills::reset_for_test();
+    RegistryGuard(g)
+}
+
+async fn orch_with_bus(
+    cwd: std::path::PathBuf,
+    map: tool_api::read_file_state::ReadFileStateMap,
+    sink: Arc<telemetry::InMemorySink>,
+) -> ConversationOrchestrator {
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
+    bus.attach_sink(sink).await;
+    let config = OrchestratorConfig {
+        plans_directory: Some("plans".to_string()),
+        ..OrchestratorConfig::default()
+    };
+    ConversationOrchestrator::new(
+        config,
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::with_files(vec![])),
+        cwd,
+    )
+    .with_analytics_bus(bus)
+    .with_read_state_map(map)
+}
+
+fn restore_names(events: &[telemetry::RecordedEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter(|e| e.name.starts_with("tengu_post_compact_file_restore"))
+        .map(|e| e.name.clone())
+        .collect()
+}
+
+async fn register_invoked_skill(
+    orch: &ConversationOrchestrator,
+    name: &str,
+    path: &std::path::Path,
+    content: &str,
+    agent_id: Option<&str>,
+) {
+    let session_id = orch.session.lock().await.session_id.to_string();
+    compaction::invoked_skills::register_scoped(
+        name,
+        path,
+        content,
+        compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), agent_id),
+    );
+}
+
+#[tokio::test]
+async fn reread_restores_fresh_content_not_stale_snapshot() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("live.txt");
+    // Snapshot recorded "OLD"; on disk the file now holds "NEW CONTENT".
+    std::fs::write(&path, "NEW CONTENT").expect("write file");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    set(&map, path.clone(), stale_entry("OLD STALE SNAPSHOT"));
+
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+    let restored = orch.restore_post_compact_attachments().await;
+    assert_eq!(restored.len(), 1, "the live file is restored");
+    let body = restored[0].text_content();
+    assert!(
+        body.contains("NEW CONTENT"),
+        "must restore FRESH disk content; got: {body}"
+    );
+    assert!(
+        !body.contains("OLD STALE SNAPSHOT"),
+        "must NOT restore the stale snapshot content; got: {body}"
+    );
+
+    // Exactly one success event fired, no error event.
+    assert_eq!(
+        restore_names(&sink.events().await),
+        vec!["tengu_post_compact_file_restore_success".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn oversized_reread_uses_exact_compact_file_reference_attachment() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("large.txt");
+    std::fs::write(&path, "x".repeat(20_001)).expect("write file");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    set(&map, path.clone(), stale_entry("stale"));
+
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+    let restored = orch.restore_post_compact_attachments().await;
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        restored[0].text_content(),
+        format!(
+            "<system-reminder>\nNote: {} was read before the last conversation was summarized, but the contents are too large to include. Use Read tool if you need to access it.\n</system-reminder>",
+            path.display()
+        )
+    );
+    assert_eq!(
+        restore_names(&sink.events().await),
+        vec!["tengu_post_compact_file_restore_success".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn preserved_file_attachment_is_not_restored_twice() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("already.txt");
+    std::fs::write(&path, "current").expect("write file");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    set(&map, path.clone(), stale_entry("stale"));
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+    let boundary = protocol::ConversationMessage::user_meta(
+        protocol::MessageId::new(),
+        format!(
+            "<system-reminder>\nReferenced file {} (restored after compaction):\ncurrent\n</system-reminder>",
+            path.display()
+        ),
+    );
+
+    let restored = orch
+        .restore_post_compact_attachments_against(&[boundary])
+        .await;
+    assert!(restored.is_empty());
+    assert!(restore_names(&sink.events().await).is_empty());
+}
+
+#[tokio::test]
+async fn preserved_oversized_reference_and_escaped_path_are_not_restored_twice() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("already<&>.txt");
+    std::fs::write(&path, "current").expect("write file");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    set(&map, path.clone(), stale_entry("stale"));
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+    let escaped = crate::prompt::sanitize::escape_reminder_path(&path.to_string_lossy());
+    let boundary = protocol::ConversationMessage::user_meta(
+        protocol::MessageId::new(),
+        format!(
+            "<system-reminder>\nNote: {escaped} was read before the last conversation was summarized, but the contents are too large to include. Use Read tool if you need to access it.\n</system-reminder>"
+        ),
+    );
+
+    let restored = orch
+        .restore_post_compact_attachments_against(&[boundary])
+        .await;
+    assert!(restored.is_empty());
+    assert!(restore_names(&sink.events().await).is_empty());
+}
+
+#[tokio::test]
+async fn plan_file_is_excluded_from_post_compact_restore() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map.clone(), sink.clone()).await;
+    let session_id = orch.session.lock().await.session_id;
+    let path = std::path::PathBuf::from(ConversationOrchestrator::plan_file_path(
+        &session_id,
+        dir.path(),
+        Some("plans"),
+    ));
+    std::fs::create_dir_all(path.parent().expect("plans parent")).expect("create plans dir");
+    std::fs::write(&path, "secret plan").expect("write plan");
+    set(&map, path, stale_entry("stale plan"));
+
+    let restored = orch.restore_post_compact_attachments().await;
+    assert!(restored.is_empty());
+    assert!(restore_names(&sink.events().await).is_empty());
+}
+
+#[tokio::test]
+async fn deleted_file_is_dropped_and_fires_error_event() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A path recorded in the snapshot but never written to disk (deleted).
+    let missing = dir.path().join("gone.txt");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    set(
+        &map,
+        missing,
+        stale_entry("content the model saw before deletion"),
+    );
+
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+    let restored = orch.restore_post_compact_attachments().await;
+    assert!(
+        restored.is_empty(),
+        "an unreadable/deleted file must be dropped, not restored from the stale snapshot"
+    );
+    assert_eq!(
+        restore_names(&sink.events().await),
+        vec!["tengu_post_compact_file_restore_error".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn host_seed_snapshot_is_not_restored_and_remains_cached() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("seeded.txt");
+    std::fs::write(&path, "seeded on disk").expect("write file");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    tool_api::read_file_state::set_with_model_context(
+        &map,
+        path.clone(),
+        stale_entry("host seed snapshot"),
+        false,
+    );
+
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map.clone(), sink.clone()).await;
+
+    let restored = orch.restore_post_compact_attachments().await;
+    assert!(
+        restored.is_empty(),
+        "host-seeded snapshots must not be restored into model context"
+    );
+    assert!(restore_names(&sink.events().await).is_empty());
+    assert!(
+        tool_api::read_file_state::get(&map, &path).is_some(),
+        "host-seeded snapshot must stay cached for staleness/dedup after compaction"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_compact_keeps_model_visible_read_state_untouched() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("live.txt");
+    std::fs::write(&path, "current").expect("write file");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    set(&map, path.clone(), stale_entry("model-visible snapshot"));
+    let orch = orch_with_bus(
+        dir.path().to_path_buf(),
+        map.clone(),
+        Arc::new(telemetry::InMemorySink::new()),
+    )
+    .await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let result = compaction::IterationCompactionResult {
+        messages: vec![ConversationMessage::user(
+            MessageId::new(),
+            "summary".to_string(),
+        )],
+        layers_applied: vec![compaction::CompactionLayer::Autocompact],
+        total_tokens_freed: 1,
+        cache_hit: false,
+        consecutive_failures: 0,
+        was_compacted: true,
+        rapid_refill_breaker_tripped: false,
+        consecutive_rapid_refills: 0,
+        messages_to_preserve: Vec::new(),
+        media_analysis_to_preserve: Vec::new(),
+        compaction_usage: None,
+        compaction_model: None,
+    };
+
+    let applied = orch
+        .apply_post_compact(
+            result,
+            compaction::CompactTrigger::Manual,
+            1,
+            1,
+            1,
+            std::time::Instant::now(),
+            Some(&cancel),
+        )
+        .await;
+
+    assert!(applied.is_none());
+    assert_eq!(
+        tool_api::read_file_state::get(&map, &path)
+            .expect("cancel must preserve read-state")
+            .content,
+        "model-visible snapshot"
+    );
+}
+
+#[tokio::test]
+async fn success_and_error_events_fire_per_file() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let live = dir.path().join("a.txt");
+    std::fs::write(&live, "alive").expect("write file");
+    let gone = dir.path().join("b.txt"); // never created
+
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    // Higher mtime → selected/re-read first (DESC), but ordering of the two
+    // telemetry events is not asserted — only the multiset.
+    set(&map, live.clone(), stale_entry("stale-a"));
+    set(&map, gone, stale_entry("stale-b"));
+
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+    let restored = orch.restore_post_compact_attachments().await;
+    assert_eq!(restored.len(), 1, "only the live file survives");
+    assert!(restored[0].text_content().contains("alive"));
+
+    let mut names = restore_names(&sink.events().await);
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "tengu_post_compact_file_restore_error".to_string(),
+            "tengu_post_compact_file_restore_success".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn empty_read_state_restores_nothing_and_fires_no_events() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+    let restored = orch.restore_post_compact_attachments().await;
+    assert!(restored.is_empty());
+    assert!(restore_names(&sink.events().await).is_empty());
+}
+
+// ── P2-12: post-compact SKILL restoration (`rRg`) ─────────────────────────
+
+#[tokio::test]
+async fn invoked_skill_reappears_as_attachment_post_compact() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    // No files read this turn — the skill arm must still run.
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+    // A skill was invoked before the compaction (main thread → agentId None).
+    register_invoked_skill(
+        &orch,
+        "deploy",
+        std::path::Path::new("/skills/deploy"),
+        "Deploy guidelines: run the pipeline.",
+        None,
+    )
+    .await;
+
+    let restored = orch.restore_post_compact_attachments().await;
+    assert_eq!(restored.len(), 1, "one invoked_skills meta message");
+    let body = restored[0].text_content();
+    assert!(
+        body.contains("The following skills were invoked EARLIER in this session"),
+        "byte-faithful invoked_skills preamble; got: {body}"
+    );
+    assert!(body.contains("### Skill: deploy"));
+    assert!(body.contains("Path: /skills/deploy"));
+    assert!(body.contains("Deploy guidelines: run the pipeline."));
+
+    // The registry SURVIVES compaction (not cleared) — a second restore still
+    // sees the skill (documented no-clear rationale).
+    let again = orch.restore_post_compact_attachments().await;
+    assert_eq!(again.len(), 1, "registry survives compaction");
+    assert!(again[0].text_content().contains("### Skill: deploy"));
+}
+
+#[tokio::test]
+async fn invoked_skill_split_surrogate_reaches_attachment_with_exact_utf16_sidecar() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let orch = orch_with_bus(
+        dir.path().to_path_buf(),
+        tool_api::read_file_state::new_read_file_state_map(),
+        Arc::new(telemetry::InMemorySink::new()),
+    )
+    .await;
+    let body = format!("{}😀{}", "x".repeat(19_899), "y".repeat(200));
+    register_invoked_skill(
+        &orch,
+        "utf16",
+        std::path::Path::new("/skills/utf16"),
+        &body,
+        None,
+    )
+    .await;
+
+    let restored = orch.restore_post_compact_attachments().await;
+
+    assert_eq!(restored.len(), 1);
+    let protocol::ConversationMessage::User { content, .. } = &restored[0] else {
+        panic!("post-compact attachment must be a user message");
+    };
+    let protocol::ContentBlock::TextJsUtf16 {
+        utf16_code_units, ..
+    } = &content[0]
+    else {
+        panic!("split surrogate attachment must retain its UTF-16 sidecar");
+    };
+    assert!(
+        utf16_code_units
+            .windows(2)
+            .any(|window| window == [0xD83D, 0x000A]),
+        "exact attachment must retain the high surrogate before the truncation marker"
+    );
+}
+
+#[tokio::test]
+async fn invoked_skill_never_restores_into_another_session() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = orch_with_bus(
+        dir.path().to_path_buf(),
+        tool_api::read_file_state::new_read_file_state_map(),
+        Arc::new(telemetry::InMemorySink::new()),
+    )
+    .await;
+    let other = orch_with_bus(
+        dir.path().to_path_buf(),
+        tool_api::read_file_state::new_read_file_state_map(),
+        Arc::new(telemetry::InMemorySink::new()),
+    )
+    .await;
+    assert_ne!(
+        source.session.lock().await.session_id,
+        other.session.lock().await.session_id
+    );
+    register_invoked_skill(
+        &source,
+        "deploy",
+        std::path::Path::new("/skills/deploy"),
+        "source-only body",
+        None,
+    )
+    .await;
+
+    assert!(other.restore_post_compact_attachments().await.is_empty());
+    let restored = source.restore_post_compact_attachments().await;
+    assert_eq!(restored.len(), 1);
+    assert!(restored[0].text_content().contains("source-only body"));
+}
+
+#[tokio::test]
+async fn invoked_skill_already_in_preserved_attachment_is_not_duplicated() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink).await;
+
+    let content = "Deploy guidelines: run the pipeline.";
+    register_invoked_skill(
+        &orch,
+        "deploy",
+        std::path::Path::new("/skills/deploy"),
+        content,
+        None,
+    )
+    .await;
+    let preserved = orch.restore_post_compact_attachments().await;
+    assert_eq!(preserved.len(), 1, "first compaction restores the skill");
+
+    let restored = orch
+        .restore_post_compact_attachments_against(&preserved)
+        .await;
+    assert!(
+        restored.is_empty(),
+        "preserved invoked-skills content must not be emitted twice"
+    );
+}
+
+#[tokio::test]
+async fn invoked_skill_with_markdown_separator_is_deduped_without_parsing_its_content() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink).await;
+
+    let content = "Deploy the first stage.\n\n---\n\nThen deploy the second stage.";
+    register_invoked_skill(
+        &orch,
+        "deploy",
+        std::path::Path::new("/skills/deploy"),
+        content,
+        None,
+    )
+    .await;
+
+    let first = orch.restore_post_compact_attachments().await;
+    assert_eq!(first.len(), 1, "first compaction restores the skill");
+
+    let persisted = orch.to_jsonl_message(&first[0], "session", None, None, None, None);
+    let persisted: session::JsonlMessage = serde_json::from_str(
+        &serde_json::to_string(&persisted).expect("serialize attachment metadata"),
+    )
+    .expect("round-trip attachment metadata");
+    assert_eq!(
+        persisted
+            .extra
+            .get("invokedSkillContents")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|contents| contents.first())
+            .and_then(serde_json::Value::as_str),
+        Some(content),
+        "the opaque body must be persisted without delimiter parsing"
+    );
+
+    let resumed = orch_with_bus(
+        dir.path().to_path_buf(),
+        tool_api::read_file_state::new_read_file_state_map(),
+        Arc::new(telemetry::InMemorySink::new()),
+    )
+    .await;
+    resumed
+        .restore_resume_runtime_metadata(std::slice::from_ref(&persisted))
+        .await;
+    let replayed =
+        crate::state_from_messages(uuid::Uuid::new_v4(), std::slice::from_ref(&persisted));
+    let restored = resumed
+        .restore_post_compact_attachments_against(&replayed.history)
+        .await;
+    assert!(
+        restored.is_empty(),
+        "resume followed by compact must preserve structural dedup even when Markdown contains the renderer separator"
+    );
+}
+
+#[tokio::test]
+async fn no_invoked_skills_restores_no_skill_message() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+    // Empty registry → no skill attachment (and no file snapshot → nothing).
+    let restored = orch.restore_post_compact_attachments().await;
+    assert!(restored.is_empty());
+}
+
+#[tokio::test]
+async fn subagent_skill_not_restored_on_main_thread() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let map = tool_api::read_file_state::new_read_file_state_map();
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+    // A skill invoked under a subagent (agentId Some) must NOT surface on the
+    // main-thread (agentId None) restore — `kGo` filters by agentId.
+    register_invoked_skill(
+        &orch,
+        "child-skill",
+        std::path::Path::new("/skills/child"),
+        "child body",
+        Some("agent:child"),
+    )
+    .await;
+
+    let restored = orch.restore_post_compact_attachments().await;
+    assert!(
+        restored.is_empty(),
+        "subagent skill must not restore on the main thread"
+    );
+}

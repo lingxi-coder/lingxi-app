@@ -1,7 +1,7 @@
 //! Anti-drift: every per-turn reminder must be injected by BOTH turn drivers.
 //!
 //! claude-code has ONE main loop. LingXi has two — the batched `turn_loop.rs`
-//! and the streaming driver inside `conversation.rs` — and a reminder wired
+//! and the streaming driver under `conversation/drivers` — and a reminder wired
 //! into only one of them is invisible in exactly one mode. That failure is
 //! silent: the feature works when you test it, and does nothing in production
 //! if production runs the other driver.
@@ -13,7 +13,8 @@
 //! has actually been made.
 
 const BATCHED: &str = include_str!("../src/turn_loop.rs");
-const STREAMING: &str = include_str!("../src/conversation.rs");
+const STREAMING: &str = include_str!("../src/conversation/drivers/mod.rs");
+const PROMPT_PIPELINE: &str = include_str!("../src/conversation/prompt.rs");
 
 /// Reminders that must appear in both drivers. Add a row when you add a
 /// reminder — the point is that forgetting the second driver fails here.
@@ -26,9 +27,7 @@ const TWIN_REMINDERS: &[&str] = &[
 ];
 
 /// Count DRIVER call sites only. The receiver disambiguates: the streaming
-/// driver is a method on the orchestrator (`self.`), the batched driver takes
-/// it as a parameter (`orch.`), and the in-file unit tests use a local binding
-/// also named `orch` — which is why the streaming count keys on `self.`.
+/// driver and the batched driver both name their orchestrator binding `orch`.
 fn call_sites(src: &str, receiver: &str, name: &str) -> usize {
     src.matches(&format!("{receiver}.{name}().await")).count()
 }
@@ -42,10 +41,10 @@ fn every_per_turn_reminder_is_injected_by_both_drivers() {
             "{name} must be invoked exactly once by the BATCHED driver (turn_loop.rs)"
         );
         assert_eq!(
-            call_sites(STREAMING, "self", name),
+            call_sites(STREAMING, "orch", name),
             1,
             "{name} must be invoked exactly once by the STREAMING driver \
-             (conversation.rs). A reminder wired into only the batched driver \
+             (conversation/drivers/mod.rs). A reminder wired into only the batched driver \
              is a streaming-only regression that no unit test will catch."
         );
     }
@@ -86,7 +85,7 @@ fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
     // disambiguates the two drivers, as in `call_sites` above.
     assert_eq!(
         STREAMING
-            .matches("self.prepend_leading_context(&mut snapshot).await")
+            .matches("orch.prepend_leading_context(&mut snapshot).await")
             .count(),
         1,
         "the STREAMING driver must hand-roll exactly one assembly (the main \
@@ -105,27 +104,29 @@ fn every_rebuilt_request_snapshot_re_appends_the_turn_reminders() {
     // fallback in streaming; the three rebuilds inside
     // `call_api_with_ptl_recovery` in batched.
     assert_eq!(
-        STREAMING.matches("self.reattach_outgoing_context(").count(),
+        STREAMING.matches("orch.reattach_outgoing_context(").count(),
         3,
         "STREAMING rebuilds (529 fallback, PTL retry, non-streaming fallback) \
          must each reattach; a rebuild that does not silently drops reminders"
     );
     assert_eq!(
         BATCHED.matches("orch.reattach_outgoing_context(").count(),
-        3,
-        "BATCHED rebuilds inside call_api_with_ptl_recovery must each reattach"
+        4,
+        "BATCHED recovery and context-collapse rebuilds must each reattach"
     );
 
     // Routing through the helper only proves anything while the helper still
-    // re-appends. Two sites in the streaming file: the main path, and the one
-    // inside `reattach_outgoing_context` itself (which the batched driver also
-    // calls — the helper lives on the orchestrator, in conversation.rs).
+    // re-appends. The streaming main path lives in the driver; the shared
+    // `reattach_outgoing_context` helper lives in the prompt pipeline.
     assert_eq!(
         STREAMING.matches(EXTEND).count(),
-        2,
-        "conversation.rs must re-append on the main path AND inside \
-         reattach_outgoing_context; losing the latter silently un-does every \
-         rebuild path in BOTH drivers"
+        1,
+        "the streaming main path must append this step's reminders"
+    );
+    assert_eq!(
+        PROMPT_PIPELINE.matches(EXTEND).count(),
+        1,
+        "the shared prompt pipeline must re-append reminders on every rebuild"
     );
     assert_eq!(
         BATCHED.matches(EXTEND).count(),

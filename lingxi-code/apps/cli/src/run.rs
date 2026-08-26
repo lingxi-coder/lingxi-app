@@ -3026,9 +3026,23 @@ async fn resume_resolved_session(
     // continues the *resumed* conversation only when the orchestrator carries
     // the replayed history — but the supplied `runtime` is the standard
     // sink-adapter build, so seed its session here too before running.
+    let (resolved_permission_mode, _notice) = crate::resolve_permission_mode(argv);
+    let explicit_permission_mode = resume_has_explicit_permission_mode(argv);
     if let Some(p) = &argv.prompt {
         if !p.trim().is_empty() {
-            seed_orchestrator_session(&runtime.orchestrator, session_id, &messages).await;
+            if let Err(error) = seed_orchestrator_session(
+                &runtime.orchestrator,
+                session_id,
+                &messages,
+                resolved_permission_mode,
+                explicit_permission_mode,
+            )
+            .await
+            {
+                sink.error("runtime", &format!("resume permission mode: {error}"))
+                    .await;
+                return exit_codes::RUNTIME_ERROR;
+            }
             let entries = match load_resume_entries(session_id).await {
                 Ok(entries) => entries,
                 Err(error) => {
@@ -3143,6 +3157,8 @@ async fn mount_resumed_tui_inner(
     if resumed_argv.effort.is_none() {
         resumed_argv.effort = orchestrator::runtime_metadata_from_messages(&messages).effort;
     }
+    let (resolved_permission_mode, _notice) = crate::resolve_permission_mode(&resumed_argv);
+    let explicit_permission_mode = resume_has_explicit_permission_mode(argv);
     // Build with the RESUMED session id as the JSONL writer's file name, so new
     // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
     // fresh-uuid file — the fix for resume splitting a conversation across files.
@@ -3162,7 +3178,22 @@ async fn mount_resumed_tui_inner(
     };
     // ENGINE seed: replay the transcript into the orchestrator's session so a
     // live turn continues the prior conversation.
-    seed_orchestrator_session(&tui_build.runtime.orchestrator, session_id, &messages).await;
+    let effective_permission_mode = match seed_orchestrator_session(
+        &tui_build.runtime.orchestrator,
+        session_id,
+        &messages,
+        resolved_permission_mode,
+        explicit_permission_mode,
+    )
+    .await
+    {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("lingxi-cli: resume permission mode failed: {error}");
+            return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+        }
+    };
+    tui_build.initial_permission_mode = effective_permission_mode;
     let entries = match load_resume_entries(session_id).await {
         Ok(entries) => entries,
         Err(error) => {
@@ -3619,8 +3650,18 @@ pub(crate) async fn seed_orchestrator_session(
     orchestrator: &Arc<orchestrator::ConversationOrchestrator>,
     session_id: uuid::Uuid,
     messages: &[JsonlMessage],
-) {
+    resolved_permission_mode: permission::PermissionMode,
+    explicit_cli_permission_mode: bool,
+) -> Result<permission::PermissionMode, String> {
     let replayed = orchestrator::state_from_messages(session_id, messages);
+    let effective_permission_mode = effective_resume_permission_mode(
+        resolved_permission_mode,
+        explicit_cli_permission_mode,
+        replayed.plan_mode,
+    );
+    orchestrator
+        .set_permission_mode(effective_permission_mode.wire_str())
+        .await?;
     // Seed the parent-uuid chain off the resumed transcript's tail so the first
     // append after resume chains cleanly (the writer file is the same
     // `<session_id>.jsonl` when built via `build_runtime_for_tui_inner`).
@@ -3650,11 +3691,34 @@ pub(crate) async fn seed_orchestrator_session(
     // the safe global-by-model-id fallback instead of keeping the launch
     // default provider's stale routing hint.
     session.model_profile = replayed.model_profile;
+    session.plan_mode = effective_permission_mode == permission::PermissionMode::Plan;
+    if session.plan_mode {
+        session.plan_reminder_shown = false;
+    }
     drop(session);
     orchestrator
         .sync_active_goal_stop_hook_for_current_state()
         .await;
     orchestrator.restore_resume_runtime_metadata(messages).await;
+    Ok(effective_permission_mode)
+}
+
+fn resume_has_explicit_permission_mode(argv: &Argv) -> bool {
+    argv.permission_mode.is_some() || argv.dangerously_skip_permissions
+}
+
+fn effective_resume_permission_mode(
+    resolved_permission_mode: permission::PermissionMode,
+    explicit_cli_permission_mode: bool,
+    replayed_plan_mode: bool,
+) -> permission::PermissionMode {
+    if explicit_cli_permission_mode {
+        resolved_permission_mode
+    } else if replayed_plan_mode {
+        permission::PermissionMode::Plan
+    } else {
+        resolved_permission_mode
+    }
 }
 
 /// `--resume` (no id) under `--no-tui` / non-TTY — the UNCHANGED M5-08 stdio
@@ -4363,7 +4427,15 @@ mod tests {
         }))
         .expect("valid JsonlMessage");
         let messages = vec![jsonl_line("user", &serde_json::json!("hi")), assistant];
-        seed_orchestrator_session(&build.runtime.orchestrator, Uuid::new_v4(), &messages).await;
+        seed_orchestrator_session(
+            &build.runtime.orchestrator,
+            Uuid::new_v4(),
+            &messages,
+            permission::PermissionMode::Default,
+            false,
+        )
+        .await
+        .expect("resume seed");
 
         let handle = build.runtime.orchestrator.session();
         let s = handle.lock().await;
@@ -4450,7 +4522,15 @@ mod tests {
             jsonl_line("user", &serde_json::json!("hello from the past")),
             jsonl_line("assistant", &serde_json::json!("hi, welcome back")),
         ];
-        seed_orchestrator_session(&build.runtime.orchestrator, resumed_id, &messages).await;
+        seed_orchestrator_session(
+            &build.runtime.orchestrator,
+            resumed_id,
+            &messages,
+            permission::PermissionMode::Default,
+            false,
+        )
+        .await
+        .expect("resume seed");
 
         let handle = build.runtime.orchestrator.session();
         let s = handle.lock().await;
@@ -4473,6 +4553,141 @@ mod tests {
             &s.history[1],
             protocol::ConversationMessage::Assistant { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn seed_resume_restores_open_plan_without_an_explicit_mode() {
+        let argv = tui_argv();
+        let build = crate::init::build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+        let sid = Uuid::new_v4();
+        let plan_line: JsonlMessage = serde_json::from_value(serde_json::json!({
+            "type": "user",
+            "uuid": Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": sid.to_string(),
+            "timestamp": "2026-08-25T12:00:00.000Z",
+            "cwd": "/tmp/workproj",
+            "version": "0.12.0",
+            "permissionMode": "plan",
+            "message": {"role": "user", "content": "continue the plan"}
+        }))
+        .expect("valid plan line");
+
+        let effective = seed_orchestrator_session(
+            &build.runtime.orchestrator,
+            sid,
+            std::slice::from_ref(&plan_line),
+            permission::PermissionMode::Default,
+            false,
+        )
+        .await
+        .expect("resume seed");
+        assert_eq!(effective, permission::PermissionMode::Plan);
+        assert!(build.runtime.orchestrator.plan_mode().await);
+        assert_eq!(
+            build.runtime.orchestrator.permission_mode().as_deref(),
+            Some("plan"),
+            "resume must push the enforcing gate into plan mode too"
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_resume_preserves_an_explicit_plan_mode() {
+        let argv = tui_argv();
+        let build = crate::init::build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+        let sid = Uuid::new_v4();
+        let plan_line: JsonlMessage = serde_json::from_value(serde_json::json!({
+            "type": "user",
+            "uuid": Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": sid.to_string(),
+            "timestamp": "2026-08-25T12:00:00.000Z",
+            "cwd": "/tmp/workproj",
+            "version": "0.12.0",
+            "permissionMode": "plan",
+            "message": {"role": "user", "content": "continue the plan"}
+        }))
+        .expect("valid plan line");
+
+        let effective = seed_orchestrator_session(
+            &build.runtime.orchestrator,
+            sid,
+            std::slice::from_ref(&plan_line),
+            permission::PermissionMode::Plan,
+            true,
+        )
+        .await
+        .expect("resume seed");
+        assert_eq!(effective, permission::PermissionMode::Plan);
+        assert!(build.runtime.orchestrator.plan_mode().await);
+        assert_eq!(
+            build.runtime.orchestrator.permission_mode().as_deref(),
+            Some("plan"),
+            "an explicit --permission-mode plan must keep the session and gate in plan mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_resume_suppresses_transcript_plan_when_cli_mode_is_explicitly_non_plan() {
+        let argv = tui_argv();
+        let build = crate::init::build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+        let sid = Uuid::new_v4();
+        let plan_line: JsonlMessage = serde_json::from_value(serde_json::json!({
+            "type": "user",
+            "uuid": Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": sid.to_string(),
+            "timestamp": "2026-08-25T12:00:00.000Z",
+            "cwd": "/tmp/workproj",
+            "version": "0.12.0",
+            "permissionMode": "plan",
+            "message": {"role": "user", "content": "continue the plan"}
+        }))
+        .expect("valid plan line");
+
+        let effective = seed_orchestrator_session(
+            &build.runtime.orchestrator,
+            sid,
+            std::slice::from_ref(&plan_line),
+            permission::PermissionMode::Default,
+            true,
+        )
+        .await
+        .expect("resume seed");
+        assert_eq!(effective, permission::PermissionMode::Default);
+        assert!(
+            !build.runtime.orchestrator.plan_mode().await,
+            "an explicit invocation mode must suppress transcript plan restoration"
+        );
+        assert_eq!(
+            build.runtime.orchestrator.permission_mode().as_deref(),
+            Some("default"),
+            "the enforcing gate must stay aligned with the explicit non-plan mode"
+        );
+    }
+
+    #[test]
+    fn dangerously_skip_permissions_counts_as_an_explicit_resume_override() {
+        let mut argv = tui_argv();
+        argv.dangerously_skip_permissions = true;
+        assert!(
+            resume_has_explicit_permission_mode(&argv),
+            "--dangerously-skip-permissions must suppress transcript plan restoration just like an explicit --permission-mode"
+        );
+        assert_eq!(
+            effective_resume_permission_mode(
+                permission::PermissionMode::BypassPermissions,
+                resume_has_explicit_permission_mode(&argv),
+                true,
+            ),
+            permission::PermissionMode::BypassPermissions
+        );
     }
 
     // ── P5 Phase 3: pure control-arm classification ──────────────────────────

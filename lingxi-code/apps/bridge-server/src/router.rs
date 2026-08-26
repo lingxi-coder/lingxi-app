@@ -1021,7 +1021,36 @@ impl CommandRouter for EngineCommandRouter {
                 };
 
                 let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
+                let resume_plan_mode = replayed.state.plan_mode;
+                let previous_permission_mode = self
+                    .handle
+                    .permission_mode()
+                    .await
+                    .unwrap_or_else(|| "default".to_string());
+                let previous_plan_mode = self.handle.plan_mode().await;
                 let runtime_snapshot = replayed.handle_runtime_snapshot();
+                if resume_plan_mode {
+                    if let Err(error) = self.handle.set_permission_mode("plan").await {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: format!("resume plan permission mode failed: {error}"),
+                        })
+                        .await;
+                        return;
+                    }
+                    if let Err(error) = self.handle.set_plan_mode(true).await {
+                        let _ = self
+                            .handle
+                            .set_permission_mode(&previous_permission_mode)
+                            .await;
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: format!("resume plan mode failed: {error}"),
+                        })
+                        .await;
+                        return;
+                    }
+                }
                 if let Err(error) =
                     self.handle
                         .resume_session(
@@ -1041,6 +1070,13 @@ impl CommandRouter for EngineCommandRouter {
                         )
                         .await
                 {
+                    if resume_plan_mode {
+                        let _ = self.handle.set_plan_mode(previous_plan_mode).await;
+                        let _ = self
+                            .handle
+                            .set_permission_mode(&previous_permission_mode)
+                            .await;
+                    }
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
                         message: format!("resume_session failed: {error}"),

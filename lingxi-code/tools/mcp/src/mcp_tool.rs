@@ -100,6 +100,23 @@ pub(crate) fn parse_full_name(full_name: &str) -> Result<(&str, &str), ToolError
     Ok((server, tool))
 }
 
+/// Claude Code 2.1.246 accepts non-object MCP arguments when the server's
+/// input schema is the literal empty schema `{}`. Model providers can surface
+/// those arguments as a JSON-encoded string; decode that one transport artifact
+/// before forwarding the value to the MCP server. A non-empty schema retains
+/// the provider value verbatim, and malformed JSON remains a string.
+fn normalize_empty_schema_arguments(schema: Option<&Value>, input: Value) -> Value {
+    let has_empty_schema = matches!(schema, Some(Value::Object(object)) if object.is_empty());
+    if !has_empty_schema {
+        return input;
+    }
+
+    match input {
+        Value::String(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| Value::String(raw)),
+        other => other,
+    }
+}
+
 /// Assemble the optional `mcp_meta` passthrough for a surfaced tool result.
 ///
 /// Mirrors claude-code (`services/mcp/client.ts:1897-1909`): the surfaced
@@ -860,7 +877,10 @@ impl Tool for MCPTool {
         // `callMCPToolWithUrlElicitationRetry` (client.ts:1766-1990). The
         // generic dispatcher path keeps reading `full_name`/`arguments`.
         let (full_name, arguments) = match &self.full_name {
-            Some(fqn) => (fqn.clone(), input),
+            Some(fqn) => (
+                fqn.clone(),
+                normalize_empty_schema_arguments(self.bound_schema.as_ref(), input),
+            ),
             None => {
                 let fqn = input
                     .get("full_name")
@@ -1977,6 +1997,45 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn empty_schema_decodes_json_encoded_argument_types() {
+        let schema = json!({});
+
+        assert_eq!(
+            normalize_empty_schema_arguments(Some(&schema), json!(r#"[1,2]"#)),
+            json!([1, 2])
+        );
+        assert_eq!(
+            normalize_empty_schema_arguments(Some(&schema), json!("42")),
+            json!(42)
+        );
+        assert_eq!(
+            normalize_empty_schema_arguments(Some(&schema), json!("true")),
+            json!(true)
+        );
+        assert_eq!(
+            normalize_empty_schema_arguments(Some(&schema), json!([1, 2])),
+            json!([1, 2]),
+            "already typed arguments remain unchanged"
+        );
+    }
+
+    #[test]
+    fn empty_schema_preserves_invalid_json_and_nonempty_schema_strings() {
+        let empty_schema = json!({});
+        assert_eq!(
+            normalize_empty_schema_arguments(Some(&empty_schema), json!("not-json")),
+            json!("not-json")
+        );
+
+        let object_schema = json!({"type":"object","properties":{}});
+        assert_eq!(
+            normalize_empty_schema_arguments(Some(&object_schema), json!(r#"[1,2]"#)),
+            json!(r#"[1,2]"#),
+            "only the literal empty schema relaxes argument typing"
+        );
     }
 
     #[test]

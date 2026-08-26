@@ -66,59 +66,20 @@ impl ConversationOrchestrator {
     async fn reset_session_scoped_runtime(&self) {
         let session_id = self.session.lock().await.session_id.to_string();
         compaction::invoked_skills::clear_session(&session_id);
-        if let Some(compactor) = self.compaction.as_ref() {
-            let _ = compactor.context_collapse.reset("session_boundary");
-        }
-        if let Some(handle) = self.session_memory.as_ref() {
-            let mut extractor = handle.extractor.lock().await;
-            handle
-                .generation
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            extractor.reset();
-        }
-        if let Some(tracker) = self.cost_tracker.as_ref() {
-            tracker.reset().await;
-        }
-        self.api_calls_recorded.store(0, Ordering::SeqCst);
-        self.last_api_call_at_ms.store(-1, Ordering::SeqCst);
-        *self
-            .session_started_at
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = std::time::Instant::now();
-        self.last_response_input_tokens.store(0, Ordering::Relaxed);
-        self.output_token_pool.store(0, Ordering::Relaxed);
-        self.turn_start_output_baseline.store(0, Ordering::Relaxed);
-        self.refusal_fallback_latched.store(false, Ordering::SeqCst);
-        // The cascade's tried-models list resets WITH the latch: a cleared
-        // session must be able to route to the same fallback again, and leaving
-        // the list populated would make every stage look already-tried.
-        self.refusal_tried_models
-            .try_lock()
-            .map(|mut v| v.clear())
-            .ok();
+        self.compaction_runtime
+            .reset_context_collapse_and_session_memory()
+            .await;
+        self.model_runtime.reset_cost_and_api_accounting().await;
+        self.compaction_runtime.reset_token_accounting();
+        self.model_runtime.reset_refusal_fallback();
 
         self.tools
             .deferral()
             .replace_loaded(std::iter::empty::<String>());
-        self.read_state_map
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain()
-            .for_each(drop);
-        self.post_compact_skill_attachments
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        self.prompt_runtime.reset_read_state();
+        self.transcript.reset_session_scoped().await;
         self.orphan_forced_decisions.lock().await.clear();
-        self.sent_conditional_rules.lock().await.clear();
-        self.sent_nested_memory.lock().await.clear();
-        self.sent_skill_names.lock().await.clear();
-        self.sent_agent_names.lock().await.clear();
-        self.surfaced_memory_paths.lock().await.clear();
-        self.surfaced_skill_names.lock().await.clear();
-        *self.current_turn_system_prompt.lock().await = None;
-        *self.pending_memory_prefetch.lock().await = None;
-        *self.pending_skill_prefetch.lock().await = None;
+        self.prompt_runtime.reset_session_scoped().await;
     }
 }
 
@@ -147,12 +108,13 @@ impl OrchestratorHandle for ConversationOrchestrator {
         s.message_timing = engine::session::MessageTimingState::default();
         s.session_id = protocol::SessionId::new();
         let new_session_id = s.session_id.to_string();
-        self.compaction_cumulative_dropped_tokens
+        self.compaction_runtime
+            .compaction_cumulative_dropped_tokens
             .store(0, std::sync::atomic::Ordering::Relaxed);
         // Reset the JSONL parent-uuid chain (M5-07) since we minted a new
         // session id; downstream appends should not chain to the prior
         // session's last entry.
-        *self.last_jsonl_uuid.lock().await = None;
+        *self.transcript.last_jsonl_uuid.lock().await = None;
         drop(s);
         self.invoked_skill_session_guard.replace(new_session_id);
         // (review #8) Reset the autocompact circuit-breaker / rapid-refill
@@ -163,7 +125,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // the freshly-cleared session — permanently disabling autocompact there
         // (a tripped breaker only clears on a successful compact, which can then
         // never run). Zero it alongside the cumulative-dropped-tokens reset.
-        *self.compaction_tracking.lock().await = compaction::AutoCompactTrackingState::default();
+        *self.compaction_runtime.compaction_tracking.lock().await =
+            compaction::AutoCompactTrackingState::default();
         // (parity 2.1.212) claude-code's clearConversation calls resetCostState
         // (yJe): a freshly-cleared session starts the cost footer/status line at
         // zero instead of carrying the prior conversation's accumulated total
@@ -231,6 +194,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         s.transcript_only_messages = runtime.transcript_only_message_ids.into_iter().collect();
         s.compact_summary_messages = runtime.compact_summary_message_ids.into_iter().collect();
         *self
+            .transcript
             .post_compact_skill_attachments
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -269,29 +233,33 @@ impl OrchestratorHandle for ConversationOrchestrator {
             runtime.main_thread_agent_definition,
         )
         .await;
-        self.compaction_cumulative_dropped_tokens.store(
-            runtime.cumulative_dropped_tokens,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        *self.compaction_tracking.lock().await = compaction::AutoCompactTrackingState {
-            compacted: runtime.compacted,
-            turn_counter: runtime.turn_counter,
-            turn_id: runtime.turn_id,
-            consecutive_failures: runtime.consecutive_failures,
-            consecutive_rapid_refills: runtime.consecutive_rapid_refills,
-            // Transient in-call state (SC-04); never restored from metadata.
-            ..Default::default()
-        };
+        self.compaction_runtime
+            .compaction_cumulative_dropped_tokens
+            .store(
+                runtime.cumulative_dropped_tokens,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        *self.compaction_runtime.compaction_tracking.lock().await =
+            compaction::AutoCompactTrackingState {
+                compacted: runtime.compacted,
+                turn_counter: runtime.turn_counter,
+                turn_id: runtime.turn_id,
+                consecutive_failures: runtime.consecutive_failures,
+                consecutive_rapid_refills: runtime.consecutive_rapid_refills,
+                // Transient in-call state (SC-04); never restored from metadata.
+                ..Default::default()
+            };
         self.tools
             .deferral()
             .replace_loaded(runtime.loaded_tool_names);
         // Seed the parent-uuid chain so any future append chains off the
         // resumed tail (matching the M5-07 writer's chain semantics).
-        *self.last_jsonl_uuid.lock().await = last_jsonl_uuid;
-        self.refusal_fallback_latched
+        *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+        self.model_runtime
+            .refusal_fallback_latched
             .store(false, std::sync::atomic::Ordering::SeqCst);
         // …and so does the cascade's tried-models list (see `clear_session`).
-        self.refusal_tried_models.lock().await.clear();
+        self.model_runtime.refusal_tried_models.lock().await.clear();
         self.hooks.clear_session_hooks(old_session_id).await;
         self.sync_active_goal_stop_hook_for_current_state().await;
         if !runtime.deferred_tools.is_empty() {
@@ -654,7 +622,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// `sessionId` field is the BARE uuid (the `<uuid>.jsonl` stem the loader
     /// keys `custom_titles` by). No-op Ok when no writer is wired.
     async fn rename_session(&self, name: String) -> Result<(), HandleError> {
-        let Some(writer) = self.jsonl_writer.as_ref() else {
+        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return Ok(());
         };
         let session_id = self.session.lock().await.session_id;
@@ -762,7 +730,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn current_effort(&self) -> Option<String> {
-        self.current_effort
+        self.model_runtime
+            .current_effort
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -1018,7 +987,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn list_hooks(&self) -> Vec<HookInfo> {
         // M6-07: read the wired HookRegistry (Task 7).
-        let Some(reg) = self.hook_registry.as_ref() else {
+        let Some(reg) = self.lifecycle_runtime.hook_registry.as_ref() else {
             return Vec::new();
         };
         let g = reg.read().await;
@@ -1047,7 +1016,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn list_agents(&self) -> Vec<AgentInfo> {
         // M6-07: read the wired agent catalog (Task 7).
-        let Some(cat) = self.agent_catalog.as_ref() else {
+        let Some(cat) = self.lifecycle_runtime.agent_catalog.as_ref() else {
             return Vec::new();
         };
         let g = cat.read().await;
@@ -1239,7 +1208,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // intentionally filtered here because the model never saw them. An
         // empty visible cache still renders the locked "No files in context"
         // branch.
-        self.read_state_map
+        self.prompt_runtime
+            .read_state_map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .model_context_keys()
@@ -1672,7 +1642,8 @@ mod tests {
             std::env::temp_dir(),
         )
         .with_session_memory(handle.clone());
-        orch.sent_nested_memory
+        orch.prompt_runtime
+            .sent_nested_memory
             .lock()
             .await
             .insert(std::path::PathBuf::from("/old-session/nested.md"));
@@ -1691,7 +1662,11 @@ mod tests {
         assert_eq!(extractor.pending_tool_calls(), 0);
         drop(extractor);
         assert!(
-            orch.sent_nested_memory.lock().await.is_empty(),
+            orch.prompt_runtime
+                .sent_nested_memory
+                .lock()
+                .await
+                .is_empty(),
             "clear must not carry nested-memory sent state into the new session"
         );
         assert!(
@@ -1977,11 +1952,13 @@ mod tests {
         let compact_summary = protocol::MessageId::new();
         let skill_message = protocol::MessageId::new();
         tools.deferral().mark_loaded(["StaleTool"]);
-        orch.sent_skill_names
+        orch.prompt_runtime
+            .sent_skill_names
             .lock()
             .await
             .insert("stale-skill".to_string());
-        orch.last_response_input_tokens
+        orch.compaction_runtime
+            .last_response_input_tokens
             .store(99, std::sync::atomic::Ordering::Relaxed);
 
         traits::OrchestratorHandle::resume_session(
@@ -2023,11 +2000,12 @@ mod tests {
         assert!(session.compact_summary_messages.contains(&compact_summary));
         drop(session);
         assert_eq!(
-            orch.compaction_cumulative_dropped_tokens
+            orch.compaction_runtime
+                .compaction_cumulative_dropped_tokens
                 .load(std::sync::atomic::Ordering::Relaxed),
             4_321
         );
-        let tracking = orch.compaction_tracking.lock().await;
+        let tracking = orch.compaction_runtime.compaction_tracking.lock().await;
         assert!(tracking.compacted);
         assert_eq!(tracking.turn_counter, 3);
         assert_eq!(tracking.turn_id, "turn-after-compact");
@@ -2036,14 +2014,16 @@ mod tests {
         drop(tracking);
         assert!(tools.deferral().is_loaded("DeferredTool"));
         assert!(!tools.deferral().is_loaded("StaleTool"));
-        assert!(orch.sent_skill_names.lock().await.is_empty());
+        assert!(orch.prompt_runtime.sent_skill_names.lock().await.is_empty());
         assert_eq!(
-            orch.last_response_input_tokens
+            orch.compaction_runtime
+                .last_response_input_tokens
                 .load(std::sync::atomic::Ordering::Relaxed),
             0
         );
         assert_eq!(
-            orch.post_compact_skill_attachments
+            orch.transcript
+                .post_compact_skill_attachments
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&skill_message)
@@ -2052,7 +2032,8 @@ mod tests {
             "hot resume restores structured skill attachment identity"
         );
         assert_eq!(
-            orch.current_effort
+            orch.model_runtime
+                .current_effort
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_deref(),
@@ -2072,6 +2053,7 @@ mod tests {
         .expect("second hot resume");
         assert_eq!(
             *orch
+                .model_runtime
                 .current_effort
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
@@ -2095,7 +2077,7 @@ mod tests {
         let visible = std::env::temp_dir().join("visible.txt");
         let seeded = std::env::temp_dir().join("seeded.txt");
         tool_api::read_file_state::set(
-            &orch.read_state_map,
+            &orch.prompt_runtime.read_state_map,
             visible.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: "visible".into(),
@@ -2108,7 +2090,7 @@ mod tests {
             },
         );
         tool_api::read_file_state::set_with_model_context(
-            &orch.read_state_map,
+            &orch.prompt_runtime.read_state_map,
             seeded,
             tool_api::read_file_state::ReadFileEntry {
                 content: "seeded".into(),
@@ -2159,7 +2141,8 @@ mod tests {
         .expect("hot resume");
 
         assert_eq!(
-            orch.current_effort
+            orch.model_runtime
+                .current_effort
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_deref(),
@@ -2253,12 +2236,17 @@ mod tests {
         .expect("resume agent session");
 
         {
-            let restored = orch.main_thread_agent.read().await;
+            let restored = orch.lifecycle_runtime.main_thread_agent.read().await;
             let restored = restored.as_ref().expect("resumed main-thread agent");
             assert_eq!(restored.agent_type, "reviewer");
             assert_eq!(restored.system_prompt.as_deref(), Some("review carefully"));
         }
-        assert!(orch.main_thread_agent_hook_id.lock().await.is_some());
+        assert!(orch
+            .lifecycle_runtime
+            .main_thread_agent_hook_id
+            .lock()
+            .await
+            .is_some());
         assert!(orch.hooks.has_hooks_for(&hooks::HookEventType::Stop).await);
 
         traits::OrchestratorHandle::resume_session(
@@ -2272,8 +2260,18 @@ mod tests {
         .await
         .expect("resume default-agent session");
 
-        assert!(orch.main_thread_agent.read().await.is_none());
-        assert!(orch.main_thread_agent_hook_id.lock().await.is_none());
+        assert!(orch
+            .lifecycle_runtime
+            .main_thread_agent
+            .read()
+            .await
+            .is_none());
+        assert!(orch
+            .lifecycle_runtime
+            .main_thread_agent_hook_id
+            .lock()
+            .await
+            .is_none());
         assert!(!orch.hooks.has_hooks_for(&hooks::HookEventType::Stop).await);
     }
 

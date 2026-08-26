@@ -987,12 +987,18 @@ mod tests {
     /// A concurrency-SAFE tool whose `interrupt_behavior()==Cancel`. Sleeps,
     /// racing its `ctx.cancel`; on cancel returns `Aborted` so the executor
     /// substitutes the synthetic. Mirrors a WebFetch/Agent-style Cancel tool.
-    struct CancelBehaviorTool;
+    struct CancelBehaviorTool {
+        name: &'static str,
+        is_mcp: bool,
+    }
 
     #[async_trait]
     impl Tool for CancelBehaviorTool {
         fn name(&self) -> &str {
-            "CancelTool"
+            self.name
+        }
+        fn is_mcp(&self) -> bool {
+            self.is_mcp
         }
         fn input_schema(&self) -> &serde_json::Value {
             static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
@@ -1075,7 +1081,14 @@ mod tests {
 
     fn orch_with_cancel_and_block_tools() -> ConversationOrchestrator {
         let mut registry = ToolRegistry::new();
-        registry.register_builtin(Arc::new(CancelBehaviorTool) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(CancelBehaviorTool {
+            name: "CancelTool",
+            is_mcp: false,
+        }) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(CancelBehaviorTool {
+            name: "McpCancelTool",
+            is_mcp: true,
+        }) as Arc<dyn Tool>);
         // SafeTool defaults to Block (no interrupt_behavior override).
         registry.register_builtin(Arc::new(SafeTool) as Arc<dyn Tool>);
         ConversationOrchestrator::new(
@@ -1131,6 +1144,34 @@ mod tests {
         };
         assert!(*is_error);
         assert_eq!(content, REJECT_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn interrupted_mcp_tool_uses_the_2_1_246_explicit_error() {
+        let orch = orch_with_cancel_and_block_tools();
+        let user_cancel = tokio_util::sync::CancellationToken::new();
+        let mut exec = StreamingToolExecutor::new_with_user_cancel(&orch, user_cancel.clone());
+        exec.add_tool(
+            ToolUseId::new(),
+            "McpCancelTool".into(),
+            json!({}),
+            None,
+            MessageId::new(),
+        );
+        user_cancel.cancel();
+        exec.apply_abort_to_pending();
+
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = exec.tools[0].result.as_ref().unwrap()
+        else {
+            panic!()
+        };
+        assert!(*is_error);
+        assert_eq!(
+            content,
+            "Error: The tool call was interrupted before a result was received. It may or may not have completed on the server — verify before assuming it succeeded, and retry if needed."
+        );
     }
 
     /// End-to-end through `run_to_completion`: an in-flight Cancel-behavior tool

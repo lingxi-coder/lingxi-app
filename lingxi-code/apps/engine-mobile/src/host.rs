@@ -5338,13 +5338,18 @@ impl MobileEngineHandle {
         {
             Ok(replayed) => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                let resume_plan_mode = replayed.state.plan_mode;
                 let previous_permission_mode = handle
                     .permission_mode()
                     .await
                     .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
-                let target_permission_mode = recorded_permission_mode
-                    .clone()
-                    .unwrap_or_else(|| self.inner.session_default_permission_mode.clone());
+                let target_permission_mode = if resume_plan_mode {
+                    "plan".to_string()
+                } else {
+                    recorded_permission_mode
+                        .clone()
+                        .unwrap_or_else(|| self.inner.session_default_permission_mode.clone())
+                };
                 self.restore_session_permission_mode(&target_permission_mode)
                     .await?;
                 if let Err(error) =
@@ -5372,6 +5377,16 @@ impl MobileEngineHandle {
                     return Err(ClientError::Internal {
                         message: format!("resume_session failed: {error}"),
                     });
+                }
+                if resume_plan_mode {
+                    if let Err(error) = handle.set_plan_mode(true).await {
+                        let _ = self
+                            .restore_session_permission_mode(&previous_permission_mode)
+                            .await;
+                        return Err(ClientError::Internal {
+                            message: format!("resume plan mode failed: {error}"),
+                        });
+                    }
                 }
                 self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
                     .await;

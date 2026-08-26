@@ -437,19 +437,17 @@ pub fn get_default_write_paths() -> Vec<String> {
 /// pipeline is reproduced step-for-step.
 #[must_use]
 pub fn glob_to_regex(glob_pattern: &str) -> String {
+    static SPECIAL: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static UNCLOSED: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let special = SPECIAL.get_or_init(|| Regex::new(r"[.^$+{}()|\\]").expect("static regex"));
+    let unclosed = UNCLOSED.get_or_init(|| Regex::new(r"\[([^\]]*?)$").expect("static regex"));
     // Step 1: escape regex special characters (except glob chars * ? [ ]).
     // TS: .replace(/[.^$+{}()|\\]/g, '\\$&')
-    let step1 = Regex::new(r"[.^$+{}()|\\]")
-        .expect("static regex")
-        .replace_all(glob_pattern, r"\$0")
-        .into_owned();
+    let step1 = special.replace_all(glob_pattern, r"\$0").into_owned();
 
     // Step 2: escape unclosed brackets (no matching ]).
     // TS: .replace(/\[([^\]]*?)$/g, '\\[$1')
-    let step2 = Regex::new(r"\[([^\]]*?)$")
-        .expect("static regex")
-        .replace_all(&step1, r"\[$1")
-        .into_owned();
+    let step2 = unclosed.replace_all(&step1, r"\[$1").into_owned();
 
     // Step 3: convert glob patterns to regex (order matters - ** before *).
     let step3 = step2

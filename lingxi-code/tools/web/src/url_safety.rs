@@ -5,15 +5,15 @@
 //!   credentials (`user:pass@`), and single-label / internal hostnames. Wired
 //!   into [`crate::web_fetch::validate_url`] (a real fetch-time gate).
 //! - [`is_preapproved_url`] / [`is_preapproved_host`] — `isPreapprovedUrl`: the
-//!   ~90 code-doc hosts that bypass the domain blocklist. PORTED but NOT yet
-//!   wired: the blocklist preflight (`checkDomainBlocklist`, a network call to
-//!   `api.anthropic.com/api/web/domain_info`) is not ported, so there is nothing
-//!   to bypass yet. Ready to consult once that preflight lands.
+//!   ~90 code-doc hosts that bypass the domain blocklist. This module keeps the
+//!   pure host/path predicate plus unit-test coverage, while the live WebFetch
+//!   apply-step / markdown path currently consults
+//!   [`crate::markdown::is_preapproved_host`] for the production gate.
 //! - [`is_permitted_redirect`] — `isPermittedRedirect`: a redirect is safe only
 //!   if it keeps protocol+port, carries no credentials, and stays on the same
-//!   host modulo a leading `www.`. PORTED but NOT yet wired: the fetch goes
-//!   through the `Http` transport which follows redirects internally, so there
-//!   is no per-hop seam to consult. Ready for a future custom-redirect follower.
+//!   host modulo a leading `www.`. The live redirect gate is
+//!   [`crate::web_fetch::is_permitted_redirect`]; this copy is the shared pure
+//!   helper kept in lockstep with that fetch-time check.
 
 use url::Url;
 

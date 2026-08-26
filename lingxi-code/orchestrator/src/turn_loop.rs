@@ -805,9 +805,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                     message_tokens: api_success_message_tokens,
                     did_fall_back_to_non_streaming: false,
                     is_non_interactive_session: !orch.prompt_is_interactive(),
-                    print: !orch.prompt_is_interactive(),
-                    is_tty: false,
-                    query_source: "user".into(),
+                    print: orch.config.print,
+                    is_tty: orch.config.is_tty,
+                    query_source: crate::config::sanitize_query_source(&orch.config.query_source)
+                        .to_string(),
                     permission_mode: if orch.session.lock().await.plan_mode {
                         "plan"
                     } else {
@@ -7271,13 +7272,12 @@ mod hook_context_attachment_tests {
         );
         let uses = uses();
         let id = uses[0].0.clone();
-        let (_results, _prevent, _injected, _mods) =
-            telemetry::otel::with_trace_context_future(
-                Some(&trace_context),
-                dispatch_tool_uses_tracked(&orch, &uses, None),
-            )
-            .await
-            .expect("dispatch");
+        let (_results, _prevent, _injected, _mods) = telemetry::otel::with_trace_context_future(
+            Some(&trace_context),
+            dispatch_tool_uses_tracked(&orch, &uses, None),
+        )
+        .await
+        .expect("dispatch");
 
         let raw = std::fs::read_to_string(&path).expect("read jsonl");
         let line = raw

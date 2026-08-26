@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use crate::env::{generate_proxy_env_vars, Platform};
+use crate::env::Platform;
 use crate::fs_args::{generate_filesystem_args, ReadConfig, WriteConfig};
 
 /// `isExecutable(p)` (`linux-sandbox-utils.js:285-296`): is `p` executable by
@@ -559,6 +559,8 @@ pub struct WrapParams<'a> {
     pub platform: Platform,
     /// Resolved tmpdir for `generate_proxy_env_vars` (`TMPDIR` env var).
     pub tmpdir: &'a str,
+    /// Optional per-session token that validates per-command proxy credentials.
+    pub proxy_auth_token: Option<&'a str>,
 }
 
 /// Push the `--unshare-net` network args (socket binds + proxy `--setenv`s)
@@ -598,12 +600,14 @@ fn push_network_args(bwrap_args: &mut Vec<String>, params: &WrapParams<'_>) -> i
 
     // Proxy env vars: HTTP listener 3128, SOCKS listener 1080 (the
     // sandbox-internal socat ports), plus the CA cert.
-    let proxy_env = generate_proxy_env_vars(
+    let proxy_env = crate::env::generate_proxy_env_vars_with_auth(
         Some(3128),
         Some(1080),
         params.ca_cert_path,
         params.platform,
         params.tmpdir,
+        Some(params.command),
+        params.proxy_auth_token,
     );
     for (k, v) in proxy_env {
         bwrap_args.push("--setenv".into());
@@ -1123,6 +1127,7 @@ mod tests {
             cwd,
             platform: Platform::Linux,
             tmpdir: tmp,
+            proxy_auth_token: None,
         }
     }
 

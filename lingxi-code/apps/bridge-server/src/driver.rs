@@ -142,10 +142,10 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
             })
             .await;
         let (joined, consumed) = msgqueue::join_prompt_values(&batch)?;
-        // Consume-once: remove the merged commands so the between-turn drain
-        // never re-runs them.
+        // Consume-once: 2.1.245 `messageQueue.consume` so the between-turn
+        // drain never re-runs the folded commands.
         self.queue
-            .remove(&consumed, "drained mid-turn into running turn")
+            .consume(&consumed, "drained mid-turn into running turn")
             .await;
         Some(joined)
     }

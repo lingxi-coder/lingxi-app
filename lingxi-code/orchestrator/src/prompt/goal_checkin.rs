@@ -476,5 +476,4 @@ mod tests {
         state.clear();
         assert_eq!(state, GoalDeferralState::default());
     }
-
 }

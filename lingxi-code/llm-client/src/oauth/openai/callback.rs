@@ -244,7 +244,10 @@ async fn read_request_head(stream: &mut TcpStream) -> Option<String> {
         }
         (!head.is_empty()).then(|| String::from_utf8_lossy(&head).into_owned())
     };
-    tokio::time::timeout(READ_TIMEOUT, read).await.ok().flatten()
+    tokio::time::timeout(READ_TIMEOUT, read)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Best-effort `percent`-decode. Base64url callback values contain no `%`, but
@@ -343,14 +346,19 @@ mod tests {
 
         // Connect and close without writing anything.
         {
-            let probe = TcpStream::connect(("127.0.0.1", port)).await.expect("probe");
+            let probe = TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("probe");
             drop(probe);
         }
         sleep(Duration::from_millis(20)).await;
 
         // The real redirect still completes.
         let _ = send_get(port, "/auth/callback?code=abc&state=S").await;
-        let params = server.await.expect("join").expect("accept survived the probe");
+        let params = server
+            .await
+            .expect("join")
+            .expect("accept survived the probe");
         assert_eq!(params.code, "abc");
     }
 
@@ -399,7 +407,9 @@ mod tests {
         let port = listener.port();
         let server = tokio::spawn(async move { listener.accept("S").await });
 
-        let mut client = TcpStream::connect(("127.0.0.1", port)).await.expect("connect");
+        let mut client = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
         client
             .write_all(b"GET /auth/callback?code=split&state=S HTTP/1.1\r\n")
             .await

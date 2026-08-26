@@ -243,7 +243,6 @@ impl Tool for FileWriteTool {
             .get("content")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("content is required".into()))?;
-
         // Worktree parity plan (Task 3): a RELATIVE `file_path` resolves
         // against the CURRENT session cwd (`ctx.cwd()`, switchable by
         // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that

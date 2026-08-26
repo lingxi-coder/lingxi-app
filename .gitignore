@@ -33,6 +33,9 @@ claw-code-graphify-orchestrator/
 .port_sessions/
 .sandbox-home/
 .clawd-todos.json
+/projects/
+/backups/
+/mcp-needs-auth-cache.json
 
 # ---------------------------------------------------------------
 # Generated code-intel indexes + tool output (rebuildable; any level)

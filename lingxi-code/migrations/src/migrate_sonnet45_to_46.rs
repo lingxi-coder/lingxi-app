@@ -22,9 +22,9 @@ const SONNET45_MODELS: [&str; 4] = [
 ];
 
 /// Run the migration.
-pub async fn run(env: &MigrationEnv) {
+pub async fn run(env: &MigrationEnv) -> bool {
     if !env.ctx.first_party {
-        return;
+        return true;
     }
     // isProSubscriber || isMaxSubscriber || isTeamPremiumSubscriber; `None`
     // (unknown tier) ⇒ all three false in TS ⇒ early return (fail closed).
@@ -33,7 +33,7 @@ pub async fn run(env: &MigrationEnv) {
         Some(SubscriptionType::Pro | SubscriptionType::Max | SubscriptionType::Team)
     );
     if !eligible {
-        return;
+        return true;
     }
 
     let sp = settings_path(
@@ -45,19 +45,17 @@ pub async fn run(env: &MigrationEnv) {
         .ok()
         .and_then(|m| m.get("model").and_then(Value::as_str).map(String::from))
     else {
-        return;
+        return true;
     };
     if !SONNET45_MODELS.contains(&model.as_str()) {
-        return;
+        return true;
     }
 
     let has_1m = model.ends_with("[1m]");
     let target = if has_1m { "sonnet[1m]" } else { "sonnet" };
     if let Err(e) = update_settings(&sp, vec![("model".into(), Some(json!(target)))]) {
-        // TS `updateSettingsForSource` never throws — it returns an ignored
-        // `{error}` (settings.ts:416-523); the numStartups gate, timestamp
-        // and event still run. Warn and continue.
-        tracing::warn!(error = %e, "migrate_sonnet45_to_46: settings write failed (ignored, TS parity)");
+        tracing::warn!(error = %e, "migrate_sonnet45_to_46: settings write failed");
+        return false;
     }
 
     // Skip notification for brand-new users (numStartups <= 1).
@@ -76,7 +74,7 @@ pub async fn run(env: &MigrationEnv) {
             // TS `saveGlobalConfig` throws here, before logEvent (no catch in
             // this migration) — mirror that by skipping the emit.
             tracing::warn!(error = %e, "migrate_sonnet45_to_46: timestamp write failed");
-            return;
+            return false;
         }
     }
     env.emit(
@@ -87,6 +85,7 @@ pub async fn run(env: &MigrationEnv) {
         ]),
     )
     .await;
+    true
 }
 
 #[cfg(test)]
@@ -219,13 +218,10 @@ mod tests {
         );
     }
 
-    /// Convention check: a failing settings WRITE must not block the
-    /// timestamp stamp (TS `updateSettingsForSource` returns an ignored
-    /// `{error}`, settings.ts:416-523; the numStartups gate + saveGlobalConfig
-    /// + logEvent still run).
+    /// In 2.1.245 a failing settings write aborts before the timestamp/event.
     #[cfg(unix)]
     #[tokio::test]
-    async fn settings_write_failure_still_stamps_timestamp() {
+    async fn settings_write_failure_skips_timestamp() {
         use std::os::unix::fs::PermissionsExt;
         let t = temp_config();
         std::fs::write(&t.global, r#"{"numStartups": 5}"#).unwrap();
@@ -246,8 +242,8 @@ mod tests {
             read_settings_map(&sp).unwrap()["model"],
             serde_json::json!("claude-sonnet-4-5-20250929")
         );
-        // …but the timestamp is STILL stamped (and the emit ran; bus is None).
+        // …and the timestamp is no longer stamped.
         let m = crate::global_config::read_map(&t.global).unwrap();
-        assert!(m["sonnet45To46MigrationTimestamp"].is_i64());
+        assert!(m.get("sonnet45To46MigrationTimestamp").is_none());
     }
 }

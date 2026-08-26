@@ -15,19 +15,19 @@ use crate::settings_update::{read_settings_map, settings_path, update_settings, 
 use serde_json::json;
 
 /// Run the migration.
-pub async fn run(env: &MigrationEnv) {
+pub async fn run(env: &MigrationEnv) -> bool {
     let cfg = match global_config::read_map(&env.global_config_path) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "migrate_bypass_permissions: config read failed");
-            return;
+            return true;
         }
     };
     if !cfg
         .get("bypassPermissionsModeAccepted")
         .is_some_and(js_truthy)
     {
-        return;
+        return true;
     }
 
     let has_skip = [SettingsSource::User, SettingsSource::Local]
@@ -52,11 +52,8 @@ pub async fn run(env: &MigrationEnv) {
                 Some(json!(true)),
             )],
         ) {
-            // TS `updateSettingsForSource` never throws — it returns `{error}`
-            // (settings.ts:416-523) and the migration discards it (TS:23-26),
-            // so the catch is unreachable from a settings-write failure: the
-            // event is still emitted and the config key still removed.
-            tracing::warn!(error = %e, "migrate_bypass_permissions: settings write failed (ignored, TS parity)");
+            tracing::warn!(error = %e, "migrate_bypass_permissions: settings write failed");
+            return false;
         }
     }
 
@@ -71,7 +68,9 @@ pub async fn run(env: &MigrationEnv) {
         m
     }) {
         tracing::warn!(error = %e, "migrate_bypass_permissions: config cleanup failed");
+        return false;
     }
+    true
 }
 
 #[cfg(test)]
@@ -123,13 +122,11 @@ mod tests {
         assert!(m.get("bypassPermissionsModeAccepted").is_none());
     }
 
-    /// Fix 3 continue branch: a failing settings WRITE must not block the
-    /// event + config-key removal (TS `updateSettingsForSource` returns an
-    /// ignored `{error}`, settings.ts:416-523; TS:28-34 proceed regardless —
-    /// the catch is unreachable from a settings-write failure).
+    /// In 2.1.245 a failing settings write aborts the migration and preserves
+    /// the legacy config key so the runner can retry later.
     #[cfg(unix)]
     #[tokio::test]
-    async fn settings_write_failure_still_removes_config_key() {
+    async fn settings_write_failure_preserves_config_key() {
         use std::os::unix::fs::PermissionsExt;
         let t = temp_config();
         std::fs::write(&t.global, r#"{"bypassPermissionsModeAccepted": true}"#).unwrap();
@@ -148,9 +145,9 @@ mod tests {
             .unwrap()
             .get("skipDangerousModePermissionPrompt")
             .is_none());
-        // …but the config key is STILL removed.
+        // …and the config key is preserved for a retry.
         let m = crate::global_config::read_map(&t.global).unwrap();
-        assert!(m.get("bypassPermissionsModeAccepted").is_none());
+        assert_eq!(m["bypassPermissionsModeAccepted"], json!(true));
     }
 
     #[tokio::test]

@@ -26,10 +26,12 @@ impl SseFrameSplitter {
 
         let mut frames = Vec::new();
         while let Some((content_len, consumed)) = find_event_boundary(&self.buffer) {
-            let event: Vec<u8> = self.buffer.drain(..consumed).collect();
-            if let Some(frame) = parse_event(&event[..content_len]) {
+            if let Some(frame) = parse_event(&self.buffer[..content_len]) {
                 frames.push(frame);
             }
+            let remaining = self.buffer.len() - consumed;
+            self.buffer.copy_within(consumed.., 0);
+            self.buffer.truncate(remaining);
         }
         frames
     }

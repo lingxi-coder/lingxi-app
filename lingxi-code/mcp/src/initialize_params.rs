@@ -5,6 +5,9 @@ use crate::identity::ClientInfo;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+/// Latest MCP protocol version date the bundled client sends in `initialize`.
+pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
+
 /// Wire-shape `{"roots": {"listChanged": true}, "elicitation": {}}` — both
 /// fields required. `roots.listChanged: true` advertises that the client will
 /// send `notifications/roots/list_changed` when its working-dir set changes
@@ -52,7 +55,7 @@ pub struct InitializeParams {
 impl Default for InitializeParams {
     fn default() -> Self {
         Self {
-            protocol_version: "2025-11-25",
+            protocol_version: LATEST_PROTOCOL_VERSION,
             capabilities: ClientCapabilities::default(),
             client_info: ClientInfo::default(),
         }
@@ -70,7 +73,7 @@ mod tests {
 
         // protocolVersion is the literal MCP date the SDK's
         // LATEST_PROTOCOL_VERSION resolves to (SDK 1.29.0 → 2025-11-25).
-        assert_eq!(json["protocolVersion"], "2025-11-25");
+        assert_eq!(json["protocolVersion"], LATEST_PROTOCOL_VERSION);
 
         // capabilities is EXACTLY
         // {"roots": {"listChanged": true}, "elicitation": {}}.

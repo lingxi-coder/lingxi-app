@@ -1,13 +1,8 @@
-//! Live version-facing identifier pins for the Claude Code 2.1.220 oracle.
+//! Historical contract fixtures captured from the Claude Code 2.1.220 oracle.
 //!
-//! 2.1.220 is the binary this port is read against — the forked-skill sidecars,
-//! the `set_cwd` trust handshake, PowerShell 5.1 cwd-first shadowing, the
-//! ←-on-empty gesture and the refusal cascade were all ported from it. The
-//! advertised version had lagged at 2.1.217, so a session implementing 2.1.220
-//! behaviour was telling servers and child processes it was something else.
-//!
-//! Everything below derives from ONE constant, so the three identifiers cannot
-//! drift apart.
+//! These assertions intentionally keep their original capture version. Live
+//! version-facing identifier pins belong in `parity_claude_2_1_246.rs` so a
+//! target bump cannot make this historical fixture look current.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -29,54 +24,6 @@ fn backlog_contracts() -> Value {
 
 fn gap_oracle() -> Value {
     serde_json::from_str(GAP_ORACLE).expect("2.1.220 gap oracle fixture must be valid JSON")
-}
-
-/// The current parity target is exposed from one source of truth.
-///
-/// Raised to 2.1.241 on 2026-08-23 with the latest alignment fixes. The three pins
-/// below are what the port ANNOUNCES; the `gap_oracle` fixture further down
-/// still pins **2.1.220**, and deliberately so — that field records which binary
-/// the fixture was CAPTURED from, which does not change when the target does.
-#[test]
-fn version_const_is_2_1_241() {
-    assert_eq!(traits::CLAUDE_CODE_VERSION, "2.1.241");
-}
-
-/// Child processes receive the 2.1.241 `AI_AGENT` identifier.
-#[test]
-fn ai_agent_env_value_is_2_1_241() {
-    let derived = format!(
-        "claude-code_{}_agent",
-        traits::CLAUDE_CODE_VERSION.replace('.', "-")
-    );
-    assert_eq!(derived, "claude-code_2-1-241_agent");
-}
-
-/// WebFetch presents the 2.1.241 Claude-compatible user agent.
-///
-/// Note the oracle stores this as interpolated FRAGMENTS, not one literal — a
-/// fixed-string grep for `Claude-User (claude-code/…)` returns zero hits in the
-/// 2.1.220 AND 2.1.241 binaries alike. The shape is unchanged across the bump.
-#[test]
-fn web_fetch_user_agent_is_2_1_241() {
-    let derived = format!(
-        "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-        traits::CLAUDE_CODE_VERSION
-    );
-    assert_eq!(
-        derived,
-        "Claude-User (claude-code/2.1.241; +https://support.anthropic.com/)"
-    );
-}
-
-/// Every version-facing identifier derives from the SAME constant, so a future
-/// bump cannot move one and leave another behind — which is exactly how the
-/// port came to advertise 2.1.217 while implementing 2.1.220.
-#[test]
-fn the_identifiers_share_one_source() {
-    let v = traits::CLAUDE_CODE_VERSION;
-    assert!(format!("claude-code_{}_agent", v.replace('.', "-")).contains(&v.replace('.', "-")));
-    assert!(format!("Claude-User (claude-code/{v}; +https://support.anthropic.com/)").contains(v));
 }
 
 /// Wave 0 maps every approved engineering item to exactly one implementation

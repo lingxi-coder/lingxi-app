@@ -299,6 +299,9 @@ impl Task for MonitorHandler {
             timeout,
             cwd,
             tool_use_id: _,
+            creator_teammate_name: _,
+            creator_team_name: _,
+            creator_agent_id: _,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -848,6 +851,9 @@ mod tests {
             timeout: None,
             cwd: None,
             tool_use_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
         }
     }
 

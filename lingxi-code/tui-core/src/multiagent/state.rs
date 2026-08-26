@@ -36,6 +36,17 @@ pub struct WorkflowAgentRow {
     pub label: String,
     /// Latest lifecycle state: `start` / `done` / `error` / `cached`.
     pub state: String,
+    /// First queue timestamp observed for this agent, if the live feed supplied
+    /// one. The task spool does not carry this, so rows parsed from history may
+    /// leave it unset.
+    pub queued_at_ms: Option<u64>,
+    /// First "really allocated" timestamp observed for this agent. Used to
+    /// distinguish a merely queued agent from one that has actually started.
+    pub started_at_ms: Option<u64>,
+    /// Latest token count surfaced by the live observer for this agent.
+    pub tokens: u64,
+    /// Latest tool-call count surfaced by the live observer for this agent.
+    pub tool_calls: u64,
 }
 
 /// One phase of a workflow run, with the agents that ran under it. Parsed from
@@ -82,14 +93,16 @@ pub struct WorkflowRow {
     /// Distinct agents launched by the run (parsed from the spool). `0` until
     /// enriched.
     pub agent_count: usize,
+    /// Aggregate workflow tokens when known (terminal outcome or live observer
+    /// sum). `0` when the runtime has not reported any yet.
+    pub total_tokens: u64,
     /// Phase/agent tree parsed from the run's output spool. Empty until enriched
     /// (or when the run emitted no `phase()`/`agent()` progress).
     pub phases: Vec<WorkflowPhase>,
-    /// The run's inline script source, when the workflow was launched from an
-    /// inline `script` (not a saved `name`/`scriptPath`). Present ⇒ the
-    /// `/workflows` picker offers the `s` "Save dynamic workflow" chord (oracle
-    /// gates `save` on a saveable inline script). `None` for name/path-sourced
-    /// runs and until the launcher plumbs the script through.
+    /// The run's stored resolved script source. Present ⇒ the `/workflows`
+    /// picker offers the `s` "Save dynamic workflow" chord (the oracle gates
+    /// `save` on the workflow task's truthy `script`). `None` for adopted paused
+    /// records whose stored script is empty.
     pub script: Option<String>,
 }
 

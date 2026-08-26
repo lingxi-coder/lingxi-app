@@ -64,6 +64,11 @@ pub struct TaskStateBase {
     /// Additive + defaulted so older serialized rows remain valid.
     #[serde(default)]
     pub creator_team_name: Option<String>,
+    /// Persistent agent id of the teammate / subagent that CREATED this task.
+    /// Kept on the shared base so every background task type can participate
+    /// in unnamed-parent rest deferral. Additive/defaulted for old rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_agent_id: Option<AgentId>,
 }
 
 /// Tagged union of per-type task states.
@@ -299,6 +304,9 @@ pub struct LocalWorkflowTaskState {
     pub transcript_dir: Option<PathBuf>,
     /// Index of the currently-executing step.
     pub current_step: usize,
+    /// Terminal result/failure/usage payload for workflow notifications.
+    #[serde(default)]
+    pub outcome: traits::task_registry::WorkflowTerminalOutcome,
 }
 
 /// State specific to an MCP monitor task.

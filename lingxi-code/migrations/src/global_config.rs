@@ -5,8 +5,10 @@
 //! `utils/env.ts getGlobalClaudeFile` + `utils/envUtils.ts
 //! getClaudeConfigHomeDir`, operating on a raw [`serde_json::Map`] so unknown
 //! keys (the real file carries dozens: `numStartups`, `oauthAccount`, …) are
-//! NEVER dropped. `serde_json`'s workspace `preserve_order` feature keeps key
-//! order stable across round-trips.
+//! NEVER dropped. Values equal to Claude's built-in global defaults are the
+//! sole exception: the upstream writer filters those before serialization.
+//! `serde_json`'s workspace `preserve_order` feature keeps key order stable
+//! across round-trips.
 //!
 //! Documented simplifications vs TS (`config.ts:797-864`):
 //! - Uses a crate-local cross-process lock dir with PID/start-time stale-owner
@@ -183,6 +185,63 @@ pub fn read_map(path: &Path) -> Result<JsonMap, GlobalConfigError> {
             "expected a JSON object, got {other}"
         ))),
     }
+}
+
+/// Materialize Claude's first-start pair before startup migrations run.
+///
+/// The gate is the JS truthiness of `firstStartTime`, not the independent
+/// presence of `firstStartVersion`: a missing/null/empty/false/zero timestamp
+/// starts a fresh pair and overwrites any stale version with the running
+/// compatibility version. Once the timestamp is truthy, a missing version is
+/// deliberately left missing — the oracle does not backfill it later.
+pub fn ensure_first_start_metadata(
+    path: &Path,
+    first_start_time: &str,
+    version: &str,
+) -> Result<bool, GlobalConfigError> {
+    let first_start_time = first_start_time.to_string();
+    let version = version.to_string();
+    save_map(path, move |mut map| {
+        if map
+            .get("firstStartTime")
+            .is_some_and(crate::context::js_truthy)
+        {
+            return map;
+        }
+        map.insert(
+            "firstStartTime".to_string(),
+            Value::String(first_start_time),
+        );
+        map.insert("firstStartVersion".to_string(), Value::String(version));
+        map
+    })
+}
+
+/// Return the persisted installation `machineID`, creating/replacing it using
+/// the same observable compatibility rule as Claude 2.1.245.
+///
+/// Any value that does not match `^[0-9a-f]{64}$` is replaced by a fresh
+/// 64-character lowercase hexadecimal identifier.
+#[must_use]
+pub fn ensure_machine_id(path: &Path) -> String {
+    if let Ok(map) = read_map(path) {
+        if let Some(id) = map.get("machineID").and_then(Value::as_str) {
+            if id.len() == 64
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return id.to_string();
+            }
+        }
+    }
+    let id = random_user_id();
+    let to_store = id.clone();
+    let _ = save_map(path, move |mut map| {
+        map.insert("machineID".to_string(), Value::String(to_store));
+        map
+    });
+    id
 }
 
 /// `saveGlobalConfig(prev => next)` (`config.ts:797-864`): read-modify-write.
@@ -606,9 +665,19 @@ fn process_is_alive(pid: i32) -> bool {
 fn write_atomic(path: &Path, map: &JsonMap) -> Result<(), GlobalConfigError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).map_err(GlobalConfigError::Io)?;
-    let serialized = serde_json::to_string_pretty(&Value::Object(map.clone()))
+    let mut filtered = map.clone();
+    filtered.retain(|key, value| !equals_global_default(key, value));
+    let serialized = serde_json::to_string_pretty(&Value::Object(filtered))
         .map_err(|e| GlobalConfigError::Broken(e.to_string()))?;
     let target = resolve_write_target(path);
+    if target.is_file() {
+        if let Err(error) = backup_config_if_due(&target) {
+            // Claude logs and continues when backup maintenance fails; a
+            // backup problem must never turn a valid config update into a
+            // failed startup.
+            tracing::warn!(%error, path = %target.display(), "global config backup failed");
+        }
+    }
     let tmp = target
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -628,6 +697,137 @@ fn write_atomic(path: &Path, map: &JsonMap) -> Result<(), GlobalConfigError> {
         let _ = std::fs::remove_file(&tmp);
         GlobalConfigError::Io(e)
     })
+}
+
+fn equals_global_default(key: &str, value: &Value) -> bool {
+    match (key, value) {
+        (
+            "numStartups"
+            | "queuedCommandUpHintCount"
+            | "memoryUsageCount"
+            | "promptQueueUseCount"
+            | "btwUseCount",
+            Value::Number(number),
+        ) => number.as_i64() == Some(0),
+        ("messageIdleNotifThresholdMs", Value::Number(number)) => number.as_i64() == Some(60_000),
+        ("theme", Value::String(text)) => text == "dark",
+        ("preferredNotifChannel", Value::String(text)) => text == "auto",
+        ("editorMode", Value::String(text)) => text == "normal",
+        ("diffTool", Value::String(text)) => text == "auto",
+        (
+            "verbose"
+            | "externalEditorContext"
+            | "showMessageTimestamps"
+            | "hasSeenTasksHint"
+            | "hasUsedStash"
+            | "hasUsedBackgroundTask"
+            | "showExpandedTodos"
+            | "briefTranscript"
+            | "autoConnectIde"
+            | "copyFullResponse"
+            | "unpinOpus47LaunchEffort"
+            | "unpinOpus48LaunchEffort"
+            | "unpinFable5LaunchEffort",
+            Value::Bool(false),
+        ) => true,
+        (
+            "autoCompactEnabled"
+            | "autoScrollEnabled"
+            | "showTurnDuration"
+            | "todoFeatureEnabled"
+            | "autoInstallIdeExtension"
+            | "fileCheckpointingEnabled"
+            | "terminalProgressBarEnabled"
+            | "respectGitignore",
+            Value::Bool(true),
+        ) => true,
+        (
+            "env" | "tipsHistory" | "cachedDynamicConfigs" | "cachedGrowthBookFeatures",
+            Value::Object(object),
+        ) => object.is_empty(),
+        ("customApiKeyResponses", Value::Object(object)) => {
+            object.len() == 2
+                && object
+                    .get("approved")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+                && object
+                    .get("rejected")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+        }
+        _ => false,
+    }
+}
+
+const CONFIG_BACKUP_MIN_INTERVAL: Duration = Duration::from_secs(60);
+const CONFIG_BACKUP_RETAIN: usize = 5;
+
+fn backup_config_if_due(target: &Path) -> std::io::Result<()> {
+    let backups = config_backups_dir(target);
+    create_secure_dir_all(&backups)?;
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let prefix = format!("{file_name}.backup.");
+    let mut names = backup_names(&backups, &prefix)?;
+    names.sort_unstable_by(|left, right| right.cmp(left));
+    let newest_ms = names
+        .first()
+        .and_then(|name| name.strip_prefix(&prefix))
+        .and_then(|stamp| stamp.parse::<u128>().ok())
+        .unwrap_or(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    if now_ms.saturating_sub(newest_ms) >= CONFIG_BACKUP_MIN_INTERVAL.as_millis() {
+        let name = format!("{prefix}{now_ms}");
+        std::fs::copy(target, backups.join(&name))?;
+        names.push(name);
+        names.sort_unstable_by(|left, right| right.cmp(left));
+    }
+    for stale in names.into_iter().skip(CONFIG_BACKUP_RETAIN) {
+        let _ = std::fs::remove_file(backups.join(stale));
+    }
+    Ok(())
+}
+
+fn create_secure_dir_all(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+fn backup_names(backups: &Path, prefix: &str) -> std::io::Result<Vec<String>> {
+    Ok(std::fs::read_dir(backups)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with(prefix))
+        .collect())
+}
+
+fn config_backups_dir(target: &Path) -> PathBuf {
+    if global_config_path().as_deref() == Some(target) {
+        if let Some(home) = lingxi_config_home() {
+            return home.join("backups");
+        }
+    }
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    if target.file_name() == Some(std::ffi::OsStr::new(branding::LEGACY_GLOBAL_CONFIG_FILE)) {
+        parent.join("backups")
+    } else {
+        parent.join(branding::DOT_DIR).join("backups")
+    }
 }
 
 /// The fallible tail of [`write_atomic`], isolated so its caller can clean up
@@ -1008,6 +1208,7 @@ pub fn record_trust_accept(config_path: &Path, cwd: &Path) {
 mod tests {
     use super::*;
     use crate::test_support::env_lock;
+    use serde_json::json;
 
     fn write_test_lock_dir(lock_dir: &Path, owner: &ConfigLockOwner) {
         create_secure_dir(lock_dir).unwrap();
@@ -1143,6 +1344,102 @@ mod tests {
     }
 
     #[test]
+    fn first_start_metadata_uses_timestamp_truthiness_as_its_only_gate() {
+        let t = temp_config();
+        ensure_first_start_metadata(&t.global, "2026-08-25T00:00:00.000Z", "2.1.245").unwrap();
+        let first = read_map(&t.global).unwrap();
+        assert_eq!(first["firstStartTime"], json!("2026-08-25T00:00:00.000Z"));
+        assert_eq!(first["firstStartVersion"], json!("2.1.245"));
+
+        std::fs::write(
+            &t.global,
+            r#"{"firstStartTime":"2000-01-01T00:00:00.000Z"}"#,
+        )
+        .unwrap();
+        assert!(
+            !ensure_first_start_metadata(&t.global, "2026-08-25T00:00:00.000Z", "2.1.245").unwrap()
+        );
+        let preserved = read_map(&t.global).unwrap();
+        assert!(preserved.get("firstStartVersion").is_none());
+
+        std::fs::write(
+            &t.global,
+            r#"{"firstStartTime":null,"firstStartVersion":"old"}"#,
+        )
+        .unwrap();
+        ensure_first_start_metadata(&t.global, "2026-08-25T00:00:00.000Z", "2.1.245").unwrap();
+        let replaced = read_map(&t.global).unwrap();
+        assert_eq!(
+            replaced["firstStartTime"],
+            json!("2026-08-25T00:00:00.000Z")
+        );
+        assert_eq!(replaced["firstStartVersion"], json!("2.1.245"));
+    }
+
+    #[test]
+    fn machine_id_requires_64_lowercase_hex_characters() {
+        let t = temp_config();
+        let created = ensure_machine_id(&t.global);
+        assert_eq!(created.len(), 64);
+        assert_eq!(read_map(&t.global).unwrap()["machineID"], json!(created));
+
+        let existing = "a".repeat(64);
+        std::fs::write(&t.global, json!({"machineID": existing}).to_string()).unwrap();
+        assert_eq!(ensure_machine_id(&t.global), existing);
+
+        for invalid in [
+            String::new(),
+            "legacy".to_string(),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            std::fs::write(&t.global, json!({"machineID": &invalid}).to_string()).unwrap();
+            let replaced = ensure_machine_id(&t.global);
+            assert_eq!(replaced.len(), 64);
+            assert!(replaced
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+            assert_ne!(replaced, invalid);
+        }
+    }
+
+    #[test]
+    fn config_writes_backup_existing_bytes_but_not_a_new_file() {
+        let t = temp_config();
+        save_map(&t.global, |mut map| {
+            map.insert("first".into(), json!(1));
+            map
+        })
+        .unwrap();
+        let backups = config_backups_dir(&t.global);
+        assert!(!backups.exists());
+
+        let original = std::fs::read_to_string(&t.global).unwrap();
+        save_map(&t.global, |mut map| {
+            map.insert("second".into(), json!(2));
+            map
+        })
+        .unwrap();
+        let names = backup_names(&backups, "claude.json.backup.").unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(backups.join(&names[0])).unwrap(),
+            original
+        );
+
+        // A second write inside the 60-second window reuses the same backup.
+        save_map(&t.global, |mut map| {
+            map.insert("third".into(), json!(3));
+            map
+        })
+        .unwrap();
+        assert_eq!(
+            backup_names(&backups, "claude.json.backup.").unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
     fn save_map_roundtrips_and_preserves_unknown_keys() {
         let t = temp_config();
         std::fs::write(
@@ -1167,6 +1464,32 @@ mod tests {
             keys.iter().position(|k| *k == "zeta").unwrap()
                 < keys.iter().position(|k| *k == "alpha").unwrap()
         );
+    }
+
+    #[test]
+    fn save_map_filters_only_values_equal_to_built_in_defaults() {
+        let t = temp_config();
+        std::fs::write(
+            &t.global,
+            r#"{"theme":"light","verbose":true,"unknown":{"x":1}}"#,
+        )
+        .unwrap();
+        save_map(&t.global, |mut map| {
+            map.insert("theme".into(), json!("dark"));
+            map.insert("verbose".into(), json!(false));
+            map.insert("autoCompactEnabled".into(), json!(true));
+            map.insert("installMethod".into(), Value::Null);
+            map
+        })
+        .unwrap();
+        let back = read_map(&t.global).unwrap();
+        assert!(back.get("theme").is_none());
+        assert!(back.get("verbose").is_none());
+        assert!(back.get("autoCompactEnabled").is_none());
+        assert_eq!(back["unknown"], json!({"x": 1}));
+        // `installMethod` defaults to JS `undefined`; an explicit JSON null is
+        // not equal to that default and must survive.
+        assert_eq!(back["installMethod"], Value::Null);
     }
 
     #[test]

@@ -1850,6 +1850,63 @@ pub trait OrchestratorHandle: Send + Sync {
         None
     }
 
+    /// Whether dynamic workflows are enabled for THIS session.
+    async fn dynamic_workflows_enabled(&self) -> bool {
+        false
+    }
+
+    /// Whether enterprise policy owns the session's `enableWorkflows` value.
+    async fn dynamic_workflows_managed(&self) -> bool {
+        false
+    }
+
+    /// Effective session-owned `workflowSizeGuideline` value.
+    async fn workflow_size_guideline(&self) -> String {
+        "medium".to_string()
+    }
+
+    /// Whether enterprise policy owns the session's `workflowSizeGuideline`.
+    async fn workflow_size_guideline_managed(&self) -> bool {
+        false
+    }
+
+    /// Coherent session-owned `workflowSizeGuideline` snapshot.
+    async fn workflow_size_guideline_state(
+        &self,
+    ) -> crate::session_flags::WorkflowSizeGuidelineSnapshot {
+        crate::session_flags::WorkflowSizeGuidelineSnapshot {
+            value: "medium",
+            managed: false,
+            is_default: true,
+        }
+    }
+
+    /// Whether the session's workflow-size value is still the built-in default.
+    async fn workflow_size_guideline_is_default(&self) -> bool {
+        true
+    }
+
+    /// Update the live session-owned dynamic-workflow gate.
+    async fn set_dynamic_workflows_enabled(
+        &self,
+        enabled: bool,
+        managed: bool,
+    ) -> Result<(), HandleError> {
+        let _ = (enabled, managed);
+        Ok(())
+    }
+
+    /// Update the live session-owned workflow-size setting.
+    async fn set_workflow_size_guideline(
+        &self,
+        value: String,
+        managed: bool,
+        is_default: bool,
+    ) -> Result<(), HandleError> {
+        let _ = (value, managed, is_default);
+        Ok(())
+    }
+
     /// Change the live effort for this session as well as future transcript
     /// rows. Persistence of the default remains the slash command's concern.
     async fn set_effort_level(&self, _effort: Option<String>) -> Result<(), HandleError> {
@@ -2918,6 +2975,14 @@ pub trait OutputStream: Send + Sync {
     /// **Default no-op**: every pre-existing `OutputStream` impl keeps
     /// compiling unchanged. Only `StreamJsonStream` overrides this.
     async fn emit_stream_event(&self, _event_json: &str, _is_message_start: bool) {}
+
+    /// Whether [`Self::emit_stream_event`] will actually consume reconstructed
+    /// SSE JSON. Default `false` so the streaming loop can skip serialize work
+    /// for TUI / mock sinks. Stream-json with `--include-partial-messages` returns
+    /// true.
+    fn wants_partial_stream_events(&self) -> bool {
+        false
+    }
 
     /// Emit a `system/hook_started` frame for `--include-hook-events`.
     ///

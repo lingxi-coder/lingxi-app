@@ -55,9 +55,9 @@ fn default_main_loop_model_setting(env: &MigrationEnv) -> &'static str {
 }
 
 /// Run the migration.
-pub async fn run(env: &MigrationEnv) {
+pub async fn run(env: &MigrationEnv) -> bool {
     if !is_opus1m_merge_enabled(env) {
-        return;
+        return true;
     }
     let sp = settings_path(
         SettingsSource::User,
@@ -68,7 +68,7 @@ pub async fn run(env: &MigrationEnv) {
         .ok()
         .and_then(|m| m.get("model").and_then(Value::as_str).map(String::from));
     if model.as_deref() != Some("opus") {
-        return;
+        return true;
     }
 
     // modelToSet: undefined (delete) when opus[1m] IS the default, else set.
@@ -79,16 +79,15 @@ pub async fn run(env: &MigrationEnv) {
         ("model".to_string(), Some(json!(migrated)))
     };
     if let Err(e) = update_settings(&sp, vec![update]) {
-        // TS `updateSettingsForSource` never throws — it returns an ignored
-        // `{error}` (settings.ts:416-523) and TS emits unconditionally after
-        // the ignored write. Warn and continue to the emit.
-        tracing::warn!(error = %e, "migrate_opus_to_opus1m: settings write failed (ignored, TS parity)");
+        tracing::warn!(error = %e, "migrate_opus_to_opus1m: settings write failed");
+        return false;
     }
     env.emit(
         telemetry::tengu::migration::OPUS_TO_OPUS1M_MIGRATION,
         std::collections::HashMap::new(),
     )
     .await;
+    true
 }
 
 #[cfg(test)]

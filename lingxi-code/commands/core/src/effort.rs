@@ -59,17 +59,13 @@ const MAX_MODELS: &str = "Fable 5, Opus 4.6+, Sonnet 4.6+";
 /// The `- max:` line renders `Maximum capability with deepest reasoning
 /// (${gAi})`; the `- xhigh:` line renders `Extended reasoning with thorough
 /// analysis (${nyn})`. The `- ultracode:` line is appended only when
-/// `e = x4(js())` is true (here [`dynamic_workflows_enabled`]); `xhigh` is
+/// `e = x4(js())` is true; `xhigh` is
 /// unconditional. `XVn` uses square brackets (`[...]`) for the bracketed list —
 /// the angle-bracket (`<...>`) form lives in the separate non-interactive
 /// empty-arg fallback (`tdm`), which this port routes to `show_current`.
-fn usage() -> String {
-    usage_with(dynamic_workflows_enabled())
-}
-
-/// `getEffortHelpText` (`XVn`) parameterized on the `e = x4(js())` gate, so both
-/// the gated-off and gated-on renderings are unit-testable independently of the
-/// seam-blocked [`dynamic_workflows_enabled`].
+///
+/// `getEffortHelpText` (`XVn`) is parameterized on the `e = x4(js())` gate so
+/// both gated-off and gated-on renderings stay unit-testable without a global.
 fn usage_with(dynamic_workflows: bool) -> String {
     let ultracode_list = if dynamic_workflows { "|ultracode" } else { "" };
     let ultracode_line = if dynamic_workflows {
@@ -91,15 +87,6 @@ Effort levels:\n\
 
 /// Environment variable that pins / clears the effort level for the session.
 const EFFORT_ENV_VAR: &str = "LINGXI_EFFORT_LEVEL";
-
-/// `x4(js())` — claude's dynamic-workflow-orchestration gate that unlocks the
-/// `ultracode` pseudo-level. `x4(e) = Ow() && (e===void 0 || yve(e))`, where
-/// `Ow()` is the dynamic-workflows feature flag and `yve` confirms the model
-/// supports it.
-///
-fn dynamic_workflows_enabled() -> bool {
-    traits::session_flags::dynamic_workflows_enabled()
-}
 
 /// The discrete effort levels (`effort.ts` `EFFORT_LEVELS` / `nP =
 /// ["low","medium","high","xhigh","max"]`, v2.1.183).
@@ -608,11 +595,12 @@ impl BuiltinCommandHandler for EffortHandler {
         // COMMON_HELP_ARGS.includes(args) in TS (case-sensitive there).
         if matches!(trimmed, "help" | "-h" | "--help") {
             return CommandResult::Done {
-                display: Some(usage()),
+                display: Some(usage_with(self.handle.dynamic_workflows_enabled().await)),
             };
         }
 
         let normalized = trimmed.to_lowercase();
+        let workflows_enabled = self.handle.dynamic_workflows_enabled().await;
         let display = if normalized.is_empty() || normalized == "current" || normalized == "status"
         {
             self.show_current().await
@@ -623,7 +611,7 @@ impl BuiltinCommandHandler for EffortHandler {
             // dynamic-workflow seam is off it returns the "needs dynamic
             // workflows enabled" guidance (`Pum` L1); when on it maps to `xhigh`
             // (with the dynamic-orchestration suffix).
-            if dynamic_workflows_enabled() {
+            if workflows_enabled {
                 // ultracode → xhigh (Hum/Pum). Session-only orchestration.
                 self.set_effort(EffortLevel::Xhigh).await
             } else {
@@ -636,11 +624,7 @@ impl BuiltinCommandHandler for EffortHandler {
             // `ZVn` invalid-arg branch — uses the original (un-normalized,
             // trimmed) argument text. The `ultracode,` hint is appended only
             // when the dynamic-workflow seam is on (`x4(js())`).
-            let ultracode_hint = if dynamic_workflows_enabled() {
-                " ultracode,"
-            } else {
-                ""
-            };
+            let ultracode_hint = if workflows_enabled { " ultracode," } else { "" };
             format!(
                 "Invalid argument: {trimmed}. Valid options are: low, medium, high, xhigh, max,{ultracode_hint} auto"
             )
@@ -758,8 +742,21 @@ mod tests {
         EffortHandler::new(Arc::new(MockOrchestratorHandle::new()))
     }
 
+    fn handler_with_gate(enabled: bool) -> EffortHandler {
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        mock.set_dynamic_workflows_gate(enabled, false);
+        EffortHandler::new(mock)
+    }
+
     async fn run(raw: &str) -> String {
         match handler().handle(&args(raw)).await {
+            CommandResult::Done { display: Some(s) } => s,
+            other => panic!("expected Done with display, got {other:?}"),
+        }
+    }
+
+    async fn run_with_gate(raw: &str, enabled: bool) -> String {
+        match handler_with_gate(enabled).handle(&args(raw)).await {
             CommandResult::Done { display: Some(s) } => s,
             other => panic!("expected Done with display, got {other:?}"),
         }
@@ -769,7 +766,7 @@ mod tests {
     async fn help_args_render_usage() {
         let _env = TestEnv::new();
         for raw in ["help", "-h", "--help", "  help  "] {
-            assert_eq!(run(raw).await, usage());
+            assert_eq!(run(raw).await, usage_with(false));
         }
     }
 
@@ -777,9 +774,8 @@ mod tests {
     fn usage_is_byte_exact_with_gate_off() {
         // `getEffortHelpText` (`XVn`) with `e = x4(js()) === false`:
         // `xhigh` present, `ultracode` absent. Square brackets per `XVn`.
-        assert!(!dynamic_workflows_enabled());
         assert_eq!(
-            usage(),
+            usage_with(false),
             "Usage: /effort [low|medium|high|xhigh|max|auto]\n\n\
 Effort levels:\n\
 - low: Quick, straightforward implementation\n\
@@ -897,7 +893,8 @@ Effort levels:\n\
             run("ultracode").await,
             "Ultracode needs dynamic workflows enabled (see /config). Valid options are: low, medium, high, xhigh, max, auto"
         );
-        assert_eq!(run("ULTRACODE").await,
+        assert_eq!(
+            run("ULTRACODE").await,
             "Ultracode needs dynamic workflows enabled (see /config). Valid options are: low, medium, high, xhigh, max, auto"
         );
     }
@@ -1015,9 +1012,19 @@ Effort levels:\n\
         // The Usage block's `- max:` line renders the Usage template
         // `Maximum capability with deepest reasoning (${gAi})` with
         // `gAi="Fable 5, Opus 4.6+, Sonnet 4.6+"`.
-        assert!(usage().contains(
+        assert!(usage_with(false).contains(
             "- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6+)\n"
         ));
+    }
+
+    #[tokio::test]
+    async fn help_and_invalid_arg_follow_the_handle_gate() {
+        let _env = TestEnv::new();
+        assert_eq!(run_with_gate("help", true).await, usage_with(true));
+        assert_eq!(
+            run_with_gate("bogus", true).await,
+            "Invalid argument: bogus. Valid options are: low, medium, high, xhigh, max, ultracode, auto"
+        );
     }
 
     // ---- persistence (updateSettingsForSource) parity ----

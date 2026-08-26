@@ -47,7 +47,8 @@ pub use api::SubagentApiClient;
 pub use builtins::{builtin_agent_definitions, fork_agent_definition};
 pub use catalog::{
     load_agents_from_dirs, parse_agent_from_json, parse_agent_markdown,
-    parse_agents_from_flag_json, parse_agents_from_json, AgentLoadError,
+    parse_agents_from_flag_json, parse_agents_from_flag_json_checked, parse_agents_from_json,
+    AgentLoadError,
 };
 pub use color_manager::AgentColorManager;
 pub use context::SubagentContext;

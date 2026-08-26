@@ -1,5 +1,5 @@
 //! Parity fixture: `tengu_api_success` event name + payload field subset locked
-//! against claude-code 2.1.195's per-request success emission, plus the
+//! against Claude Code 2.1.246's per-request success emission, plus the
 //! surviving `tengu_cost_budget_*` thresholds.
 //!
 //! Strict-parity note: the former `tengu_cost_recorded` event was PORT-ONLY
@@ -23,11 +23,18 @@ use test_harness::parity::load_fixture;
 struct Fixture {
     event_names: EventNames,
     thresholds_bps: Thresholds,
+    query_sources: QuerySources,
     canonical_api_success_input: CanonicalInput,
     expected_payload_keys: Vec<String>,
     expected_payload_values: HashMap<String, serde_json::Value>,
     budget_warning_payload_keys: Vec<String>,
     budget_exceeded_payload_keys: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct QuerySources {
+    repl_main_thread: String,
+    sdk: String,
 }
 
 #[derive(Deserialize)]
@@ -94,7 +101,7 @@ fn event_names_match_fixture_byte_for_byte() {
     let fx: Fixture = load_fixture("cost_events");
     assert_eq!(
         fx.event_names.api_success, "tengu_api_success",
-        "fixture must declare the claude-2.1.195 api_success event name"
+        "fixture must declare the Claude Code 2.1.246 api_success event name"
     );
     assert_eq!(fx.event_names.budget_warning, "tengu_cost_budget_warning");
     assert_eq!(fx.event_names.budget_exceeded, "tengu_cost_budget_exceeded");
@@ -115,6 +122,73 @@ fn thresholds_match_constants_byte_for_byte() {
         fx.thresholds_bps.batch_discount, BATCH_DISCOUNT_BPS,
         "fixture batch_discount must equal BATCH_DISCOUNT_BPS"
     );
+}
+
+#[test]
+fn fixture_query_source_matches_the_live_repl_orchestrator_config() {
+    let fx: Fixture = load_fixture("cost_events");
+    let config = orchestrator::OrchestratorConfig::default();
+    assert_eq!(
+        fx.canonical_api_success_input.query_source,
+        config.query_source
+    );
+    assert_eq!(
+        config.query_source,
+        orchestrator::QUERY_SOURCE_REPL_MAIN_THREAD
+    );
+    assert_eq!(fx.query_sources.repl_main_thread, config.query_source);
+    assert_eq!(fx.query_sources.sdk, orchestrator::QUERY_SOURCE_SDK);
+    assert_eq!(
+        orchestrator::sanitize_query_source(&fx.query_sources.sdk),
+        orchestrator::QUERY_SOURCE_SDK
+    );
+}
+
+#[tokio::test]
+async fn api_success_sdk_query_source_matches_transport_wire_value() {
+    let fx: Fixture = load_fixture("cost_events");
+    let bus = Arc::new(AnalyticsBus::new());
+    let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
+    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
+        .await;
+    let inp = &fx.canonical_api_success_input;
+
+    emit_api_success(
+        &bus,
+        &ApiSuccessFields {
+            model: inp.model.clone(),
+            input_tokens: inp.input_tokens,
+            output_tokens: inp.output_tokens,
+            cached_input_tokens: inp.cached_input_tokens,
+            uncached_input_tokens: inp.uncached_input_tokens,
+            duration_ms: inp.duration_ms,
+            duration_ms_including_retries: inp.duration_ms_including_retries,
+            attempt: inp.attempt,
+            cost_nano_usd: inp.cost_nano_usd,
+            provider: inp.provider.clone(),
+            stop_reason: Some(inp.stop_reason.clone()),
+            request_id: Some(inp.request_id.clone()),
+            message_count: inp.message_count,
+            message_tokens: inp.message_tokens,
+            did_fall_back_to_non_streaming: inp.did_fall_back_to_non_streaming,
+            is_non_interactive_session: true,
+            print: false,
+            is_tty: false,
+            query_source: fx.query_sources.sdk.clone(),
+            permission_mode: inp.permission_mode.clone(),
+            ttft_ms: Some(inp.ttft_ms),
+            fast_mode: inp.fast_mode,
+            time_since_last_api_call_ms: Some(inp.time_since_last_api_call_ms),
+        },
+    )
+    .await;
+
+    let events = sink.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0].1.get("querySource"),
+        Some(AnalyticsValue::String(value)) if value == "sdk"
+    ));
 }
 
 #[tokio::test]

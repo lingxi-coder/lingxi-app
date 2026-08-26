@@ -67,7 +67,10 @@ pub mod test_support;
 /// integration tests can use the fixtures without a feature flag).
 pub mod test_support_stream;
 
-pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};
+pub use config::{
+    sanitize_query_source, OrchestratorConfig, MAX_TURNS_DEFAULT, QUERY_SOURCE_REPL_MAIN_THREAD,
+    QUERY_SOURCE_SDK,
+};
 pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient,
     SessionMemoryHandle, StreamingApiClient, TurnOutcome,

@@ -42,12 +42,12 @@
 //! - `didFallBackToNonStreaming` — `true` on the 529 non-streaming fallback arm,
 //!   `false` on the plain streaming/batched success path (`didFallBackToNonStreaming:m`).
 //! - `isNonInteractiveSession` — `xr()` (`isNonInteractiveSession:L`).
-//! - `print` — the `-p`/`--print` flag (`print:B`). The port has a single
-//!   non-interactive global; `print` and `isNonInteractiveSession` both map to it
-//!   (a minor fidelity loss — claude distinguishes the two).
-//! - `isTTY` — `process.stdout.isTTY??!1` (`isTTY:...`). The orchestrator engine
-//!   has no stdout TTY notion; faithfully `false`.
-//! - `querySource` — main-query source constant `"user"` (`querySource:Bg(f)`).
+//! - `print` — the `-p`/`--print` flag (`print:B`). Distinct from
+//!   `isNonInteractiveSession` (SDK/transport is non-interactive but not print).
+//! - `isTTY` — `process.stdout.isTTY??!1` (`isTTY:...`). Hosts thread the real
+//!   stdout TTY; SDK / tests default `false`.
+//! - `querySource` — Claude Code 2.1.245 main-query allowlist
+//!   (`repl_main_thread` / `sdk`, sanitized via `E_`).
 //! - `permissionMode` — `"plan"` when plan-mode else `"default"` (`permissionMode:No(T)`).
 //!   The port `PermissionGate` exposes only plan/default, not acceptEdits/bypass.
 //!
@@ -103,12 +103,13 @@ pub struct ApiSuccessFields {
     pub did_fall_back_to_non_streaming: bool,
     /// `xr()` non-interactive-session flag (`isNonInteractiveSession:L`).
     pub is_non_interactive_session: bool,
-    /// `-p`/`--print` flag (`print:B`); maps to the same global as
-    /// `is_non_interactive_session` in the port.
+    /// `-p`/`--print` flag (`print:B`). Distinct from
+    /// [`Self::is_non_interactive_session`].
     pub print: bool,
-    /// `process.stdout.isTTY??!1` (`isTTY:...`); faithfully `false` (no engine TTY).
+    /// `process.stdout.isTTY??!1` (`isTTY:...`). Host-supplied; default `false`.
     pub is_tty: bool,
-    /// Main-query source constant `"user"` (`querySource:Bg(f)`).
+    /// Main-query source (`querySource:hl(m)` / `E_(querySource)`). CLI is
+    /// `"repl_main_thread"`; SDK/bridge is `"sdk"`.
     pub query_source: String,
     /// `"plan"` when plan-mode else `"default"` (`permissionMode:No(T)`).
     pub permission_mode: String,

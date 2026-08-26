@@ -83,6 +83,20 @@ fn escape_xml(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+const WORKFLOW_RESULT_PREVIEW_UTF16: usize = 8_000;
+
+fn utf16_len(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
+fn truncate_utf16(value: &str, limit: usize) -> String {
+    // Claude uses JavaScript `string.slice(0, 8000)`, whose index is measured
+    // in UTF-16 code units and may split a surrogate pair. When that string is
+    // serialized to UTF-8 the lone surrogate becomes U+FFFD, so preserve that
+    // observable edge case instead of truncating only at Rust `char` bounds.
+    String::from_utf16_lossy(&value.encode_utf16().take(limit).collect::<Vec<_>>())
+}
+
 /// Render ONE `<task-notification>` block for a drained task, dispatching on its
 /// `task_type` to the byte-faithful per-type format.
 fn render_one(n: &TaskNotification) -> String {
@@ -164,6 +178,122 @@ fn render_one(n: &TaskNotification) -> String {
             };
             format!(
                 "<task-notification>\n<task-id>{}</task-id>{tool_use_id_line}\n<output-file>{output_file}</output-file>\n<status>{}</status>\n<summary>{}</summary>\n<note>{NOTE}</note>{result_section}{usage_section}{worktree_section}\n</task-notification>",
+                n.task_id,
+                n.status,
+                escape_xml(&summary)
+            )
+        }
+        "local_workflow" => {
+            let summary = match n.status.as_str() {
+                "completed" => format!("Dynamic workflow \"{}\" completed", n.description),
+                "failed" => format!(
+                    "Dynamic workflow \"{}\" failed: {}",
+                    n.description,
+                    n.error.as_deref().unwrap_or("Unknown error")
+                ),
+                _ => format!("Dynamic workflow \"{}\" was stopped", n.description),
+            };
+            let args_clause = n
+                .workflow_args
+                .as_deref()
+                .map(|args| format!(", args: {args}"))
+                .unwrap_or_default();
+            let recovery_section = if matches!(n.status.as_str(), "failed" | "killed") {
+                let mut lines = Vec::new();
+                if let (Some(script_path), Some(run_id)) =
+                    (&n.workflow_script_path, &n.workflow_run_id)
+                {
+                    lines.push(format!(
+                        "To resume after editing the script, call: Workflow({{scriptPath: '{script_path}', resumeFromRunId: '{run_id}'{args_clause}}})"
+                    ));
+                }
+                if let Some(transcript_dir) = &n.workflow_transcript_dir {
+                    lines.push(format!("Agent transcripts: {transcript_dir}"));
+                }
+                if lines.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n<recovery>{}</recovery>", escape_xml(&lines.join("\n")))
+                }
+            } else {
+                String::new()
+            };
+            let result_section = if n.status == "completed" {
+                n.result
+                    .as_deref()
+                    .map(|result| {
+                        let escaped = escape_xml(result);
+                        let length = utf16_len(&escaped);
+                        if length > WORKFLOW_RESULT_PREVIEW_UTF16 {
+                            let preview = truncate_utf16(&escaped, WORKFLOW_RESULT_PREVIEW_UTF16);
+                            format!(
+                                "\n<result>{preview}\n... (truncated {} chars, full result in {output_file})</result>",
+                                length - WORKFLOW_RESULT_PREVIEW_UTF16
+                            )
+                        } else {
+                            format!("\n<result>{escaped}</result>")
+                        }
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let diagnostics_section = if n.status == "completed" {
+                n.workflow_transcript_dir
+                    .as_deref()
+                    .map(|transcript_dir| {
+                        let mut lines = vec![
+                            format!(
+                                "Per-agent results: {transcript_dir}/journal.jsonl — one {{\"type\":\"result\",...}} line per completed agent with its full return value."
+                            ),
+                            "If the result above is empty or unexpected, Read this file BEFORE diagnosing — do not assume agents returned non-empty results."
+                                .to_string(),
+                        ];
+                        if let (Some(script_path), Some(run_id)) =
+                            (&n.workflow_script_path, &n.workflow_run_id)
+                        {
+                            lines.push(format!(
+                                "To re-run with edited post-processing: Workflow({{scriptPath: '{script_path}', resumeFromRunId: '{run_id}'{args_clause}}}) — agents whose (prompt, opts) are unchanged replay from cache."
+                            ));
+                        }
+                        format!(
+                            "\n<diagnostics>{}</diagnostics>",
+                            escape_xml(&lines.join("\n"))
+                        )
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let failures_section = if n.workflow_failures.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n<failures>{}</failures>",
+                    escape_xml(&n.workflow_failures.join("\n"))
+                )
+            };
+            let progress_usage = match (
+                n.workflow_agents_done,
+                n.workflow_agents_error,
+                n.workflow_agents_skipped,
+                n.workflow_agents_empty_result,
+            ) {
+                (Some(done), Some(error), Some(skipped), Some(empty_result)) => format!(
+                    "<agents_done>{done}</agents_done><agents_error>{error}</agents_error><agents_skipped>{skipped}</agents_skipped><agents_empty_result>{empty_result}</agents_empty_result>"
+                ),
+                _ => String::new(),
+            };
+            let usage_section = format!(
+                "\n<usage><agent_count>{}</agent_count>{}<subagent_tokens>{}</subagent_tokens><tool_uses>{}</tool_uses><duration_ms>{}</duration_ms></usage>",
+                n.workflow_agent_count.unwrap_or(0),
+                progress_usage,
+                n.workflow_total_tokens.unwrap_or(0),
+                n.workflow_total_tool_calls.unwrap_or(0),
+                n.workflow_duration_ms.unwrap_or(0),
+            );
+            format!(
+                "<task-notification>\n<task-id>{}</task-id>{tool_use_id_line}\n<output-file>{output_file}</output-file>\n<status>{}</status>\n<summary>{}</summary>{recovery_section}{result_section}{diagnostics_section}{failures_section}{usage_section}\n</task-notification>",
                 n.task_id,
                 n.status,
                 escape_xml(&summary)
@@ -339,6 +469,12 @@ mod tests {
             killed_by: None,
             worktree_path: None,
             worktree_branch: None,
+            workflow_failures: Vec::new(),
+            workflow_agent_count: None,
+            workflow_total_tokens: None,
+            workflow_total_tool_calls: None,
+            workflow_duration_ms: None,
+            ..Default::default()
         }
     }
 
@@ -386,6 +522,118 @@ mod tests {
             block.contains("<summary>Background command \"sleeper\" was stopped</summary>"),
             "got: {block}"
         );
+    }
+
+    #[test]
+    fn workflow_keeps_result_failures_and_usage_separate() {
+        let mut n = base("w12345678", "local_workflow", "completed", "review");
+        n.result = Some("final <answer>".into());
+        n.workflow_failures = vec!["agent A failed".into(), "agent B timed out".into()];
+        n.workflow_agent_count = Some(2);
+        n.workflow_total_tokens = Some(17);
+        n.workflow_total_tool_calls = Some(5);
+        n.workflow_duration_ms = Some(91);
+        n.workflow_script_path = Some("/tmp/workflow.js".into());
+        n.workflow_run_id = Some("wf_abcdef".into());
+        n.workflow_args = Some(r#"{"q":"x"}"#.into());
+        n.workflow_transcript_dir = Some("/tmp/transcripts/wf_abcdef".into());
+        n.workflow_agents_done = Some(1);
+        n.workflow_agents_error = Some(1);
+        n.workflow_agents_skipped = Some(0);
+        n.workflow_agents_empty_result = Some(0);
+
+        let block = render_one(&n);
+        assert!(block.contains("<result>final &lt;answer&gt;</result>"));
+        assert!(block.contains("<failures>agent A failed\nagent B timed out</failures>"));
+        assert!(block.contains(
+            "<diagnostics>Per-agent results: /tmp/transcripts/wf_abcdef/journal.jsonl — one {\"type\":\"result\",...} line per completed agent with its full return value."
+        ));
+        assert!(block.contains(
+            "To re-run with edited post-processing: Workflow({scriptPath: '/tmp/workflow.js', resumeFromRunId: 'wf_abcdef', args: {\"q\":\"x\"}}) — agents whose (prompt, opts) are unchanged replay from cache.</diagnostics>"
+        ));
+        assert!(block.contains(
+            "<usage><agent_count>2</agent_count><agents_done>1</agents_done><agents_error>1</agents_error><agents_skipped>0</agents_skipped><agents_empty_result>0</agents_empty_result><subagent_tokens>17</subagent_tokens><tool_uses>5</tool_uses><duration_ms>91</duration_ms></usage>"
+        ));
+        assert!(!block.contains("<result>final &lt;answer&gt;\nagent A failed"));
+    }
+
+    #[test]
+    fn workflow_usage_omits_progress_counts_without_workflow_progress() {
+        let mut n = base("w12345678", "local_workflow", "completed", "review");
+        n.workflow_agent_count = Some(2);
+        n.workflow_total_tokens = Some(17);
+        n.workflow_total_tool_calls = Some(5);
+        n.workflow_duration_ms = Some(91);
+
+        let block = render_one(&n);
+        assert!(block.contains(
+            "<usage><agent_count>2</agent_count><subagent_tokens>17</subagent_tokens><tool_uses>5</tool_uses><duration_ms>91</duration_ms></usage>"
+        ));
+        assert!(!block.contains("<agents_done>"));
+        assert!(!block.contains("<agents_error>"));
+        assert!(!block.contains("<agents_skipped>"));
+        assert!(!block.contains("<agents_empty_result>"));
+    }
+
+    #[test]
+    fn workflow_usage_keeps_progress_counts_when_present() {
+        let mut n = base("w12345678", "local_workflow", "completed", "review");
+        n.workflow_agent_count = Some(2);
+        n.workflow_total_tokens = Some(17);
+        n.workflow_total_tool_calls = Some(5);
+        n.workflow_duration_ms = Some(91);
+        n.workflow_agents_done = Some(1);
+        n.workflow_agents_error = Some(1);
+        n.workflow_agents_skipped = Some(0);
+        n.workflow_agents_empty_result = Some(0);
+
+        let block = render_one(&n);
+        assert!(block.contains(
+            "<usage><agent_count>2</agent_count><agents_done>1</agents_done><agents_error>1</agents_error><agents_skipped>0</agents_skipped><agents_empty_result>0</agents_empty_result><subagent_tokens>17</subagent_tokens><tool_uses>5</tool_uses><duration_ms>91</duration_ms></usage>"
+        ));
+    }
+
+    #[test]
+    fn workflow_failure_includes_recovery_metadata() {
+        let mut n = base("w12345678", "local_workflow", "failed", "review");
+        n.error = Some("boom".into());
+        n.workflow_script_path = Some("/tmp/a&b.js".into());
+        n.workflow_run_id = Some("wf_abcdef".into());
+        n.workflow_args = Some("[1,2]".into());
+        n.workflow_transcript_dir = Some("/tmp/transcripts/wf_abcdef".into());
+
+        let block = render_one(&n);
+        assert!(block.contains(
+            "<recovery>To resume after editing the script, call: Workflow({scriptPath: '/tmp/a&amp;b.js', resumeFromRunId: 'wf_abcdef', args: [1,2]})\nAgent transcripts: /tmp/transcripts/wf_abcdef</recovery>"
+        ));
+        assert!(!block.contains("<diagnostics>"));
+        assert!(!block.contains("<result>"));
+    }
+
+    #[test]
+    fn workflow_result_is_truncated_at_8000_utf16_units() {
+        let mut n = base("w12345678", "local_workflow", "completed", "review");
+        n.result = Some("x".repeat(8_001));
+        let block = render_one(&n);
+        assert!(block.contains(
+            &format!(
+                "<result>{}\n... (truncated 1 chars, full result in /tmp/tasks/w12345678.output)</result>",
+                "x".repeat(8_000)
+            )
+        ));
+    }
+
+    #[test]
+    fn workflow_result_truncation_matches_javascript_slice_at_surrogate_boundary() {
+        let mut n = base("w12345678", "local_workflow", "completed", "review");
+        n.result = Some(format!("{}😀x", "a".repeat(7_999)));
+
+        let block = render_one(&n);
+
+        assert!(block.contains(&format!(
+            "<result>{}�\n... (truncated 2 chars, full result in /tmp/tasks/w12345678.output)</result>",
+            "a".repeat(7_999)
+        )));
     }
 
     #[test]
@@ -623,10 +871,10 @@ mod tests {
 
     #[test]
     fn generic_type_uses_task_type_tag_and_status_text() {
-        let n = base("w12345678", "local_workflow", "completed", "deploy");
+        let n = base("w12345678", "custom_task", "completed", "deploy");
         let block = render_one(&n);
         assert!(
-            block.contains("<task-type>local_workflow</task-type>"),
+            block.contains("<task-type>custom_task</task-type>"),
             "got: {block}"
         );
         assert!(

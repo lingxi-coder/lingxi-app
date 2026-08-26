@@ -221,6 +221,8 @@ impl ScreenView {
         theme: ThemeName,
         vim: bool,
         verbose: bool,
+        dynamic_workflows_enabled: bool,
+        workflow_size_guideline: &str,
         agent_view_enabled: bool,
         left_arrow_opens_agents: bool,
         default_to_agents_view: bool,
@@ -233,6 +235,8 @@ impl ScreenView {
                 theme,
                 vim,
                 verbose,
+                dynamic_workflows_enabled,
+                workflow_size_guideline,
                 agent_view_enabled,
                 left_arrow_opens_agents,
                 default_to_agents_view,
@@ -814,22 +818,21 @@ fn settings_lines(
     theme: ThemeName,
     vim: bool,
     verbose: bool,
+    dynamic_workflows_enabled: bool,
+    workflow_size_guideline: &str,
     agent_view_enabled: bool,
     left_arrow_opens_agents: bool,
     default_to_agents_view: bool,
     lingxi_home: &str,
     cwd: &str,
 ) -> Vec<Line<'static>> {
-    // The composition root publishes the effective merged value after applying
-    // user/project/local/flag/managed precedence. Reading the process snapshot
-    // here prevents `/config` from disagreeing with the Workflow tool.
-    let workflow_size = traits::session_flags::workflow_size_guideline();
     let mut out = vec![
         header("Session settings"),
         row("└ Theme", theme.as_wire()),
         row("└ Vim mode", on_off(vim)),
         row("└ Verbose", on_off(verbose)),
-        row("└ Dynamic workflow size", workflow_size),
+        row("└ Dynamic workflows", on_off(dynamic_workflows_enabled)),
+        row("└ Dynamic workflow size", workflow_size_guideline),
         row(
             "└ Dialog expiry",
             tui_core::theme_persist::load_dialog_expiry()
@@ -1044,6 +1047,8 @@ mod tests {
             false,
             true,
             true,
+            "medium",
+            true,
             true,
             false,
             &home,
@@ -1059,6 +1064,10 @@ mod tests {
         assert!(text.contains("absent"), "{text}");
         assert!(text.contains("Read-only view"), "{text}");
         assert!(text.contains("Verbose") && text.contains("on"), "{text}");
+        assert!(
+            text.contains("Dynamic workflows") && text.contains("on"),
+            "{text}"
+        );
         // Agents-view rows (2.1.220), oracle order and labels.
         assert!(text.contains("Open agents view by default"), "{text}");
         assert!(text.contains("← opens agents"), "{text}");
@@ -1114,6 +1123,8 @@ mod tests {
             false,
             true,
             false,
+            "small",
+            false,
             true,
             true,
             "/no/such/home",
@@ -1137,6 +1148,8 @@ mod tests {
             false,
             true,
             true,
+            "large",
+            true,
             false,
             true,
             "/no/such/home",
@@ -1158,6 +1171,8 @@ mod tests {
             ThemeName::Dark,
             false,
             false,
+            false,
+            "medium",
             true,
             true,
             false,

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { extractAll } from '@electron/asar';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -50,25 +52,33 @@ export function verifyPackage(root = packageRoot) {
 
   const contents = join(paths.appPath, 'Contents');
   const resources = join(contents, 'Resources');
+  const packagedAsar = join(resources, 'app.asar');
   const packagedApp = join(resources, 'app');
+  requirePath(packagedAsar, 'application asar');
+  if (existsSync(packagedApp)) {
+    throw new Error('unpacked Resources/app must not remain beside app.asar');
+  }
+  if (existsSync(join(resources, 'default_app.asar'))) {
+    throw new Error('Electron default_app.asar must not be present');
+  }
+  const extractedApp = mkdtempSync(join(tmpdir(), 'lingxi-asar-'));
+  extractAll(packagedAsar, extractedApp);
   const expected = [
     join(contents, 'Info.plist'),
     join(contents, 'MacOS', APP_NAME),
     join(resources, 'bin', 'bridge-server'),
     join(resources, 'icon.icns'),
     join(resources, 'INTERNAL_BETA.md'),
-    join(packagedApp, 'package.json'),
-    join(packagedApp, 'out', 'main', 'index.js'),
-    join(packagedApp, 'out', 'preload', 'index.cjs'),
-    join(packagedApp, 'out', 'renderer', 'index.html'),
-    join(packagedApp, 'node_modules', '@lingxi', 'bridge-client', 'dist', 'index.js'),
-    join(packagedApp, 'node_modules', 'ws', 'package.json'),
-    join(packagedApp, 'node_modules', 'ws', 'lib', 'stream.js'),
+    join(extractedApp, 'package.json'),
+    join(extractedApp, 'out', 'main', 'index.js'),
+    join(extractedApp, 'out', 'preload', 'index.cjs'),
+    join(extractedApp, 'out', 'renderer', 'index.html'),
+    join(extractedApp, 'node_modules', '@lingxi', 'bridge-client', 'dist', 'index.js'),
+    join(extractedApp, 'node_modules', 'ws', 'package.json'),
+    join(extractedApp, 'node_modules', 'ws', 'lib', 'stream.js'),
   ];
+  try {
   for (const path of expected) requirePath(path);
-  if (existsSync(join(resources, 'default_app.asar'))) {
-    throw new Error('Electron default_app.asar must not be present');
-  }
 
   assertArm64Executable(join(contents, 'MacOS', APP_NAME), `${APP_NAME} executable`);
   assertArm64Executable(join(resources, 'bin', 'bridge-server'), 'packaged bridge-server sidecar');
@@ -97,14 +107,14 @@ export function verifyPackage(root = packageRoot) {
     if (plistHasKey(plistPath, key)) throw new Error(`unused or permissive plist key remains: ${key}`);
   }
 
-  const runtimeMetadata = readJson(join(packagedApp, 'package.json'));
+  const runtimeMetadata = readJson(join(extractedApp, 'package.json'));
   if (runtimeMetadata.main !== 'out/main/index.js') throw new Error('runtime package main is incorrect');
   if ('devDependencies' in runtimeMetadata) throw new Error('runtime package contains devDependencies');
   if (Object.keys(runtimeMetadata.dependencies ?? {}).sort().join(',') !== '@lingxi/bridge-client') {
     throw new Error('runtime package contains unexpected production dependencies');
   }
   for (const dependency of ['@lingxi/bridge-client', 'ws']) {
-    const dependencyMetadata = readJson(join(packagedApp, 'node_modules', ...dependency.split('/'), 'package.json'));
+    const dependencyMetadata = readJson(join(extractedApp, 'node_modules', ...dependency.split('/'), 'package.json'));
     if ('devDependencies' in dependencyMetadata) {
       throw new Error(`${dependency} package contains devDependencies`);
     }
@@ -115,7 +125,7 @@ export function verifyPackage(root = packageRoot) {
     '-e',
     'import("@lingxi/bridge-client").then(({ BridgeClient }) => { if (typeof BridgeClient !== "function") process.exit(2); })',
   ], {
-    cwd: packagedApp,
+    cwd: extractedApp,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: 'pipe',
   });
@@ -131,7 +141,7 @@ export function verifyPackage(root = packageRoot) {
     `${APP_NAME}.app/Contents/MacOS/${APP_NAME}`,
     `${APP_NAME}.app/Contents/Resources/bin/bridge-server`,
     `${APP_NAME}.app/Contents/Resources/INTERNAL_BETA.md`,
-    `${APP_NAME}.app/Contents/Resources/app/out/main/index.js`,
+    `${APP_NAME}.app/Contents/Resources/app.asar`,
   ]) {
     if (!zipEntries.includes(path)) throw new Error(`required ZIP entry is missing: ${path}`);
   }
@@ -152,6 +162,9 @@ export function verifyPackage(root = packageRoot) {
     zipPath: paths.zipPath,
     zipBytes: statSync(paths.zipPath).size,
   };
+  } finally {
+    rmSync(extractedApp, { recursive: true, force: true });
+  }
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

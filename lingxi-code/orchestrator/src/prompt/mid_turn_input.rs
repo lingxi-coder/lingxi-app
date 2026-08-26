@@ -130,7 +130,7 @@ impl Default for CancelReasonFlag {
 /// cancel-check point. The adapter (at the composition root, backed by
 /// `msgqueue`) snapshots the highest-priority `Next`/`Now` main-thread,
 /// non-slash commands, joins the consecutive prompts via `join_prompt_values`,
-/// REMOVES the consumed commands from the queue, and returns the joined text.
+/// `consume`s the folded commands from the queue, and returns the joined text.
 /// Returns `None` when nothing batchable is queued → no injection this step.
 ///
 /// The returned text is injected as a META user message (hidden in the
@@ -140,8 +140,8 @@ impl Default for CancelReasonFlag {
 pub trait MidTurnInputSource: Send + Sync {
     /// Drain + return the joined text of the queued main-thread, non-slash
     /// prompts at or above `Next` priority, or `None` when there is nothing to
-    /// inject. CONSUME-ONCE: drained commands are removed from the queue so they
-    /// are not re-run by the between-turn drain.
+    /// inject. CONSUME-ONCE: drained commands are `consume`d from the queue so
+    /// they are not re-run by the between-turn drain.
     async fn take_mid_turn_input(&self) -> Option<String>;
 }
 

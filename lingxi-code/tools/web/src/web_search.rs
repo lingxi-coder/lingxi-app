@@ -1083,7 +1083,7 @@ impl Tool for WebSearchTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        100_000
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         true
@@ -1729,6 +1729,12 @@ mod tests {
         assert_eq!(WEB_SEARCH_MAX_USES, 8);
         assert_eq!(WEB_SEARCH_DEFAULT_MAX_TOKENS, 4096);
         assert_eq!(TOOL_NAME, "WebSearch");
+    }
+
+    #[test]
+    fn tool_max_result_size_matches_claude_limit() {
+        let tool = WebSearchTool::new(validation_ctx());
+        assert_eq!(tool.max_result_size_chars(), 100_000);
     }
 
     #[test]

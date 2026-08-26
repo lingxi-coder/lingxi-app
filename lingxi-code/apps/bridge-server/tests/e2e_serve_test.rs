@@ -72,6 +72,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         mcp_paths: vec![cwd.join(".mcp.json")],
         use_noop_permission_gate: false,
         deny_unresolved_ask: false,
+        is_tty: false,
         injected_permission_gate: None,
         ask_user_question_tx: None,
         computer_access_tx: None,

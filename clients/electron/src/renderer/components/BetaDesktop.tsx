@@ -275,12 +275,27 @@ function richPromptText(node: Node): string {
   if (node instanceof HTMLElement && node.matches(FILE_MENTION_SELECTOR)) return '';
   if (node instanceof HTMLBRElement) return '\n';
 
-  let value = '';
+  const parts: string[] = [];
+  let hasText = false;
+  let endsWithNewline = false;
   for (const child of node.childNodes) {
-    if (child instanceof HTMLElement && /^(DIV|P)$/.test(child.tagName) && value && !value.endsWith('\n')) value += '\n';
-    value += richPromptText(child);
+    const next = richPromptText(child);
+    if (
+      child instanceof HTMLElement
+      && /^(DIV|P)$/.test(child.tagName)
+      && hasText
+      && !endsWithNewline
+    ) {
+      parts.push('\n');
+      endsWithNewline = true;
+    }
+    parts.push(next);
+    if (next.length > 0) {
+      hasText = true;
+      endsWithNewline = next.endsWith('\n');
+    }
   }
-  return value;
+  return parts.join('');
 }
 
 function richPromptSnapshot(editor: HTMLElement): RichPromptSnapshot {
@@ -625,10 +640,7 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
     next.interimResults = true;
     next.lang = typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US';
     next.onresult = (event) => {
-      let transcript = '';
-      for (let index = 0; index < event.results.length; index += 1) {
-        transcript += event.results[index][0]?.transcript ?? '';
-      }
+      const transcript = Array.from(event.results, (result) => result[0]?.transcript ?? '').join('');
       const prefix = voiceBase.current;
       replaceVoiceText(`${prefix}${prefix && transcript ? ' ' : ''}${transcript}`);
     };

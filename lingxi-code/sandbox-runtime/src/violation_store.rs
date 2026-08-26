@@ -26,6 +26,8 @@ const MAX_SIZE: usize = 100;
 pub struct Violation {
     /// base64 of the sandboxed command (`encodeSandboxedCommand`).
     pub encoded_command: String,
+    /// The user-facing violation line surfaced by Claude Code.
+    pub line: Option<String>,
     /// Destination host (network violations).
     pub host: Option<String>,
     /// Destination port (network violations).
@@ -142,6 +144,15 @@ impl SandboxViolationStore {
             .collect()
     }
 
+    /// User-facing violation lines for `command`, in stored order.
+    #[must_use]
+    pub fn get_violation_lines_for_command(&self, command: &str) -> Vec<String> {
+        self.get_violations_for_command(command)
+            .into_iter()
+            .filter_map(|violation| violation.line)
+            .collect()
+    }
+
     /// `clear`: empty the retained violations but KEEP `total_count`, then
     /// notify (with the now-empty tail).
     pub fn clear(&self) {
@@ -239,6 +250,32 @@ mod tests {
             .iter()
             .all(|x| x.encoded_command == encode_sandboxed_command("git status")));
         assert_eq!(store.get_violations_for_command("nothing here").len(), 0);
+    }
+
+    #[test]
+    fn violation_lines_for_command_keep_only_matching_lines() {
+        let store = SandboxViolationStore::new();
+        store.add_violation(Violation {
+            encoded_command: encode_sandboxed_command("git status"),
+            line: Some(
+                "deny network-outbound github.com:443 (host is not on the allow list)".into(),
+            ),
+            ..Default::default()
+        });
+        store.add_violation(Violation {
+            encoded_command: encode_sandboxed_command("npm install"),
+            line: Some(
+                "deny network-outbound registry.npmjs.org:443 (host is not on the allow list)"
+                    .into(),
+            ),
+            ..Default::default()
+        });
+        assert_eq!(
+            store.get_violation_lines_for_command("git status"),
+            vec![
+                "deny network-outbound github.com:443 (host is not on the allow list)".to_string()
+            ]
+        );
     }
 
     #[test]

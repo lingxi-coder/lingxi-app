@@ -35,16 +35,12 @@ pub fn workflow_row_from_record(r: WorkflowRecord) -> WorkflowRow {
         current_step: r.current_step,
         started_at_ms: r.started_at_ms,
         ended_at_ms: r.ended_at_ms,
+        script: r.script,
         script_path: r.script_path,
         args: r.args,
-        // Enriched separately from the run's output spool (the record carries
-        // no progress data); `cmd_workflows` fills these via
-        // `parse_workflow_spool`.
-        agent_count: 0,
+        agent_count: usize::try_from(r.agent_count).unwrap_or(usize::MAX),
+        total_tokens: r.total_tokens,
         phases: Vec::new(),
-        // The reduced `WorkflowRecord` carries no script source; the picker's
-        // `s save` chord stays hidden until the launcher plumbs it through.
-        script: None,
     }
 }
 
@@ -231,5 +227,15 @@ mod tests {
         sort_workflows_newest_first(&mut rows);
         let ids: Vec<&str> = rows.iter().map(|r| r.task_id.as_str()).collect();
         assert_eq!(ids, ["wb", "wd", "wc", "wa"]);
+    }
+
+    #[test]
+    fn workflow_row_from_record_preserves_inline_script() {
+        let row = workflow_row_from_record(WorkflowRecord {
+            task_id: "w12345678".into(),
+            script: Some("export const meta = {};".into()),
+            ..WorkflowRecord::default()
+        });
+        assert_eq!(row.script.as_deref(), Some("export const meta = {};"));
     }
 }

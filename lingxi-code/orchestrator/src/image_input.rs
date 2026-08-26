@@ -110,6 +110,15 @@ fn base64_encode(data: &[u8]) -> String {
 /// # Errors
 /// Returns [`OrchestratorError::Internal`] only if the file cannot be read.
 pub fn load_image_source(path: &Path) -> Result<ImageSource, OrchestratorError> {
+    const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_IMAGE_BYTES {
+            return Err(OrchestratorError::Internal(format!(
+                "image {} exceeds {MAX_IMAGE_BYTES} bytes",
+                path.display()
+            )));
+        }
+    }
     let bytes = std::fs::read(path).map_err(|e| {
         OrchestratorError::Internal(format!("could not read image {}: {e}", path.display()))
     })?;

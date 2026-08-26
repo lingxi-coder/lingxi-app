@@ -396,7 +396,9 @@ fn callback_to_auth_err(e: CallbackError) -> OpenAiAuthError {
         CallbackError::InvalidRequest(m) => OpenAiAuthError::ServerError(format!("callback: {m}")),
         // The provider redirected with `error=` — most often the user pressed
         // Deny, which is a cancellation, not a server fault.
-        CallbackError::Provider(detail) => OpenAiAuthError::ServerError(format!("denied: {detail}")),
+        CallbackError::Provider(detail) => {
+            OpenAiAuthError::ServerError(format!("denied: {detail}"))
+        }
     }
 }
 
@@ -451,8 +453,9 @@ mod tests {
         )]))
     }
 
-    fn handle_from_http(http: Arc<MockHttp>) -> (OpenAiOAuthHandle, Arc<MemStorage>, Arc<AtomicBool>)
-    {
+    fn handle_from_http(
+        http: Arc<MockHttp>,
+    ) -> (OpenAiOAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
         let clock = TestClock::new(1_000);
         let storage = MemStorage::new();
         let cm = mem_credential_manager(storage.clone(), clock.clone());
@@ -673,7 +676,10 @@ mod tests {
         handle.login().await.expect("login ok");
         assert_eq!(storage.count("lingxi"), 4);
         assert!(
-            storage.accounts("lingxi").iter().all(|a| !a.starts_with("anthropic-")),
+            storage
+                .accounts("lingxi")
+                .iter()
+                .all(|a| !a.starts_with("anthropic-")),
             "login wrote an Anthropic slot: {:?}",
             storage.accounts("lingxi"),
         );

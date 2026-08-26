@@ -5,16 +5,66 @@ use super::*;
 use serde_json::json;
 use std::any::Any;
 use std::collections::HashMap as StdHashMap;
+use std::collections::HashSet as StdHashSet;
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
 use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
+use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
 use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use traits::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use traits::{BudgetError, SubagentUsage};
 
 static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+#[test]
+fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
+    assert!(workflow_result_value_is_empty(&json!("")));
+    assert!(workflow_result_value_is_empty(&json!([])));
+    assert!(workflow_result_value_is_empty(&json!({})));
+    assert!(workflow_result_value_is_empty(&json!({"items": []})));
+    assert!(!workflow_result_value_is_empty(&json!({"items": [1]})));
+
+    let mut metrics = WorkflowRunMetrics::default();
+    metrics.record_cached(0, None, None, "[]");
+    metrics.record_result(
+        1,
+        None,
+        None,
+        &Ok(SubagentResult::Completed {
+            agent_id: protocol::AgentId::new(),
+            content: json!("answer"),
+            usage: SubagentUsage::default(),
+            total_tool_use_count: 0,
+            total_duration_ms: 0,
+            total_tokens: 0,
+            assistant_message_count: 0,
+            response_char_count: 0,
+            last_request_id: None,
+        }),
+    );
+    metrics.record_result(
+        2,
+        None,
+        None,
+        &Ok(SubagentResult::Failed {
+            agent_id: protocol::AgentId::new(),
+            reason: "boom".into(),
+        }),
+    );
+    metrics.record_result(
+        3,
+        None,
+        None,
+        &Ok(SubagentResult::Failed {
+            agent_id: protocol::AgentId::new(),
+            reason: "skipped by user".into(),
+        }),
+    );
+
+    assert_eq!(metrics.terminal_counts(), (2, 1, 1, 1));
+}
 
 #[test]
 fn local_app_workflow_lease_root_is_derived_from_the_requested_app() {
@@ -55,6 +105,9 @@ struct EchoSpawner {
     seen: StdMutex<Vec<String>>,
     seen_reqs: StdMutex<Vec<SubagentSpawnRequest>>,
     fail: bool,
+    total_tokens: u64,
+    total_tool_use_count: u64,
+    total_duration_ms: u64,
 }
 
 #[derive(Default)]
@@ -62,6 +115,42 @@ struct WorkflowForwardingProbeSpawner {
     plain_spawns: std::sync::atomic::AtomicUsize,
     watchdogs: StdMutex<Vec<traits::subagent_spawn::WorkflowQueryWatchdog>>,
     observer_presence: StdMutex<Vec<bool>>,
+}
+
+struct BlockingWorkflowObserverSpawner {
+    started: std::sync::atomic::AtomicUsize,
+    started_prompts: StdMutex<Vec<String>>,
+    released: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+    started_tx: StdMutex<Option<mpsc::UnboundedSender<String>>>,
+}
+
+impl BlockingWorkflowObserverSpawner {
+    fn new(started_tx: mpsc::UnboundedSender<String>) -> Self {
+        Self {
+            started: std::sync::atomic::AtomicUsize::new(0),
+            started_prompts: StdMutex::new(Vec::new()),
+            released: std::sync::atomic::AtomicBool::new(false),
+            release: tokio::sync::Notify::new(),
+            started_tx: StdMutex::new(Some(started_tx)),
+        }
+    }
+
+    fn started_count(&self) -> usize {
+        self.started.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn release_all(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.release.notify_waiters();
+    }
+
+    async fn wait_until_released(&self) {
+        while !self.released.load(std::sync::atomic::Ordering::Acquire) {
+            self.release.notified().await;
+        }
+    }
 }
 
 fn completed_probe_result(agent_id: protocol::AgentId) -> SubagentResult {
@@ -116,6 +205,56 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
                 .await;
         }
         Ok(completed_probe_result(agent_id))
+    }
+}
+
+#[async_trait]
+impl SubagentSpawner for BlockingWorkflowObserverSpawner {
+    async fn agent_listing(&self) -> Vec<traits::subagent_spawn::SubagentListingEntry> {
+        vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: DEFAULT_WORKFLOW_SUBAGENT.to_string(),
+            when_to_use: String::new(),
+            tools_description: String::new(),
+        }]
+    }
+
+    async fn spawn(
+        &self,
+        request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.started_prompts
+            .lock()
+            .unwrap()
+            .push(request.prompt.clone());
+        if let Some(tx) = self.started_tx.lock().unwrap().as_ref() {
+            let _ = tx.send(request.prompt);
+        }
+        self.wait_until_released().await;
+        Ok(completed_probe_result(protocol::AgentId::new()))
+    }
+
+    async fn spawn_workflow_with_observer(
+        &self,
+        request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<String>>,
+        _observer: Option<Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>>,
+        _watchdog: traits::subagent_spawn::WorkflowQueryWatchdog,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.started_prompts
+            .lock()
+            .unwrap()
+            .push(request.prompt.clone());
+        if let Some(tx) = self.started_tx.lock().unwrap().as_ref() {
+            let _ = tx.send(request.prompt);
+        }
+        self.wait_until_released().await;
+        Ok(completed_probe_result(protocol::AgentId::new()))
     }
 }
 
@@ -174,9 +313,9 @@ impl SubagentSpawner for EchoSpawner {
                 output_tokens: 100,
                 ..Default::default()
             },
-            total_tool_use_count: 0,
-            total_duration_ms: 0,
-            total_tokens: 0,
+            total_tool_use_count: self.total_tool_use_count,
+            total_duration_ms: self.total_duration_ms,
+            total_tokens: self.total_tokens,
             assistant_message_count: 0,
             response_char_count: 0,
             last_request_id: None,
@@ -365,19 +504,116 @@ impl FileSystem for InMemoryFs {
 #[derive(Default)]
 struct RecordingSink {
     statuses: StdMutex<Vec<(String, TaskStatus)>>,
+    workflow_outcome: StdMutex<Option<traits::task_registry::WorkflowTerminalOutcome>>,
+    calls: StdMutex<Vec<&'static str>>,
 }
 #[async_trait]
 impl TaskStatusSink for RecordingSink {
     async fn set_status(&self, task_id: &str, status: TaskStatus) {
+        if status.is_terminal() {
+            self.calls.lock().unwrap().push("status");
+        }
         self.statuses
             .lock()
             .unwrap()
             .push((task_id.to_string(), status));
     }
+
+    async fn set_workflow_outcome(
+        &self,
+        _task_id: &str,
+        outcome: traits::task_registry::WorkflowTerminalOutcome,
+    ) {
+        self.calls.lock().unwrap().push("outcome");
+        *self.workflow_outcome.lock().unwrap() = Some(outcome);
+    }
+
+    async fn is_terminal(&self, task_id: &str) -> bool {
+        self.statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(id, _)| id == task_id)
+            .is_some_and(|(_, status)| status.is_terminal())
+    }
 }
 impl RecordingSink {
     fn last_status(&self) -> Option<TaskStatus> {
         self.statuses.lock().unwrap().last().map(|(_, s)| *s)
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+struct BlockingWorkflowTerminalSink {
+    inner: RecordingSink,
+    started_tx: StdMutex<Option<oneshot::Sender<()>>>,
+    release_rx: TokioMutex<Option<oneshot::Receiver<()>>>,
+    terminalizing: StdMutex<StdHashSet<String>>,
+}
+
+impl BlockingWorkflowTerminalSink {
+    fn new(started_tx: oneshot::Sender<()>, release_rx: oneshot::Receiver<()>) -> Self {
+        Self {
+            inner: RecordingSink::default(),
+            started_tx: StdMutex::new(Some(started_tx)),
+            release_rx: TokioMutex::new(Some(release_rx)),
+            terminalizing: StdMutex::new(StdHashSet::new()),
+        }
+    }
+
+    fn last_status(&self) -> Option<TaskStatus> {
+        self.inner.last_status()
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.inner.calls()
+    }
+}
+
+#[async_trait]
+impl TaskStatusSink for BlockingWorkflowTerminalSink {
+    async fn set_status(&self, task_id: &str, status: TaskStatus) {
+        self.inner.set_status(task_id, status).await;
+    }
+
+    async fn set_workflow_outcome(
+        &self,
+        task_id: &str,
+        outcome: traits::task_registry::WorkflowTerminalOutcome,
+    ) {
+        self.inner.set_workflow_outcome(task_id, outcome).await;
+    }
+
+    async fn finish_workflow_terminal(
+        &self,
+        task_id: &str,
+        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        status: TaskStatus,
+    ) {
+        self.terminalizing
+            .lock()
+            .unwrap()
+            .insert(task_id.to_string());
+        self.inner.set_workflow_outcome(task_id, outcome).await;
+        if let Some(tx) = self.started_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        if let Some(rx) = self.release_rx.lock().await.take() {
+            let _ = rx.await;
+        }
+        self.inner.set_status(task_id, status).await;
+        self.terminalizing.lock().unwrap().remove(task_id);
+    }
+
+    async fn is_terminal(&self, task_id: &str) -> bool {
+        if self.terminalizing.lock().unwrap().contains(task_id) {
+            return true;
+        }
+        self.inner.is_terminal(task_id).await
     }
 }
 
@@ -511,8 +747,13 @@ fn workflow_input(script: &str) -> TaskSpawnInput {
         run_id: None,
         invocation_mode: Some("inline".to_string()),
         workflow_source: Some("inline".to_string()),
+        script_is_verbatim_builtin: Some(false),
         transcript_subdir: None,
         launched_from_subagent: false,
+        tool_use_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        creator_agent_id: None,
     }
 }
 
@@ -652,7 +893,7 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
     );
 }
 
-/// The 1000-agent lifetime cap: the 1001st REAL spawn rejects with the
+/// The 1000-agent lifetime cap: the 1001st real `agent()` call rejects with the
 /// byte-exact `WorkflowAgentCapError` message, terminating the run.
 #[tokio::test]
 async fn agent_cap_rejects_the_1001st_spawn() {
@@ -681,6 +922,35 @@ async fn agent_cap_rejects_the_1001st_spawn() {
         msg.contains("Workflow agent() call cap reached (1000)"),
         "got: {msg}"
     );
+}
+
+/// The lifetime cap is enforced per call even when all calls arrive in one
+/// parallel batch: the first 1000 run and only later calls receive the cap
+/// error sentinel, which `parallel()` converts to `null`.
+#[tokio::test]
+async fn agent_cap_admits_first_1000_parallel_calls() {
+    let spawner = Arc::new(EchoSpawner::default());
+    let outcome = run_workflow_script(
+        "const rs = await parallel(Array.from({ length: 1001 }, () => () => agent('x'))); return rs.length;",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        spawner.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect("parallel cap batch should resolve with null for the overflow slot");
+    assert_eq!(outcome.result.as_deref(), Some("1001"));
+    assert_eq!(spawner.seen.lock().unwrap().len(), 1000);
 }
 
 /// An explicit unknown `agentType` throws the byte-exact not-found error
@@ -712,6 +982,32 @@ async fn unknown_agent_type_throws_not_found() {
             "agent({agentType}): agent type 'nope' not found. Available agents: general-purpose, Explore, code-reviewer"
         ),
         "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn remote_isolation_is_rejected_in_local_workflow_build() {
+    let result = run_workflow_script(
+        "await agent('p', { isolation: 'remote' });",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect_err("remote isolation must be unavailable in local build");
+    assert!(
+        format!("{result}").contains("agent({isolation:'remote'}) is not available in this build")
     );
 }
 
@@ -924,6 +1220,7 @@ async fn workflow_agent_progress_keeps_provider_qualified_model() {
         Arc::new(AnalyticsBus::new()),
         None,
         None,
+        None,
     )
     .await
     .expect("workflow runs to completion");
@@ -940,6 +1237,164 @@ async fn workflow_agent_progress_keeps_provider_qualified_model() {
             Some("deepseek/deepseek-v4-flash".to_string()),
         ]
     );
+}
+
+#[tokio::test]
+async fn workflow_emits_queued_progress_for_waiting_parallel_agents_before_slots_free() {
+    let cap = concurrency_cap();
+    let calls = (0..=cap)
+        .map(|index| format!("() => agent('a{index}')"))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let script = format!("const rs = await parallel([\n{calls}\n]);\nreturn rs.length;");
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let spawner = Arc::new(BlockingWorkflowObserverSpawner::new(started_tx));
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let run = tokio::spawn({
+        let spawner = spawner.clone();
+        async move {
+            run_workflow_script_with_live_updates(
+                &script,
+                DEFAULT_WORKFLOW_SUBAGENT,
+                spawner,
+                Arc::new(MockInvoker),
+                Arc::new(MockBudget),
+                None,
+                Some(progress_tx),
+                None,
+                None,
+                None,
+                None,
+                0,
+                NestedConfig::default(),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Arc::new(AnalyticsBus::new()),
+                None,
+                None,
+                None,
+            )
+            .await
+        }
+    });
+
+    for index in 0..cap {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("spawn {index} should start"))
+            .expect("started prompt");
+    }
+
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut queued = Vec::new();
+        while queued.len() < cap {
+            let progress = progress_rx.recv().await.expect("queued progress");
+            if progress.kind == "workflow_agent"
+                && progress.state.as_deref() == Some("start")
+                && progress
+                    .tool_use_id
+                    .as_deref()
+                    .is_some_and(|tool_use_id| tool_use_id.ends_with("_queued"))
+            {
+                queued.push(progress);
+            }
+        }
+        queued
+    })
+    .await
+    .expect("queued events for admitted slots should arrive before a slot frees");
+
+    assert_eq!(
+        spawner.started_count(),
+        cap,
+        "the overflow agent should still be waiting on the concurrency cap"
+    );
+    assert_eq!(
+        queued
+            .iter()
+            .map(|progress| progress.index)
+            .collect::<Vec<_>>(),
+        (0..cap as u64).collect::<Vec<_>>()
+    );
+    assert!(queued
+        .iter()
+        .all(|progress| progress.queued_at_ms.is_some() && progress.attempt == Some(1)));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            loop {
+                let progress = progress_rx.recv().await.expect("progress channel open");
+                if progress.kind == "workflow_agent"
+                    && progress.state.as_deref() == Some("start")
+                    && progress
+                        .tool_use_id
+                        .as_deref()
+                        .is_some_and(|tool_use_id| tool_use_id.ends_with("_queued"))
+                {
+                    return progress;
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "the overflow call must not emit queued until a buffered slot actually starts"
+    );
+
+    spawner.release_all();
+    let outcome = run
+        .await
+        .expect("workflow task join")
+        .expect("workflow succeeds");
+    let expected_count = (cap + 1).to_string();
+    assert_eq!(outcome.result.as_deref(), Some(expected_count.as_str()));
+    assert_eq!(
+        spawner.started_count(),
+        cap + 1,
+        "releasing the blocked calls should also let the overflow call run"
+    );
+}
+
+#[tokio::test]
+async fn workflow_rejected_agent_type_emits_no_queued_progress() {
+    let spawner = Arc::new(EchoSpawner::default());
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let err = run_workflow_script_with_live_updates(
+        "await agent('x', { agentType: 'missing-agent' }); return 'done';",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        spawner,
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        Some(progress_tx),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("invalid agentType should throw before spawn");
+    assert!(
+        err.to_string()
+            .contains("agent type 'missing-agent' not found"),
+        "{err}"
+    );
+
+    while let Ok(progress) = progress_rx.try_recv() {
+        assert!(
+            !(progress.kind == "workflow_agent"
+                && progress.state.as_deref() == Some("start")
+                && progress
+                    .tool_use_id
+                    .as_deref()
+                    .is_some_and(|tool_use_id| tool_use_id.ends_with("_queued"))),
+            "rejected agent() calls must not emit queued progress: {progress:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1440,6 +1895,200 @@ async fn handler_registration_wait_exits_immediately_on_kill() {
 }
 
 #[tokio::test]
+async fn workflow_kill_preserves_terminal_status_when_sink_already_knows_task_is_done() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let sink = Arc::new(RecordingSink::default());
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let spawner = Arc::new(BlockingWorkflowObserverSpawner::new(started_tx));
+    let handler = make_handler(spawner, mgr, sink.clone());
+    let ctx = make_ctx(fs.clone());
+
+    let handle = handler
+        .spawn(workflow_input("await agent('blocked');"), ctx.clone())
+        .await
+        .expect("spawn succeeds");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+        .await
+        .expect("workflow child should start")
+        .expect("started prompt");
+
+    sink.set_status(&handle.task_id, TaskStatus::Completed)
+        .await;
+    handler
+        .kill(&handle.task_id, ctx)
+        .await
+        .expect("kill should succeed");
+
+    assert_eq!(
+        sink.last_status(),
+        Some(TaskStatus::Completed),
+        "kill must not overwrite an already-terminal workflow status"
+    );
+}
+
+#[tokio::test]
+async fn workflow_drain_pending_kills_preserves_terminal_status() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let sink = Arc::new(RecordingSink::default());
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let spawner = Arc::new(BlockingWorkflowObserverSpawner::new(started_tx));
+    let handler = make_handler(spawner, mgr, sink.clone());
+
+    let handle = handler
+        .spawn(workflow_input("await agent('blocked');"), make_ctx(fs))
+        .await
+        .expect("spawn succeeds");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+        .await
+        .expect("workflow child should start")
+        .expect("started prompt");
+
+    sink.set_status(&handle.task_id, TaskStatus::Completed)
+        .await;
+    (handle.cleanup.as_ref().expect("cleanup seam"))();
+    handler.drain_pending_kills().await;
+
+    assert_eq!(
+        sink.last_status(),
+        Some(TaskStatus::Completed),
+        "drain must not overwrite an already-terminal workflow status"
+    );
+}
+
+#[tokio::test]
+async fn workflow_kill_preserves_terminalizing_outcome_window() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let sink = Arc::new(BlockingWorkflowTerminalSink::new(started_tx, release_rx));
+    let handler = make_handler(Arc::new(EchoSpawner::default()), mgr, sink.clone());
+    let ctx = make_ctx(fs);
+
+    let handle = handler
+        .spawn(workflow_input("return { ok: true };"), ctx.clone())
+        .await
+        .expect("spawn succeeds");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        .await
+        .expect("workflow should enter terminal publish")
+        .expect("terminal publish signal");
+
+    handler
+        .kill(&handle.task_id, ctx)
+        .await
+        .expect("kill should succeed while terminal publish is blocked");
+
+    let _ = release_tx.send(());
+    for _ in 0..400 {
+        if sink.last_status().is_some_and(TaskStatus::is_terminal) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        sink.last_status(),
+        Some(TaskStatus::Completed),
+        "kill must not overwrite a workflow already committing its terminal outcome"
+    );
+    assert_eq!(sink.calls(), vec!["outcome", "status"]);
+}
+
+#[tokio::test]
+async fn workflow_drain_preserves_terminalizing_outcome_window() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let sink = Arc::new(BlockingWorkflowTerminalSink::new(started_tx, release_rx));
+    let handler = make_handler(Arc::new(EchoSpawner::default()), mgr, sink.clone());
+
+    let handle = handler
+        .spawn(workflow_input("return { ok: true };"), make_ctx(fs))
+        .await
+        .expect("spawn succeeds");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        .await
+        .expect("workflow should enter terminal publish")
+        .expect("terminal publish signal");
+
+    (handle.cleanup.as_ref().expect("cleanup seam"))();
+    handler.drain_pending_kills().await;
+
+    let _ = release_tx.send(());
+    for _ in 0..400 {
+        if sink.last_status().is_some_and(TaskStatus::is_terminal) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        sink.last_status(),
+        Some(TaskStatus::Completed),
+        "drain must not overwrite a workflow already committing its terminal outcome"
+    );
+    assert_eq!(sink.calls(), vec!["outcome", "status"]);
+}
+
+#[tokio::test]
+async fn workflow_cleanup_records_cancellation_even_when_worker_map_is_contended() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let sink = Arc::new(RecordingSink::default());
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let spawner = Arc::new(BlockingWorkflowObserverSpawner::new(started_tx));
+    let handler = make_handler(spawner, mgr, sink.clone());
+    let workers = handler.workers_map();
+
+    let handle = handler
+        .spawn(workflow_input("await agent('blocked');"), make_ctx(fs))
+        .await
+        .expect("spawn succeeds");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+        .await
+        .expect("workflow child should start")
+        .expect("started prompt");
+
+    let workers_guard = workers.lock().await;
+    (handle.cleanup.as_ref().expect("cleanup seam"))();
+    drop(workers_guard);
+
+    handler.drain_pending_kills().await;
+    assert_eq!(
+        await_terminal(&sink).await,
+        TaskStatus::Killed,
+        "cleanup must not silently lose cancellation when the worker map is contended"
+    );
+}
+
+#[tokio::test]
 async fn workflow_transcript_root_stays_pinned_across_retarget() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let dir = tempdir().unwrap();
@@ -1468,8 +2117,13 @@ async fn workflow_transcript_root_stays_pinned_across_retarget() {
                 run_id: Some("wf_pin".into()),
                 invocation_mode: Some("inline".to_string()),
                 workflow_source: Some("inline".to_string()),
+                script_is_verbatim_builtin: Some(false),
                 transcript_subdir: Some(transcript_root.clone()),
                 launched_from_subagent: false,
+                tool_use_id: None,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
             },
             make_ctx(fs),
         )
@@ -1517,8 +2171,13 @@ async fn workflow_transcript_dir_matches_child_transcript_location() {
                 run_id: Some("wf_real_dir".into()),
                 invocation_mode: Some("inline".to_string()),
                 workflow_source: Some("inline".to_string()),
+                script_is_verbatim_builtin: Some(false),
                 transcript_subdir: Some(transcript_root.clone()),
                 launched_from_subagent: false,
+                tool_use_id: None,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
             },
             make_ctx(fs),
         )
@@ -1592,8 +2251,13 @@ async fn resume_replays_journaled_agent_results_without_respawning() {
         run_id: None,
         invocation_mode: Some("inline".to_string()),
         workflow_source: Some("inline".to_string()),
+        script_is_verbatim_builtin: Some(false),
         transcript_subdir: None,
         launched_from_subagent: false,
+        tool_use_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        creator_agent_id: None,
     };
     let handle2 = h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
     assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
@@ -1645,8 +2309,13 @@ async fn transcript_journal_appends_started_and_result_before_resume() {
                 run_id: Some("wf_append".into()),
                 invocation_mode: Some("inline".into()),
                 workflow_source: Some("inline".into()),
+                script_is_verbatim_builtin: Some(false),
                 transcript_subdir: Some(transcript_dir.clone()),
                 launched_from_subagent: false,
+                tool_use_id: None,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
             },
             make_ctx(fs_trait.clone()),
         )
@@ -1688,8 +2357,13 @@ async fn transcript_journal_appends_started_and_result_before_resume() {
                 run_id: None,
                 invocation_mode: Some("inline".into()),
                 workflow_source: Some("inline".into()),
+                script_is_verbatim_builtin: Some(false),
                 transcript_subdir: Some(transcript_dir),
                 launched_from_subagent: false,
+                tool_use_id: None,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
             },
             make_ctx(fs_trait),
         )
@@ -1765,8 +2439,13 @@ async fn resume_with_a_changed_prefix_reruns_from_the_edit_onward() {
         run_id: None,
         invocation_mode: Some("inline".to_string()),
         workflow_source: Some("inline".to_string()),
+        script_is_verbatim_builtin: Some(false),
         transcript_subdir: None,
         launched_from_subagent: false,
+        tool_use_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        creator_agent_id: None,
     };
     h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
     assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
@@ -1858,6 +2537,7 @@ async fn handler_rejects_a_non_workflow_input() {
         tool_use_id: None,
         creator_teammate_name: None,
         creator_team_name: None,
+        creator_agent_id: None,
         spawn_request: None,
         inheritance: None,
     };
@@ -2126,6 +2806,52 @@ fn concurrency_cap_formula_matches_binary() {
     assert_eq!(formula(18), 16, "18 cores → 16 (cap)");
 }
 
+#[test]
+fn workflow_script_size_uses_javascript_utf16_length() {
+    assert_eq!(workflow_script_size_chars("abc"), 3);
+    assert_eq!(workflow_script_size_chars("😀"), 2);
+    assert_eq!(workflow_script_size_chars("a😀b"), 4);
+}
+
+#[test]
+fn telemetry_names_are_redacted_unless_the_script_is_a_verbatim_builtin() {
+    assert_eq!(
+        telemetry_workflow_name(Some("built-in"), Some(true), Some("review-changes")),
+        "review-changes"
+    );
+    assert_eq!(
+        telemetry_workflow_name(Some("built-in"), Some(true), None),
+        "custom"
+    );
+    assert_eq!(
+        telemetry_workflow_name(Some("inline"), Some(false), Some("review-changes")),
+        "custom"
+    );
+    assert_eq!(
+        telemetry_workflow_name(Some("scriptPath"), Some(false), Some("review-changes")),
+        "custom"
+    );
+    assert_eq!(
+        telemetry_workflow_name(Some("built-in"), Some(false), Some("review-changes")),
+        "custom"
+    );
+    assert_eq!(
+        telemetry_workflow_description(Some("built-in"), Some(true), Some("keep me")),
+        "keep me"
+    );
+    assert_eq!(
+        telemetry_workflow_description(Some("inline"), Some(false), Some("secret")),
+        ""
+    );
+    assert_eq!(
+        telemetry_workflow_description(Some("built-in"), Some(false), Some("secret")),
+        ""
+    );
+    let long = "😀".repeat(120);
+    let sliced = telemetry_workflow_description(Some("built-in"), Some(true), Some(&long));
+    assert_eq!(sliced.encode_utf16().count(), 200);
+}
+
 // ==== Telemetry tests ====================================================
 
 /// `tengu_workflow_phase_completed` does NOT fire when the script has no
@@ -2179,7 +2905,7 @@ async fn telemetry_phase_completed_fires_per_phase_for_named_workflow() {
 
     let spawner = Arc::new(EchoSpawner::default());
     run_workflow_script(
-        "phase('Step 1'); phase('Step 2'); return 'done';",
+        "phase('Step 1'); await agent('phase-1'); phase('Step 2'); await agent('phase-2'); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
         spawner,
         Arc::new(MockInvoker),
@@ -2197,7 +2923,8 @@ async fn telemetry_phase_completed_fires_per_phase_for_named_workflow() {
         // emits tengu_workflow_phase_completed.
         Some(PhaseTelemetryCtx {
             run_id: "wf_test".to_string(),
-            workflow_source: Some("my-workflow".to_string()),
+            workflow_source: Some("built-in".to_string()),
+            script_is_verbatim_builtin: Some(true),
             workflow_name: Some("My Workflow".to_string()),
             invocation_mode: Some("named".to_string()),
         }),
@@ -2219,14 +2946,14 @@ async fn telemetry_phase_completed_fires_per_phase_for_named_workflow() {
         matches!(phase_events[0].metadata.get("phase_title"), Some(AnalyticsValue::String(s)) if s == "Step 1"),
         "first phase title"
     );
-    // phase_index is 0-based in telemetry (oracle §7). Contrast with workflow_agent
-    // phaseIndex which is 1-based (oracle §8).
+    // Current Claude Code keeps phaseIndex 1-based for both workflow progress
+    // and `tengu_workflow_phase_completed` telemetry.
     assert!(
         matches!(
             phase_events[0].metadata.get("phase_index"),
-            Some(AnalyticsValue::Int(0))
+            Some(AnalyticsValue::Int(1))
         ),
-        "first phase index (0-based in telemetry, oracle §7)"
+        "first phase index (1-based in current Claude Code telemetry)"
     );
     assert!(
         matches!(phase_events[1].metadata.get("phase_title"), Some(AnalyticsValue::String(s)) if s == "Step 2"),
@@ -2235,10 +2962,63 @@ async fn telemetry_phase_completed_fires_per_phase_for_named_workflow() {
     assert!(
         matches!(
             phase_events[1].metadata.get("phase_index"),
-            Some(AnalyticsValue::Int(1))
+            Some(AnalyticsValue::Int(2))
         ),
-        "second phase index (0-based in telemetry, oracle §7)"
+        "second phase index (1-based in current Claude Code telemetry)"
     );
+}
+
+#[tokio::test]
+async fn telemetry_phase_completed_includes_phase_only_workflows() {
+    use telemetry::InMemorySink;
+    let sink = Arc::new(InMemorySink::default());
+    let bus = Arc::new(AnalyticsBus::new());
+    bus.attach_sink(sink.clone()).await;
+
+    run_workflow_script(
+        "phase('Empty 1'); log('no agents'); phase('Empty 2'); return 'done';",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        bus.clone(),
+        None,
+        Some(PhaseTelemetryCtx {
+            run_id: "wf_test_phase_only".to_string(),
+            workflow_source: Some("built-in".to_string()),
+            script_is_verbatim_builtin: Some(true),
+            workflow_name: Some("phase-only".to_string()),
+            invocation_mode: Some("named".to_string()),
+        }),
+    )
+    .await
+    .expect("runs");
+
+    let events = sink.events().await;
+    let phase_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.name == telemetry::tengu::workflow::PHASE_COMPLETED)
+        .collect();
+    assert_eq!(phase_events.len(), 2);
+    assert!(matches!(
+        phase_events[0].metadata.get("phase_title"),
+        Some(AnalyticsValue::String(title)) if title == "Empty 1"
+    ));
+    assert!(matches!(
+        phase_events[0].metadata.get("phase_agent_count"),
+        Some(AnalyticsValue::Int(0))
+    ));
+    assert!(matches!(
+        phase_events[1].metadata.get("phase_title"),
+        Some(AnalyticsValue::String(title)) if title == "Empty 2"
+    ));
 }
 
 /// `tengu_workflow_phase_completed` does NOT fire for an INLINE script, even if
@@ -2272,6 +3052,7 @@ async fn telemetry_phase_completed_suppressed_for_inline_workflow() {
         Some(PhaseTelemetryCtx {
             run_id: "wf_test_inline".to_string(),
             workflow_source: Some("inline".to_string()),
+            script_is_verbatim_builtin: Some(false),
             workflow_name: None,
             invocation_mode: Some("inline".to_string()),
         }),
@@ -2317,6 +3098,7 @@ async fn telemetry_phase_completed_suppressed_for_script_path_workflow() {
         Some(PhaseTelemetryCtx {
             run_id: "wf_test_scriptpath".to_string(),
             workflow_source: Some("/path/to/workflow.js".to_string()),
+            script_is_verbatim_builtin: Some(false),
             workflow_name: None,
             invocation_mode: Some("scriptPath".to_string()),
         }),
@@ -2466,6 +3248,96 @@ async fn telemetry_agent_cap_fires() {
         matches!(md.get("agentCount"), Some(AnalyticsValue::Int(1000))),
         "agentCount field must be 1000"
     );
+}
+
+#[tokio::test]
+async fn telemetry_launched_uses_declared_phase_count_and_utf16_script_size() {
+    use telemetry::InMemorySink;
+    let sink = Arc::new(InMemorySink::default());
+    let bus = Arc::new(AnalyticsBus::new());
+    bus.attach_sink(sink.clone()).await;
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let status = Arc::new(RecordingSink::default());
+    let handler = LocalWorkflowHandler::new(
+        Arc::new(EchoSpawner {
+            total_tokens: 40,
+            total_tool_use_count: 3,
+            total_duration_ms: 7,
+            ..Default::default()
+        }),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        mgr,
+    )
+    .with_status_sink(status.clone())
+    .with_bus(bus);
+    let script = "export const meta = { name: 'named', description: 'd', phases: [{ title: 'A' }, { title: 'B' }] };\nphase('A'); await agent('a'); phase('B'); await agent('b'); return '😀';";
+    let mut input = workflow_input(script);
+    if let TaskSpawnInput::LocalWorkflow {
+        invocation_mode,
+        workflow_source,
+        script_is_verbatim_builtin,
+        ..
+    } = &mut input
+    {
+        *invocation_mode = Some("named".into());
+        *workflow_source = Some("built-in".into());
+        *script_is_verbatim_builtin = Some(true);
+    }
+    handler.spawn(input, make_ctx(fs)).await.unwrap();
+    assert_eq!(await_terminal(&status).await, TaskStatus::Completed);
+
+    let events = sink.events().await;
+    let launched = events
+        .iter()
+        .find(|event| event.name == telemetry::tengu::workflow::LAUNCHED)
+        .expect("launched event");
+    assert!(matches!(
+        launched.metadata.get("phase_count"),
+        Some(AnalyticsValue::Int(2))
+    ));
+    assert!(matches!(
+        launched.metadata.get("script_size_chars"),
+        Some(AnalyticsValue::Int(value)) if *value == workflow_script_size_chars(script)
+    ));
+    assert!(matches!(
+        launched.metadata.get("workflow_name"),
+        Some(AnalyticsValue::String(value)) if value == "named"
+    ));
+    assert!(matches!(
+        launched.metadata.get("workflow_description"),
+        Some(AnalyticsValue::String(value)) if value == "d"
+    ));
+    let completed = events
+        .iter()
+        .find(|event| event.name == telemetry::tengu::workflow::COMPLETED)
+        .expect("completed event");
+    assert!(matches!(
+        completed.metadata.get("total_tokens"),
+        Some(AnalyticsValue::Int(80))
+    ));
+    assert!(matches!(
+        completed.metadata.get("total_tool_calls"),
+        Some(AnalyticsValue::Int(6))
+    ));
+    let phase_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.name == telemetry::tengu::workflow::PHASE_COMPLETED)
+        .collect();
+    assert_eq!(phase_events.len(), 2);
+    assert!(matches!(
+        phase_events[0].metadata.get("phase_index"),
+        Some(AnalyticsValue::Int(1))
+    ));
+    assert!(matches!(
+        phase_events[0].metadata.get("phase_tokens"),
+        Some(AnalyticsValue::Int(40))
+    ));
 }
 
 // ==== Structured progress event tests (Task 10) ==========================
@@ -2941,7 +3813,8 @@ async fn workflow_agent_throw_on_error_preserves_failure_reason() {
 #[tokio::test]
 async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt() {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let observer = WorkflowAgentLiveObserver::new(
+    let observer = WorkflowAgentLiveObserver::new_with_metrics(
+        None,
         Some(tx),
         workflow_progress_update(&workflow::Progress::Agent {
             index: 3,
@@ -2955,6 +3828,8 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
             tool_use_id: "workflow_agent_3_queued".to_string(),
         }),
         None,
+        None,
+        0,
     );
     let agent_id = protocol::AgentId::new();
     let agent_id_string = agent_id.to_string();
@@ -2998,4 +3873,141 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
         .last_attempt_reason
         .as_deref()
         .is_some_and(|reason| reason.contains("opening the response stream")));
+}
+
+#[tokio::test]
+async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
+    let (spool_tx, mut spool_rx) = mpsc::unbounded_channel();
+    let (live_tx, mut live_rx) = mpsc::unbounded_channel();
+    emit_workflow_agent_queued(
+        Some(&spool_tx),
+        Some(&live_tx),
+        4,
+        "Design",
+        "Design the flow",
+        Some(2),
+        Some("Implementation".to_string()),
+        Some("deepseek/deepseek-v4-flash".to_string()),
+        100,
+    );
+    let queued_line = spool_rx.recv().await.expect("queued spool line");
+    let queued_json: serde_json::Value =
+        serde_json::from_str(queued_line.trim_start_matches("[workflow_agent] "))
+            .expect("queued snapshot json");
+    assert_eq!(queued_json["queuedAt"], 100);
+    assert_eq!(queued_json["phaseIndex"], 2);
+    assert_eq!(queued_json["toolUseID"], "workflow_agent_4_queued");
+    let queued_live = live_rx.recv().await.expect("queued live update");
+    assert_eq!(queued_live.queued_at_ms, Some(100));
+
+    let observer = WorkflowAgentLiveObserver::new_with_metrics(
+        Some(spool_tx),
+        Some(live_tx),
+        WorkflowProgressUpdate {
+            kind: "workflow_agent".to_string(),
+            index: 4,
+            title: None,
+            message: None,
+            label: Some("Design".to_string()),
+            phase_index: Some(2),
+            phase_title: Some("Implementation".to_string()),
+            agent_id: None,
+            agent_type: Some("designer".to_string()),
+            model: Some("deepseek/deepseek-v4-flash".to_string()),
+            fallback_model: None,
+            state: Some("start".to_string()),
+            error: None,
+            tool_use_id: Some("workflow_agent_4_queued".to_string()),
+            queued_at_ms: Some(100),
+            started_at_ms: None,
+            last_progress_at_ms: Some(100),
+            attempt: Some(1),
+            last_attempt_reason: None,
+            tokens: None,
+            tool_calls: None,
+            last_tool_name: None,
+            last_tool_summary: None,
+            prompt_preview: Some("Design the flow".to_string()),
+        },
+        None,
+        None,
+        0,
+    );
+    let agent_id = protocol::AgentId::new();
+    traits::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        traits::subagent_spawn::SubagentObservation::Allocated {
+            agent_id,
+            agent_type: "designer".to_string(),
+            name: Some("Design agent".to_string()),
+            model: "deepseek-v4-flash".to_string(),
+            model_profile: Some("deepseek".to_string()),
+        },
+    )
+    .await;
+    traits::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        traits::subagent_spawn::SubagentObservation::Progress {
+            agent_id,
+            token_count: 11,
+            tool_use_count: 2,
+        },
+    )
+    .await;
+    traits::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        traits::subagent_spawn::SubagentObservation::Completed {
+            agent_id,
+            content: Value::String("done".to_string()),
+            total_tool_use_count: 3,
+            total_duration_ms: 55,
+            usage: SubagentUsage {
+                input_tokens: 7,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            assistant_message_count: 0,
+            last_request_id: None,
+        },
+    )
+    .await;
+
+    let allocated_line = spool_rx.recv().await.expect("allocated spool line");
+    let allocated_json: serde_json::Value =
+        serde_json::from_str(allocated_line.trim_start_matches("[workflow_agent] "))
+            .expect("allocated snapshot json");
+    assert_eq!(allocated_json["state"], "progress");
+    assert_eq!(
+        allocated_json["startedAt"],
+        allocated_json["lastProgressAt"]
+    );
+
+    let progress_line = spool_rx.recv().await.expect("progress spool line");
+    let progress_json: serde_json::Value =
+        serde_json::from_str(progress_line.trim_start_matches("[workflow_agent] "))
+            .expect("progress snapshot json");
+    assert_eq!(progress_json["tokens"], 11);
+    assert_eq!(progress_json["toolCalls"], 2);
+
+    let done_line = spool_rx.recv().await.expect("done spool line");
+    let done_json: serde_json::Value =
+        serde_json::from_str(done_line.trim_start_matches("[workflow_agent] "))
+            .expect("done snapshot json");
+    assert_eq!(done_json["state"], "done");
+    assert_eq!(done_json["queuedAt"], 100);
+    assert!(done_json.get("startedAt").is_some());
+    assert_eq!(done_json["tokens"], 12);
+    assert_eq!(done_json["toolCalls"], 3);
+
+    for expected_tokens in [11_u64, 12_u64] {
+        let update = live_rx.recv().await.expect("live observer update");
+        if update.tokens == Some(expected_tokens) {
+            if expected_tokens == 11 {
+                assert_eq!(update.tool_calls, Some(2));
+            } else {
+                assert_eq!(update.tool_calls, Some(3));
+                assert_eq!(update.state.as_deref(), Some("done"));
+            }
+        }
+    }
 }

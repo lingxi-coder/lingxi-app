@@ -1089,6 +1089,14 @@ pub struct AppAgentPromptProfile {
     pub instructions: String,
 }
 
+/// Cached start-of-conversation git probe + `gitStatus:` attachment.
+pub(crate) struct GitStatusSnapshot {
+    /// Env-block `Is a git repository` probe.
+    probe: Option<crate::prompt::GitStatus>,
+    /// Rendered `gitStatus:` system-prompt attachment.
+    block: Option<String>,
+}
+
 pub struct ConversationOrchestrator {
     pub(crate) config: OrchestratorConfig,
     pub(crate) api: Arc<dyn OrchestratorApiClient>,
@@ -1109,6 +1117,12 @@ pub struct ConversationOrchestrator {
     /// Live main-loop effort. Unlike `config.effort`, this can change through
     /// stream-json control requests and in-place resume.
     pub(crate) current_effort: std::sync::RwLock<Option<String>>,
+    /// Session-owned dynamic-workflow gate shared with the Workflow tool and
+    /// TUI `/config` consumers.
+    pub(crate) dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate,
+    /// Session-owned workflow-size setting shared with the Workflow tool and
+    /// TUI `/config` consumers.
+    pub(crate) workflow_size_guideline: traits::session_flags::WorkflowSizeGuidelineState,
     /// Provider-neutral live reasoning selection for subsequent requests.
     pub(crate) current_reasoning_selection: std::sync::RwLock<traits::ReasoningSelection>,
     /// Whether the live effort came from an explicit launch/control choice.
@@ -1282,6 +1296,10 @@ pub struct ConversationOrchestrator {
     /// branch", which would re-shell git on every append for a non-repo cwd.
     #[allow(clippy::option_option)]
     pub(crate) git_branch_cache: Mutex<Option<Option<String>>>,
+    /// Frozen gitStatus probe + rendered attachment for this conversation.
+    /// Claude documents gitStatus as a start-of-conversation snapshot that does
+    /// not update, including after a worktree/session-cwd swap.
+    pub(crate) git_status_snapshot: Mutex<Option<GitStatusSnapshot>>,
     /// Stable per-prompt id for the IN-FLIGHT turn — the parity analog of TS
     /// `getPromptId()` (`sessionStorage.ts:1045-1046`), which stamps the same id
     /// on the user prompt line AND every `tool_result` `user` line of that turn.
@@ -2012,6 +2030,8 @@ impl ConversationOrchestrator {
             session: Arc::new(Mutex::new(session)),
             turn_gate: Arc::new(Mutex::new(())),
             current_effort: std::sync::RwLock::new(current_effort),
+            dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate::default(),
+            workflow_size_guideline: traits::session_flags::WorkflowSizeGuidelineState::default(),
             current_reasoning_selection: std::sync::RwLock::new(current_reasoning_selection),
             current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),
             memory,
@@ -2034,6 +2054,7 @@ impl ConversationOrchestrator {
             tool_source_assistant_uuids: Mutex::new(std::collections::HashMap::new()),
             pending_hook_attachments: Mutex::new(std::collections::HashMap::new()),
             git_branch_cache: Mutex::new(None),
+            git_status_snapshot: Mutex::new(None),
             current_prompt_id: Mutex::new(None),
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fast_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2817,6 +2838,28 @@ impl ConversationOrchestrator {
             }
         }));
         self.session_cwd = session_cwd;
+        self
+    }
+
+    /// Share the session-owned dynamic-workflow gate with slash commands, the
+    /// Workflow tool, and TUI config surfaces.
+    #[must_use]
+    pub fn with_dynamic_workflows_gate(
+        mut self,
+        gate: traits::session_flags::DynamicWorkflowsGate,
+    ) -> Self {
+        self.dynamic_workflows_gate = gate;
+        self
+    }
+
+    /// Share the session-owned workflow-size setting with slash commands, the
+    /// Workflow tool, and TUI config surfaces.
+    #[must_use]
+    pub fn with_workflow_size_guideline(
+        mut self,
+        state: traits::session_flags::WorkflowSizeGuidelineState,
+    ) -> Self {
+        self.workflow_size_guideline = state;
         self
     }
 
@@ -5875,6 +5918,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let resolved = git_branch_for_cwd(&self.cwd);
         *self.git_branch_cache.lock().await = Some(resolved.clone());
         resolved
+    }
+
+    /// Git env-block probe + `gitStatus:` attachment, frozen from the first
+    /// resolved host-side cwd for the conversation lifetime.
+    async fn cached_git_status(
+        &self,
+        cwd: &std::path::Path,
+    ) -> (Option<crate::prompt::GitStatus>, Option<String>) {
+        {
+            let cache = self.git_status_snapshot.lock().await;
+            if let Some(snap) = cache.as_ref() {
+                return (snap.probe.clone(), snap.block.clone());
+            }
+        }
+        let probe = crate::prompt::git_status::probe(cwd);
+        let block = crate::prompt::git_status::render_git_status_block(cwd);
+        *self.git_status_snapshot.lock().await = Some(GitStatusSnapshot {
+            probe: probe.clone(),
+            block: block.clone(),
+        });
+        (probe, block)
     }
 
     /// The stable per-turn `promptId` for `msg` — the parity analog of
@@ -9162,15 +9226,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         );
         // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
         // user-interrupt token → `None` (behaviour byte-identical to before).
-        let result =
-            telemetry::otel::with_turn_span("lingxi.orchestrator.turn.streaming", async {
-                traits::session_flags::scope_non_interactive_session(
-                    !self.prompt_is_interactive(),
-                    self.try_run_turn_streaming(prompt, Vec::new(), None, None, false),
-                )
-                .await
-            })
-            .await;
+        let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn.streaming", async {
+            traits::session_flags::scope_non_interactive_session(
+                !self.prompt_is_interactive(),
+                Box::pin(self.try_run_turn_streaming(prompt, Vec::new(), None, None, false)),
+            )
+            .await
+        })
+        .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
         match &result {
@@ -9204,7 +9267,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.output.emit_turn_started().await;
         let result = traits::session_flags::scope_non_interactive_session(
             !self.prompt_is_interactive(),
-            self.try_run_turn_streaming("", Vec::new(), None, None, true),
+            Box::pin(self.try_run_turn_streaming("", Vec::new(), None, None, true)),
         )
         .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
@@ -10007,7 +10070,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // #10: a connect-phase RateLimited/Overloaded keeps its dedicated
                 // downstream handling — propagate as a hard error.
                 Err(e @ (LlmError::RateLimited { .. } | LlmError::Overloaded { .. })) => {
-                    return Err(OrchestratorError::Streaming(e))
+                    return Err(OrchestratorError::Streaming(e));
                 }
                 // #10: any other connect-phase model/runtime error ends the turn
                 // GRACEFULLY as `model_error` (faithful port of the `query.ts`
@@ -10156,7 +10219,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                             error: OrchestratorError::Streaming(e),
                                             real_content_started: false,
                                             partial: crate::streaming_loop::PumpedTurn::default(),
-                                        })
+                                        });
                                     }
                                 }
                             }
@@ -10363,7 +10426,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
                         // downstream handling — propagate.
                         Err(f) if crate::turn_loop::is_carveout_propagated(&f.error) => {
-                            return Err(f.error)
+                            return Err(f.error);
                         }
                         // #10: any other mid-stream model/runtime error (e.g. Transport)
                         // ends the turn GRACEFULLY as `model_error` (faithful port of the
@@ -10462,9 +10525,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 message_tokens: api_success_message_tokens,
                                 did_fall_back_to_non_streaming,
                                 is_non_interactive_session: !self.prompt_is_interactive(),
-                                print: !self.prompt_is_interactive(),
-                                is_tty: false,
-                                query_source: "user".into(),
+                                print: self.config.print,
+                                is_tty: self.config.is_tty,
+                                query_source: crate::config::sanitize_query_source(
+                                    &self.config.query_source,
+                                )
+                                .to_string(),
                                 permission_mode: if self.session.lock().await.plan_mode {
                                     "plan"
                                 } else {
@@ -11587,13 +11653,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             async {
                 traits::session_flags::scope_non_interactive_session(
                     !self.prompt_is_interactive(),
-                    self.try_run_turn_streaming(
+                    Box::pin(self.try_run_turn_streaming(
                         prompt,
                         images,
                         Some(cancel.clone()),
                         message_id,
                         false,
-                    ),
+                    )),
                 )
                 .await
             },
@@ -12069,7 +12135,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// in the first user message when `--exclude-dynamic-system-prompt-sections`
     /// is set, so the construction (and its env-field probes) lives in ONE place.
     async fn build_prompt_context(&self) -> crate::prompt::SystemPromptContext {
-        use crate::prompt::{file_tree, git_status, SystemPromptContext};
+        use crate::prompt::{FileTree, SystemPromptContext};
 
         // Task 5 (worktree 206 session-cwd plumbing): read the LIVE
         // `self.session_cwd` — the SAME cell `EnterWorktree`/`ExitWorktree`
@@ -12103,8 +12169,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let model = self.session.lock().await.model.clone();
         let memory_files = self.memory.load(&probe_cwd).await;
 
-        let git = git_status::probe(&probe_cwd);
-        let tree = file_tree::probe(&probe_cwd, file_tree::DEFAULT_DEPTH_LIMIT);
+        let (git, _) = self.cached_git_status(&probe_cwd).await;
 
         // Tool name extraction: ToolRegistry's `all_names()` is the
         // unfiltered set (builtin + plugin + MCP). M5-03 uses the
@@ -12157,7 +12222,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             os_version: crate::prompt::env_meta::os_version_string(),
             git_status: git,
             in_worktree,
-            file_tree: tree,
+            file_tree: FileTree::default(),
             memory_files,
             tool_names,
             // `nz()` non-empty: at least one model-invocable prompt skill
@@ -12209,7 +12274,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// Assemble the full system-prompt STRING from [`Self::build_prompt_context`].
     /// Bypassed when `OrchestratorConfig::system_prompt_override` is `Some(_)`.
     async fn build_system_prompt(&self) -> String {
-        use crate::prompt::{assemble_system_prompt_with_style, git_status, ActiveOutputStyle};
+        use crate::prompt::{assemble_system_prompt_with_style, ActiveOutputStyle};
         let ctx = self.build_prompt_context().await;
         // OUTSTYLE.2/.3: when a non-default output style is active — a builtin
         // OR a custom disk style discovered under `output_style_dirs` — inject
@@ -12241,13 +12306,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // prevents. (claude drops gitStatus entirely; it is NOT re-emitted in the
         // user message.)
         if !self.config.exclude_dynamic_system_prompt_sections {
-            // Task 5 (worktree 206 session-cwd plumbing): read `ctx.cwd` (the
-            // SAME live cwd `build_prompt_context` already resolved through
-            // `self.session_cwd`), not the frozen `self.cwd` — otherwise this
-            // trailing gitStatus block would report the boot directory's git
-            // status while the env block above it already shows the swapped
-            // worktree, an inconsistent prompt.
-            if let Some(block) = git_status::render_git_status_block(&ctx.cwd) {
+            // Use the SAME guest→host-resolved probe cwd as
+            // `build_prompt_context`. The model-facing `ctx.cwd` intentionally
+            // remains the guest path on mobile, but gitStatus is one frozen
+            // host snapshot in Claude's `systemContext`; re-probing the guest
+            // path here would replace that snapshot with `None`.
+            let probe_cwd = self.prompt_probe_cwd(&ctx.cwd);
+            if let Some(block) = self.cached_git_status(&probe_cwd).await.1 {
                 prompt.push_str("\n\n");
                 prompt.push_str(&block);
             }
@@ -12303,9 +12368,6 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // splices it into the system prompt), so reading the raw guest path
         // here meant a mobile workspace `LINGXI.md` reached the model NOWHERE.
         let probe_cwd = self.prompt_probe_cwd(&self.session_cwd.cwd());
-        let memory_files = self.memory.load(&probe_cwd).await;
-        let lingxi_md = crate::prompt::memory_block::format(&memory_files);
-
         // Build the entries in claude-code insertion order; each is `# key\nvalue`.
         let mut entries: Vec<String> = Vec::with_capacity(4);
         // `--exclude-dynamic-system-prompt-sections`: the per-machine env block
@@ -12324,9 +12386,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // so the exclude-dynamic flag is a complete no-op when a custom prompt is
         // active. (The claudeMd / userEmail / currentDate entries below stay
         // unconditional — they are unrelated to this flag.)
-        if self.config.exclude_dynamic_system_prompt_sections
-            && self.config.system_prompt_override.is_none()
-        {
+        //
+        // When the env block is re-emitted we already load memory inside
+        // `build_prompt_context`; reuse that snapshot instead of loading twice.
+        let exclude_env = self.config.exclude_dynamic_system_prompt_sections
+            && self.config.system_prompt_override.is_none();
+        let lingxi_md = if exclude_env {
             let ctx = self.build_prompt_context().await;
             let env = crate::prompt::env_block::format(&ctx);
             // `env_block::format` already begins with its own `# Environment\n`
@@ -12337,7 +12402,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             if !body.is_empty() {
                 entries.push(format!("# Environment\n{body}"));
             }
-        }
+            crate::prompt::memory_block::format(&ctx.memory_files)
+        } else {
+            let memory_files = self.memory.load(&probe_cwd).await;
+            crate::prompt::memory_block::format(&memory_files)
+        };
         if !lingxi_md.is_empty() {
             entries.push(format!("# claudeMd\n{lingxi_md}"));
         }
@@ -14698,8 +14767,10 @@ message with multiple tool uses so they run concurrently."
         let mut tools = self.tools.available_tools(&ToolStaticContext::default());
         let denied = self.perms.tool_wide_deny_names().await;
         if !denied.is_empty() {
+            let denied_set: std::collections::HashSet<&str> =
+                denied.iter().map(String::as_str).collect();
             tools.retain(|t| {
-                !denied
+                !denied_set
                     .iter()
                     .any(|d| permission::tool_wide_name_matches(d, t.name()))
             });
@@ -14719,10 +14790,14 @@ message with multiple tool uses so they run concurrently."
                 match &agent.tool_policy {
                     agent::AgentToolPolicy::All { .. } => {}
                     agent::AgentToolPolicy::Explicit(names) => {
-                        tools.retain(|t| names.iter().any(|n| n == t.name()));
+                        let allowed: std::collections::HashSet<&str> =
+                            names.iter().map(String::as_str).collect();
+                        tools.retain(|t| allowed.contains(t.name()));
                     }
                     agent::AgentToolPolicy::Except(names) => {
-                        tools.retain(|t| !names.iter().any(|n| n == t.name()));
+                        let blocked: std::collections::HashSet<&str> =
+                            names.iter().map(String::as_str).collect();
+                        tools.retain(|t| !blocked.contains(t.name()));
                     }
                 }
             }

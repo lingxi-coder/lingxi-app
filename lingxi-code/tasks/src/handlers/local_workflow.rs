@@ -31,10 +31,10 @@
 //! script thread sends last is delivered to the caller.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use async_trait::async_trait;
 use futures::stream::StreamExt;
@@ -89,6 +89,413 @@ pub struct WorkflowProgressUpdate {
     pub prompt_preview: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct WorkflowRunMetrics {
+    call_count: u64,
+    total_tokens: u64,
+    total_tool_calls: u64,
+    budget_telemetry_emitted: bool,
+    cap_telemetry_emitted: bool,
+    agents: HashMap<u64, WorkflowAgentMetric>,
+    phases: BTreeMap<u32, WorkflowPhaseMetric>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowAgentMetric {
+    phase_index: Option<u32>,
+    phase_title: Option<String>,
+    state: &'static str,
+    tokens: u64,
+    tool_calls: u64,
+    duration_ms: u64,
+    skipped: bool,
+    empty_result: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorkflowPhaseMetric {
+    title: String,
+    tokens: u64,
+    tool_calls: u64,
+    duration_ms: u64,
+    agent_count: u64,
+    error_count: u64,
+    skip_count: u64,
+}
+
+impl WorkflowRunMetrics {
+    fn record_phase(&mut self, index: u32, title: String) {
+        self.phases
+            .entry(index)
+            .or_insert_with(|| WorkflowPhaseMetric {
+                title,
+                ..WorkflowPhaseMetric::default()
+            });
+    }
+
+    fn recompute_totals(&mut self) {
+        self.total_tokens = self
+            .agents
+            .values()
+            .fold(0, |total, agent| total.saturating_add(agent.tokens));
+        self.total_tool_calls = self
+            .agents
+            .values()
+            .fold(0, |total, agent| total.saturating_add(agent.tool_calls));
+    }
+
+    fn record_cached(
+        &mut self,
+        index: u64,
+        phase_index: Option<u32>,
+        phase_title: Option<String>,
+        result: &str,
+    ) {
+        self.agents.insert(
+            index,
+            WorkflowAgentMetric {
+                phase_index,
+                phase_title,
+                state: "cached",
+                tokens: 0,
+                tool_calls: 0,
+                duration_ms: 0,
+                skipped: false,
+                empty_result: workflow_result_text_is_empty(result),
+            },
+        );
+        self.recompute_totals();
+    }
+
+    fn record_result(
+        &mut self,
+        index: u64,
+        phase_index: Option<u32>,
+        phase_title: Option<String>,
+        result: &Result<SubagentResult, SubagentSpawnError>,
+    ) {
+        let metric = match result {
+            Ok(SubagentResult::Completed {
+                content,
+                total_tokens,
+                total_tool_use_count,
+                total_duration_ms,
+                ..
+            }) => WorkflowAgentMetric {
+                phase_index,
+                phase_title,
+                state: "done",
+                tokens: *total_tokens,
+                tool_calls: *total_tool_use_count,
+                duration_ms: *total_duration_ms,
+                skipped: false,
+                empty_result: workflow_result_value_is_empty(content),
+            },
+            Ok(SubagentResult::Failed { reason, .. }) => WorkflowAgentMetric {
+                phase_index,
+                phase_title,
+                state: "error",
+                tokens: self.agents.get(&index).map_or(0, |metric| metric.tokens),
+                tool_calls: self
+                    .agents
+                    .get(&index)
+                    .map_or(0, |metric| metric.tool_calls),
+                duration_ms: self
+                    .agents
+                    .get(&index)
+                    .map_or(0, |metric| metric.duration_ms),
+                skipped: reason == "skipped by user",
+                empty_result: false,
+            },
+            Ok(SubagentResult::Killed { .. }) | Err(_) => WorkflowAgentMetric {
+                phase_index,
+                phase_title,
+                state: "error",
+                tokens: self.agents.get(&index).map_or(0, |metric| metric.tokens),
+                tool_calls: self
+                    .agents
+                    .get(&index)
+                    .map_or(0, |metric| metric.tool_calls),
+                duration_ms: self
+                    .agents
+                    .get(&index)
+                    .map_or(0, |metric| metric.duration_ms),
+                skipped: false,
+                empty_result: false,
+            },
+        };
+        self.agents.insert(index, metric);
+        self.recompute_totals();
+    }
+
+    fn record_progress(
+        &mut self,
+        index: u64,
+        phase_index: Option<u32>,
+        phase_title: Option<String>,
+        state: Option<&str>,
+        error: Option<&str>,
+        tokens: Option<u64>,
+        tool_calls: Option<u64>,
+    ) {
+        let previous = self.agents.get(&index);
+        let metric = WorkflowAgentMetric {
+            phase_index: phase_index.or_else(|| previous.and_then(|m| m.phase_index)),
+            phase_title: phase_title.or_else(|| previous.and_then(|m| m.phase_title.clone())),
+            state: match state {
+                Some("done") => "done",
+                Some("error") => "error",
+                Some("cached") => "cached",
+                _ => "progress",
+            },
+            tokens: tokens.or_else(|| previous.map(|m| m.tokens)).unwrap_or(0),
+            tool_calls: tool_calls
+                .or_else(|| previous.map(|m| m.tool_calls))
+                .unwrap_or(0),
+            duration_ms: previous.map_or(0, |metric| metric.duration_ms),
+            skipped: error == Some("skipped by user")
+                || previous.is_some_and(|metric| metric.skipped),
+            empty_result: previous.is_some_and(|metric| metric.empty_result),
+        };
+        self.agents.insert(index, metric);
+        self.recompute_totals();
+    }
+
+    fn record_duration(&mut self, index: u64, duration_ms: u64) {
+        if let Some(metric) = self.agents.get_mut(&index) {
+            metric.duration_ms = duration_ms;
+        }
+        self.recompute_totals();
+    }
+
+    fn phase_metrics(&self) -> BTreeMap<u32, WorkflowPhaseMetric> {
+        let mut phases = self.phases.clone();
+        for agent in self.agents.values() {
+            let Some(index) = agent.phase_index else {
+                continue;
+            };
+            let phase = phases.entry(index).or_insert_with(|| WorkflowPhaseMetric {
+                title: agent.phase_title.clone().unwrap_or_default(),
+                ..WorkflowPhaseMetric::default()
+            });
+            phase.tokens = phase.tokens.saturating_add(agent.tokens);
+            phase.tool_calls = phase.tool_calls.saturating_add(agent.tool_calls);
+            phase.duration_ms = phase.duration_ms.saturating_add(agent.duration_ms);
+            phase.agent_count = phase.agent_count.saturating_add(1);
+            if agent.state == "error" {
+                if agent.skipped {
+                    phase.skip_count = phase.skip_count.saturating_add(1);
+                } else {
+                    phase.error_count = phase.error_count.saturating_add(1);
+                }
+            }
+        }
+        phases
+    }
+
+    fn terminal_counts(&self) -> (u64, u64, u64, u64) {
+        let mut done = 0_u64;
+        let mut error = 0_u64;
+        let mut skipped = 0_u64;
+        let mut empty_result = 0_u64;
+        for agent in self.agents.values() {
+            match agent.state {
+                "done" | "cached" => {
+                    done = done.saturating_add(1);
+                    if agent.empty_result {
+                        empty_result = empty_result.saturating_add(1);
+                    }
+                }
+                "error" if agent.skipped => skipped = skipped.saturating_add(1),
+                "error" => error = error.saturating_add(1),
+                _ => {}
+            }
+        }
+        (done, error, skipped, empty_result)
+    }
+}
+
+fn workflow_result_value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::String(value) => workflow_result_text_is_empty(value),
+        Value::Array(values) => values.is_empty(),
+        Value::Object(values) => {
+            values.is_empty()
+                || (values.len() == 1
+                    && values.values().next().is_some_and(
+                        |value| matches!(value, Value::Array(items) if items.is_empty()),
+                    ))
+        }
+        _ => false,
+    }
+}
+
+fn workflow_result_text_is_empty(value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    serde_json::from_str::<Value>(value)
+        .ok()
+        .is_some_and(|value| workflow_result_value_is_empty(&value))
+}
+
+fn workflow_agent_display_model(opts: &Value) -> Option<String> {
+    let agent_model = opts.get("model").and_then(Value::as_str)?;
+    let agent_model_profile = opts
+        .get("modelProfile")
+        .or_else(|| opts.get("model_profile"))
+        .and_then(Value::as_str)
+        .filter(|profile| !profile.is_empty());
+    Some(traits::qualified_model_ref(
+        agent_model,
+        agent_model_profile,
+    ))
+}
+
+fn format_workflow_agent_snapshot(progress: &WorkflowProgressUpdate) -> Option<String> {
+    if progress.kind != "workflow_agent" {
+        return None;
+    }
+    let mut obj = serde_json::Map::from_iter([
+        ("type".to_string(), serde_json::json!("workflow_agent")),
+        ("index".to_string(), serde_json::json!(progress.index)),
+    ]);
+    if let Some(label) = progress.label.as_ref() {
+        obj.insert("label".to_string(), serde_json::json!(label));
+    }
+    if let Some(state) = progress.state.as_ref() {
+        obj.insert("state".to_string(), serde_json::json!(state));
+    }
+    if let Some(phase_index) = progress.phase_index {
+        obj.insert("phaseIndex".to_string(), serde_json::json!(phase_index));
+    }
+    if let Some(phase_title) = progress.phase_title.as_ref() {
+        obj.insert("phaseTitle".to_string(), serde_json::json!(phase_title));
+    }
+    if let Some(agent_id) = progress.agent_id.as_ref() {
+        obj.insert("agentId".to_string(), serde_json::json!(agent_id));
+    }
+    if let Some(agent_type) = progress.agent_type.as_ref() {
+        obj.insert("agentType".to_string(), serde_json::json!(agent_type));
+    }
+    if let Some(model) = progress.model.as_ref() {
+        obj.insert("model".to_string(), serde_json::json!(model));
+    }
+    if let Some(fallback_model) = progress.fallback_model.as_ref() {
+        obj.insert(
+            "fallbackModel".to_string(),
+            serde_json::json!(fallback_model),
+        );
+    }
+    if let Some(error) = progress.error.as_ref() {
+        obj.insert("error".to_string(), serde_json::json!(error));
+    }
+    if let Some(tool_use_id) = progress.tool_use_id.as_ref() {
+        obj.insert("toolUseID".to_string(), serde_json::json!(tool_use_id));
+    }
+    if let Some(queued_at_ms) = progress.queued_at_ms {
+        obj.insert("queuedAt".to_string(), serde_json::json!(queued_at_ms));
+    }
+    if let Some(started_at_ms) = progress.started_at_ms {
+        obj.insert("startedAt".to_string(), serde_json::json!(started_at_ms));
+    }
+    if let Some(last_progress_at_ms) = progress.last_progress_at_ms {
+        obj.insert(
+            "lastProgressAt".to_string(),
+            serde_json::json!(last_progress_at_ms),
+        );
+    }
+    if let Some(attempt) = progress.attempt {
+        obj.insert("attempt".to_string(), serde_json::json!(attempt));
+    }
+    if let Some(last_attempt_reason) = progress.last_attempt_reason.as_ref() {
+        obj.insert(
+            "lastAttemptReason".to_string(),
+            serde_json::json!(last_attempt_reason),
+        );
+    }
+    if let Some(tokens) = progress.tokens {
+        obj.insert("tokens".to_string(), serde_json::json!(tokens));
+    }
+    if let Some(tool_calls) = progress.tool_calls {
+        obj.insert("toolCalls".to_string(), serde_json::json!(tool_calls));
+    }
+    if let Some(last_tool_name) = progress.last_tool_name.as_ref() {
+        obj.insert(
+            "lastToolName".to_string(),
+            serde_json::json!(last_tool_name),
+        );
+    }
+    if let Some(last_tool_summary) = progress.last_tool_summary.as_ref() {
+        obj.insert(
+            "lastToolSummary".to_string(),
+            serde_json::json!(last_tool_summary),
+        );
+    }
+    if let Some(prompt_preview) = progress.prompt_preview.as_ref() {
+        obj.insert(
+            "promptPreview".to_string(),
+            serde_json::json!(prompt_preview),
+        );
+    }
+    Some(format!(
+        "[workflow_agent] {}",
+        serde_json::Value::Object(obj)
+    ))
+}
+
+fn emit_workflow_agent_snapshot(
+    progress_tx: Option<&mpsc::UnboundedSender<String>>,
+    progress: &WorkflowProgressUpdate,
+) {
+    if let (Some(tx), Some(line)) = (progress_tx, format_workflow_agent_snapshot(progress)) {
+        let _ = tx.send(line);
+    }
+}
+
+fn emit_workflow_agent_queued(
+    progress_tx: Option<&mpsc::UnboundedSender<String>>,
+    live_progress_tx: Option<&mpsc::UnboundedSender<WorkflowProgressUpdate>>,
+    call_index: u64,
+    label: &str,
+    prompt: &str,
+    phase_index: Option<u32>,
+    phase_title: Option<String>,
+    model: Option<String>,
+    queued_at_ms: u64,
+) {
+    let update = WorkflowProgressUpdate {
+        kind: "workflow_agent".to_string(),
+        index: call_index,
+        title: None,
+        message: None,
+        label: Some(label.to_string()),
+        phase_index,
+        phase_title,
+        agent_id: None,
+        agent_type: None,
+        model,
+        fallback_model: None,
+        state: Some("start".to_string()),
+        error: None,
+        tool_use_id: Some(format!("workflow_agent_{call_index}_queued")),
+        queued_at_ms: Some(queued_at_ms),
+        started_at_ms: None,
+        last_progress_at_ms: Some(queued_at_ms),
+        attempt: Some(1),
+        last_attempt_reason: None,
+        tokens: None,
+        tool_calls: None,
+        last_tool_name: None,
+        last_tool_summary: None,
+        prompt_preview: Some(prompt.chars().take(120).collect()),
+    };
+    emit_workflow_agent_snapshot(progress_tx, &update);
+    if let Some(tx) = live_progress_tx {
+        let _ = tx.send(update);
+    }
+}
+
 #[async_trait]
 pub trait WorkflowProgressSink: Send + Sync {
     async fn emit_workflow_progress(
@@ -116,8 +523,8 @@ fn requires_workspace_lease(workflow_id: &str) -> bool {
     crate::LOCAL_APP_BUILD_WORKFLOWS.contains(&workflow_id)
 }
 
-/// claude-code `k6a` — the per-run lifetime cap on real `agent()` spawns. The
-/// 1001st spawn is refused via the throw channel so the prelude rejects the
+/// Claude Code `k6a` — the per-run lifetime cap on real `agent()` calls. The
+/// 1001st call is refused via the throw channel so the prelude rejects the
 /// `agent()` promise with `WorkflowAgentCapError` (a runaway-loop backstop).
 const WORKFLOW_AGENT_CAP: u64 = 1000;
 
@@ -435,9 +842,11 @@ pub struct LocalWorkflowHandler {
     /// `task_id` → live worker-cancel record (removed by the worker on exit, or
     /// by [`Task::kill`] / cleanup).
     workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
-    /// `task_id` → record queued for teardown by the synchronous
-    /// [`TaskHandle::cleanup`] closure; drained by [`Self::drain_pending_kills`].
-    pending_kill: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+    /// Task ids queued for teardown by the synchronous [`TaskHandle::cleanup`]
+    /// closure. The closure cannot await and must not drop a cancellation
+    /// request on lock contention, so it records the task id here and
+    /// [`Self::drain_pending_kills`] later resolves the live worker handle.
+    pending_kill: Arc<StdMutex<Vec<String>>>,
     /// Analytics bus for emitting `tengu_workflow_*` telemetry events.
     bus: Arc<AnalyticsBus>,
     /// The turn's token target (`cfg.token_budget`) backing the script's
@@ -488,7 +897,7 @@ impl LocalWorkflowHandler {
             workflow_progress_sink: None,
             worktree_manager: None,
             workers: Arc::new(Mutex::new(HashMap::new())),
-            pending_kill: Arc::new(Mutex::new(HashMap::new())),
+            pending_kill: Arc::new(StdMutex::new(Vec::new())),
             bus: Arc::new(AnalyticsBus::new()),
             token_budget_total: None,
             output_pool_cell: None,
@@ -581,13 +990,24 @@ impl LocalWorkflowHandler {
     /// Drain records queued by [`TaskHandle::cleanup`] and cancel each worker
     /// future for real (the async counterpart of the synchronous cleanup closure).
     pub async fn drain_pending_kills(&self) {
-        let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
-        for (task_id, rec) in pending {
+        let pending = {
+            let mut pending = self.pending_kill.lock().unwrap();
+            std::mem::take(&mut *pending)
+        };
+        for task_id in pending {
+            if self.status_sink.is_terminal(&task_id).await {
+                continue;
+            }
+            let Some(rec) = self.workers.lock().await.remove(&task_id) else {
+                continue;
+            };
             rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = rec.runtime.cancel(&rec.handle).await;
-            self.status_sink
-                .set_status(&task_id, TaskStatus::Killed)
-                .await;
+            if !self.status_sink.is_terminal(&task_id).await {
+                self.status_sink
+                    .set_status(&task_id, TaskStatus::Killed)
+                    .await;
+            }
         }
     }
 }
@@ -772,6 +1192,49 @@ fn concurrency_cap() -> usize {
     cores.saturating_sub(2).max(2).min(16)
 }
 
+/// JavaScript `String.length` counts UTF-16 code units, which is the value
+/// Claude Code records as `script_size_chars` in `tengu_workflow_launched`.
+fn workflow_script_size_chars(script: &str) -> i64 {
+    script.encode_utf16().count() as i64
+}
+
+/// Claude Code `Fqe(source, scriptIsVerbatimBuiltIn)`: only verbatim bundled
+/// scripts keep their real name/description in tengu payloads. Everyone else
+/// is `"custom"` / `""` (`Ytr` / `Ztr` @2.1.245).
+fn telemetry_is_verbatim_builtin(source: Option<&str>, script_is_verbatim: Option<bool>) -> bool {
+    source == Some("built-in") && script_is_verbatim.unwrap_or(true)
+}
+
+/// `Ytr`: builtin+verbatim with a name → that name, otherwise `"custom"`.
+fn telemetry_workflow_name(
+    source: Option<&str>,
+    script_is_verbatim: Option<bool>,
+    name: Option<&str>,
+) -> String {
+    if telemetry_is_verbatim_builtin(source, script_is_verbatim) {
+        name.filter(|value| !value.is_empty())
+            .unwrap_or("custom")
+            .to_string()
+    } else {
+        "custom".to_string()
+    }
+}
+
+/// `Ztr` / `uns = 200`: builtin+verbatim descriptions are `slice(0, 200)` in
+/// UTF-16 code units; everything else is `""`.
+fn telemetry_workflow_description(
+    source: Option<&str>,
+    script_is_verbatim: Option<bool>,
+    description: Option<&str>,
+) -> String {
+    if !telemetry_is_verbatim_builtin(source, script_is_verbatim) {
+        return String::new();
+    }
+    let raw = description.unwrap_or("");
+    let units: Vec<u16> = raw.encode_utf16().take(200).collect();
+    String::from_utf16_lossy(&units)
+}
+
 /// Build the `SubagentSpawnRequest` for one `agent(prompt, opts)` call. The
 /// spawn-affecting `agent()` opts are mapped from `opts_json`
 /// (`JSON.stringify(opts)`): `agentType` overrides the default subagent type,
@@ -846,6 +1309,7 @@ fn make_request(
         team_name: None,
         creator_teammate_name: None,
         creator_team_name: None,
+        creator_agent_id: None,
         mode: None,
         isolation: opt_str("isolation"),
         cwd: None,
@@ -1070,21 +1534,30 @@ fn workflow_progress_update(progress: &workflow::Progress) -> WorkflowProgressUp
 
 #[derive(Clone)]
 struct WorkflowAgentLiveObserver {
+    progress_tx: Option<mpsc::UnboundedSender<String>>,
     tx: Option<mpsc::UnboundedSender<WorkflowProgressUpdate>>,
     state: Arc<tokio::sync::Mutex<WorkflowProgressUpdate>>,
     journal: Option<(WorkflowJournalWriter, String)>,
+    metrics: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
+    call_index: u64,
 }
 
 impl WorkflowAgentLiveObserver {
-    fn new(
+    fn new_with_metrics(
+        progress_tx: Option<mpsc::UnboundedSender<String>>,
         tx: Option<mpsc::UnboundedSender<WorkflowProgressUpdate>>,
         base: WorkflowProgressUpdate,
         journal: Option<(WorkflowJournalWriter, String)>,
+        metrics: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
+        call_index: u64,
     ) -> Self {
         Self {
+            progress_tx,
             tx,
             state: Arc::new(tokio::sync::Mutex::new(base)),
             journal,
+            metrics,
+            call_index,
         }
     }
 
@@ -1092,11 +1565,30 @@ impl WorkflowAgentLiveObserver {
     where
         F: FnOnce(&mut WorkflowProgressUpdate),
     {
-        let mut state = self.state.lock().await;
-        apply(&mut state);
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(state.clone());
+        let snapshot = {
+            let mut state = self.state.lock().await;
+            apply(&mut state);
+            state.clone()
+        };
+        if let Some(metrics) = &self.metrics {
+            metrics.lock().await.record_progress(
+                self.call_index,
+                snapshot.phase_index,
+                snapshot.phase_title.clone(),
+                snapshot.state.as_deref(),
+                snapshot.error.as_deref(),
+                snapshot.tokens,
+                snapshot.tool_calls,
+            );
         }
+        emit_workflow_agent_snapshot(self.progress_tx.as_ref(), &snapshot);
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(snapshot);
+        }
+    }
+
+    async fn snapshot(&self) -> WorkflowProgressUpdate {
+        self.state.lock().await.clone()
     }
 }
 
@@ -1170,6 +1662,7 @@ impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver
             }
             traits::subagent_spawn::SubagentObservation::Completed {
                 total_tool_use_count,
+                total_duration_ms,
                 usage,
                 ..
             } => {
@@ -1187,6 +1680,12 @@ impl traits::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver
                     state.last_progress_at_ms = Some(now);
                 })
                 .await;
+                if let Some(metrics) = &self.metrics {
+                    metrics
+                        .lock()
+                        .await
+                        .record_duration(self.call_index, total_duration_ms);
+                }
             }
             traits::subagent_spawn::SubagentObservation::Failed { error, .. } => {
                 let now = unix_time_ms_now();
@@ -1290,19 +1789,94 @@ enum Plan {
 /// these are not available inside `run_workflow_script` itself (the run_id is
 /// minted in the outer worker closure), so the caller threads them in as a bundle.
 /// When `None`, phase events still fire but omit the context fields.
+#[derive(Debug, Clone)]
 pub struct PhaseTelemetryCtx {
     /// The `wf_…` run id for this workflow invocation.
     pub run_id: String,
-    /// Invocation source: path for `scriptPath`, name for `named`, `"inline"`.
+    /// Resolved source category: `"built-in"`, `"projectSettings"`,
+    /// `"userSettings"`, `"plugin"`, `"scriptPath"`, or `"inline"`.
     pub workflow_source: Option<String>,
+    /// Whether the resolved script is byte-identical to the bundled definition.
+    pub script_is_verbatim_builtin: Option<bool>,
     /// `meta.name` from the workflow script.
     pub workflow_name: Option<String>,
     /// How the workflow was invoked: `"scriptPath"` | `"named"` | `"inline"`.
     ///
-    /// Oracle §7: `tengu_workflow_phase_completed` is gated on `p.source === "built-in"`,
-    /// which corresponds to named/saved workflows only (invocation_mode == `"named"`).
-    /// Inline scripts and arbitrary `scriptPath` invocations do NOT emit this event.
+    /// Oracle §7: `tengu_workflow_phase_completed` is gated on `p.source === "built-in"`
+    /// and a verbatim bundled script. Inline/custom named scripts and arbitrary
+    /// `scriptPath` invocations do not emit this event.
     pub invocation_mode: Option<String>,
+}
+
+async fn emit_phase_completed(
+    bus: &AnalyticsBus,
+    phase_telemetry_ctx: Option<&PhaseTelemetryCtx>,
+    metrics: &WorkflowRunMetrics,
+) {
+    let is_builtin_source = phase_telemetry_ctx.is_some_and(|ctx| {
+        telemetry_is_verbatim_builtin(
+            ctx.workflow_source.as_deref(),
+            ctx.script_is_verbatim_builtin,
+        )
+    });
+    if !is_builtin_source {
+        return;
+    }
+    for (phase_index, phase) in metrics.phase_metrics() {
+        let mut md: LogEventMetadata = HashMap::new();
+        if let Some(ctx) = phase_telemetry_ctx {
+            md.insert(
+                "workflow_run_id".to_string(),
+                AnalyticsValue::String(ctx.run_id.clone()),
+            );
+            if let Some(ref src) = ctx.workflow_source {
+                md.insert(
+                    "workflow_source".to_string(),
+                    AnalyticsValue::String(src.clone()),
+                );
+            }
+            if let Some(ref name) = ctx.workflow_name {
+                md.insert(
+                    "workflow_name".to_string(),
+                    AnalyticsValue::String(name.clone()),
+                );
+            }
+        }
+        md.insert(
+            "phase_index".to_string(),
+            AnalyticsValue::Int(i64::from(phase_index)),
+        );
+        md.insert(
+            "phase_title".to_string(),
+            AnalyticsValue::String(phase.title),
+        );
+        md.insert(
+            "phase_tokens".to_string(),
+            AnalyticsValue::Int(phase.tokens as i64),
+        );
+        md.insert(
+            "phase_tool_calls".to_string(),
+            AnalyticsValue::Int(phase.tool_calls as i64),
+        );
+        md.insert(
+            "phase_agent_duration_ms".to_string(),
+            AnalyticsValue::Int(phase.duration_ms as i64),
+        );
+        md.insert(
+            "phase_agent_count".to_string(),
+            AnalyticsValue::Int(phase.agent_count as i64),
+        );
+        md.insert(
+            "phase_error_count".to_string(),
+            AnalyticsValue::Int(phase.error_count as i64),
+        );
+        md.insert(
+            "phase_skip_count".to_string(),
+            AnalyticsValue::Int(phase.skip_count as i64),
+        );
+        bus.log_event(telemetry::tengu::workflow::PHASE_COMPLETED, md)
+            .await;
+    }
 }
 
 /// Run a workflow `script` to completion, spawning each `agent()` call as a real
@@ -1337,9 +1911,8 @@ pub async fn run_workflow_script(
     // so a runaway pure-JS loop is stopped instead of leaking the OS thread.
     cancel: Arc<std::sync::atomic::AtomicBool>,
     bus: Arc<AnalyticsBus>,
-    // Optional externally-provided agent_count Arc so the caller can read the final
-    // count after the run (used by tengu_workflow_completed). When None, a private
-    // counter is created (test/standalone path).
+    // Legacy compatibility seam. Current callers read the run metrics snapshot;
+    // this argument is accepted but intentionally not used as the source of truth.
     agent_count_out: Option<Arc<AtomicU64>>,
     // Optional fields for tengu_workflow_phase_completed (oracle §7):
     // `workflow_run_id`, `workflow_source`, `workflow_name`. When None, the
@@ -1364,6 +1937,7 @@ pub async fn run_workflow_script(
         bus,
         agent_count_out,
         phase_telemetry_ctx,
+        None,
     )
     .await
 }
@@ -1387,6 +1961,7 @@ async fn run_workflow_script_with_live_updates(
     bus: Arc<AnalyticsBus>,
     agent_count_out: Option<Arc<AtomicU64>>,
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
+    workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
         allow_nested,
@@ -1394,6 +1969,10 @@ async fn run_workflow_script_with_live_updates(
         fs: nested_fs,
     } = nested;
     use std::sync::atomic::Ordering;
+
+    let emit_phase_telemetry_here = workflow_metrics_out.is_none();
+    let workflow_metrics = workflow_metrics_out
+        .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(WorkflowRunMetrics::default())));
 
     // The script's `budget`: `total` is the turn's target; `spent()` reads the
     // shared pool — main loop (fed by the orchestrator per response) plus every
@@ -1419,6 +1998,7 @@ async fn run_workflow_script_with_live_updates(
     // uses this clone to emit workflow_agent start/done/error/cached events.
     let progress_tx_for_worker = progress_tx.clone();
     let live_progress_tx_for_worker = live_progress_tx.clone();
+    let workflow_metrics_for_script = workflow_metrics.clone();
 
     // The script runs synchronously on its own OS thread; its batch runner is
     // plain sync code, so `blocking_send`/`blocking_recv` are safe here (this is
@@ -1442,6 +2022,14 @@ async fn run_workflow_script_with_live_updates(
             // and needs no runtime, so it is safe from the script thread. The host
             // drains `progress_tx` concurrently (e.g. spools to the task output).
             let on_progress = move |p: &workflow::Progress| {
+                if let workflow::Progress::Phase { index, title } = p {
+                    // The callback runs on the dedicated script thread, so a
+                    // blocking lock cannot stall the async runtime. Record
+                    // phase-only workflows independently of agent metrics.
+                    workflow_metrics_for_script
+                        .blocking_lock()
+                        .record_phase(*index, title.clone());
+                }
                 if let Some(tx) = &progress_tx {
                     let _ = tx.send(format_progress(p));
                 }
@@ -1463,12 +2051,11 @@ async fn run_workflow_script_with_live_updates(
         .expect("spawn workflow-script thread");
 
     let cap = concurrency_cap();
-    // Per-run real-spawn counter (claude-code `c`/`S()`): only fresh spawns
-    // count — replayed (journaled) and `__wf_resolve` calls are exempt, so
-    // resuming a >1000-agent workflow never trips the cap on replay.
-    // When agent_count_out is provided by the caller (for tengu_workflow_completed
-    // reporting), use that Arc so the caller can read the final count after the run.
-    let agent_count = agent_count_out.unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+    // The current Claude runtime derives the cap/telemetry count from every
+    // real `agent()` call, including journal-cache hits. Keep the old optional
+    // counter seam accepted for callers, but do not use it as the source of
+    // truth for this run. `__wf_resolve` calls are not real agents.
+    let _ = agent_count_out;
     // Per-run agent call ordinal counter (oracle §8: the `index` field on
     // `workflow_agent` events is monotonically incrementing per call, including
     // cached replay calls; `__wf_resolve` calls do NOT count).
@@ -1505,8 +2092,8 @@ async fn run_workflow_script_with_live_updates(
             // Extract and strip the phase context injected by the script engine
             // (`__wf_phase: {index, title}`) — display-only, not forwarded to spawner.
             // This phase_index is 1-based (oracle §8: `workflow_phase` toolUseID uses `Q`
-            // which auto-increments from 1). Contrast with the `phase_index` field in
-            // `tengu_workflow_phase_completed` telemetry, which is 0-based (oracle §7).
+            // which auto-increments from 1). The same 1-based index is retained in
+            // `tengu_workflow_phase_completed` telemetry in current Claude Code.
             let (phase_index, phase_title) =
                 if let Some(ph) = opts.as_object_mut().and_then(|o| o.remove("__wf_phase")) {
                     let idx = ph.get("index").and_then(Value::as_u64).map(|v| v as u32);
@@ -1575,15 +2162,78 @@ async fn run_workflow_script_with_live_updates(
             let journal = journal.clone();
             let journal_writer = journal_writer.clone();
             let spent = spent.clone();
-            let agent_count = agent_count.clone();
             let nested_fs = nested_fs.clone();
             let budget_total = token_budget_total;
             let baseline = turn_start_baseline;
             let bus_call = bus.clone();
             let ptx = worker_progress_tx.clone();
             let live_tx = worker_live_progress_tx.clone();
+            let workflow_metrics = workflow_metrics.clone();
             async move {
-                let (key, prompt, opts_json, call_index, label, phase_index, phase_title) = match plan {
+                // Claude checks the budget and lifetime cap before incrementing
+                // its agent ordinal and before looking up a journal cache hit.
+                // Do this in one mutex-protected preflight so a large parallel
+                // batch admits exactly the first 1000 calls rather than making
+                // every task observe a phase-A count of 1001+.
+                if !matches!(&plan, Plan::Resolve(_)) {
+                    if let Some(total) = budget_total.filter(|&t| t > 0) {
+                        let turn_spent = spent.load(Ordering::Relaxed).saturating_sub(baseline);
+                        if turn_spent >= total {
+                            let should_emit = {
+                                let mut metrics = workflow_metrics.lock().await;
+                                if metrics.budget_telemetry_emitted {
+                                    false
+                                } else {
+                                    metrics.budget_telemetry_emitted = true;
+                                    true
+                                }
+                            };
+                            if should_emit {
+                                let mut md: LogEventMetadata = HashMap::new();
+                                md.insert("spent".to_string(), AnalyticsValue::Int(turn_spent as i64));
+                                md.insert("budget".to_string(), AnalyticsValue::Int(total as i64));
+                                let call_count = workflow_metrics.lock().await.call_count;
+                                md.insert("agentCount".to_string(), AnalyticsValue::Int(call_count as i64));
+                                bus_call
+                                    .log_event(telemetry::tengu::workflow::BUDGET_CAP_EXCEEDED, md)
+                                    .await;
+                            }
+                            return wf_throw(&workflow_budget_exceeded_message(turn_spent, total));
+                        }
+                    }
+
+                    let cap_failure = {
+                        let mut metrics = workflow_metrics.lock().await;
+                        if metrics.call_count >= WORKFLOW_AGENT_CAP {
+                            let should_emit = !metrics.cap_telemetry_emitted;
+                            metrics.cap_telemetry_emitted = true;
+                            Some((metrics.call_count, should_emit))
+                        } else {
+                            metrics.call_count += 1;
+                            None
+                        }
+                    };
+                    if let Some((call_count, should_emit)) = cap_failure {
+                        if should_emit {
+                            let mut md: LogEventMetadata = HashMap::new();
+                            md.insert("agentCount".to_string(), AnalyticsValue::Int(call_count as i64));
+                            bus_call
+                                .log_event(telemetry::tengu::workflow::AGENT_CAP_EXCEEDED, md)
+                                .await;
+                        }
+                        return wf_throw(WORKFLOW_AGENT_CAP_MESSAGE);
+                    }
+                }
+
+                let (
+                    key,
+                    prompt,
+                    opts_json,
+                    call_index,
+                    label,
+                    phase_index,
+                    phase_title,
+                ) = match plan {
                     // `workflow()` resolution: read + strip the nested source; `""`
                     // ⇒ the runtime throws "could not resolve".
                     Plan::Resolve(spec) => {
@@ -1593,6 +2243,15 @@ async fn run_workflow_script_with_live_updates(
                         }
                     }
                     Plan::Cached { result, call_index, label, phase_index, phase_title } => {
+                        workflow_metrics
+                            .lock()
+                            .await
+                            .record_cached(
+                                call_index,
+                                phase_index,
+                                phase_title.clone(),
+                                &result,
+                            );
                         // Emit a `cached` workflow_agent event for journal replays.
                         let tool_use_id = format!("workflow_agent_{call_index}_cached");
                         let cached_event = workflow::Progress::Agent {
@@ -1606,12 +2265,13 @@ async fn run_workflow_script_with_live_updates(
                             error: None,
                             tool_use_id,
                         };
+                        let mut update = workflow_progress_update(&cached_event);
+                        update.tool_use_id = Some(format!("workflow_agent_{call_index}_cached"));
+                        update.last_progress_at_ms = Some(unix_time_ms_now());
                         if let Some(ref tx) = ptx {
-                            let _ = tx.send(format_progress(&cached_event));
+                            emit_workflow_agent_snapshot(Some(tx), &update);
                         }
                         if let Some(ref tx) = live_tx {
-                            let mut update = workflow_progress_update(&cached_event);
-                            update.tool_use_id = Some(format!("workflow_agent_{call_index}_cached"));
                             let _ = tx.send(update);
                         }
                         return result;
@@ -1624,48 +2284,25 @@ async fn run_workflow_script_with_live_updates(
                         label,
                         phase_index,
                         phase_title,
-                    } => (key, prompt, opts_json, call_index, label, phase_index, phase_title),
+                    } => (
+                        key,
+                        prompt,
+                        opts_json,
+                        call_index,
+                        label,
+                        phase_index,
+                        phase_title,
+                    ),
                 };
                 let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
+                if opts.get("isolation").and_then(Value::as_str) == Some("remote") {
+                    return wf_throw("agent({isolation:'remote'}) is not available in this build");
+                }
                 // Keep workflow progress provider-qualified. The request itself
                 // carries the provider-local wire model and profile separately,
                 // while the UI needs one stable display identity across the
                 // queued, live-observer, and terminal events.
-                let agent_model = opts.get("model").and_then(Value::as_str).map(str::to_string);
-                let agent_model_profile = opts
-                    .get("modelProfile")
-                    .or_else(|| opts.get("model_profile"))
-                    .and_then(Value::as_str)
-                    .filter(|profile| !profile.is_empty());
-                let agent_display_model = agent_model.as_deref().map(|model| {
-                    traits::qualified_model_ref(model, agent_model_profile)
-                });
-                // Budget hard ceiling (claude-code `v()` before each spawn): when a
-                // token target is set and the turn-relative spend has reached it,
-                // refuse the spawn → the prelude throws WorkflowBudgetExceededError
-                // (sequential loops stop; in parallel/pipeline the throw is caught →
-                // null). Checked before the cap so an over-budget run reports it.
-                if let Some(total) = budget_total.filter(|&t| t > 0) {
-                    let turn_spent = spent.load(Ordering::Relaxed).saturating_sub(baseline);
-                    if turn_spent >= total {
-                        let mut md: LogEventMetadata = HashMap::new();
-                        md.insert("spent".to_string(), AnalyticsValue::Int(turn_spent as i64));
-                        md.insert("budget".to_string(), AnalyticsValue::Int(total as i64));
-                        md.insert("agentCount".to_string(), AnalyticsValue::Int(agent_count.load(Ordering::Relaxed) as i64));
-                        bus_call.log_event(telemetry::tengu::workflow::BUDGET_CAP_EXCEEDED, md).await;
-                        return wf_throw(&workflow_budget_exceeded_message(turn_spent, total));
-                    }
-                }
-                // 1000-agent lifetime cap (claude-code `S()` before each real
-                // spawn): replayed/resolve calls are exempt (they never reach here).
-                // `fetch_add` returns the prior count → spawns 0..999 proceed, the
-                // 1001st throws WorkflowAgentCapError.
-                if agent_count.fetch_add(1, Ordering::SeqCst) >= WORKFLOW_AGENT_CAP {
-                    let mut md: LogEventMetadata = HashMap::new();
-                    md.insert("agentCount".to_string(), AnalyticsValue::Int(WORKFLOW_AGENT_CAP as i64));
-                    bus_call.log_event(telemetry::tengu::workflow::AGENT_CAP_EXCEEDED, md).await;
-                    return wf_throw(WORKFLOW_AGENT_CAP_MESSAGE);
-                }
+                let agent_display_model = workflow_agent_display_model(&opts);
                 // agentType validation (binary `F` @202933121): an explicit
                 // `agentType` must name a known agent, else throw the byte-exact
                 // not-found error listing the available agents.
@@ -1686,39 +2323,28 @@ async fn run_workflow_script_with_live_updates(
                         ));
                     }
                 }
-                // Emit `start` workflow_agent event before spawning (oracle §8).
-                // toolUseID for the in-flight queued emit uses the suffix "queued"
-                // (oracle §8: `workflow_agent_${ne}_queued` for queued/start state).
-                {
-                    let start_event = workflow::Progress::Agent {
-                        index: call_index,
-                        label: label.clone(),
-                        phase_index,
-                        phase_title: phase_title.clone(),
-                        agent_id: None,
-                        model: agent_display_model.clone(),
-                        state: workflow::AgentState::Start,
-                        error: None,
-                        tool_use_id: format!("workflow_agent_{call_index}_queued"),
-                    };
-                    if let Some(ref tx) = ptx {
-                        let _ = tx.send(format_progress(&start_event));
-                    }
-                    if let Some(ref tx) = live_tx {
-                        let mut update = workflow_progress_update(&start_event);
-                        update.queued_at_ms = Some(unix_time_ms_now());
-                        update.attempt = Some(1);
-                        update.prompt_preview = Some(prompt.chars().take(120).collect());
-                        let _ = tx.send(update);
-                    }
-                }
                 let inherit = SubagentInheritance {
                     tool_invoker,
                     budget,
                 };
                 let request = make_request(&subagent_type, &prompt, &opts_json);
-                let raw = if live_tx.is_some() || (journal_writer.is_some() && key.is_some()) {
-                    let observer = WorkflowAgentLiveObserver::new(
+                let queued_ms = unix_time_ms_now();
+                emit_workflow_agent_queued(
+                    ptx.as_ref(),
+                    live_tx.as_ref(),
+                    call_index,
+                    &label,
+                    &prompt,
+                    phase_index,
+                    phase_title.clone(),
+                    agent_display_model.clone(),
+                    queued_ms,
+                );
+                let queued_at_ms = Some(queued_ms);
+                let observer_enabled = live_tx.is_some() || (journal_writer.is_some() && key.is_some());
+                let observer = observer_enabled.then(|| {
+                    Arc::new(WorkflowAgentLiveObserver::new_with_metrics(
+                        ptx.clone(),
                         live_tx.clone(),
                         WorkflowProgressUpdate {
                             kind: "workflow_agent".to_string(),
@@ -1735,9 +2361,9 @@ async fn run_workflow_script_with_live_updates(
                             state: Some("start".to_string()),
                             error: None,
                             tool_use_id: Some(format!("workflow_agent_{call_index}_queued")),
-                            queued_at_ms: Some(unix_time_ms_now()),
+                            queued_at_ms,
                             started_at_ms: None,
-                            last_progress_at_ms: Some(unix_time_ms_now()),
+                            last_progress_at_ms: queued_at_ms,
                             attempt: Some(1),
                             last_attempt_reason: None,
                             tokens: None,
@@ -1749,13 +2375,17 @@ async fn run_workflow_script_with_live_updates(
                         journal_writer
                             .clone()
                             .zip(key.clone()),
-                    );
+                        Some(workflow_metrics.clone()),
+                        call_index,
+                    ))
+                });
+                let raw = if let Some(observer) = observer.clone() {
                     spawner
                         .spawn_workflow_with_observer(
                             request,
                             inherit,
                             None,
-                            Some(Arc::new(observer)),
+                            Some(observer as Arc<dyn traits::subagent_spawn::SubagentSpawnObserver>),
                             traits::subagent_spawn::WorkflowQueryWatchdog::default(),
                         )
                         .await
@@ -1763,6 +2393,10 @@ async fn run_workflow_script_with_live_updates(
                     spawner.spawn(request, inherit).await
                 };
                 let terminal_error = subagent_failure_reason(&raw);
+                workflow_metrics
+                    .lock()
+                    .await
+                    .record_result(call_index, phase_index, phase_title.clone(), &raw);
                 // Accumulate this fresh subagent's output tokens into the shared
                 // `spent` pool (replayed/cached agents cost nothing) — the same
                 // pool the main loop feeds when wired.
@@ -1792,19 +2426,36 @@ async fn run_workflow_script_with_live_updates(
                         label: label.clone(),
                         phase_index,
                         phase_title,
-                        agent_id: agent_id_str,
-                        model: agent_display_model,
-                        state,
+                        agent_id: agent_id_str.clone(),
+                        model: agent_display_model.clone(),
+                        state: state.clone(),
                         error: terminal_error.clone(),
-                        tool_use_id,
+                        tool_use_id: tool_use_id.clone(),
                     };
-                    if let Some(ref tx) = ptx {
-                        let _ = tx.send(format_progress(&lifecycle_event));
-                    }
-                    if let Some(ref tx) = live_tx {
-                        let mut update = workflow_progress_update(&lifecycle_event);
+                    let observer_state = if let Some(observer) = observer.as_ref() {
+                        Some(observer.snapshot().await)
+                    } else {
+                        None
+                    };
+                    let observer_emitted_terminal = observer_state
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.state.as_deref())
+                        .is_some_and(|state| matches!(state, "done" | "error" | "cached"));
+                    if !observer_enabled || matches!(raw, Err(_)) || !observer_emitted_terminal {
+                        let mut update =
+                            observer_state.unwrap_or_else(|| workflow_progress_update(&lifecycle_event));
+                        update.agent_id = agent_id_str;
+                        update.model = agent_display_model;
+                        update.state = Some(state.as_str().to_string());
+                        update.error = terminal_error.clone();
+                        update.tool_use_id = Some(tool_use_id);
                         update.last_progress_at_ms = Some(unix_time_ms_now());
-                        let _ = tx.send(update);
+                        if let Some(ref tx) = ptx {
+                            emit_workflow_agent_snapshot(Some(tx), &update);
+                        }
+                        if let Some(ref tx) = live_tx {
+                            let _ = tx.send(update);
+                        }
                     }
                 }
                 if opts.get("throwOnError").and_then(Value::as_bool) == Some(true) {
@@ -1846,67 +2497,12 @@ async fn run_workflow_script_with_live_updates(
         )
     })??;
 
-    // Emit `tengu_workflow_phase_completed` for each Phase in the outcome's
-    // progress list (oracle §7 payload).
-    //
-    // Oracle §7 gating condition: `p.source === "built-in"` — this event is emitted
-    // ONLY for named/saved workflows (invocation_mode == "named"). Inline scripts and
-    // arbitrary scriptPath invocations do NOT emit this event. See oracle §7 for the
-    // exact binary gate site.
-    // invocation_mode values that trigger the emit: "named" only.
-    // invocation_mode values that suppress the emit: "inline", "scriptPath", and None.
-    //
-    // Per-phase metric fields (`phase_tokens`, `phase_tool_calls`,
-    // `phase_agent_duration_ms`, `phase_agent_count`, `phase_error_count`,
-    // `phase_skip_count`) are UNAVAILABLE: LingXi's `Progress::Phase` only carries
-    // a title; no numeric per-phase aggregation is performed. These fields are
-    // omitted rather than emitted as 0 to avoid misleading consumers.
-    {
-        // Gate: only emit for named/saved workflows (p.source === "built-in" in oracle §7).
-        let is_named_source = phase_telemetry_ctx
-            .as_ref()
-            .and_then(|ctx| ctx.invocation_mode.as_deref())
-            .map(|mode| mode == "named")
-            .unwrap_or(false);
-
-        if is_named_source {
-            // phase_index is 0-based in telemetry (oracle §7: `U` starts at 0 and
-            // increments per emitted phase event). Note: Progress::Phase.index and
-            // the phaseIndex field on workflow_agent progress events are 1-based
-            // (oracle §8: `Q` auto-increments from 1 for workflow_phase events).
-            let mut phase_idx: i64 = 0;
-            for p in &outcome.progress {
-                if let workflow::Progress::Phase { title, .. } = p {
-                    let mut md: LogEventMetadata = HashMap::new();
-                    if let Some(ref ctx) = phase_telemetry_ctx {
-                        md.insert(
-                            "workflow_run_id".to_string(),
-                            AnalyticsValue::String(ctx.run_id.clone()),
-                        );
-                        if let Some(ref src) = ctx.workflow_source {
-                            md.insert(
-                                "workflow_source".to_string(),
-                                AnalyticsValue::String(src.clone()),
-                            );
-                        }
-                        if let Some(ref name) = ctx.workflow_name {
-                            md.insert(
-                                "workflow_name".to_string(),
-                                AnalyticsValue::String(name.clone()),
-                            );
-                        }
-                    }
-                    md.insert("phase_index".to_string(), AnalyticsValue::Int(phase_idx));
-                    md.insert(
-                        "phase_title".to_string(),
-                        AnalyticsValue::String(title.clone()),
-                    );
-                    bus.log_event(telemetry::tengu::workflow::PHASE_COMPLETED, md)
-                        .await;
-                    phase_idx += 1;
-                }
-            }
-        }
+    // Standalone callers (the public test/host seam) still emit here; the
+    // production task passes the metrics out so it can preserve Claude Code's
+    // completed-before-phase telemetry ordering.
+    if emit_phase_telemetry_here {
+        let metrics = workflow_metrics.lock().await.clone();
+        emit_phase_completed(&bus, phase_telemetry_ctx.as_ref(), &metrics).await;
     }
 
     Ok(outcome)
@@ -1981,8 +2577,13 @@ impl Task for LocalWorkflowHandler {
             run_id: provided_run_id,
             invocation_mode,
             workflow_source,
+            script_is_verbatim_builtin,
             transcript_subdir,
             launched_from_subagent,
+            tool_use_id: _tool_use_id,
+            creator_teammate_name: _,
+            creator_team_name: _,
+            creator_agent_id: _,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -2090,26 +2691,15 @@ impl Task for LocalWorkflowHandler {
         // telemetry without re-parsing inside the async closure.
         let meta_name: Option<String> = workflow::meta_string_value(&script, "name");
         let meta_description: Option<String> = workflow::meta_string_value(&script, "description");
-        // phase_count: number of declared phases in `meta.phases`. The workflow
-        // crate exposes `meta_string_value` for string fields; there is no direct
-        // array-length API. The `meta.phases` field is present in some templates
-        // but not enforced by validate_meta. We parse it with a minimal tree-sitter
-        // scan via `workflow::meta_array_len` when available; for now use 0 as the
-        // safe fallback (LingXi does not yet expose a meta_array_len helper).
-        // NOTE: oracle §7 spec: `c.meta.phases?.length ?? 0` — the phase COUNT is
-        // from the script's static meta declaration, not from runtime phase() calls.
-        // Since `workflow::meta_string_value` cannot walk arrays, we emit 0.
-        // This is marked unavailable in the module comment below.
-        let meta_phase_count: i64 = 0; // UNAVAILABLE: no workflow::meta_array_len()
-        let script_size_chars: i64 = script.chars().count() as i64;
+        // phase_count: number of declared phases in `meta.phases`. This mirrors
+        // the oracle's `c.meta.phases?.length ?? 0`: it is the static declaration,
+        // not the number of runtime `phase()` calls.
+        let meta_phase_count = workflow::meta_array_len(&script, "phases").unwrap_or(0) as i64;
+        let script_size_chars = workflow_script_size_chars(&script);
         let workspace_lease_token = workspace_lease
             .as_ref()
             .map(permission::WorkspacePermissionLease::token);
-        // Shared agent_count Arc threaded into run_workflow_script so the completed
-        // event can read the real post-run count (oracle §7: `k.agentCount`).
-        let shared_agent_count = Arc::new(AtomicU64::new(0));
         let worker = Box::pin({
-            let shared_agent_count = shared_agent_count.clone();
             async move {
                 let _workspace_lease = workspace_lease;
                 let registered = wait_for_workflow_registration(
@@ -2173,18 +2763,22 @@ impl Task for LocalWorkflowHandler {
                                 .unwrap_or_else(|| "inline".to_string()),
                         ),
                     );
-                    if let Some(ref name) = meta_name {
-                        md.insert(
-                            "workflow_name".to_string(),
-                            AnalyticsValue::String(name.clone()),
-                        );
-                    }
-                    if let Some(ref desc) = meta_description {
-                        md.insert(
-                            "workflow_description".to_string(),
-                            AnalyticsValue::String(desc.clone()),
-                        );
-                    }
+                    md.insert(
+                        "workflow_name".to_string(),
+                        AnalyticsValue::String(telemetry_workflow_name(
+                            workflow_source.as_deref(),
+                            script_is_verbatim_builtin,
+                            meta_name.as_deref(),
+                        )),
+                    );
+                    md.insert(
+                        "workflow_description".to_string(),
+                        AnalyticsValue::String(telemetry_workflow_description(
+                            workflow_source.as_deref(),
+                            script_is_verbatim_builtin,
+                            meta_description.as_deref(),
+                        )),
+                    );
                     md.insert(
                         "phase_count".to_string(),
                         AnalyticsValue::Int(meta_phase_count),
@@ -2266,6 +2860,8 @@ impl Task for LocalWorkflowHandler {
                 // sender on return.
                 let (ptx, mut prx) = mpsc::unbounded_channel::<String>();
                 let (wptx, mut wprx) = mpsc::unbounded_channel::<WorkflowProgressUpdate>();
+                let workflow_metrics =
+                    Arc::new(tokio::sync::Mutex::new(WorkflowRunMetrics::default()));
                 let prog_output = output_manager.clone();
                 let prog_spool = worker_spool_path.clone();
                 let worker_task_id_for_progress = worker_task_id.clone();
@@ -2315,6 +2911,13 @@ impl Task for LocalWorkflowHandler {
                             transcript_subdir: transcript_subdir.clone(),
                         })
                     };
+                let phase_telemetry_ctx = PhaseTelemetryCtx {
+                    run_id: run_id.clone(),
+                    workflow_source: workflow_source.clone(),
+                    script_is_verbatim_builtin,
+                    workflow_name: meta_name.clone(),
+                    invocation_mode: invocation_mode.clone(),
+                };
                 let run = run_workflow_script_with_live_updates(
                     &script,
                     DEFAULT_WORKFLOW_SUBAGENT,
@@ -2335,34 +2938,24 @@ impl Task for LocalWorkflowHandler {
                     },
                     worker_cancel,
                     worker_bus.clone(),
-                    Some(shared_agent_count.clone()),
+                    None,
                     // Pass the phase telemetry context so run_workflow_script can
                     // emit tengu_workflow_phase_completed with the correct run_id,
-                    // workflow_source, workflow_name, and the invocation_mode gate
-                    // (oracle §7: only "named" sources emit phase_completed).
-                    Some(PhaseTelemetryCtx {
-                        run_id: run_id.clone(),
-                        workflow_source: workflow_source.clone(),
-                        workflow_name: meta_name.clone(),
-                        invocation_mode: invocation_mode.clone(),
-                    }),
+                    // workflow_source, workflow_name, and built-in-source gate.
+                    Some(phase_telemetry_ctx.clone()),
+                    Some(workflow_metrics.clone()),
                 );
                 let (outcome, (), ()) = tokio::join!(run, drain, live_drain);
                 let elapsed_ms = run_start.elapsed().as_millis() as i64;
+                let workflow_metrics_snapshot = workflow_metrics.lock().await.clone();
 
                 // tengu_workflow_completed — oracle §7 exact payload.
                 // `status` derivation: `abortController?.signal.aborted ? "killed"
                 //   : k.error ? "failed" : "completed"` (oracle §7).
-                // `agent_count`: real final count from the shared_agent_count Arc.
-                // `total_tokens` / `total_tool_calls`: UNAVAILABLE — LingXi's
-                //   `RunOutcome` carries no per-run token/tool-call aggregates; these
-                //   fields are omitted rather than emitted as 0. `SubagentResult` per-
-                //   agent usage is only available inside `run_workflow_script`'s worker
-                //   future and is not propagated to `RunOutcome`. A future refactor that
-                //   accumulates these into the outcome struct can add them here.
+                // `agent_count`: all real `agent()` calls, including cache hits;
+                // total token/tool-call rollups come from terminal subagent results.
                 {
-                    let agent_count_val =
-                        shared_agent_count.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                    let agent_count_val = workflow_metrics_snapshot.call_count as i64;
                     let status_str = if completed_cancel.load(std::sync::atomic::Ordering::Relaxed)
                     {
                         "killed"
@@ -2385,18 +2978,22 @@ impl Task for LocalWorkflowHandler {
                                 .unwrap_or_else(|| "inline".to_string()),
                         ),
                     );
-                    if let Some(ref name) = meta_name {
-                        md.insert(
-                            "workflow_name".to_string(),
-                            AnalyticsValue::String(name.clone()),
-                        );
-                    }
-                    if let Some(ref desc) = meta_description {
-                        md.insert(
-                            "workflow_description".to_string(),
-                            AnalyticsValue::String(desc.clone()),
-                        );
-                    }
+                    md.insert(
+                        "workflow_name".to_string(),
+                        AnalyticsValue::String(telemetry_workflow_name(
+                            workflow_source.as_deref(),
+                            script_is_verbatim_builtin,
+                            meta_name.as_deref(),
+                        )),
+                    );
+                    md.insert(
+                        "workflow_description".to_string(),
+                        AnalyticsValue::String(telemetry_workflow_description(
+                            workflow_source.as_deref(),
+                            script_is_verbatim_builtin,
+                            meta_description.as_deref(),
+                        )),
+                    );
                     md.insert(
                         "status".to_string(),
                         AnalyticsValue::String(status_str.to_string()),
@@ -2405,13 +3002,27 @@ impl Task for LocalWorkflowHandler {
                         "agent_count".to_string(),
                         AnalyticsValue::Int(agent_count_val),
                     );
+                    md.insert(
+                        "total_tokens".to_string(),
+                        AnalyticsValue::Int(workflow_metrics_snapshot.total_tokens as i64),
+                    );
+                    md.insert(
+                        "total_tool_calls".to_string(),
+                        AnalyticsValue::Int(workflow_metrics_snapshot.total_tool_calls as i64),
+                    );
                     md.insert("duration_ms".to_string(), AnalyticsValue::Int(elapsed_ms));
                     worker_bus
                         .log_event(telemetry::tengu::workflow::COMPLETED, md)
                         .await;
+                    emit_phase_completed(
+                        &worker_bus,
+                        Some(&phase_telemetry_ctx),
+                        &workflow_metrics_snapshot,
+                    )
+                    .await;
                 }
-                // Note: tengu_workflow_phase_completed is emitted inside
-                // run_workflow_script with the PhaseTelemetryCtx passed above.
+                // Note: phase telemetry is emitted after completed so event order
+                // matches Claude Code's completed-before-phase sequence.
 
                 // Persist the journal (new + replayed results) under the run id so a
                 // later resume can replay them. Serialise before any await so the std
@@ -2424,9 +3035,44 @@ impl Task for LocalWorkflowHandler {
                     let _ = fs.write_file(p, s).await;
                 }
 
-                // The Workflow tool result is the script's return value; spool it.
-                // A script-level error spools its message and fails the task. Spool
-                // I/O is best-effort — a write failure must not mask the result.
+                // Publish the structured terminal payload before status so the
+                // registry's notification drain cannot observe a result-less
+                // completion. Failures remain separate from the script result,
+                // matching Claude's workflow notification shape.
+                let (agents_done, agents_error, agents_skipped, agents_empty_result) =
+                    workflow_metrics_snapshot.terminal_counts();
+                let terminal_outcome = match &outcome {
+                    Ok(out) => traits::task_registry::WorkflowTerminalOutcome {
+                        result: out.result.clone(),
+                        failures: out.failures.clone(),
+                        agent_count: workflow_metrics_snapshot.call_count,
+                        total_tokens: workflow_metrics_snapshot.total_tokens,
+                        total_tool_calls: workflow_metrics_snapshot.total_tool_calls,
+                        duration_ms: elapsed_ms as u64,
+                        agents_done,
+                        agents_error,
+                        agents_skipped,
+                        agents_empty_result,
+                        progress_counts_available: true,
+                        ..Default::default()
+                    },
+                    Err(error) => traits::task_registry::WorkflowTerminalOutcome {
+                        error: Some(error.to_string()),
+                        agent_count: workflow_metrics_snapshot.call_count,
+                        total_tokens: workflow_metrics_snapshot.total_tokens,
+                        total_tool_calls: workflow_metrics_snapshot.total_tool_calls,
+                        duration_ms: elapsed_ms as u64,
+                        agents_done,
+                        agents_error,
+                        agents_skipped,
+                        agents_empty_result,
+                        progress_counts_available: true,
+                        ..Default::default()
+                    },
+                };
+                // The Workflow tool result is the script's return value; spool
+                // only that value. Spool I/O is best-effort — a write failure
+                // must not mask the result.
                 let (payload, status) = match outcome {
                     Ok(out) => (out.result.unwrap_or_default(), TaskStatus::Completed),
                     Err(e) => (e.to_string(), TaskStatus::Failed),
@@ -2435,18 +3081,21 @@ impl Task for LocalWorkflowHandler {
                     let _ = output_manager.append(&worker_spool_path, &payload).await;
                 }
 
-                status_sink.set_status(&worker_task_id, status).await;
+                status_sink
+                    .finish_workflow_terminal(&worker_task_id, terminal_outcome, status)
+                    .await;
                 workers.lock().await.remove(&worker_task_id);
             }
         });
 
+        let mut workers = self.workers.lock().await;
         let bg_handle = ctx
             .runtime
             .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
             .await
             .map_err(|e| TaskError::Internal(e.to_string()))?;
 
-        self.workers.lock().await.insert(
+        workers.insert(
             task_id.clone(),
             WorkerCancel {
                 handle: bg_handle,
@@ -2454,27 +3103,27 @@ impl Task for LocalWorkflowHandler {
                 cancel,
             },
         );
+        drop(workers);
 
         // 4. Synchronous cleanup seam (claude-code `registerCleanup` parity): the
-        //    closure cannot await, so it moves any live cancel record into
-        //    `pending_kill`; `drain_pending_kills` performs the real cancel.
-        let cleanup_workers = self.workers.clone();
+        //    closure cannot await, so it records the task id for later async
+        //    drain. This must not silently lose cancellation on lock contention.
         let cleanup_pending = self.pending_kill.clone();
         let cleanup_task_id = task_id.clone();
         let cleanup: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let (Ok(mut workers), Ok(mut pending)) =
-                (cleanup_workers.try_lock(), cleanup_pending.try_lock())
-            {
-                if let Some(rec) = workers.remove(&cleanup_task_id) {
-                    pending.insert(cleanup_task_id.clone(), rec);
-                }
-            }
+            cleanup_pending
+                .lock()
+                .unwrap()
+                .push(cleanup_task_id.clone());
         });
 
         Ok(TaskHandle::new(task_id, Some(cleanup)))
     }
 
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        if self.status_sink.is_terminal(task_id).await {
+            return Ok(());
+        }
         // Cancel the in-flight worker future (the analogue of TS
         // `abortController.abort()`). An absent record ⇒ already terminated ⇒
         // graceful no-op.
@@ -2489,9 +3138,11 @@ impl Task for LocalWorkflowHandler {
                 .await
                 .map_err(|e| TaskError::Io(e.to_string()))?;
         }
-        self.status_sink
-            .set_status(task_id, TaskStatus::Killed)
-            .await;
+        if !self.status_sink.is_terminal(task_id).await {
+            self.status_sink
+                .set_status(task_id, TaskStatus::Killed)
+                .await;
+        }
         Ok(())
     }
 }

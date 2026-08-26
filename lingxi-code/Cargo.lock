@@ -3508,6 +3508,7 @@ dependencies = [
  "base64 0.22.1",
  "branding",
  "bytes",
+ "futures-util",
  "indexmap 2.7.1",
  "jsonrpc",
  "migrations",

@@ -63,6 +63,8 @@ android {
             applicationIdSuffix = ".debug"
         }
         release {
+            // Enable only after the minified release variant passes the
+            // UniFFI/JNI device smoke documented in the optimizer checklist.
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

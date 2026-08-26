@@ -10,7 +10,7 @@
 //!
 //! The byte-exact model-facing surface — the tool name, the long-form
 //! description ([`Tool::prompt`]), and the input schema — is reproduced from the
-//! claude-code v2.1.185 binary. The launch itself goes through the injected
+//! claude-code v2.1.245 binary. The launch itself goes through the injected
 //! [`WorkflowLauncher`] seam, which the composition root wires over the task
 //! registry; with no launcher wired the tool serves its surface but `call`
 //! reports a clear error.
@@ -51,7 +51,7 @@ pub const TOOL_NAME: &str = "Workflow";
 
 const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 
-/// The long-form tool description (claude-code v2.1.185 `prompt`), reproduced
+/// The long-form tool description (claude-code v2.1.245 `prompt`), reproduced
 /// byte-for-byte. A trailing newline (should an editor add one to the data file)
 /// is stripped so the API description matches the binary exactly.
 static DESCRIPTION: Lazy<String> = Lazy::new(|| {
@@ -60,7 +60,7 @@ static DESCRIPTION: Lazy<String> = Lazy::new(|| {
         .to_string()
 });
 
-/// The input schema (claude-code v2.1.185 `inputSchema`), reproduced from the
+/// The input schema (claude-code v2.1.245 `inputSchema`), reproduced from the
 /// zod `strictObject` definition (source-order properties, `additionalProperties:
 /// false`, no required keys — the "at least one of script/name/scriptPath"
 /// constraint is a runtime `.refine`, enforced in [`Tool::validate_input`]).
@@ -88,6 +88,17 @@ pub struct WorkflowLaunchSpec {
     /// this unset and resolve the current session at launch time; mobile UI
     /// resumes set it so a concurrent session switch cannot retarget the run.
     pub session_uuid: Option<String>,
+    /// Originating Workflow tool-use id for the terminal task notification.
+    pub tool_use_id: Option<String>,
+    /// Whether the Workflow call came from a subagent context.
+    pub launched_from_subagent: bool,
+    /// Stable creator ownership for parent-rest deferral.
+    pub creator_teammate_name: Option<String>,
+    /// Team containing the creator, when it belongs to one.
+    pub creator_team_name: Option<String>,
+    /// Stringified `protocol::AgentId`; the launcher boundary is intentionally
+    /// protocol-agnostic and the host parses the prefixed wire form.
+    pub creator_agent_id: Option<String>,
 }
 
 /// The result of a successful launch.
@@ -112,6 +123,10 @@ pub struct WorkflowLaunched {
     /// `transcriptDir = Nte(runId)` → `<sessionProjectDir>/<sessionId>/subagents/workflows/<runId>`).
     /// `None` if the session dir is not available to the launcher.
     pub transcript_dir: Option<String>,
+    /// Compiler diagnostic returned by Claude's `async_launched` path when the
+    /// script was parsed successfully but could not be compiled. This is a
+    /// successful tool result with no task registered, not a validation error.
+    pub error: Option<String>,
 }
 
 /// Error launching a workflow.
@@ -139,6 +154,28 @@ pub fn is_valid_run_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
+/// Mint the wire-shaped workflow run id used by fresh launches. A supplied
+/// resume id is reused exactly, matching Claude's `resumeFromRunId ?? wf_*`.
+#[must_use]
+pub fn mint_run_id(resume_from_run_id: Option<&str>) -> String {
+    if let Some(run_id) = resume_from_run_id.filter(|value| !value.is_empty()) {
+        return run_id.to_string();
+    }
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let value = nanos ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    format!(
+        "wf_{:08x}-{:03x}",
+        (value >> 32) as u32,
+        (value as u32) & 0xfff
+    )
+}
+
 fn user_config_home_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir));
@@ -149,8 +186,8 @@ fn user_config_home_dir() -> Option<PathBuf> {
         .map(|home| home.join(branding::DOT_DIR))
 }
 
-fn saved_workflow_dirs() -> Vec<PathBuf> {
-    let project = PathBuf::from(branding::DOT_DIR).join("workflows");
+fn saved_workflow_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let project = cwd.join(branding::DOT_DIR).join("workflows");
     let mut dirs = vec![project.clone()];
     if let Some(user) = user_config_home_dir().map(|home| home.join("workflows")) {
         if user != project {
@@ -160,8 +197,8 @@ fn saved_workflow_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn saved_workflow_candidates(name: &str) -> Vec<PathBuf> {
-    saved_workflow_dirs()
+fn saved_workflow_candidates(cwd: &Path, name: &str) -> Vec<PathBuf> {
+    saved_workflow_dirs(cwd)
         .into_iter()
         .flat_map(|dir| {
             WORKFLOW_EXTENSIONS
@@ -171,34 +208,53 @@ fn saved_workflow_candidates(name: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Return Claude Code's resolver source for a named workflow. The source is
+/// intentionally independent of the resolved script body: a named built-in
+/// with an explicit script override still reports `built-in`, while the
+/// `scriptMatchesDefinition` flag controls telemetry redaction separately.
+#[must_use]
+pub fn workflow_source_for_name(cwd: &Path, name: &str) -> Option<&'static str> {
+    if BUILTIN_WORKFLOWS.get(name).is_some() {
+        return Some("built-in");
+    }
+    let project = cwd.join(branding::DOT_DIR).join("workflows");
+    if WORKFLOW_EXTENSIONS
+        .iter()
+        .any(|ext| project.join(format!("{name}{ext}")).is_file())
+    {
+        return Some("projectSettings");
+    }
+    let user_dirs = user_config_home_dir()
+        .into_iter()
+        .map(|home| home.join("workflows"));
+    if user_dirs.into_iter().any(|dir| {
+        WORKFLOW_EXTENSIONS
+            .iter()
+            .any(|ext| dir.join(format!("{name}{ext}")).is_file())
+    }) {
+        return Some("userSettings");
+    }
+    None
+}
+
 fn path_for_read(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn saved_workflow_dirs_display() -> String {
-    saved_workflow_dirs()
-        .into_iter()
-        .map(|dir| {
-            let mut s = dir.to_string_lossy().into_owned();
-            if !s.ends_with(std::path::MAIN_SEPARATOR) {
-                s.push(std::path::MAIN_SEPARATOR);
-            }
-            s
-        })
-        .collect::<Vec<_>>()
-        .join(" or ")
-}
-
 /// Resolve a launch spec to a script source. Precedence follows claude-code:
-/// `scriptPath` over `script` over `name` (the schema marks `scriptPath` as
-/// "Takes precedence over `script` and `name`"). `read` loads a file's contents
+/// `scriptPath` over `name` over `script` (a named workflow must resolve before
+/// an optional inline body can override its source). `read` loads a file's contents
 /// (the host provides real I/O); `name` resolution looks first under the
 /// immutable built-ins, then the project saved-workflow directory
 /// (`.lingxi/workflows/<name>`), then the user config directory
 /// (`$LINGXI_CONFIG_DIR/workflows/<name>` or `~/.lingxi/workflows/<name>`) with
 /// common script extensions. Built-ins win before filesystem lookup so a
 /// project checkout cannot shadow bundled workflow code.
-pub fn resolve_script<R>(spec: &WorkflowLaunchSpec, read: R) -> Result<String, WorkflowLaunchError>
+pub fn resolve_script_at<R>(
+    cwd: &Path,
+    spec: &WorkflowLaunchSpec,
+    read: R,
+) -> Result<String, WorkflowLaunchError>
 where
     R: Fn(&str) -> std::io::Result<String>,
 {
@@ -207,26 +263,38 @@ where
         return read(&path)
             .map_err(|e| WorkflowLaunchError(format!("cannot read scriptPath '{path}': {e}")));
     }
+    if let Some(name) = nonempty(&spec.name) {
+        let named = if let Some(descriptor) = BUILTIN_WORKFLOWS.get(&name) {
+            descriptor.script.to_string()
+        } else {
+            let mut resolved = None;
+            for candidate in saved_workflow_candidates(cwd, &name) {
+                if let Ok(src) = read(&path_for_read(&candidate)) {
+                    resolved = Some(src);
+                    break;
+                }
+            }
+            resolved.ok_or_else(|| {
+                WorkflowLaunchError(format!("Workflow \"{name}\" not found. Available: (none)"))
+            })?
+        };
+        return Ok(nonempty(&spec.script).unwrap_or(named));
+    }
     if let Some(script) = nonempty(&spec.script) {
         return Ok(script);
     }
-    if let Some(name) = nonempty(&spec.name) {
-        if let Some(descriptor) = BUILTIN_WORKFLOWS.get(&name) {
-            return Ok(descriptor.script.to_string());
-        }
-        for candidate in saved_workflow_candidates(&name) {
-            if let Ok(src) = read(&path_for_read(&candidate)) {
-                return Ok(src);
-            }
-        }
-        return Err(WorkflowLaunchError(format!(
-            "no saved workflow named '{name}' under {}",
-            saved_workflow_dirs_display()
-        )));
-    }
     Err(WorkflowLaunchError(
-        "Must provide script, name, or scriptPath".into(),
+        "Must provide script, name, scriptPath, or runId".into(),
     ))
+}
+
+/// Resolve relative to the process working directory. Production composition
+/// roots should use [`resolve_script_at`] with their live session cwd.
+pub fn resolve_script<R>(spec: &WorkflowLaunchSpec, read: R) -> Result<String, WorkflowLaunchError>
+where
+    R: Fn(&str) -> std::io::Result<String>,
+{
+    resolve_script_at(Path::new(""), spec, read)
 }
 
 /// Every workflow that builds a local app and therefore honours the app's
@@ -269,7 +337,7 @@ pub fn apply_local_app_build_default_model(
             return Err(WorkflowLaunchError(format!(
                 "cannot read app workflow model from '{}': {error}",
                 path.display()
-            )))
+            )));
         }
     };
     let metadata: Value = serde_json::from_str(&metadata).map_err(|error| {
@@ -298,7 +366,7 @@ pub fn apply_local_app_build_default_model(
             return Err(WorkflowLaunchError(
                 "local-app-build args must be an object so the configured model can be applied"
                     .to_string(),
-            ))
+            ));
         }
     };
     object.insert("model".to_string(), Value::String(model.to_string()));
@@ -534,17 +602,32 @@ pub trait WorkflowLauncher: Send + Sync {
 #[derive(Clone)]
 pub struct WorkflowTool {
     launcher: Option<Arc<dyn WorkflowLauncher>>,
-    /// The session-frozen `workflowSizeGuideline` `/config` value. Binary
-    /// `St().workflowSizeGuideline`, frozen for the session via `Jvd`'s cache;
-    /// here the composition root reads the persisted setting once and hands it
-    /// in, so the freeze is structural. Drives the [`Tool::prompt`] appendix
-    /// (`qAs + VAs(size)`). Defaults to [`WorkflowSizeGuideline::Medium`]
-    /// (the oracle's `_Td`) when unset — NOT `Unrestricted`.
+    /// Shared live session cwd. Desktop updates this after persistent-shell
+    /// `cd`; mobile supplies a fixed cell. `None` falls back to process cwd for
+    /// offline/surface-only registries.
+    current_cwd: Option<Arc<std::sync::Mutex<PathBuf>>>,
+    /// The session-owned `workflowSizeGuideline` seed. Composition roots load
+    /// the initial persisted value once, then `/config` mutates the shared
+    /// session carrier so [`Tool::prompt`] can reflect live session changes
+    /// (`qAs + VAs(size)`) without rebuilding the registry. Defaults to
+    /// [`WorkflowSizeGuideline::Medium`] (the oracle's `_Td`) when unset —
+    /// NOT `Unrestricted`.
     size_guideline: WorkflowSizeGuideline,
     /// MANAGED-settings `disableWorkflows` (binary `fbn()`'s second arm).
     /// Threaded at registration because `ToolStaticContext` carries only
     /// feature flags.
     managed_disable_workflows: bool,
+    /// Session-owned dynamic-workflow gate shared with the orchestrator
+    /// handle. When absent, tests and lightweight hosts fall back to the
+    /// construction-time snapshot in `session_enabled`.
+    dynamic_workflows_gate: Option<traits::session_flags::DynamicWorkflowsGate>,
+    /// Session-owned workflow-size setting shared with the orchestrator
+    /// handle. When absent, tests and lightweight hosts fall back to the
+    /// legacy process-global compatibility snapshot.
+    size_guideline_state: Option<traits::session_flags::WorkflowSizeGuidelineState>,
+    /// Session-scoped dynamic-workflow gate (`pA()`): launch/runtime policy may
+    /// leave Workflow installed but unavailable for this session.
+    session_enabled: bool,
 }
 
 impl WorkflowTool {
@@ -556,20 +639,75 @@ impl WorkflowTool {
     pub fn new(launcher: Option<Arc<dyn WorkflowLauncher>>) -> Self {
         Self {
             launcher,
+            current_cwd: None,
             size_guideline: WorkflowSizeGuideline::default(),
             managed_disable_workflows: false,
+            dynamic_workflows_gate: None,
+            size_guideline_state: None,
+            session_enabled: true,
         }
     }
 
-    /// Set the session-frozen `workflowSizeGuideline` (binary
-    /// `St().workflowSizeGuideline`). The composition root resolves the
-    /// persisted `/config` value once at startup and passes it here; the value
-    /// then flavors the [`Tool::prompt`] appendix for the whole session.
+    /// Bind the same live cwd cell used by Bash and the orchestrator.
+    #[must_use]
+    pub fn with_current_cwd(mut self, cwd: Arc<std::sync::Mutex<PathBuf>>) -> Self {
+        self.current_cwd = Some(cwd);
+        self
+    }
+
+    fn current_cwd(&self) -> PathBuf {
+        self.current_cwd
+            .as_ref()
+            .and_then(|cwd| cwd.lock().ok().map(|guard| guard.clone()))
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default()
+    }
+
+    /// Seed the session-owned `workflowSizeGuideline` from startup settings.
     #[must_use]
     pub fn with_size_guideline(mut self, size: WorkflowSizeGuideline) -> Self {
         self.size_guideline = size;
-        let managed = traits::session_flags::workflow_size_guideline_is_managed();
-        let _ = traits::session_flags::set_workflow_size_guideline(size.as_wire(), managed);
+        if let Some(state) = self.size_guideline_state.as_ref() {
+            let managed = state.managed();
+            let _ = state.set(size.as_wire(), managed);
+        } else {
+            let managed = traits::session_flags::workflow_size_guideline_is_managed();
+            let _ = traits::session_flags::set_workflow_size_guideline(size.as_wire(), managed);
+        }
+        self
+    }
+
+    /// Seed the session-owned guideline without losing whether it came from
+    /// the built-in default. Claude's 2.1.245 warning uses 25 agents for the
+    /// default `medium`, but uses 15 when the user explicitly selected medium.
+    #[must_use]
+    pub fn with_size_guideline_source(
+        mut self,
+        size: WorkflowSizeGuideline,
+        managed: bool,
+        is_default: bool,
+    ) -> Self {
+        self.size_guideline = size;
+        if let Some(state) = self.size_guideline_state.as_ref() {
+            let _ = state.set_with_source(size.as_wire(), managed, is_default);
+        } else {
+            let _ = traits::session_flags::set_workflow_size_guideline_with_source(
+                size.as_wire(),
+                managed,
+                is_default,
+            );
+        }
+        self
+    }
+
+    /// Share the session-owned workflow-size setting with the tool.
+    #[must_use]
+    pub fn with_size_guideline_state(
+        mut self,
+        state: traits::session_flags::WorkflowSizeGuidelineState,
+    ) -> Self {
+        self.size_guideline = WorkflowSizeGuideline::from_wire(state.value());
+        self.size_guideline_state = Some(state);
         self
     }
 
@@ -586,6 +724,39 @@ impl WorkflowTool {
         self
     }
 
+    /// Share the session-owned dynamic-workflow gate with the tool.
+    #[must_use]
+    pub fn with_dynamic_workflows_gate(
+        mut self,
+        gate: traits::session_flags::DynamicWorkflowsGate,
+    ) -> Self {
+        self.dynamic_workflows_gate = Some(gate);
+        self
+    }
+
+    /// Set the session-resolved dynamic-workflow availability (`pA()`).
+    #[must_use]
+    pub fn with_session_enabled(mut self, enabled: bool) -> Self {
+        self.session_enabled = enabled;
+        self
+    }
+
+    fn workflow_session_enabled(&self) -> bool {
+        self.dynamic_workflows_gate
+            .as_ref()
+            .map(|gate| gate.enabled())
+            .unwrap_or(self.session_enabled)
+    }
+
+    fn workflow_size_guideline(&self) -> WorkflowSizeGuideline {
+        self.size_guideline_state
+            .as_ref()
+            .map(|state| WorkflowSizeGuideline::from_wire(state.value()))
+            .unwrap_or_else(|| {
+                WorkflowSizeGuideline::from_wire(traits::session_flags::workflow_size_guideline())
+            })
+    }
+
     /// Is the tool disabled, by env var OR managed setting? Binary `fbn()`.
     fn workflows_disabled(&self) -> bool {
         !workflows_enabled(self.managed_disable_workflows)
@@ -600,20 +771,25 @@ impl WorkflowTool {
             args: input.get("args").cloned(),
             resume_from_run_id: s("resumeFromRunId"),
             session_uuid: None,
+            tool_use_id: None,
+            launched_from_subagent: false,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
         }
     }
 
     /// List saved workflow names from project and user workflow directories.
     /// Returns a comma-joined string for the errorCode-1b message. Missing
     /// directories are ignored.
-    fn list_available_workflow_names() -> Option<String> {
+    fn list_available_workflow_names(&self) -> Option<String> {
         let mut saw_dir = false;
         let mut names: Vec<String> = BUILTIN_WORKFLOWS
             .names()
             .into_iter()
             .map(str::to_string)
             .collect();
-        for dir in saved_workflow_dirs() {
+        for dir in saved_workflow_dirs(&self.current_cwd()) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
             };
@@ -652,7 +828,7 @@ impl Tool for WorkflowTool {
         &INPUT_SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        // Port of `fbn()` + `pA()` from claude-code v2.1.186 (offset 196461282).
+        // Port of `fbn()` + `pA()` from claude-code v2.1.245.
         // `fbn()` returns true (= disable) when:
         //   `isEnvTruthy(process.env.LINGXI_DISABLE_WORKFLOWS)` OR
         //   `$H()?.settings.disableWorkflows === true`
@@ -667,7 +843,7 @@ impl Tool for WorkflowTool {
         // (`tengu_workflows_enabled`), and plan-availability gates have no LingXi
         // backing and are treated as permissive (enabled), matching the
         // Max/Team/null-plan default.
-        !self.workflows_disabled()
+        !self.workflows_disabled() && self.workflow_session_enabled()
     }
     fn max_result_size_chars(&self) -> usize {
         100000
@@ -703,9 +879,11 @@ impl Tool for WorkflowTool {
         // — the base description plus the (possibly-empty) size-guideline
         // appendix. `/config` updates the live session snapshot, so prefer that
         // value over the construction-time fallback on every prompt build.
-        let live = traits::session_flags::workflow_size_guideline();
-        let size = WorkflowSizeGuideline::from_wire(live);
-        format!("{}{}", *DESCRIPTION, size.prompt_appendix())
+        format!(
+            "{}{}",
+            *DESCRIPTION,
+            self.workflow_size_guideline().prompt_appendix()
+        )
     }
 
     async fn validate_input(
@@ -736,7 +914,7 @@ impl Tool for WorkflowTool {
             }
         }
 
-        // ── Gate order mirrors claude-code v2.1.186 validateInput (offset 203004507) ──
+        // ── Gate order mirrors claude-code v2.1.245 validateInput ──
         //
         // errorCode 7 — abort / input truncated
         // ⚠️ UNREACHABLE: the binary's `yke(t.abortController.signal)` is the
@@ -756,14 +934,14 @@ impl Tool for WorkflowTool {
         }
 
         // errorCode 6 — session gate (`pA()`)
-        // ⚠️ PARTIAL: the binary's `pA()` checks org policy, launch gate, and the
-        // user's `/config` "Dynamic workflows" toggle. None of these sources are
-        // threaded to validate_input in LingXi's ctx. The gate below is the local-
-        // equivalent env-var path; the managed org/launch/config arms are NOT
-        // reachable. In practice this gate is always permissive on local builds.
-        // Message byte-exact per §8 errorCode 6.
-        // (No additional local gate beyond the env-var above — pA() defaults
-        // permissive on Max/Team/null-plan; only fires when explicitly disabled.)
+        // The composition root resolves the effective `enableWorkflows`
+        // setting once per session and threads it here, alongside the process-
+        // global publication for `/effort`/TUI consumers.
+        if !self.workflow_session_enabled() {
+            return Err(ValidationError(
+                "Dynamic workflows are not enabled for this session (org policy, launch gate, or the \"Dynamic workflows\" setting in /config).".into(),
+            ));
+        }
 
         // errorCode 1 — script resolution (sub-errors 1a–1f, byte-exact per §8.1)
         // Reproduces the binary's D7a() resolution logic with exact error strings.
@@ -782,29 +960,34 @@ impl Tool for WorkflowTool {
                     "UNC paths are not allowed for workflow scriptPath: {path}"
                 )));
             }
+            let input_path = Path::new(path);
+            let resolved_path = if input_path.is_absolute() {
+                input_path.to_path_buf()
+            } else {
+                self.current_cwd().join(input_path)
+            };
+            let resolved_path_wire = resolved_path.to_string_lossy();
             // 1d / 1e / 1f — file read / not found / too large
-            match std::fs::read(path) {
+            match std::fs::read(&resolved_path) {
                 Ok(bytes) => {
                     if bytes.len() > MAX_SCRIPT_BYTES {
                         return Err(ValidationError(format!(
-                            "Workflow script file {path} exceeds {MAX_SCRIPT_BYTES} bytes"
+                            "Workflow script file {resolved_path_wire} exceeds {MAX_SCRIPT_BYTES} bytes"
                         )));
                     }
                     resolved_script = String::from_utf8_lossy(&bytes).into_owned();
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(ValidationError(format!(
-                        "Workflow script file not found: {path}"
+                        "Workflow script file not found: {resolved_path_wire}"
                     )));
                 }
                 Err(e) => {
                     return Err(ValidationError(format!(
-                        "Failed to read workflow script file {path}: {e}"
+                        "Failed to read workflow script file {resolved_path_wire}: {e}"
                     )));
                 }
             }
-        } else if let Some(ref inline) = script {
-            resolved_script = inline.clone();
         } else if let Some(ref wf_name) = name {
             // Built-ins are immutable and must win before project/user files.
             // Keep validation on the same resolver order as the launcher:
@@ -812,11 +995,13 @@ impl Tool for WorkflowTool {
             // reject a launch whose execution would actually use the bundled
             // script.
             if let Some(descriptor) = BUILTIN_WORKFLOWS.get(wf_name) {
-                resolved_script = descriptor.script.to_string();
+                resolved_script = script
+                    .clone()
+                    .unwrap_or_else(|| descriptor.script.to_string());
             } else {
                 // Try to resolve from saved workflows (project first, then user).
                 let mut found: Option<String> = None;
-                for candidate in saved_workflow_candidates(wf_name) {
+                for candidate in saved_workflow_candidates(&self.current_cwd(), wf_name) {
                     match std::fs::read_to_string(&candidate) {
                         Ok(src) => {
                             found = Some(src);
@@ -827,11 +1012,11 @@ impl Tool for WorkflowTool {
                     }
                 }
                 if let Some(src) = found {
-                    resolved_script = src;
+                    resolved_script = script.clone().unwrap_or(src);
                 } else {
                     // 1b — workflow name not found; list available names
                     let available: String =
-                        Self::list_available_workflow_names().unwrap_or_default();
+                        self.list_available_workflow_names().unwrap_or_default();
                     let list = if available.is_empty() {
                         "(none)".to_string()
                     } else {
@@ -842,10 +1027,12 @@ impl Tool for WorkflowTool {
                     )));
                 }
             }
+        } else if let Some(ref inline) = script {
+            resolved_script = inline.clone();
         } else {
             // 1a — none of script/name/scriptPath provided
             return Err(ValidationError(
-                "Must provide script, name, or scriptPath".into(),
+                "Must provide script, name, scriptPath, or runId".into(),
             ));
         }
 
@@ -890,17 +1077,37 @@ impl Tool for WorkflowTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let launcher = self.launcher.as_ref().ok_or_else(|| {
             ToolError::Internal("Workflow launching is not available in this host".into())
         })?;
-        let spec = Self::spec_from_input(&input);
-        let launched = launcher
+        let mut spec = Self::spec_from_input(&input);
+        spec.tool_use_id = ctx.tool_use_id.as_ref().map(ToString::to_string);
+        spec.launched_from_subagent = ctx.agent_id.is_some();
+        spec.creator_teammate_name = ctx.agent_name.clone();
+        spec.creator_team_name = ctx.team_name.clone();
+        spec.creator_agent_id = ctx.agent_id.map(|id| id.to_string());
+        let launch_result = launcher
             .launch(spec)
             .await
-            .map_err(|e| ToolError::Internal(e.to_string()))?;
+            .map_err(|error| ToolError::Internal(error.to_string()))?;
+        if let Some(error) = launch_result.error {
+            let model_content =
+                format!("Workflow script has a syntax error and was not launched:\n{error}");
+            return Ok(ToolCallResult {
+                data: json!({
+                    "error": error,
+                    "model_content": model_content,
+                }),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: true,
+                mcp_meta: None,
+            });
+        }
         // claude-code result shape (output schema `sUp`, local path): status,
         // taskId, taskType, plus the optional workflowName / runId / scriptPath /
         // summary / transcriptDir. The "remote_launched"/"remote_agent" + sessionUrl
@@ -915,11 +1122,11 @@ impl Tool for WorkflowTool {
         //   + optional "\nScript file: …\n(Edit …)"
         //   + optional "\nRun ID: …\nTo resume …"
         //   + "\n\nYou will be notified when it completes. Use /workflows to watch live progress."
-        let task_id = launched.task_id.clone();
-        let summary = launched.summary.as_deref();
-        let transcript = launched.transcript_dir.as_deref();
-        let script_p = launched.script_path.as_deref();
-        let run_id_str = launched.run_id.as_deref();
+        let task_id = launch_result.task_id.clone();
+        let summary = launch_result.summary.as_deref();
+        let transcript = launch_result.transcript_dir.as_deref();
+        let script_p = launch_result.script_path.as_deref();
+        let run_id_str = launch_result.run_id.as_deref();
 
         let n = summary.map_or_else(String::new, |s| format!("\nSummary: {s}"));
         let r = transcript.map_or_else(String::new, |t| format!("\nTranscript dir: {t}"));
@@ -933,7 +1140,7 @@ impl Tool for WorkflowTool {
             (Some(p), Some(rid)) => format!(
                 "\nRun ID: {rid}\nTo resume after editing the script: \
                  Workflow({{scriptPath: \"{p}\", resumeFromRunId: \"{rid}\"}}) \
-                 — completed agents return cached results."
+                 — completed agents return cached results (cached results may themselves be empty — inspect journal.jsonl before assuming there is something to recover)."
             ),
             _ => String::new(),
         };
@@ -949,19 +1156,19 @@ impl Tool for WorkflowTool {
             "model_content": model_content,
         });
         let obj = data.as_object_mut().expect("json object");
-        if let Some(name) = launched.workflow_name {
+        if let Some(name) = launch_result.workflow_name {
             obj.insert("workflowName".into(), Value::String(name));
         }
-        if let Some(rid) = launched.run_id {
+        if let Some(rid) = launch_result.run_id {
             obj.insert("runId".into(), Value::String(rid));
         }
-        if let Some(path) = launched.script_path {
+        if let Some(path) = launch_result.script_path {
             obj.insert("scriptPath".into(), Value::String(path));
         }
-        if let Some(sum) = launched.summary {
+        if let Some(sum) = launch_result.summary {
             obj.insert("summary".into(), Value::String(sum));
         }
-        if let Some(td) = launched.transcript_dir {
+        if let Some(td) = launch_result.transcript_dir {
             obj.insert("transcriptDir".into(), Value::String(td));
         }
         Ok(ToolCallResult {
@@ -1046,6 +1253,18 @@ mod tests {
     }
 
     #[test]
+    fn named_workflow_source_matches_claude_categories() {
+        assert_eq!(
+            workflow_source_for_name(std::path::Path::new("."), "deep-research"),
+            Some("built-in")
+        );
+        assert_eq!(
+            workflow_source_for_name(std::path::Path::new("."), "missing"),
+            None
+        );
+    }
+
+    #[test]
     fn max_result_size_is_100000() {
         assert_eq!(tool(None).max_result_size_chars(), 100000);
     }
@@ -1086,6 +1305,22 @@ mod tests {
         };
         assert_eq!(resolve_script(&spec, &read).unwrap(), "FROM_NAME");
 
+        // A named workflow resolves first, while an explicit body overrides
+        // the resolved source. An unknown name must not fall through to the
+        // inline body.
+        let spec = WorkflowLaunchSpec {
+            name: Some("review".into()),
+            script: Some("NAMED_OVERRIDE".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_script(&spec, &read).unwrap(), "NAMED_OVERRIDE");
+        let spec = WorkflowLaunchSpec {
+            name: Some("missing".into()),
+            script: Some("DO_NOT_FALL_THROUGH".into()),
+            ..Default::default()
+        };
+        assert!(resolve_script(&spec, &read).is_err());
+
         // unknown name + nothing-provided → errors.
         let spec = WorkflowLaunchSpec {
             name: Some("missing".into()),
@@ -1118,7 +1353,9 @@ mod tests {
 
     #[test]
     fn workflow_listing_always_includes_builtin_names() {
-        let names = WorkflowTool::list_available_workflow_names().expect("built-ins");
+        let names = tool(None)
+            .list_available_workflow_names()
+            .expect("built-ins");
         assert!(names.split(", ").any(|name| name == "deep-research"));
     }
 
@@ -1204,12 +1441,20 @@ mod tests {
 
     #[test]
     fn description_matches_the_binary_byte_for_byte() {
-        // v2.1.185 runtime length of the Workflow tool description.
-        assert_eq!(DESCRIPTION.len(), 18961, "description byte length drifted");
+        // v2.1.245 runtime markers of the Workflow tool description.
+        assert_eq!(
+            DESCRIPTION.len(),
+            19200,
+            "description byte length drifted from Claude Code 2.1.245"
+        );
         assert!(DESCRIPTION.starts_with(
             "Execute a workflow script that orchestrates multiple subagents deterministically."
         ));
         assert!(DESCRIPTION.ends_with("hand-author a continuation script."));
+        assert!(DESCRIPTION.contains("Use the Agent tool (if available)"));
+        assert!(DESCRIPTION.contains("min(16, available CPUs - 2)"));
+        assert!(DESCRIPTION.contains("e.g. 'general-purpose', 'code-reviewer'"));
+        assert!(DESCRIPTION.contains("Before diagnosing why a completed workflow returned an empty or unexpected result, Read <transcriptDir>/journal.jsonl"));
         // The ${r1e} interpolation resolved to the ▸ group marker.
         assert!(DESCRIPTION.contains("\"▸ name\" group in /workflows"));
         // No leftover raw escape sequences.
@@ -1244,6 +1489,89 @@ mod tests {
         let t = WorkflowTool::new(None).with_disable_workflows(true);
         let ctx = tool_api::test_support::fresh_ctx();
         // The env arm must be OFF so this proves the MANAGED arm fired.
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let err = t
+            .validate_input(&serde_json::json!({"script": "x"}), &ctx)
+            .await
+            .expect_err("must reject");
+        assert_eq!(
+            err.0,
+            "Dynamic workflows are disabled by managed settings (`disableWorkflows`)."
+        );
+    }
+
+    #[test]
+    fn session_gate_disables_the_tool() {
+        let ctx = ToolStaticContext::default();
+        assert!(
+            !WorkflowTool::new(None)
+                .with_session_enabled(false)
+                .is_enabled(&ctx),
+            "session gate must hide the tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_gate_rejects_at_validate_with_exact_message() {
+        let t = WorkflowTool::new(None).with_session_enabled(false);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let err = t
+            .validate_input(&serde_json::json!({"script": "x"}), &ctx)
+            .await
+            .expect_err("must reject");
+        assert_eq!(
+            err.0,
+            "Dynamic workflows are not enabled for this session (org policy, launch gate, or the \"Dynamic workflows\" setting in /config)."
+        );
+    }
+
+    #[test]
+    fn session_owned_gate_is_live_and_isolated() {
+        let ctx = ToolStaticContext::default();
+        let first_gate = traits::session_flags::DynamicWorkflowsGate::new(true, false);
+        let second_gate = traits::session_flags::DynamicWorkflowsGate::new(false, true);
+        let first = WorkflowTool::new(None).with_dynamic_workflows_gate(first_gate.clone());
+        let second = WorkflowTool::new(None).with_dynamic_workflows_gate(second_gate.clone());
+
+        assert!(first.is_enabled(&ctx));
+        assert!(!second.is_enabled(&ctx));
+
+        first_gate.set_enabled(false);
+        second_gate.set_enabled(true);
+
+        assert!(!first.is_enabled(&ctx));
+        assert!(second.is_enabled(&ctx));
+        assert!(second_gate.managed());
+    }
+
+    #[tokio::test]
+    async fn session_owned_gate_rejects_after_live_toggle() {
+        let gate = traits::session_flags::DynamicWorkflowsGate::new(true, false);
+        let tool = WorkflowTool::new(None).with_dynamic_workflows_gate(gate.clone());
+        let ctx = tool_api::test_support::fresh_ctx();
+
+        tool.validate_input(&serde_json::json!({"script": "x"}), &ctx)
+            .await
+            .expect_err("script must still fail later checks while gate is on");
+
+        gate.set_enabled(false);
+        let err = tool
+            .validate_input(&serde_json::json!({"script": "x"}), &ctx)
+            .await
+            .expect_err("must reject once the live gate turns off");
+        assert_eq!(
+            err.0,
+            "Dynamic workflows are not enabled for this session (org policy, launch gate, or the \"Dynamic workflows\" setting in /config)."
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_disable_precedes_session_gate() {
+        let t = WorkflowTool::new(None)
+            .with_disable_workflows(true)
+            .with_session_enabled(false);
+        let ctx = tool_api::test_support::fresh_ctx();
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         let err = t
@@ -1313,6 +1641,24 @@ mod tests {
             )
         );
         let _ = traits::session_flags::set_workflow_size_guideline("medium", false);
+
+        let session_state =
+            traits::session_flags::WorkflowSizeGuidelineState::new("large", false, false).unwrap();
+        let session_owned = WorkflowTool::new(None)
+            .with_size_guideline_state(session_state.clone())
+            .with_size_guideline_source(WorkflowSizeGuideline::Large, false, false);
+        let _ = traits::session_flags::set_workflow_size_guideline("small", false);
+        assert_eq!(
+            session_owned.prompt(&opts).await,
+            format!(
+                "{}{}",
+                *DESCRIPTION,
+                WorkflowSizeGuideline::Large.prompt_appendix()
+            ),
+            "session-owned state must win over the process-global compatibility snapshot"
+        );
+        let _ = session_state.set("medium", false);
+        let _ = traits::session_flags::set_workflow_size_guideline("medium", false);
     }
 
     #[test]
@@ -1361,13 +1707,46 @@ mod tests {
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
         let err = t.validate_input(&json!({}), &ctx).await.unwrap_err();
-        assert_eq!(err.0, "Must provide script, name, or scriptPath");
+        assert_eq!(err.0, "Must provide script, name, scriptPath, or runId");
 
         let err2 = t
             .validate_input(&json!({ "title": "x" }), &ctx)
             .await
             .unwrap_err();
-        assert_eq!(err2.0, "Must provide script, name, or scriptPath");
+        assert_eq!(err2.0, "Must provide script, name, scriptPath, or runId");
+    }
+
+    #[tokio::test]
+    async fn relative_script_path_uses_the_live_session_cwd() {
+        let root = unique_temp_path("live-cwd");
+        let moved = unique_temp_path("live-cwd-moved");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&moved).unwrap();
+        std::fs::write(root.join("workflow.js"), VALID_SCRIPT).unwrap();
+        let cwd = Arc::new(std::sync::Mutex::new(root.clone()));
+        let t = tool(None).with_current_cwd(cwd.clone());
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+
+        t.validate_input(&json!({ "scriptPath": "workflow.js" }), &ctx)
+            .await
+            .expect("relative scriptPath resolves from the live cwd");
+        *cwd.lock().unwrap() = moved.clone();
+        let error = t
+            .validate_input(&json!({ "scriptPath": "workflow.js" }), &ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.0,
+            format!(
+                "Workflow script file not found: {}",
+                moved.join("workflow.js").display()
+            )
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(moved);
     }
 
     #[tokio::test]
@@ -1387,6 +1766,59 @@ mod tests {
             err.0.starts_with("Invalid workflow script:"),
             "expected errorCode 2 message, got: {:?}",
             err.0
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_body_syntax_before_a_task_can_launch() {
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+
+        let script = concat!(
+            "export const meta = { name: 'bad-body', description: 'syntax error' };\n",
+            "if (\n",
+        );
+        t.validate_input(&json!({ "script": script }), &ctx)
+            .await
+            .expect("body compilation belongs to the launcher, not validate_input");
+    }
+
+    #[tokio::test]
+    async fn call_surfaces_launcher_compile_error_without_registering_a_task() {
+        let launcher = Arc::new(RichMockLauncher {
+            launched: WorkflowLaunched {
+                task_id: "w_compile_error".into(),
+                run_id: Some("wf_compile-error".into()),
+                workflow_name: Some("bad-body".into()),
+                summary: Some("syntax error".into()),
+                error: Some("Unexpected end of input".into()),
+                ..Default::default()
+            },
+        });
+        let t = tool(Some(launcher));
+        let res = t
+            .call(
+                json!({ "script": "export const meta = { name: 'bad-body', description: 'syntax error' }; if (" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("compile failures return a structured tool-error result");
+
+        assert!(res.data.get("status").is_none());
+        assert_eq!(res.data["error"], "Unexpected end of input");
+        assert!(res.is_error);
+        assert!(res.data.get("taskId").is_none());
+        assert!(res.data.get("taskType").is_none());
+        assert!(res.data.get("runId").is_none());
+        assert!(res.data.get("workflowName").is_none());
+        assert!(res.data.get("summary").is_none());
+        assert!(res.data.get("transcriptDir").is_none());
+        assert_eq!(
+            res.data["model_content"],
+            "Workflow script has a syntax error and was not launched:\nUnexpected end of input"
         );
     }
 
@@ -1630,6 +2062,7 @@ mod tests {
                 transcript_dir: Some(
                     "/home/.lingxi/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456".into()
                 ),
+                error: None,
             },
         });
         let t = tool(Some(launcher));
@@ -1680,7 +2113,9 @@ mod tests {
             "must have Run ID line: {mc}"
         );
         assert!(
-            mc.ends_with("\n\nYou will be notified when it completes. Use /workflows to watch live progress."),
+            mc.ends_with(
+                "\n\nYou will be notified when it completes. Use /workflows to watch live progress."
+            ),
             "must end with footer: {mc}"
         );
     }
@@ -1697,6 +2132,7 @@ mod tests {
                 workflow_name: None,
                 summary: None,
                 transcript_dir: None,
+                error: None,
             },
         });
         let t = tool(Some(launcher));
@@ -1743,7 +2179,9 @@ mod tests {
         assert!(!mc.contains("Run ID:"), "no Run ID line when absent: {mc}");
         // Footer always present
         assert!(
-            mc.ends_with("\n\nYou will be notified when it completes. Use /workflows to watch live progress."),
+            mc.ends_with(
+                "\n\nYou will be notified when it completes. Use /workflows to watch live progress."
+            ),
             "footer always present: {mc}"
         );
     }
@@ -1760,6 +2198,7 @@ mod tests {
                 workflow_name: Some("wf-name".into()),
                 summary: Some("My workflow summary".into()),
                 transcript_dir: Some("/tmp/transcripts/subagents/workflows/wf_RUNID".into()),
+                error: None,
             },
         });
         let t = tool(Some(launcher));
@@ -1784,7 +2223,7 @@ mod tests {
             "\nScript file: /path/to/script.js",
             "\n(Edit this file with Write/Edit and re-invoke Workflow with {scriptPath: \"/path/to/script.js\"} to iterate without resending the script.)",
             "\nRun ID: wf_RUNID",
-            "\nTo resume after editing the script: Workflow({scriptPath: \"/path/to/script.js\", resumeFromRunId: \"wf_RUNID\"}) — completed agents return cached results.",
+            "\nTo resume after editing the script: Workflow({scriptPath: \"/path/to/script.js\", resumeFromRunId: \"wf_RUNID\"}) — completed agents return cached results (cached results may themselves be empty — inspect journal.jsonl before assuming there is something to recover).",
             "\n\nYou will be notified when it completes. Use /workflows to watch live progress.",
         );
         assert_eq!(mc, expected, "launch text must be byte-exact per §1 oracle");

@@ -4,9 +4,33 @@
 use async_trait::async_trait;
 use futures_core::stream::Stream;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use thiserror::Error;
+
+/// Stable namespace for caches whose entries also include per-file OS
+/// metadata. `generation` must change whenever a backend can change read
+/// results without changing that metadata. Real disk backends use generation
+/// zero; virtual or decorated backends should return `None` unless they can
+/// provide such a generation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FileSystemCacheIdentity {
+    backend: &'static str,
+    namespace: PathBuf,
+    generation: u64,
+}
+
+impl FileSystemCacheIdentity {
+    /// Construct a stable cache namespace for one filesystem backend.
+    #[must_use]
+    pub fn new(backend: &'static str, namespace: PathBuf, generation: u64) -> Self {
+        Self {
+            backend,
+            namespace,
+            generation,
+        }
+    }
+}
 
 /// Sandboxed read/write access to the workspace.
 ///
@@ -14,7 +38,16 @@ use thiserror::Error;
 /// `std::fs` directly so the host can sandbox, virtualize, or audit access.
 #[async_trait]
 pub trait FileSystem: Send + Sync {
-    /// Read a UTF-8 file, optionally constrained to a byte `offset`/`limit`
+    /// Stable cache identity for metadata-keyed read caches.
+    ///
+    /// The default disables cross-call caching. Virtual/decorated backends
+    /// should opt in only when their generation invalidates every content
+    /// change that underlying OS file metadata cannot observe.
+    fn cache_identity(&self) -> Option<FileSystemCacheIdentity> {
+        None
+    }
+
+    /// Read a UTF-8 file, optionally constrained to a line-indexed `offset`/`limit`
     /// window. Returns [`FsError::BinaryFile`] for non-text files.
     async fn read_file(
         &self,
@@ -22,6 +55,25 @@ pub trait FileSystem: Send + Sync {
         offset: Option<u64>,
         limit: Option<u64>,
     ) -> Result<FileContent, FsError>;
+
+    /// Read at most `max_bytes` from the start of a UTF-8 file.
+    ///
+    /// Used by session catalog / lite metadata so listing hundreds of JSONL
+    /// transcripts does not slurp each file in full. The default implementation
+    /// reads the whole file via [`read_file`](Self::read_file) and truncates;
+    /// platform filesystems override this with a real prefix read.
+    async fn read_file_prefix(&self, path: &str, max_bytes: usize) -> Result<FileContent, FsError> {
+        let mut file = self.read_file(path, None, None).await?;
+        if file.content.len() > max_bytes {
+            let mut end = max_bytes;
+            while end > 0 && !file.content.is_char_boundary(end) {
+                end -= 1;
+            }
+            file.content.truncate(end);
+            file.truncated = true;
+        }
+        Ok(file)
+    }
 
     /// Write `content` to `path`, creating or truncating as needed.
     async fn write_file(&self, path: &str, content: &str) -> Result<(), FsError>;
@@ -224,6 +276,72 @@ pub trait FlockGuard: Send + Sync {
     fn path(&self) -> &str;
 }
 
+/// Apply the line-indexed `offset`/`limit` window used by [`FileSystem::read_file`].
+///
+/// Unwindowed reads return `content` as-is (no line-split / join). Windowed
+/// reads skip `offset` lines then keep at most `limit` lines, joined by `\n`,
+/// matching the historical `str::lines()` contract (trailing newline dropped).
+#[must_use]
+pub fn apply_line_window(content: String, offset: Option<u64>, limit: Option<u64>) -> FileContent {
+    let total_lines = content.lines().count() as u64;
+    if offset.is_none() && limit.is_none() {
+        return FileContent {
+            content,
+            total_lines,
+            truncated: false,
+        };
+    }
+    let skip = offset.unwrap_or(0);
+    let mut taken = 0u64;
+    let mut out = String::new();
+    for (index, line) in content.lines().enumerate() {
+        if (index as u64) < skip {
+            continue;
+        }
+        if let Some(lim) = limit {
+            if taken >= lim {
+                break;
+            }
+        }
+        if taken > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
+        taken += 1;
+    }
+    FileContent {
+        content: out,
+        total_lines,
+        truncated: false,
+    }
+}
+
+/// Decode a UTF-8 prefix read of `n` bytes (possibly mid-character at the tail).
+///
+/// Incomplete trailing bytes are dropped so the result is always valid UTF-8.
+/// `truncated` is true when the read filled the requested `max_bytes` budget.
+pub fn file_content_from_prefix_bytes(
+    path: &str,
+    mut buf: Vec<u8>,
+    n: usize,
+    max_bytes: usize,
+) -> Result<FileContent, FsError> {
+    buf.truncate(n);
+    if let Err(error) = std::str::from_utf8(&buf) {
+        if error.error_len().is_some() {
+            return Err(FsError::BinaryFile(path.to_string()));
+        }
+        buf.truncate(error.valid_up_to());
+    }
+    let content = String::from_utf8(buf).map_err(|_| FsError::BinaryFile(path.to_string()))?;
+    let total_lines = content.lines().count() as u64;
+    Ok(FileContent {
+        content,
+        total_lines,
+        truncated: n == max_bytes,
+    })
+}
+
 /// Result of [`FileSystem::read_file`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileContent {
@@ -287,4 +405,45 @@ pub enum FileEventKind {
     Modified,
     /// File deleted.
     Deleted,
+}
+
+#[cfg(test)]
+mod apply_line_window_tests {
+    use super::{apply_line_window, file_content_from_prefix_bytes, FsError};
+
+    #[test]
+    fn unwindowed_preserves_trailing_newline() {
+        let got = apply_line_window("a\nb\n".into(), None, None);
+        assert_eq!(got.content, "a\nb\n");
+        assert_eq!(got.total_lines, 2);
+        assert!(!got.truncated);
+    }
+
+    #[test]
+    fn offset_and_limit_are_line_indexed() {
+        let got = apply_line_window("a\nb\nc\nd".into(), Some(1), Some(2));
+        assert_eq!(got.content, "b\nc");
+        assert_eq!(got.total_lines, 4);
+    }
+
+    #[test]
+    fn prefix_read_trims_only_incomplete_trailing_utf8() {
+        let bytes = "hi🙂".as_bytes();
+        let got = file_content_from_prefix_bytes(
+            "x",
+            bytes[..bytes.len() - 1].to_vec(),
+            bytes.len() - 1,
+            bytes.len(),
+        )
+        .expect("prefix with incomplete tail stays readable");
+        assert_eq!(got.content, "hi");
+        assert!(got.truncated);
+    }
+
+    #[test]
+    fn prefix_read_rejects_internal_invalid_utf8() {
+        let err = file_content_from_prefix_bytes("x", vec![b'h', 0xff, b'i'], 3, 3)
+            .expect_err("internal invalid byte must be binary");
+        assert!(matches!(err, FsError::BinaryFile(path) if path == "x"));
+    }
 }

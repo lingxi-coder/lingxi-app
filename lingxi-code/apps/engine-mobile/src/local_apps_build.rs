@@ -2291,10 +2291,7 @@ mod tests {
     /// beats a row that would otherwise have answered.
     #[test]
     fn the_legacy_next_marker_is_rejected_before_the_combination_is_read() {
-        for (scaffolded, surface) in [
-            (true, Some(local_apps::AppSurface::Dom)),
-            (false, None),
-        ] {
+        for (scaffolded, surface) in [(true, Some(local_apps::AppSurface::Dom)), (false, None)] {
             let root = tempfile::tempdir().expect("tempdir");
             let layout = layout_with(root.path(), scaffolded, surface);
             let workspace = layout.root().join(layout.workspace_rel());
@@ -2344,7 +2341,9 @@ mod tests {
         scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactCanvasV1).expect("scaffold");
 
         assert!(
-            load_record_mirror(&layout).expect("record mirror").scaffolded,
+            load_record_mirror(&layout)
+                .expect("record mirror")
+                .scaffolded,
             "the scaffold is the moment the app gets its shape"
         );
         assert_eq!(
@@ -2368,7 +2367,10 @@ mod tests {
         scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1).expect("scaffold");
 
         let after = load_record_mirror(&layout).expect("record mirror");
-        assert_eq!(after.name, "Tide Clock", "the interviewed name must survive");
+        assert_eq!(
+            after.name, "Tide Clock",
+            "the interviewed name must survive"
+        );
         assert_eq!(
             after.brief, "shows the local tide",
             "the interviewed brief must survive"
@@ -2677,7 +2679,8 @@ mod tests {
     /// everything under `app/` and `src/` is the user's app from here on.
     fn formed_layout(root: &Path) -> AppLayout {
         let layout = shell_layout(root);
-        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1).expect("first scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
+            .expect("first scaffold");
         layout
     }
 
@@ -2748,10 +2751,7 @@ mod tests {
             "# guided contract",
             "LINGXI.md is preserved"
         );
-        assert!(
-            workspace.join("app/app.jsx").is_file(),
-            "the seed landed"
-        );
+        assert!(workspace.join("app/app.jsx").is_file(), "the seed landed");
     }
 
     #[test]
@@ -2790,8 +2790,11 @@ mod tests {
             "app/screens/user-written.jsx",
             b"// the user's own code",
         );
-        fs::write(workspace.join("app/globals.css"), "/* the user's own css */")
-            .expect("edit a seed path");
+        fs::write(
+            workspace.join("app/globals.css"),
+            "/* the user's own css */",
+        )
+        .expect("edit a seed path");
 
         scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, false)
             .expect("repin");
@@ -2816,8 +2819,16 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = shell_layout(root.path());
         let workspace = layout.root().join(layout.workspace_rel());
-        write_workspace_file(&workspace, ".git/objects/pre-confirmation", b"squatted history");
-        write_workspace_file(&workspace, ".lingxi-build-state/build-output/dist/index.html", b"stale");
+        write_workspace_file(
+            &workspace,
+            ".git/objects/pre-confirmation",
+            b"squatted history",
+        );
+        write_workspace_file(
+            &workspace,
+            ".lingxi-build-state/build-output/dist/index.html",
+            b"stale",
+        );
 
         scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
             .expect("scaffold");
@@ -2842,12 +2853,9 @@ mod tests {
         fs::create_dir_all(&workspace).expect("bare workspace");
         write_workspace_file(&workspace, "keep-me.txt", b"not ours to delete");
 
-        let error = scaffold_workspace_initialized(
-            &layout,
-            LocalAppBuildTarget::ViteReactStaticV1,
-            true,
-        )
-        .expect_err("an uninitialized workspace must not be wiped");
+        let error =
+            scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
+                .expect_err("an uninitialized workspace must not be wiped");
 
         assert!(
             format!("{error}").contains("initialized app workspace"),

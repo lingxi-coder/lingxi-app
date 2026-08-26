@@ -1,6 +1,6 @@
 {
-  "_source": "claude-code 2.1.195: `j(\"tengu_api_success\", {...})` per-request success emission (binary strings @ offsets 210128520 sub-query + 212533011 main-query). Budget-threshold events (tengu_cost_budget_warning/exceeded) per M3 spec docs/superpowers/specs/2026-05-23-m3-engine-completion-design.md §7 lines 730-748.",
-  "_note": "Strict-parity (2.1.195): the former tengu_cost_recorded event was PORT-ONLY (0 hits in 2.1.195) and was dropped. The per-request success telemetry is now tengu_api_success (cost::emit_api_success), fired by the orchestrator. This fixture locks (a) the api_success event name + the field SUBSET the port plumbs 1:1 from the cost-record success path, (b) the camelCase claude field names, (c) costUSD as a DOLLARS float (claude `costUSD:p`; port divides nano-USD by 1e9), (d) the surviving basis-points budget thresholds. The HashMap-backed sink does NOT byte-lock field ORDER — only the name SET + value types/values are observable.",
+  "_source": "claude-code 2.1.245: `tengu_api_success` per-request success emission, including the main-query `querySource` allowlist (`repl_main_thread` / `sdk`). Budget-threshold events (tengu_cost_budget_warning/exceeded) retain the M3 basis-point thresholds.",
+  "_note": "Strict-parity: the former tengu_cost_recorded event was PORT-ONLY and was dropped. The per-request success telemetry is tengu_api_success (cost::emit_api_success), fired by the orchestrator. This fixture locks (a) the api_success event name + the field subset the port plumbs 1:1 from the cost-record success path, (b) the camelCase Claude field names, (c) costUSD as a dollars float, (d) 2.1.245 querySource values, and (e) the surviving basis-points budget thresholds. The HashMap-backed sink does not byte-lock field order — only the name set and value types/values are observable.",
   "event_names": {
     "api_success": "tengu_api_success",
     "budget_warning": "tengu_cost_budget_warning",
@@ -10,6 +10,10 @@
     "warning": 8000,
     "exceeded": 10000,
     "batch_discount": 5000
+  },
+  "query_sources": {
+    "repl_main_thread": "repl_main_thread",
+    "sdk": "sdk"
   },
   "canonical_api_success_input": {
     "model": "claude-opus-4-6",
@@ -30,7 +34,7 @@
     "is_non_interactive_session": false,
     "print": false,
     "is_tty": false,
-    "query_source": "user",
+    "query_source": "repl_main_thread",
     "permission_mode": "default",
     "ttft_ms": 42,
     "fast_mode": true,
@@ -81,7 +85,7 @@
     "isNonInteractiveSession": false,
     "print": false,
     "isTTY": false,
-    "querySource": "user",
+    "querySource": "repl_main_thread",
     "permissionMode": "default",
     "ttftMs": 42,
     "fastMode": true,

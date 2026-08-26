@@ -196,8 +196,10 @@ impl EventStreamSplitter {
 
             messages.push(EventStreamMessage { headers, payload });
 
-            // Consume the frame from the buffer.
-            self.buf.drain(..total_len);
+            // Consume the frame from the buffer without reallocating the tail.
+            let remaining = self.buf.len() - total_len;
+            self.buf.copy_within(total_len.., 0);
+            self.buf.truncate(remaining);
         }
 
         Ok(messages)

@@ -18,13 +18,13 @@ const LEGACY_MODELS: [&str; 4] = [
 ];
 
 /// Run the migration.
-pub async fn run(env: &MigrationEnv) {
+pub async fn run(env: &MigrationEnv) -> bool {
     if !env.ctx.first_party {
-        return;
+        return true;
     }
     // isLegacyModelRemapEnabled (`model.ts:552-554`) = NOT env-truthy opt-out.
     if env_var_truthy("LINGXI_DISABLE_LEGACY_MODEL_REMAP") {
-        return;
+        return true;
     }
 
     let sp = settings_path(
@@ -36,17 +36,15 @@ pub async fn run(env: &MigrationEnv) {
         .ok()
         .and_then(|m| m.get("model").and_then(Value::as_str).map(String::from))
     else {
-        return;
+        return true;
     };
     if !LEGACY_MODELS.contains(&model.as_str()) {
-        return;
+        return true;
     }
 
     if let Err(e) = update_settings(&sp, vec![("model".into(), Some(json!("opus")))]) {
-        // TS `updateSettingsForSource` never throws — it returns `{error}`
-        // (settings.ts:416-523) and the migration discards it (TS:48), then
-        // still stamps the timestamp and emits the event. Warn and continue.
-        tracing::warn!(error = %e, "migrate_legacy_opus: settings write failed (ignored, TS parity)");
+        tracing::warn!(error = %e, "migrate_legacy_opus: settings write failed");
+        return false;
     }
     if let Err(e) = global_config::save_map(&env.global_config_path, |mut m| {
         m.insert(
@@ -57,7 +55,7 @@ pub async fn run(env: &MigrationEnv) {
     }) {
         // TS throws here, before logEvent — mirror that by skipping the emit.
         tracing::warn!(error = %e, "migrate_legacy_opus: timestamp write failed");
-        return;
+        return false;
     }
     env.emit(
         telemetry::tengu::migration::LEGACY_OPUS_MIGRATION,
@@ -67,6 +65,7 @@ pub async fn run(env: &MigrationEnv) {
         )]),
     )
     .await;
+    true
 }
 
 #[cfg(test)]
@@ -114,14 +113,13 @@ mod tests {
         }
     }
 
-    /// Fix 2 continue branch: a failing settings WRITE must not block the
-    /// timestamp stamp + event (TS `updateSettingsForSource` returns an
-    /// ignored `{error}`, settings.ts:416-523; TS:48-56 proceed regardless).
+    /// In 2.1.245 a failing settings write aborts the migration before the
+    /// timestamp/event side effects.
     // See rewrites_each_legacy_string_and_stamps_timestamp for the lock rationale.
     #[allow(clippy::await_holding_lock)]
     #[cfg(unix)]
     #[tokio::test]
-    async fn settings_write_failure_still_stamps_timestamp() {
+    async fn settings_write_failure_skips_timestamp() {
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
@@ -141,9 +139,9 @@ mod tests {
             read_settings_map(&sp).unwrap()["model"],
             json!("claude-opus-4-1")
         );
-        // …but the timestamp is STILL stamped (and the emit ran; bus is None).
+        // …and the timestamp is no longer stamped.
         let m = crate::global_config::read_map(&t.global).unwrap();
-        assert!(m["legacyOpusMigrationTimestamp"].is_i64());
+        assert!(m.get("legacyOpusMigrationTimestamp").is_none());
     }
 
     /// Emission contract: the happy path logs `tengu_legacy_opus_migration`

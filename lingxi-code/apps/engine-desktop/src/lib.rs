@@ -58,6 +58,7 @@ use orchestrator::provider_adapter::SubscriberState;
 use orchestrator::test_support::{NoOpPermissionGate, StaticMemoryProvider};
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
+    QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK,
 };
 use permission::gate::PermissionGate;
 use platform_posix::{
@@ -67,7 +68,11 @@ use platform_posix::{
 use sandbox::runtime_config::Platform as SandboxPlatform;
 use secret::CredentialManager;
 use skill_api::SkillRegistry;
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use tokio::sync::RwLock;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
@@ -1488,12 +1493,18 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         task_id: &str,
         result: Option<String>,
         usage: Option<traits::task_registry::AgentRunUsage>,
+        agent_id: Option<protocol::AgentId>,
+        agent_name: Option<String>,
+        team_name: Option<String>,
     ) {
         tasks::handlers::TaskStatusSink::notify_rest(
             self.task_registry.as_ref(),
             task_id,
             result.clone(),
             usage.clone(),
+            agent_id,
+            agent_name.clone(),
+            team_name.clone(),
         )
         .await;
         tasks::handlers::TaskStatusSink::notify_rest(
@@ -1501,6 +1512,9 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
             task_id,
             result,
             usage,
+            agent_id,
+            agent_name,
+            team_name,
         )
         .await;
     }
@@ -1720,7 +1734,10 @@ pub fn desktop_tool_registry(
 /// `scriptPath`/`name` are read from disk relative to `cwd`.
 struct TaskRegistryWorkflowLauncher {
     registry: Arc<tasks::registry::TaskRegistry>,
-    cwd: std::path::PathBuf,
+    /// Project cwd that owns the session directory; fixed for the session.
+    project_cwd: std::path::PathBuf,
+    /// Live cwd shared with Bash/orchestrator and sampled for each launch.
+    current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
     /// The claude home directory (e.g. `~/.claude`), used to derive
     /// `transcriptDir = <sessionProjectDir>/<sessionId>/subagents/workflows/<runId>`.
     lingxi_home: std::path::PathBuf,
@@ -1736,7 +1753,11 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         &self,
         mut spec: tool_workflow::WorkflowLaunchSpec,
     ) -> Result<tool_workflow::WorkflowLaunched, tool_workflow::WorkflowLaunchError> {
-        let cwd = self.cwd.clone();
+        let cwd = self
+            .current_cwd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let abs = |p: &str| -> std::path::PathBuf {
             let path = std::path::Path::new(p);
             if path.is_absolute() {
@@ -1745,7 +1766,8 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        let script = tool_workflow::resolve_script(&spec, |p| std::fs::read_to_string(abs(p)))?;
+        let script =
+            tool_workflow::resolve_script_at(&cwd, &spec, |p| std::fs::read_to_string(abs(p)))?;
         // Reject a malformed `meta` block at the tool boundary (claude-code parses
         // + validates `meta` when the Workflow tool accepts a script). The
         // byte-exact message surfaces to the model as the tool error.
@@ -1769,6 +1791,23 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             if let Err(workflow::WorkflowError::Script(m)) = workflow::check_determinism(&script) {
                 return Err(tool_workflow::WorkflowLaunchError(m));
             }
+        }
+        if let Err(error) = workflow::validate_body(&script) {
+            let error = match error {
+                workflow::WorkflowError::Engine(message)
+                | workflow::WorkflowError::Script(message) => message,
+            };
+            let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
+            let workflow_name = workflow::meta_string_value(&script, "name");
+            let summary = workflow::meta_string_value(&script, "description");
+            return Ok(tool_workflow::WorkflowLaunched {
+                task_id: tasks::generate_task_id(tasks::TaskType::LocalWorkflow),
+                run_id: Some(run_id),
+                workflow_name,
+                summary,
+                error: Some(error),
+                ..Default::default()
+            });
         }
         // Resume gate (claude-code validateInput errorCode 3): a `resumeFromRunId`
         // that names a STILL-RUNNING workflow is rejected — two runs sharing a run
@@ -1795,17 +1834,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         // is fine — only the workflow SCRIPT is barred from the clock). The
         // surfaced shape matches claude-code 2.1.195 `wf_${randomUUID().slice(0,12)}`
         // = `wf_` + 8 hex + `-` + 3 hex (the first 12 chars of a v4 UUID).
-        let run_id = spec.resume_from_run_id.clone().unwrap_or_else(|| {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static WF_SEQ: AtomicU64 = AtomicU64::new(0);
-            let seq = WF_SEQ.fetch_add(1, Ordering::Relaxed);
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            let v = nanos ^ seq.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-            format!("wf_{:08x}-{:03x}", (v >> 32) as u32, (v as u32) & 0xfff)
-        });
+        let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
         // `meta.name` → `workflowName` in the result.
         let workflow_name = workflow::meta_string_value(&script, "name");
         tool_workflow::apply_local_app_build_default_model(
@@ -1815,6 +1844,9 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         )?;
         // `meta.description` → `summary` in the result (claude-code `p = c.meta.description`).
         let summary = workflow::meta_string_value(&script, "description");
+        let task_description = summary
+            .clone()
+            .unwrap_or_else(|| "Dynamic workflow".to_string());
         // Reserve before the first run-id-derived filesystem write. Collect
         // every subsequent error in one block so release is unconditional.
         let reservation = self
@@ -1826,30 +1858,51 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             // Persist the script so it is editable + re-runnable via `scriptPath`
             // (claude-code persists every invocation's script "under the session
             // directory"). A `scriptPath` input is already on disk → return it as-is;
-            // an inline/`name` script is written under `<cwd>/.lingxi-scratch/workflows`.
+            // an inline/`name` script is written under the session's workflow directory.
+            let subagents = orchestrator::transcript_paths::subagents_dir(
+                &self.lingxi_home,
+                &self.project_cwd.to_string_lossy(),
+                &self.session_uuid,
+            );
             let script_path = if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty())
             {
-                abs(p).to_str().map(str::to_string)
+                abs(p).to_str().map(str::to_string).ok_or_else(|| {
+                    tool_workflow::WorkflowLaunchError(
+                        "workflow script path is not valid UTF-8".to_string(),
+                    )
+                })?
             } else {
-                let dir = cwd.join(".lingxi-scratch").join("workflows");
+                let session_dir = subagents.parent().ok_or_else(|| {
+                    tool_workflow::WorkflowLaunchError(
+                        "cannot derive workflow session directory".to_string(),
+                    )
+                })?;
+                let dir = session_dir.join("workflows");
                 let file = dir.join(format!("{run_id}.js"));
-                (std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&file, &script).is_ok())
-                    .then(|| file.to_str().map(str::to_string))
-                    .flatten()
+                std::fs::create_dir_all(&dir).map_err(|error| {
+                    tool_workflow::WorkflowLaunchError(format!(
+                        "cannot create workflow script directory '{}': {error}",
+                        dir.display()
+                    ))
+                })?;
+                std::fs::write(&file, &script).map_err(|error| {
+                    tool_workflow::WorkflowLaunchError(format!(
+                        "cannot persist workflow script '{}': {error}",
+                        file.display()
+                    ))
+                })?;
+                file.to_str().map(str::to_string).ok_or_else(|| {
+                    tool_workflow::WorkflowLaunchError(
+                        "workflow script path is not valid UTF-8".to_string(),
+                    )
+                })?
             };
             // `transcriptDir` = `<sessionProjectDir>/<sessionId>/subagents/workflows/<runId>`
             // (claude-code `Nte(runId)` → `path.join(CU() ?? _g(gr()), xt(), "subagents",
             // "workflows", e)`). We derive via `orchestrator::transcript_paths::subagents_dir`
             // which computes `<lingxi_home>/projects/<sanitize(cwd)>/<session_uuid>/subagents`,
             // then append `workflows/<runId>`.
-            let transcript_dir = {
-                let subagents = orchestrator::transcript_paths::subagents_dir(
-                    &self.lingxi_home,
-                    &self.cwd.to_string_lossy(),
-                    &self.session_uuid,
-                );
-                subagents.join("workflows").join(&run_id)
-            };
+            let transcript_dir = { subagents.join("workflows").join(&run_id) };
             std::fs::create_dir_all(&transcript_dir).map_err(|error| {
                 tool_workflow::WorkflowLaunchError(format!(
                     "cannot create workflow transcript directory '{}': {error}",
@@ -1858,14 +1911,44 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             })?;
             let transcript_dir_wire = transcript_dir.to_str().map(str::to_string);
             // Derive telemetry fields for tengu_workflow_launched (oracle §7).
-            let (invocation_mode, workflow_source) =
-                if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty()) {
-                    ("scriptPath".to_string(), p.to_string())
-                } else if let Some(n) = spec.name.as_deref().filter(|s| !s.is_empty()) {
-                    ("named".to_string(), n.to_string())
-                } else {
-                    ("inline".to_string(), "inline".to_string())
-                };
+            // Claude keeps launch origin separate from the verbatim-builtin
+            // flag: an arbitrary scriptPath is still sourced as `scriptPath`,
+            // while a named workflow is builtin only when the resolver chose
+            // that exact bundled name and source.
+            let has_script_path = spec
+                .script_path
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .is_some();
+            let named_source = spec
+                .name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .and_then(|name| tool_workflow::workflow_source_for_name(&cwd, name));
+            let named_builtin = spec
+                .name
+                .as_deref()
+                .and_then(|name| tool_workflow::BUILTIN_WORKFLOWS.get(name))
+                .is_some_and(|descriptor| descriptor.script == script);
+            let has_name = spec.name.as_deref().filter(|s| !s.is_empty()).is_some();
+            // Claude's invocation mode uses scriptPath first, then the named
+            // selector, then a standalone inline script. Keep telemetry's
+            // origin in that order when callers provide multiple selectors;
+            // a named call may still carry an explicit script body.
+            let (invocation_mode, workflow_source) = if has_script_path {
+                ("scriptPath".to_string(), "scriptPath".to_string())
+            } else if has_name {
+                (
+                    "named".to_string(),
+                    if named_builtin {
+                        "built-in".to_string()
+                    } else {
+                        named_source.unwrap_or("custom").to_string()
+                    },
+                )
+            } else {
+                ("inline".to_string(), "inline".to_string())
+            };
             let task_id = self
                 .registry
                 .spawn(
@@ -1891,24 +1974,35 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                         run_id: Some(run_id.clone()),
                         invocation_mode: Some(invocation_mode),
                         workflow_source: Some(workflow_source),
+                        script_is_verbatim_builtin: Some(named_builtin),
                         transcript_subdir: Some(transcript_dir.clone()),
-                        // `t.agentId != null` in claude-code: the Workflow tool is called
-                        // from a subagent when a sub-session invokes it. LingXi does not
-                        // thread the calling agent id to the launcher at this time; treat
-                        // as false (top-level launch) — this field is best-effort.
-                        launched_from_subagent: false,
+                        // `t.agentId != null` in claude-code: the Workflow tool stamps
+                        // the invocation source before handing the launch spec off.
+                        launched_from_subagent: spec.launched_from_subagent,
+                        tool_use_id: spec.tool_use_id.clone(),
+                        creator_teammate_name: spec.creator_teammate_name.clone(),
+                        creator_team_name: spec.creator_team_name.clone(),
+                        creator_agent_id: spec
+                            .creator_agent_id
+                            .as_deref()
+                            .and_then(protocol::AgentId::parse_prefixed),
                     },
-                    "Workflow".to_string(),
+                    task_description,
                 )
                 .await
                 .map_err(|e| tool_workflow::WorkflowLaunchError(e.to_string()))?;
+            self.registry
+                .set_workflow_resume_metadata(&task_id, script_path.clone(), transcript_dir.clone())
+                .await
+                .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
             Ok(tool_workflow::WorkflowLaunched {
                 task_id,
                 run_id: Some(run_id.clone()),
-                script_path,
+                script_path: Some(script_path),
                 workflow_name,
                 summary,
                 transcript_dir: transcript_dir_wire,
+                error: None,
             })
         }
         .await;
@@ -2225,6 +2319,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     mcp_paths: vec![PathBuf::from("/tmp/project/.mcp.json")],
 ///     use_noop_permission_gate: false,
 ///     deny_unresolved_ask: false,
+///     is_tty: false,
 ///     max_turns: None,
 ///     max_budget_usd: None,
 ///     json_schema: None,
@@ -2380,6 +2475,11 @@ pub struct DesktopConfig {
     /// inner, so interactive/transport builds and every existing caller stay
     /// byte-identical. The CLI sets this from `argv.print`.
     pub deny_unresolved_ask: bool,
+    /// Claude Code 2.1.245 `process.stdout.isTTY??!1` (`tengu_api_success.isTTY`).
+    /// Distinct from [`Self::deny_unresolved_ask`]: `-p` in a terminal is print
+    /// and TTY. CLI fills this from stdout; SDK / bridge / mobile / tests leave
+    /// the default `false`.
+    pub is_tty: bool,
     /// CLI `--max-turns N`: cap on agent turns, mapped to
     /// [`orchestrator::OrchestratorConfig::max_turns`] in `build()`. `None` (the
     /// default) = unbounded.
@@ -2681,6 +2781,41 @@ impl DesktopSessionComposition {
     pub fn is_interactive_session(self) -> bool {
         matches!(self, Self::InteractiveCli)
     }
+
+    /// Claude Code 2.1.245 main-query identity: `(querySource, print)`.
+    #[must_use]
+    pub fn query_source_and_print(
+        self,
+        output_style: Option<&str>,
+        print_mode: bool,
+    ) -> (String, bool) {
+        match self {
+            Self::Transport => (QUERY_SOURCE_SDK.to_string(), false),
+            Self::InteractiveCli | Self::HeadlessCli => {
+                let query_source =
+                    match output_style.filter(|style| !style.is_empty() && *style != "default") {
+                        Some("Concise") => {
+                            format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Concise")
+                        }
+                        Some("Proactive") => {
+                            format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Proactive")
+                        }
+                        Some("Explanatory") => {
+                            format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Explanatory")
+                        }
+                        Some("Learning") => {
+                            format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:Learning")
+                        }
+                        Some(_) => format!("{QUERY_SOURCE_REPL_MAIN_THREAD}:outputStyle:custom"),
+                        None => QUERY_SOURCE_REPL_MAIN_THREAD.to_string(),
+                    };
+                (
+                    query_source,
+                    matches!(self, Self::HeadlessCli) && print_mode,
+                )
+            }
+        }
+    }
 }
 
 /// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
@@ -2819,6 +2954,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("mcp_paths", &self.mcp_paths)
             .field("use_noop_permission_gate", &self.use_noop_permission_gate)
             .field("deny_unresolved_ask", &self.deny_unresolved_ask)
+            .field("is_tty", &self.is_tty)
             .field(
                 "injected_permission_gate",
                 if self.injected_permission_gate.is_some() {
@@ -2927,6 +3063,7 @@ impl Default for DesktopConfig {
             mcp_paths: Vec::new(),
             use_noop_permission_gate: true,
             deny_unresolved_ask: false,
+            is_tty: false,
             max_turns: None,
             plan_mode_instructions: None,
             plans_directory: None,
@@ -3005,7 +3142,7 @@ fn resolve_workflow_size_guideline(
     cfg: &DesktopConfig,
     cwd: &std::path::Path,
     managed_layers: &[engine::settings::SettingsJson],
-) -> (tool_workflow::WorkflowSizeGuideline, bool) {
+) -> (tool_workflow::WorkflowSizeGuideline, bool, bool) {
     let defaults = engine::settings::SettingsJson {
         workflow_size_guideline: Some("medium".to_string()),
         ..Default::default()
@@ -3034,12 +3171,55 @@ fn resolve_workflow_size_guideline(
         .and_then(|settings| settings.settings.workflow_size_guideline.as_deref())
         .unwrap_or("medium");
     let guideline = tool_workflow::WorkflowSizeGuideline::from_wire(wire);
-    let managed = effective
+    let source = effective
         .as_ref()
         .and_then(|settings| settings.effective_for("workflowSizeGuideline"))
-        .and_then(|source| source.contributors.last())
-        .is_some_and(|source| *source == engine::settings::tracer::Source::Managed);
-    (guideline, managed)
+        .and_then(|provenance| provenance.contributors.last())
+        .copied();
+    let managed = source == Some(engine::settings::tracer::Source::Managed);
+    let is_default = source == Some(engine::settings::tracer::Source::Defaults);
+    (guideline, managed, is_default)
+}
+
+fn resolve_workflow_session_enabled(
+    cfg: &DesktopConfig,
+    cwd: &std::path::Path,
+    managed_layers: &[engine::settings::SettingsJson],
+) -> (bool, bool) {
+    let defaults = engine::settings::SettingsJson {
+        enable_workflows: Some(true),
+        ..Default::default()
+    };
+    let user_settings_path = cfg.lingxi_home.join("settings.json");
+    let effective = engine::settings::Settings::load_with_layers_from_user_path(
+        engine::settings::LoadInputs {
+            env: &std::collections::BTreeMap::new(),
+            project_dir: cwd,
+            defaults,
+        },
+        engine::settings::FileLayerScope {
+            include_user: cfg.setting_source_scope.0,
+            include_project: cfg.setting_source_scope.1,
+            include_local: cfg.setting_source_scope.1,
+        },
+        engine::settings::SupplementalLayers {
+            cli_layer: cfg.flag_settings.as_ref(),
+            managed_layers,
+        },
+        Some(&user_settings_path),
+    )
+    .ok();
+    let enabled = effective
+        .as_ref()
+        .and_then(|settings| settings.settings.enable_workflows)
+        .unwrap_or(true);
+    let managed = effective
+        .as_ref()
+        .and_then(|settings| settings.effective_for("enableWorkflows"))
+        .and_then(|provenance| provenance.contributors.last())
+        .copied()
+        == Some(engine::settings::tracer::Source::Managed);
+    (enabled, managed)
 }
 
 /// Assemble the desktop slash-command registry.
@@ -4183,29 +4363,83 @@ fn connected_provider_fallback(
 /// helpers (same `engine::settings::Settings::load` seam). Returns `None` on any
 /// load failure or when the field is unset — the caller then injects no output
 /// style section (OUTSTYLE.2).
-fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+#[derive(Clone)]
+struct MergedSettingsCacheEntry {
+    project_dir: PathBuf,
+    revision: u64,
+    value: engine::settings::EffectiveSettings,
+}
+
+fn merged_settings_revision(project_dir: &Path, env: &BTreeMap<String, String>) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    project_dir.hash(&mut hasher);
+    for path in [
+        engine::settings::loader::user_settings_path(),
+        Some(engine::settings::loader::project_settings_path(project_dir)),
+        Some(engine::settings::loader::local_settings_path(project_dir)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        path.hash(&mut hasher);
+        match std::fs::metadata(&path) {
+            Ok(metadata) => {
+                metadata.len().hash(&mut hasher);
+                if let Ok(modified) = metadata.modified() {
+                    if let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        since_epoch.as_secs().hash(&mut hasher);
+                        since_epoch.subsec_nanos().hash(&mut hasher);
+                    }
+                }
+            }
+            Err(_) => 0u8.hash(&mut hasher),
+        }
+    }
+    for (key, value) in env {
+        key.hash(&mut hasher);
+        value.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn load_merged_settings(project_dir: &Path) -> Option<engine::settings::EffectiveSettings> {
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let revision = merged_settings_revision(project_dir, &env);
+    let cache = SETTINGS_CACHE.get_or_init(|| Mutex::new(None));
+    if let Some(entry) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|entry| entry.project_dir == project_dir && entry.revision == revision)
+    {
+        return Some(entry.value.clone());
+    }
     let inputs = engine::settings::LoadInputs {
         env: &env,
         project_dir,
         defaults: engine::settings::schema::SettingsJson::default(),
     };
-    engine::settings::Settings::load(inputs)
-        .ok()
-        .and_then(|eff| eff.settings.output_style)
+    let value = engine::settings::Settings::load(inputs).ok()?;
+    *cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(MergedSettingsCacheEntry {
+        project_dir: project_dir.to_path_buf(),
+        revision,
+        value: value.clone(),
+    });
+    Some(value)
+}
+
+static SETTINGS_CACHE: OnceLock<Mutex<Option<MergedSettingsCacheEntry>>> = OnceLock::new();
+
+fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
+    load_merged_settings(project_dir).and_then(|eff| eff.settings.output_style)
 }
 
 /// Load the merged `settings.showThinkingSummaries` request-beta preference.
 /// Absent/invalid settings resolve to Claude Code's default (`false`).
 fn load_merged_show_thinking_summaries(project_dir: &std::path::Path) -> bool {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load(inputs)
-        .ok()
+    load_merged_settings(project_dir)
         .and_then(|eff| eff.settings.show_thinking_summaries)
         .unwrap_or(false)
 }
@@ -4214,14 +4448,7 @@ fn load_merged_show_thinking_summaries(project_dir: &std::path::Path) -> bool {
 /// enabled when absent so existing installations gain the safe image sidecar
 /// without a migration.
 fn load_merged_vision_delegation_enabled(project_dir: &std::path::Path) -> bool {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load(inputs)
-        .ok()
+    load_merged_settings(project_dir)
         .and_then(|effective| effective.settings.vision_delegation_enabled)
         .unwrap_or(true)
 }
@@ -4229,14 +4456,7 @@ fn load_merged_vision_delegation_enabled(project_dir: &std::path::Path) -> bool 
 /// Load the merged `settings.agentPushNotifEnabled` preference. The independent
 /// `tengu_kairos_push_notifications` feature flag is applied by consumers.
 fn load_merged_agent_push_notif_enabled(project_dir: &std::path::Path) -> bool {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load(inputs)
-        .ok()
+    load_merged_settings(project_dir)
         .and_then(|effective| effective.settings.agent_push_notif_enabled)
         .unwrap_or(false)
 }
@@ -4244,14 +4464,7 @@ fn load_merged_agent_push_notif_enabled(project_dir: &std::path::Path) -> bool {
 /// Load `settings.workflowKeywordTriggerEnabled`. The default remains off,
 /// matching Claude Code's optional setting.
 fn load_merged_workflow_keyword_trigger_enabled(project_dir: &std::path::Path) -> bool {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load(inputs)
-        .ok()
+    load_merged_settings(project_dir)
         .and_then(|eff| eff.settings.workflow_keyword_trigger_enabled)
         .unwrap_or(false)
 }
@@ -4263,14 +4476,7 @@ fn load_merged_workflow_keyword_trigger_enabled(project_dir: &std::path::Path) -
 /// parity P2-14). Returns `false` on any load failure or when the key is unset —
 /// the frozen default (preflight runs).
 fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load(inputs)
-        .ok()
+    load_merged_settings(project_dir)
         .and_then(|eff| eff.settings.skip_web_fetch_preflight)
         .unwrap_or(false)
 }
@@ -4285,14 +4491,7 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
 /// load failure or when the key is unset — the frozen default (agent view
 /// enabled; the env half still applies independently).
 fn load_merged_disable_agent_view(project_dir: &std::path::Path) -> bool {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load(inputs)
-        .ok()
+    load_merged_settings(project_dir)
         .and_then(|eff| eff.settings.disable_agent_view)
         .unwrap_or(false)
 }
@@ -4303,14 +4502,7 @@ fn load_merged_disable_agent_view(project_dir: &std::path::Path) -> bool {
 /// `if (tX() || lMe()) return hooks_gate`. `false` on any load failure or when
 /// both keys are unset (the permissive default).
 fn load_merged_hooks_restricted(project_dir: &std::path::Path) -> bool {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load(inputs)
-        .ok()
+    load_merged_settings(project_dir)
         .map(|eff| {
             eff.settings.disable_all_hooks.unwrap_or(false)
                 || eff.settings.allow_managed_hooks_only.unwrap_or(false)
@@ -4323,14 +4515,7 @@ fn load_merged_hooks_restricted(project_dir: &std::path::Path) -> bool {
 /// the setting that suppresses every hook, including hooks registered after
 /// boot.
 fn load_merged_disable_all_hooks(project_dir: &std::path::Path) -> bool {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load(inputs)
-        .ok()
+    load_merged_settings(project_dir)
         .and_then(|eff| eff.settings.disable_all_hooks)
         .unwrap_or(false)
 }
@@ -4378,18 +4563,12 @@ async fn load_ask_user_question_timeout(cfg: &DesktopConfig) -> Option<String> {
 fn load_merged_http_hook_policy(
     project_dir: &std::path::Path,
 ) -> (Option<Vec<String>>, Option<Vec<String>>) {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    match engine::settings::Settings::load(inputs) {
-        Ok(eff) => (
+    match load_merged_settings(project_dir) {
+        Some(eff) => (
             eff.settings.allowed_http_hook_urls,
             eff.settings.http_hook_allowed_env_vars,
         ),
-        Err(_) => (None, None),
+        None => (None, None),
     }
 }
 
@@ -6444,7 +6623,8 @@ pub async fn build(
     // Build the provider-neutral drive service (the retry/rate-limit/betas loop),
     // then wrap it in the thin `ProviderApiAdapter` that impls the orchestrator +
     // agent seams. The `with_*` builders live on `ApiService`.
-    let interactive_session = cfg.session_composition().is_interactive_session();
+    let session_composition = cfg.session_composition();
+    let interactive_session = session_composition.is_interactive_session();
     let service_built = llm_client::ApiService::new_with_routing(
         llm_client,
         llm_transport,
@@ -6538,6 +6718,16 @@ pub async fn build(
     // Keep the legacy main-loop interactive bit aligned for CLI TUI / stdio
     // REPL sessions until every remaining consumer reads `interactive_session`.
     orch_cfg.interactive_permissions = interactive_session;
+    // Resolve output style before query identity: Claude Code includes builtin
+    // output-style names in `repl_main_thread:outputStyle:*`.
+    let output_style = load_merged_output_style(&cfg.cwd);
+    // Claude Code 2.1.245: CLI is `repl_main_thread`, SDK/bridge transport is
+    // `sdk`, and print is the explicit headless print mode only.
+    let (query_source, print) = session_composition
+        .query_source_and_print(output_style.as_deref(), cfg.deny_unresolved_ask);
+    orch_cfg.query_source = query_source;
+    orch_cfg.print = print;
+    orch_cfg.is_tty = cfg.is_tty;
     // TPM-C: use the bare id produced by parse_model_ref (strips a profile/ prefix
     // so a qualified default_model like "openai/gpt-4o" never reaches the wire).
     orch_cfg.model.clone_from(&default_model_id);
@@ -6593,7 +6783,7 @@ pub async fn build(
     // orchestrator config so `build_system_prompt` injects the active style's
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
-    orch_cfg.output_style = load_merged_output_style(&cfg.cwd);
+    orch_cfg.output_style = output_style;
     traits::session_flags::set_show_thinking_summaries(load_merged_show_thinking_summaries(
         &cfg.cwd,
     ));
@@ -8143,27 +8333,22 @@ pub async fn build(
     );
 
     let task_registry = Arc::new(task_registry_inner);
-    teammate_registry_status_sink
-        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+    teammate_registry_status_sink.bind(task_registry.clone());
 
     // (5.46f) Bind the deferred LocalAgent status sink now that the registry
     //         `Arc` exists: the persistent agent's `set_status` / `notify_rest`
     //         now reach `task_registry`, so terminal + per-rest notifications
     //         surface through `take_pending_task_notifications`.
-    local_agent_status_sink
-        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
-    dream_status_sink
-        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+    local_agent_status_sink.bind(task_registry.clone());
+    dream_status_sink.bind(task_registry.clone());
     // (M8 cc2.1.198) Bind the deferred LocalBash sink too: the bash worker's
     // terminal `set_status` / `set_exit_code` now reach `task_registry`, so a
     // finished background command flips its panel row off `Running`.
-    bash_status_sink
-        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+    bash_status_sink.bind(task_registry.clone());
     // Bind the deferred LocalWorkflow sink: a finished workflow's terminal
     // `set_status(Completed/Failed)` now reaches `task_registry`, so `/workflows`
     // flips it off `Running` instead of showing it stuck forever.
-    local_workflow_status_sink
-        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+    local_workflow_status_sink.bind(task_registry.clone());
 
     // (5.48) Cron: construct, load the single persisted tasks file, and start the
     //        live cron scheduler so jobs created by CronCreate actually fire —
@@ -8883,11 +9068,14 @@ pub async fn build(
     // after `register_desktop_tools`, because its launcher needs `task_registry`
     // (constructed above): `Workflow.call` spawns a `LocalWorkflow` background
     // task through it and returns `{status:"async_launched", taskId, taskType}`.
+    let dynamic_workflows_gate;
+    let workflow_size_guideline_state;
     {
         let workflow_launcher: Arc<dyn tool_workflow::WorkflowLauncher> =
             Arc::new(TaskRegistryWorkflowLauncher {
                 registry: task_registry.clone(),
-                cwd: cwd.clone(),
+                project_cwd: cwd.clone(),
+                current_cwd: current_cwd_cell.clone(),
                 lingxi_home: cfg.lingxi_home.clone(),
                 session_uuid: main_session_uuid.clone(),
             });
@@ -8901,12 +9089,16 @@ pub async fn build(
                 .into_iter()
                 .filter_map(|raw| serde_json::from_str(&raw).ok())
                 .collect();
-        let (workflow_size_guideline, managed_workflow) =
+        let (workflow_size_guideline, managed_workflow, default_workflow) =
             resolve_workflow_size_guideline(&cfg, &cwd, &managed_workflow_layers);
-        let _ = traits::session_flags::set_workflow_size_guideline(
+        workflow_size_guideline_state = traits::session_flags::WorkflowSizeGuidelineState::new(
             workflow_size_guideline.as_wire(),
             managed_workflow,
-        );
+            default_workflow,
+        )
+        .expect("desktop workflowSizeGuideline must be valid");
+        let (workflow_session_enabled, workflow_session_managed) =
+            resolve_workflow_session_enabled(&cfg, &cwd, &managed_workflow_layers);
         // `disableWorkflows` is an ORG policy, so it is read from MANAGED
         // settings only — a project or user file must not be able to turn the
         // tool off on the org's behalf, nor to turn it back on.
@@ -8920,13 +9112,23 @@ pub async fn build(
                 .and_then(serde_json::Value::as_bool)
         })
         .unwrap_or(false);
-        traits::session_flags::set_dynamic_workflows_enabled(tool_workflow::workflows_enabled(
-            managed_disable_workflows,
-        ));
+        let workflow_policy_enabled = tool_workflow::workflows_enabled(managed_disable_workflows);
+        dynamic_workflows_gate = traits::session_flags::DynamicWorkflowsGate::new(
+            workflow_policy_enabled && workflow_session_enabled,
+            workflow_session_managed || !workflow_policy_enabled,
+        );
         tools_inner.register_builtin(Arc::new(
             tool_workflow::WorkflowTool::new(Some(workflow_launcher))
-                .with_size_guideline(workflow_size_guideline)
-                .with_disable_workflows(managed_disable_workflows),
+                .with_current_cwd(current_cwd_cell.clone())
+                .with_size_guideline_state(workflow_size_guideline_state.clone())
+                .with_size_guideline_source(
+                    workflow_size_guideline,
+                    managed_workflow,
+                    default_workflow,
+                )
+                .with_disable_workflows(managed_disable_workflows)
+                .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
+                .with_session_enabled(workflow_session_enabled),
         ));
     }
     for (conn_id, mcp_tools) in
@@ -9254,7 +9456,9 @@ pub async fn build(
         output,
         memory,
         cwd,
-    );
+    )
+    .with_dynamic_workflows_gate(dynamic_workflows_gate);
+    let orch_builder = orch_builder.with_workflow_size_guideline(workflow_size_guideline_state);
     // Gap #5: wire the production JSONL writer (constructed just above) so the
     // session is persisted + discoverable by the resume loader.
     // (M3 cc2.1.198) `--no-session-persistence` ⟶ `cfg.session_persistence:
@@ -10327,8 +10531,9 @@ pub async fn build(
 mod tests {
     use super::{
         build, desktop_tool_registry, model_deprecation_warning, parse_worktree_slash_action,
-        resolve_workflow_size_guideline, sandbox_network_ask_callback, CoordinatorWiring,
-        DesktopConfig, DesktopSessionComposition, WorktreeSlashAction, WORKTREE_SLASH_USAGE,
+        resolve_workflow_session_enabled, resolve_workflow_size_guideline,
+        sandbox_network_ask_callback, CoordinatorWiring, DesktopConfig, DesktopSessionComposition,
+        WorktreeSlashAction, QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
     };
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10403,17 +10608,99 @@ mod tests {
             ..DesktopConfig::default()
         };
 
-        let (without_managed, is_managed) = resolve_workflow_size_guideline(&cfg, &cwd, &[]);
+        let (without_managed, is_managed, is_default) =
+            resolve_workflow_size_guideline(&cfg, &cwd, &[]);
         assert_eq!(
             without_managed,
             tool_workflow::WorkflowSizeGuideline::Large,
             "flag > local > user"
         );
         assert!(!is_managed);
+        assert!(!is_default);
 
-        let (with_managed, is_managed) = resolve_workflow_size_guideline(&cfg, &cwd, &[managed]);
+        let (with_managed, is_managed, is_default) =
+            resolve_workflow_size_guideline(&cfg, &cwd, &[managed]);
         assert_eq!(with_managed, tool_workflow::WorkflowSizeGuideline::Small);
         assert!(is_managed);
+        assert!(!is_default);
+    }
+
+    #[test]
+    fn workflow_size_tracks_the_builtin_default_separately_from_explicit_medium() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("project");
+        let lingxi_home = tmp.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&lingxi_home).unwrap();
+        let cfg = DesktopConfig {
+            cwd: cwd.clone(),
+            lingxi_home,
+            ..DesktopConfig::default()
+        };
+
+        let (guideline, managed, is_default) = resolve_workflow_size_guideline(&cfg, &cwd, &[]);
+        assert_eq!(guideline, tool_workflow::WorkflowSizeGuideline::Medium);
+        assert!(!managed);
+        assert!(is_default);
+    }
+
+    #[test]
+    fn workflow_session_enabled_uses_custom_home_flag_and_managed_precedence() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("project");
+        let lingxi_home = tmp.path().join("custom-home");
+        std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+        std::fs::create_dir_all(&lingxi_home).unwrap();
+        std::fs::write(
+            lingxi_home.join("settings.json"),
+            r#"{"enableWorkflows":false}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            r#"{"enableWorkflows":true}"#,
+        )
+        .unwrap();
+        let flag: engine::settings::SettingsJson =
+            serde_json::from_str(r#"{"enableWorkflows":false}"#).unwrap();
+        let managed: engine::settings::SettingsJson =
+            serde_json::from_str(r#"{"enableWorkflows":true}"#).unwrap();
+        let cfg = DesktopConfig {
+            cwd: cwd.clone(),
+            lingxi_home,
+            flag_settings: Some(flag),
+            ..DesktopConfig::default()
+        };
+
+        assert_eq!(
+            resolve_workflow_session_enabled(&cfg, &cwd, &[]),
+            (false, false),
+            "flag > local > user"
+        );
+        assert_eq!(
+            resolve_workflow_session_enabled(&cfg, &cwd, &[managed]),
+            (true, true),
+            "managed > flag > local > user"
+        );
+    }
+
+    #[test]
+    fn workflow_session_enabled_defaults_true() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("project");
+        let lingxi_home = tmp.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&lingxi_home).unwrap();
+        let cfg = DesktopConfig {
+            cwd: cwd.clone(),
+            lingxi_home,
+            ..DesktopConfig::default()
+        };
+
+        assert_eq!(
+            resolve_workflow_session_enabled(&cfg, &cwd, &[]),
+            (true, false)
+        );
     }
 
     #[test]
@@ -10883,6 +11170,9 @@ mod tests {
         assert!(cfg.mcp_paths.is_empty());
         // CLI default — opt into `NoOpPermissionGate`.
         assert!(cfg.use_noop_permission_gate);
+        // SDK/tests/default hosts have no stdout TTY; the CLI fills this from
+        // `process.stdout.isTTY??!1`.
+        assert!(!cfg.is_tty);
         // New sessions use the built-in Auto preference unless a trusted
         // settings/CLI tier explicitly supplies another mode.
         assert_eq!(cfg.permission_mode, permission::PermissionMode::Auto);
@@ -10927,6 +11217,46 @@ mod tests {
             cfg.session_composition(),
             DesktopSessionComposition::Transport,
             "bridge/SDK hosts stay on transport semantics even if they wire a live permission surface"
+        );
+
+        assert_eq!(
+            DesktopSessionComposition::InteractiveCli.query_source_and_print(None, false),
+            (QUERY_SOURCE_REPL_MAIN_THREAD.to_string(), false)
+        );
+        assert_eq!(
+            DesktopSessionComposition::HeadlessCli.query_source_and_print(None, true),
+            (QUERY_SOURCE_REPL_MAIN_THREAD.to_string(), true)
+        );
+        assert_eq!(
+            DesktopSessionComposition::Transport.query_source_and_print(None, true),
+            (QUERY_SOURCE_SDK.to_string(), false)
+        );
+        assert_eq!(
+            DesktopSessionComposition::InteractiveCli
+                .query_source_and_print(Some("Explanatory"), false),
+            (
+                "repl_main_thread:outputStyle:Explanatory".to_string(),
+                false
+            )
+        );
+        assert_eq!(
+            DesktopSessionComposition::InteractiveCli
+                .query_source_and_print(Some("Concise"), false),
+            ("repl_main_thread:outputStyle:Concise".to_string(), false)
+        );
+        assert_eq!(
+            DesktopSessionComposition::InteractiveCli
+                .query_source_and_print(Some("Proactive"), false),
+            ("repl_main_thread:outputStyle:Proactive".to_string(), false)
+        );
+        assert_eq!(
+            DesktopSessionComposition::InteractiveCli
+                .query_source_and_print(Some("custom-style"), false),
+            ("repl_main_thread:outputStyle:custom".to_string(), false)
+        );
+        assert!(
+            !DesktopConfig::default().is_tty,
+            "isTTY is host-supplied stdout state, not derived from composition"
         );
     }
 
@@ -11446,6 +11776,7 @@ mod tests {
             mcp_paths: vec![cwd.join(".mcp.json")],
             use_noop_permission_gate: use_noop,
             deny_unresolved_ask: false,
+            is_tty: false,
             max_turns: None,
             plan_mode_instructions: None,
             plans_directory: None,

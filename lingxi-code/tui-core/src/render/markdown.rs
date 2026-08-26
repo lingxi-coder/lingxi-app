@@ -22,12 +22,32 @@
 use crate::render::markdown_table::{self, ColumnAlign};
 use crate::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
 
 /// Default render width (display columns) used by [`render`] when the caller
 /// has no terminal width to thread in. Tables are the only block whose layout
 /// depends on width; everything else is width-independent, so existing
 /// non-table callers/tests are unaffected by this default.
 const DEFAULT_RENDER_WIDTH: usize = 80;
+const MARKDOWN_CACHE_CAP: usize = 64;
+
+struct MarkdownCache {
+    entries: VecDeque<(u64, Vec<StyledLine>)>,
+}
+
+static MARKDOWN_CACHE: Mutex<MarkdownCache> = Mutex::new(MarkdownCache {
+    entries: VecDeque::new(),
+});
+
+fn markdown_cache_key(text: &str, theme: &MarkdownTheme, width: usize) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    width.hash(&mut hasher);
+    format!("{theme:?}").hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Dim vertical bar prefixing blockquote lines. Matches claude-code's
 /// `BLOCKQUOTE_BAR` (`src/constants/figures.ts`) — U+258E (▎ LEFT ONE QUARTER
@@ -161,14 +181,32 @@ pub fn render(text: &str, theme: &MarkdownTheme) -> Vec<StyledLine> {
 /// algorithm in [`markdown_table`]). Non-table blocks are width-independent.
 #[must_use]
 pub fn render_with_width(text: &str, theme: &MarkdownTheme, width: usize) -> Vec<StyledLine> {
+    let key = markdown_cache_key(text, theme, width);
+    {
+        let cache = MARKDOWN_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, lines)) = cache.entries.iter().find(|(k, _)| *k == key) {
+            return lines.clone();
+        }
+    }
+
     let options = Options::ENABLE_TABLES;
     let parser = Parser::new_ext(text, options);
-
     let mut builder = Builder::new(theme, width);
     for event in parser {
         builder.handle(event);
     }
-    builder.finish()
+    let lines = builder.finish();
+
+    let mut cache = MARKDOWN_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cache.entries.len() >= MARKDOWN_CACHE_CAP {
+        cache.entries.pop_front();
+    }
+    cache.entries.push_back((key, lines.clone()));
+    lines
 }
 
 /// Accumulates styled lines while walking markdown events. Inline content is

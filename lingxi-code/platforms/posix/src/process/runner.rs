@@ -974,6 +974,19 @@ mod async_hook_tests {
         )
     }
 
+    #[tokio::test]
+    async fn drain_observed_preserves_output_larger_than_eight_mebibytes() {
+        let payload = vec![b'x'; 8 * 1024 * 1024 + 257];
+        let mut reader = payload.as_slice();
+        let mut captured = Vec::new();
+
+        drain_observed(&mut reader, &mut captured, None, false)
+            .await
+            .expect("drain");
+
+        assert_eq!(captured, payload);
+    }
+
     #[test]
     fn parse_async_first_line_recognizes_marker_and_timeout() {
         let def = Duration::from_millis(15_000);

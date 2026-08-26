@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, InMemorySink, NoOpSink};
+use tokio::sync::{Mutex, Notify};
 
 #[tokio::test]
 async fn noop_sink_swallows_events_silently() {
@@ -54,4 +55,55 @@ async fn analytics_bus_with_default_sink_is_noop() {
     let events = in_mem.events().await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].name, "after_swap");
+}
+
+struct BlockingSink {
+    started: Notify,
+    release: Notify,
+    events: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl AnalyticsSink for BlockingSink {
+    async fn log_event(&self, name: &str, _metadata: HashMap<String, AnalyticsValue>) {
+        self.started.notify_one();
+        self.release.notified().await;
+        self.events.lock().await.push(name.to_string());
+    }
+
+    async fn log_event_async(&self, name: &str, metadata: HashMap<String, AnalyticsValue>) {
+        self.log_event(name, metadata).await;
+    }
+
+    fn name(&self) -> &str {
+        "blocking"
+    }
+}
+
+#[tokio::test]
+async fn analytics_bus_log_event_awaits_sink_delivery() {
+    let bus = Arc::new(AnalyticsBus::new());
+    let sink = Arc::new(BlockingSink {
+        started: Notify::new(),
+        release: Notify::new(),
+        events: Mutex::new(Vec::new()),
+    });
+    bus.attach_sink(sink.clone()).await;
+
+    let bus_task = {
+        let bus = bus.clone();
+        tokio::spawn(async move {
+            bus.log_event("evt", HashMap::new()).await;
+        })
+    };
+
+    sink.started.notified().await;
+    assert!(
+        !bus_task.is_finished(),
+        "log_event must not return before the sink finishes its synchronous path"
+    );
+
+    sink.release.notify_one();
+    bus_task.await.expect("log task must join");
+    assert_eq!(sink.events.lock().await.as_slice(), ["evt"]);
 }

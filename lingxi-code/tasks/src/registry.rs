@@ -102,6 +102,14 @@ struct RestPayload {
     result: Option<String>,
     /// Run usage → the `<usage>` section.
     usage: Option<traits::task_registry::AgentRunUsage>,
+    /// Persistent id of the resting agent. Used only for unnamed-owner
+    /// fallback; never surfaced as a display name.
+    agent_id: Option<protocol::AgentId>,
+    /// The resting agent's DISPLAY identity. A "came to rest" notification is
+    /// deferred while this agent still owns live background children, and the
+    /// owner match is by the same creator fields child task creation stamps.
+    agent_name: Option<String>,
+    team_name: Option<String>,
 }
 
 type TaskCleanup = Arc<dyn Fn() + Send + Sync>;
@@ -410,6 +418,7 @@ impl TaskRegistry {
             notified: false,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
         };
         // Build a default state per type; production stores real fields.
         #[allow(clippy::match_same_arms)]
@@ -494,6 +503,28 @@ impl TaskRegistry {
         tool_use_id: Option<String>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, TaskError> {
+        self.register_mcp_task_owned(
+            server_name,
+            tool_name,
+            tool_use_id,
+            None,
+            None,
+            None,
+            cancel,
+        )
+        .await
+    }
+
+    pub(crate) async fn register_mcp_task_owned(
+        &self,
+        server_name: String,
+        tool_name: String,
+        tool_use_id: Option<String>,
+        creator_teammate_name: Option<String>,
+        creator_team_name: Option<String>,
+        creator_agent_id: Option<protocol::AgentId>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, TaskError> {
         let id = generate_task_id(TaskType::McpTask);
         let path = self
             .output_manager
@@ -518,8 +549,9 @@ impl TaskRegistry {
             output_file: path,
             output_offset: 0,
             notified: false,
-            creator_teammate_name: None,
-            creator_team_name: None,
+            creator_teammate_name,
+            creator_team_name,
+            creator_agent_id,
         };
         let state = TaskState::McpTask(crate::state::McpTaskState {
             base,
@@ -720,6 +752,7 @@ impl TaskRegistry {
             notified: false,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
         };
         let state = state_for_spawn(base, &input);
         // 4. Publish every registry artifact as one transaction from the point
@@ -1004,6 +1037,7 @@ impl TaskRegistry {
                 notified: true,
                 creator_teammate_name: None,
                 creator_team_name: None,
+                creator_agent_id: None,
             },
             session_uuid: adopted.session_uuid,
             workflow_id: adopted.workflow_id,
@@ -1014,6 +1048,7 @@ impl TaskRegistry {
             script_path: Some(adopted.script_path),
             transcript_dir: Some(std::path::PathBuf::from(adopted.transcript_dir)),
             current_step: 0,
+            outcome: Default::default(),
         });
         tasks.insert(adopted.task_id, state);
         Ok(())
@@ -1123,6 +1158,34 @@ impl TaskRegistry {
         self.tasks.write().await.insert(id, state);
     }
 
+    async fn fire_task_completed_hook(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        updated: &TaskState,
+    ) {
+        if let Some(firer) = &self.task_completed_firer {
+            let status_str = match status {
+                TaskStatus::Completed => Some("completed"),
+                TaskStatus::Failed => Some("failed"),
+                _ => None,
+            };
+            if let Some(status_str) = status_str {
+                let base = updated.base();
+                firer
+                    .fire(hooks::TaskCompletedFire {
+                        task_id: task_id.to_string(),
+                        status: status_str.to_string(),
+                        task_subject: base.description.clone(),
+                        task_description: Some(base.description.clone()),
+                        teammate_name: base.creator_teammate_name.clone(),
+                        team_name: base.creator_team_name.clone(),
+                    })
+                    .await;
+            }
+        }
+    }
+
     /// Force `task_id`'s status to `status`. Returns
     /// [`TaskError::NotFound`] if the id is unknown. Only Bash and Agent
     /// variants currently carry a writable `status` field in the M1 surface;
@@ -1162,37 +1225,8 @@ impl TaskRegistry {
             // never stalls other task operations.
         };
 
-        // Best-effort `TaskCompleted` fire on the terminal transition
-        // (claude-code `executeTaskCompletedHooks`). Only `Completed` / `Failed`
-        // mirror claude-code's fire points (`TaskUpdateTool` status →
-        // `completed`; `stopHooks.ts` for a teammate's in-progress tasks). A
-        // `Killed` transition is terminal but has no claude-code counterpart, so
-        // it does NOT fire. No-op when no firer is registered.
-        if let Some(firer) = &self.task_completed_firer {
-            let status_str = match status {
-                TaskStatus::Completed => Some("completed"),
-                TaskStatus::Failed => Some("failed"),
-                _ => None,
-            };
-            if let Some(status_str) = status_str {
-                let base = updated.base();
-                // Wire payload (`TaskCompletedHookInputSchema`): `task_subject`
-                // and `task_description` both source from the task's
-                // `description` — the M-surface task state carries no distinct
-                // `subject` field. `teammate_name` / `team_name` are not stored
-                // on the task state, so they ride as `None` (documented gap).
-                firer
-                    .fire(hooks::TaskCompletedFire {
-                        task_id: task_id.to_string(),
-                        status: status_str.to_string(),
-                        task_subject: base.description.clone(),
-                        task_description: Some(base.description.clone()),
-                        teammate_name: base.creator_teammate_name.clone(),
-                        team_name: base.creator_team_name.clone(),
-                    })
-                    .await;
-            }
-        }
+        self.fire_task_completed_hook(&task_id, status, &updated)
+            .await;
 
         Ok(updated)
     }
@@ -1235,6 +1269,9 @@ impl TaskRegistry {
         task_id: &str,
         result: Option<String>,
         usage: Option<traits::task_registry::AgentRunUsage>,
+        agent_id: Option<protocol::AgentId>,
+        agent_name: Option<String>,
+        team_name: Option<String>,
     ) {
         let Some(task_id) = self.resolve_task_id(task_id).await else {
             return;
@@ -1246,10 +1283,40 @@ impl TaskRegistry {
                 _ => return,
             }
         }
-        self.pending_rest
-            .write()
-            .await
-            .insert(task_id, RestPayload { result, usage });
+        self.pending_rest.write().await.insert(
+            task_id,
+            RestPayload {
+                result,
+                usage,
+                agent_id,
+                agent_name,
+                team_name,
+            },
+        );
+    }
+
+    fn has_live_background_children_locked(
+        map: &HashMap<String, TaskState>,
+        rested_agent_id: Option<protocol::AgentId>,
+        agent_name: Option<&str>,
+        team_name: Option<&str>,
+    ) -> bool {
+        if let Some(rested_agent_id) = rested_agent_id {
+            return map.values().any(|state| {
+                let base = state.base();
+                !base.status.is_terminal() && base.creator_agent_id == Some(rested_agent_id)
+            });
+        }
+
+        let Some(agent_name) = agent_name.filter(|name| !name.is_empty()) else {
+            return false;
+        };
+        map.values().any(|state| {
+            let base = state.base();
+            !base.status.is_terminal()
+                && base.creator_teammate_name.as_deref() == Some(agent_name)
+                && base.creator_team_name.as_deref() == team_name
+        })
     }
 
     /// Drain the terminal tasks not yet surfaced to the model, marking each
@@ -1293,6 +1360,53 @@ impl TaskRegistry {
             }
             agent.outcome.merge(outcome);
         }
+    }
+
+    /// Record a workflow's terminal payload before the status transition opens
+    /// it to the notification drain.
+    pub async fn set_workflow_outcome(
+        &self,
+        task_id: &str,
+        outcome: traits::task_registry::WorkflowTerminalOutcome,
+    ) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalWorkflow(workflow)) = map.get_mut(&task_id) {
+            workflow.outcome = outcome;
+        }
+    }
+
+    /// Atomically publish a workflow's terminal payload and terminal status.
+    ///
+    /// This closes the outcome→status race: a concurrent kill/drain cannot
+    /// observe a non-terminal workflow after its terminal payload already
+    /// landed and then overwrite it as `Killed`.
+    pub async fn finish_workflow_terminal(
+        &self,
+        task_id: &str,
+        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        status: TaskStatus,
+    ) -> Result<TaskState, TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let updated = {
+            let mut map = self.tasks.write().await;
+            let entry = map
+                .get_mut(&task_id)
+                .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+            let TaskState::LocalWorkflow(workflow) = entry else {
+                return Ok(entry.clone());
+            };
+            if workflow.base.status.is_terminal() {
+                return Ok(entry.clone());
+            }
+            workflow.outcome = outcome;
+            workflow.base.status = status;
+            entry.clone()
+        };
+
+        self.fire_task_completed_hook(&task_id, status, &updated)
+            .await;
+        Ok(updated)
     }
 
     /// [`Self::kill`] with the stop initiator recorded (`"parent"` / `"user"`).
@@ -1344,8 +1458,28 @@ impl TaskRegistry {
             };
             let error = match state {
                 TaskState::LocalAgent(agent) => agent.error.clone(),
+                TaskState::LocalWorkflow(workflow) => workflow.outcome.error.clone(),
                 _ => None,
             };
+            let workflow_outcome = match state {
+                TaskState::LocalWorkflow(workflow) => Some(workflow.outcome.clone()),
+                _ => None,
+            };
+            let workflow_metadata = match state {
+                TaskState::LocalWorkflow(workflow) => Some((
+                    workflow.script_path.clone(),
+                    workflow.run_id.clone(),
+                    workflow.args.clone(),
+                    workflow
+                        .transcript_dir
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                )),
+                _ => None,
+            };
+            let workflow_counts_available = workflow_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.progress_counts_available);
             // `local_agent` optional sections — the payload the terminating run
             // reported via `set_agent_outcome` (and the stop initiator recorded
             // by `kill_with_reason`). Every other task type carries none of
@@ -1369,7 +1503,6 @@ impl TaskRegistry {
                 // `set_agent_outcome` before its terminal status. `None` stays
                 // the byte-faithful "no result" case (a run that produced no
                 // text, or a non-agent task).
-                result: agent_outcome.result,
                 usage: agent_outcome.usage,
                 // `killed_by` (the by-Claude/by-user split, from
                 // `kill_with_reason`) + the isolation `<worktree>` section (the
@@ -1379,6 +1512,58 @@ impl TaskRegistry {
                 killed_by: agent_outcome.killed_by,
                 worktree_path: agent_outcome.worktree_path,
                 worktree_branch: agent_outcome.worktree_branch,
+                result: workflow_outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.result.clone())
+                    .or(agent_outcome.result),
+                workflow_failures: workflow_outcome
+                    .as_ref()
+                    .map(|outcome| outcome.failures.clone())
+                    .unwrap_or_default(),
+                workflow_agent_count: workflow_outcome.as_ref().map(|outcome| outcome.agent_count),
+                workflow_total_tokens: workflow_outcome
+                    .as_ref()
+                    .map(|outcome| outcome.total_tokens),
+                workflow_total_tool_calls: workflow_outcome
+                    .as_ref()
+                    .map(|outcome| outcome.total_tool_calls),
+                workflow_duration_ms: workflow_outcome.as_ref().map(|outcome| outcome.duration_ms),
+                workflow_script_path: workflow_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.0.clone()),
+                workflow_run_id: workflow_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.1.clone()),
+                workflow_args: workflow_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.2.clone()),
+                workflow_transcript_dir: workflow_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.3.clone()),
+                workflow_agents_done: workflow_counts_available
+                    .then(|| workflow_outcome.as_ref().map(|outcome| outcome.agents_done))
+                    .flatten(),
+                workflow_agents_error: workflow_counts_available
+                    .then(|| {
+                        workflow_outcome
+                            .as_ref()
+                            .map(|outcome| outcome.agents_error)
+                    })
+                    .flatten(),
+                workflow_agents_skipped: workflow_counts_available
+                    .then(|| {
+                        workflow_outcome
+                            .as_ref()
+                            .map(|outcome| outcome.agents_skipped)
+                    })
+                    .flatten(),
+                workflow_agents_empty_result: workflow_counts_available
+                    .then(|| {
+                        workflow_outcome
+                            .as_ref()
+                            .map(|outcome| outcome.agents_empty_result)
+                    })
+                    .flatten(),
             });
             // Mark notified so the completion surfaces exactly once. The task
             // itself stays addressable until an explicit cleanup/delete removes
@@ -1396,13 +1581,22 @@ impl TaskRegistry {
         // drain above already owns it).
         let rest_payloads: Vec<(String, RestPayload)> = {
             let mut armed = self.pending_rest.write().await;
-            let drained = armed.drain().collect::<Vec<_>>();
-            drained
+            armed.drain().collect::<Vec<_>>()
         };
+        let mut deferred_rest = Vec::new();
         for (id, payload) in rest_payloads {
             let Some(state) = map.get(&id) else { continue };
             let b = state.base();
             if b.status.is_terminal() {
+                continue;
+            }
+            if Self::has_live_background_children_locked(
+                &map,
+                payload.agent_id,
+                payload.agent_name.as_deref(),
+                payload.team_name.as_deref(),
+            ) {
+                deferred_rest.push((id, payload));
                 continue;
             }
             out.push(traits::task_registry::TaskNotification {
@@ -1435,9 +1629,34 @@ impl TaskRegistry {
                 killed_by: None,
                 worktree_path: None,
                 worktree_branch: None,
+                workflow_failures: Vec::new(),
+                workflow_agent_count: None,
+                workflow_total_tokens: None,
+                workflow_total_tool_calls: None,
+                workflow_duration_ms: None,
+                workflow_script_path: None,
+                workflow_run_id: None,
+                workflow_args: None,
+                workflow_transcript_dir: None,
+                workflow_agents_done: None,
+                workflow_agents_error: None,
+                workflow_agents_skipped: None,
+                workflow_agents_empty_result: None,
             });
         }
+        drop(map);
+        self.requeue_deferred_rest(deferred_rest).await;
         out
+    }
+
+    async fn requeue_deferred_rest(&self, deferred_rest: Vec<(String, RestPayload)>) {
+        if deferred_rest.is_empty() {
+            return;
+        }
+        let mut armed = self.pending_rest.write().await;
+        for (id, payload) in deferred_rest {
+            armed.entry(id).or_insert(payload);
+        }
     }
 
     /// Kill a task, cancelling its background handle if any.
@@ -1670,25 +1889,64 @@ fn task_err_to_team_spawn_err(e: TaskError) -> TeamSpawnError {
 /// REAL `input` fields (the spawn path, unlike `create`'s placeholder path,
 /// has the agent ids / commands the variant carries).
 fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState {
-    // Stamp the originating `tool_use_id` onto the task so a backgrounded agent's
+    // Stamp the originating `tool_use_id` onto the task so a background task's
     // `<task-notification>` carries the `<tool-use-id>` line (claude-code parity).
-    // Only `LocalAgent` threads it today; other types keep the caller's `None`.
-    if let TaskSpawnInput::LocalAgent {
-        tool_use_id,
-        creator_teammate_name,
-        creator_team_name,
-        ..
-    } = input
-    {
-        if base.tool_use_id.is_none() {
-            base.tool_use_id = tool_use_id.clone();
+    match input {
+        TaskSpawnInput::LocalAgent {
+            tool_use_id,
+            creator_teammate_name,
+            creator_team_name,
+            creator_agent_id,
+            ..
+        } => {
+            if base.tool_use_id.is_none() {
+                base.tool_use_id.clone_from(tool_use_id);
+            }
+            if base.creator_teammate_name.is_none() {
+                base.creator_teammate_name.clone_from(creator_teammate_name);
+            }
+            if base.creator_team_name.is_none() {
+                base.creator_team_name.clone_from(creator_team_name);
+            }
+            if base.creator_agent_id.is_none() {
+                base.creator_agent_id = *creator_agent_id;
+            }
         }
-        if base.creator_teammate_name.is_none() {
-            base.creator_teammate_name = creator_teammate_name.clone();
+        TaskSpawnInput::LocalWorkflow {
+            tool_use_id,
+            creator_teammate_name,
+            creator_team_name,
+            creator_agent_id,
+            ..
         }
-        if base.creator_team_name.is_none() {
-            base.creator_team_name = creator_team_name.clone();
+        | TaskSpawnInput::Monitor {
+            tool_use_id,
+            creator_teammate_name,
+            creator_team_name,
+            creator_agent_id,
+            ..
         }
+        | TaskSpawnInput::McpTask {
+            tool_use_id,
+            creator_teammate_name,
+            creator_team_name,
+            creator_agent_id,
+            ..
+        } => {
+            if base.tool_use_id.is_none() {
+                base.tool_use_id.clone_from(tool_use_id);
+            }
+            if base.creator_teammate_name.is_none() {
+                base.creator_teammate_name.clone_from(creator_teammate_name);
+            }
+            if base.creator_team_name.is_none() {
+                base.creator_team_name.clone_from(creator_team_name);
+            }
+            if base.creator_agent_id.is_none() {
+                base.creator_agent_id = *creator_agent_id;
+            }
+        }
+        _ => {}
     }
     match input {
         TaskSpawnInput::LocalBash { command, .. } => {
@@ -1746,8 +2004,13 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             run_id,
             invocation_mode: _,
             workflow_source: _,
+            script_is_verbatim_builtin: _,
             transcript_subdir,
             launched_from_subagent: _,
+            tool_use_id: _,
+            creator_teammate_name: _,
+            creator_team_name: _,
+            creator_agent_id: _,
         } => TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
             base,
             session_uuid: session_uuid.clone(),
@@ -1761,6 +2024,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             script_path: None,
             transcript_dir: transcript_subdir.clone(),
             current_step: 0,
+            outcome: Default::default(),
         }),
         TaskSpawnInput::MonitorMcp { server_name, watch } => {
             TaskState::MonitorMcp(crate::state::MonitorMcpTaskState {
@@ -1774,6 +2038,9 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             timeout: _,
             cwd: _,
             tool_use_id,
+            creator_teammate_name: _,
+            creator_team_name: _,
+            creator_agent_id: _,
         } => {
             if base.tool_use_id.is_none() {
                 base.tool_use_id = tool_use_id.clone();
@@ -1788,6 +2055,9 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             server_name,
             tool_name,
             tool_use_id,
+            creator_teammate_name: _,
+            creator_team_name: _,
+            creator_agent_id: _,
         } => {
             if base.tool_use_id.is_none() {
                 base.tool_use_id = tool_use_id.clone();

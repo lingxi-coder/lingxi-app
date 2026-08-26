@@ -43,7 +43,7 @@ use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 use traits::{
     BackgroundTaskHandle, ProcessCommand, ProcessError, ProcessOutput, ProcessRunner,
@@ -144,6 +144,9 @@ pub trait TaskStatusSink: Send + Sync {
         _task_id: &str,
         _result: Option<String>,
         _usage: Option<traits::task_registry::AgentRunUsage>,
+        _agent_id: Option<protocol::AgentId>,
+        _agent_name: Option<String>,
+        _team_name: Option<String>,
     ) {
     }
 
@@ -168,6 +171,31 @@ pub trait TaskStatusSink: Send + Sync {
         _task_id: &str,
         _outcome: traits::task_registry::AgentTerminalOutcome,
     ) {
+    }
+
+    /// Record a workflow's result/failure/usage payload before its terminal
+    /// status is published. Registry-backed sinks override this; standalone
+    /// handlers remain payload-agnostic.
+    async fn set_workflow_outcome(
+        &self,
+        _task_id: &str,
+        _outcome: traits::task_registry::WorkflowTerminalOutcome,
+    ) {
+    }
+
+    /// Atomically publish a workflow's terminal payload plus terminal status.
+    ///
+    /// Registry-backed sinks override this so a workflow outcome cannot be
+    /// observed in the "payload written, status still non-terminal" window.
+    /// Defaulted to the historical two-step sequence for standalone sinks.
+    async fn finish_workflow_terminal(
+        &self,
+        task_id: &str,
+        outcome: traits::task_registry::WorkflowTerminalOutcome,
+        status: TaskStatus,
+    ) {
+        self.set_workflow_outcome(task_id, outcome).await;
+        self.set_status(task_id, status).await;
     }
 
     /// Queue a live stdout event from a `monitor_ws` task. Default no-op keeps
@@ -227,11 +255,10 @@ pub struct LocalBashHandler {
     /// in-flight `run()`, which `SIGKILL`s the real OS child via the runner's
     /// `kill_on_drop`).
     workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
-    /// `task_id` → record queued for teardown by the synchronous
-    /// [`TaskHandle::cleanup`] closure (which cannot await). Drained by
-    /// [`LocalBashHandler::drain_pending_kills`], the async seam the
-    /// registry/cleanup-registry calls on agent exit.
-    pending_kill: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+    /// Task ids queued for teardown by the synchronous [`TaskHandle::cleanup`]
+    /// closure (which cannot await). The closure records the request here so a
+    /// contended async mutex cannot silently drop cancellation.
+    pending_kill: Arc<StdMutex<Vec<String>>>,
 }
 
 impl LocalBashHandler {
@@ -254,7 +281,7 @@ impl LocalBashHandler {
             output_manager,
             status_sink: Arc::new(NoopStatusSink),
             workers: Arc::new(Mutex::new(HashMap::new())),
-            pending_kill: Arc::new(Mutex::new(HashMap::new())),
+            pending_kill: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 
@@ -284,8 +311,14 @@ impl LocalBashHandler {
     /// status (a raced pending-kill record must not clobber a real
     /// Completed/Failed with `Killed`).
     pub async fn drain_pending_kills(&self) {
-        let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
-        for (task_id, rec) in pending {
+        let pending = {
+            let mut pending = self.pending_kill.lock().unwrap();
+            std::mem::take(&mut *pending)
+        };
+        for task_id in pending {
+            let Some(rec) = self.workers.lock().await.remove(&task_id) else {
+                continue;
+            };
             let _ = rec.runtime.cancel(&rec.handle).await;
             // Don't overwrite an already-reported terminal status: a worker that
             // finished on its own before this (possibly raced) record was
@@ -456,19 +489,13 @@ impl Task for LocalBashHandler {
         //    the registry/cleanup-registry drains via the async
         //    `drain_pending_kills`. Authoritative termination also flows through
         //    `Task::kill`.
-        let cleanup_workers = self.workers.clone();
         let cleanup_pending = self.pending_kill.clone();
         let cleanup_task_id = task_id.clone();
         let cleanup: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let (Ok(mut workers), Ok(mut pending)) =
-                (cleanup_workers.try_lock(), cleanup_pending.try_lock())
-            {
-                if let Some(rec) = workers.remove(&cleanup_task_id) {
-                    pending.insert(cleanup_task_id.clone(), rec);
-                }
-                // If no live record remains the worker already exited; nothing
-                // to queue (the terminal status was already reported).
-            }
+            cleanup_pending
+                .lock()
+                .unwrap()
+                .push(cleanup_task_id.clone());
         });
 
         Ok(TaskHandle::new(task_id, Some(cleanup)))
@@ -1098,8 +1125,13 @@ mod tests {
                     run_id: None,
                     invocation_mode: None,
                     workflow_source: None,
+                    script_is_verbatim_builtin: None,
                     transcript_subdir: None,
                     launched_from_subagent: false,
+                    tool_use_id: None,
+                    creator_teammate_name: None,
+                    creator_team_name: None,
+                    creator_agent_id: None,
                 },
                 make_ctx(fs),
             )

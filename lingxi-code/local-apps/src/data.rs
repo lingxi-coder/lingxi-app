@@ -15,7 +15,9 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Current internal `SQLite` schema version.
@@ -256,6 +258,23 @@ pub struct DataMigrationResult {
 pub struct AppDataStore {
     layout: AppLayout,
     connection: Connection,
+    /// Manifest hash whose JSON-field indexes have been ensured for this
+    /// connection. The schema check runs on every request, but index DDL only
+    /// needs to run once per manifest revision.
+    indexed_manifest_hash: Mutex<Option<String>>,
+}
+
+enum CachedStoreEntry {
+    Active(Arc<Mutex<AppDataStore>>),
+    /// A deleted/replaced database path. Keep this tombstone so an in-flight
+    /// request that passed the service-level app lookup cannot reopen the
+    /// database between invalidation and directory removal.
+    Invalidating,
+}
+
+fn cached_store_map() -> &'static Mutex<HashMap<PathBuf, CachedStoreEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedStoreEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl AppDataStore {
@@ -293,6 +312,10 @@ impl AppDataStore {
                  );
                  CREATE INDEX IF NOT EXISTS _lingxi_records_updated
                      ON _lingxi_records (collection, updated_at_ms DESC, record_id ASC);
+                 CREATE INDEX IF NOT EXISTS _lingxi_records_created
+                     ON _lingxi_records (collection, created_at_ms DESC, record_id ASC);
+                 CREATE INDEX IF NOT EXISTS _lingxi_records_revision
+                     ON _lingxi_records (collection, revision DESC, record_id ASC);
                  INSERT OR IGNORE INTO _lingxi_schema
                      (singleton, schema_version, manifest_hash, manifest_json, updated_at_ms)
                      VALUES (1, 1, '', '', 0);",
@@ -301,7 +324,11 @@ impl AppDataStore {
         if !was_present {
             set_private_database_permissions(&database_path)?;
         }
-        let store = Self { layout, connection };
+        let store = Self {
+            layout,
+            connection,
+            indexed_manifest_hash: Mutex::new(None),
+        };
         let state = store.schema_state()?;
         if state.schema_version != DATA_SCHEMA_VERSION {
             return Err(AppError::StorageCorrupt(format!(
@@ -310,6 +337,75 @@ impl AppDataStore {
             )));
         }
         Ok(store)
+    }
+
+    /// Open (or reuse) a process-wide cached store for `layout`.
+    ///
+    /// Schema init and WAL pragmas run once per database path; subsequent
+    /// query/mutate calls skip that work. Intended for the mobile local-app
+    /// host hot path.
+    pub fn with_cached<T>(
+        layout: AppLayout,
+        f: impl FnOnce(&mut Self) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let cache = cached_store_map();
+        let key = layout.database_path();
+        let mut map = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let store = match map.get(&key) {
+            Some(CachedStoreEntry::Active(store)) => Arc::clone(store),
+            Some(CachedStoreEntry::Invalidating) => {
+                return Err(AppError::RuntimeBusy(format!(
+                    "database {} is being removed",
+                    key.display()
+                )));
+            }
+            None => {
+                let opened = Arc::new(Mutex::new(Self::open(layout)?));
+                map.insert(key.clone(), CachedStoreEntry::Active(Arc::clone(&opened)));
+                opened
+            }
+        };
+        let mut store = store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Keep the map lock until the store lock is held. This gives
+        // invalidation a clear happens-before edge: it cannot remove an entry
+        // while a caller is between cache lookup and acquiring its store lock.
+        drop(map);
+        f(&mut store)
+    }
+
+    /// Drop a cached connection before its database path is deleted or
+    /// replaced. This prevents a later recreate from reusing an unlinked
+    /// SQLite connection.
+    pub fn invalidate_cached(layout: &AppLayout) {
+        let cache = cached_store_map();
+        let key = layout.database_path();
+        let store = {
+            let mut map = cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let store = match map.remove(&key) {
+                Some(CachedStoreEntry::Active(store)) => Some(store),
+                Some(CachedStoreEntry::Invalidating) | None => None,
+            };
+            // Keep the tombstone installed across the caller's subsequent
+            // delete/replace operation. There is no valid operation for this
+            // app id after AppService retires it, so reopening would only
+            // resurrect a stale database through a late in-flight request.
+            map.insert(key, CachedStoreEntry::Invalidating);
+            store
+        };
+        // Wait for any in-flight operation that already held the cached
+        // connection before the directory is removed. The tombstone above
+        // prevents a late opener from creating a new connection meanwhile.
+        if let Some(store) = store {
+            let _guard = store
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
     }
 
     /// Read current database schema metadata.
@@ -365,7 +461,7 @@ impl AppDataStore {
         for filter in &query.filters {
             append_filter(&mut sql, &mut values, filter)?;
         }
-        append_sort(&mut sql, &mut values, query);
+        append_sort(&mut sql, query);
         sql.push_str(" LIMIT ? OFFSET ?");
         values.push(SqlValue::Integer(i64::from(query.limit) + 1));
         values.push(SqlValue::Integer(i64::try_from(query.offset).map_err(
@@ -564,6 +660,7 @@ impl AppDataStore {
             .connection
             .transaction()
             .map_err(|error| map_database_error("begin schema migration", &error))?;
+        ensure_json_field_indexes(&transaction, manifest)?;
         transaction
             .execute(
                 "UPDATE _lingxi_schema SET schema_version = ?1, manifest_hash = ?2,
@@ -579,6 +676,11 @@ impl AppDataStore {
         transaction
             .commit()
             .map_err(|error| map_database_error("commit schema migration", &error))?;
+        *self
+            .indexed_manifest_hash
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(preview.to_manifest_hash.clone());
         Ok(DataMigrationResult {
             manifest_hash: preview.to_manifest_hash,
             backup_rel,
@@ -604,6 +706,20 @@ impl AppDataStore {
             )
             .map_err(|error| map_database_error("verify app database manifest", &error))?;
         if actual == expected {
+            let mut indexed_hash = self
+                .indexed_manifest_hash
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if indexed_hash.as_deref() != Some(expected.as_str()) {
+                let transaction = self.connection.unchecked_transaction().map_err(|error| {
+                    map_database_error("begin json index reconciliation", &error)
+                })?;
+                ensure_json_field_indexes(&transaction, manifest)?;
+                transaction.commit().map_err(|error| {
+                    map_database_error("commit json index reconciliation", &error)
+                })?;
+                *indexed_hash = Some(expected);
+            }
             Ok(())
         } else {
             Err(AppError::WorkflowStateInvalid(format!(
@@ -612,6 +728,56 @@ impl AppDataStore {
             )))
         }
     }
+}
+
+fn ensure_json_field_indexes(
+    connection: &Connection,
+    manifest: &AppManifest,
+) -> Result<(), AppError> {
+    let existing: BTreeSet<String> = connection
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND name GLOB '_lingxi_json_*'",
+        )
+        .map_err(|error| map_database_error("list json field indexes", &error))?
+        .query_map([], |row| row.get(0))
+        .map_err(|error| map_database_error("list json field indexes", &error))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()
+        .map_err(|error| map_database_error("read json field indexes", &error))?;
+    let field_ids: BTreeSet<&str> = manifest
+        .collections
+        .iter()
+        .flat_map(|collection| collection.fields.iter().map(|field| field.id.as_str()))
+        .collect();
+    let desired: BTreeMap<String, &str> = field_ids
+        .into_iter()
+        .map(|field_id| (format!("_lingxi_json_field_{field_id}"), field_id))
+        .collect();
+
+    for name in existing.iter().filter(|name| !desired.contains_key(*name)) {
+        let quoted = name.replace('"', "\"\"");
+        connection
+            .execute(&format!("DROP INDEX IF EXISTS \"{quoted}\""), [])
+            .map_err(|error| map_database_error("drop json field index", &error))?;
+    }
+
+    // The expression is independent of collection, while collection is the
+    // leading indexed column. One index per field id therefore serves every
+    // collection and avoids duplicate full-table indexes when schemas reuse a
+    // common field name. Existing canonical indexes remain untouched, so a
+    // process reopen never rebuilds a valid large index.
+    for (name, field_id) in desired {
+        if existing.contains(&name) {
+            continue;
+        }
+        let sql = format!(
+            "CREATE INDEX \"{name}\" ON _lingxi_records (collection, json_extract(document, '$.{field_id}'))"
+        );
+        connection
+            .execute(&sql, [])
+            .map_err(|error| map_database_error("create json field index", &error))?;
+    }
+    Ok(())
 }
 
 fn require_collection<'a>(
@@ -686,7 +852,6 @@ fn append_filter(
     values: &mut Vec<SqlValue>,
     filter: &DataFilter,
 ) -> Result<(), AppError> {
-    let path = format!("$.{}", filter.field_id);
     match filter.operator {
         DataFilterOperator::Equal
         | DataFilterOperator::NotEqual
@@ -703,16 +868,20 @@ fn append_filter(
                 DataFilterOperator::GreaterThanOrEqual => ">=",
                 DataFilterOperator::Contains | DataFilterOperator::In => unreachable!(),
             };
-            sql.push_str(&format!(" AND json_extract(document, ?) {operator} ?"));
-            values.push(SqlValue::Text(path));
+            sql.push_str(&format!(
+                " AND json_extract(document, '$.{}') {operator} ?",
+                filter.field_id
+            ));
             values.push(json_scalar_to_sql(&filter.value)?);
         }
         DataFilterOperator::Contains => {
             let needle = filter.value.as_str().ok_or_else(|| {
                 AppError::InvalidRequest("contains filter requires a string".into())
             })?;
-            sql.push_str(" AND CAST(json_extract(document, ?) AS TEXT) LIKE ? ESCAPE '\\'");
-            values.push(SqlValue::Text(path));
+            sql.push_str(&format!(
+                " AND CAST(json_extract(document, '$.{}') AS TEXT) LIKE ? ESCAPE '\\'",
+                filter.field_id
+            ));
             values.push(SqlValue::Text(format!("%{}%", escape_like(needle))));
         }
         DataFilterOperator::In => {
@@ -720,8 +889,10 @@ fn append_filter(
                 .value
                 .as_array()
                 .ok_or_else(|| AppError::InvalidRequest("in filter requires an array".into()))?;
-            sql.push_str(" AND json_extract(document, ?) IN (");
-            values.push(SqlValue::Text(path));
+            sql.push_str(&format!(
+                " AND json_extract(document, '$.{}') IN (",
+                filter.field_id
+            ));
             for (index, member) in members.iter().enumerate() {
                 if index > 0 {
                     sql.push_str(", ");
@@ -735,7 +906,7 @@ fn append_filter(
     Ok(())
 }
 
-fn append_sort(sql: &mut String, values: &mut Vec<SqlValue>, query: &DataQuery) {
+fn append_sort(sql: &mut String, query: &DataQuery) {
     sql.push_str(" ORDER BY ");
     match query.sort_key.as_ref().unwrap_or(&DataSortKey::UpdatedAt) {
         DataSortKey::RecordId => sql.push_str("record_id"),
@@ -743,8 +914,7 @@ fn append_sort(sql: &mut String, values: &mut Vec<SqlValue>, query: &DataQuery) 
         DataSortKey::UpdatedAt => sql.push_str("updated_at_ms"),
         DataSortKey::Revision => sql.push_str("revision"),
         DataSortKey::Field(field_id) => {
-            sql.push_str("json_extract(document, ?)");
-            values.push(SqlValue::Text(format!("$.{field_id}")));
+            sql.push_str(&format!("json_extract(document, '$.{field_id}')"));
         }
     }
     sql.push_str(match query.sort_direction {
@@ -1351,6 +1521,26 @@ mod tests {
         let manifest = manifest();
         store.migrate_manifest(&manifest, false, 1).unwrap();
         (root, store, manifest)
+    }
+
+    #[test]
+    fn reopening_preserves_existing_json_indexes() {
+        let (root, store, manifest) = open_initialized();
+        drop(store);
+        let layout = AppLayout::new(root.path(), "abcd1234").unwrap();
+        let reopened = AppDataStore::open(layout).unwrap();
+        let schema_before: i64 = reopened
+            .connection
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .unwrap();
+
+        reopened.ensure_manifest(&manifest).unwrap();
+
+        let schema_after: i64 = reopened
+            .connection
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(schema_after, schema_before);
     }
 
     #[test]

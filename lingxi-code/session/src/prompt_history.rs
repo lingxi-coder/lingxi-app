@@ -717,6 +717,20 @@ mod tests {
     }
 
     #[test]
+    fn read_merge_keeps_a_single_history_row_larger_than_256_kib() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path(), "s-large");
+        let display = "x".repeat(300 * 1024);
+        store.enqueue(&display);
+        assert!(store.flush());
+
+        let fresh = store_in(dir.path(), "s-fresh");
+        let merged = fresh.read_merged();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].display, display);
+    }
+
+    #[test]
     fn recall_prioritizes_current_session_and_filters_project() {
         let dir = tempfile::tempdir().unwrap();
         // Another project's entry must not appear.

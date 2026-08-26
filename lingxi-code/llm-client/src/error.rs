@@ -330,6 +330,9 @@ impl LlmError {
 /// unwrap — and no Bedrock content-type validation exists here to branch on.
 #[must_use]
 pub fn error_display_text(error: &LlmError) -> String {
+    if crate::model::stream_watchdog::is_stream_no_response(error) {
+        return "No response from API".to_string();
+    }
     if let LlmError::TlsCert { code, .. } = error {
         return match code.as_str() {
             "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
@@ -364,7 +367,7 @@ pub fn error_display_text(error: &LlmError) -> String {
     };
 
     if crate::model::stream_watchdog::is_stream_suspended(error) {
-        return "Connection interrupted by system sleep".to_string();
+        return "Connection lost while your computer was asleep".to_string();
     }
     if matches!(error, LlmError::TransportTimeout { .. }) {
         return "Request timed out. Check your internet connection and proxy settings".to_string();
@@ -490,7 +493,12 @@ mod api_error_status_tests {
                 std::time::Duration::from_secs(300),
                 std::time::Duration::from_secs(900),
             )),
-            "Connection interrupted by system sleep"
+            "Connection lost while your computer was asleep"
+        );
+
+        assert_eq!(
+            error_display_text(&crate::model::stream_watchdog::first_byte_timeout_error()),
+            "No response from API"
         );
         // No drift → an ordinary idle timeout, NOT a suspend.
         assert!(!crate::model::stream_watchdog::is_stream_suspended(

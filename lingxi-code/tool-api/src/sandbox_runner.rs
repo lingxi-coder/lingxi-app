@@ -17,6 +17,13 @@ use sandbox::wrap::SandboxWrapError;
 use std::path::Path;
 use std::sync::Arc;
 
+/// User-facing sandbox-violation lines recorded for one command.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SandboxCommandViolations {
+    /// One line per surfaced violation, in store order.
+    pub lines: Vec<String>,
+}
+
 /// Async seam that turns a raw command string into a sandbox-wrapped command.
 ///
 /// Implementations may be stateful (e.g. a per-session `SandboxManager`); the
@@ -51,6 +58,11 @@ pub trait SandboxRunner: Send + Sync {
     /// Reset any per-session sandbox state (e.g. drop the `SandboxManager` and
     /// its proxies) at session teardown. Default no-op.
     async fn reset(&self) {}
+
+    /// User-facing sandbox violations recorded for `command`.
+    async fn command_violations(&self, _command: &str) -> SandboxCommandViolations {
+        SandboxCommandViolations::default()
+    }
 }
 
 /// The current behavior, hoisted behind the [`SandboxRunner`] seam.
@@ -208,6 +220,10 @@ mod tests {
         // Defaults are no-ops; they must be callable through the trait object.
         runner.cleanup_after_command().await;
         runner.reset().await;
+        assert_eq!(
+            runner.command_violations("ls -la").await,
+            SandboxCommandViolations::default()
+        );
 
         // Down-cast is not available through the trait object, so re-create a
         // concrete instance to assert the recorded args via a fresh call path.

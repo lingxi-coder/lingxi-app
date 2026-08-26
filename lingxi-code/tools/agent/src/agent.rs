@@ -1567,6 +1567,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 .map(std::string::ToString::to_string),
             creator_teammate_name: ctx.agent_name.clone(),
             creator_team_name: ctx.team_name.clone(),
+            creator_agent_id: ctx.agent_id,
             // Workflow-only spawn seam (defaults; the Agent tool doesn't use the
             // workflow-subagent prompt override/addendum or disallow-union).
             system_prompt_override: None,
@@ -2668,6 +2669,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             tool_use_id: None,
             creator_teammate_name: ctx.agent_name.clone(),
             creator_team_name: ctx.team_name.clone(),
+            creator_agent_id: ctx.agent_id,
             // Workflow-only spawn seam (defaults; unused by the Agent tool).
             system_prompt_override: None,
             system_prompt_addendum: None,

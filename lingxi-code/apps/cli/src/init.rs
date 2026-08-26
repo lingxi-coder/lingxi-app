@@ -28,6 +28,8 @@ use client_protocol::permission::PermissionRequest as PermissionRequestDto;
 use command_api::RegistrySlashDispatcher;
 use engine_desktop::{build, DesktopConfig};
 use orchestrator::ConversationOrchestrator;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use traits::{AuthHandle, OutputStream};
 
@@ -401,6 +403,94 @@ pub(crate) fn parse_cli_mcp_servers(entries: Option<&Vec<String>>) -> Vec<mcp::M
     out
 }
 
+/// Load merged settings once per `(cwd, include_user, include_project)` and
+/// reuse the snapshot for every boot helper below.
+fn load_scoped_settings(
+    include_user: bool,
+    include_project: bool,
+) -> Option<engine::settings::EffectiveSettings> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    type Key = (std::path::PathBuf, bool, bool, u64);
+    static CACHE: std::sync::Mutex<Option<(Key, engine::settings::EffectiveSettings)>> =
+        std::sync::Mutex::new(None);
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let revision = settings_revision(&project_dir, include_user, include_project, &env);
+    let key = (project_dir.clone(), include_user, include_project, revision);
+    {
+        let guard = CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((cached_key, settings)) = guard.as_ref() {
+            if *cached_key == key {
+                return Some(settings.clone());
+            }
+        }
+    }
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    let loaded =
+        engine::settings::Settings::load_scoped(inputs, include_user, include_project).ok()?;
+    *CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, loaded.clone()));
+    Some(loaded)
+}
+
+fn settings_revision(
+    project_dir: &std::path::Path,
+    include_user: bool,
+    include_project: bool,
+    env: &std::collections::BTreeMap<String, String>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    include_user.hash(&mut hasher);
+    include_project.hash(&mut hasher);
+    if include_user {
+        settings_file_revision(
+            engine::settings::loader::user_settings_path().as_deref(),
+            &mut hasher,
+        );
+    }
+    if include_project {
+        settings_file_revision(
+            Some(engine::settings::loader::project_settings_path(project_dir).as_path()),
+            &mut hasher,
+        );
+        settings_file_revision(
+            Some(engine::settings::loader::local_settings_path(project_dir).as_path()),
+            &mut hasher,
+        );
+    }
+    for (key, value) in env {
+        key.hash(&mut hasher);
+        value.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn settings_file_revision(path: Option<&std::path::Path>, hasher: &mut DefaultHasher) {
+    let Some(path) = path else {
+        0u8.hash(hasher);
+        return;
+    };
+    path.hash(hasher);
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            metadata.len().hash(hasher);
+            metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .hash(hasher);
+        }
+        Err(_) => 0u8.hash(hasher),
+    }
+}
+
 /// Load the merged settings `providers` object, honoring `--setting-sources`.
 ///
 /// Resolves the project dir from the *current* working directory — the process
@@ -412,16 +502,7 @@ fn load_provider_profiles(
     include_user: bool,
     include_project: bool,
 ) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
-        .ok()
-        .and_then(|eff| eff.settings.providers)
+    load_scoped_settings(include_user, include_project).and_then(|eff| eff.settings.providers)
 }
 
 /// Load the merged `settings.axScreenReader` (project + user + env layers,
@@ -431,15 +512,7 @@ fn load_provider_profiles(
 /// its "off" default.
 pub(crate) fn load_settings_ax_screen_reader(argv: &Argv) -> Option<bool> {
     let (include_user, include_project) = setting_source_flags(argv.setting_sources.as_deref());
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
-        .ok()
+    load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.ax_screen_reader)
 }
 
@@ -450,15 +523,7 @@ pub(crate) fn load_settings_ax_screen_reader(argv: &Argv) -> Option<bool> {
 /// env var / `--max-thinking-tokens` flag budget pre-empts it). `None` when
 /// unset / on any load failure → the resolver keeps thinking on (adaptive).
 fn load_always_thinking_enabled(include_user: bool, include_project: bool) -> Option<bool> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
-        .ok()
+    load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.always_thinking_enabled)
 }
 
@@ -468,15 +533,7 @@ fn load_always_thinking_enabled(include_user: bool, include_project: bool) -> Op
 /// `--model` is absent, so the picker choice survives a restart. `None` when
 /// unset / on any load failure → the caller keeps the built-in default.
 fn load_settings_model(include_user: bool, include_project: bool) -> Option<String> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
-        .ok()
+    load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.model)
         .filter(|m| !m.trim().is_empty())
 }
@@ -485,15 +542,7 @@ fn load_settings_model(include_user: bool, include_project: bool) -> Option<Stri
 /// the custom plan-file directory (206 `iT`). `None` when unset/blank; the
 /// orchestrator resolves + containment-checks it against the project root.
 fn load_settings_plans_directory(include_user: bool, include_project: bool) -> Option<String> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
-        .ok()
+    load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.plans_directory)
         .filter(|d| !d.trim().is_empty())
 }
@@ -502,15 +551,7 @@ fn load_settings_plans_directory(include_user: bool, include_project: bool) -> O
 /// filtered. The live credential provider invokes the helper only when no
 /// higher-priority Anthropic credential was configured.
 fn load_settings_api_key_helper(include_user: bool, include_project: bool) -> Option<String> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
-        .ok()
+    load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.api_key_helper)
         .filter(|d| !d.trim().is_empty())
 }
@@ -523,15 +564,7 @@ fn load_settings_company_announcements(
     include_user: bool,
     include_project: bool,
 ) -> Option<Vec<String>> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
-        .ok()
+    load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.company_announcements)
 }
 
@@ -541,15 +574,7 @@ fn load_settings_emoji_completion_enabled(
     include_user: bool,
     include_project: bool,
 ) -> Option<bool> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
-        .ok()
+    load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.emoji_completion_enabled)
 }
 
@@ -557,15 +582,7 @@ fn load_settings_emoji_completion_enabled(
 /// glob patterns / absolute paths of `LINGXI.md` files to exclude from the
 /// system prompt (claude-code `isLingxiMdExcluded`). Empty when unset.
 fn load_lingxi_md_excludes(include_user: bool, include_project: bool) -> Vec<String> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
-        .ok()
+    load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.lingxi_md_excludes)
         .unwrap_or_default()
 }
@@ -576,16 +593,7 @@ fn load_lingxi_md_excludes(include_user: bool, include_project: bool) -> Vec<Str
 /// `None` on any load failure or when no `routing` block is set; callers then
 /// fall back to the default (empty) routing config.
 fn load_routing(include_user: bool, include_project: bool) -> Option<serde_json::Value> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
-        .ok()
-        .and_then(|eff| eff.settings.routing)
+    load_scoped_settings(include_user, include_project).and_then(|eff| eff.settings.routing)
 }
 
 /// Resolve a deterministic [`DesktopConfig`] from `Argv` + `std::env`.
@@ -656,7 +664,11 @@ pub(crate) fn resolve_desktop_config(
     // servers survive, exactly the strict-mcp-config shape). `--bare` does NOT
     // (`V5d.mcpAutoDiscovered:!1`; its help never lists MCP among the skips).
     if argv.strict_mcp_config || gates.disables_mcp_discovery() {
-        let nonexistent = std::path::PathBuf::from("/dev/null");
+        // Use a fresh path that cannot exist instead of `/dev/null`: the MCP
+        // loader treats an existing empty file as malformed JSON and would
+        // otherwise emit three spurious warnings in every strict child.
+        let nonexistent =
+            std::env::temp_dir().join(format!(".lingxi-no-mcp-config-{}", uuid::Uuid::new_v4()));
         project_mcp_path = nonexistent.clone();
         global_mcp_path = nonexistent;
     }
@@ -794,6 +806,12 @@ pub(crate) fn resolve_desktop_config(
         // `NoOpPermissionGate` (allow) — a known limitation of the v0.6.0
         // fallback REPL, not the primary interactive surface.
         deny_unresolved_ask: argv.print,
+        // Claude Code 2.1.245 `process.stdout.isTTY??!1`. Independent of
+        // `--print`: `-p` in a terminal is both print and TTY.
+        is_tty: {
+            use std::io::IsTerminal;
+            std::io::stdout().is_terminal()
+        },
         // CLI `--max-turns` / `--max-budget-usd` → orchestrator caps in `build()`
         // (print-gated above; interactive sessions leave both unset).
         max_turns,
@@ -1405,13 +1423,12 @@ mod tests {
             cfg.memory_provider.is_none(),
             "safe mode disables LINGXI.md"
         );
-        assert!(
-            cfg.mcp_paths
-                .iter()
-                .all(|p| p == std::path::Path::new("/dev/null")),
-            "safe mode nulls discovered MCP paths: {:?}",
-            cfg.mcp_paths
-        );
+        assert_eq!(cfg.mcp_paths[0], cfg.mcp_paths[1]);
+        assert!(!cfg.mcp_paths[0].exists());
+        assert!(cfg.mcp_paths[0]
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| name.starts_with(".lingxi-no-mcp-config-")));
 
         // Safe mode + --add-dir: NO escape (unlike bare).
         let safe_dir =

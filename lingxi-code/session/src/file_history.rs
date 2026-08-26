@@ -501,11 +501,11 @@ impl FileHistory {
             return true;
         };
         let backup_path = self.resolve_backup_path(name);
-        let orig = tokio::fs::read(original).await;
-        let back = tokio::fs::read(&backup_path).await;
-        match (orig, back) {
-            (Ok(a), Ok(b)) => a != b,
-            // One readable and the other not ⇒ changed.
+        let orig_meta = tokio::fs::metadata(original).await;
+        let back_meta = tokio::fs::metadata(&backup_path).await;
+        match (orig_meta, back_meta) {
+            (Ok(a), Ok(b)) if a.len() != b.len() => true,
+            (Ok(_), Ok(_)) => files_differ(original, &backup_path).await,
             _ => true,
         }
     }
@@ -529,6 +529,37 @@ impl FileHistory {
             p.to_path_buf()
         } else {
             self.cwd.join(p)
+        }
+    }
+}
+
+async fn files_differ(original: &Path, backup: &Path) -> bool {
+    use tokio::io::AsyncReadExt;
+    let Ok(mut orig) = tokio::fs::File::open(original).await else {
+        return true;
+    };
+    let Ok(mut back) = tokio::fs::File::open(backup).await else {
+        return true;
+    };
+    // Keep the async state small. Fixed arrays become part of the nested
+    // `has_any_changes` future and can overflow Tokio's test/runtime stack in
+    // debug builds before the first read is polled.
+    let mut orig_buf = vec![0u8; 65_536];
+    let mut back_buf = vec![0u8; 65_536];
+    loop {
+        let orig_n = match orig.read(&mut orig_buf).await {
+            Ok(n) => n,
+            Err(_) => return true,
+        };
+        let back_n = match back.read(&mut back_buf).await {
+            Ok(n) => n,
+            Err(_) => return true,
+        };
+        if orig_n != back_n || orig_buf[..orig_n] != back_buf[..back_n] {
+            return true;
+        }
+        if orig_n == 0 {
+            return false;
         }
     }
 }

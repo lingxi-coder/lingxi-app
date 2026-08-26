@@ -770,6 +770,13 @@ impl PermissionPolicy {
         if let Some(ask) = Self::shell_overlength_bash_ask(tool_name, input) {
             return ask;
         }
+        #[cfg(feature = "bash-ast")]
+        let bash_ast = if shell_command::is_shell_tool(tool_name) {
+            shell_command::command_from_input(input)
+                .map(crate::bash_ast_security::parse_for_security)
+        } else {
+            None
+        };
         // BYPASS-01 / ALLOWOVER-01: every guard ASK below is routed through
         // `resolve_guard_ask`, which (1) lets bypassPermissions suppress a
         // type-`other` guard ask (returning allow), (2) lets a tool-wide allow
@@ -778,7 +785,9 @@ impl PermissionPolicy {
         // through unchanged.
         let bypass = self.bypass_active(mode);
         #[cfg(feature = "bash-ast")]
-        if let Some(ask) = Self::shell_dangerous_rm_variable_ask(tool_name, input) {
+        if let Some(ask) =
+            Self::shell_dangerous_rm_variable_ask(tool_name, input, bash_ast.as_ref())
+        {
             return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
         }
         // 1f. CATASTROPHIC REMOVAL FORCED-ASK. This must run before every
@@ -826,7 +835,12 @@ impl PermissionPolicy {
         // PERM-SBX-WOG-02: on the too-complex/parse-abort branch this runs the
         // strict WOg gate instead of the permissive BAu check (BAu XOR WOg);
         // a normally-parsed command keeps the current BAu behavior.
-        if self.shell_sandbox_auto_allows_decision(tool_name, input) {
+        if self.shell_sandbox_auto_allows_decision(
+            tool_name,
+            input,
+            #[cfg(feature = "bash-ast")]
+            bash_ast.as_ref(),
+        ) {
             return allow_sandbox_auto();
         }
         // 2. Path containment guards. The catastrophic removal guard used to
@@ -1006,7 +1020,12 @@ impl PermissionPolicy {
                 return allow_with_rule(rule);
             }
         }
-        if let Some(ask) = Self::shell_bash_safety_ask(tool_name, input) {
+        if let Some(ask) = Self::shell_bash_safety_ask(
+            tool_name,
+            input,
+            #[cfg(feature = "bash-ast")]
+            bash_ast.as_ref(),
+        ) {
             return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
         }
         // Local-app build workflows receive a temporary, canonical-root lease.
@@ -1698,6 +1717,9 @@ impl PermissionPolicy {
         &self,
         tool_name: &str,
         input: &serde_json::Value,
+        #[cfg(feature = "bash-ast")] parsed: Option<
+            &crate::bash_ast_security::ParseForSecurityResult,
+        >,
     ) -> bool {
         let Some(sandbox) = self.sandbox_runtime.as_ref() else {
             return false;
@@ -1713,10 +1735,17 @@ impl PermissionPolicy {
         };
         #[cfg(feature = "bash-ast")]
         {
-            if let crate::bash_ast_security::ParseForSecurityResult::TooComplex { reason } =
-                crate::bash_ast_security::parse_for_security(cmd)
+            let parsed_owned;
+            let verdict = match parsed {
+                Some(p) => p,
+                None => {
+                    parsed_owned = crate::bash_ast_security::parse_for_security(cmd);
+                    &parsed_owned
+                }
+            };
+            if let crate::bash_ast_security::ParseForSecurityResult::TooComplex { reason } = verdict
             {
-                return sandbox.wog_allows_when_too_complex(cmd, &reason);
+                return sandbox.wog_allows_when_too_complex(cmd, reason);
             }
         }
         sandbox.auto_allows(cmd)
@@ -1753,16 +1782,26 @@ impl PermissionPolicy {
     fn shell_dangerous_rm_variable_ask(
         tool_name: &str,
         input: &serde_json::Value,
+        parsed: Option<&crate::bash_ast_security::ParseForSecurityResult>,
     ) -> Option<PermissionResult> {
         if !shell_command::is_shell_tool(tool_name) {
             return None;
         }
         let command = shell_command::command_from_input(input)?;
         // Too-complex gate (`hHg` runs `GIu` only on the too-complex branch).
-        if !matches!(
-            crate::bash_ast_security::parse_for_security(command),
-            crate::bash_ast_security::ParseForSecurityResult::TooComplex { .. }
-        ) {
+        let too_complex = match parsed {
+            Some(p) => {
+                matches!(
+                    p,
+                    crate::bash_ast_security::ParseForSecurityResult::TooComplex { .. }
+                )
+            }
+            None => matches!(
+                crate::bash_ast_security::parse_for_security(command),
+                crate::bash_ast_security::ParseForSecurityResult::TooComplex { .. }
+            ),
+        };
+        if !too_complex {
             return None;
         }
         let (cmd, target) = crate::dangerous_removal::dangerous_rm_on_variable_path(command)?;
@@ -2111,6 +2150,9 @@ impl PermissionPolicy {
     fn shell_bash_safety_ask(
         tool_name: &str,
         input: &serde_json::Value,
+        #[cfg(feature = "bash-ast")] parsed: Option<
+            &crate::bash_ast_security::ParseForSecurityResult,
+        >,
     ) -> Option<PermissionResult> {
         if !shell_command::is_shell_tool(tool_name) {
             return None;
@@ -2134,12 +2176,20 @@ impl PermissionPolicy {
             use crate::bash_ast_security::{
                 check_semantics, parse_for_security, ParseForSecurityResult, SemanticCheckResult,
             };
-            match parse_for_security(command) {
+            let parsed_owned;
+            let verdict = match parsed {
+                Some(p) => p,
+                None => {
+                    parsed_owned = parse_for_security(command);
+                    &parsed_owned
+                }
+            };
+            match verdict {
                 ParseForSecurityResult::TooComplex { reason } => {
-                    return Some(ask_bash_safety(tool_name, reason));
+                    return Some(ask_bash_safety(tool_name, reason.clone()));
                 }
                 ParseForSecurityResult::Simple { commands } => {
-                    if let SemanticCheckResult::Deny { reason } = check_semantics(&commands) {
+                    if let SemanticCheckResult::Deny { reason } = check_semantics(commands) {
                         return Some(ask_bash_safety(tool_name, reason));
                     }
                     return None;

@@ -2674,6 +2674,10 @@ fn forward_desktop_workflow_event(
                     phase_index: progress.phase_index.map(|value| value as usize),
                     phase_title: progress.phase_title,
                     state: progress.state,
+                    queued_at_ms: progress.queued_at_ms,
+                    started_at_ms: progress.started_at_ms,
+                    tokens: progress.tokens,
+                    tool_calls: progress.tool_calls,
                 },
             )));
         }

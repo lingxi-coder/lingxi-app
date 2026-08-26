@@ -673,7 +673,9 @@ async fn drain_main_thread(
             Some(ref t) => tag_loop_tick_in_flight(loop_runtime, true, t),
             None => tag_loop_tick_in_flight(loop_runtime, false, &joined),
         }
-        queue.remove(&consumed, "drained into follow-up turn").await;
+        queue
+            .consume(&consumed, "drained into follow-up turn")
+            .await;
         let (generation, cancel) = active_turn.begin(None);
         driver.run_turn_with_cancel(joined, cancel).await;
         interactions.drain().await;

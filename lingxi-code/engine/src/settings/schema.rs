@@ -298,6 +298,12 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_keyword_trigger_enabled: Option<bool>,
 
+    /// Scalar field (later source wins). Session-scoped gate for dynamic
+    /// workflows. Absence resolves to enabled at the composition root, matching
+    /// Claude Code's default-on path when no plan/experiment gate disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_workflows: Option<bool>,
+
     /// Scalar field (later source wins). `workflowSizeGuideline` controls the
     /// advisory fan-out size appended to the Workflow tool prompt. Valid wire
     /// values are `unrestricted`, `small`, `medium`, and `large`; consumers
@@ -847,6 +853,12 @@ mod tests {
         let parsed: SettingsJson =
             serde_json::from_str(r#"{"workflowSizeGuideline":"medium"}"#).unwrap();
         assert_eq!(parsed.workflow_size_guideline.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn deserializes_enable_workflows() {
+        let parsed: SettingsJson = serde_json::from_str(r#"{"enableWorkflows":false}"#).unwrap();
+        assert_eq!(parsed.enable_workflows, Some(false));
     }
 
     #[test]

@@ -1492,8 +1492,8 @@ impl McpRegistry {
         &self,
         configs: Vec<McpServerConfig>,
     ) -> Vec<(String, Result<McpConnectionId, McpError>)> {
-        let mut out = Vec::with_capacity(configs.len());
-        for config in configs {
+        use futures_util::future::join_all;
+        let futs = configs.into_iter().map(|config| async move {
             let name = config.name.clone();
             if config.disabled {
                 self.connections.write().await.insert(
@@ -1504,7 +1504,7 @@ impl McpRegistry {
                     },
                 );
                 tracing::debug!(server = %name, "skipping disabled MCP server");
-                continue;
+                return None;
             }
 
             let result = self.connect(config.clone()).await;
@@ -1520,9 +1520,9 @@ impl McpRegistry {
                     },
                 );
             }
-            out.push((name, result));
-        }
-        out
+            Some((name, result))
+        });
+        join_all(futs).await.into_iter().flatten().collect()
     }
 
     /// Background reconnect/backoff loop (claude-code `reconnectWithBackoff`).
@@ -2054,17 +2054,32 @@ impl McpRegistry {
     /// `appState.mcp.tools` in order and pushing first-seen server names, with
     /// NO sort, so the required-MCP error lists servers in that same order.
     pub async fn servers_with_tools(&self) -> Vec<String> {
-        let clients: Vec<Arc<McpClient>> = self
+        let clients: Vec<(String, Arc<McpClient>)> = self
             .clients
             .read()
             .await
-            .values()
-            .map(|entry| Arc::clone(&entry.client))
+            .iter()
+            .map(|(name, entry)| (name.clone(), Arc::clone(&entry.client)))
+            .collect();
+        let cached: HashMap<String, Vec<traits::McpToolDto>> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter_map(|(name, state)| match state {
+                McpConnectionState::Connected { tools, .. } => Some((name.clone(), tools.clone())),
+                _ => None,
+            })
             .collect();
         let mut out: Vec<String> = Vec::new();
-        for client in clients {
-            let Ok(tools) = client.list_tools().await else {
-                continue;
+        for (name, client) in clients {
+            let tools = if let Some(tools) = cached.get(&name) {
+                tools.clone()
+            } else {
+                match client.list_tools().await {
+                    Ok(tools) => tools,
+                    Err(_) => continue,
+                }
             };
             for tool in tools {
                 // `full_name` is `mcp__<server>__<tool>` (rewrite site in

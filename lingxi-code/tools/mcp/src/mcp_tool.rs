@@ -1151,6 +1151,9 @@ impl Tool for MCPTool {
             server_name: server.clone(),
             tool_name: tool.clone(),
             tool_use_id: tool_use_id_str.clone(),
+            creator_teammate_name: ctx.agent_name.clone(),
+            creator_team_name: ctx.team_name.clone(),
+            creator_agent_id: ctx.agent_id,
         };
         let task_id = match task_registry
             .register_mcp_task(registration, cancel.clone())
@@ -2601,6 +2604,10 @@ mod auto_background_race_tests {
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
         use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-slow"));
+        use_ctx.agent_name = Some("builder".into());
+        use_ctx.team_name = Some("alpha".into());
+        let creator_agent_id = protocol::AgentId::new();
+        use_ctx.agent_id = Some(creator_agent_id);
         // Interactive session → default 120000ms threshold (flag default on).
 
         let result = tool
@@ -2623,6 +2630,9 @@ mod auto_background_race_tests {
         assert_eq!(regd[0].server_name, "slow");
         assert_eq!(regd[0].tool_name, "slowtool");
         assert_eq!(regd[0].tool_use_id.as_deref(), Some("tu-slow"));
+        assert_eq!(regd[0].creator_teammate_name.as_deref(), Some("builder"));
+        assert_eq!(regd[0].creator_team_name.as_deref(), Some("alpha"));
+        assert_eq!(regd[0].creator_agent_id, Some(creator_agent_id));
     }
 
     // Auto-background disabled (`auto_bg_ms == 0`, here via the non-interactive

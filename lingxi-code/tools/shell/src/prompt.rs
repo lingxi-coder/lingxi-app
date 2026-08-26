@@ -248,7 +248,7 @@ const SANDBOX_PROMPT_LIST_MAX: usize = 50;
 ///
 /// Applied to EVERY list rendered into the `## Command sandbox` JSON —
 /// `read.denyOnly`, `read.allowWithinDeny`, `write.allowOnly`,
-/// `write.denyWithinAllow`, `allowedHosts`, `deniedHosts`, `allowUnixSockets` —
+/// `write.denyWithinAllow`, `deniedHosts`, `allowUnixSockets` —
 /// AFTER dedup / `$TMPDIR` normalization, matching the oracle's
 /// `Phr(gXr(list))` / `Phr(l(t.allowOnly))` nesting.
 fn truncate_for_prompt(items: Vec<String>) -> Vec<String> {
@@ -443,7 +443,6 @@ fn temp_file_bullet(exports_tmpdir: bool) -> &'static str {
 /// - read `allowWithinDeny`    → `filesystem.allow_read` (only when non-empty)
 /// - write `allowOnly`         → `filesystem.allow_write` (via [`normalize_allow_only`])
 /// - write `denyWithinAllow`   → `filesystem.deny_write`
-/// - network `allowedHosts`    → `network.allowed_domains` (only when non-empty)
 /// - network `deniedHosts`     → `network.denied_domains` (only when non-empty)
 /// - `allowUnixSockets`        → `network.allow_unix_sockets` (only when non-empty)
 /// - `ignoreViolations`        → `ignore_violations`
@@ -481,15 +480,10 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     });
 
     // Network config object — only emit keys that have values, mirroring the
-    // TS conditional-spread shape (`...(x && { x })`). Key order: allowedHosts,
-    // then deniedHosts, then allowUnixSockets (prompt.ts:205-213).
+    // TS conditional-spread shape (`...(x && { x })`). Latest Claude Code only
+    // surfaces deniedHosts/allowUnixSockets in the prompt; allowedHosts are
+    // intentionally omitted even when the allowlist is non-empty.
     let mut network = serde_json::Map::new();
-    if !cfg.network.allowed_domains.is_empty() {
-        network.insert(
-            "allowedHosts".into(),
-            serde_json::json!(truncate_for_prompt(dedup(&cfg.network.allowed_domains))),
-        );
-    }
     if !cfg.network.denied_domains.is_empty() {
         network.insert(
             "deniedHosts".into(),
@@ -505,7 +499,8 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
 
     let mut restriction_lines: Vec<String> = Vec::new();
     restriction_lines.push(format!("Filesystem: {}", json_compact(&filesystem)));
-    if !network.is_empty() {
+    let has_network_prompt = !network.is_empty();
+    if has_network_prompt {
         restriction_lines.push(format!(
             "Network: {}",
             json_compact(&serde_json::Value::Object(network))
@@ -550,6 +545,9 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     };
 
     let mut items = sandbox_override_items;
+    if has_network_prompt {
+        items.push(Bullet::Item("Network egress goes through a filtering proxy. Attempt requests and read the error rather than predicting whether a host is reachable; denied connections are reported in a `<sandbox_violations>` block explaining the reason.".into()));
+    }
     items.push(Bullet::Item(
         temp_file_bullet(sandbox_exports_tmpdir()).into(),
     ));
@@ -1223,6 +1221,7 @@ mod tests {
             },
             network: sandbox::runtime_config::NetworkRestrictionConfig {
                 allowed_domains: vec!["example.com".into()],
+                denied_domains: vec!["blocked.example".into()],
                 ..Default::default()
             },
             ..Default::default()
@@ -1240,7 +1239,8 @@ mod tests {
             "writable path not inlined; got:\n{p}"
         );
         assert!(
-            p.contains("Network: ") && p.contains("\"allowedHosts\":[\"example.com\"]"),
+            p.contains("Network egress goes through a filtering proxy.")
+                && !p.contains("allowedHosts"),
             "network line missing; got:\n{p}"
         );
         // disabled-by-policy branch (allow_unsandboxed_commands=false).
@@ -1356,11 +1356,11 @@ mod tests {
             ..Default::default()
         };
         let p = simple_prompt(&cfg);
-        // Seven lists × one marker each.
+        // Six lists × one marker each (allowedHosts no longer render).
         assert_eq!(
             p.matches("... and 10 more (truncated for prompt size)")
                 .count(),
-            7,
+            6,
             "every sandbox list must be capped at 50; got:\n{p}"
         );
         // The 50th entry survives, the 51st does not.
@@ -1374,7 +1374,6 @@ mod tests {
     #[test]
     fn sandbox_section_emits_denied_hosts_in_order() {
         let _g = env_lock();
-        // allowedHosts THEN deniedHosts THEN allowUnixSockets.
         let cfg = SandboxRuntimeConfig {
             enabled: true,
             network: sandbox::runtime_config::NetworkRestrictionConfig {
@@ -1387,8 +1386,12 @@ mod tests {
         };
         let p = simple_prompt(&cfg);
         assert!(
-            p.contains("\"allowedHosts\":[\"a.com\"],\"deniedHosts\":[\"b.com\"],\"allowUnixSockets\":[\"/s\"]"),
-            "network keys must be allowedHosts,deniedHosts,allowUnixSockets in order; got:\n{p}"
+            p.contains("\"deniedHosts\":[\"b.com\"],\"allowUnixSockets\":[\"/s\"]"),
+            "network keys must be deniedHosts,allowUnixSockets in order; got:\n{p}"
+        );
+        assert!(
+            !p.contains("allowedHosts"),
+            "allowedHosts must be omitted from the prompt; got:\n{p}"
         );
 
         // Empty denied_domains ⇒ deniedHosts ABSENT.
@@ -1404,6 +1407,10 @@ mod tests {
         assert!(
             !p2.contains("deniedHosts"),
             "deniedHosts must be absent when denied_domains empty; got:\n{p2}"
+        );
+        assert!(
+            !p2.contains("Network egress goes through a filtering proxy."),
+            "filtering proxy guidance must be absent without a rendered network object; got:\n{p2}"
         );
     }
 

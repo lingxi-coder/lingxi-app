@@ -288,6 +288,7 @@ pub fn save_workflow_size_guideline(value: &str) {
 /// `kCt = Rt().leftArrowOpensAgents !== false`): whether ← on an empty
 /// composer opens the agents view. Absent ⇒ enabled (the `!== false` default).
 const LEFT_ARROW_OPENS_AGENTS_KEY: &str = "leftArrowOpensAgents";
+const ENABLE_WORKFLOWS_KEY: &str = "enableWorkflows";
 
 /// The `defaultToAgentsView` config field (claude-code's `/config` row
 /// "Open agents view by default" / settings row "Start in agent view"):
@@ -328,6 +329,35 @@ pub fn save_left_arrow_opens_agents(enabled: bool) {
 /// Test seam: write the flag at an explicit path.
 pub fn save_left_arrow_opens_agents_to(path: &Path, enabled: bool) -> std::io::Result<()> {
     save_bool_field_to(path, LEFT_ARROW_OPENS_AGENTS_KEY, enabled)
+}
+
+/// Read the stored `enableWorkflows` flag. `None` on any error / absent key
+/// (caller chooses the session default).
+#[must_use]
+pub fn load_enable_workflows() -> Option<bool> {
+    load_bool_field_from(&settings_path()?, ENABLE_WORKFLOWS_KEY)
+}
+
+/// Test seam: read the `enableWorkflows` flag from an explicit path.
+#[must_use]
+pub fn load_enable_workflows_from(path: &Path) -> Option<bool> {
+    load_bool_field_from(path, ENABLE_WORKFLOWS_KEY)
+}
+
+/// Best-effort save of `enableWorkflows`. Logs + swallows errors
+/// (session-only on failure).
+pub fn save_enable_workflows(enabled: bool) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    if let Err(e) = save_bool_field_to(&path, ENABLE_WORKFLOWS_KEY, enabled) {
+        tracing::debug!(error = %e, "enableWorkflows persist failed (session-only)");
+    }
+}
+
+/// Test seam: write `enableWorkflows` at an explicit path.
+pub fn save_enable_workflows_to(path: &Path, enabled: bool) -> std::io::Result<()> {
+    save_bool_field_to(path, ENABLE_WORKFLOWS_KEY, enabled)
 }
 
 /// Read `copyOnSelect`; callers default an absent key to `true`.
@@ -576,6 +606,25 @@ mod tests {
         save_copy_on_select_to(&path, false).unwrap();
         assert_eq!(load_copy_on_select_from(&path), Some(false));
         assert_eq!(load_left_arrow_opens_agents_from(&path), Some(false));
+        assert_eq!(load_editor_mode_is_vim_from(&path), Some(true));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn enable_workflows_round_trips_preserving_other_keys() {
+        let dir =
+            std::env::temp_dir().join(format!("lingxi_workflows_persist_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(load_enable_workflows_from(&path), None);
+
+        save_string_field_to(&path, EDITOR_MODE_KEY, "vim").unwrap();
+        save_enable_workflows_to(&path, true).unwrap();
+        assert_eq!(load_enable_workflows_from(&path), Some(true));
+        save_enable_workflows_to(&path, false).unwrap();
+        assert_eq!(load_enable_workflows_from(&path), Some(false));
         assert_eq!(load_editor_mode_is_vim_from(&path), Some(true));
         let _ = std::fs::remove_file(&path);
     }

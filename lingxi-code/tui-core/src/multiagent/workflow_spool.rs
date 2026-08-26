@@ -16,6 +16,12 @@
 use crate::multiagent::state::{WorkflowAgentRow, WorkflowPhase};
 use std::collections::HashMap;
 
+fn json_u64(v: &serde_json::Value, camel: &str, snake: &str) -> Option<u64> {
+    v.get(camel)
+        .or_else(|| v.get(snake))
+        .and_then(serde_json::Value::as_u64)
+}
+
 /// Parse `spool` into `(distinct_agent_count, phases)`. Phases are returned in
 /// first-seen order; each phase's agents are in first-seen order with their
 /// latest lifecycle state. Malformed lines are skipped.
@@ -68,6 +74,10 @@ pub fn parse_workflow_spool(spool: &str) -> (usize, Vec<WorkflowPhase>) {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let queued_at_ms = json_u64(&v, "queuedAt", "queued_at_ms");
+            let started_at_ms = json_u64(&v, "startedAt", "started_at_ms");
+            let tokens = json_u64(&v, "tokens", "tokens");
+            let tool_calls = json_u64(&v, "toolCalls", "tool_calls");
             let phase_index = usize::try_from(
                 v.get("phaseIndex")
                     .and_then(serde_json::Value::as_u64)
@@ -89,6 +99,18 @@ pub fn parse_workflow_spool(spool: &str) -> (usize, Vec<WorkflowPhase>) {
                 if !label.is_empty() {
                     slot.1.label = label;
                 }
+                if let Some(queued_at_ms) = queued_at_ms {
+                    slot.1.queued_at_ms.get_or_insert(queued_at_ms);
+                }
+                if let Some(started_at_ms) = started_at_ms {
+                    slot.1.started_at_ms.get_or_insert(started_at_ms);
+                }
+                if let Some(tokens) = tokens {
+                    slot.1.tokens = tokens;
+                }
+                if let Some(tool_calls) = tool_calls {
+                    slot.1.tool_calls = tool_calls;
+                }
             } else {
                 bucket.push((
                     key,
@@ -96,6 +118,10 @@ pub fn parse_workflow_spool(spool: &str) -> (usize, Vec<WorkflowPhase>) {
                         index,
                         label,
                         state,
+                        queued_at_ms,
+                        started_at_ms,
+                        tokens: tokens.unwrap_or(0),
+                        tool_calls: tool_calls.unwrap_or(0),
                     },
                 ));
             }
@@ -172,5 +198,41 @@ some free-form log line
         assert_eq!(n, 0);
         assert_eq!(phases.len(), 1);
         assert_eq!(phases[0].title, "Only");
+    }
+
+    #[test]
+    fn rich_agent_snapshots_restore_queue_start_and_usage() {
+        let spool = "\
+[1] === Design ===
+[workflow_agent] {\"type\":\"workflow_agent\",\"index\":0,\"label\":\"designer\",\"state\":\"start\",\"phaseIndex\":1,\"queuedAt\":100,\"toolUseID\":\"workflow_agent_0_queued\"}
+[workflow_agent] {\"type\":\"workflow_agent\",\"index\":0,\"label\":\"designer\",\"state\":\"progress\",\"phaseIndex\":1,\"startedAt\":120,\"tokens\":9,\"toolCalls\":1}
+[workflow_agent] {\"type\":\"workflow_agent\",\"index\":0,\"label\":\"designer\",\"state\":\"done\",\"phaseIndex\":1,\"agentId\":\"a1\",\"tokens\":42,\"toolCalls\":3}
+";
+        let (n, phases) = parse_workflow_spool(spool);
+        assert_eq!(n, 1);
+        assert_eq!(phases.len(), 1);
+        let agent = &phases[0].agents[0];
+        assert_eq!(agent.label, "designer");
+        assert_eq!(agent.state, "done");
+        assert_eq!(agent.queued_at_ms, Some(100));
+        assert_eq!(agent.started_at_ms, Some(120));
+        assert_eq!(agent.tokens, 42);
+        assert_eq!(agent.tool_calls, 3);
+    }
+
+    #[test]
+    fn legacy_minimal_agent_lines_stay_compatible() {
+        let spool = "\
+[workflow_agent] {\"type\":\"workflow_agent\",\"index\":0,\"label\":\"legacy\",\"state\":\"start\"}
+[workflow_agent] {\"type\":\"workflow_agent\",\"index\":0,\"label\":\"legacy\",\"state\":\"done\"}
+";
+        let (n, phases) = parse_workflow_spool(spool);
+        assert_eq!(n, 1);
+        assert_eq!(phases[0].agents[0].label, "legacy");
+        assert_eq!(phases[0].agents[0].state, "done");
+        assert_eq!(phases[0].agents[0].queued_at_ms, None);
+        assert_eq!(phases[0].agents[0].started_at_ms, None);
+        assert_eq!(phases[0].agents[0].tokens, 0);
+        assert_eq!(phases[0].agents[0].tool_calls, 0);
     }
 }

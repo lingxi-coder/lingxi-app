@@ -468,8 +468,105 @@ fn commander_help(e: &clap::Error) -> String {
     reorder_help_sections(&help)
 }
 
+fn command_runs_config_startup(command: Option<&crate::commands::Commands>) -> bool {
+    match command {
+        Some(crate::commands::Commands::Project(project)) => project.command.is_some(),
+        Some(
+            crate::commands::Commands::Sandbox(_)
+            | crate::commands::Commands::Attach(_)
+            | crate::commands::Commands::RemoteControl(_)
+            | crate::commands::Commands::Rm(_)
+            | crate::commands::Commands::Daemon(_)
+            | crate::commands::Commands::BgRun(_)
+            | crate::commands::Commands::BgPtySession(_),
+        ) => false,
+        _ => true,
+    }
+}
+
+fn command_initializes_user_id(command: Option<&crate::commands::Commands>) -> bool {
+    matches!(
+        command,
+        Some(
+            crate::commands::Commands::Mcp(_)
+                | crate::commands::Commands::Doctor(_)
+                | crate::commands::Commands::SetupToken(_)
+                | crate::commands::Commands::Install(_)
+                | crate::commands::Commands::Update(_)
+        )
+    )
+}
+
+/// Materialize first-run configuration and run the versioned startup
+/// migrations at Claude's pre-command boundary. Specialized fast paths that
+/// bypass this block in the oracle are filtered by
+/// [`command_runs_config_startup`].
+async fn run_config_startup(command: Option<&crate::commands::Commands>) {
+    if !command_runs_config_startup(command) {
+        return;
+    }
+    let (Some(global_config_path), Some(lingxi_home)) = (
+        migrations::global_config::global_config_path(),
+        migrations::global_config::lingxi_config_home(),
+    ) else {
+        return;
+    };
+
+    let migration_pending = migrations::global_config::read_map(&global_config_path)
+        .map(|map| {
+            map.get("migrationVersion")
+                .and_then(serde_json::Value::as_u64)
+                != Some(migrations::CURRENT_MIGRATION_VERSION)
+        })
+        .unwrap_or(false);
+    let initializes_device_identity = command.is_none() || command_initializes_user_id(command);
+
+    if migration_pending || initializes_device_identity {
+        let first_start_time =
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        if let Err(error) = migrations::global_config::ensure_first_start_metadata(
+            &global_config_path,
+            &first_start_time,
+            traits::CLAUDE_CODE_VERSION,
+        ) {
+            tracing::warn!(%error, "first-start metadata write failed");
+        }
+    }
+    if migration_pending || initializes_device_identity {
+        let _ = migrations::global_config::ensure_machine_id(&global_config_path);
+    }
+
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env = migrations::MigrationEnv {
+        global_config_path,
+        lingxi_config_home: lingxi_home,
+        project_dir,
+        ctx: migrations::MigrationContext::from_env(),
+        bus: None,
+    };
+    // `Lm(e)` in 2.1.245 runs this unversioned migration immediately before
+    // the version-13 set; it is intentionally no longer a runner member.
+    migrations::migrate_mcp_servers::run(&env).await;
+    migrations::run_migrations(&env).await;
+
+    // These command families reach the device identity during their own
+    // startup in Claude 2.1.245; keep it after the migration block so the
+    // resulting top-level key order matches the oracle.
+    if command_initializes_user_id(command) {
+        let _ = migrations::global_config::get_or_create_user_id();
+    }
+
+    // Async fire-and-forget (TS `.catch(() => {})`): retried next startup.
+    tokio::spawn(async move {
+        migrations::migrate_changelog_from_config(&env).await;
+    });
+}
+
 /// Top-level entrypoint. Returns the process exit code.
 pub async fn run_cli(args: Vec<OsString>) -> i32 {
+    if let Some(code) = commands::plugin_eval_mock::run_from_env().await {
+        return code;
+    }
     startup_trace::start();
     // Freeze the startup environment BEFORE anything can apply a settings-file
     // `env` to the process. `${VAR}` inside a MANAGED MCP allow/deny matcher
@@ -546,6 +643,20 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     if let Err(msg) = parsed.validate_background_args() {
         eprintln!("{msg}");
         return exit_codes::ARGV_ERROR;
+    }
+
+    // Claude Code 2.1.246 validates the entire `--agents` record before any
+    // runtime/auth work. Safe mode deliberately ignores the flag without
+    // parsing it; bare mode still validates it.
+    let safe_mode = parsed.safe_mode
+        || traits::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref());
+    if !safe_mode {
+        if let Some(raw) = parsed.agents.as_deref() {
+            if let Err(error) = agent::parse_agents_from_flag_json_checked(raw) {
+                eprintln!("Error: Invalid --agents configuration:\n{error}");
+                return exit_codes::ARGV_ERROR;
+            }
+        }
     }
 
     // (M4 cc2.1.198) `--effort` argParser warning. The binary validates INSIDE
@@ -753,6 +864,8 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             let _ = mcp::enterprise_policy::install_flag_settings_policy(value);
         }
     }
+
+    run_config_startup(parsed.command.as_ref()).await;
 
     // Top-level subcommand dispatch (mcp/auth/plugin/project/setup-token/agents/
     // install/update/doctor/auto-mode/ultrareview). When clap matched a leading
@@ -1178,44 +1291,6 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         eprintln!("{notice}");
     }
 
-    // Config migrations (`main.tsx runMigrations`, CURRENT_MIGRATION_VERSION
-    // = 11) — the same pre-REPL point as the deprecation notice above, common
-    // to Print/Tui/StdioRepl. At `migrationVersion == 11` this is a read-only
-    // no-op (version guard). A NEWER real claude-code may have moved the file
-    // past 11; the TS `!==` guard then re-runs the set (all 9 migrations
-    // no-op on an already-migrated config) and writes 11 back — the same
-    // bounded version ping-pong two coexisting real claude-code versions
-    // produce. `bus: None`: no pre-boot telemetry bus substrate exists (same
-    // as the deprecation notice); the 9 event names are registered for when
-    // one does. Tier is structurally None (no keychain subscriptionType) —
-    // the subscriber-gated migrations take their faithful fail-closed
-    // branches; the CLI deliberately does not read the keychain pre-boot
-    // (avoids a second keychain prompt).
-    //
-    // `project_dir`: `std::env::current_dir()` is read AFTER `cwd::apply_cwd`
-    // above, so it reflects the effective `--cwd` project directory — the CLI
-    // keeps no pre-chdir "original cwd"; the post-chdir dir is the project
-    // dir the migrations should target (matches TS, where migrations run
-    // against the resolved working directory).
-    if let (Some(global_config_path), Some(lingxi_home)) = (
-        migrations::global_config::global_config_path(),
-        migrations::global_config::lingxi_config_home(),
-    ) {
-        let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let env = migrations::MigrationEnv {
-            global_config_path,
-            lingxi_config_home: lingxi_home,
-            project_dir,
-            ctx: migrations::MigrationContext::from_env(),
-            bus: None,
-        };
-        migrations::run_migrations(&env).await;
-        // Async fire-and-forget (TS `.catch(() => {})`): retried next startup.
-        tokio::spawn(async move {
-            migrations::migrate_changelog_from_config(&env).await;
-        });
-    }
-
     let make_sink = || -> Arc<dyn output::OutputSink> {
         if parsed.is_json_output() {
             Arc::new(output::JsonSink::new(protocol::SessionId::new()))
@@ -1593,6 +1668,66 @@ mod startup_notice_tests {
                 std::env::set_var(k, v);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod config_startup_tests {
+    use super::{command_initializes_user_id, command_runs_config_startup};
+    use crate::argv::Argv;
+
+    fn parsed(args: &[&str]) -> Argv {
+        Argv::from_iter(std::iter::once("lingxi-cli").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn standard_commands_run_startup_while_special_fast_paths_do_not() {
+        for args in [
+            &["auth", "status"][..],
+            &["auto-mode", "defaults"][..],
+            &["mcp", "list"][..],
+            &["plugin", "list"][..],
+            &["doctor"][..],
+        ] {
+            let argv = parsed(args);
+            assert!(
+                command_runs_config_startup(argv.command.as_ref()),
+                "{args:?}"
+            );
+        }
+        for args in [
+            &["project"][..],
+            &["attach", "missing"][..],
+            &["remote-control"][..],
+        ] {
+            let argv = parsed(args);
+            assert!(
+                !command_runs_config_startup(argv.command.as_ref()),
+                "{args:?}"
+            );
+        }
+        let project_purge = parsed(&["project", "purge", "--dry-run", "--yes"]);
+        assert!(command_runs_config_startup(project_purge.command.as_ref()));
+        assert!(command_runs_config_startup(None));
+    }
+
+    #[test]
+    fn only_device_identity_command_families_eagerly_create_user_id() {
+        for args in [
+            &["mcp", "list"][..],
+            &["doctor"][..],
+            &["setup-token"][..],
+            &["install"][..],
+            &["update"][..],
+        ] {
+            let argv = parsed(args);
+            assert!(
+                command_initializes_user_id(argv.command.as_ref()),
+                "{args:?}"
+            );
+        }
+        let argv = parsed(&["auth", "status"]);
+        assert!(!command_initializes_user_id(argv.command.as_ref()));
     }
 }
 

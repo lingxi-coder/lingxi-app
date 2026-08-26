@@ -354,6 +354,9 @@ impl Tool for MonitorTool {
                 persistent,
                 cwd: Some(cwd.to_string_lossy().into_owned()),
                 tool_use_id: ctx.tool_use_id.map(|id| id.to_string()),
+                creator_teammate_name: ctx.agent_name,
+                creator_team_name: ctx.team_name,
+                creator_agent_id: ctx.agent_id,
             })
             .await
             .map_err(|e| ToolError::Internal(format!("Monitor: {e}")))?;
@@ -537,6 +540,10 @@ mod tests {
         let mut call_ctx = fresh_ctx();
         call_ctx.cwd = Some(std::path::PathBuf::from("/tmp/monitor-cwd"));
         call_ctx.tool_use_id = Some(protocol::ToolUseId::new());
+        call_ctx.agent_name = Some("builder".into());
+        call_ctx.team_name = Some("alpha".into());
+        let creator_agent_id = protocol::AgentId::new();
+        call_ctx.agent_id = Some(creator_agent_id);
         let expected_tool_use_id = call_ctx.tool_use_id.as_ref().map(ToString::to_string);
         let out = tool_with_registry(registry.clone())
             .call(
@@ -562,6 +569,9 @@ mod tests {
         assert_eq!(launched.timeout_ms, 0);
         assert_eq!(launched.cwd.as_deref(), Some("/tmp/monitor-cwd"));
         assert_eq!(launched.tool_use_id, expected_tool_use_id);
+        assert_eq!(launched.creator_teammate_name.as_deref(), Some("builder"));
+        assert_eq!(launched.creator_team_name.as_deref(), Some("alpha"));
+        assert_eq!(launched.creator_agent_id, Some(creator_agent_id));
     }
 
     #[tokio::test]

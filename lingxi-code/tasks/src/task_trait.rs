@@ -64,6 +64,9 @@ pub enum TaskSpawnInput {
         /// Team name of the teammate / subagent that created this background
         /// task. Distinct from the TARGET team on `spawn_request.team_name`.
         creator_team_name: Option<String>,
+        /// Persistent agent id of the teammate / subagent that created this
+        /// background task. Distinct from the TARGET child identity.
+        creator_agent_id: Option<protocol::AgentId>,
         /// Complete spawn request for a background Agent invocation. The
         /// duplicated state fields above remain the compact task-index surface;
         /// this preserves model/cwd/context/isolation/schema/depth overrides for
@@ -127,14 +130,29 @@ pub enum TaskSpawnInput {
         /// How the workflow was invoked: `"scriptPath"` | `"named"` | `"inline"`.
         /// Derived from the original `WorkflowLaunchSpec` by the launcher.
         invocation_mode: Option<String>,
-        /// The workflow source: path for `scriptPath`, name for `named`, or
-        /// `"inline"` for an inline script.
+        /// The resolved workflow source category: `"built-in"`,
+        /// `"projectSettings"`, `"userSettings"`, `"plugin"`,
+        /// `"scriptPath"`, or `"inline"`.
         workflow_source: Option<String>,
+        /// Whether the resolved script is byte-identical to a bundled built-in.
+        /// This is intentionally separate from `workflow_source`: a named
+        /// built-in with an explicit script override still has source
+        /// `"built-in"`, but is not verbatim for telemetry redaction.
+        script_is_verbatim_builtin: Option<bool>,
         /// Launch-pinned transcript directory for every child this workflow
         /// spawns. `None` keeps the spawner's session-derived default.
         transcript_subdir: Option<std::path::PathBuf>,
         /// `true` when launched from a subagent context (`t.agentId != null`).
         launched_from_subagent: bool,
+        /// Originating Workflow tool-use id for `<tool-use-id>` in the terminal
+        /// task notification.
+        tool_use_id: Option<String>,
+        /// Creator display/team/id ownership for rest-notification deferral.
+        creator_teammate_name: Option<String>,
+        /// Team containing the creator, when it belongs to one.
+        creator_team_name: Option<String>,
+        /// Persistent identity of the creator agent, when available.
+        creator_agent_id: Option<protocol::AgentId>,
     },
     /// Spawn an MCP monitor.
     MonitorMcp {
@@ -153,6 +171,12 @@ pub enum TaskSpawnInput {
         cwd: Option<std::path::PathBuf>,
         /// Originating assistant tool-use id.
         tool_use_id: Option<String>,
+        /// Creator display/team/id ownership for rest-notification deferral.
+        creator_teammate_name: Option<String>,
+        /// Team containing the creator, when it belongs to one.
+        creator_team_name: Option<String>,
+        /// Persistent identity of the creator agent, when available.
+        creator_agent_id: Option<protocol::AgentId>,
     },
     /// Spawn a backgrounded MCP tool call (claude-code 2.1.212 `mcp_task`).
     /// Created when a single `tools/call` exceeds `getMcpAutoBackgroundMs` and
@@ -164,6 +188,12 @@ pub enum TaskSpawnInput {
         tool_name: String,
         /// Originating assistant `tool_use_id`, if any (`toolUseId`).
         tool_use_id: Option<String>,
+        /// Creator display/team/id ownership for rest-notification deferral.
+        creator_teammate_name: Option<String>,
+        /// Team containing the creator, when it belongs to one.
+        creator_team_name: Option<String>,
+        /// Persistent identity of the creator agent, when available.
+        creator_agent_id: Option<protocol::AgentId>,
     },
     /// Spawn a dream loop.
     Dream {

@@ -269,25 +269,32 @@ impl<'cb> RataApp<'cb> {
         terminal: &mut RataTerminal,
         mut session: Option<&mut TerminalSession>,
     ) -> io::Result<AppExit> {
+        let mut need_draw = true;
         loop {
+            let mut dirty = false;
             while let Ok(event) = self.events_rx.try_recv() {
                 self.apply_turn_event(event);
+                dirty = true;
             }
             // The widget serializes permission prompts (one owns the
             // keyboard; later arrivals queue), so the drain is unconditional.
             while let Ok(exchange) = self.permission_rx.try_recv() {
                 self.open_permission(exchange);
+                dirty = true;
             }
             while let Ok(exchange) = self.ask_user_question_rx.try_recv() {
                 self.open_ask_user_question(exchange);
+                dirty = true;
             }
             while let Ok(exchange) = self.computer_access_rx.try_recv() {
                 self.open_computer_access(exchange);
+                dirty = true;
             }
             // Off-thread clipboard-image paste results (Ctrl+V): attach the
             // temp PNG (or surface the error) as soon as the worker delivers.
             while let Ok(result) = self.paste_rx.try_recv() {
                 self.chat_widget.clipboard_image_result(result);
+                dirty = true;
             }
             while let Ok(result) = self.copy_rx.try_recv() {
                 if let Err(error) = result {
@@ -299,15 +306,24 @@ impl<'cb> RataApp<'cb> {
                         });
                     }
                 }
+                dirty = true;
             }
             // Flush a due non-bracketed paste burst (held first char renders
             // as typing; a completed burst lands as one paste). The pump
             // never submits, so the outcome needs no callback dispatch.
-            let _ = self.chat_widget.pump_paste_burst();
+            let paste_was_pending = self.chat_widget.paste_burst_pending();
+            let paste_outcome = self.chat_widget.pump_paste_burst();
+            if !matches!(paste_outcome, ChatOutcome::Continue)
+                || (paste_was_pending && !self.chat_widget.paste_burst_pending())
+            {
+                dirty = true;
+            }
             // Countdown-backed modal views must advance while the terminal is
             // idle. This runs before drawing so an expired questionnaire is
             // popped and its queued successor can render on the same tick.
-            self.chat_widget.pump_view_timeout();
+            if self.chat_widget.pump_view_timeout() {
+                dirty = true;
+            }
             // A ← handoff may be waiting for the active tool boundary or its
             // 10-second defer cap. Advance it on the same redraw clock.
             self.chat_widget.pump_backgrounding();
@@ -315,7 +331,10 @@ impl<'cb> RataApp<'cb> {
             // already validated + BEL-normalized) write through to the tty
             // BEFORE the draw so the diff pass never interleaves with them.
             self.write_terminal_sequences(terminal)?;
-            self.render_tick(terminal)?;
+            if need_draw || dirty || self.chat_widget.needs_animated_redraw() {
+                self.render_tick(terminal)?;
+                need_draw = false;
+            }
             // While burst state is pending (a held first char, an unflushed
             // buffer) the 8ms flush deadline must not wait out the full
             // redraw interval — a keystroke would echo up to ~50ms late.
@@ -325,6 +344,7 @@ impl<'cb> RataApp<'cb> {
                 self.redraw_interval
             };
             if event::poll(poll_timeout)? {
+                need_draw = true;
                 let outcome = match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
                     Event::Paste(text) => self.on_paste(&text),

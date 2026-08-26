@@ -15,19 +15,22 @@
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
 /// `VERSION` in outward-facing identifiers — the `AI_AGENT` child-env value
-/// (`claude-code_2-1-241_agent`) and the WebFetch `User-Agent`
-/// (`claude-code/2.1.241`). LingXi is a 1:1 copy, so it presents the same string.
+/// (`claude-code_2-1-246_agent`) and the WebFetch `User-Agent`
+/// (`claude-code/2.1.246`). LingXi is a 1:1 copy, so it presents the same string.
 /// Single source of truth (R-V1) so the AI_AGENT and User-Agent stamps never drift.
 ///
-/// Raised 2.1.238 → 2.1.241 on 2026-08-23, once the remaining version-facing
-/// byte-alignment gaps for this wave were landed and re-locked.
+/// Raised 2.1.241 → 2.1.245 on 2026-08-25, once the main query-loop identity
+/// (`querySource` / `print` vs non-interactive) matched the 2.1.245 binary.
+/// Raised 2.1.245 → 2.1.246 on 2026-08-25 after black-box checks showed the
+/// public `--help` surface stayed byte-identical while the local oracle binary
+/// moved forward.
 ///
 /// The bump is deliberately LAST. It is what this session tells servers and child
 /// processes it is, so raising it before the behaviour matched would overstate
 /// the port — and the port has been burned by the opposite error too (it once
 /// advertised 2.1.217 while implementing 2.1.220), which is why all three
 /// identifiers derive from this one constant.
-pub const CLAUDE_CODE_VERSION: &str = "2.1.241";
+pub const CLAUDE_CODE_VERSION: &str = "2.1.246";
 
 pub mod agent_name_registry;
 pub mod agent_view;
@@ -123,7 +126,10 @@ pub use deep_link::{DeepLinkError, DeepLinkOpener};
 pub use device_status::{DeviceStatus, DeviceStatusError, DeviceStatusProvider};
 pub use effect_handler::EffectHandler;
 pub use file_history_sink::FileHistorySink;
-pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
+pub use filesystem::{
+    apply_line_window, file_content_from_prefix_bytes, FileContent, FileEvent, FileEventKind,
+    FileSystem, FileSystemCacheIdentity, FlockGuard, FsError,
+};
 pub use haptics::{HapticError, HapticService, HapticStyle};
 pub use http::{
     HttpError, HttpTransport, RawByteStreamWithMeta, ResolvedAddressOverride, WebSocketConnection,

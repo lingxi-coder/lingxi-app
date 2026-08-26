@@ -18,19 +18,19 @@ use serde_json::{json, Value};
 // async for the uniform migration-runner API; this one emits no telemetry,
 // so it has no await point.
 #[allow(clippy::unused_async)]
-pub async fn run(env: &MigrationEnv) {
+pub async fn run(env: &MigrationEnv) -> bool {
     let cfg = match global_config::read_map(&env.global_config_path) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "migrate_sonnet1m_to_sonnet45: config read failed");
-            return;
+            return true;
         }
     };
     if cfg
         .get("sonnet1m45MigrationComplete")
         .is_some_and(js_truthy)
     {
-        return;
+        return true;
     }
 
     let sp = settings_path(
@@ -46,11 +46,8 @@ pub async fn run(env: &MigrationEnv) {
             &sp,
             vec![("model".into(), Some(json!("sonnet-4-5-20250929[1m]")))],
         ) {
-            // TS `updateSettingsForSource` never throws — it returns
-            // `{error}` (settings.ts:416-523) and the migration discards it
-            // (TS:33-37), then unconditionally sets the completion flag
-            // (TS:44-48). Warn and continue so the flag is still set.
-            tracing::warn!(error = %e, "migrate_sonnet1m_to_sonnet45: settings write failed (ignored, TS parity)");
+            tracing::warn!(error = %e, "migrate_sonnet1m_to_sonnet45: settings write failed");
+            return false;
         }
     }
 
@@ -59,7 +56,9 @@ pub async fn run(env: &MigrationEnv) {
         m
     }) {
         tracing::warn!(error = %e, "migrate_sonnet1m_to_sonnet45: flag write failed");
+        return false;
     }
+    true
 }
 
 #[cfg(test)]
@@ -122,12 +121,10 @@ mod tests {
         assert_eq!(m["sonnet1m45MigrationComplete"], json!(true));
     }
 
-    /// Fix 1 continue branch: a failing settings WRITE must not block the
-    /// completion flag (TS `updateSettingsForSource` returns an ignored
-    /// `{error}`, settings.ts:416-523; flag set unconditionally TS:44-48).
+    /// In 2.1.245 a failing settings write aborts before the completion flag.
     #[cfg(unix)]
     #[tokio::test]
-    async fn settings_write_failure_still_sets_flag() {
+    async fn settings_write_failure_skips_flag() {
         use std::os::unix::fs::PermissionsExt;
         let t = temp_config();
         let sp = settings_path(SettingsSource::User, &t.home, &t.project);
@@ -145,9 +142,9 @@ mod tests {
             read_settings_map(&sp).unwrap()["model"],
             json!("sonnet[1m]")
         );
-        // …but the flag is STILL set.
+        // …and the completion flag is no longer set.
         let m = crate::global_config::read_map(&t.global).unwrap();
-        assert_eq!(m["sonnet1m45MigrationComplete"], json!(true));
+        assert!(m.get("sonnet1m45MigrationComplete").is_none());
     }
 
     #[tokio::test]

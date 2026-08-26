@@ -397,6 +397,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // Transport host: the adapter gate IS the enforcement, so headless
         // deny-on-ask does not apply (only consulted when use_noop is true).
         deny_unresolved_ask: false,
+        // Transport host: no process stdout TTY for `tengu_api_success.isTTY`.
+        is_tty: false,
         // Transport host: no injected interactive gate (that is the TUI's path).
         injected_permission_gate: None,
         // The headless bridge has no interactive /fork or /resume-as-background
@@ -1057,6 +1059,7 @@ mod tests {
             mcp_paths: vec![cwd.join(".mcp.json")],
             use_noop_permission_gate: false,
             deny_unresolved_ask: false,
+            is_tty: false,
             injected_permission_gate: None,
             ask_user_question_tx: None,
             computer_access_tx: None,

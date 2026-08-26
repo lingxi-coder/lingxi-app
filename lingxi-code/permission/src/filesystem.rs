@@ -57,6 +57,7 @@
 //! lexical form, matching claude-code's exception-swallowing resolver.
 
 use crate::rule::PermissionRuleSource;
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 const PERMISSION_PATH_RESOLUTION_MAX_HOPS: usize = 64;
@@ -287,19 +288,20 @@ fn path_resolution_must_fail_closed(path: &Path) -> bool {
 
 fn resolve_additional_permission_paths(absolute_path: &Path) -> Vec<PathBuf> {
     let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+    seen.insert(absolute_path.to_path_buf());
     if let Some(collapsed) = resolve_deepest_existing_ancestor(absolute_path) {
-        if collapsed != absolute_path {
+        if seen.insert(collapsed.clone()) {
             resolved.push(collapsed);
         }
     }
 
     let mut current = absolute_path.to_path_buf();
-    let mut lineage = Vec::new();
+    let mut lineage = HashSet::new();
     for _ in 0..PERMISSION_PATH_RESOLUTION_MAX_HOPS {
-        if lineage.contains(&current) {
+        if !lineage.insert(current.clone()) {
             break;
         }
-        lineage.push(current.clone());
 
         match std::fs::read_link(&current) {
             Ok(target) => {
@@ -312,7 +314,7 @@ fn resolve_additional_permission_paths(absolute_path: &Path) -> Vec<PathBuf> {
                     parent.join(target)
                 };
                 let next = normalize_lexically(&next);
-                if next != current && !resolved.contains(&next) {
+                if seen.insert(next.clone()) {
                     resolved.push(next.clone());
                 }
                 current = next;
@@ -322,7 +324,7 @@ fn resolve_additional_permission_paths(absolute_path: &Path) -> Vec<PathBuf> {
     }
 
     if let Ok(real_path) = std::fs::canonicalize(absolute_path) {
-        if real_path != absolute_path && !resolved.contains(&real_path) {
+        if seen.insert(real_path.clone()) {
             resolved.push(real_path);
         }
     }
@@ -519,26 +521,62 @@ pub fn path_matches_rule_pattern(
     // ourselves (above) — rather than handing the absolute path to the builder
     // — avoids the `ignore` crate's prefix-strip mis-matching paths that sit
     // OUTSIDE the root (it would otherwise glob-test the unstripped absolute).
-    let mut builder = ignore::gitignore::GitignoreBuilder::new("/");
-    if let Err(e) = builder.add_line(None, stripped) {
-        // An unbuildable glob (e.g. an unbalanced char class) matches nothing.
-        // That is fail-CLOSED for an allow rule (safe) but fail-OPEN for a deny
-        // rule (the deny silently does nothing), and it diverges from npm
-        // `ignore`, which is more lenient — so surface it rather than swallow.
-        tracing::warn!(
-            pattern = %stripped,
-            error = %e,
-            "permission rule has an unparseable glob; the rule will not match"
-        );
-        return false;
-    }
-    let Ok(gitignore) = builder.build() else {
+    let gitignore = cached_gitignore(stripped);
+    let Some(gitignore) = gitignore.as_ref() else {
         return false;
     };
     let target = Path::new("/").join(&rel_str);
     gitignore
         .matched_path_or_any_parents(&target, false)
         .is_ignore()
+}
+
+fn cached_gitignore(pattern: &str) -> Option<std::sync::Arc<ignore::gitignore::Gitignore>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Cache =
+        Mutex<std::collections::HashMap<String, Option<Arc<ignore::gitignore::Gitignore>>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(hit) = guard.get(pattern) {
+            return hit.clone();
+        }
+    }
+    let mut builder = ignore::gitignore::GitignoreBuilder::new("/");
+    if let Err(e) = builder.add_line(None, pattern) {
+        // An unbuildable glob (e.g. an unbalanced char class) matches nothing.
+        // That is fail-CLOSED for an allow rule (safe) but fail-OPEN for a deny
+        // rule (the deny silently does nothing), and it diverges from npm
+        // `ignore`, which is more lenient — so surface it rather than swallow.
+        tracing::warn!(
+            pattern = %pattern,
+            error = %e,
+            "permission rule has an unparseable glob; the rule will not match"
+        );
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.len() < 256 {
+            guard.insert(pattern.to_string(), None);
+        }
+        return None;
+    }
+    let Ok(gitignore) = builder.build() else {
+        return None;
+    };
+    let compiled = Arc::new(gitignore);
+    {
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.len() < 256 {
+            guard.insert(pattern.to_string(), Some(compiled.clone()));
+        }
+    }
+    Some(compiled)
 }
 
 /// Normalize a path string for case-insensitive comparison — port of

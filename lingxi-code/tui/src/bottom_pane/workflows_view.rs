@@ -26,7 +26,9 @@
 
 use std::any::Any;
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -39,13 +41,58 @@ use tool_workflow::{
     sanitize_workflow_name, save_dynamic_workflow, saved_feedback, WorkflowSaveError, WorkflowScope,
 };
 use tui_core::multiagent::{
-    apply_workflow_progress, sort_workflows_newest_first, MultiAgentEvent, WorkflowPhase,
-    WorkflowRow,
+    apply_workflow_progress, sort_workflows_newest_first, workflow_size_warning, MultiAgentEvent,
+    WorkflowPhase, WorkflowRow, WorkflowSizeWarning, WorkflowSizeWarningInput,
 };
 use tui_core::theme::Theme;
 
 use crate::bottom_pane::view::{BottomPaneView, TaskAction, ViewOutcome};
 use crate::renderable::Renderable;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WorkflowWarningConfig {
+    pub ultracode_active: bool,
+    pub guideline_agent_cap: Option<u32>,
+    /// `tengu_ochre_gantry` payload. LingXi has no Statsig transport today,
+    /// so ordinary callers leave these `None` (the oracle's `{}` default).
+    pub remote_enabled: Option<bool>,
+    pub remote_agent_cap: Option<f64>,
+    pub remote_token_cap: Option<f64>,
+}
+
+#[derive(Clone, Default)]
+pub struct WorkflowWarningRegistry {
+    shown: Arc<Mutex<HashSet<String>>>,
+}
+
+impl WorkflowWarningRegistry {
+    fn record_once(&self, row: &WorkflowRow, warning: WorkflowSizeWarning) {
+        if !matches!(row.status.as_str(), "pending" | "running") {
+            return;
+        }
+        let Ok(mut shown) = self.shown.lock() else {
+            return;
+        };
+        // Claude's render effect dedupes by task row id (`ee.id`), not run id:
+        // a resumed run reusing `wf_…` is a new task and may warn once itself.
+        if !shown.insert(row.task_id.clone()) {
+            return;
+        }
+        telemetry::emit_workflow_size_warning_shown(
+            match warning.axis {
+                tui_core::multiagent::WorkflowSizeWarningAxis::Agents => "agents",
+                tui_core::multiagent::WorkflowSizeWarningAxis::Tokens => "tokens",
+                tui_core::multiagent::WorkflowSizeWarningAxis::Both => "both",
+            },
+            warning.scheduled_agents,
+            warning.total_tokens,
+            warning.projected_tokens,
+            warning.agent_cap,
+            warning.token_cap,
+            warning.cap_from_guideline,
+        );
+    }
+}
 
 /// Current wall clock in epoch millis (`0` if the clock is before the epoch).
 fn now_ms() -> u64 {
@@ -126,6 +173,47 @@ fn list_glyph(status: &str) -> &'static str {
     }
 }
 
+fn workflow_started_agents(row: &WorkflowRow) -> usize {
+    let from_phases = row
+        .phases
+        .iter()
+        .flat_map(|phase| phase.agents.iter())
+        .filter(|agent| agent.started_at_ms.is_some() || agent.state != "start")
+        .count();
+    if from_phases > 0 {
+        from_phases
+    } else if matches!(row.status.as_str(), "completed" | "failed" | "killed") {
+        row.agent_count
+    } else {
+        0
+    }
+}
+
+fn workflow_total_tokens(row: &WorkflowRow) -> u64 {
+    let live_total = row
+        .phases
+        .iter()
+        .flat_map(|phase| phase.agents.iter())
+        .fold(0u64, |total, agent| total.saturating_add(agent.tokens));
+    row.total_tokens.max(live_total)
+}
+
+fn workflow_warning(
+    row: &WorkflowRow,
+    config: WorkflowWarningConfig,
+) -> Option<WorkflowSizeWarning> {
+    workflow_size_warning(WorkflowSizeWarningInput {
+        scheduled_agents: u64::try_from(row.agent_count).unwrap_or(u64::MAX),
+        started_agents: u64::try_from(workflow_started_agents(row)).unwrap_or(u64::MAX),
+        total_tokens: workflow_total_tokens(row),
+        ultracode_active: config.ultracode_active,
+        guideline_agent_cap: config.guideline_agent_cap,
+        remote_enabled: config.remote_enabled,
+        remote_agent_cap: config.remote_agent_cap,
+        remote_token_cap: config.remote_token_cap,
+    })
+}
+
 /// Chrome lines around the windowed row list (title + subtitle + 2 spacers +
 /// footer) plus a 2-line reserve for the `↑/↓ N more` indicators — the analog of
 /// the oracle's `vvp - 7` (`window = clamp(rows - 7, 3, len)`).
@@ -142,17 +230,29 @@ pub struct WorkflowsView {
     /// Inner viewport height from the last `render`, so `lines()` can size the
     /// scroll window the same way the oracle does (`clamp(rows-7, 3, len)`).
     last_viewport: Cell<u16>,
+    /// Session-scoped workflow warning gate inputs (`workflowSizeGuideline`,
+    /// Ultracode suppression).
+    warning_config: WorkflowWarningConfig,
+    /// Telemetry/on-screen dedupe for `tengu_workflow_size_warning_shown`.
+    warning_registry: WorkflowWarningRegistry,
 }
 
 impl WorkflowsView {
     /// Build the picker over `rows`, selecting the first run.
     #[must_use]
-    pub fn new(rows: Vec<WorkflowRow>, theme: Theme) -> Self {
+    pub fn new(
+        rows: Vec<WorkflowRow>,
+        theme: Theme,
+        warning_config: WorkflowWarningConfig,
+        warning_registry: WorkflowWarningRegistry,
+    ) -> Self {
         Self {
             rows,
             selected: 0,
             theme,
             last_viewport: Cell::new(0),
+            warning_config,
+            warning_registry,
         }
     }
 
@@ -212,6 +312,12 @@ impl WorkflowsView {
             parts.push(e);
         }
         parts.join(" \u{00b7} ")
+    }
+
+    fn selected_warning(&self) -> Option<WorkflowSizeWarning> {
+        self.rows
+            .get(self.selected)
+            .and_then(|row| workflow_warning(row, self.warning_config))
     }
 
     /// Rendered body lines: title, subtitle, spacer, one line per run, spacer,
@@ -276,6 +382,15 @@ impl WorkflowsView {
                 // Oracle gap between name and meta is exactly two spaces (no dot).
                 spans.push(Span::styled(format!("  {meta}"), dim_style));
             }
+            if selected {
+                if let Some(warning) = workflow_warning(r, self.warning_config) {
+                    self.warning_registry.record_once(r, warning);
+                    spans.push(Span::styled(
+                        format!("  {}", warning.compact_copy()),
+                        dim_style,
+                    ));
+                }
+            }
             lines.push(Line::from(spans));
         }
         if more_below > 0 {
@@ -314,6 +429,9 @@ impl WorkflowsView {
                 .is_some_and(|r| r.script.is_some())
             {
                 parts.push("s save".to_string());
+            }
+            if let Some(warning) = self.selected_warning() {
+                parts.push(warning.footer_copy().to_string());
             }
         }
         parts.push("Esc close".to_string());
@@ -423,9 +541,12 @@ impl BottomPaneView for WorkflowsView {
                 ViewOutcome::Pending
             }
             KeyCode::Enter => match self.rows.get(self.selected) {
-                Some(r) => {
-                    ViewOutcome::OpenView(Box::new(WorkflowDetailView::new(r.clone(), self.theme)))
-                }
+                Some(r) => ViewOutcome::OpenView(Box::new(WorkflowDetailView::new(
+                    r.clone(),
+                    self.theme,
+                    self.warning_config,
+                    self.warning_registry.clone(),
+                ))),
                 None => ViewOutcome::Cancelled,
             },
             KeyCode::Char('x') => match self.rows.get(self.selected) {
@@ -461,7 +582,7 @@ impl BottomPaneView for WorkflowsView {
                 _ => ViewOutcome::Pending,
             },
             // Oracle `s` chord (`chord:"s", action:"save"`), gated on the row
-            // carrying a saveable inline script → open the "Save dynamic
+            // carrying a saveable stored script → open the "Save dynamic
             // workflow" form.
             KeyCode::Char('s') => match self.rows.get(self.selected) {
                 Some(r) if r.script.is_some() => {
@@ -528,17 +649,26 @@ pub struct WorkflowDetailView {
     /// runs past the bottom and the first N `↑` presses only bleed off dead
     /// state without moving the view).
     last_viewport: Cell<u16>,
+    warning_config: WorkflowWarningConfig,
+    warning_registry: WorkflowWarningRegistry,
 }
 
 impl WorkflowDetailView {
     /// Build a detail view over one run snapshot.
     #[must_use]
-    pub fn new(row: WorkflowRow, theme: Theme) -> Self {
+    pub fn new(
+        row: WorkflowRow,
+        theme: Theme,
+        warning_config: WorkflowWarningConfig,
+        warning_registry: WorkflowWarningRegistry,
+    ) -> Self {
         Self {
             row,
             theme,
             scroll: 0,
             last_viewport: Cell::new(0),
+            warning_config,
+            warning_registry,
         }
     }
 
@@ -616,6 +746,10 @@ impl WorkflowDetailView {
                 row_elapsed(&self.row).unwrap_or_else(|| "\u{2014}".to_string()),
             ),
         ];
+        if let Some(warning) = workflow_warning(&self.row, self.warning_config) {
+            self.warning_registry.record_once(&self.row, warning);
+            lines.push(label("Warning", warning.compact_copy().to_string()));
+        }
         if !self.row.description.is_empty() {
             lines.push(label("Script", self.row.description.clone()));
         }
@@ -685,10 +819,15 @@ impl WorkflowDetailView {
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "\u{2191}\u{2193} scroll \u{00b7} Esc back",
-            dim_style,
-        )));
+        let footer = if let Some(warning) = workflow_warning(&self.row, self.warning_config) {
+            format!(
+                "{} \u{00b7} \u{2191}\u{2193} scroll \u{00b7} Esc back",
+                warning.footer_copy()
+            )
+        } else {
+            "\u{2191}\u{2193} scroll \u{00b7} Esc back".to_string()
+        };
+        lines.push(Line::from(Span::styled(footer, dim_style)));
         lines
     }
 }
@@ -752,7 +891,7 @@ impl BottomPaneView for WorkflowDetailView {
 }
 
 /// The "Save dynamic workflow" form (oracle `iNt`, dialog `mode:"save"`), pushed
-/// by the `s` chord when the selected run carries an inline script. A name input
+/// by the `s` chord when the selected run carries a stored script. A name input
 /// (default from the run's meta.name / summary), `Tab` toggles scope
 /// Project ⇄ User, `Enter` saves (a second `Enter` overwrites on EEXIST), `Esc`
 /// cancels. The write itself goes through [`tool_workflow::save_dynamic_workflow`]
@@ -1011,6 +1150,7 @@ impl BottomPaneView for WorkflowSaveView {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+    use traits::task_registry::WorkflowRecord;
     use tui_core::multiagent::{WorkflowAgentRow, WorkflowPhase, WorkflowProgressEvent};
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -1030,6 +1170,7 @@ mod tests {
             script_path: None,
             args: None,
             agent_count: 3,
+            total_tokens: 0,
             phases: vec![WorkflowPhase {
                 index: 0,
                 title: "Scan".to_string(),
@@ -1038,11 +1179,19 @@ mod tests {
                         index: 0,
                         label: "grep".to_string(),
                         state: "done".to_string(),
+                        queued_at_ms: None,
+                        started_at_ms: None,
+                        tokens: 0,
+                        tool_calls: 0,
                     },
                     WorkflowAgentRow {
                         index: 1,
                         label: "scan".to_string(),
                         state: "start".to_string(),
+                        queued_at_ms: None,
+                        started_at_ms: None,
+                        tokens: 0,
+                        tool_calls: 0,
                     },
                 ],
             }],
@@ -1051,7 +1200,12 @@ mod tests {
     }
 
     fn view(rows: Vec<WorkflowRow>) -> WorkflowsView {
-        WorkflowsView::new(rows, Theme::dark())
+        WorkflowsView::new(
+            rows,
+            Theme::dark(),
+            WorkflowWarningConfig::default(),
+            WorkflowWarningRegistry::default(),
+        )
     }
 
     #[test]
@@ -1146,7 +1300,12 @@ mod tests {
 
     #[test]
     fn detail_scrolls_and_clamps_at_top() {
-        let mut v = WorkflowDetailView::new(row("w1", "running", "deploy"), Theme::dark());
+        let mut v = WorkflowDetailView::new(
+            row("w1", "running", "deploy"),
+            Theme::dark(),
+            WorkflowWarningConfig::default(),
+            WorkflowWarningRegistry::default(),
+        );
         assert_eq!(v.scroll, 0);
         v.handle_key(press(KeyCode::Down));
         assert_eq!(v.scroll, 1);
@@ -1236,7 +1395,12 @@ mod tests {
         live.run_id = Some("wf_live".into());
         live.phases.clear();
         live.agent_count = 0;
-        let mut detail = WorkflowDetailView::new(live, Theme::dark());
+        let mut detail = WorkflowDetailView::new(
+            live,
+            Theme::dark(),
+            WorkflowWarningConfig::default(),
+            WorkflowWarningRegistry::default(),
+        );
 
         detail.apply_multiagent_event(&MultiAgentEvent::WorkflowProgress(WorkflowProgressEvent {
             task_id: "w-live".into(),
@@ -1257,7 +1421,12 @@ mod tests {
 
     #[test]
     fn detail_renders_phase_and_agents() {
-        let v = WorkflowDetailView::new(row("w1", "running", "deploy"), Theme::dark());
+        let v = WorkflowDetailView::new(
+            row("w1", "running", "deploy"),
+            Theme::dark(),
+            WorkflowWarningConfig::default(),
+            WorkflowWarningRegistry::default(),
+        );
         let area = Rect::new(0, 0, 70, 20);
         let mut buf = Buffer::empty(area);
         v.render(area, &mut buf);
@@ -1368,13 +1537,97 @@ mod tests {
             title: String::new(),
             agents: vec![],
         }];
-        let v = WorkflowDetailView::new(r, Theme::dark());
+        let v = WorkflowDetailView::new(
+            r,
+            Theme::dark(),
+            WorkflowWarningConfig::default(),
+            WorkflowWarningRegistry::default(),
+        );
         let area = Rect::new(0, 0, 60, 16);
         let mut buf = Buffer::empty(area);
         v.render(area, &mut buf);
         let text = buf_text(&buf, area);
         assert!(text.contains("Phase 1"), "ordinal label: {text}");
         assert!(!text.contains("Phase 7"), "not the parsed index: {text}");
+    }
+
+    #[test]
+    fn large_workflow_warning_appears_in_picker_footer_and_row_label() {
+        let mut r = row("w1", "running", "big-run");
+        r.agent_count = 30;
+        r.phases.clear();
+        let v = view(vec![r]);
+        assert!(v
+            .footer()
+            .contains("Large workflow \u{00b7} /workflows to stop"));
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        v.render(area, &mut buf);
+        let text = buf_text(&buf, area);
+        assert!(text.contains("Large workflow"), "{text}");
+    }
+
+    #[test]
+    fn ultracode_active_suppresses_large_workflow_warning() {
+        let mut r = row("w1", "running", "big-run");
+        r.agent_count = 30;
+        r.phases.clear();
+        let v = WorkflowsView::new(
+            vec![r],
+            Theme::dark(),
+            WorkflowWarningConfig {
+                ultracode_active: true,
+                guideline_agent_cap: None,
+                ..Default::default()
+            },
+            WorkflowWarningRegistry::default(),
+        );
+        assert!(!v.footer().contains("Large workflow"));
+    }
+
+    #[test]
+    fn detail_view_shows_warning_label_and_footer_copy() {
+        let mut r = row("w1", "running", "big-run");
+        r.agent_count = 30;
+        r.phases.clear();
+        let v = WorkflowDetailView::new(
+            r,
+            Theme::dark(),
+            WorkflowWarningConfig::default(),
+            WorkflowWarningRegistry::default(),
+        );
+        let area = Rect::new(0, 0, 80, 16);
+        let mut buf = Buffer::empty(area);
+        v.render(area, &mut buf);
+        let text = buf_text(&buf, area);
+        assert!(text.contains("Warning"), "{text}");
+        assert!(text.contains("Large workflow"), "{text}");
+        assert!(text.contains("/workflows to stop"), "{text}");
+    }
+
+    #[test]
+    fn warning_telemetry_registry_ignores_terminal_rows() {
+        let registry = WorkflowWarningRegistry::default();
+        let warning = workflow_size_warning(WorkflowSizeWarningInput {
+            scheduled_agents: 30,
+            started_agents: 0,
+            total_tokens: 0,
+            ultracode_active: false,
+            guideline_agent_cap: None,
+            remote_enabled: None,
+            remote_agent_cap: None,
+            remote_token_cap: None,
+        })
+        .expect("warning");
+
+        for status in ["completed", "failed", "killed", "paused"] {
+            registry.record_once(&row("w-terminal", status, "large"), warning);
+        }
+        assert!(registry.shown.lock().unwrap().is_empty());
+
+        registry.record_once(&row("w-running", "running", "large"), warning);
+        assert_eq!(registry.shown.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -1417,19 +1670,35 @@ mod tests {
     }
 
     #[test]
-    fn s_chord_gated_on_inline_script() {
-        // No inline script → no `s save` hint, `s` is a no-op.
-        let mut no_script = view(vec![row("w1", "completed", "deploy")]);
+    fn s_chord_gated_on_stored_script() {
+        // No stored script → no `s save` hint, `s` is a no-op.
+        let mut no_script = view(vec![tui_core::multiagent::workflow_row_from_record(
+            WorkflowRecord {
+                task_id: "w1".to_string(),
+                run_id: Some("wf_w1".to_string()),
+                name: "deploy".to_string(),
+                status: "paused".to_string(),
+                script_path: Some("/workspace/build.js".to_string()),
+                ..WorkflowRecord::default()
+            },
+        )]);
         assert!(!no_script.footer().contains("s save"));
         assert!(matches!(
             no_script.handle_key(press(KeyCode::Char('s'))),
             ViewOutcome::Pending
         ));
 
-        // Inline script present → `s save` hint, `s` opens the save form.
-        let mut r = row("w1", "completed", "deploy");
-        r.script = Some("export const meta = {};\n".to_string());
-        let mut with_script = view(vec![r]);
+        // Stored script present → `s save` hint, `s` opens the save form.
+        let mut with_script = view(vec![tui_core::multiagent::workflow_row_from_record(
+            WorkflowRecord {
+                task_id: "w1".to_string(),
+                run_id: Some("wf_w1".to_string()),
+                name: "deploy".to_string(),
+                status: "completed".to_string(),
+                script: Some("export const meta = {};\n".to_string()),
+                ..WorkflowRecord::default()
+            },
+        )]);
         assert!(with_script.footer().contains("s save"));
         assert!(matches!(
             with_script.handle_key(press(KeyCode::Char('s'))),

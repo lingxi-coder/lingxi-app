@@ -24,6 +24,7 @@
 //! executor threads.
 
 use crate::checkpoints::AppCheckpointStore;
+use crate::data;
 use crate::error::AppError;
 use crate::events::{AppEvent, AppEventObserver};
 use crate::ids;
@@ -764,7 +765,9 @@ impl AppService {
     ) -> Result<AppRecord, AppError> {
         let name = name.trim();
         if name.is_empty() {
-            return Err(AppError::InvalidRequest("app name must not be empty".into()));
+            return Err(AppError::InvalidRequest(
+                "app name must not be empty".into(),
+            ));
         }
         ensure_within("app name", name.len(), MAX_NAME_BYTES)?;
         let brief = brief.trim();
@@ -1331,7 +1334,13 @@ impl AppService {
                 order,
                 vec![AppEvent::AppsChanged { apps: records }],
             );
-            let removal = Self::run_blocking(move || storage::delete_app_dir(&root, &app_id)).await;
+            let removal = Self::run_blocking(move || {
+                if let Ok(layout) = AppLayout::new(root.clone(), app_id.clone()) {
+                    data::AppDataStore::invalidate_cached(&layout);
+                }
+                storage::delete_app_dir(&root, &app_id)
+            })
+            .await;
             if let Err(error) = removal {
                 tracing::warn!(
                     error = %error,
@@ -2103,7 +2112,12 @@ mod tests {
 
         let committed = h
             .service
-            .commit_scaffold(&shell.id, "  打飞机  ", "  一个竖版射击小游戏  ", Some("openai/gpt-5"))
+            .commit_scaffold(
+                &shell.id,
+                "  打飞机  ",
+                "  一个竖版射击小游戏  ",
+                Some("openai/gpt-5"),
+            )
             .await
             .unwrap();
         assert!(committed.scaffolded);
@@ -2452,7 +2466,10 @@ mod tests {
             .expect("shell creation must accept an empty brief");
         assert!(!record.scaffolded, "a shell is not scaffolded");
         assert_eq!(record.brief, "");
-        assert_eq!(record.name, "untitled", "empty brief falls back to the placeholder");
+        assert_eq!(
+            record.name, "untitled",
+            "empty brief falls back to the placeholder"
+        );
     }
 
     #[tokio::test]
@@ -2480,7 +2497,10 @@ mod tests {
             .create_app_with_mode(None, "a todo list", None, CreateMode::Scaffolded, None)
             .await
             .expect("create");
-        assert!(record.scaffolded, "the create+scaffold path commits scaffolded=true");
+        assert!(
+            record.scaffolded,
+            "the create+scaffold path commits scaffolded=true"
+        );
         // `AppState::create_with_git` hardcodes `scaffolded: true` in its own
         // literal (state.rs) — `assert!` above alone would still pass even if
         // the `app.record.scaffolded = mode == CreateMode::Scaffolded;`
@@ -2544,7 +2564,10 @@ mod tests {
                 _ => None,
             })
             .expect("AppCreated must be emitted");
-        assert_eq!(created, None, "LocalAppCreate's path has no request to correlate");
+        assert_eq!(
+            created, None,
+            "LocalAppCreate's path has no request to correlate"
+        );
     }
 
     #[tokio::test]

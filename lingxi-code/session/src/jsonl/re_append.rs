@@ -42,6 +42,7 @@
 //! - arg2 `skip_dedup` — `true` FORCES the write (post-compaction paths use it,
 //!   because compaction just destroyed the tail).
 
+use crate::jsonl::reader::is_valid_atis_latch;
 use crate::jsonl::LITE_READ_BUF_SIZE;
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -122,6 +123,10 @@ pub struct SessionMetadataState {
     /// `currentSessionIsolationLatch` → `{type:"isolation-latch",side,sessionId}`.
     /// Note the wire key is `side`, NOT `isolationLatch`.
     pub isolation_latch: Option<String>,
+    /// `currentSessionAtisLatch` → `{type:"atis-latch",atis,sessionId}`.
+    /// `Some("")` is meaningful: the oracle gates on `!== undefined`, and
+    /// its `/^[\x21-\x7e]*$/` validator accepts the empty string.
+    pub atis: Option<String>,
     /// `currentSessionWorktree` → `{type:"worktree-state",worktreeSession,sessionId}`.
     ///
     /// Gated on `!== undefined`, NOT on truthiness: an explicit
@@ -445,6 +450,13 @@ pub fn plan_re_append(
             }
         }
     }
+    if state.atis.is_none() {
+        if let Some(found) = find_last_typed_field(tail, "atis-latch", "atis") {
+            if is_valid_atis_latch(&found) {
+                state.atis = Some(found);
+            }
+        }
+    }
 
     // ── 2. rebuild ──────────────────────────────────────────────────────────
     let sid = || Value::String(session_id.to_string());
@@ -531,6 +543,13 @@ pub fn plan_re_append(
         entries.push(obj(vec![
             ("type", Value::String("isolation-latch".into())),
             ("side", Value::String(latch.to_string())),
+            ("sessionId", sid()),
+        ]));
+    }
+    if let Some(atis) = &state.atis {
+        entries.push(obj(vec![
+            ("type", Value::String("atis-latch".into())),
+            ("atis", Value::String(atis.clone())),
             ("sessionId", sid()),
         ]));
     }
@@ -688,7 +707,7 @@ fn dedup_key(value: &Value) -> String {
 }
 
 /// `new Date().toISOString()` — millisecond precision, `Z` suffix.
-fn iso_now() -> String {
+pub(crate) fn iso_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -751,7 +770,7 @@ mod tests {
 
     // ── record shape / order ────────────────────────────────────────────────
 
-    /// The rebuild emits the oracle's 14 record types in the exact push order of
+    /// The rebuild emits the oracle's 15 record types in the exact push order of
     /// `planReAppendSessionMetadata`, with the exact key order per record.
     /// Byte-locked: this is what the dedup comparator hashes on, so any drift
     /// here silently turns every re-append into an unconditional append.
@@ -770,6 +789,7 @@ mod tests {
             mode: Some("default".into()),
             permission_mode: Some("acceptEdits".into()),
             isolation_latch: Some("left".into()),
+            atis: Some("atis-token".into()),
             worktree: Some(serde_json::json!({"worktreePath": "/wt"})),
             pr_number: Some(42),
             pr_url: Some("https://example.test/pull/42".into()),
@@ -802,6 +822,7 @@ mod tests {
                 "mode",
                 "permission-mode",
                 "isolation-latch",
+                "atis-latch",
                 "worktree-state",
                 "pr-link",
                 "bridge-session",
@@ -857,14 +878,18 @@ mod tests {
         );
         assert_eq!(
             lines[11],
+            r#"{"type":"atis-latch","atis":"atis-token","sessionId":"S1"}"#
+        );
+        assert_eq!(
+            lines[12],
             r#"{"type":"worktree-state","worktreeSession":{"worktreePath":"/wt"},"sessionId":"S1"}"#
         );
         // pr-link and bridge-session put `sessionId` SECOND, unlike every other record.
-        assert!(lines[12].starts_with(
+        assert!(lines[13].starts_with(
             r#"{"type":"pr-link","sessionId":"S1","prNumber":42,"prUrl":"https://example.test/pull/42","prRepository":"acme/widgets","timestamp":""#
         ));
         assert_eq!(
-            lines[13],
+            lines[14],
             r#"{"type":"bridge-session","sessionId":"S1","bridgeSessionId":"bridge-9","lastSequenceNum":7,"declaredDialogKinds":["ask"],"sessionGroupingId":"grp-1"}"#
         );
     }
@@ -1265,6 +1290,48 @@ mod tests {
         let mode = serde_json::json!({"type": "mode", "sessionId": "S1", "mode": "plan"});
         let mode2 = serde_json::json!({"type": "mode", "sessionId": "S1", "mode": "default"});
         assert_ne!(dedup_key(&mode), dedup_key(&mode2));
+    }
+
+    #[test]
+    fn re_append_adopts_and_writes_valid_atis_latch_in_oracle_order() {
+        let mut state = SessionMetadataState {
+            isolation_latch: Some("left".into()),
+            worktree: Some(serde_json::json!({"name": "wt"})),
+            ..Default::default()
+        };
+        let plan = plan_re_append(
+            concat!(
+                r#"{"type":"atis-latch","sessionId":"S1","atis":"valid-token"}"#,
+                "\n",
+            ),
+            &mut state,
+            "S1",
+            true,
+            true,
+        )
+        .expect("plan");
+
+        assert_eq!(state.atis.as_deref(), Some("valid-token"));
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| entry["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["isolation-latch", "atis-latch", "worktree-state"],
+        );
+        assert_eq!(plan.entries[1]["atis"], "valid-token");
+
+        let mut invalid = SessionMetadataState::default();
+        let invalid_plan = plan_re_append(
+            "{\"type\":\"atis-latch\",\"sessionId\":\"S1\",\"atis\":\"bad\\u0020token\"}\n",
+            &mut invalid,
+            "S1",
+            true,
+            true,
+        )
+        .expect("plan");
+        assert!(invalid.atis.is_none());
+        assert!(invalid_plan.entries.is_empty());
     }
 
     /// The comparator is a STRING compare of the serialization, so a record

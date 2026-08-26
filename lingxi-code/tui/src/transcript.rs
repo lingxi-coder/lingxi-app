@@ -10,6 +10,7 @@
 //! [`Transcript::flush_active`] finalizes it, so active text is never
 //! double-rendered.
 
+use std::cell::RefCell;
 use std::io;
 use std::io::Write;
 
@@ -35,6 +36,23 @@ pub struct Transcript {
     committed_to_terminal: usize,
     /// Rich-vs-raw + verbose/expanded state applied when rendering cells.
     render_mode: RenderMode,
+    /// Cached wrap of committed cells for the last (width, mode, len). Full-screen
+    /// redraws wrap every committed cell at 20 Hz; this skips that work when the
+    /// committed history has not changed.
+    wrap_cache: RefCell<Option<CommittedWrapCache>>,
+}
+
+struct CommittedWrapCache {
+    /// Viewport width the cached lines were wrapped at.
+    width: u16,
+    /// Render mode (raw/verbose) used when wrapping.
+    render_mode: RenderMode,
+    /// Number of committed cells represented by `lines`.
+    committed_len: usize,
+    /// Palette used to produce the styled lines.
+    theme: Theme,
+    /// Wrapped committed lines.
+    lines: Vec<Line<'static>>,
 }
 
 impl Transcript {
@@ -57,6 +75,7 @@ impl Transcript {
     /// Append a finalized cell to the committed history.
     pub fn push_committed(&mut self, cell: Box<dyn HistoryCell>) {
         self.committed.push(cell);
+        self.invalidate_wrap_cache();
     }
 
     /// Commit a [`RenderedMessage`] via [`cell_for_message`] — the transcript
@@ -84,6 +103,7 @@ impl Transcript {
     pub fn flush_active(&mut self) {
         if let Some(cell) = self.active.take() {
             self.committed.push(cell);
+            self.invalidate_wrap_cache();
         }
     }
 
@@ -155,13 +175,34 @@ impl Transcript {
     #[must_use]
     pub fn visible_fullscreen_lines(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
         let width = width.max(1);
-        let mut lines = Vec::new();
-        for cell in &self.committed {
-            lines.extend(wrap_to_width(
-                cell.display_lines(width, theme, self.render_mode),
+        let committed_len = self.committed.len();
+        let mut cache = self.wrap_cache.borrow_mut();
+        let hit = cache.as_ref().is_some_and(|c| {
+            c.width == width
+                && c.render_mode == self.render_mode
+                && c.committed_len == committed_len
+                && c.theme == *theme
+        });
+        let mut lines = if hit {
+            cache.as_ref().expect("checked").lines.clone()
+        } else {
+            let mut wrapped = Vec::new();
+            for cell in &self.committed {
+                wrapped.extend(wrap_to_width(
+                    cell.display_lines(width, theme, self.render_mode),
+                    width,
+                ));
+            }
+            *cache = Some(CommittedWrapCache {
                 width,
-            ));
-        }
+                render_mode: self.render_mode,
+                committed_len,
+                theme: *theme,
+                lines: wrapped.clone(),
+            });
+            wrapped
+        };
+        drop(cache);
         if let Some(active) = &self.active {
             lines.extend(wrap_to_width(
                 active.display_lines(width, theme, self.render_mode),
@@ -177,6 +218,7 @@ impl Transcript {
         self.committed.clear();
         self.active = None;
         self.committed_to_terminal = 0;
+        self.invalidate_wrap_cache();
     }
 
     /// The committed cells, in commit order (the active cell is excluded).
@@ -223,6 +265,7 @@ impl Transcript {
     /// Replace the render mode (rich/raw + verbose).
     pub fn set_render_mode(&mut self, mode: RenderMode) {
         self.render_mode = mode;
+        self.invalidate_wrap_cache();
     }
 
     /// Whether collapsible content renders expanded (Ctrl-O state).
@@ -234,12 +277,18 @@ impl Transcript {
     /// Set the verbose/expanded state.
     pub fn set_verbose(&mut self, verbose: bool) {
         self.render_mode.verbose = verbose;
+        self.invalidate_wrap_cache();
     }
 
     /// Flip the verbose/expanded state; returns the new value.
     pub fn toggle_verbose(&mut self) -> bool {
         self.render_mode.verbose = !self.render_mode.verbose;
+        self.invalidate_wrap_cache();
         self.render_mode.verbose
+    }
+
+    fn invalidate_wrap_cache(&mut self) {
+        *self.wrap_cache.get_mut() = None;
     }
 }
 

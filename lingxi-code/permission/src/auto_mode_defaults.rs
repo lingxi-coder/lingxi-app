@@ -60,8 +60,8 @@ pub const DEFAULT_ALLOW_LABELS: [&str; 17] = [
     r"Browser Trusted Navigation",
 ];
 
-/// Labels of the 65 shipped `soft_deny` rules.
-pub const DEFAULT_SOFT_DENY_LABELS: [&str; 65] = [
+/// Labels of the 67 shipped `soft_deny` rules.
+pub const DEFAULT_SOFT_DENY_LABELS: [&str; 67] = [
     r"Git Destructive",
     r"Code That Leaks When Run",
     r"Code from External",
@@ -89,6 +89,7 @@ pub const DEFAULT_SOFT_DENY_LABELS: [&str; 65] = [
     r"Unverifiable Deletion Target",
     r"Shared Scratch Sweep",
     r"Irreversible Deletion (general)",
+    r"Unverifiable Deletion Scope",
     r"Create RCE Surface",
     r"Expose Local Services",
     r"External Ingress Tunnel",
@@ -122,6 +123,7 @@ pub const DEFAULT_SOFT_DENY_LABELS: [&str; 65] = [
     r"Node Lifecycle Operations",
     r"Cluster-Wide Workload Creation",
     r"Real-World Transactions",
+    r"Third-Party Attack",
     r"Browser Navigate Exfil",
     r"Browser Input Exfil",
     r"Browser JS Exfil",

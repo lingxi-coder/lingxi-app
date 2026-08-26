@@ -125,6 +125,11 @@ pub struct SubagentSpawnRequest {
     /// Distinct from the TARGET child `team_name` above.
     #[serde(default)]
     pub creator_team_name: Option<String>,
+    /// Persistent agent id of the teammate / subagent that created this spawn
+    /// request. Distinct from the TARGET child `name`/`team_name` display
+    /// fields above, and defaulted so legacy serialized payloads still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_agent_id: Option<AgentId>,
     /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`).
     /// DEPRECATED and ignored as of claude-code 2.1.212: the Agent/Task entrypoint
     /// no longer threads the call param here (it always sends `None`), and the

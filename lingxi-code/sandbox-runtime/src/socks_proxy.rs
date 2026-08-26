@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use percent_encoding::percent_decode_str;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -19,12 +20,12 @@ use crate::config::{
     current_network_config, shared_network_config, NetworkConfig, SharedNetworkConfig,
 };
 use crate::dial::dial_direct;
-use crate::host::is_valid_host;
-use crate::matcher::{filter_network_request_with_ask, AskFn};
+use crate::matcher::{filter_network_request_with_ask_decision, AskFn};
 use crate::parent_proxy::{
     connect_via_parent_proxy, select_parent_proxy_url, should_bypass_parent_proxy,
     ResolvedParentProxy,
 };
+use crate::violation_store::{SandboxViolationStore, Violation};
 
 /// SOCKS5 protocol version byte (RFC 1928 §3).
 const SOCKS_VERSION: u8 = 0x05;
@@ -47,6 +48,8 @@ pub const REP_GENERAL_FAILURE: u8 = 0x01;
 pub const REP_NOT_ALLOWED: u8 = 0x02;
 /// Reply: host unreachable (the dial failed).
 pub const REP_HOST_UNREACHABLE: u8 = 0x04;
+/// Username/password auth (RFC 1929).
+const METHOD_USERNAME_PASSWORD: u8 = 0x02;
 
 /// Parse a SOCKS5 CONNECT request body into `(host, port)`.
 ///
@@ -113,6 +116,10 @@ pub struct SocksOptions {
     /// decides. `None` ⇒ unmatched hosts denied (the P5 behaviour). Added for
     /// P8b so the manager can thread its ask-callback into the live SOCKS gate.
     pub ask: Option<AskFn>,
+    /// Optional per-session token that validates per-command SOCKS credentials.
+    pub proxy_auth_token: Option<String>,
+    /// Optional violation store for `<sandbox_violations>` attribution.
+    pub violation_store: Option<Arc<SandboxViolationStore>>,
 }
 
 impl SocksOptions {
@@ -130,8 +137,66 @@ impl SocksOptions {
             config: shared_network_config(config),
             parent_proxy,
             ask,
+            proxy_auth_token: None,
+            violation_store: None,
         }
     }
+}
+
+fn format_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+async fn read_credential_field(client: &mut TcpStream) -> std::io::Result<String> {
+    let mut len = [0u8; 1];
+    client.read_exact(&mut len).await?;
+    let mut bytes = vec![0u8; len[0] as usize];
+    client.read_exact(&mut bytes).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn decode_socks_username_and_password(
+    username: &str,
+    password: &str,
+    proxy_auth_token: Option<&str>,
+) -> Option<String> {
+    let expected = proxy_auth_token?;
+    if password != expected {
+        return None;
+    }
+    let decoded_user = percent_decode_str(username).decode_utf8_lossy();
+    decoded_user.strip_prefix("srt.").map(ToString::to_string)
+}
+
+fn record_network_violation(
+    opts: &SocksOptions,
+    encoded_command: Option<String>,
+    host: &str,
+    port: u16,
+    reason: &str,
+) {
+    let Some(store) = opts.violation_store.as_ref() else {
+        return;
+    };
+    let Some(encoded_command) = encoded_command else {
+        return;
+    };
+    let line = format!(
+        "deny network-outbound {} ({reason})",
+        format_host_port(host, port)
+    );
+    store.add_violation(Violation {
+        encoded_command,
+        line: Some(line),
+        host: Some(host.to_string()),
+        port: Some(port),
+        operation: Some("connect".into()),
+        ..Default::default()
+    });
 }
 
 /// Build a SOCKS5 reply frame: `VER REP RSV ATYP=IPv4 BND.ADDR=0.0.0.0 BND.PORT=0`.
@@ -169,14 +234,37 @@ async fn handle_connection(mut client: TcpStream, opts: &SocksOptions) -> std::i
     let nmethods = head[1] as usize;
     let mut methods = vec![0u8; nmethods];
     client.read_exact(&mut methods).await?;
-    if methods.contains(&0x00) {
-        // Select NO-AUTH.
-        client.write_all(&[SOCKS_VERSION, 0x00]).await?;
-    } else {
-        // No acceptable method (the sandbox client always offers no-auth).
-        client.write_all(&[SOCKS_VERSION, 0xFF]).await?;
-        return Ok(());
-    }
+    let encoded_command =
+        if opts.proxy_auth_token.is_some() && methods.contains(&METHOD_USERNAME_PASSWORD) {
+            client
+                .write_all(&[SOCKS_VERSION, METHOD_USERNAME_PASSWORD])
+                .await?;
+            let mut version = [0u8; 1];
+            client.read_exact(&mut version).await?;
+            if version[0] != 0x01 {
+                let _ = client.write_all(&[0x01, 0x01]).await;
+                return Ok(());
+            }
+            let username = read_credential_field(&mut client).await?;
+            let password = read_credential_field(&mut client).await?;
+            let encoded = decode_socks_username_and_password(
+                &username,
+                &password,
+                opts.proxy_auth_token.as_deref(),
+            );
+            let status = if encoded.is_some() { 0x00 } else { 0x01 };
+            client.write_all(&[0x01, status]).await?;
+            if status != 0x00 {
+                return Ok(());
+            }
+            encoded
+        } else if methods.contains(&0x00) {
+            client.write_all(&[SOCKS_VERSION, 0x00]).await?;
+            None
+        } else {
+            client.write_all(&[SOCKS_VERSION, 0xFF]).await?;
+            return Ok(());
+        };
 
     // --- Request: VER CMD RSV ATYP DST.ADDR DST.PORT (RFC 1928 §4) ---
     let Some(req) = read_request(&mut client).await? else {
@@ -197,9 +285,10 @@ async fn handle_connection(mut client: TcpStream, opts: &SocksOptions) -> std::i
     // Read the CURRENT live config (clone the inner Arc), then DROP the guard
     // before the await — the std RwLock is never held across a suspension point.
     let net = current_network_config(&opts.config);
-    if !is_valid_host(&host)
-        || !filter_network_request_with_ask(port, &host, &net, opts.ask.as_ref()).await
-    {
+    let decision =
+        filter_network_request_with_ask_decision(port, &host, &net, opts.ask.as_ref()).await;
+    if let Some(reason) = decision.denied_reason() {
+        record_network_violation(opts, encoded_command, &host, port, reason);
         let _ = client.write_all(&reply_frame(REP_NOT_ALLOWED)).await;
         return Ok(());
     }
@@ -277,6 +366,9 @@ async fn read_request(client: &mut TcpStream) -> std::io::Result<Option<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::shared_network_config;
+    use crate::env::sandbox_proxy_username;
+    use crate::violation_store::SandboxViolationStore;
     #[test]
     fn parse_connect_request_ipv4_domain_ipv6() {
         // VER=5 CMD=1 RSV=0 ATYP DST.ADDR DST.PORT
@@ -364,6 +456,32 @@ mod tests {
         let mut sel = [0u8; 2];
         c.read_exact(&mut sel).await.unwrap();
         assert_eq!(sel, [0x05, 0x00]);
+        c.write_all(req_body).await.unwrap();
+        let mut reply = [0u8; 10];
+        c.read_exact(&mut reply).await.unwrap();
+        reply
+    }
+
+    async fn socks_handshake_auth_and_request(
+        c: &mut TcpStream,
+        command: &str,
+        token: &str,
+        req_body: &[u8],
+    ) -> [u8; 10] {
+        c.write_all(&[0x05, 0x01, METHOD_USERNAME_PASSWORD])
+            .await
+            .unwrap();
+        let mut sel = [0u8; 2];
+        c.read_exact(&mut sel).await.unwrap();
+        assert_eq!(sel, [0x05, METHOD_USERNAME_PASSWORD]);
+        let username = sandbox_proxy_username(command);
+        c.write_all(&[0x01, username.len() as u8]).await.unwrap();
+        c.write_all(username.as_bytes()).await.unwrap();
+        c.write_all(&[token.len() as u8]).await.unwrap();
+        c.write_all(token.as_bytes()).await.unwrap();
+        let mut auth = [0u8; 2];
+        c.read_exact(&mut auth).await.unwrap();
+        assert_eq!(auth, [0x01, 0x00]);
         c.write_all(req_body).await.unwrap();
         let mut reply = [0u8; 10];
         c.read_exact(&mut reply).await.unwrap();
@@ -488,8 +606,6 @@ mod tests {
     /// is REP_GRANTED and tunnels — no rebind.
     #[tokio::test]
     async fn live_config_swap_changes_socks_decision() {
-        use crate::config::shared_network_config;
-
         let seen = Arc::new(AtomicU32::new(0));
         let echo_port = spawn_echo(Arc::clone(&seen)).await;
 
@@ -499,6 +615,8 @@ mod tests {
             config: Arc::clone(&shared),
             parent_proxy: None,
             ask: None,
+            proxy_auth_token: None,
+            violation_store: None,
         });
         let l = TokioListener::bind("127.0.0.1:0").await.unwrap();
         let socks_port = l.local_addr().unwrap().port();
@@ -534,5 +652,36 @@ mod tests {
         let mut got = [0u8; 9];
         c2.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"livesocks");
+    }
+
+    #[tokio::test]
+    async fn denied_socks_request_with_auth_records_violation_line() {
+        let store = Arc::new(SandboxViolationStore::new());
+        let opts = Arc::new(SocksOptions {
+            config: shared_network_config(NetworkConfig::default()),
+            parent_proxy: None,
+            ask: None,
+            proxy_auth_token: Some("tok_123".into()),
+            violation_store: Some(Arc::clone(&store)),
+        });
+        let l = TokioListener::bind("127.0.0.1:0").await.unwrap();
+        let socks_port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = serve_socks(l, opts).await;
+        });
+
+        let mut c = TcpStream::connect(("127.0.0.1", socks_port)).await.unwrap();
+        let reply = socks_handshake_auth_and_request(
+            &mut c,
+            "echo hi",
+            "tok_123",
+            &req_domain(b"denied.example", 443),
+        )
+        .await;
+        assert_eq!(reply[1], REP_NOT_ALLOWED);
+        assert_eq!(
+            store.get_violation_lines_for_command("echo hi"),
+            vec!["deny network-outbound denied.example:443 (host is not on the allow list)"]
+        );
     }
 }

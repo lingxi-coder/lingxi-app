@@ -131,17 +131,40 @@ impl CoalescedHeartbeatLines {
 
 pub enum OutboundMsg {
     Line(String),
+    /// A stream-event line whose pending-capacity reservation is tracked by
+    /// the drain task. Keeping the kind out-of-band avoids classifying an
+    /// ordinary frame from its serialized contents (which may contain a
+    /// nested `{"type":"stream_event"}` value).
+    StreamEvent(String),
     /// Wake the single writer to drain the coalesced heartbeat mailbox.
     Heartbeats(Arc<CoalescedHeartbeatLines>),
     Flush(oneshot::Sender<()>),
 }
 
-fn spawn_drain_task(mut rx: mpsc::UnboundedReceiver<OutboundMsg>) {
+fn spawn_drain_task(
+    mut rx: mpsc::UnboundedReceiver<OutboundMsg>,
+    pending_stream_events: Arc<AtomicUsize>,
+) {
     tokio::spawn(async move {
         let mut stdout = std::io::stdout();
         while let Some(msg) = rx.recv().await {
             match msg {
-                OutboundMsg::Line(line) => emit_line_to_stdout(&mut stdout, &line),
+                OutboundMsg::Line(line) => {
+                    emit_line_to_stdout(&mut stdout, &line);
+                }
+                OutboundMsg::StreamEvent(line) => {
+                    emit_line_to_stdout(&mut stdout, &line);
+                    // `OutboundMsg` is public and a transport-side producer
+                    // may enqueue a pre-serialized event without going
+                    // through `StreamJsonStream::enqueue`. Do not let that
+                    // underflow the reservation counter and disable all
+                    // subsequent events.
+                    let _ = pending_stream_events.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |count| Some(count.saturating_sub(1)),
+                    );
+                }
                 OutboundMsg::Heartbeats(heartbeats) => {
                     for line in heartbeats.drain() {
                         emit_line_to_stdout(&mut stdout, &line);
@@ -387,6 +410,9 @@ pub fn build_hook_progress_frame(
 /// frames share the same queue and cannot overtake data frames.
 pub type OutboundTx = mpsc::UnboundedSender<OutboundMsg>;
 
+/// Drop replaceable `stream_event` frames when stdout is this far behind.
+const MAX_PENDING_STREAM_EVENTS: usize = 8192;
+
 /// A 4th `OutputStream` impl that writes NDJSON frames to stdout.
 ///
 /// ## Phase 0 stdout drain
@@ -448,6 +474,8 @@ pub struct StreamJsonStream {
     /// Latest-value mailbox that prevents an unbounded backlog of replaceable
     /// tool heartbeat frames when stdout is slow.
     heartbeat_lines: Arc<CoalescedHeartbeatLines>,
+    /// In-flight `stream_event` frames not yet drained to stdout.
+    pending_stream_events: Arc<AtomicUsize>,
 }
 
 impl StreamJsonStream {
@@ -474,6 +502,7 @@ impl StreamJsonStream {
             forward_subagent_text: AtomicBool::new(false),
             omit_thinking: AtomicBool::new(false),
             heartbeat_lines: Arc::new(CoalescedHeartbeatLines::default()),
+            pending_stream_events: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -491,7 +520,7 @@ impl StreamJsonStream {
         // Take the Rx out of the option — this can only succeed once.
         let mut guard = self.drain_rx.lock().await;
         if let Some(rx) = guard.take() {
-            spawn_drain_task(rx);
+            spawn_drain_task(rx, Arc::clone(&self.pending_stream_events));
             self.drain_started.store(1, Ordering::Release);
         }
         // If guard.take() returned None another caller raced us and already
@@ -519,14 +548,43 @@ impl StreamJsonStream {
     /// task). Sending to an unbounded channel is infallible unless the receiver
     /// is dropped (i.e. the drain task panicked — in that case we silently drop
     /// the frame rather than panicking the caller).
-    fn enqueue_line(&self, line: String) {
-        let _ = self.out_tx.send(OutboundMsg::Line(line));
+    fn enqueue_line(&self, line: String, is_stream_event: bool) {
+        if is_stream_event && !self.reserve_stream_event() {
+            return;
+        }
+        let message = if is_stream_event {
+            OutboundMsg::StreamEvent(line)
+        } else {
+            OutboundMsg::Line(line)
+        };
+        if self.out_tx.send(message).is_err() && is_stream_event {
+            self.pending_stream_events.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    fn reserve_stream_event(&self) -> bool {
+        let mut current = self.pending_stream_events.load(Ordering::Relaxed);
+        loop {
+            if current >= MAX_PENDING_STREAM_EVENTS {
+                return false;
+            }
+            match self.pending_stream_events.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Serialise `v` to an escaped NDJSON line and enqueue it.
     fn enqueue(&self, v: &Value) {
         let line = serialize_ndjson_line(v);
-        self.enqueue_line(line);
+        let is_stream_event = v.get("type").and_then(Value::as_str) == Some("stream_event");
+        self.enqueue_line(line, is_stream_event);
     }
 
     /// Build the client-protocol heartbeat frame used by stream-json. Keeping
@@ -1453,8 +1511,12 @@ impl OutputStream for StreamJsonStream {
     /// FIDELITY NOTE (G5): `event_json` is reconstructed from the parsed
     /// `LlmEvent` — semantically equivalent to the Anthropic SSE event but
     /// NOT byte-for-byte identical (e.g. field ordering, default values).
+    fn wants_partial_stream_events(&self) -> bool {
+        self.include_partial_messages.load(Ordering::Relaxed) && !self.suppress_frames
+    }
+
     async fn emit_stream_event(&self, event_json: &str, is_message_start: bool) {
-        if !self.include_partial_messages.load(Ordering::Relaxed) || self.suppress_frames {
+        if !self.wants_partial_stream_events() {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
@@ -2284,6 +2346,29 @@ mod tests {
         assert_eq!(frame["session_id"], "sess-notice");
     }
 
+    #[tokio::test]
+    async fn nested_stream_event_value_does_not_consume_stream_event_capacity() {
+        let stream = StreamJsonStream::new(make_params("sess-nested"));
+        let mut rx = stream
+            .drain_rx
+            .lock()
+            .await
+            .take()
+            .expect("drain receiver available");
+        let frame = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "input": {"type": "stream_event"}}]}
+        });
+
+        stream.enqueue(&frame);
+
+        assert_eq!(stream.pending_stream_events.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            rx.try_recv().expect("frame enqueued"),
+            OutboundMsg::Line(_)
+        ));
+    }
+
     /// Verify U+2028/U+2029 escaping.
     #[test]
     fn line_terminator_escaping() {
@@ -2745,6 +2830,7 @@ mod tests {
             .await;
         let line = match rx.try_recv().expect("a frame was enqueued") {
             OutboundMsg::Line(l) => l,
+            OutboundMsg::StreamEvent(l) => l,
             OutboundMsg::Heartbeats(_) => panic!("expected a Line frame"),
             OutboundMsg::Flush(_) => panic!("expected a Line frame"),
         };

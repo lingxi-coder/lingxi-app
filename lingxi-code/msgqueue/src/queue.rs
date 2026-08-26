@@ -390,6 +390,9 @@ impl MessageQueueManager {
     /// Remove the commands with the given `uuids` from the queue, logging a
     /// `Remove` for each. Twin of `remove(commandsToRemove)` (which matches by
     /// reference identity; here we match by `uuid`). `reason` is recorded.
+    ///
+    /// Keep this for cancellation / prompt-restore. The 2.1.245 query loop
+    /// folds absorbed commands via [`Self::consume`].
     pub async fn remove(&self, uuids: &[String], reason: &str) {
         if uuids.is_empty() {
             return;
@@ -405,6 +408,18 @@ impl MessageQueueManager {
             })
             .await;
         }
+    }
+
+    /// Claude Code 2.1.245 `messageQueue.consume(commands)`: drop commands the
+    /// query loop has already folded into the running / follow-up turn.
+    ///
+    /// Same splice and `"remove"` operation log as [`Self::remove`] — 2.1.245's
+    /// shared helper still records `remove` for both. The JS split is the
+    /// subscriber bus (`remove` → prompt-restore, `consume` → a separate bus
+    /// so folded text is not bounced back into the TUI input). LingXi has no
+    /// dual-bus subscriber yet; this is the named fold-into-turn path.
+    pub async fn consume(&self, uuids: &[String], reason: &str) {
+        self.remove(uuids, reason).await;
     }
 
     /// Pop EVERY queued command, logging a `Clear`. Twin of `dequeueAll` /
@@ -775,6 +790,32 @@ mod tests {
         assert!(matches!(ops[1], QueueOperation::Dequeue { .. }));
         assert!(matches!(ops[2], QueueOperation::Enqueue { .. }));
         assert!(matches!(ops[3], QueueOperation::Remove { .. }));
+    }
+
+    #[tokio::test]
+    async fn consume_folds_commands_and_logs_remove() {
+        // 2.1.245 `consume` shares the splice + `"remove"` operation log with
+        // `remove`; only the subscriber bus differs in JS.
+        let q = MessageQueueManager::new();
+        let rec = Arc::new(VecRecorder::new());
+        q.set_recorder(rec.clone()).await;
+
+        q.enqueue(mk(QueuePriority::Next, "a")).await;
+        q.enqueue(mk(QueuePriority::Next, "b")).await;
+        q.consume(&["a".into()], "drained mid-turn into running turn")
+            .await;
+
+        assert_eq!(q.len().await, 1);
+        let remaining = q.snapshot().await;
+        assert_eq!(remaining[0].uuid, "b");
+        let ops = rec.ops().await;
+        match ops.last() {
+            Some(QueueOperation::Remove { uuid, reason }) => {
+                assert_eq!(uuid, "a");
+                assert_eq!(reason, "drained mid-turn into running turn");
+            }
+            other => panic!("expected Remove, got {other:?}"),
+        }
     }
 
     #[tokio::test]

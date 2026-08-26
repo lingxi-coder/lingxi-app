@@ -47,7 +47,20 @@ globalThis.__WF_THROW_PREFIX = String.fromCharCode(1) + "__wf_throw__" + String.
 // explicit `=== null` / `??` checks behave the same. Collision-proof, NUL-free,
 // U+0001-framed like the throw prefix.
 globalThis.__WF_NULL = String.fromCharCode(1) + "__wf_null__" + String.fromCharCode(1);
+// The native runner captures these failures for the terminal workflow result.
+// Keep the fallback so the prelude remains usable in standalone harnesses.
+if (!('__wf_record_failure' in globalThis)) globalThis.__wf_record_failure = () => {};
 globalThis.agent = (prompt, opts) => new Promise((res, rej) => { globalThis.__wf_queue.push({ prompt: String(prompt), opts: opts || {}, res, rej }); });
+globalThis.__wf_error_info = (e) => {
+  if (e && typeof e === "object") {
+    return {
+      name: e.name,
+      msg: typeof e.message === "string" ? e.message : String(e),
+    };
+  }
+  return { name: undefined, msg: String(e) };
+};
+globalThis.__wf_plural = (n, word) => n === 1 ? word : word + "s";
 globalThis.__wf_pump = () => {
   const q = globalThis.__wf_queue;
   if (q.length === 0) return false;
@@ -61,7 +74,11 @@ globalThis.__wf_pump = () => {
     const r = results[i];
     if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
       // Agent-cap, budget-ceiling, or caller-requested terminal failure → reject.
-      q[i].rej(new Error(r.slice(globalThis.__WF_THROW_PREFIX.length)));
+      const msg = r.slice(globalThis.__WF_THROW_PREFIX.length);
+      const err = new Error(msg);
+      if (msg.startsWith("Workflow token budget exceeded")) err.name = "WorkflowBudgetExceededError";
+      else if (msg.startsWith("Workflow agent() call cap reached")) err.name = "WorkflowAgentCapError";
+      q[i].rej(err);
     } else if (r === globalThis.__WF_NULL) {
       // skipped / dead agent → resolve with null (claude-code's contract).
       q[i].res(null);
@@ -88,9 +105,25 @@ globalThis.parallel = async (thunks) => {
   if (!Array.isArray(thunks)) throw new TypeError("parallel() expects an array of functions");
   if (thunks.length > 4096) throw new Error("array length " + thunks.length + " exceeds the maximum of 4096 supported across the workflow VM boundary");
   for (let t of thunks) if (typeof t !== "function") throw new TypeError("parallel() expects an array of functions, not promises. Wrap each call: () => agent(...)");
-  const ps = thunks.map((t) => { try { return Promise.resolve(t()); } catch (e) { return Promise.resolve(null); } });
+  const ps = thunks.map((t) => { try { return Promise.resolve(t()); } catch (e) { return Promise.reject(e); } });
+  const settled = await Promise.allSettled(ps);
   const out = [];
-  for (const p of ps) { try { out.push(await p); } catch (e) { out.push(null); } }
+  let dropped = 0;
+  for (let i = 0; i < settled.length; i++) {
+    const entry = settled[i];
+    if (entry.status === "fulfilled") {
+      out.push(entry.value);
+    } else {
+      const { name, msg } = globalThis.__wf_error_info(entry.reason);
+      if (name === "WorkflowBudgetExceededError") dropped++;
+      else {
+        globalThis.__wf_record_failure(`parallel[${i}] failed: ${msg}`);
+        log(`parallel[${i}] failed: ${msg}`);
+      }
+      out.push(null);
+    }
+  }
+  if (dropped > 0) globalThis.__wf_record_failure(`parallel: ${dropped} ${globalThis.__wf_plural(dropped, "slot")} dropped \u2014 token budget exceeded`);
   return out;
 };
 // pipeline(): each item runs its stage chain independently with NO barrier
@@ -103,10 +136,34 @@ globalThis.pipeline = async (items, ...stages) => {
   for (const s of stages) if (typeof s !== "function") throw new TypeError("pipeline() stages must be functions: pipeline(items, item => ..., result => ...)");
   const chain = async (item, idx) => {
     let v = item;
-    for (const s of stages) v = await s(v, item, idx);
+    for (const s of stages) {
+      // Claude Code treats a null stage result as a dropped pipeline item and
+      // does not invoke later stages with that sentinel.
+      if (v === null) break;
+      v = await s(v, item, idx);
+    }
     return v;
   };
-  return await parallel(items.map((it, i) => () => chain(it, i)));
+  const ps = items.map((it, i) => chain(it, i));
+  const settled = await Promise.allSettled(ps);
+  const out = [];
+  let dropped = 0;
+  for (let i = 0; i < settled.length; i++) {
+    const entry = settled[i];
+    if (entry.status === "fulfilled") {
+      out.push(entry.value);
+    } else {
+      const { name, msg } = globalThis.__wf_error_info(entry.reason);
+      if (name === "WorkflowBudgetExceededError") dropped++;
+      else {
+        globalThis.__wf_record_failure(`pipeline[${i}] failed: ${msg}`);
+        log(`pipeline[${i}] failed: ${msg}`);
+      }
+      out.push(null);
+    }
+  }
+  if (dropped > 0) globalThis.__wf_record_failure(`pipeline: ${dropped} ${globalThis.__wf_plural(dropped, "slot")} dropped \u2014 token budget exceeded`);
+  return out;
 };
 // Default globals. The host OVERRIDES each (before this prelude runs) when it
 // has a real value: `budget` (a WorkflowBudgetSource), `args` (the tool input),
@@ -125,6 +182,11 @@ if (!('workflow' in globalThis)) globalThis.workflow = async () => { throw new E
 /// the prelude's `globalThis.__WF_NULL`
 /// (`String.fromCharCode(1)+"__wf_null__"+String.fromCharCode(1)`).
 pub const WF_NULL_SENTINEL: &str = "\u{1}__wf_null__\u{1}";
+
+/// Host-side refuse marker: when a batch runner returns this prefix plus a
+/// message, the prelude rejects that `agent()` promise. Byte-identical to
+/// `globalThis.__WF_THROW_PREFIX`.
+pub const WF_THROW_PREFIX: &str = "\u{1}__wf_throw__\u{1}";
 
 /// State of a `workflow_agent` progress event (oracle §8).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,6 +316,10 @@ pub struct RunOutcome {
     /// tool result; this is `JSON.stringify(value)`. `None` when the script
     /// returns `undefined` (no `return`).
     pub result: Option<String>,
+    /// Non-fatal per-item failures collected by `parallel()` / `pipeline()`.
+    /// These are kept separate from progress logs so task notifications can
+    /// surface them even when the script itself returns successfully.
+    pub failures: Vec<String>,
 }
 
 /// Supplies the live token budget the script's `budget` global reflects: the
@@ -341,6 +407,74 @@ pub fn validate_meta(script: &str) -> Result<(), WorkflowError> {
     Ok(())
 }
 
+/// Compile the executable workflow body without running it. Claude Code does
+/// this before registering the background task, so syntax errors are returned
+/// synchronously and cannot create a task that fails later in the background.
+#[must_use]
+pub fn validate_body(script: &str) -> Result<(), WorkflowError> {
+    use rquickjs::{Context, Runtime};
+
+    let prepared = strip_meta_export(script);
+    validate_body_language(&prepared)?;
+    let runtime = Runtime::new().map_err(|e| WorkflowError::Engine(e.to_string()))?;
+    let context = Context::full(&runtime).map_err(|e| WorkflowError::Engine(e.to_string()))?;
+    let wrapped = format!("(async () => {{\n'use strict';\n{prepared}\n}})");
+    context.with(|context| {
+        context
+            .eval::<rquickjs::Value, _>(wrapped.as_bytes())
+            .map(|_| ())
+            .map_err(|e| WorkflowError::Script(e.to_string()))
+    })
+}
+
+/// Claude's workflow VM compiles the body as strict JavaScript and rejects a
+/// small set of syntax forms before execution. QuickJS otherwise accepts some
+/// of these in its default sloppy mode, so keep the source-level gate explicit
+/// instead of relying on engine-specific parser behavior.
+fn validate_body_language(script_body: &str) -> Result<(), WorkflowError> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .map_err(|error| WorkflowError::Engine(format!("tree-sitter init: {error}")))?;
+    let Some(tree) = parser.parse(script_body, None) else {
+        return Ok(());
+    };
+    let source = script_body.as_bytes();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "with_statement" => {
+                return Err(WorkflowError::Script(
+                    "'with' statements are not supported in workflow scripts.".into(),
+                ));
+            }
+            "call_expression" => {
+                if let Some(function) = node.child_by_field_name("function") {
+                    if node_text(function, source) == "import" {
+                        return Err(WorkflowError::Script(
+                            "import() is not available in workflow scripts.".into(),
+                        ));
+                    }
+                }
+            }
+            "lexical_declaration" => {
+                if node_text(node, source)
+                    .trim_start()
+                    .starts_with("await using")
+                {
+                    return Err(WorkflowError::Script(
+                        "'await using' declarations are not supported in workflow scripts.".into(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    Ok(())
+}
+
 fn node_text<'a>(node: tree_sitter::Node, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
 }
@@ -390,8 +524,92 @@ pub fn meta_string_value(script: &str, field: &str) -> Option<String> {
     None
 }
 
+/// Extract the number of elements in a literal `meta.<field>` array. Claude
+/// Code uses `meta.phases?.length ?? 0` for workflow telemetry; keeping this
+/// parser-side avoids evaluating user code while preserving the literal-only
+/// metadata contract enforced by [`validate_meta`].
+#[must_use]
+pub fn meta_array_len(script: &str, field: &str) -> Option<usize> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(script, None)?;
+    let src = script.as_bytes();
+    let obj = first_statement(tree.root_node()).and_then(|s| meta_object(s, src))?;
+    let mut c = obj.walk();
+    for pair in obj.named_children(&mut c) {
+        if pair.kind() != "pair" {
+            continue;
+        }
+        let Some(key) = pair.child_by_field_name("key") else {
+            continue;
+        };
+        let key_name = match key.kind() {
+            "property_identifier" => node_text(key, src).to_string(),
+            "string" => string_inner(key, src),
+            _ => continue,
+        };
+        if key_name == field {
+            return array_value_len(pair, src);
+        }
+    }
+    None
+}
+
+fn array_value_len(pair: tree_sitter::Node<'_>, src: &[u8]) -> Option<usize> {
+    let value = pair.child_by_field_name("value")?;
+    if value.kind() != "array" {
+        return None;
+    }
+    // Claude sanitizes `meta.phases` before reading `.length`: only literal
+    // objects containing a string `title` survive. Sparse arrays are rejected
+    // by the metadata parser rather than counted as holes.
+    let mut syntax_cursor = value.walk();
+    let mut needs_value = true;
+    for child in value.children(&mut syntax_cursor) {
+        match child.kind() {
+            "[" | "]" | "comment" => {}
+            "," if needs_value => return None,
+            "," => needs_value = true,
+            _ if child.is_named() => needs_value = false,
+            _ => {}
+        }
+    }
+    let mut cursor = value.walk();
+    Some(
+        value
+            .named_children(&mut cursor)
+            .filter(|child| {
+                child.kind() == "object" && object_string_field(*child, "title", src).is_some()
+            })
+            .count(),
+    )
+}
+
+fn object_string_field(object: tree_sitter::Node<'_>, field: &str, src: &[u8]) -> Option<String> {
+    let mut cursor = object.walk();
+    let result = object.named_children(&mut cursor).find_map(|pair| {
+        if pair.kind() != "pair" {
+            return None;
+        }
+        let key = pair.child_by_field_name("key")?;
+        let key_name = match key.kind() {
+            "property_identifier" => node_text(key, src).to_string(),
+            "string" => string_inner(key, src),
+            _ => return None,
+        };
+        if key_name != field {
+            return None;
+        }
+        let value = pair.child_by_field_name("value")?;
+        (value.kind() == "string").then(|| string_inner(value, src))
+    });
+    result
+}
+
 /// The byte-exact message claude-code returns when an INLINE workflow `script`
-/// uses a non-deterministic API (binary v2.1.186 validateInput, errorCode 4).
+/// uses a non-deterministic API (Claude Code 2.1.245 validateInput, errorCode 4).
 pub const NON_DETERMINISTIC_MESSAGE: &str = "Workflow scripts must be deterministic: Date.now()/Math.random()/new Date() are unavailable (breaks resume). Stamp results after the workflow returns, or pass timestamps via args.";
 
 /// Reject a script that uses a non-deterministic API — `Date.now()`,
@@ -553,15 +771,30 @@ fn walk_value(v: tree_sitter::Node, src: &[u8]) -> Result<(), String> {
         "object" => walk_object_literal(v, src),
         "array" => {
             let mut c = v.walk();
-            for el in v.named_children(&mut c) {
-                match el.kind() {
+            let mut needs_value = true;
+            for child in v.children(&mut c) {
+                match child.kind() {
+                    "[" | "]" => {}
+                    "," => {
+                        if needs_value {
+                            return Err("sparse arrays not allowed in meta".into());
+                        }
+                        // A final comma is valid; another comma before an
+                        // element is a hole and is rejected on the next comma
+                        // or at the closing delimiter.
+                        needs_value = true;
+                    }
                     "comment" => {}
-                    "spread_element" => return Err("spread not allowed in meta".into()),
-                    _ => walk_value(el, src)?,
+                    _ if child.is_named() => {
+                        walk_value(child, src)?;
+                        needs_value = false;
+                    }
+                    _ => {}
                 }
             }
             Ok(())
         }
+        "spread_element" => Err("spread not allowed in meta".into()),
         "template_string" => {
             let mut c = v.walk();
             if v.named_children(&mut c)
@@ -785,6 +1018,7 @@ pub fn run_sync(script: &str) -> Result<RunOutcome, WorkflowError> {
     Ok(RunOutcome {
         progress,
         result: None,
+        failures: Vec::new(),
     })
 }
 
@@ -873,6 +1107,7 @@ where
     let current_phase: Rc<RefCell<Option<(u32, String)>>> = Rc::new(RefCell::new(None));
     let error: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let result_slot: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let failures: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let runner = Rc::new(RefCell::new(agent_runner));
     let on_progress = Rc::new(RefCell::new(on_progress));
     let prepared = strip_meta_export(script);
@@ -887,7 +1122,7 @@ where
     // already routed to `__wf_error` inside the `catch`, so the success handler
     // sees `undefined` and the rejection handler is a no-op.
     let wrapped = format!(
-        "(async () => {{ try {{\n{prepared}\n}} catch (e) {{ globalThis.__wf_error(String(e) + (e && e.stack ? \"\\n\" + e.stack : \"\")); }} }})().then((v) => {{ try {{ if (v !== undefined) globalThis.__wf_result(JSON.stringify(v)); }} catch (e) {{ globalThis.__wf_error(String(e)); }} }}, () => {{}});"
+        "(async () => {{ 'use strict'; try {{\n{prepared}\n}} catch (e) {{ globalThis.__wf_error(String(e) + (e && e.stack ? \"\\n\" + e.stack : \"\")); }} }})().then((v) => {{ try {{ if (v !== undefined) globalThis.__wf_result(JSON.stringify(v)); }} catch (e) {{ globalThis.__wf_error(String(e)); }} }}, () => {{}});"
     );
 
     ctx.with(|ctx| -> Result<(), WorkflowError> {
@@ -981,6 +1216,17 @@ where
                 "__wf_error",
                 Function::new(ctx.clone(), move |msg: String| {
                     *err.borrow_mut() = Some(msg);
+                })
+                .map_err(eng)?,
+            )
+            .map_err(eng)?;
+
+        let failure_sink = failures.clone();
+        globals
+            .set(
+                "__wf_record_failure",
+                Function::new(ctx.clone(), move |message: String| {
+                    failure_sink.borrow_mut().push(message);
                 })
                 .map_err(eng)?,
             )
@@ -1092,7 +1338,12 @@ where
     }
     let progress = progress.borrow().clone();
     let result = result_slot.borrow().clone();
-    Ok(RunOutcome { progress, result })
+    let failures = failures.borrow().clone();
+    Ok(RunOutcome {
+        progress,
+        result,
+        failures,
+    })
 }
 
 #[cfg(test)]
@@ -1118,6 +1369,25 @@ mod meta_validation_tests {
             "export const meta = { name: `n`, description: 'd', n: -3, b: true, z: null, o: { k: [1, 2] } };",
         )
         .expect("valid literals");
+    }
+
+    #[test]
+    fn validate_body_compiles_async_body_without_running_it() {
+        validate_body(
+            "export const meta = { name: 'x', description: 'd' };\nawait agent('p'); return 1;",
+        )
+        .expect("valid async body");
+        assert!(
+            validate_body("export const meta = { name: 'x', description: 'd' };\nif (").is_err()
+        );
+        assert!(validate_body(
+            "export const meta = { name: 'x', description: 'd' };\nwith ({x: 1}) { log(x); }"
+        )
+        .is_err());
+        assert!(validate_body(
+            "export const meta = { name: 'x', description: 'd' };\nawait import('x');"
+        )
+        .is_err());
     }
 
     #[test]
@@ -1154,6 +1424,41 @@ mod meta_validation_tests {
         assert_eq!(
             err("export const meta = { name: 'x', description: '' };"),
             "meta.description must be a non-empty string"
+        );
+    }
+
+    #[test]
+    fn meta_array_len_matches_literal_phase_count() {
+        let script = "export const meta = { name: 'x', description: 'd', phases: [{ title: 'A' }, { title: 'B' }] };";
+        assert_eq!(meta_array_len(script, "phases"), Some(2));
+        assert_eq!(meta_array_len(script, "missing"), None);
+        assert_eq!(
+            meta_array_len(
+                "export const meta = { name: 'x', description: 'd', phases: 'nope' };",
+                "phases"
+            ),
+            None
+        );
+        assert_eq!(
+            meta_array_len(
+                "export const meta = { name: 'x', description: 'd', phases: [, ,] };",
+                "phases"
+            ),
+            None
+        );
+        assert_eq!(
+            meta_array_len(
+                "export const meta = { name: 'x', description: 'd', phases: [1, { foo: 'x' }, { title: 'A' }] };",
+                "phases"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            meta_array_len(
+                "export const meta = { name: 'x', description: 'd', phases: [] };",
+                "phases"
+            ),
+            Some(0)
         );
     }
 
@@ -1567,10 +1872,95 @@ log(String(rs[0]) + ',' + String(rs[1]))
         .unwrap();
         assert_eq!(
             out.progress,
+            vec![
+                Progress::Log {
+                    message: "parallel[1] failed: boom".into()
+                },
+                Progress::Log {
+                    message: "OK,null".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parallel_logs_budget_drop_summary_instead_of_per_item_failures() {
+        let script = r#"
+const rs = await parallel([
+  () => agent('a'),
+  () => agent('b'),
+])
+log(rs.map(value => String(value)).join(','))
+"#;
+        let msg = "Workflow token budget exceeded (1 / 1 output tokens). Stopping further agent() calls. In-flight agents will complete; their results are preserved.";
+        let out = run(script, move |_prompts: &[String], _opts: &[String]| {
+            vec![
+                format!("{}{msg}", super::WF_THROW_PREFIX),
+                format!("{}{msg}", super::WF_THROW_PREFIX),
+            ]
+        })
+        .unwrap();
+        assert_eq!(
+            out.progress,
             vec![Progress::Log {
-                message: "OK,null".into()
+                message: "null,null".into()
             }]
         );
+        assert_eq!(
+            out.failures,
+            vec!["parallel: 2 slots dropped \u{2014} token budget exceeded"]
+        );
+    }
+
+    #[test]
+    fn pipeline_logs_budget_drop_summary_for_a_single_item() {
+        let script = r#"
+const rs = await pipeline(
+  ['only'],
+  (item) => agent(item),
+)
+log(String(rs[0]))
+"#;
+        let msg = "Workflow token budget exceeded (1 / 1 output tokens). Stopping further agent() calls. In-flight agents will complete; their results are preserved.";
+        let out = run(script, move |_prompts: &[String], _opts: &[String]| {
+            vec![format!("{}{msg}", super::WF_THROW_PREFIX)]
+        })
+        .unwrap();
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "null".into()
+            }]
+        );
+        assert_eq!(
+            out.failures,
+            vec!["pipeline: 1 slot dropped \u{2014} token budget exceeded"]
+        );
+    }
+
+    #[test]
+    fn pipeline_logs_item_failures_and_keeps_other_items_running() {
+        let script = r#"
+const rs = await pipeline(
+  ['drop', 'keep'],
+  (item) => { if (item === 'drop') throw new Error('boom'); return item; },
+  (value) => value + '!'
+)
+log(rs.map(value => String(value)).join('|'))
+"#;
+        let out = run(script, no_agents).unwrap();
+        assert_eq!(
+            out.progress,
+            vec![
+                Progress::Log {
+                    message: "pipeline[0] failed: boom".into()
+                },
+                Progress::Log {
+                    message: "null|keep!".into()
+                },
+            ]
+        );
+        assert_eq!(out.failures, vec!["pipeline[0] failed: boom"]);
     }
 
     #[test]
@@ -1687,6 +2077,32 @@ log(rs.join(','))
             vec![Progress::Log {
                 message: "20,30,40".into()
             }]
+        );
+    }
+
+    #[test]
+    fn pipeline_skips_remaining_stages_after_a_null_result() {
+        // Claude Code stops an item's chain as soon as a stage resolves to
+        // null; later stages must not be invoked with that sentinel.
+        let script = r#"
+const rs = await pipeline(
+  ['drop', 'keep'],
+  (item) => item === 'drop' ? null : item,
+  (value) => { log('stage2:' + value); return value + '!'; },
+)
+log(rs.map(value => String(value)).join('|'))
+"#;
+        let out = run(script, no_agents).unwrap();
+        assert_eq!(
+            out.progress,
+            vec![
+                Progress::Log {
+                    message: "stage2:keep".into()
+                },
+                Progress::Log {
+                    message: "null|keep!".into()
+                },
+            ]
         );
     }
 

@@ -378,8 +378,37 @@ fn print_status_json(
     oauth_email: Option<&str>,
     oauth_org: Option<&str>,
 ) {
+    let value = status_json(
+        logged_in,
+        auth_method,
+        api_provider,
+        has_api_key_env,
+        has_stored_api_key,
+        oauth_email,
+        oauth_org,
+        traits::traffic_mode::is_telemetry_disabled(),
+    );
+    // Two-space pretty print, matching claude's `jsonStringify(_, null, 2)`.
+    match serde_json::to_string_pretty(&value) {
+        Ok(s) => println!("{s}"),
+        Err(_) => println!("{{}}"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn status_json(
+    logged_in: bool,
+    auth_method: &str,
+    api_provider: &str,
+    has_api_key_env: bool,
+    has_stored_api_key: bool,
+    oauth_email: Option<&str>,
+    oauth_org: Option<&str>,
+    analytics_disabled: bool,
+) -> serde_json::Value {
     // Preserve claude's key ordering: loggedIn, authMethod, apiProvider,
-    // [apiKeySource], then the claude.ai block (email/orgId/orgName/subscriptionType).
+    // analyticsDisabled, [apiKeySource], then the claude.ai block
+    // (email/orgId/orgName/subscriptionType).
     let mut map = serde_json::Map::new();
     map.insert("loggedIn".to_string(), serde_json::Value::Bool(logged_in));
     map.insert(
@@ -389,6 +418,10 @@ fn print_status_json(
     map.insert(
         "apiProvider".to_string(),
         serde_json::Value::String(api_provider.to_string()),
+    );
+    map.insert(
+        "analyticsDisabled".to_string(),
+        serde_json::Value::Bool(analytics_disabled),
     );
 
     // apiKeySource: the stored key source first, else the env var, else absent.
@@ -425,12 +458,7 @@ fn print_status_json(
         map.insert("subscriptionType".to_string(), serde_json::Value::Null);
     }
 
-    let value = serde_json::Value::Object(map);
-    // Two-space pretty print, matching claude's `jsonStringify(_, null, 2)`.
-    match serde_json::to_string_pretty(&value) {
-        Ok(s) => println!("{s}"),
-        Err(_) => println!("{{}}"),
-    }
+    serde_json::Value::Object(map)
 }
 
 /// Human-readable status output — claude's `--text` form.
@@ -536,7 +564,7 @@ fn env_truthy(var: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_manual_auth_code;
+    use super::{parse_manual_auth_code, status_json};
 
     /// M8: `code#state` splitting mirrors claude's
     /// `f.trim().split("#")` + `!m || !g` validity check.
@@ -562,5 +590,17 @@ mod tests {
         assert_eq!(parse_manual_auth_code("#xyz"), None);
         assert_eq!(parse_manual_auth_code(""), None);
         assert_eq!(parse_manual_auth_code("   "), None);
+    }
+
+    #[test]
+    fn status_json_emits_analytics_disabled_after_api_provider() {
+        let value = status_json(false, "none", "firstParty", false, false, None, None, true);
+        assert_eq!(value["analyticsDisabled"], serde_json::json!(true));
+
+        let rendered = serde_json::to_string_pretty(&value).unwrap();
+        assert!(
+            rendered.find("\"apiProvider\"").unwrap()
+                < rendered.find("\"analyticsDisabled\"").unwrap()
+        );
     }
 }

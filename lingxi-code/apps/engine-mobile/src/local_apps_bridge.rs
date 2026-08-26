@@ -675,7 +675,10 @@ mod tests {
             init_session_id: None,
             workspace_rel: "apps/app00001/workspace".into(),
         };
-        assert!(lower_record(&record).scaffolded, "a formed app lowers formed");
+        assert!(
+            lower_record(&record).scaffolded,
+            "a formed app lowers formed"
+        );
         record.scaffolded = false;
         assert!(
             !lower_record(&record).scaffolded,

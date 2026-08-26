@@ -221,6 +221,19 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
         state.last_full_key = None;
         state.mount_points.clear();
     }
+
+    async fn command_violations(
+        &self,
+        command: &str,
+    ) -> tool_api::sandbox_runner::SandboxCommandViolations {
+        let state = self.state.lock().await;
+        let lines = state
+            .manager
+            .as_ref()
+            .map(|manager| manager.violation_lines_for_command(command))
+            .unwrap_or_default();
+        tool_api::sandbox_runner::SandboxCommandViolations { lines }
+    }
 }
 
 #[cfg(test)]
@@ -457,5 +470,29 @@ mod tests {
         let state = runner.state.lock().await;
         assert!(state.manager.is_none());
         assert!(state.mount_points.is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_violations_reads_live_manager_store() {
+        let runner = SandboxRuntimeRunner::new();
+        {
+            let mut state = runner.state.lock().await;
+            let manager = state.manager.get_or_insert_with(SandboxManager::new);
+            manager
+                .violation_store()
+                .add_violation(sandbox_runtime::Violation {
+                    encoded_command: sandbox_runtime::env::encode_sandboxed_command("echo hi"),
+                    line: Some(
+                        "deny network-outbound example.com:443 (host is not on the allow list)"
+                            .into(),
+                    ),
+                    ..Default::default()
+                });
+        }
+        let got = runner.command_violations("echo hi").await;
+        assert_eq!(
+            got.lines,
+            vec!["deny network-outbound example.com:443 (host is not on the allow list)"]
+        );
     }
 }

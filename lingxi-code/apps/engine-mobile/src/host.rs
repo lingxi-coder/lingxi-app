@@ -1348,9 +1348,7 @@ impl MobileOAuthManager {
                     organization_id: Some(info.org_id),
                     fedramp: false,
                 })
-                .map_err(|error| {
-                    oauth_err(session.provider.id(), "exchange", error)
-                }),
+                .map_err(|error| oauth_err(session.provider.id(), "exchange", error)),
             MobileOAuthProvider::OpenAi => self
                 .openai
                 .complete_mobile_browser_login(&code, &session.verifier, &session.redirect_uri)
@@ -1363,9 +1361,7 @@ impl MobileOAuthManager {
                     organization_id: None,
                     fedramp: info.fedramp,
                 })
-                .map_err(|error| {
-                    oauth_err(session.provider.id(), "exchange", error)
-                }),
+                .map_err(|error| oauth_err(session.provider.id(), "exchange", error)),
         }
     }
 
@@ -1474,7 +1470,7 @@ impl MobileOAuthManager {
                     None,
                     0,
                     true,
-                )
+                );
             }
         };
         let (token, account_id, fedramp) = match provider {
@@ -1505,7 +1501,7 @@ impl MobileOAuthManager {
                             None,
                             0,
                             true,
-                        )
+                        );
                     }
                 }
             }
@@ -1542,7 +1538,7 @@ impl MobileOAuthManager {
                             None,
                             0,
                             true,
-                        )
+                        );
                     }
                 }
             }
@@ -1567,7 +1563,7 @@ impl MobileOAuthManager {
         let endpoint = match endpoint {
             Ok(endpoint) => endpoint,
             Err(message) => {
-                return provider_connection_failure(message, false, false, None, 0, true)
+                return provider_connection_failure(message, false, false, None, 0, true);
             }
         };
         let mut headers = vec![
@@ -2834,6 +2830,11 @@ async fn build_mobile_inner_with_ask(
         &cfg.lingxi_home.join("settings.json"),
     );
     let mut orch_cfg = OrchestratorConfig::default();
+    // Mobile is a transport host, not the CLI REPL. Keep main-query telemetry
+    // on Claude Code's SDK source and never mark it as `--print`.
+    orch_cfg.query_source = orchestrator::QUERY_SOURCE_SDK.to_string();
+    orch_cfg.print = false;
+    orch_cfg.is_tty = false;
     // TPM-C: use the bare id produced by parse_model_ref (strips a profile/
     // prefix when present, passes through unchanged for bare ids).
     orch_cfg.model.clone_from(&default_model_id);
@@ -2909,6 +2910,15 @@ async fn build_mobile_inner_with_ask(
     // `agentPushNotifEnabled` scalar override (user → project → local). The
     // feature flag is checked independently by the cron/tool consumers.
     let mut agent_push_notif_enabled = false;
+    // `workflowSizeGuideline` scalar override (user → project → local). Absent
+    // stays at Claude Code's built-in medium default; an explicit "medium"
+    // remains explicit (is_default = false).
+    let mut workflow_size_guideline = tool_workflow::WorkflowSizeGuideline::Medium;
+    let mut workflow_size_guideline_is_default = true;
+    // `enableWorkflows` scalar override (user → project → local). Absent stays
+    // enabled, matching Claude Code's default-on session gate when no launch /
+    // experiment policy disables it.
+    let mut workflow_session_enabled = true;
     // (#3 shell-expansion) Capture the boot `Arc<PermissionPolicy>` before it is
     // consumed by `PolicyPermissionGate::new`, so `tool_ctx.permission_policy`
     // shares the SAME base policy the model-facing gate enforces (the prompt
@@ -3107,6 +3117,22 @@ async fn build_mobile_inner_with_ask(
                         .and_then(serde_json::Value::as_bool)
                     {
                         agent_push_notif_enabled = b;
+                    }
+                    if let Some(size) = v
+                        .get("workflowSizeGuideline")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        if tool_workflow::WorkflowSizeGuideline::ALL_WIRE.contains(&size) {
+                            workflow_size_guideline =
+                                tool_workflow::WorkflowSizeGuideline::from_wire(size);
+                            workflow_size_guideline_is_default = false;
+                        }
+                    }
+                    if let Some(b) = v
+                        .get("enableWorkflows")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        workflow_session_enabled = b;
                     }
                 }
                 additional_working_dirs
@@ -3768,24 +3794,45 @@ async fn build_mobile_inner_with_ask(
     // v3 Phase 1: register the Workflow tool (mirror of the desktop
     // registration — after the base registry, because the launcher needs the
     // sealed `task_registry` Arc). Mobile has no managed-settings tier, so
-    // `disableWorkflows` policy is absent (false) and the size guideline is
-    // the default; `LINGXI_DISABLE_WORKFLOWS` still works via
-    // `workflows_enabled`.
+    // `disableWorkflows` policy is absent (false); `LINGXI_DISABLE_WORKFLOWS`
+    // still works via `workflows_enabled`.
+    let workflow_cwd = Arc::new(std::sync::Mutex::new(session_cwd.cwd()));
+    session_cwd.link_live_cwd(workflow_cwd.clone());
     let workflow_launcher = Arc::new(crate::workflow_support::MobileWorkflowLauncher {
         registry: task_registry.clone(),
-        cwd: cwd.clone(),
+        project_cwd: cwd.clone(),
+        current_cwd: workflow_cwd.clone(),
         lingxi_home: cfg.lingxi_home.clone(),
         session_uuid: active_session_uuid.clone(),
         checkpoints: workflow_checkpoints.clone(),
         status_sink: local_workflow_status_sink.clone(),
     });
+    let workflow_policy_enabled = tool_workflow::workflows_enabled(false);
+    let workflow_size_guideline_state = traits::session_flags::WorkflowSizeGuidelineState::new(
+        workflow_size_guideline.as_wire(),
+        false,
+        workflow_size_guideline_is_default,
+    )
+    .expect("mobile workflowSizeGuideline must be valid");
+    let dynamic_workflows_gate = traits::session_flags::DynamicWorkflowsGate::new(
+        workflow_policy_enabled && workflow_session_enabled,
+        !workflow_policy_enabled,
+    );
     {
-        traits::session_flags::set_dynamic_workflows_enabled(tool_workflow::workflows_enabled(
-            false,
+        tools.register_builtin(Arc::new(
+            tool_workflow::WorkflowTool::new(Some(
+                workflow_launcher.clone() as Arc<dyn tool_workflow::WorkflowLauncher>
+            ))
+            .with_current_cwd(workflow_cwd)
+            .with_size_guideline_state(workflow_size_guideline_state.clone())
+            .with_size_guideline_source(
+                workflow_size_guideline,
+                false,
+                workflow_size_guideline_is_default,
+            )
+            .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
+            .with_session_enabled(workflow_session_enabled),
         ));
-        tools.register_builtin(Arc::new(tool_workflow::WorkflowTool::new(Some(
-            workflow_launcher.clone() as Arc<dyn tool_workflow::WorkflowLauncher>,
-        ))));
     }
     // First-party local-app host operations as ORDINARY builtins. Registered
     // here, while `tools` is still `&mut` — `register_builtin` cannot run once
@@ -3904,8 +3951,7 @@ async fn build_mobile_inner_with_ask(
     local_workflow_invoker.set(Arc::new(
         tool_api::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
     ));
-    local_workflow_status_sink
-        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+    local_workflow_status_sink.bind(task_registry.clone());
 
     // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,
     // `LINGXI_MEMDIR_PREFETCH`. When truthy, wire the memdir-backed memory
@@ -3986,6 +4032,8 @@ async fn build_mobile_inner_with_ask(
         // `cwd` is reused below by the batch-8 registration, so clone here.
         cwd.clone(),
     )
+    .with_dynamic_workflows_gate(dynamic_workflows_gate)
+    .with_workflow_size_guideline(workflow_size_guideline_state)
     .with_session_id(main_session_id)
     .with_jsonl_writer(session_writer.clone())
     // P0.2: attach the SAME `HookRegistry` the executor reads so `list_hooks`
@@ -9272,11 +9320,9 @@ pub(crate) async fn run_app_boot_backfill_sweep(
         // spelling; any older dir whose name ends with this
         // app's workspace suffix is renamed onto it.
         {
-            let workspace_cwd =
-                canonical_cwd_string(&backfill_root.join(&record.workspace_rel));
+            let workspace_cwd = canonical_cwd_string(&backfill_root.join(&record.workspace_rel));
             let projects = backfill_home.join("projects");
-            let expected = projects
-                .join(session::jsonl::path::project_dir_name(&workspace_cwd));
+            let expected = projects.join(session::jsonl::path::project_dir_name(&workspace_cwd));
             let suffix = format!("-apps-{}-workspace", record.id);
             // There can be MORE than one drifted directory —
             // the two documented drifts compound (an old
@@ -9286,19 +9332,18 @@ pub(crate) async fn run_app_boot_backfill_sweep(
             // permanently, because the rename makes
             // `expected` exist and this block never runs
             // again.
-            let mut drifted: Vec<std::path::PathBuf> =
-                match std::fs::read_dir(&projects) {
-                    Ok(entries) => entries
-                        .flatten()
-                        .filter(|entry| {
-                            entry.file_name().to_string_lossy().ends_with(&suffix)
-                                && entry.path() != expected
-                                && entry.path().is_dir()
-                        })
-                        .map(|entry| entry.path())
-                        .collect(),
-                    Err(_) => Vec::new(),
-                };
+            let mut drifted: Vec<std::path::PathBuf> = match std::fs::read_dir(&projects) {
+                Ok(entries) => entries
+                    .flatten()
+                    .filter(|entry| {
+                        entry.file_name().to_string_lossy().ends_with(&suffix)
+                            && entry.path() != expected
+                            && entry.path().is_dir()
+                    })
+                    .map(|entry| entry.path())
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
             let init_file_name = record
                 .init_session_id
                 .as_deref()
@@ -9310,9 +9355,7 @@ pub(crate) async fn run_app_boot_backfill_sweep(
                 // arbitrary `read_dir` winner would bury it.
                 let base_index = init_file_name
                     .as_deref()
-                    .and_then(|file| {
-                        drifted.iter().position(|dir| dir.join(file).exists())
-                    })
+                    .and_then(|file| drifted.iter().position(|dir| dir.join(file).exists()))
                     .unwrap_or(0);
                 let base = drifted.remove(base_index);
                 match std::fs::rename(&base, &expected) {
@@ -9477,12 +9520,8 @@ pub(crate) async fn run_app_boot_backfill_sweep(
                     // cleanup on the CreateApp path settles
                     // the race between the two: whoever loses
                     // `set_init_session` takes its file back.
-                    let removed = remove_app_session_file(
-                        &backfill_home,
-                        &backfill_root,
-                        &record,
-                        &init_id,
-                    );
+                    let removed =
+                        remove_app_session_file(&backfill_home, &backfill_root, &record, &init_id);
                     tracing::warn!(
                         app_id = %record.id,
                         error = %error,
@@ -10692,7 +10731,8 @@ mod tests {
 
         let launcher = crate::workflow_support::MobileWorkflowLauncher {
             registry: rt.task_registry.clone(),
-            cwd: tmp.path().to_path_buf(),
+            project_cwd: tmp.path().to_path_buf(),
+            current_cwd: Arc::new(std::sync::Mutex::new(tmp.path().to_path_buf())),
             lingxi_home: tmp.path().join(".claude"),
             // The launcher and status sink must share the engine's live
             // session watermark; a detached fixture uuid would correctly
@@ -10715,6 +10755,7 @@ mod tests {
                 args: None,
                 resume_from_run_id: None,
                 session_uuid: None,
+                ..Default::default()
             })
             .await
             .expect("launch succeeds");
@@ -10782,6 +10823,75 @@ mod tests {
         assert!(
             !again.iter().any(|n| n.task_id == launched.task_id),
             "consume-once: a second drain must not re-surface it"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_relative_script_path_uses_live_cwd_but_session_files_stay_under_project_root()
+    {
+        use tool_workflow::WorkflowLauncher as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener = Arc::new(FakeListener::default());
+        let listener_for_build: Arc<dyn ClientEventListener> = listener.clone();
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build_mobile(
+            test_config(tmp.path()),
+            platform,
+            listener_for_build,
+            perm_sink,
+        )
+        .await
+        .expect("build_mobile");
+
+        let live_dir = tmp.path().join("live");
+        std::fs::create_dir_all(&live_dir).expect("create live dir");
+        std::fs::write(
+            live_dir.join("workflow.js"),
+            "export const meta = { name: 'live-cwd', description: 'relative path' }\nreturn 1\n",
+        )
+        .expect("write workflow");
+        let current_cwd = Arc::new(std::sync::Mutex::new(live_dir.clone()));
+        let launcher = crate::workflow_support::MobileWorkflowLauncher {
+            registry: rt.task_registry.clone(),
+            project_cwd: tmp.path().to_path_buf(),
+            current_cwd,
+            lingxi_home: tmp.path().join(".claude"),
+            session_uuid: rt.active_session_uuid.clone(),
+            checkpoints: rt.workflow_checkpoints.clone(),
+            status_sink: rt.workflow_status_sink.clone(),
+        };
+
+        let launched = launcher
+            .launch(tool_workflow::WorkflowLaunchSpec {
+                script: None,
+                name: None,
+                script_path: Some("workflow.js".into()),
+                args: None,
+                resume_from_run_id: None,
+                session_uuid: None,
+                tool_use_id: None,
+                launched_from_subagent: false,
+                ..Default::default()
+            })
+            .await
+            .expect("launch succeeds");
+
+        assert_eq!(
+            launched.script_path.as_deref(),
+            Some(live_dir.join("workflow.js").to_string_lossy().as_ref())
+        );
+        let transcript_dir = launched
+            .transcript_dir
+            .as_deref()
+            .expect("workflow launch returns its transcript directory")
+            .to_string();
+        assert!(
+            transcript_dir.starts_with(tmp.path().join(".claude").to_string_lossy().as_ref()),
+            "transcript dir must stay anchored at the project session root: {transcript_dir}"
         );
     }
 
@@ -10980,6 +11090,82 @@ mod tests {
     }
 
     #[test]
+    fn build_mobile_marks_builtin_workflow_guideline_default_when_unset() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let orch: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            assert!(
+                orch.dynamic_workflows_enabled().await,
+                "mobile should default enableWorkflows to true when no tier sets it"
+            );
+            assert_eq!(
+                orch.workflow_size_guideline().await,
+                "medium",
+                "mobile should retain the built-in workflowSizeGuideline default in session state"
+            );
+            assert!(
+                orch.workflow_size_guideline_is_default().await,
+                "an unset workflowSizeGuideline must remain marked as the built-in default"
+            );
+            assert!(
+                !orch.workflow_size_guideline_managed().await,
+                "mobile has no managed workflow-size tier"
+            );
+        });
+    }
+
+    #[test]
+    fn build_mobile_applies_explicit_workflow_settings_from_user_project_local() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home").join(branding::DOT_DIR);
+        let project_settings_dir = tmp.path().join(branding::DOT_DIR);
+        std::fs::create_dir_all(&user_home).expect("create user settings dir");
+        std::fs::create_dir_all(&project_settings_dir).expect("create project settings dir");
+        std::fs::write(
+            user_home.join("settings.json"),
+            r#"{"workflowSizeGuideline":"small","enableWorkflows":true}"#,
+        )
+        .expect("write user settings");
+        std::fs::write(
+            project_settings_dir.join("settings.json"),
+            r#"{"workflowSizeGuideline":"large","enableWorkflows":true}"#,
+        )
+        .expect("write project settings");
+        std::fs::write(
+            project_settings_dir.join("settings.local.json"),
+            r#"{"workflowSizeGuideline":"medium","enableWorkflows":false}"#,
+        )
+        .expect("write local settings");
+
+        let mut cfg = test_config(tmp.path());
+        cfg.lingxi_home = user_home;
+        let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
+
+        handle.runtime().block_on(async {
+            let orch: Arc<dyn traits::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            assert!(
+                !orch.dynamic_workflows_enabled().await,
+                "the local enableWorkflows=false override must disable workflows for the session"
+            );
+            assert_eq!(
+                orch.workflow_size_guideline().await,
+                "medium",
+                "the last workflowSizeGuideline tier should win"
+            );
+            assert!(
+                !orch.workflow_size_guideline_is_default().await,
+                "an explicit medium setting must not be mistaken for the built-in default"
+            );
+            assert!(
+                !orch.workflow_size_guideline_managed().await,
+                "mobile should publish workflow size as unmanaged"
+            );
+        });
+    }
+
+    #[test]
     fn submit_lists_and_loads_nested_workflow_agents() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
@@ -11075,8 +11261,13 @@ mod tests {
                         run_id: None,
                         invocation_mode: Some("inline".to_string()),
                         workflow_source: Some("inline".to_string()),
+                        script_is_verbatim_builtin: Some(false),
                         transcript_subdir: None,
                         launched_from_subagent: false,
+                        tool_use_id: None,
+                        creator_teammate_name: None,
+                        creator_team_name: None,
+                        creator_agent_id: None,
                     },
                     "workflow".to_string(),
                 )
@@ -13384,10 +13575,7 @@ mod tests {
     /// The `AppCreated` row (record + correlation key) from a create's events.
     fn created_row(
         events: &[Ev],
-    ) -> Option<(
-        client_protocol::local_apps::AppRecordDto,
-        Option<String>,
-    )> {
+    ) -> Option<(client_protocol::local_apps::AppRecordDto, Option<String>)> {
         events.iter().find_map(|event| match event {
             Ev::AppEvent {
                 event: AppEventDto::AppCreated { record, request_id },
@@ -13427,9 +13615,16 @@ mod tests {
         handle.runtime().block_on(async {
             // The "+" button's exact payload: empty name, empty brief, no
             // surface, `Shell`, and its own correlation key.
-            let events =
-                submit_create(&handle, &listener, "", "", None, AppCreateModeDto::Shell, Some("req-1"))
-                    .await;
+            let events = submit_create(
+                &handle,
+                &listener,
+                "",
+                "",
+                None,
+                AppCreateModeDto::Shell,
+                Some("req-1"),
+            )
+            .await;
             let (record, request_id) =
                 created_row(&events).expect("a Shell create must announce AppCreated");
             assert_eq!(
@@ -13447,11 +13642,7 @@ mod tests {
                 "an empty wire name plus an empty brief derives the placeholder"
             );
 
-            let workspace = tmp
-                .path()
-                .join("apps")
-                .join(&record.id)
-                .join("workspace");
+            let workspace = tmp.path().join("apps").join(&record.id).join("workspace");
             assert!(
                 workspace.join(".lingxi").is_dir(),
                 "layout.initialize() must have run before the initializer"
@@ -13460,7 +13651,13 @@ mod tests {
                 workspace.join("LINGXI.md").is_file(),
                 "the shell workspace must carry the guided contract"
             );
-            for leaked in ["app", "src", "package.json", "vite.config.mjs", "index.html"] {
+            for leaked in [
+                "app",
+                "src",
+                "package.json",
+                "vite.config.mjs",
+                "index.html",
+            ] {
                 assert!(
                     !workspace.join(leaked).exists(),
                     "a shell workspace must hold no application source; found {leaked}"
@@ -13504,8 +13701,9 @@ mod tests {
                 Some("req-2"),
             )
             .await;
-            let (code, message, request_id) = first_failure(&events)
-                .unwrap_or_else(|| panic!("a Shell create that names a surface must fail typed, got {events:?}"));
+            let (code, message, request_id) = first_failure(&events).unwrap_or_else(|| {
+                panic!("a Shell create that names a surface must fail typed, got {events:?}")
+            });
             assert_eq!(code, AppErrorCodeDto::InvalidRequest);
             assert!(
                 message.contains("surface"),
@@ -13533,8 +13731,16 @@ mod tests {
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
-            let events =
-                submit_create(&handle, &listener, "", "", None, AppCreateModeDto::Shell, None).await;
+            let events = submit_create(
+                &handle,
+                &listener,
+                "",
+                "",
+                None,
+                AppCreateModeDto::Shell,
+                None,
+            )
+            .await;
             let (row, _) = created_row(&events).expect("a Shell create must announce AppCreated");
             let record = handle
                 .local_apps()

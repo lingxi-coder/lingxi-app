@@ -434,6 +434,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             team_name: None,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
             mode: None,
             isolation: None,
             cwd: None,
@@ -741,6 +742,58 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    async fn dynamic_workflows_enabled(&self) -> bool {
+        self.dynamic_workflows_gate.enabled()
+    }
+
+    async fn dynamic_workflows_managed(&self) -> bool {
+        self.dynamic_workflows_gate.managed()
+    }
+
+    async fn workflow_size_guideline(&self) -> String {
+        self.workflow_size_guideline.value().to_string()
+    }
+
+    async fn workflow_size_guideline_managed(&self) -> bool {
+        self.workflow_size_guideline.managed()
+    }
+
+    async fn workflow_size_guideline_state(
+        &self,
+    ) -> traits::session_flags::WorkflowSizeGuidelineSnapshot {
+        self.workflow_size_guideline.snapshot()
+    }
+
+    async fn workflow_size_guideline_is_default(&self) -> bool {
+        self.workflow_size_guideline.is_default()
+    }
+
+    async fn set_dynamic_workflows_enabled(
+        &self,
+        enabled: bool,
+        managed: bool,
+    ) -> Result<(), HandleError> {
+        self.dynamic_workflows_gate.set(enabled, managed);
+        Ok(())
+    }
+
+    async fn set_workflow_size_guideline(
+        &self,
+        value: String,
+        managed: bool,
+        is_default: bool,
+    ) -> Result<(), HandleError> {
+        if !self
+            .workflow_size_guideline
+            .set_with_source(&value, managed, is_default)
+        {
+            return Err(HandleError::ActionFailed(format!(
+                "invalid workflowSizeGuideline: {value}"
+            )));
+        }
+        Ok(())
     }
 
     async fn set_effort_level(&self, effort: Option<String>) -> Result<(), HandleError> {

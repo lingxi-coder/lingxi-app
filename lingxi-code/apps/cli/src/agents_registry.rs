@@ -1448,7 +1448,10 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].from, "peer");
         assert_eq!(first[0].content, "peer is now idle.");
-        assert_eq!(first[0].summary.as_deref(), Some("peer is idle: review finished"));
+        assert_eq!(
+            first[0].summary.as_deref(),
+            Some("peer is idle: review finished")
+        );
 
         reg.update_status("busy", None);
         reg.update_status("idle", None);

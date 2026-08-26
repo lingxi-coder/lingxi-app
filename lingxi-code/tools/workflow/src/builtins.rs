@@ -191,20 +191,20 @@ mod tests {
             // locked set" and never enumerates it, so `three` has to be named
             // here or every 3D request falls back to hand-rolled 2D.
             "three@0.185.1 is in the locked set",
-        // The UI kit, and the one import style that survives the pinned iife
-        // build. A generated app that reaches for `@ionic/core/components`
-        // fails at BUNDLE time with a code-splitting error that names neither
-        // Ionic nor this contract.
-        "@ionic/react barrel",
-        "NEVER from @ionic/core/components",
-        // Without this the outlet has nothing to animate and the platform back
-        // gesture never attaches -- a silent loss of the thing Ionic was chosen
-        // for.
-        "IonPage as its ROOT element",
-        // Two scaffolds, two entry points. The old contract named only
-        // home-screen.jsx, which does not exist in a canvas workspace.
-        "app/screens/game-screen.jsx for a drawn surface",
-        "src/game/frame-loop.js",
+            // The UI kit, and the one import style that survives the pinned iife
+            // build. A generated app that reaches for `@ionic/core/components`
+            // fails at BUNDLE time with a code-splitting error that names neither
+            // Ionic nor this contract.
+            "@ionic/react barrel",
+            "NEVER from @ionic/core/components",
+            // Without this the outlet has nothing to animate and the platform back
+            // gesture never attaches -- a silent loss of the thing Ionic was chosen
+            // for.
+            "IonPage as its ROOT element",
+            // Two scaffolds, two entry points. The old contract named only
+            // home-screen.jsx, which does not exist in a canvas workspace.
+            "app/screens/game-screen.jsx for a drawn surface",
+            "src/game/frame-loop.js",
             "own the frame loop yourself with requestAnimationFrame",
             "maxRepairRounds",
             "conditionally detect ImageGen",

@@ -127,6 +127,12 @@ mod tests {
             killed_by: None,
             worktree_path: None,
             worktree_branch: None,
+            workflow_failures: Vec::new(),
+            workflow_agent_count: None,
+            workflow_total_tokens: None,
+            workflow_total_tool_calls: None,
+            workflow_duration_ms: None,
+            ..Default::default()
         };
         let reg = Arc::new(FakeRegistry(Mutex::new(vec![n.clone()])));
         let provider = RegistryTaskNotifications::new(reg);

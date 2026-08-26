@@ -265,6 +265,7 @@ fn local_agent_input() -> TaskSpawnInput {
         tool_use_id: None,
         creator_teammate_name: None,
         creator_team_name: None,
+        creator_agent_id: None,
         spawn_request: None,
         inheritance: None,
     }
@@ -279,6 +280,7 @@ fn local_agent_input_with_creator(name: &str, team: &str) -> TaskSpawnInput {
         tool_use_id: None,
         creator_teammate_name: Some(name.into()),
         creator_team_name: Some(team.into()),
+        creator_agent_id: None,
         spawn_request: None,
         inheritance: None,
     }
@@ -360,8 +362,13 @@ async fn budget_stop_matches_claude_background_agent_filter() {
                 run_id: Some("wf_budget".into()),
                 invocation_mode: Some("inline".into()),
                 workflow_source: Some("inline".into()),
+                script_is_verbatim_builtin: Some(false),
                 transcript_subdir: None,
                 launched_from_subagent: false,
+                tool_use_id: None,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
             },
             "background workflow".into(),
         )
@@ -387,6 +394,7 @@ async fn budget_stop_matches_claude_background_agent_filter() {
                 notified: false,
                 creator_teammate_name: None,
                 creator_team_name: None,
+                creator_agent_id: None,
             },
             agent_id: protocol::AgentId::nil(),
             subagent_type: "general-purpose".into(),
@@ -1766,7 +1774,9 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         notified: false,
         creator_teammate_name: None,
         creator_team_name: None,
+        creator_agent_id: None,
     };
+    let creator_agent_id = protocol::AgentId::new();
     let input = TaskSpawnInput::LocalAgent {
         agent_id: protocol::AgentId::nil(),
         subagent_type: "general-purpose".into(),
@@ -1775,6 +1785,7 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         tool_use_id: Some("toolu_bg42".into()),
         creator_teammate_name: Some("researcher".into()),
         creator_team_name: Some("alpha".into()),
+        creator_agent_id: Some(creator_agent_id),
         spawn_request: None,
         inheritance: None,
     };
@@ -1785,6 +1796,7 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         Some("researcher")
     );
     assert_eq!(state.base().creator_team_name.as_deref(), Some("alpha"));
+    assert_eq!(state.base().creator_agent_id, Some(creator_agent_id));
 
     // A `None` input tool_use_id leaves the base untouched.
     let base2 = TaskStateBase {
@@ -1801,6 +1813,7 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         notified: false,
         creator_teammate_name: None,
         creator_team_name: None,
+        creator_agent_id: None,
     };
     let input2 = TaskSpawnInput::LocalAgent {
         agent_id: protocol::AgentId::nil(),
@@ -1810,6 +1823,7 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         tool_use_id: None,
         creator_teammate_name: None,
         creator_team_name: None,
+        creator_agent_id: None,
         spawn_request: None,
         inheritance: None,
     };
@@ -1817,6 +1831,189 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
     assert_eq!(state2.base().tool_use_id, None);
     assert_eq!(state2.base().creator_teammate_name, None);
     assert_eq!(state2.base().creator_team_name, None);
+    assert_eq!(state2.base().creator_agent_id, None);
+}
+
+#[test]
+fn state_for_spawn_stamps_local_workflow_tool_use_id() {
+    let creator_agent_id = protocol::AgentId::new();
+    let base = TaskStateBase {
+        id: "wspawn001".into(),
+        task_type: TaskType::LocalWorkflow,
+        status: TaskStatus::Running,
+        description: "Audit source".into(),
+        tool_use_id: None,
+        start_time: SystemTime::now(),
+        end_time: None,
+        total_paused_ms: 0,
+        output_file: std::path::PathBuf::from("/tmp/tasks/wspawn001.output"),
+        output_offset: 0,
+        notified: false,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        creator_agent_id: None,
+    };
+    let input = TaskSpawnInput::LocalWorkflow {
+        session_uuid: Some("session-1".into()),
+        workflow_id: "audit".into(),
+        script: "return 'ok'".into(),
+        resume_from_run_id: None,
+        args: Some(r#"{"scope":"src"}"#.into()),
+        run_id: Some("wf_abcdef".into()),
+        invocation_mode: Some("inline".into()),
+        workflow_source: Some("inline".into()),
+        script_is_verbatim_builtin: Some(false),
+        transcript_subdir: Some("/tmp/transcripts/wf_abcdef".into()),
+        launched_from_subagent: true,
+        tool_use_id: Some("toolu_workflow42".into()),
+        creator_teammate_name: Some("builder".into()),
+        creator_team_name: Some("alpha".into()),
+        creator_agent_id: Some(creator_agent_id),
+    };
+
+    let state = state_for_spawn(base, &input);
+    assert_eq!(
+        state.base().tool_use_id.as_deref(),
+        Some("toolu_workflow42")
+    );
+    assert_eq!(
+        state.base().creator_teammate_name.as_deref(),
+        Some("builder")
+    );
+    assert_eq!(state.base().creator_team_name.as_deref(), Some("alpha"));
+    assert_eq!(state.base().creator_agent_id, Some(creator_agent_id));
+    assert_eq!(state.base().description, "Audit source");
+}
+
+#[tokio::test]
+async fn take_pending_carries_workflow_resume_and_terminal_metadata() {
+    use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
+
+    let (_d, registry) = make_registry();
+    registry
+        .insert_state_for_test(TaskState::LocalWorkflow(LocalWorkflowTaskState {
+            base: TaskStateBase {
+                id: "wmeta0001".into(),
+                task_type: TaskType::LocalWorkflow,
+                status: TaskStatus::Completed,
+                description: "Audit source".into(),
+                tool_use_id: Some("toolu_workflow42".into()),
+                start_time: SystemTime::now(),
+                end_time: Some(SystemTime::now()),
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/wmeta0001.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            session_uuid: Some("session-1".into()),
+            workflow_id: "audit".into(),
+            script: "return 'ok'".into(),
+            resume_from_run_id: None,
+            args: Some(r#"{"scope":"src"}"#.into()),
+            run_id: Some("wf_abcdef".into()),
+            script_path: Some("/tmp/session/workflows/wf_abcdef.js".into()),
+            transcript_dir: Some("/tmp/session/subagents/workflows/wf_abcdef".into()),
+            current_step: 2,
+            outcome: traits::task_registry::WorkflowTerminalOutcome {
+                result: Some("ok".into()),
+                failures: vec!["one retry exhausted".into()],
+                agent_count: 4,
+                total_tokens: 120,
+                total_tool_calls: 7,
+                duration_ms: 900,
+                agents_done: 2,
+                agents_error: 1,
+                agents_skipped: 1,
+                agents_empty_result: 1,
+                progress_counts_available: true,
+                ..Default::default()
+            },
+        }))
+        .await;
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained.len(), 1);
+    let notification = &drained[0];
+    assert_eq!(notification.description, "Audit source");
+    assert_eq!(
+        notification.tool_use_id.as_deref(),
+        Some("toolu_workflow42")
+    );
+    assert_eq!(notification.workflow_run_id.as_deref(), Some("wf_abcdef"));
+    assert_eq!(
+        notification.workflow_script_path.as_deref(),
+        Some("/tmp/session/workflows/wf_abcdef.js")
+    );
+    assert_eq!(
+        notification.workflow_transcript_dir.as_deref(),
+        Some("/tmp/session/subagents/workflows/wf_abcdef")
+    );
+    assert_eq!(notification.workflow_agent_count, Some(4));
+    assert_eq!(notification.workflow_agents_done, Some(2));
+    assert_eq!(notification.workflow_agents_error, Some(1));
+    assert_eq!(notification.workflow_agents_skipped, Some(1));
+    assert_eq!(notification.workflow_agents_empty_result, Some(1));
+}
+
+#[tokio::test]
+async fn workflow_notification_omits_default_progress_counts() {
+    use crate::state::LocalWorkflowTaskState;
+
+    let (_d, registry) = make_registry();
+    registry
+        .insert_state_for_test(TaskState::LocalWorkflow(LocalWorkflowTaskState {
+            base: TaskStateBase {
+                id: "wmeta0002".into(),
+                task_type: TaskType::LocalWorkflow,
+                status: TaskStatus::Killed,
+                description: "Audit source".into(),
+                tool_use_id: Some("toolu_workflow43".into()),
+                start_time: SystemTime::now(),
+                end_time: Some(SystemTime::now()),
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/wmeta0002.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            session_uuid: Some("session-1".into()),
+            workflow_id: "audit".into(),
+            script: "return 'ok'".into(),
+            resume_from_run_id: None,
+            args: None,
+            run_id: Some("wf_counts_hidden".into()),
+            script_path: Some("/tmp/session/workflows/wf_counts_hidden.js".into()),
+            transcript_dir: Some("/tmp/session/subagents/workflows/wf_counts_hidden".into()),
+            current_step: 1,
+            outcome: traits::task_registry::WorkflowTerminalOutcome {
+                result: Some("stopped".into()),
+                agent_count: 2,
+                total_tokens: 40,
+                total_tool_calls: 3,
+                duration_ms: 120,
+                agents_done: 0,
+                agents_error: 0,
+                agents_skipped: 0,
+                agents_empty_result: 0,
+                progress_counts_available: false,
+                ..Default::default()
+            },
+        }))
+        .await;
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained.len(), 1);
+    let notification = &drained[0];
+    assert_eq!(notification.workflow_agent_count, Some(2));
+    assert_eq!(notification.workflow_agents_done, None);
+    assert_eq!(notification.workflow_agents_error, None);
+    assert_eq!(notification.workflow_agents_skipped, None);
+    assert_eq!(notification.workflow_agents_empty_result, None);
 }
 
 #[tokio::test]
@@ -1838,6 +2035,7 @@ async fn take_pending_carries_agent_error() {
         notified: false,
         creator_teammate_name: None,
         creator_team_name: None,
+        creator_agent_id: None,
     };
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
@@ -1882,6 +2080,7 @@ fn agent_state(id: &str, status: TaskStatus) -> crate::state::TaskState {
             notified: false,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
         },
         agent_id: protocol::AgentId::nil(),
         subagent_type: String::new(),
@@ -2055,6 +2254,7 @@ async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
                 notified: false,
                 creator_teammate_name: None,
                 creator_team_name: None,
+                creator_agent_id: None,
             },
             session_uuid: None,
             workflow_id: String::new(),
@@ -2065,6 +2265,7 @@ async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
             script_path: None,
             transcript_dir: None,
             current_step: 0,
+            outcome: Default::default(),
         })
     };
 
@@ -2125,6 +2326,7 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
                 notified: false,
                 creator_teammate_name: None,
                 creator_team_name: None,
+                creator_agent_id: None,
             },
             session_uuid: None,
             workflow_id: "local-app-build".into(),
@@ -2135,6 +2337,7 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
             script_path: None,
             transcript_dir: None,
             current_step: 0,
+            outcome: Default::default(),
         })
     };
 
@@ -2184,6 +2387,7 @@ async fn find_nonterminal_local_app_workflows_covers_the_canvas_build_too() {
                 notified: false,
                 creator_teammate_name: None,
                 creator_team_name: None,
+                creator_agent_id: None,
             },
             session_uuid: None,
             workflow_id: workflow_id.into(),
@@ -2194,6 +2398,7 @@ async fn find_nonterminal_local_app_workflows_covers_the_canvas_build_too() {
             script_path: None,
             transcript_dir: None,
             current_step: 0,
+            outcome: Default::default(),
         })
     };
 
@@ -2285,6 +2490,7 @@ async fn register_adopted_workflow_does_not_replace_existing_live_task_with_same
             notified: false,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
         },
         session_uuid: Some("session-live".into()),
         workflow_id: "live-workflow".into(),
@@ -2295,6 +2501,7 @@ async fn register_adopted_workflow_does_not_replace_existing_live_task_with_same
         script_path: None,
         transcript_dir: None,
         current_step: 0,
+        outcome: Default::default(),
     });
     registry.insert_state_for_test(live).await;
 
@@ -2346,6 +2553,7 @@ async fn workflow_run_id_reservation_and_paused_cleanup_respect_liveness_and_ses
                 notified: false,
                 creator_teammate_name: None,
                 creator_team_name: None,
+                creator_agent_id: None,
             },
             session_uuid: Some(session_uuid.into()),
             workflow_id: String::new(),
@@ -2356,6 +2564,7 @@ async fn workflow_run_id_reservation_and_paused_cleanup_respect_liveness_and_ses
             script_path: None,
             transcript_dir: None,
             current_step: 0,
+            outcome: Default::default(),
         })
     };
     registry
@@ -2435,6 +2644,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
         notified: false,
         creator_teammate_name: None,
         creator_team_name: None,
+        creator_agent_id: None,
     };
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
@@ -2467,6 +2677,9 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
                 tool_uses: 3,
                 duration_ms: 1500,
             }),
+            None,
+            None,
+            None,
         )
         .await;
     let drained = registry.take_pending_task_notifications().await;
@@ -2503,12 +2716,464 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
     );
 
     // Re-armable: the NEXT rest surfaces again (same task-id notifies > once).
-    registry.mark_task_rested("a-rest-1", None, None).await;
+    registry
+        .mark_task_rested("a-rest-1", None, None, None, None, None)
+        .await;
     assert_eq!(
         registry.take_pending_task_notifications().await.len(),
         1,
         "each subsequent rest re-arms the notification"
     );
+}
+
+#[tokio::test]
+async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying() {
+    use crate::state::{LocalAgentTaskState, LocalWorkflowTaskState, TaskState, TaskStateBase};
+    let (_d, registry) = make_registry();
+    let parent_agent_id = protocol::AgentId::new();
+
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            base: TaskStateBase {
+                id: "a-rest-parent".into(),
+                task_type: TaskType::LocalAgent,
+                status: TaskStatus::Running,
+                description: "bg agent".into(),
+                tool_use_id: Some("toolu_parent".into()),
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-parent.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            agent_id: parent_agent_id,
+            subagent_type: String::new(),
+            prompt: String::new(),
+            error: None,
+            messages: vec![],
+            pending_messages: vec![],
+            is_backgrounded: true,
+            outcome: Default::default(),
+            forked_skill_name: None,
+        }))
+        .await;
+    registry
+        .insert_state_for_test(TaskState::LocalWorkflow(LocalWorkflowTaskState {
+            base: TaskStateBase {
+                id: "w-child-live".into(),
+                task_type: TaskType::LocalWorkflow,
+                status: TaskStatus::Running,
+                description: "child workflow".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/w-child-live.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: Some(parent_agent_id),
+            },
+            session_uuid: None,
+            workflow_id: "child".into(),
+            script: "return true".into(),
+            resume_from_run_id: None,
+            args: None,
+            run_id: Some("wf_child".into()),
+            script_path: None,
+            transcript_dir: None,
+            current_step: 0,
+            outcome: Default::default(),
+        }))
+        .await;
+
+    registry
+        .mark_task_rested(
+            "a-rest-parent",
+            Some("rested".into()),
+            Some(traits::task_registry::AgentRunUsage {
+                subagent_tokens: 7,
+                tool_uses: 1,
+                duration_ms: 99,
+            }),
+            Some(parent_agent_id),
+            None,
+            None,
+        )
+        .await;
+
+    assert!(
+        registry.take_pending_task_notifications().await.is_empty(),
+        "an unnamed rested agent stays quiet while its live workflow child is still running"
+    );
+
+    registry
+        .set_status("w-child-live", TaskStatus::Completed)
+        .await
+        .expect("child terminal transition should succeed");
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(
+        drained.len(),
+        2,
+        "child terminal + deferred rest notification"
+    );
+    let rest = drained
+        .iter()
+        .find(|notification| notification.task_id == "a-rest-parent")
+        .expect("deferred rest notification should surface");
+    assert_eq!(rest.status, "completed");
+    assert_eq!(rest.result.as_deref(), Some("rested"));
+    assert_eq!(rest.usage.as_ref().map(|u| u.subagent_tokens), Some(7));
+}
+
+#[tokio::test]
+async fn named_rested_agent_waits_for_live_background_children_before_notifying() {
+    use crate::state::{LocalAgentTaskState, LocalBashTaskState, TaskState, TaskStateBase};
+    let (_d, registry) = make_registry();
+
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            base: TaskStateBase {
+                id: "a-rest-parent".into(),
+                task_type: TaskType::LocalAgent,
+                status: TaskStatus::Running,
+                description: "bg agent".into(),
+                tool_use_id: Some("toolu_parent".into()),
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-parent.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            agent_id: protocol::AgentId::nil(),
+            subagent_type: String::new(),
+            prompt: String::new(),
+            error: None,
+            messages: vec![],
+            pending_messages: vec![],
+            is_backgrounded: true,
+            outcome: Default::default(),
+            forked_skill_name: None,
+        }))
+        .await;
+    registry
+        .insert_state_for_test(TaskState::LocalBash(LocalBashTaskState {
+            base: TaskStateBase {
+                id: "b-child-live".into(),
+                task_type: TaskType::LocalBash,
+                status: TaskStatus::Running,
+                description: "child".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/b-child-live.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: Some("reviewer".into()),
+                creator_team_name: Some("alpha".into()),
+                creator_agent_id: None,
+            },
+            command: "sleep 1".into(),
+            pid: None,
+            exit_code: None,
+        }))
+        .await;
+
+    registry
+        .mark_task_rested(
+            "a-rest-parent",
+            Some("rested".into()),
+            Some(traits::task_registry::AgentRunUsage {
+                subagent_tokens: 7,
+                tool_uses: 1,
+                duration_ms: 99,
+            }),
+            None,
+            Some("reviewer".into()),
+            Some("alpha".into()),
+        )
+        .await;
+
+    assert!(
+        registry.take_pending_task_notifications().await.is_empty(),
+        "a rested agent stays quiet while it still owns live background children"
+    );
+
+    registry
+        .set_status("b-child-live", TaskStatus::Completed)
+        .await
+        .expect("child terminal transition should succeed");
+
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(
+        drained.len(),
+        2,
+        "child terminal + deferred rest notification"
+    );
+    let rest = drained
+        .iter()
+        .find(|notification| notification.task_id == "a-rest-parent")
+        .expect("deferred rest notification should surface");
+    assert_eq!(rest.status, "completed");
+    assert_eq!(rest.result.as_deref(), Some("rested"));
+    assert_eq!(rest.usage.as_ref().map(|u| u.subagent_tokens), Some(7));
+}
+
+#[tokio::test]
+async fn deferred_rest_requeue_preserves_newer_payload() {
+    use crate::state::{LocalAgentTaskState, LocalBashTaskState, TaskState, TaskStateBase};
+    let (_d, registry) = make_registry();
+
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            base: TaskStateBase {
+                id: "a-rest-parent".into(),
+                task_type: TaskType::LocalAgent,
+                status: TaskStatus::Running,
+                description: "bg agent".into(),
+                tool_use_id: Some("toolu_parent".into()),
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-parent.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            agent_id: protocol::AgentId::nil(),
+            subagent_type: String::new(),
+            prompt: String::new(),
+            error: None,
+            messages: vec![],
+            pending_messages: vec![],
+            is_backgrounded: true,
+            outcome: Default::default(),
+            forked_skill_name: None,
+        }))
+        .await;
+    registry
+        .insert_state_for_test(TaskState::LocalBash(LocalBashTaskState {
+            base: TaskStateBase {
+                id: "b-child-live".into(),
+                task_type: TaskType::LocalBash,
+                status: TaskStatus::Running,
+                description: "child".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/b-child-live.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: Some("reviewer".into()),
+                creator_team_name: Some("alpha".into()),
+                creator_agent_id: None,
+            },
+            command: "sleep 1".into(),
+            pid: None,
+            exit_code: None,
+        }))
+        .await;
+
+    registry
+        .mark_task_rested(
+            "a-rest-parent",
+            Some("stale".into()),
+            Some(traits::task_registry::AgentRunUsage {
+                subagent_tokens: 1,
+                tool_uses: 1,
+                duration_ms: 10,
+            }),
+            None,
+            Some("reviewer".into()),
+            Some("alpha".into()),
+        )
+        .await;
+    let stale = registry
+        .pending_rest
+        .write()
+        .await
+        .remove("a-rest-parent")
+        .expect("stale payload should be armed");
+
+    registry
+        .mark_task_rested(
+            "a-rest-parent",
+            Some("fresh".into()),
+            Some(traits::task_registry::AgentRunUsage {
+                subagent_tokens: 9,
+                tool_uses: 2,
+                duration_ms: 20,
+            }),
+            None,
+            Some("reviewer".into()),
+            Some("alpha".into()),
+        )
+        .await;
+    registry
+        .requeue_deferred_rest(vec![("a-rest-parent".into(), stale)])
+        .await;
+
+    registry
+        .set_status("b-child-live", TaskStatus::Completed)
+        .await
+        .expect("child terminal transition should succeed");
+
+    let drained = registry.take_pending_task_notifications().await;
+    let rest = drained
+        .iter()
+        .find(|notification| notification.task_id == "a-rest-parent")
+        .expect("fresh rest payload should survive stale requeue");
+    assert_eq!(rest.result.as_deref(), Some("fresh"));
+    assert_eq!(rest.usage.as_ref().map(|u| u.subagent_tokens), Some(9));
+}
+
+#[tokio::test]
+async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
+    use crate::state::{LocalAgentTaskState, LocalBashTaskState, TaskState, TaskStateBase};
+    let (_d, registry) = make_registry();
+    let owner_a = protocol::AgentId::new();
+    let owner_b = protocol::AgentId::new();
+
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            base: TaskStateBase {
+                id: "a-rest-a".into(),
+                task_type: TaskType::LocalAgent,
+                status: TaskStatus::Running,
+                description: "bg agent a".into(),
+                tool_use_id: Some("toolu_parent_a".into()),
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-a.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            agent_id: owner_a,
+            subagent_type: String::new(),
+            prompt: String::new(),
+            error: None,
+            messages: vec![],
+            pending_messages: vec![],
+            is_backgrounded: true,
+            outcome: Default::default(),
+            forked_skill_name: None,
+        }))
+        .await;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            base: TaskStateBase {
+                id: "a-rest-b".into(),
+                task_type: TaskType::LocalAgent,
+                status: TaskStatus::Running,
+                description: "bg agent b".into(),
+                tool_use_id: Some("toolu_parent_b".into()),
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-b.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            agent_id: owner_b,
+            subagent_type: String::new(),
+            prompt: String::new(),
+            error: None,
+            messages: vec![],
+            pending_messages: vec![],
+            is_backgrounded: true,
+            outcome: Default::default(),
+            forked_skill_name: None,
+        }))
+        .await;
+    registry
+        .insert_state_for_test(TaskState::LocalBash(LocalBashTaskState {
+            base: TaskStateBase {
+                id: "b-child-live".into(),
+                task_type: TaskType::LocalBash,
+                status: TaskStatus::Running,
+                description: "child".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/b-child-live.output"),
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: Some("reviewer".into()),
+                creator_team_name: Some("alpha".into()),
+                creator_agent_id: Some(owner_b),
+            },
+            command: "sleep 1".into(),
+            pid: None,
+            exit_code: None,
+        }))
+        .await;
+
+    registry
+        .mark_task_rested(
+            "a-rest-a",
+            Some("rested-a".into()),
+            None,
+            Some(owner_a),
+            Some("reviewer".into()),
+            Some("alpha".into()),
+        )
+        .await;
+    registry
+        .mark_task_rested(
+            "a-rest-b",
+            Some("rested-b".into()),
+            None,
+            Some(owner_b),
+            Some("reviewer".into()),
+            Some("alpha".into()),
+        )
+        .await;
+
+    let drained = registry.take_pending_task_notifications().await;
+    let rest_a = drained
+        .iter()
+        .find(|notification| notification.task_id == "a-rest-a")
+        .expect("owner A should notify immediately");
+    assert_eq!(rest_a.result.as_deref(), Some("rested-a"));
+    assert!(
+        drained
+            .iter()
+            .all(|notification| notification.task_id != "a-rest-b"),
+        "owner B stays deferred while its own child is still live"
+    );
+
+    registry
+        .set_status("b-child-live", TaskStatus::Completed)
+        .await
+        .expect("child terminal transition should succeed");
+    let drained = registry.take_pending_task_notifications().await;
+    let rest_b = drained
+        .iter()
+        .find(|notification| notification.task_id == "a-rest-b")
+        .expect("owner B should notify after its child exits");
+    assert_eq!(rest_b.result.as_deref(), Some("rested-b"));
 }
 
 #[tokio::test]
@@ -2532,6 +3197,7 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
             notified: true, // already surfaced (e.g. via TaskOutput)
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
         };
         registry
             .insert_state_for_test(TaskState::LocalBash(LocalBashTaskState {
@@ -2683,7 +3349,7 @@ async fn finished_background_bash_task_does_not_stay_running() {
         bash_sink.clone() as Arc<dyn crate::handlers::TaskStatusSink>,
     );
     let registry = Arc::new(registry);
-    bash_sink.bind(registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+    bash_sink.bind(registry.clone());
 
     let id = registry
         .spawn(

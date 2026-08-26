@@ -20,6 +20,35 @@ fn unknown_flag_exits_1() {
 }
 
 #[test]
+fn invalid_agents_configuration_exits_before_runtime() {
+    for (raw, detail) in [
+        ("{bad", "invalid JSON: JSON Parse error: Expected '}'"),
+        (
+            r#"{"x":{"description":3,"prompt":"p"}}"#,
+            "x.description: Invalid input: expected string, received number",
+        ),
+        (
+            r#"{"x":{"description":"d","prompt":"p","hooks":{"PreToolUse":[{"foo":"bar"}]}}}"#,
+            "x.hooks.PreToolUse.0.hooks: Invalid input: expected array, received undefined",
+        ),
+        (
+            r#"{"x":{"description":"d","prompt":"p","mcpServers":[{"srv":123}]}}"#,
+            "x.mcpServers.0: Invalid input",
+        ),
+    ] {
+        Command::cargo_bin("lingxi-cli")
+            .unwrap()
+            .args(["-p", "noop", "--agents", raw, "--output-format", "json"])
+            .assert()
+            .code(1)
+            .stdout(predicate::eq(""))
+            .stderr(predicate::eq(format!(
+                "Error: Invalid --agents configuration:\n{detail}\n"
+            )));
+    }
+}
+
+#[test]
 fn cwd_to_nonexistent_path_exits_1() {
     Command::cargo_bin("lingxi-cli")
         .unwrap()

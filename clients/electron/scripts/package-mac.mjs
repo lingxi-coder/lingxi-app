@@ -4,6 +4,8 @@ import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } fro
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+import { createPackage } from '@electron/asar';
+
 import {
   APP_NAME,
   BUNDLE_ID,
@@ -101,7 +103,7 @@ function signApplication(appPath, contents, appContainer) {
   ], { stdio: 'inherit' });
 }
 
-function main() {
+async function main() {
   if (process.platform !== 'darwin' || process.arch !== TARGET_ARCH) {
     throw new Error(`macOS ${TARGET_ARCH} host required; received ${process.platform} ${process.arch}`);
   }
@@ -160,6 +162,9 @@ function main() {
   };
   writeJson(join(packagedApp, 'package.json'), runtimeMetadata);
   copyProductionDependencies(metadata.dependencies, packageRoot, join(packagedApp, 'node_modules'));
+  const asarPath = join(resources, 'app.asar');
+  await createPackage(packagedApp, asarPath);
+  rmSync(packagedApp, { recursive: true, force: true });
   const binDir = join(resources, 'bin');
   mkdirSync(binDir, { recursive: true });
   const packagedSidecar = join(binDir, 'bridge-server');
@@ -198,9 +203,7 @@ function main() {
   log(`sha256: ${checksum}`);
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   process.stderr.write(`[package:mac] ERROR: ${formatError(error)}\n`);
   process.exitCode = 1;
-}
+});

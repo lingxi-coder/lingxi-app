@@ -441,7 +441,7 @@ impl MobileWorkflowStatusSink {
         }
     }
 
-    pub(crate) fn bind(&self, registry: Arc<dyn traits::task_registry::TaskRegistryHandle>) {
+    pub(crate) fn bind(&self, registry: Arc<tasks::registry::TaskRegistry>) {
         self.registry.bind(registry);
     }
 
@@ -682,7 +682,10 @@ impl traits::tool_invoker::ToolInvoker for DeferredToolInvoker {
 /// the app sandbox).
 pub(crate) struct MobileWorkflowLauncher {
     pub(crate) registry: Arc<tasks::registry::TaskRegistry>,
-    pub(crate) cwd: std::path::PathBuf,
+    /// Project cwd that owns the persisted session directory; fixed for the session.
+    pub(crate) project_cwd: std::path::PathBuf,
+    /// Live cwd shared with the session and sampled at each launch.
+    pub(crate) current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
     /// The lingxi home (`<app_files_root>/.claude`), anchoring
     /// `transcriptDir = <projectDir>/<sessionId>/subagents/workflows/<runId>`.
     pub(crate) lingxi_home: std::path::PathBuf,
@@ -702,7 +705,11 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         &self,
         mut spec: tool_workflow::WorkflowLaunchSpec,
     ) -> Result<tool_workflow::WorkflowLaunched, tool_workflow::WorkflowLaunchError> {
-        let cwd = self.cwd.clone();
+        let cwd = self
+            .current_cwd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let abs = |p: &str| -> std::path::PathBuf {
             let path = std::path::Path::new(p);
             if path.is_absolute() {
@@ -711,7 +718,8 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        let script = tool_workflow::resolve_script(&spec, |p| std::fs::read_to_string(abs(p)))?;
+        let script =
+            tool_workflow::resolve_script_at(&cwd, &spec, |p| std::fs::read_to_string(abs(p)))?;
         // Reject a malformed `meta` block at the tool boundary; the byte-exact
         // message surfaces to the model as the tool error (desktop parity).
         workflow::validate_meta(&script).map_err(|e| {
@@ -734,6 +742,23 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             if let Err(workflow::WorkflowError::Script(m)) = workflow::check_determinism(&script) {
                 return Err(tool_workflow::WorkflowLaunchError(m));
             }
+        }
+        if let Err(error) = workflow::validate_body(&script) {
+            let error = match error {
+                workflow::WorkflowError::Engine(message)
+                | workflow::WorkflowError::Script(message) => message,
+            };
+            let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
+            let workflow_name = workflow::meta_string_value(&script, "name");
+            let summary = workflow::meta_string_value(&script, "description");
+            return Ok(tool_workflow::WorkflowLaunched {
+                task_id: tasks::generate_task_id(tasks::TaskType::LocalWorkflow),
+                run_id: Some(run_id),
+                workflow_name,
+                summary,
+                error: Some(error),
+                ..Default::default()
+            });
         }
         // Resume gate (errorCode 3): a `resumeFromRunId` naming a
         // STILL-RUNNING workflow is rejected — two runs sharing a run id
@@ -761,21 +786,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         // Mint the run id at launch (fresh) or reuse the resume id. Host
         // clock use is fine — only the workflow SCRIPT is barred from the
         // clock. Shape: `wf_` + 8 hex + `-` + 3 hex.
-        let run_id = spec
-            .resume_from_run_id
-            .clone()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static WF_SEQ: AtomicU64 = AtomicU64::new(0);
-                let seq = WF_SEQ.fetch_add(1, Ordering::Relaxed);
-                let nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0);
-                let v = nanos ^ seq.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                format!("wf_{:08x}-{:03x}", (v >> 32) as u32, (v as u32) & 0xfff)
-            });
+        let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
         let workflow_name = workflow::meta_string_value(&script, "name");
         tool_workflow::apply_local_app_build_default_model(
             &cwd,
@@ -783,6 +794,9 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             &mut spec.args,
         )?;
         let summary = workflow::meta_string_value(&script, "description");
+        let task_description = summary
+            .clone()
+            .unwrap_or_else(|| "Dynamic workflow".to_string());
         // One launch belongs to exactly one session. Capture the live session
         // once so a concurrent retarget cannot split its task row, checkpoint,
         // and transcript directory across two conversations.
@@ -801,33 +815,48 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             .await
             .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
         let launch_result = async {
+            let subagents = orchestrator::transcript_paths::subagents_dir(
+                &self.lingxi_home,
+                &self.project_cwd.to_string_lossy(),
+                &session_uuid,
+            );
             // Persist the script so it is editable + re-runnable via `scriptPath`.
             // A `scriptPath` input is already on disk → returned as-is; an
-            // inline/`name` script is written under the app-sandbox scratch dir.
-            let script_path =
-                if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty()) {
-                    abs(p).to_str().map(str::to_string)
-                } else {
-                    let dir = cwd.join(".lingxi-scratch").join("workflows");
-                    let file = dir.join(format!("{run_id}.js"));
-                    (std::fs::create_dir_all(&dir).is_ok()
-                        && std::fs::write(&file, &script).is_ok())
-                    .then(|| file.to_str().map(str::to_string))
-                    .flatten()
-                }
-                .ok_or_else(|| {
+            // inline/`name` script is written under the session-owned workflow dir.
+            let script_path = if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty())
+            {
+                abs(p).to_str().map(str::to_string).ok_or_else(|| {
                     tool_workflow::WorkflowLaunchError(
-                        "cannot persist workflow script for restart-safe resume".to_string(),
+                        "workflow script path is not valid UTF-8".to_string(),
+                    )
+                })?
+            } else {
+                let session_dir = subagents.parent().ok_or_else(|| {
+                    tool_workflow::WorkflowLaunchError(
+                        "cannot derive workflow session directory".to_string(),
                     )
                 })?;
-            let transcript_dir = {
-                let subagents = orchestrator::transcript_paths::subagents_dir(
-                    &self.lingxi_home,
-                    &self.cwd.to_string_lossy(),
-                    &session_uuid,
-                );
-                subagents.join("workflows").join(&run_id)
+                let dir = session_dir.join("workflows");
+                let file = dir.join(format!("{run_id}.js"));
+                std::fs::create_dir_all(&dir).map_err(|error| {
+                    tool_workflow::WorkflowLaunchError(format!(
+                        "cannot create workflow script directory '{}': {error}",
+                        dir.display()
+                    ))
+                })?;
+                std::fs::write(&file, &script).map_err(|error| {
+                    tool_workflow::WorkflowLaunchError(format!(
+                        "cannot persist workflow script '{}': {error}",
+                        file.display()
+                    ))
+                })?;
+                file.to_str().map(str::to_string).ok_or_else(|| {
+                    tool_workflow::WorkflowLaunchError(
+                        "workflow script path is not valid UTF-8".to_string(),
+                    )
+                })?
             };
+            let transcript_dir = { subagents.join("workflows").join(&run_id) };
             std::fs::create_dir_all(&transcript_dir).map_err(|error| {
                 tool_workflow::WorkflowLaunchError(format!(
                     "cannot create workflow transcript directory '{}': {error}",
@@ -846,14 +875,36 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                     ))
                 })?;
             let transcript_dir_wire = transcript_dir.to_str().map(str::to_string);
-            let (invocation_mode, workflow_source) =
-                if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty()) {
-                    ("scriptPath".to_string(), p.to_string())
-                } else if let Some(n) = spec.name.as_deref().filter(|s| !s.is_empty()) {
-                    ("named".to_string(), n.to_string())
-                } else {
-                    ("inline".to_string(), "inline".to_string())
-                };
+            let has_script_path = spec
+                .script_path
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .is_some();
+            let has_name = spec.name.as_deref().filter(|s| !s.is_empty()).is_some();
+            let named_source = spec
+                .name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .and_then(|name| tool_workflow::workflow_source_for_name(&cwd, name));
+            let named_builtin = spec
+                .name
+                .as_deref()
+                .and_then(|name| tool_workflow::BUILTIN_WORKFLOWS.get(name))
+                .is_some_and(|descriptor| descriptor.script == script);
+            let (invocation_mode, workflow_source) = if has_script_path {
+                ("scriptPath".to_string(), "scriptPath".to_string())
+            } else if has_name {
+                (
+                    "named".to_string(),
+                    if named_source.is_some() {
+                        named_source.unwrap_or("custom").to_string()
+                    } else {
+                        "custom".to_string()
+                    },
+                )
+            } else {
+                ("inline".to_string(), "inline".to_string())
+            };
             let script_sha256 = sha256_hex(script.as_bytes());
             let task_id = self
                 .registry
@@ -875,10 +926,18 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                         run_id: Some(run_id.clone()),
                         invocation_mode: Some(invocation_mode),
                         workflow_source: Some(workflow_source),
+                        script_is_verbatim_builtin: Some(named_builtin),
                         transcript_subdir: Some(transcript_dir.clone()),
-                        launched_from_subagent: false,
+                        launched_from_subagent: spec.launched_from_subagent,
+                        tool_use_id: spec.tool_use_id.clone(),
+                        creator_teammate_name: spec.creator_teammate_name.clone(),
+                        creator_team_name: spec.creator_team_name.clone(),
+                        creator_agent_id: spec
+                            .creator_agent_id
+                            .as_deref()
+                            .and_then(protocol::AgentId::parse_prefixed),
                     },
-                    "Workflow".to_string(),
+                    task_description,
                 )
                 .await
                 .map_err(|e| tool_workflow::WorkflowLaunchError(e.to_string()))?;
@@ -941,6 +1000,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 workflow_name,
                 summary,
                 transcript_dir: transcript_dir_wire,
+                error: None,
             })
         }
         .await;

@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(test)]
-use std::sync::Mutex;
-use std::sync::{mpsc, Arc, OnceLock, RwLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -88,10 +86,30 @@ struct OtelRuntime {
     debug: Mutex<DebugMirrorState>,
 }
 
-#[derive(Debug)]
 struct MetricsRuntime {
     provider: SdkMeterProvider,
     prometheus_registry: Option<Registry>,
+    counters: Mutex<HashMap<String, opentelemetry::metrics::Counter<f64>>>,
+    histograms: Mutex<HashMap<String, opentelemetry::metrics::Histogram<f64>>>,
+}
+
+impl std::fmt::Debug for MetricsRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetricsRuntime")
+            .field("prometheus_registry", &self.prometheus_registry.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl MetricsRuntime {
+    fn new(provider: SdkMeterProvider, prometheus_registry: Option<Registry>) -> Self {
+        Self {
+            provider,
+            prometheus_registry,
+            counters: Mutex::new(HashMap::new()),
+            histograms: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -271,10 +289,21 @@ impl OtelRuntime {
         let Some(metrics) = &self.metrics else {
             return;
         };
-        let meter = metrics.provider.meter(metrics::METER_NAME);
-        let counter = meter.f64_counter(instrument.to_string()).build();
         let key_values = self.metric_attributes(attrs);
-        counter.add(value, &key_values);
+        {
+            let mut map = metrics
+                .counters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let counter = map.entry(instrument.to_string()).or_insert_with(|| {
+                metrics
+                    .provider
+                    .meter(metrics::METER_NAME)
+                    .f64_counter(instrument.to_string())
+                    .build()
+            });
+            counter.add(value, &key_values);
+        }
         #[cfg(test)]
         self.debug
             .lock()
@@ -291,10 +320,21 @@ impl OtelRuntime {
         let Some(metrics) = &self.metrics else {
             return;
         };
-        let meter = metrics.provider.meter(metrics::METER_NAME);
-        let histogram = meter.f64_histogram(instrument.to_string()).build();
         let key_values = self.metric_attributes(attrs);
-        histogram.record(value, &key_values);
+        {
+            let mut map = metrics
+                .histograms
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let histogram = map.entry(instrument.to_string()).or_insert_with(|| {
+                metrics
+                    .provider
+                    .meter(metrics::METER_NAME)
+                    .f64_histogram(instrument.to_string())
+                    .build()
+            });
+            histogram.record(value, &key_values);
+        }
         #[cfg(test)]
         self.debug
             .lock()
@@ -893,9 +933,7 @@ impl TraceCarrier {
     fn into_serialized(self) -> Option<SerializedTraceContext> {
         self.traceparent.map(|traceparent| SerializedTraceContext {
             traceparent,
-            tracestate: self
-                .tracestate
-                .filter(|tracestate| !tracestate.is_empty()),
+            tracestate: self.tracestate.filter(|tracestate| !tracestate.is_empty()),
         })
     }
 }
@@ -1500,10 +1538,7 @@ fn build_metrics_runtime(
                 .with_resource(resource)
                 .with_reader(reader)
                 .build();
-            return Ok(Some(MetricsRuntime {
-                provider,
-                prometheus_registry: Some(registry),
-            }));
+            return Ok(Some(MetricsRuntime::new(provider, Some(registry))));
         }
         ExporterKind::Console => {
             let reader = PeriodicReader::builder(opentelemetry_stdout::MetricExporter::default())
@@ -1534,10 +1569,7 @@ fn build_metrics_runtime(
         }
     };
 
-    Ok(Some(MetricsRuntime {
-        provider,
-        prometheus_registry: None,
-    }))
+    Ok(Some(MetricsRuntime::new(provider, None)))
 }
 
 fn build_logger_provider(
@@ -2229,7 +2261,8 @@ mod tests {
     #[tokio::test]
     async fn with_turn_span_keeps_trace_context_across_await() {
         let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
-        let _guard = install_process_with_config("turn-test", false, trace_console_runtime_config());
+        let _guard =
+            install_process_with_config("turn-test", false, trace_console_runtime_config());
 
         let inside = with_turn_span("lingxi.turn.test", async {
             tokio::task::yield_now().await;
@@ -2482,7 +2515,10 @@ mod tests {
                 "provider".into(),
                 AnalyticsValue::String("anthropic".into()),
             );
-            md.insert("querySource".into(), AnalyticsValue::String("user".into()));
+            md.insert(
+                "querySource".into(),
+                AnalyticsValue::String("repl_main_thread".into()),
+            );
             md.insert("inputTokens".into(), AnalyticsValue::Int(1000));
             md.insert("outputTokens".into(), AnalyticsValue::Int(500));
             md.insert("cachedInputTokens".into(), AnalyticsValue::Int(128));
@@ -2682,7 +2718,7 @@ mod tests {
             md.insert("costUSD".into(), AnalyticsValue::Float(0.0175));
             md.insert("durationMs".into(), AnalyticsValue::Int(250));
             md.insert("requestId".into(), AnalyticsValue::String("req-1".into()));
-            md.insert("querySource".into(), AnalyticsValue::String("user".into()));
+            md.insert("querySource".into(), AnalyticsValue::String("sdk".into()));
             md.insert("fastMode".into(), AnalyticsValue::Bool(false));
             bus.log_event("tengu_api_success", md).await;
         });
@@ -2707,6 +2743,10 @@ mod tests {
         assert_eq!(
             api_request.attributes.get("speed"),
             Some(&AttrValue::from("normal"))
+        );
+        assert_eq!(
+            api_request.attributes.get("query_source"),
+            Some(&AttrValue::from("sdk"))
         );
         // The tengu passthrough record is still emitted alongside.
         assert!(debug

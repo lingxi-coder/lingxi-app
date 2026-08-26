@@ -10,6 +10,7 @@
 //! session mode, read by builders such as the `AgentTool` fork gate.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::Arc;
 
 /// `getIsNonInteractiveSession()` analog. Defaults `false` (interactive); set by
 /// [`ConversationOrchestrator::new`](../../orchestrator) from the session's
@@ -47,12 +48,180 @@ static TOOL_SEARCH_ENABLED: AtomicBool = AtomicBool::new(false);
 /// root after managed policy and environment gates are known.
 static DYNAMIC_WORKFLOWS_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Effective `workflowSizeGuideline` for the current process/session.
-/// `2` is `medium`, the Claude Code 2.1.219+ default.
-static WORKFLOW_SIZE_GUIDELINE: AtomicU8 = AtomicU8::new(2);
+/// Session-owned dynamic-workflow gate shared by the Workflow tool,
+/// orchestrator handle, and TUI consumers. This lets one process host
+/// multiple sessions without routing workflow availability through the legacy
+/// process-global compatibility flag.
+#[derive(Clone, Debug)]
+pub struct DynamicWorkflowsGate {
+    enabled: Arc<AtomicBool>,
+    managed: Arc<AtomicBool>,
+}
 
-/// Whether the effective workflow-size value is owned by managed policy.
-static WORKFLOW_SIZE_GUIDELINE_MANAGED: AtomicBool = AtomicBool::new(false);
+impl DynamicWorkflowsGate {
+    /// Create a session-owned gate with its effective availability and policy
+    /// ownership state.
+    #[must_use]
+    pub fn new(enabled: bool, managed: bool) -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(enabled)),
+            managed: Arc::new(AtomicBool::new(managed)),
+        }
+    }
+
+    /// Whether dynamic workflows are currently available in this session.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Whether the current value is locked by managed or environment policy.
+    #[must_use]
+    pub fn managed(&self) -> bool {
+        self.managed.load(Ordering::Relaxed)
+    }
+
+    /// Update workflow availability for every clone of this session gate.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Update whether the session gate is policy-owned.
+    pub fn set_managed(&self, managed: bool) {
+        self.managed.store(managed, Ordering::Relaxed);
+    }
+
+    /// Update both gate fields for every clone.
+    ///
+    /// The two atomic fields are stored independently; callers that expose a
+    /// live transition should update them before publishing related UI state.
+    pub fn set(&self, enabled: bool, managed: bool) {
+        self.set_enabled(enabled);
+        self.set_managed(managed);
+    }
+}
+
+impl Default for DynamicWorkflowsGate {
+    fn default() -> Self {
+        Self::new(true, false)
+    }
+}
+
+const WORKFLOW_SIZE_GUIDELINE_DEFAULT_ENCODED: u8 = 0b1010;
+const WORKFLOW_SIZE_GUIDELINE_MANAGED_BIT: u8 = 1 << 2;
+const WORKFLOW_SIZE_GUIDELINE_DEFAULT_BIT: u8 = 1 << 3;
+
+/// Effective `workflowSizeGuideline` compatibility snapshot for callers that
+/// still have no session-owned handle. `0b1010` encodes `medium`, unmanaged,
+/// built-in default.
+static WORKFLOW_SIZE_GUIDELINE_SNAPSHOT: AtomicU8 =
+    AtomicU8::new(WORKFLOW_SIZE_GUIDELINE_DEFAULT_ENCODED);
+
+fn encode_workflow_size_guideline(value: &str, managed: bool, is_default: bool) -> Option<u8> {
+    let mut encoded = match value {
+        "unrestricted" => 0,
+        "small" => 1,
+        "medium" => 2,
+        "large" => 3,
+        _ => return None,
+    };
+    if managed {
+        encoded |= WORKFLOW_SIZE_GUIDELINE_MANAGED_BIT;
+    }
+    if is_default {
+        encoded |= WORKFLOW_SIZE_GUIDELINE_DEFAULT_BIT;
+    }
+    Some(encoded)
+}
+
+#[must_use]
+fn decode_workflow_size_guideline(encoded: u8) -> WorkflowSizeGuidelineSnapshot {
+    let value = match encoded & 0b11 {
+        0 => "unrestricted",
+        1 => "small",
+        3 => "large",
+        _ => "medium",
+    };
+    WorkflowSizeGuidelineSnapshot {
+        value,
+        managed: encoded & WORKFLOW_SIZE_GUIDELINE_MANAGED_BIT != 0,
+        is_default: encoded & WORKFLOW_SIZE_GUIDELINE_DEFAULT_BIT != 0,
+    }
+}
+
+/// Coherent `workflowSizeGuideline` snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkflowSizeGuidelineSnapshot {
+    /// Effective wire value (`unrestricted`, `small`, `medium`, or `large`).
+    pub value: &'static str,
+    /// Whether managed policy owns the effective value.
+    pub managed: bool,
+    /// Whether the effective value is still the built-in default.
+    pub is_default: bool,
+}
+
+/// Session-owned workflow-size setting shared by the Workflow tool,
+/// orchestrator handle, and TUI consumers.
+#[derive(Clone, Debug)]
+pub struct WorkflowSizeGuidelineState {
+    snapshot: Arc<AtomicU8>,
+}
+
+impl WorkflowSizeGuidelineState {
+    /// Create a session-owned workflow-size state from one validated wire value.
+    #[must_use]
+    pub fn new(value: &str, managed: bool, is_default: bool) -> Option<Self> {
+        Some(Self {
+            snapshot: Arc::new(AtomicU8::new(encode_workflow_size_guideline(
+                value, managed, is_default,
+            )?)),
+        })
+    }
+
+    /// Read the coherent workflow-size snapshot.
+    #[must_use]
+    pub fn snapshot(&self) -> WorkflowSizeGuidelineSnapshot {
+        decode_workflow_size_guideline(self.snapshot.load(Ordering::Relaxed))
+    }
+
+    /// Effective workflow-size wire value.
+    #[must_use]
+    pub fn value(&self) -> &'static str {
+        self.snapshot().value
+    }
+
+    /// Whether managed policy owns the effective value.
+    #[must_use]
+    pub fn managed(&self) -> bool {
+        self.snapshot().managed
+    }
+
+    /// Whether the effective value is still the built-in default.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.snapshot().is_default
+    }
+
+    /// Update the session-owned value as an explicit non-default choice.
+    pub fn set(&self, value: &str, managed: bool) -> bool {
+        self.set_with_source(value, managed, false)
+    }
+
+    /// Update the session-owned value together with managed/default provenance.
+    pub fn set_with_source(&self, value: &str, managed: bool, is_default: bool) -> bool {
+        let Some(encoded) = encode_workflow_size_guideline(value, managed, is_default) else {
+            return false;
+        };
+        self.snapshot.store(encoded, Ordering::Relaxed);
+        true
+    }
+}
+
+impl Default for WorkflowSizeGuidelineState {
+    fn default() -> Self {
+        Self::new("medium", false, true).expect("default workflow guideline must be valid")
+    }
+}
 
 /// Record whether the current process is a non-interactive (`-p`/print/headless)
 /// session. Idempotent; safe to call repeatedly (the value is fixed per process).
@@ -173,33 +342,48 @@ pub fn dynamic_workflows_enabled() -> bool {
 /// Returns `false` for an unknown wire value and leaves the prior snapshot
 /// untouched.
 pub fn set_workflow_size_guideline(value: &str, managed: bool) -> bool {
-    let encoded = match value {
-        "unrestricted" => 0,
-        "small" => 1,
-        "medium" => 2,
-        "large" => 3,
-        _ => return false,
+    set_workflow_size_guideline_with_source(value, managed, false)
+}
+
+/// Publish the effective workflow-size value together with its provenance.
+/// Composition roots use `is_default=true` only when the winning settings
+/// layer is the built-in defaults layer; live `/config` changes are explicit.
+pub fn set_workflow_size_guideline_with_source(
+    value: &str,
+    managed: bool,
+    is_default: bool,
+) -> bool {
+    let Some(encoded) = encode_workflow_size_guideline(value, managed, is_default) else {
+        return false;
     };
-    WORKFLOW_SIZE_GUIDELINE.store(encoded, Ordering::Relaxed);
-    WORKFLOW_SIZE_GUIDELINE_MANAGED.store(managed, Ordering::Relaxed);
+    WORKFLOW_SIZE_GUIDELINE_SNAPSHOT.store(encoded, Ordering::Relaxed);
     true
 }
 
 /// Effective workflow-size wire value. Defaults to `medium`.
 #[must_use]
 pub fn workflow_size_guideline() -> &'static str {
-    match WORKFLOW_SIZE_GUIDELINE.load(Ordering::Relaxed) {
-        0 => "unrestricted",
-        1 => "small",
-        3 => "large",
-        _ => "medium",
-    }
+    workflow_size_guideline_snapshot().value
 }
 
 /// Whether managed policy owns the effective workflow-size setting.
 #[must_use]
 pub fn workflow_size_guideline_is_managed() -> bool {
-    WORKFLOW_SIZE_GUIDELINE_MANAGED.load(Ordering::Relaxed)
+    workflow_size_guideline_snapshot().managed
+}
+
+/// Whether `workflowSizeGuideline` is the built-in default rather than a user,
+/// project, CLI, or managed setting.
+#[must_use]
+pub fn workflow_size_guideline_is_default() -> bool {
+    workflow_size_guideline_snapshot().is_default
+}
+
+/// Coherent compatibility snapshot for callers that still rely on the legacy
+/// process-global workflow-size publication.
+#[must_use]
+pub fn workflow_size_guideline_snapshot() -> WorkflowSizeGuidelineSnapshot {
+    decode_workflow_size_guideline(WORKFLOW_SIZE_GUIDELINE_SNAPSHOT.load(Ordering::Relaxed))
 }
 
 #[cfg(test)]
@@ -227,5 +411,49 @@ mod tests {
         set_agent_push_notif_enabled(false);
         assert!(!agent_push_notif_enabled());
         set_agent_push_notif_enabled(prior);
+    }
+
+    #[test]
+    fn workflow_size_guideline_tracks_default_provenance() {
+        let prior = workflow_size_guideline();
+        let prior_managed = workflow_size_guideline_is_managed();
+        let prior_default = workflow_size_guideline_is_default();
+
+        assert!(set_workflow_size_guideline_with_source(
+            "medium", false, true
+        ));
+        assert!(workflow_size_guideline_is_default());
+        assert!(set_workflow_size_guideline("medium", false));
+        assert!(!workflow_size_guideline_is_default());
+
+        let _ = set_workflow_size_guideline_with_source(prior, prior_managed, prior_default);
+    }
+
+    #[test]
+    fn workflow_size_guideline_state_instances_are_isolated() {
+        let first = WorkflowSizeGuidelineState::new("small", false, false).unwrap();
+        let second = WorkflowSizeGuidelineState::new("large", true, true).unwrap();
+
+        first.set("unrestricted", false);
+
+        assert_eq!(first.value(), "unrestricted");
+        assert!(!first.managed());
+        assert!(!first.is_default());
+        assert_eq!(second.value(), "large");
+        assert!(second.managed());
+        assert!(second.is_default());
+    }
+
+    #[test]
+    fn dynamic_workflows_gate_instances_are_isolated() {
+        let first = DynamicWorkflowsGate::new(true, false);
+        let second = DynamicWorkflowsGate::new(false, true);
+
+        first.set(false, false);
+
+        assert!(!first.enabled());
+        assert!(!first.managed());
+        assert!(!second.enabled());
+        assert!(second.managed());
     }
 }

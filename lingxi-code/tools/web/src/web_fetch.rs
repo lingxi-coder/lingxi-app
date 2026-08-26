@@ -699,7 +699,7 @@ impl Tool for WebFetchTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        100_000
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         true

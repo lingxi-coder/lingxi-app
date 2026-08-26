@@ -82,6 +82,7 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
             "workflowSizeGuideline",
             layer.workflow_size_guideline.is_some(),
         ),
+        ("enableWorkflows", layer.enable_workflows.is_some()),
         ("enabledTools", layer.enabled_tools.is_some()),
         ("additionalIncludes", layer.additional_includes.is_some()),
         ("sandbox", layer.sandbox.is_some()),
@@ -202,5 +203,36 @@ mod tests {
         })
         .unwrap();
         assert!(eff.effective_for("nonsense").is_none());
+    }
+
+    #[test]
+    fn enable_workflows_provenance_is_recorded() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        let user_dir = tmp.path().join("home_t9c").join(".lingxi");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        let mut uf = std::fs::File::create(user_dir.join("settings.json")).unwrap();
+        writeln!(uf, r#"{{"enableWorkflows": false}}"#).unwrap();
+        std::env::set_var("HOME", tmp.path().join("home_t9c"));
+
+        let defaults = SettingsJson {
+            enable_workflows: Some(true),
+            ..Default::default()
+        };
+        let eff = Settings::load(LoadInputs {
+            env: &BTreeMap::new(),
+            project_dir,
+            defaults,
+        })
+        .unwrap();
+
+        let prov = eff
+            .effective_for("enableWorkflows")
+            .expect("enableWorkflows must have provenance");
+        assert_eq!(prov.contributors, vec![Source::User]);
     }
 }

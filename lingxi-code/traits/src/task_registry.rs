@@ -29,6 +29,12 @@ pub struct McpTaskRegistration {
     pub tool_name: String,
     /// Originating assistant `tool_use_id`, if any (`toolUseId`).
     pub tool_use_id: Option<String>,
+    /// Creator ownership used to defer a resting parent's notification.
+    pub creator_teammate_name: Option<String>,
+    /// Team containing the creator, when it belongs to one.
+    pub creator_team_name: Option<String>,
+    /// Persistent identity of the creator agent, when available.
+    pub creator_agent_id: Option<protocol::AgentId>,
 }
 
 /// Launch input for a background stdout event monitor.
@@ -46,6 +52,12 @@ pub struct MonitorRegistration {
     pub cwd: Option<String>,
     /// Originating assistant tool-use id, when available.
     pub tool_use_id: Option<String>,
+    /// Creator ownership used to defer a resting parent's notification.
+    pub creator_teammate_name: Option<String>,
+    /// Team containing the creator, when it belongs to one.
+    pub creator_team_name: Option<String>,
+    /// Persistent identity of the creator agent, when available.
+    pub creator_agent_id: Option<protocol::AgentId>,
 }
 
 /// Filter for [`TaskRegistryHandle::list`].
@@ -157,12 +169,26 @@ pub struct WorkflowRecord {
     /// Wall-clock end (epoch millis) for a terminal run, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at_ms: Option<u64>,
+    /// Stored script source for a saveable dynamic workflow run. Claude keeps
+    /// the resolved script on every live workflow task, regardless of whether
+    /// it was launched inline, by name, or by path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
     /// Script path needed by an explicitly resumed paused workflow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_path: Option<String>,
     /// Serialized workflow args needed by an explicitly resumed paused workflow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
+    /// Distinct workflow agents known for this run. Terminal runs surface the
+    /// runtime's aggregate count; live runs may leave this `0` until the TUI
+    /// enriches from the spool/progress feed.
+    #[serde(default)]
+    pub agent_count: u64,
+    /// Aggregate workflow tokens when the runtime has them. Live runs may leave
+    /// this `0` until progress updates land.
+    #[serde(default)]
+    pub total_tokens: u64,
 }
 
 /// Everything a terminating `local_agent` run reports beyond its status — the
@@ -216,6 +242,51 @@ pub struct AgentRunUsage {
     pub tool_uses: u64,
     /// `totalDurationMs` → `<duration_ms>`.
     pub duration_ms: u64,
+}
+
+/// Everything a terminating `local_workflow` run reports beyond its status.
+/// Claude keeps the script result, non-fatal item failures, and aggregate usage
+/// as separate notification fields; keeping them together here makes the
+/// status-sink update atomic with the terminal transition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowTerminalOutcome {
+    /// The script's serialized return value, if it returned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// Non-fatal `parallel()` / `pipeline()` diagnostics.
+    #[serde(default)]
+    pub failures: Vec<String>,
+    /// Fatal script/engine error, if the workflow failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Number of real `agent()` calls, including cached calls.
+    #[serde(default)]
+    pub agent_count: u64,
+    /// Aggregate terminal subagent tokens.
+    #[serde(default)]
+    pub total_tokens: u64,
+    /// Aggregate terminal subagent tool calls.
+    #[serde(default)]
+    pub total_tool_calls: u64,
+    /// End-to-end workflow duration.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Terminal workflow-agent counts used by Claude's enriched `<usage>`.
+    #[serde(default)]
+    pub agents_done: u64,
+    /// Terminal workflow agents that failed.
+    #[serde(default)]
+    pub agents_error: u64,
+    /// Terminal workflow agents that were skipped.
+    #[serde(default)]
+    pub agents_skipped: u64,
+    /// Successful workflow agents whose result was structurally empty.
+    #[serde(default)]
+    pub agents_empty_result: u64,
+    /// Whether the terminal counts above came from real workflow progress
+    /// instrumentation instead of a default zero-fill.
+    #[serde(default)]
+    pub progress_counts_available: bool,
 }
 
 /// A terminal task that has not yet been surfaced to the model, snapshotted at
@@ -279,6 +350,47 @@ pub struct TaskNotification {
     /// `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// `local_workflow`: non-fatal per-item diagnostics rendered in a separate
+    /// `<failures>` section, never appended to `<result>`.
+    #[serde(default)]
+    pub workflow_failures: Vec<String>,
+    /// `local_workflow`: aggregate workflow usage fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_agent_count: Option<u64>,
+    /// `local_workflow`: aggregate terminal subagent token count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_total_tokens: Option<u64>,
+    /// `local_workflow`: aggregate terminal subagent tool-call count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_total_tool_calls: Option<u64>,
+    /// `local_workflow`: end-to-end workflow duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_duration_ms: Option<u64>,
+    /// `local_workflow`: session-owned persisted script path and run identity,
+    /// used to render recovery/diagnostics instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_script_path: Option<String>,
+    /// `local_workflow`: stable run identifier used by resume instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
+    /// `local_workflow`: serialized workflow arguments used by rerun instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_args: Option<String>,
+    /// `local_workflow`: directory containing per-agent transcript journals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_transcript_dir: Option<String>,
+    /// Terminal workflow-agent counters included inside `<usage>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_agents_done: Option<u64>,
+    /// `local_workflow`: number of failed terminal agent calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_agents_error: Option<u64>,
+    /// `local_workflow`: number of skipped terminal agent calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_agents_skipped: Option<u64>,
+    /// `local_workflow`: number of terminal agent calls with empty results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_agents_empty_result: Option<u64>,
 }
 
 /// One chunk of a task's accumulated stdout/stderr spool.
@@ -372,8 +484,11 @@ pub trait TaskRegistryHandle: Send + Sync {
                 current_step: 0,
                 started_at_ms: None,
                 ended_at_ms: None,
+                script: None,
                 script_path: None,
                 args: None,
+                agent_count: 0,
+                total_tokens: 0,
             })
             .collect())
     }
@@ -430,6 +545,11 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// stored value alone. Default no-op so existing mock handles compile
     /// unchanged.
     async fn set_agent_outcome(&self, _id: &str, _outcome: AgentTerminalOutcome) {}
+
+    /// Record a terminating `local_workflow`'s result, failures, and usage
+    /// before its terminal status is published. Defaulted for existing hosts
+    /// and mocks that do not expose workflow notifications.
+    async fn set_workflow_outcome(&self, _id: &str, _outcome: WorkflowTerminalOutcome) {}
 
     /// Spawn a real background monitor and return its registry task id.
     /// Hosts without a task runtime fail closed rather than minting a fake id.

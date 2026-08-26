@@ -445,6 +445,9 @@ pub struct ApiService {
     /// otherwise untestable); `None` (production) uses
     /// [`crate::model::stream_watchdog::resolve_stream_idle_timeout`].
     stream_idle_timeout_override: Option<Duration>,
+    /// Test-only override for the connect-phase first-byte watchdog. `None`
+    /// resolves the provider/body-aware timeout from the process environment.
+    stream_first_byte_timeout_override: Option<Duration>,
     /// Conversation-session scoped OpenAI Responses WebSocket connection/cache.
     ///
     /// The adapter is used by one conversation runtime; mobile already enforces
@@ -530,6 +533,54 @@ fn parse_fallback_chain(raw: &str) -> Vec<String> {
         }
     }
     out
+}
+
+fn extra_body_object() -> Option<serde_json::Map<String, serde_json::Value>> {
+    extra_body_object_uncached()
+}
+
+fn extra_body_object_uncached() -> Option<serde_json::Map<String, serde_json::Value>> {
+    let Ok(t) = std::env::var("CLAUDE_CODE_EXTRA_BODY") else {
+        return None;
+    };
+    if t.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(&t) {
+        Ok(serde_json::Value::Object(map)) => Some(map),
+        Ok(_) => {
+            tracing::error!(
+                "CLAUDE_CODE_EXTRA_BODY env var must be a JSON object, but was given {t}"
+            );
+            None
+        }
+        Err(err) => {
+            tracing::error!("Error parsing CLAUDE_CODE_EXTRA_BODY: {err}");
+            None
+        }
+    }
+}
+
+fn extra_metadata_object() -> Option<serde_json::Map<String, serde_json::Value>> {
+    extra_metadata_object_uncached()
+}
+
+fn extra_metadata_object_uncached() -> Option<serde_json::Map<String, serde_json::Value>> {
+    let Ok(extra_str) = std::env::var("CLAUDE_CODE_EXTRA_METADATA") else {
+        return None;
+    };
+    if extra_str.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(&extra_str) {
+        Ok(serde_json::Value::Object(extra)) => Some(extra),
+        _ => {
+            tracing::error!(
+                "CLAUDE_CODE_EXTRA_METADATA env var must be a JSON object, but was given {extra_str}"
+            );
+            None
+        }
+    }
 }
 
 impl ApiService {
@@ -715,6 +766,7 @@ impl ApiService {
             aws_auth: None,
             last_rate_limit_record_ts_ms: Mutex::new(None),
             stream_idle_timeout_override: None,
+            stream_first_byte_timeout_override: None,
             responses_ws_session: tokio::sync::Mutex::new(ResponsesWebSocketSession::new()),
         }
     }
@@ -733,6 +785,15 @@ impl ApiService {
     #[must_use]
     pub fn with_stream_idle_timeout_override(mut self, timeout: Option<Duration>) -> Self {
         self.stream_idle_timeout_override = timeout;
+        self
+    }
+
+    /// Test-only: force the streaming first-byte timeout. Builder-style;
+    /// default `None` uses the provider/body-aware environment resolver.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_stream_first_byte_timeout_override(mut self, timeout: Duration) -> Self {
+        self.stream_first_byte_timeout_override = Some(timeout);
         self
     }
 
@@ -873,25 +934,9 @@ impl ApiService {
         parent_session_id: Option<&str>,
     ) -> String {
         let mut obj = serde_json::Map::new();
-        if let Ok(extra_str) = std::env::var("CLAUDE_CODE_EXTRA_METADATA") {
-            // `if(t)` — an empty/unset value is skipped silently; a set-but-invalid
-            // value logs at error level (claude-code `yit`: `else` branch of
-            // `if(i && typeof i==="object" && !Array.isArray(i))`). serde's
-            // `Value::Object` already excludes arrays, so a JSON array falls to the
-            // log arm like `!Array.isArray` in CC. One message only (unlike
-            // EXTRA_BODY, METADATA's `xl(t,!1)` folds parse-failure into the same
-            // arm — there is no "Error parsing …" variant).
-            if !extra_str.is_empty() {
-                match serde_json::from_str::<serde_json::Value>(&extra_str) {
-                    Ok(serde_json::Value::Object(extra)) => {
-                        for (k, v) in extra {
-                            obj.insert(k, v);
-                        }
-                    }
-                    _ => tracing::error!(
-                        "CLAUDE_CODE_EXTRA_METADATA env var must be a JSON object, but was given {extra_str}"
-                    ),
-                }
+        if let Some(extra) = extra_metadata_object() {
+            for (k, v) in extra {
+                obj.insert(k, v);
             }
         }
         obj.insert(
@@ -1468,18 +1513,8 @@ impl ApiService {
         let mut r = serde_json::Map::new();
         // claude-code enters the parse branch only when the env var is truthy; an
         // empty string is falsy in JS, so an empty value is a silent no-op.
-        if let Ok(t) = std::env::var("CLAUDE_CODE_EXTRA_BODY") {
-            if !t.is_empty() {
-                match serde_json::from_str::<serde_json::Value>(&t) {
-                    Ok(serde_json::Value::Object(map)) => r = map,
-                    Ok(_) => tracing::error!(
-                        "CLAUDE_CODE_EXTRA_BODY env var must be a JSON object, but was given {t}"
-                    ),
-                    Err(err) => {
-                        tracing::error!("Error parsing CLAUDE_CODE_EXTRA_BODY: {err}");
-                    }
-                }
-            }
+        if let Some(map) = extra_body_object() {
+            r = map;
         }
         if !betas.is_empty() {
             match r.get_mut("anthropic_beta") {
@@ -2378,7 +2413,6 @@ impl ApiService {
         let mut chain_idx: usize = 0;
         // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
         let mut aws_auth_attempts: u32 = 0;
-
         loop {
             // prepare → inject headers → execute.
             let mut prepared = match self.client.prepare(&req).await {
@@ -3243,6 +3277,9 @@ impl ApiService {
         let thinking_budget: u32 = reasoning_budget(req.reasoning);
         // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
         let mut aws_auth_attempts: u32 = 0;
+        // `StreamNoResponse` owns a separate one-retry ledger in the oracle.
+        // It is intentionally independent from the ordinary retry budget.
+        let mut no_response_retries: u8 = 0;
         // (cc 2.1.219) `Kt`/`no` — per-query, reset with every drive. Streams
         // are main-thread or subagent turns, never `fB()==="auxiliary"`.
         let mut dispatch = DispatchHeaderState::default();
@@ -3265,10 +3302,21 @@ impl ApiService {
                 .headers
                 .contains_key(DISPATCH_ID_HEADER);
 
+            let provider = &prepared.route.resolved_route.provider_id;
+            let body_bytes = prepared.provider_request.body_bytes.as_ref().map_or_else(
+                || prepared.provider_request.body_json.to_string().len(),
+                Vec::len,
+            );
+            let first_byte_timeout = self.stream_first_byte_timeout_override.or_else(|| {
+                crate::model::stream_watchdog::resolve_stream_first_byte_timeout(
+                    provider, body_bytes,
+                )
+            });
+
             // Open stream through the prepared-call path so injected headers are
             // preserved while OpenAI Responses providers can reuse a WebSocket
             // session and apply previous_response_id deltas.
-            let opened = {
+            let open = async {
                 let mut responses_ws_session = self.responses_ws_session.lock().await;
                 self.client
                     .open_prepared_stream_with_session(
@@ -3278,8 +3326,32 @@ impl ApiService {
                     )
                     .await
             };
+            let opened = match first_byte_timeout {
+                Some(timeout) => {
+                    let wall = std::time::SystemTime::now();
+                    tokio::time::timeout(timeout, open)
+                        .await
+                        .unwrap_or_else(|_elapsed| {
+                            Err(crate::model::stream_watchdog::first_byte_abort_error(
+                                timeout,
+                                wall.elapsed().unwrap_or(timeout),
+                            ))
+                        })
+                }
+                None => open.await,
+            };
             match opened {
                 Err(transport_err) => {
+                    // The oracle permits one `StreamNoResponse` retry across the
+                    // whole request, then terminates before generic retry logic.
+                    // On the first occurrence it still flows through dispatch
+                    // degradation and the normal retry/backoff classifier.
+                    if crate::model::stream_watchdog::is_stream_no_response(&transport_err) {
+                        if no_response_retries >= 1 {
+                            return Err(transport_err);
+                        }
+                        no_response_retries += 1;
+                    }
                     // (cc 2.1.219) dispatch-header degradation, arm 1 (2.1.220
                     // @237555467) on the stream CONNECT phase: strip for the
                     // rest of this query + immediate budget-free retry.

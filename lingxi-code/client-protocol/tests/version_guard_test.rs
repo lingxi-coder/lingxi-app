@@ -494,7 +494,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::AppOperationFailed.app_id", "Option<String>");
     put("ClientEvent::AppOperationFailed.code", "AppErrorCodeDto");
     put("ClientEvent::AppOperationFailed.message", "String");
-    put("ClientEvent::AppOperationFailed.request_id", "Option<String>");
+    put(
+        "ClientEvent::AppOperationFailed.request_id",
+        "Option<String>",
+    );
 
     put("ClientEvent::CoordinatorStatus", "coordinator_status");
     put("ClientEvent::CoordinatorStatus.active_workers", "u32");

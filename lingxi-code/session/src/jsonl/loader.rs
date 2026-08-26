@@ -26,7 +26,7 @@
 
 use crate::jsonl::path::{project_dir_name, session_path};
 use crate::jsonl::re_append::{find_last_typed_field, read_tail};
-use crate::jsonl::reader::{JsonlReader, LoadedTranscript};
+use crate::jsonl::reader::{extract_json_string_field, JsonlReader, LoadedTranscript};
 use crate::jsonl::schema::{JsonlMessage, SESSION_KIND_KEY};
 use crate::jsonl::title::{extract_title, truncate_title};
 use serde_json::Value;
@@ -35,11 +35,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use traits::FileSystem;
+use traits::{FileSystem, FileSystemCacheIdentity};
 use uuid::Uuid;
 
 /// Metadata for one resumable session row (uuid + title + mtime + created + line count).
@@ -52,14 +52,13 @@ pub struct SessionMetadata {
     /// [`collect_dir`]) and normalized to [`crate::jsonl::title::TITLE_MAX_CHARS`]
     /// chars + ellipsis; the display surfaces re-truncate by terminal width.
     pub title: String,
-    /// Transcript logical last-activity time (UTC `SystemTime`).
+    /// Resume-catalog last-activity time (UTC `SystemTime`).
     ///
-    /// Mirrors claude-code's resume/log catalog, which sorts by the chain tip's
-    /// timestamp rather than the transcript file's raw mtime, so touching or
-    /// reopening a file does not reorder sessions.
+    /// Claude clamps the last user/assistant transcript timestamp to the file's
+    /// mtime (`Math.min(lastMessageAtMs, modified.getTime())`), so touching a
+    /// transcript forward does not reorder it while an older mtime still wins.
     pub modified: SystemTime,
-    /// Transcript logical creation time (UTC `SystemTime`) from the first
-    /// message in the reconstructed main chain.
+    /// Transcript file creation/birth time.
     ///
     /// Used as the equal-`modified` tie-break, matching claude-code
     /// `sortLogs`/`loadSameRepoMessageLogs`.
@@ -209,25 +208,61 @@ fn transcript_matches_target_dirs(transcript_cwd: Option<&str>, target_cwds: &[S
         .any(|target| project_dir_name(target) == transcript_dir)
 }
 
-fn transcript_logical_times(
+fn transcript_logical_modified(
     loaded: &LoadedTranscript,
-    arg: &str,
-) -> Option<(SystemTime, SystemTime)> {
-    let (chain, _) = build_conversation_chain(loaded, arg);
-    let first = chain.first()?;
-    let last = chain.last()?;
-    let created_ms = timestamp_millis(&first.timestamp);
+    file_modified: SystemTime,
+) -> Option<SystemTime> {
+    let last = loaded
+        .messages_in_order
+        .iter()
+        .rev()
+        .find(|message| matches!(message.message_type.as_str(), "user" | "assistant"))?;
     let modified_ms = timestamp_millis(&last.timestamp);
-    if created_ms == i64::MIN || modified_ms == i64::MIN {
+    if modified_ms == i64::MIN {
         return None;
     }
-    let created = SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(
-        u64::try_from(created_ms).ok()?,
-    ))?;
-    let modified = SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(
-        u64::try_from(modified_ms).ok()?,
-    ))?;
-    Some((created, modified))
+    let transcript_modified = SystemTime::UNIX_EPOCH.checked_add(
+        std::time::Duration::from_millis(u64::try_from(modified_ms).ok()?),
+    )?;
+    Some(std::cmp::min(transcript_modified, file_modified))
+}
+
+async fn transcript_logical_modified_from_path(
+    path: &Path,
+    file_modified: SystemTime,
+) -> SystemTime {
+    let Ok(file) = tokio::fs::File::open(path).await else {
+        return file_modified;
+    };
+    let mut lines = BufReader::new(file).lines();
+    let mut last_timestamp = None;
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.strip_prefix('\u{FEFF}').unwrap_or(&line);
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if !matches!(
+            value.get("type").and_then(Value::as_str),
+            Some("user" | "assistant")
+        ) {
+            continue;
+        }
+        let Some(timestamp) = value.get("timestamp").and_then(Value::as_str) else {
+            continue;
+        };
+        let millis = timestamp_millis(timestamp);
+        if millis != i64::MIN {
+            last_timestamp = Some(millis);
+        }
+    }
+    let Some(millis) = last_timestamp.and_then(|value| u64::try_from(value).ok()) else {
+        return file_modified;
+    };
+    SystemTime::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_millis(millis))
+        .map_or(file_modified, |logical| {
+            std::cmp::min(logical, file_modified)
+        })
 }
 
 /// Parse the `worktree ` lines of `git worktree list --porcelain` into absolute
@@ -392,11 +427,39 @@ fn is_loop_session(messages: &[JsonlMessage]) -> bool {
 /// does not exist (`NotFound`) and `Ok(true)` when it was read. Directory-level
 /// I/O errors are returned; unreadable or wholly corrupt candidate files are
 /// counted in `skipped_files` so readable siblings can still be listed.
+#[derive(Clone)]
+struct CatalogCandidate {
+    uuid: Uuid,
+    path: PathBuf,
+    stem: String,
+    file_len: u64,
+    file_modified: SystemTime,
+    file_created: SystemTime,
+}
+
+#[derive(Clone)]
+struct CatalogCacheEntry {
+    fs_identity: FileSystemCacheIdentity,
+    path: PathBuf,
+    file_len: u64,
+    file_modified: SystemTime,
+    file_created: SystemTime,
+    current_is_sdk_entrypoint: bool,
+    target_cwds: Vec<String>,
+    row: Option<SessionMetadata>,
+    skipped: bool,
+}
+
+fn catalog_cache() -> &'static Mutex<Vec<CatalogCacheEntry>> {
+    static CACHE: OnceLock<Mutex<Vec<CatalogCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 async fn collect_dir(
     dir: &Path,
-    target_cwds: &[String],
+    _target_cwds: &[String],
     fs: &Arc<dyn FileSystem>,
-    rows: &mut Vec<SessionMetadata>,
+    candidates: &mut Vec<CatalogCandidate>,
     skipped_files: &mut usize,
 ) -> Result<bool, LoaderError> {
     let mut entries = match tokio::fs::read_dir(dir).await {
@@ -409,6 +472,12 @@ async fn collect_dir(
             });
         }
     };
+
+    // Process-constant: SDK runtimes do not hide SDK/loop sessions from the picker.
+    let current_is_sdk_entrypoint = matches!(
+        std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
+        Ok("sdk-cli" | "sdk-ts" | "sdk-py")
+    );
 
     while let Some(entry) = entries
         .next_entry()
@@ -451,188 +520,319 @@ async fn collect_dir(
         let Ok(uuid) = Uuid::parse_str(stem) else {
             continue;
         };
+        let stem = stem.to_string();
 
-        // Route the file TOLERANTLY ([`read_routed`]) rather than `read_all`:
-        // besides the chain participants (`messages_in_order`, identical to what
-        // `read_all` returned) it yields the Tier-1 metadata side-maps the picker
-        // needs to surface a session's stored title — `summaries` (keyed by
-        // leafUuid), `custom_titles` + `ai_titles` (keyed by sessionId). See
-        // `LoadedTranscript`.
-        let reader = JsonlReader::new(path.clone(), fs.clone());
-        let loaded = match reader.read_routed().await {
-            Ok(loaded) => loaded,
-            Err(_) => {
-                *skipped_files += 1;
-                continue;
-            }
-        };
-
-        // Preserve crash-tail tolerance: a valid transcript remains resumable
-        // even when its last line was truncated. If no message can be recovered
-        // at all, however, a zero-turn `(session)` row would be a dead resume
-        // target and conceal catalog damage from the desktop client.
-        if loaded.messages_in_order.is_empty() && loaded.malformed_line_count > 0 {
-            *skipped_files += 1;
-            continue;
-        }
-
-        let transcript_cwd = transcript_cwd_from_path(&path, &loaded);
-        if !transcript_matches_target_dirs(transcript_cwd.as_deref(), target_cwds) {
-            continue;
-        }
-
-        let (created, modified) =
-            transcript_logical_times(&loaded, stem).unwrap_or((file_created, file_modified));
-
-        // SESSION.1 — claude-code HIDES sub-agent / sidechain transcripts from
-        // the /resume picker. The decision is made from the FIRST line only:
-        //   - `parseSessionInfoFromLite` returns null when the file's first line
-        //     contains `"isSidechain":true` (listSessionsImpl.ts:88-95);
-        //   - `enrichLog` returns null when the first entry `isSidechain` OR
-        //     carries a truthy `teamName` (sessionStorage.ts:5055-5067);
-        //   - `filterResumableSessions` drops `l.isSidechain` (resume picker).
-        // Mirror that: inspect only the first chain-participant line (the first
-        // parsed transcript line — we do NOT scan the whole file for the decision)
-        // and skip the session when it is a sidechain message or carries a truthy
-        // `teamName`. `teamName` is an outer field captured in
-        // `JsonlMessage::extra`; the truthiness test matches TS
-        // `if (enriched.teamName)` (an empty-string teamName is falsy).
-        // Binary `vkm`: `let a = qpn.has(vsc() ?? "")` where
-        // `qpn = new Set(["sdk-cli","sdk-ts","sdk-py"])` and `vsc()` returns the
-        // CURRENT process entrypoint (`CLAUDE_CODE_ENTRYPOINT`). So `a` is true
-        // when *this* process is itself running under an SDK entrypoint — and the
-        // SDK-entrypoint and `/loop` session filters below are gated on `!a`:
-        // when running as an SDK runtime we do NOT hide SDK/loop sessions from the
-        // picker. (This is process-constant, so we read it once per session row.)
-        let current_is_sdk_entrypoint = matches!(
-            std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
-            Ok("sdk-cli" | "sdk-ts" | "sdk-py")
-        );
-
-        if let Some(first) = loaded.messages_in_order.first() {
-            let has_team_name = first.extra.get("teamName").is_some_and(|v| match v {
-                serde_json::Value::Null => false,
-                serde_json::Value::String(s) => !s.is_empty(),
-                _ => true,
-            });
-            if first.is_sidechain || has_team_name {
-                continue;
-            }
-
-            // Gap #2 fix — SESSION.2: filter `sessionKind` daemon sessions.
-            // Binary `vkm` (@ 206492423):
-            //   `if(i.sessionKind==="daemon"||i.sessionKind==="daemon-worker") return C(...),null`
-            // Binary log: `"$ filtered from /resume: sessionKind="` @ 113414433.
-            // `sessionKind` is carried in `extra` (outer field, not a named
-            // struct field). SC-07: the writer half now stamps it
-            // (`jsonl::writer::stamp_session_kind`), so this filter can
-            // actually fire on a LingXi-written transcript; both halves share
-            // `SESSION_KIND_KEY` so the spelling cannot drift apart again.
-            let session_kind = first
-                .extra
-                .get(SESSION_KIND_KEY)
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if session_kind == "daemon" || session_kind == "daemon-worker" {
-                continue;
-            }
-
-            // Gap #3 fix — SESSION.3: filter SDK-entrypoint sessions.
-            // Binary `vkm`: `qpn=new Set(["sdk-cli","sdk-ts","sdk-py"])`;
-            //   `if(!a && qpn.has(n.entrypoint??"")) return C(...),null`
-            // Binary log: `"# filtered from /resume: entrypoint="` @ 113414513.
-            // `!a` = the CURRENT process is NOT an SDK runtime (see
-            // `current_is_sdk_entrypoint` above): SDK sessions are hidden only from
-            // a normal CLI picker. The entrypoint field IS a named struct field.
-            let entrypoint = first.entrypoint.as_deref().unwrap_or("");
-            if !current_is_sdk_entrypoint && matches!(entrypoint, "sdk-cli" | "sdk-ts" | "sdk-py") {
-                continue;
+        // Cheap first-line hide: sidechain / daemon / SDK sessions can be
+        // skipped without parsing the rest of the JSONL. Survivors still take
+        // the full `read_routed` path (custom titles live at file tail).
+        let path_str = path.to_str().unwrap_or("");
+        if !path_str.is_empty() {
+            if let Ok(prefix) = fs
+                .read_file_prefix(path_str, crate::jsonl::LITE_READ_BUF_SIZE)
+                .await
+            {
+                let content = prefix
+                    .content
+                    .strip_prefix('\u{FEFF}')
+                    .unwrap_or(&prefix.content);
+                let line1 = content.split('\n').next().unwrap_or("");
+                if first_line_hides_session(line1, current_is_sdk_entrypoint) {
+                    continue;
+                }
             }
         }
-
-        // Gap #4 fix — SESSION.4: filter `/loop` sessions.
-        // Binary `vkm`: `m=r.includes("<command-name>/loop</command-name>")` (where
-        // `r` is the first line raw string), then
-        //   `if(!a&&n.isLoopSession) return C(...),null`
-        // Binary log: `"% filtered from /resume: /loop session"` @ 113414577.
-        // Confirmed string: `"<command-name>/loop</command-name>"` @ 113388700.
-        // 2.1.212 fix (2.1.211 changelog): the detector no longer tests
-        // `messages[0]` blindly — it walks to the FIRST GENUINE user prompt,
-        // skipping non-user lines, `isMeta`/`isCompactSummary` lines, and
-        // `tool_result` turns, so a compacted / meta-first transcript is no
-        // longer mis-hidden (or mis-shown). See [`is_loop_session`]. We test
-        // OUTSIDE the `if let Some(first)` block so we don't shadow the
-        // first-check path; the session is only reachable here when it has at
-        // least one message (the block above `continue`d otherwise).
-        if !current_is_sdk_entrypoint && is_loop_session(&loaded.messages_in_order) {
-            continue;
-        }
-
-        // Title precedence — 1:1 with claude-code's resolution, which composes
-        // `readLiteMetadata` (custom-title field wins over ai-title field;
-        // `sessionStorage.ts:4771-4775`) with `getLogDisplayTitle`
-        // (`customTitle || summary || firstPrompt`; `utils/log.ts:30`). Folded:
-        //   custom-title > ai-title > summary(@ tip leafUuid) > first-user-message.
-        // Custom (user rename) ALWAYS wins over an AI title — `logs.ts:69`
-        // "User renames (custom-title) always win over AI titles in read
-        // preference". `custom_titles`/`ai_titles` are keyed by sessionId; for a
-        // resume-picker row that key is the filename stem (`sid`) — equal to the
-        // chain tip's sessionId for the normal, non-forked sessions the picker
-        // lists. The `summary` is keyed by the chain TIP's uuid (its `leafUuid`),
-        // matching TS `summaries.get(leafMessage.uuid)` (`sessionStorage.ts:3009`).
-        // The first-three sources are stored verbatim (only normalized via
-        // `truncate_title`); the first-message fallback runs the full
-        // `extract_title` transforms. `extract_title`'s `'(session)'` empty
-        // fallback still applies when none of the four yields text.
-        let sid = stem;
-        // claude `getLogDisplayTitle` (`gBe`) leads with the session's `agentName`
-        // — for an agent-owned session the picker row shows the agent's name above
-        // any custom/ai title (`agentName || customTitle || aiTitle || summary ||
-        // …`). `agent_names` is keyed by `sessionId` (reader.rs), = the stem `sid`.
-        // (The remaining `gBe` tail — `<tick>` → "Autonomous session", the
-        // `sessionId.slice(0,8)` empty fallback, and the `dln` wrapped-tag-pair
-        // strip — is deferred; it is niche to the picker and the firstPrompt
-        // sub-logic is intricate. The port keeps `extract_title`'s first-message
-        // path + `(session)` empty marker for those.)
-        let tip = find_tip(&loaded, sid);
-        let title = loaded
-            .agent_names
-            .get(sid)
-            .or_else(|| loaded.custom_titles.get(sid))
-            .or_else(|| loaded.ai_titles.get(sid))
-            .or_else(|| tip.and_then(|tip| loaded.summaries.get(&tip.uuid)))
-            .map_or_else(
-                || extract_title(&loaded.messages_in_order),
-                |t| truncate_title(t),
-            );
-        let pr_number = loaded.pr_numbers.get(sid).copied();
-        // `OEe`'s match source: `d.customTitle ?? d.aiTitle`. Note this skips
-        // `agent_names`, which the DISPLAY title above leads with — an
-        // agent-owned session is searchable by the title the user (or the AI)
-        // gave it, not by the agent's name.
-        let custom_or_ai_title = loaded
-            .custom_titles
-            .get(sid)
-            .or_else(|| loaded.ai_titles.get(sid))
-            .cloned();
-
-        rows.push(SessionMetadata {
+        candidates.push(CatalogCandidate {
             uuid,
-            title,
-            custom_or_ai_title,
-            modified,
-            created,
-            // claude-code `messageCount: countVisibleMessages(chain)`
-            // (sessionStorage.ts:2509/4665): only user/assistant lines with
-            // VISIBLE content count — NOT every chain-participant line. A raw
-            // `.len()` over-counts tool_result-only user lines, tool_use-only
-            // assistant lines, isMeta lines, and system/attachment lines.
-            message_count: count_visible_messages(&loaded.messages_in_order),
             path,
-            pr_number,
+            stem,
+            file_len: metadata.len(),
+            file_modified,
+            file_created,
         });
     }
     Ok(true)
+}
+
+async fn enrich_candidate(
+    candidate: CatalogCandidate,
+    fs: &Arc<dyn FileSystem>,
+    cache_identity: Option<&FileSystemCacheIdentity>,
+    current_is_sdk_entrypoint: bool,
+    target_cwds: &[String],
+    skipped_files: &mut usize,
+) -> Result<Option<SessionMetadata>, LoaderError> {
+    let Some(cache_identity) = cache_identity else {
+        return enrich_candidate_uncached(
+            candidate,
+            fs,
+            current_is_sdk_entrypoint,
+            target_cwds,
+            skipped_files,
+        )
+        .await;
+    };
+    let cache = catalog_cache();
+    {
+        let cache = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = cache.iter().find(|entry| {
+            entry.fs_identity == *cache_identity
+                && entry.path == candidate.path
+                && entry.file_len == candidate.file_len
+                && entry.file_modified == candidate.file_modified
+                && entry.file_created == candidate.file_created
+                && entry.current_is_sdk_entrypoint == current_is_sdk_entrypoint
+                && entry.target_cwds == target_cwds
+        }) {
+            if entry.skipped {
+                *skipped_files += 1;
+            }
+            return Ok(entry.row.clone());
+        }
+    }
+
+    let skipped_before = *skipped_files;
+    let result = enrich_candidate_uncached(
+        candidate.clone(),
+        fs,
+        current_is_sdk_entrypoint,
+        target_cwds,
+        skipped_files,
+    )
+    .await?;
+    let skipped = *skipped_files > skipped_before;
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cache.len() >= 128 {
+        cache.remove(0);
+    }
+    cache.push(CatalogCacheEntry {
+        fs_identity: cache_identity.clone(),
+        path: candidate.path,
+        file_len: candidate.file_len,
+        file_modified: candidate.file_modified,
+        file_created: candidate.file_created,
+        current_is_sdk_entrypoint,
+        target_cwds: target_cwds.to_vec(),
+        row: result.clone(),
+        skipped,
+    });
+    Ok(result)
+}
+
+async fn enrich_candidate_uncached(
+    candidate: CatalogCandidate,
+    fs: &Arc<dyn FileSystem>,
+    current_is_sdk_entrypoint: bool,
+    target_cwds: &[String],
+    skipped_files: &mut usize,
+) -> Result<Option<SessionMetadata>, LoaderError> {
+    let CatalogCandidate {
+        uuid,
+        path,
+        stem,
+        file_modified,
+        file_created,
+        ..
+    } = candidate;
+    // Route the file TOLERANTLY ([`read_routed`]) rather than `read_all`:
+    // besides the chain participants (`messages_in_order`, identical to what
+    // `read_all` returned) it yields the Tier-1 metadata side-maps the picker
+    // needs to surface a session's stored title — `summaries` (keyed by
+    // leafUuid), `custom_titles` + `ai_titles` (keyed by sessionId). See
+    // `LoadedTranscript`.
+    let reader = JsonlReader::new(path.clone(), fs.clone());
+    let loaded = match reader.read_routed().await {
+        Ok(loaded) => loaded,
+        Err(_) => {
+            *skipped_files += 1;
+            return Ok(None);
+        }
+    };
+
+    // Preserve crash-tail tolerance: a valid transcript remains resumable
+    // even when its last line was truncated. If no message can be recovered
+    // at all, however, a zero-turn `(session)` row would be a dead resume
+    // target and conceal catalog damage from the desktop client.
+    if loaded.messages_in_order.is_empty() && loaded.malformed_line_count > 0 {
+        *skipped_files += 1;
+        return Ok(None);
+    }
+
+    // The prefix check is only an early reject. A missing/partial first
+    // line must not turn into an implicit allow: re-run the authoritative
+    // cwd extraction after the tolerant full parse.
+    let transcript_cwd = transcript_cwd_from_path(&path, &loaded);
+    if !transcript_matches_target_dirs(transcript_cwd.as_deref(), target_cwds) {
+        return Ok(None);
+    }
+
+    let created = file_created;
+    let modified = transcript_logical_modified(&loaded, file_modified).unwrap_or(file_modified);
+
+    // SESSION.1 — claude-code HIDES sub-agent / sidechain transcripts from
+    // the /resume picker. The decision is made from the FIRST line only:
+    //   - `parseSessionInfoFromLite` returns null when the file's first line
+    //     contains `"isSidechain":true` (listSessionsImpl.ts:88-95);
+    //   - `enrichLog` returns null when the first entry `isSidechain` OR
+    //     carries a truthy `teamName` (sessionStorage.ts:5055-5067);
+    //   - `filterResumableSessions` drops `l.isSidechain` (resume picker).
+    // Mirror that: inspect only the first chain-participant line (the first
+    // parsed transcript line — we do NOT scan the whole file for the decision)
+    // and skip the session when it is a sidechain message or carries a truthy
+    // `teamName`. `teamName` is an outer field captured in
+    // `JsonlMessage::extra`; the truthiness test matches TS
+    // `if (enriched.teamName)` (an empty-string teamName is falsy).
+    if let Some(first) = loaded.messages_in_order.first() {
+        let has_team_name = first.extra.get("teamName").is_some_and(|v| match v {
+            serde_json::Value::Null => false,
+            serde_json::Value::String(s) => !s.is_empty(),
+            _ => true,
+        });
+        if first.is_sidechain || has_team_name {
+            return Ok(None);
+        }
+
+        // Gap #2 fix — SESSION.2: filter `sessionKind` daemon sessions.
+        // Binary `vkm` (@ 206492423):
+        //   `if(i.sessionKind==="daemon"||i.sessionKind==="daemon-worker") return C(...),null`
+        // Binary log: `"$ filtered from /resume: sessionKind="` @ 113414433.
+        // `sessionKind` is carried in `extra` (outer field, not a named
+        // struct field). SC-07: the writer half now stamps it
+        // (`jsonl::writer::stamp_session_kind`), so this filter can
+        // actually fire on a LingXi-written transcript; both halves share
+        // `SESSION_KIND_KEY` so the spelling cannot drift apart again.
+        let session_kind = first
+            .extra
+            .get(SESSION_KIND_KEY)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if session_kind == "daemon" || session_kind == "daemon-worker" {
+            return Ok(None);
+        }
+
+        // Gap #3 fix — SESSION.3: filter SDK-entrypoint sessions.
+        // Binary `vkm`: `qpn=new Set(["sdk-cli","sdk-ts","sdk-py"])`;
+        //   `if(!a && qpn.has(n.entrypoint??"")) return C(...),null`
+        // Binary log: `"# filtered from /resume: entrypoint="` @ 113414513.
+        // `!a` = the CURRENT process is NOT an SDK runtime (see
+        // `current_is_sdk_entrypoint` above): SDK sessions are hidden only from
+        // a normal CLI picker. The entrypoint field IS a named struct field.
+        let entrypoint = first.entrypoint.as_deref().unwrap_or("");
+        if !current_is_sdk_entrypoint && matches!(entrypoint, "sdk-cli" | "sdk-ts" | "sdk-py") {
+            return Ok(None);
+        }
+    }
+
+    // Gap #4 fix — SESSION.4: filter `/loop` sessions.
+    // Binary `vkm`: `m=r.includes("<command-name>/loop</command-name>")` (where
+    // `r` is the first line raw string), then
+    //   `if(!a&&n.isLoopSession) return C(...),null`
+    // Binary log: `"% filtered from /resume: /loop session"` @ 113414577.
+    // Confirmed string: `"<command-name>/loop</command-name>"` @ 113388700.
+    // 2.1.212 fix (2.1.211 changelog): the detector no longer tests
+    // `messages[0]` blindly — it walks to the FIRST GENUINE user prompt,
+    // skipping non-user lines, `isMeta`/`isCompactSummary` lines, and
+    // `tool_result` turns, so a compacted / meta-first transcript is no
+    // longer mis-hidden (or mis-shown). See [`is_loop_session`]. We test
+    // OUTSIDE the `if let Some(first)` block so we don't shadow the
+    // first-check path; the session is only reachable here when it has at
+    // least one message (the block above `continue`d otherwise).
+    if !current_is_sdk_entrypoint && is_loop_session(&loaded.messages_in_order) {
+        return Ok(None);
+    }
+
+    // Title precedence — 1:1 with claude-code's resolution, which composes
+    // `readLiteMetadata` (custom-title field wins over ai-title field;
+    // `sessionStorage.ts:4771-4775`) with `getLogDisplayTitle`
+    // (`customTitle || summary || firstPrompt`; `utils/log.ts:30`). Folded:
+    //   custom-title > ai-title > summary(@ tip leafUuid) > first-user-message.
+    // Custom (user rename) ALWAYS wins over an AI title — `logs.ts:69`
+    // "User renames (custom-title) always win over AI titles in read
+    // preference". `custom_titles`/`ai_titles` are keyed by sessionId; for a
+    // resume-picker row that key is the filename stem (`sid`) — equal to the
+    // chain tip's sessionId for the normal, non-forked sessions the picker
+    // lists. The `summary` is keyed by the chain TIP's uuid (its `leafUuid`),
+    // matching TS `summaries.get(leafMessage.uuid)` (`sessionStorage.ts:3009`).
+    // The first-three sources are stored verbatim (only normalized via
+    // `truncate_title`); the first-message fallback runs the full
+    // `extract_title` transforms. `extract_title`'s `'(session)'` empty
+    // fallback still applies when none of the four yields text.
+    let sid = stem.as_str();
+    // claude `getLogDisplayTitle` (`gBe`) leads with the session's `agentName`
+    // — for an agent-owned session the picker row shows the agent's name above
+    // any custom/ai title (`agentName || customTitle || aiTitle || summary ||
+    // …`). `agent_names` is keyed by `sessionId` (reader.rs), = the stem `sid`.
+    // (The remaining `gBe` tail — `<tick>` → "Autonomous session", the
+    // `sessionId.slice(0,8)` empty fallback, and the `dln` wrapped-tag-pair
+    // strip — is deferred; it is niche to the picker and the firstPrompt
+    // sub-logic is intricate. The port keeps `extract_title`'s first-message
+    // path + `(session)` empty marker for those.)
+    let tip = find_tip(&loaded, sid);
+    let title = loaded
+        .agent_names
+        .get(sid)
+        .or_else(|| loaded.custom_titles.get(sid))
+        .or_else(|| loaded.ai_titles.get(sid))
+        .or_else(|| tip.and_then(|tip| loaded.summaries.get(&tip.uuid)))
+        .map_or_else(
+            || extract_title(&loaded.messages_in_order),
+            |t| truncate_title(t),
+        );
+    let pr_number = loaded.pr_numbers.get(sid).copied();
+    // `OEe`'s match source: `d.customTitle ?? d.aiTitle`. Note this skips
+    // `agent_names`, which the DISPLAY title above leads with — an
+    // agent-owned session is searchable by the title the user (or the AI)
+    // gave it, not by the agent's name.
+    let custom_or_ai_title = loaded
+        .custom_titles
+        .get(sid)
+        .or_else(|| loaded.ai_titles.get(sid))
+        .cloned();
+
+    Ok(Some(SessionMetadata {
+        uuid,
+        title,
+        custom_or_ai_title,
+        modified,
+        created,
+        // claude-code `messageCount: countVisibleMessages(chain)`
+        // (sessionStorage.ts:2509/4665): only user/assistant lines with
+        // VISIBLE content count — NOT every chain-participant line. A raw
+        // `.len()` over-counts tool_result-only user lines, tool_use-only
+        // assistant lines, isMeta lines, and system/attachment lines.
+        message_count: count_visible_messages(&loaded.messages_in_order),
+        path,
+        pr_number,
+    }))
+}
+
+/// Cheap first-line hide for the resume picker. Matches the first-message
+/// filters (sidechain / teamName / daemon / SDK entrypoint) when those flags
+/// are already present on line 1. Loop-session detection still needs the
+/// full parse (first genuine user prompt, not necessarily line 1).
+fn first_line_hides_session(line1: &str, current_is_sdk_entrypoint: bool) -> bool {
+    if line1.contains("\"isSidechain\":true") || line1.contains("\"isSidechain\": true") {
+        return true;
+    }
+    if extract_json_string_field(line1, "teamName").is_some_and(|s| !s.is_empty()) {
+        return true;
+    }
+    match extract_json_string_field(line1, SESSION_KIND_KEY).as_deref() {
+        Some("daemon" | "daemon-worker") => return true,
+        _ => {}
+    }
+    if !current_is_sdk_entrypoint {
+        if matches!(
+            extract_json_string_field(line1, "entrypoint").as_deref(),
+            Some("sdk-cli" | "sdk-ts" | "sdk-py")
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Count the VISIBLE messages in a chain — port of `countVisibleMessages`
@@ -710,7 +910,8 @@ fn has_visible_content(content: Option<&Value>, assistant: bool) -> bool {
 }
 
 /// Resolve the project dir for `cwd` and return up to `limit` most-recently-modified
-/// `.jsonl` files as [`SessionMetadata`] rows, sorted by mtime desc (created/birthtime desc on tie).
+/// `.jsonl` files as [`SessionMetadata`] rows, sorted by clamped logical
+/// activity time desc (created/birthtime desc on tie).
 ///
 /// Errors:
 /// - [`LoaderError::EmptyDirectory`] if the project dir doesn't exist OR contains no `.jsonl`.
@@ -719,9 +920,11 @@ fn has_visible_content(content: Option<&Value>, assistant: bool) -> bool {
 /// Each row's `title` is resolved by [`collect_dir`] with claude-code's display
 /// precedence — `custom-title` > `ai-title` > `summary` (at the chain tip's
 /// `leafUuid`) > first-user-message ([`crate::jsonl::title::extract_title`]) —
-/// from the **full** routed JSONL content (we open + parse every candidate, then
-/// sort + truncate). This is O(N * lines) for N sessions; for the typical N ≤ 5
-/// case (the picker limit) the cost is trivial.
+/// from the **full** routed JSONL content. A cold scan opens and parses every
+/// surviving candidate before sorting (logical chain timestamps are not
+/// recoverable from file mtime alone); the bounded revision cache below makes
+/// subsequent picker refreshes parse only files whose length or timestamps
+/// changed.
 ///
 /// Sub-agent / sidechain transcripts are HIDDEN (SESSION.1): a session is dropped
 /// when its first parsed line is an `isSidechain` message or carries a truthy
@@ -857,8 +1060,13 @@ async fn list_recent_sessions_inner_with_diagnostics(
     fs: &Arc<dyn FileSystem>,
     worktree_paths: &[String],
 ) -> Result<SessionCatalog, LoaderError> {
-    let mut rows: Vec<SessionMetadata> = Vec::new();
+    let mut candidates: Vec<CatalogCandidate> = Vec::new();
     let mut skipped_files = 0;
+    let target_cwds: Vec<String> = if worktree_paths.len() > 1 {
+        worktree_paths.to_vec()
+    } else {
+        vec![cwd.to_string()]
+    };
 
     if worktree_paths.len() <= 1 {
         // 0/1 worktrees (or git unavailable): scan ONLY the cwd's project dir.
@@ -867,9 +1075,9 @@ async fn list_recent_sessions_inner_with_diagnostics(
         // original `EmptyDirectory`, while other I/O errors propagate as `Io`.
         collect_dir(
             &project_dir_for_cwd(lingxi_home, cwd),
-            &[cwd.to_string()],
+            &target_cwds,
             fs,
-            &mut rows,
+            &mut candidates,
             &mut skipped_files,
         )
         .await?;
@@ -903,9 +1111,9 @@ async fn list_recent_sessions_inner_with_diagnostics(
                     if prefixes.iter().any(|p| worktree_dir_matches(name, p)) {
                         collect_dir(
                             &entry.path(),
-                            worktree_paths,
+                            &target_cwds,
                             fs,
-                            &mut rows,
+                            &mut candidates,
                             &mut skipped_files,
                         )
                         .await?;
@@ -917,15 +1125,38 @@ async fn list_recent_sessions_inner_with_diagnostics(
             Err(_) => {
                 collect_dir(
                     &project_dir_for_cwd(lingxi_home, cwd),
-                    &[cwd.to_string()],
+                    &target_cwds,
                     fs,
-                    &mut rows,
+                    &mut candidates,
                     &mut skipped_files,
                 )
                 .await?;
             }
         }
+    }
 
+    let current_is_sdk_entrypoint = matches!(
+        std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
+        Ok("sdk-cli" | "sdk-ts" | "sdk-py")
+    );
+    let cache_identity = fs.cache_identity();
+    let mut rows: Vec<SessionMetadata> = Vec::new();
+    for candidate in candidates {
+        match enrich_candidate(
+            candidate,
+            fs,
+            cache_identity.as_ref(),
+            current_is_sdk_entrypoint,
+            &target_cwds,
+            &mut skipped_files,
+        )
+        .await?
+        {
+            Some(row) => rows.push(row),
+            None => {}
+        }
+    }
+    if worktree_paths.len() > 1 {
         rows = deduplicate_by_session_id(rows);
     }
 
@@ -1198,7 +1429,8 @@ async fn select_session_path_across_worktrees(
                 ),
             });
         }
-        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let file_modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let modified = transcript_logical_modified_from_path(&candidate, file_modified).await;
         let replace = selected
             .as_ref()
             .is_none_or(|(_, selected_modified)| modified > *selected_modified);
@@ -2369,7 +2601,8 @@ mod tests {
             "uuid": uuid.to_string(),
             "parentUuid": null,
             "sessionId": uuid.to_string(),
-            "timestamp": "2026-05-25T12:00:00.000Z",
+            "timestamp": chrono::DateTime::<chrono::Utc>::from(mtime)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "cwd": cwd,
             "version": "0.12.0",
             "isSidechain": is_sidechain,
@@ -2464,7 +2697,8 @@ mod tests {
             "uuid": uuid.to_string(),
             "parentUuid": null,
             "sessionId": uuid.to_string(),
-            "timestamp": "2026-05-25T12:00:00.000Z",
+            "timestamp": chrono::DateTime::<chrono::Utc>::from(mtime)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "cwd": cwd,
             "version": "0.12.0",
             "isSidechain": false,
@@ -2542,6 +2776,76 @@ mod tests {
             .expect("list");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].uuid, main);
+    }
+
+    #[tokio::test]
+    async fn relocated_tail_overrides_colliding_first_line_cwd() {
+        let (temp, lingxi_home, cwd, dir) = setup();
+        let id = Uuid::new_v4();
+        // Replacing one path separator with another non-alphanumeric byte
+        // preserves Claude's sanitized project-dir key while changing cwd.
+        let old_cwd = cwd.replacen(std::path::MAIN_SEPARATOR, "-", 1);
+        assert_ne!(old_cwd, cwd);
+        assert_eq!(project_dir_name(&old_cwd), project_dir_name(&cwd));
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let user = serde_json::json!({
+            "type": "user",
+            "uuid": id.to_string(),
+            "parentUuid": null,
+            "sessionId": id.to_string(),
+            "timestamp": timestamp,
+            "cwd": old_cwd,
+            "message": {"role": "user", "content": "relocated session"}
+        });
+        let relocated = serde_json::json!({
+            "type": "relocated",
+            "sessionId": id.to_string(),
+            "relocatedCwd": cwd
+        });
+        std::fs::write(
+            dir.join(format!("{id}.jsonl")),
+            format!("{}\n{}\n", user, relocated),
+        )
+        .unwrap();
+
+        let rows = list_recent_sessions_inner(&lingxi_home, &cwd, 5, &make_fs(temp.path()), &[])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uuid, id);
+    }
+
+    #[tokio::test]
+    async fn resume_modified_time_clamps_last_message_to_file_mtime() {
+        let (temp, lingxi_home, cwd, dir) = setup();
+        let base = SystemTime::now();
+        let clamped = write_session(
+            &dir,
+            &cwd,
+            "future transcript",
+            base + Duration::from_secs(100),
+            false,
+            None,
+        );
+        filetime::set_file_mtime(
+            dir.join(format!("{clamped}.jsonl")),
+            filetime::FileTime::from_system_time(base + Duration::from_secs(10)),
+        )
+        .unwrap();
+        let newer = write_session(
+            &dir,
+            &cwd,
+            "newer activity",
+            base + Duration::from_secs(20),
+            false,
+            None,
+        );
+
+        let rows = list_recent_sessions(&lingxi_home, &cwd, 5, make_fs(temp.path()))
+            .await
+            .unwrap();
+        assert_eq!(rows[0].uuid, newer);
+        assert_eq!(rows[1].uuid, clamped);
     }
 
     #[tokio::test]
@@ -2702,6 +3006,59 @@ mod tests {
             entries[0].message["content"],
             messages[0].message["content"]
         );
+    }
+
+    #[tokio::test]
+    async fn duplicate_loader_uses_logical_activity_not_raw_mtime() {
+        let temp = TempDir::new().unwrap();
+        let lingxi_home = temp.path().join("home");
+        let wt_a = "/wt/alpha";
+        let wt_b = "/wt/beta";
+        let dir_a = lingxi_home.join("projects").join(project_dir_name(wt_a));
+        let dir_b = lingxi_home.join("projects").join(project_dir_name(wt_b));
+        let id = Uuid::new_v4();
+        let base = SystemTime::now() - Duration::from_secs(60);
+
+        write_session_id(
+            &dir_a,
+            id,
+            wt_a,
+            "older logical",
+            base + Duration::from_secs(10),
+        );
+        filetime::set_file_mtime(
+            dir_a.join(format!("{id}.jsonl")),
+            filetime::FileTime::from_system_time(base + Duration::from_secs(30)),
+        )
+        .unwrap();
+        write_session_id(
+            &dir_b,
+            id,
+            wt_b,
+            "newer logical",
+            base + Duration::from_secs(20),
+        );
+
+        let worktrees = vec![wt_a.to_string(), wt_b.to_string()];
+        let rows =
+            list_recent_sessions_inner(&lingxi_home, wt_a, 10, &make_fs(temp.path()), &worktrees)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows.iter().find(|row| row.uuid == id).unwrap().title,
+            "newer logical"
+        );
+
+        let loaded = load_session_across_worktrees_inner(
+            &lingxi_home,
+            wt_a,
+            id,
+            make_fs(temp.path()),
+            &worktrees,
+        )
+        .await
+        .unwrap();
+        assert_eq!(loaded[0].message["content"], "newer logical");
     }
 
     #[tokio::test]

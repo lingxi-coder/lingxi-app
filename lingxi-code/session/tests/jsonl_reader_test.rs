@@ -210,6 +210,93 @@ fn route_lines_backfills_pr_number_from_legacy_url_only_record() {
     );
 }
 
+#[test]
+fn route_lines_tracks_content_replacements_and_marble_state_exactly() {
+    let routed = route_lines(concat!(
+        r#"{"type":"content-replacement","sessionId":"sid-1","replacements":[{"path":"a.txt","text":"A"}]}"#,
+        "\n",
+        r#"{"type":"content-replacement","sessionId":"sid-1","replacements":[{"path":"c.txt","text":"C"}]}"#,
+        "\n",
+        r#"{"type":"marble-origami-commit","sessionId":"sid-1","commit":"pre-reset"}"#,
+        "\n",
+        r#"{"type":"marble-origami-snapshot","sessionId":"sid-1","snapshot":"pre-reset"}"#,
+        "\n",
+        r#"{"type":"marble-origami-reset","sessionId":"sid-1","reason":"manual"}"#,
+        "\n",
+        r#"{"type":"content-replacement","sessionId":"sid-1","agentId":"agent-1","replacements":[{"path":"b.txt","text":"B"}]}"#,
+        "\n",
+        r#"{"type":"marble-origami-commit","sessionId":"sid-1","commit":"post-reset"}"#,
+        "\n",
+        r#"{"type":"marble-origami-snapshot","sessionId":"sid-1","snapshot":"post-reset"}"#,
+        "\n",
+    ));
+
+    assert_eq!(
+        vec![
+            routed.content_replacements.get("sid-1").unwrap()[0]["path"]
+                .as_str()
+                .unwrap(),
+            routed.content_replacements.get("sid-1").unwrap()[1]["path"]
+                .as_str()
+                .unwrap(),
+        ],
+        vec!["a.txt", "c.txt"],
+        "session-level content replacements must flatten in encounter order",
+    );
+    assert_eq!(
+        routed.agent_content_replacements.get("agent-1").unwrap()[0]["path"],
+        "b.txt",
+        "agent-level replacements must stay separate from the session map",
+    );
+    assert_eq!(routed.context_collapse_commits.len(), 1);
+    assert_eq!(
+        routed.context_collapse_commits[0]["commit"], "post-reset",
+        "reset must clear earlier marble commits",
+    );
+    assert_eq!(
+        routed.context_collapse_snapshot.as_ref().unwrap()["snapshot"],
+        "post-reset",
+        "only the live marble snapshot survives cold load",
+    );
+}
+
+#[test]
+fn route_lines_tracks_branch_sidecars_with_oracle_validation() {
+    let routed = route_lines(concat!(
+        r#"{"type":"relocated","sessionId":"sid-1","relocatedCwd":"/old"}"#,
+        "\n",
+        r#"{"type":"relocated","sessionId":"sid-1","relocatedCwd":""}"#,
+        "\n",
+        r#"{"type":"relocated","sessionId":"sid-1","relocatedCwd":"/new"}"#,
+        "\n",
+        r#"{"type":"history-suppression","sessionId":"sid-1","cause":"manual","ts":"2026-08-25T00:00:00.000Z"}"#,
+        "\n",
+        r#"{"type":"atis-latch","sessionId":"sid-1","atis":"valid-token"}"#,
+        "\n",
+        "{\"type\":\"atis-latch\",\"sessionId\":\"sid-1\",\"atis\":\"bad\\u0020token\"}",
+        "\n",
+        r#"{"type":"atis-latch","sessionId":"sid-2","atis":""}"#,
+        "\n",
+    ));
+
+    assert_eq!(
+        routed.relocated_cwds.get("sid-1").map(String::as_str),
+        Some("/new"),
+        "relocated is last-valid-write-wins and ignores empty cwd values",
+    );
+    assert!(routed.session_history_suppressed);
+    assert_eq!(
+        routed.atis_latches.get("sid-1").map(String::as_str),
+        Some("valid-token"),
+        "atis values containing bytes outside [0x21, 0x7e] are ignored",
+    );
+    assert_eq!(
+        routed.atis_latches.get("sid-2").map(String::as_str),
+        Some(""),
+        "the oracle's /^[\\x21-\\x7e]*$/ validator accepts an empty latch",
+    );
+}
+
 #[tokio::test]
 async fn read_all_is_tolerant_of_metadata_and_malformed_lines() {
     // Same mixed content, but exercised through the public `JsonlReader::read_all`

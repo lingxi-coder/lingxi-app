@@ -219,6 +219,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             tool_use_id: None,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
             spawn_request: None,
             inheritance: None,
         },
@@ -241,8 +242,13 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             run_id: None,
             invocation_mode: None,
             workflow_source: None,
+            script_is_verbatim_builtin: None,
             transcript_subdir: None,
             launched_from_subagent: false,
+            tool_use_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
         },
         TaskType::MonitorMcp => TaskSpawnInput::MonitorMcp {
             server_name: String::new(),
@@ -253,11 +259,17 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             timeout: None,
             cwd: None,
             tool_use_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
         },
         TaskType::McpTask => TaskSpawnInput::McpTask {
             server_name: String::new(),
             tool_name: String::new(),
             tool_use_id: None,
+            creator_teammate_name: None,
+            creator_team_name: None,
+            creator_agent_id: None,
         },
         TaskType::Dream => TaskSpawnInput::Dream {
             prompt: String::new(),
@@ -364,8 +376,11 @@ impl TaskRegistryHandle for TaskRegistry {
                     current_step: w.current_step,
                     started_at_ms: epoch_ms(w.base.start_time),
                     ended_at_ms: w.base.end_time.and_then(epoch_ms),
+                    script: (!w.script.is_empty()).then(|| w.script.clone()),
                     script_path: w.script_path.clone(),
                     args: w.args.clone(),
+                    agent_count: w.outcome.agent_count,
+                    total_tokens: w.outcome.total_tokens,
                 });
             }
         }
@@ -402,6 +417,14 @@ impl TaskRegistryHandle for TaskRegistry {
         self.set_bash_exit_code(id, exit_code)
             .await
             .map_err(task_err_to_registry_err)
+    }
+
+    async fn set_workflow_outcome(
+        &self,
+        id: &str,
+        outcome: traits::task_registry::WorkflowTerminalOutcome,
+    ) {
+        TaskRegistry::set_workflow_outcome(self, id, outcome).await;
     }
 
     async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
@@ -449,6 +472,9 @@ impl TaskRegistryHandle for TaskRegistry {
                 timeout,
                 cwd: reg.cwd.map(PathBuf::from),
                 tool_use_id: reg.tool_use_id,
+                creator_teammate_name: reg.creator_teammate_name,
+                creator_team_name: reg.creator_team_name,
+                creator_agent_id: reg.creator_agent_id,
             },
             reg.description,
         )
@@ -465,11 +491,14 @@ impl TaskRegistryHandle for TaskRegistry {
         reg: traits::task_registry::McpTaskRegistration,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, TaskRegistryError> {
-        TaskRegistry::register_mcp_task(
+        TaskRegistry::register_mcp_task_owned(
             self,
             reg.server_name,
             reg.tool_name,
             reg.tool_use_id,
+            reg.creator_teammate_name,
+            reg.creator_team_name,
+            reg.creator_agent_id,
             cancel,
         )
         .await
@@ -578,7 +607,7 @@ impl TaskRegistryHandle for TaskRegistry {
         usage: Option<traits::task_registry::AgentRunUsage>,
     ) {
         // Dispatch to the inherent arm-rest path (no-op for unknown/terminal).
-        TaskRegistry::mark_task_rested(self, id, result, usage).await;
+        TaskRegistry::mark_task_rested(self, id, result, usage, None, None, None).await;
     }
 
     async fn take_pending_task_notifications(
@@ -776,6 +805,7 @@ mod tests {
                     notified: false,
                     creator_teammate_name: None,
                     creator_team_name: None,
+                    creator_agent_id: None,
                 },
                 command: "tail -f build.log".into(),
                 exit_code: None,
@@ -872,6 +902,7 @@ mod tests {
                 notified: false,
                 creator_teammate_name: None,
                 creator_team_name: None,
+                creator_agent_id: None,
             };
             let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
                 base,
@@ -932,16 +963,18 @@ mod tests {
                         notified: false,
                         creator_teammate_name: None,
                         creator_team_name: None,
+                        creator_agent_id: None,
                     },
                     session_uuid: session.map(str::to_string),
                     workflow_id: format!("wf-{id}"),
-                    script: String::new(),
+                    script: format!("export const meta = {{ name: 'wf-{id}' }};"),
                     resume_from_run_id: None,
                     args: None,
                     run_id: Some(run.into()),
                     script_path: None,
                     transcript_dir: None,
                     current_step: 2,
+                    outcome: Default::default(),
                 })
             };
         registry
@@ -964,6 +997,7 @@ mod tests {
             .await;
         let mut paused = mk_wf("w000pause", None, TaskStatus::Paused, "wf_pause", false);
         if let TaskState::LocalWorkflow(workflow) = &mut paused {
+            workflow.script.clear();
             workflow.script_path = Some("/workspace/build.js".into());
             workflow.args = Some(r#"{"app_id":"demo"}"#.into());
         }
@@ -983,6 +1017,7 @@ mod tests {
             notified: false,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
         };
         registry
             .insert_state_for_test(TaskState::LocalBash(crate::state::LocalBashTaskState {
@@ -1009,11 +1044,23 @@ mod tests {
         assert_eq!(done.current_step, 2);
         assert_eq!(done.started_at_ms, Some(1_000));
         assert_eq!(done.ended_at_ms, Some(5_000), "terminal run carries an end");
+        assert_eq!(
+            done.script.as_deref(),
+            Some("export const meta = { name: 'wf-w0000done0' };")
+        );
         let run = wfs.iter().find(|w| w.task_id == "w0000run0").unwrap();
         assert_eq!(run.status, "running");
         assert_eq!(run.ended_at_ms, None, "a running run has no end");
+        assert_eq!(
+            run.script.as_deref(),
+            Some("export const meta = { name: 'wf-w0000run0' };")
+        );
         let paused = wfs.iter().find(|w| w.task_id == "w000pause").unwrap();
         assert_eq!(paused.status, "paused");
+        assert_eq!(
+            paused.script, None,
+            "adopted paused runs do not surface an empty inline script"
+        );
         assert_eq!(paused.script_path.as_deref(), Some("/workspace/build.js"));
         assert_eq!(paused.args.as_deref(), Some(r#"{"app_id":"demo"}"#));
     }
@@ -1038,6 +1085,7 @@ mod tests {
                     notified: false,
                     creator_teammate_name: None,
                     creator_team_name: None,
+                    creator_agent_id: None,
                 },
                 session_uuid: Some(session.to_string()),
                 workflow_id: format!("wf-{id}"),
@@ -1048,6 +1096,7 @@ mod tests {
                 script_path: None,
                 transcript_dir: None,
                 current_step: 0,
+                outcome: Default::default(),
             })
         };
         registry
@@ -1074,6 +1123,7 @@ mod tests {
                     notified: false,
                     creator_teammate_name: None,
                     creator_team_name: None,
+                    creator_agent_id: None,
                 },
                 command: "echo visible".into(),
                 pid: None,
@@ -1121,6 +1171,7 @@ mod tests {
             notified: false,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
         };
         let state = TaskState::LocalBash(crate::state::LocalBashTaskState {
             base,
@@ -1161,6 +1212,7 @@ mod tests {
             notified: false,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
         };
         let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
             base,

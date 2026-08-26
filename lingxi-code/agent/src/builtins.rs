@@ -332,18 +332,18 @@ pub fn web_fetch_agent_definition() -> AgentDefinition {
     d
 }
 
-// ── Workflow-subagent prompts (byte-identical to kBp / xBp in v2.1.186) ──
+// ── Workflow-subagent prompts (byte-identical to Claude Code 2.1.245) ──
 
 /// kBp — `workflow-subagent` system prompt (no schema / default path).
 ///
-/// Byte offset 202947087 in the v2.1.186 binary. The em-dashes are U+2014;
+/// Byte-verified against the v2.1.245 binary. The em-dashes are U+2014;
 /// the quotes around "Done." and "Sent." are straight ASCII `"`.
 /// Returned by `Oho.getSystemPrompt`.
 pub const WORKFLOW_SUBAGENT_PROMPT: &str = "You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.\n\nCRITICAL: Your final text response is returned **verbatim** as a string to the calling script \u{2014} it is your return value, not a message to a human.\n- Output the literal result (data, JSON, text). Do NOT output confirmations like \"Done.\" or \"Sent.\"\n- If asked for JSON, return ONLY the raw JSON \u{2014} no code fences, no prose, no markdown.\n- Do NOT use SendUserMessage to deliver your answer. Put your answer in your final text response.\n- Be concise. The script will parse your output.";
 
 /// xBp — `workflow-subagent` system prompt when a `schema` IS provided.
 ///
-/// Byte offset 202949377 in the v2.1.186 binary. The `${Lp}` placeholder is
+/// Byte-verified against the v2.1.245 binary. The `${Lp}` placeholder is
 /// the StructuredOutput tool name — bind it at construction time to
 /// [`orchestrator::STRUCTURED_OUTPUT_TOOL_NAME`] (`"StructuredOutput"`).
 /// Returned by `DBp.getSystemPrompt`.
@@ -356,16 +356,16 @@ pub const WORKFLOW_SUBAGENT_SCHEMA_PROMPT: &str = "You are a subagent spawned by
 
 /// HBp — non-schema subagent NOTE addendum (§3).
 /// Appended to a user-specified agentType's system prompt for non-schema runs.
-/// Byte offset 202947689 in v2.1.186 binary.
+/// Byte-verified against the v2.1.245 binary.
 pub const WORKFLOW_SUBAGENT_NON_SCHEMA_ADDENDUM: &str = "\n\n---\n\nNOTE: You are running inside a workflow script. Your final text response is returned verbatim as a string to the calling script \u{2014} it is your return value, not a message to a human. Output the literal result; do not output confirmations like \"Done.\" Be concise \u{2014} the script will parse your output.";
 
 /// IBp — schema subagent NOTE addendum (§4).
 /// Appended to a user-specified agentType's system prompt for schema runs.
-/// Byte offset 202948991 in v2.1.186 binary.
+/// Byte-verified against the v2.1.245 binary.
 /// `${Lp}` is resolved to `StructuredOutput`.
 pub const WORKFLOW_SUBAGENT_SCHEMA_ADDENDUM: &str = "\n\n---\n\nNOTE: You are running inside a workflow script. You MUST return your final answer by calling the StructuredOutput tool exactly once \u{2014} the tool's input schema defines the required shape. Do your work, then call StructuredOutput; do NOT put your answer in a text response (the script reads ONLY the tool call). If validation fails, read the error and call StructuredOutput again with a corrected shape.";
 
-/// Tools disallowed for the workflow-subagent (Oho.disallowedTools, v2.1.186).
+/// Tools disallowed for the workflow-subagent in Claude Code 2.1.245.
 ///
 /// Resolves: `i1` → `"SendUserMessage"`, `ns` → `"Agent"`, `SI` → `"Workflow"`.
 pub fn workflow_subagent_disallowed() -> Vec<String> {
@@ -375,7 +375,7 @@ pub fn workflow_subagent_disallowed() -> Vec<String> {
         .collect()
 }
 
-/// Build the `workflow-subagent` builtin agentdef (`Oho` from v2.1.186).
+/// Build the `workflow-subagent` builtin agentdef from Claude Code 2.1.245.
 ///
 /// `tools: ["*"]` (All policy, use_exact_tools: false), disallowed =
 /// `[SendUserMessage, Agent, Workflow]`, system prompt = kBp.
@@ -1042,7 +1042,7 @@ mod tests {
     fn workflow_subagent_schema_prompt_binds_structured_output_name() {
         // xBp verbatim from oracle §2 (agentdef-and-validation.md).
         // ${Lp} resolved to "StructuredOutput" (orchestrator::STRUCTURED_OUTPUT_TOOL_NAME).
-        // Byte offset 202949377 in v2.1.186 binary.
+        // Byte-verified against the v2.1.245 binary.
         let expected = "You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.\n\nCRITICAL: You MUST call the StructuredOutput tool exactly once to return your final answer. The tool's input schema defines the required shape.\n- Do your work (Read files, run commands, etc.), then call StructuredOutput with your answer.\n- Do NOT put your answer in a text response. The script reads ONLY the StructuredOutput tool call.\n- If the schema validation fails, read the error and call StructuredOutput again with a corrected shape.\n- After calling StructuredOutput successfully, end your turn. No acknowledgment needed.";
         assert_eq!(
             WORKFLOW_SUBAGENT_SCHEMA_PROMPT, expected,

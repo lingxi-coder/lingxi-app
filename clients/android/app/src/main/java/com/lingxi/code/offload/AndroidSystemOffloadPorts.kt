@@ -95,18 +95,33 @@ private class CalendarPort(private val context: Context) : NativeCommandPort {
             ?: return@withContext NativeOffloadResult.usage("calendar list [--limit <n>]")
         val limit = args.option("limit")?.toIntOrNull()?.coerceIn(1, 100) ?: 20
         val rows = mutableListOf<String>()
-        context.contentResolver.query(
-            CalendarContract.Events.CONTENT_URI,
-            arrayOf(
+        val sort = "${CalendarContract.Events.DTSTART} DESC"
+        val cursor = if (android.os.Build.VERSION.SDK_INT >= 26) {
+            val extras = android.os.Bundle().apply {
+                putInt(android.content.ContentResolver.QUERY_ARG_LIMIT, limit)
+                putString(android.content.ContentResolver.QUERY_ARG_SQL_SORT_ORDER, sort)
+            }
+            context.contentResolver.query(CalendarContract.Events.CONTENT_URI, arrayOf(
                 CalendarContract.Events._ID,
                 CalendarContract.Events.TITLE,
                 CalendarContract.Events.DTSTART,
                 CalendarContract.Events.DTEND,
-            ),
-            null,
-            null,
-            "${CalendarContract.Events.DTSTART} DESC",
-        )?.use { cursor ->
+            ), extras, null)
+        } else {
+            context.contentResolver.query(
+                CalendarContract.Events.CONTENT_URI,
+                arrayOf(
+                    CalendarContract.Events._ID,
+                    CalendarContract.Events.TITLE,
+                    CalendarContract.Events.DTSTART,
+                    CalendarContract.Events.DTEND,
+                ),
+                null,
+                null,
+                sort,
+            )
+        }
+        cursor?.use { cursor ->
             val id = cursor.getColumnIndexOrThrow(CalendarContract.Events._ID)
             val title = cursor.getColumnIndexOrThrow(CalendarContract.Events.TITLE)
             val start = cursor.getColumnIndexOrThrow(CalendarContract.Events.DTSTART)

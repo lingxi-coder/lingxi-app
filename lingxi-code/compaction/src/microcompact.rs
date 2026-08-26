@@ -13,16 +13,15 @@
 //!   no-op result is returned when the clear-set is empty OR `tokens_saved == 0`
 //!   (TS `maybeTimeBasedMicrocompact`, `microCompact.ts:446-530`).
 //!
-//! **Time-gap divergence (documented):** TS `evaluateTimeBasedTrigger`
+//! **Time-gap trigger:** TS `evaluateTimeBasedTrigger`
 //! (`microCompact.ts:422-444`) computes the gap as `now - lastAssistant.timestamp`
-//! and only fires when it exceeds `gapThresholdMinutes`. The Rust
-//! [`protocol::ConversationMessage::Assistant`] variant carries **no per-message
-//! timestamp** (and `protocol/` is frozen — we may not add one), so the
-//! Rust trigger falls back to a **count-based** keep-recent gate only: when
-//! `enabled` is true the clear/keep selection runs unconditionally on the
-//! collected compactable IDs. This is *close*, not byte-faithful, for the
-//! time-gap predicate. [`evaluate_time_based_trigger`] is still provided so a
-//! caller that *does* have a last-assistant timestamp out-of-band can supply it.
+//! and only fires when it exceeds `gapThresholdMinutes`. Conversation messages
+//! do not carry timestamps in the Rust protocol, so the session persists the
+//! last-assistant time out-of-band and the compaction orchestrator supplies it
+//! to [`evaluate_time_based_trigger`]. Missing timing fails safe and does not
+//! run microcompact. The lower-level [`MicroCompactor::compact`] remains a pure
+//! clear/keep transform and therefore assumes its caller already passed the
+//! time gate.
 
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::HashSet;
@@ -90,8 +89,7 @@ pub struct TimeBasedMCConfig {
     /// unless explicitly turned on.
     pub enabled: bool,
     /// Idle-gap threshold in minutes; TS fires when the gap since the last
-    /// assistant message exceeds this. Default `60`. See the module-level
-    /// time-gap divergence note.
+    /// assistant message exceeds this. Default `60`.
     pub gap_threshold_minutes: u64,
     /// How many of the most-recent compactable tool results to always keep.
     /// Floored at 1 at use-site. Default `5`.

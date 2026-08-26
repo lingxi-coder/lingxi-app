@@ -396,20 +396,6 @@ impl Tool for GlobTool {
         let no_ignore = is_env_truthy("LINGXI_GLOB_NO_IGNORE", true);
         let hidden = is_env_truthy("LINGXI_GLOB_HIDDEN", true);
 
-        let mut wb = WalkBuilder::new(&canon_base);
-        wb.overrides(overrides);
-        if no_ignore {
-            // `--no-ignore`: ignore every ignore source.
-            wb.git_ignore(false)
-                .ignore(false)
-                .git_global(false)
-                .git_exclude(false);
-        }
-        if hidden {
-            // `--hidden`: INCLUDE hidden files (WalkBuilder hides them by default).
-            wb.hidden(false);
-        }
-
         // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
         // `LINGXI_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
         // (The TS path shells `rg` with an execFile timeout + SIGKILL; the
@@ -418,29 +404,12 @@ impl Tool for GlobTool {
         let is_wsl = self.ctx.platform.as_str() == "wsl";
         let timeout = ripgrep_timeout(is_wsl);
         let deadline = started + timeout;
-        let mut timed_out = false;
 
-        let mut hits: Vec<(PathBuf, SystemTime)> = Vec::new();
-        for entry in wb.build() {
-            if Instant::now() >= deadline {
-                timed_out = true;
-                break;
-            }
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            // Skip the search root itself + any non-file entries.
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                continue;
-            }
-            let mtime = entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            hits.push((entry.path().to_path_buf(), mtime));
-        }
+        let (mut hits, timed_out) = tokio::task::spawn_blocking(move || {
+            glob_walk(canon_base, overrides, no_ignore, hidden, deadline)
+        })
+        .await
+        .map_err(|e| ToolError::Io(e.to_string()))?;
 
         // Mirror `utils/ripgrep.ts:444-454`: a timeout with NO results is a hard
         // error (so the model knows the search didn't complete); a timeout WITH
@@ -520,6 +489,52 @@ impl Tool for GlobTool {
             mcp_meta: None,
         })
     }
+}
+
+fn glob_walk(
+    canon_base: PathBuf,
+    overrides: ignore::overrides::Override,
+    no_ignore: bool,
+    hidden: bool,
+    deadline: Instant,
+) -> (Vec<(PathBuf, SystemTime)>, bool) {
+    let mut wb = WalkBuilder::new(&canon_base);
+    wb.overrides(overrides);
+    if no_ignore {
+        // `--no-ignore`: ignore every ignore source.
+        wb.git_ignore(false)
+            .ignore(false)
+            .git_global(false)
+            .git_exclude(false);
+    }
+    if hidden {
+        // `--hidden`: INCLUDE hidden files (WalkBuilder hides them by default).
+        wb.hidden(false);
+    }
+
+    let mut timed_out = false;
+    let mut hits: Vec<(PathBuf, SystemTime)> = Vec::new();
+    for entry in wb.build() {
+        if Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        // Skip the search root itself + any non-file entries.
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        hits.push((entry.path().to_path_buf(), mtime));
+    }
+    (hits, timed_out)
 }
 
 #[cfg(test)]

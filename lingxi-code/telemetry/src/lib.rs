@@ -147,6 +147,29 @@ pub fn emit_workflow_saved(scope: &str, overwrite: bool, script_size_chars: usiz
     );
 }
 
+/// Emit `tengu_workflow_size_warning_shown` — the `/workflows` UI displayed the
+/// large-workflow warning for a run.
+pub fn emit_workflow_size_warning_shown(
+    axis: &str,
+    scheduled_agents: u64,
+    total_tokens: u64,
+    projected_tokens: u64,
+    agent_cap: f64,
+    token_cap: f64,
+    cap_from_guideline: bool,
+) {
+    tracing::info!(
+        event = crate::tengu::workflow::SIZE_WARNING_SHOWN,
+        axis = %axis,
+        scheduled_agents = scheduled_agents,
+        total_tokens = total_tokens,
+        projected_tokens = projected_tokens,
+        agent_cap = agent_cap,
+        token_cap = token_cap,
+        cap_from_guideline = cap_from_guideline,
+    );
+}
+
 // -- EXPERIMENTAL_SKILL_SEARCH skill-discovery emit helper -------------------
 
 /// Emit the skill-discovery-collected event with the `hidden_by_main_turn` field

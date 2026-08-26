@@ -137,10 +137,8 @@ pub fn matches_pattern_with(
     }
 
     // TS: otherwise treat as regex.
-    let Ok(regex) = Regex::new(matcher) else {
-        // TS: `catch { logForDebugging(...); return false }` — an invalid
-        // regex never panics, it just logs and fails to match.
-        tracing::debug!(matcher = %matcher, "Invalid regex pattern in hook matcher");
+    let regex = cached_hook_regex(matcher);
+    let Some(regex) = regex.as_ref() else {
         return false;
     };
     if regex.is_match(match_query) {
@@ -164,6 +162,37 @@ pub fn matches_pattern_with(
         }
     }
     false
+}
+
+fn cached_hook_regex(matcher: &str) -> Option<std::sync::Arc<Regex>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Cache = Mutex<std::collections::HashMap<String, Option<Arc<Regex>>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(hit) = guard.get(matcher) {
+            return hit.clone();
+        }
+    }
+    let compiled = match Regex::new(matcher) {
+        Ok(regex) => Some(Arc::new(regex)),
+        Err(_) => {
+            tracing::debug!(matcher = %matcher, "Invalid regex pattern in hook matcher");
+            None
+        }
+    };
+    {
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.len() < 256 {
+            guard.insert(matcher.to_string(), compiled.clone());
+        }
+    }
+    compiled
 }
 
 /// Returns `true` when `matcher` is a *bare MCP server matcher* — a simple

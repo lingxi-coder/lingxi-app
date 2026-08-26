@@ -1158,8 +1158,8 @@ mod turn_recovery_tests {
         // `ExitWorktree` swap the shared `tool_api::SessionCwd` cell the tool
         // layer resolves relative paths through. The NEXT system-prompt
         // render must show the SWAPPED directory's env-block
-        // `Primary working directory:` line (and the trailing gitStatus block,
-        // which shares the same live cwd) — not the frozen boot cwd.
+        // `Primary working directory:` line. The trailing gitStatus block is a
+        // separate start-of-conversation snapshot and remains frozen.
         let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-session-cwd-boot-fixture");
         let session_cwd = tool_api::SessionCwd::new(boot_cwd.clone(), vec![boot_cwd.clone()]);
         let orch = ConversationOrchestrator::new(
@@ -1228,6 +1228,49 @@ mod turn_recovery_tests {
             )),
             "no swap ⇒ boot cwd, exactly as before: {sp}"
         );
+    }
+
+    #[tokio::test]
+    async fn git_status_stays_frozen_after_session_cwd_swap() {
+        fn init_repo(path: &std::path::Path, marker: &str) {
+            let git = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(path)
+                    .status()
+                    .expect("git is available")
+                    .success()
+            };
+            assert!(git(&["init", "-q"]));
+            std::fs::write(path.join(marker), marker).expect("seed marker");
+        }
+
+        let boot = tempfile::tempdir().expect("boot repo");
+        let worktree = tempfile::tempdir().expect("worktree repo");
+        init_repo(boot.path(), "boot-only.txt");
+        init_repo(worktree.path(), "worktree-only.txt");
+
+        let session_cwd = tool_api::SessionCwd::new(boot.path().to_path_buf(), Vec::new());
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            boot.path().to_path_buf(),
+        )
+        .with_session_cwd(session_cwd.clone());
+
+        let before = orch.build_system_prompt().await;
+        assert!(before.contains("boot-only.txt"), "before:\n{before}");
+
+        session_cwd.swap(worktree.path().to_path_buf(), Vec::new());
+        assert_eq!(session_cwd.cwd(), worktree.path());
+        let after = orch.build_system_prompt().await;
+        assert!(after.contains("boot-only.txt"), "after:\n{after}");
+        assert!(!after.contains("worktree-only.txt"), "after:\n{after}");
     }
 
     #[tokio::test]
@@ -2637,6 +2680,45 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             "no-resolver path must keep probing the session cwd; body was:\n{body}"
         );
     }
+
+    #[tokio::test]
+    async fn git_status_uses_the_host_dir_behind_a_guest_session_cwd() {
+        let host = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(host.path())
+                .status()
+                .expect("git is available")
+                .success()
+        };
+        assert!(git(&["init", "-q"]));
+        assert!(git(&["config", "user.name", "Prompt Probe"]));
+        assert!(git(&[
+            "config",
+            "user.email",
+            "prompt-probe@example.invalid"
+        ]));
+        assert!(git(&["config", "commit.gpgsign", "false"]));
+        std::fs::write(host.path().join("tracked.txt"), "seed").expect("seed file");
+        assert!(git(&["add", "tracked.txt"]));
+        assert!(git(&["commit", "-q", "-m", "seed"]));
+
+        let guest = std::path::PathBuf::from("/workspace/app-pathatlas-git-probe");
+        let resolver_root = host.path().to_path_buf();
+        let orch = orch_with_provider(Arc::new(StaticMemoryProvider::empty()))
+            .with_session_cwd(tool_api::SessionCwd::new(guest, Vec::new()))
+            .with_prompt_probe_cwd_resolver(Arc::new(move |_path: &std::path::Path| {
+                resolver_root.clone()
+            }));
+
+        let prompt = orch.build_system_prompt().await;
+        assert!(
+            prompt.contains("gitStatus: This is the git status at the start of the conversation."),
+            "the host-backed gitStatus snapshot must survive prompt assembly; prompt was:\n{prompt}"
+        );
+        assert!(prompt.contains("Git user: Prompt Probe"));
+    }
 }
 
 // ============================================================================
@@ -3986,6 +4068,12 @@ mod skill_listing_reminder_tests {
             killed_by: None,
             worktree_path: None,
             worktree_branch: None,
+            workflow_failures: Vec::new(),
+            workflow_agent_count: None,
+            workflow_total_tokens: None,
+            workflow_total_tool_calls: None,
+            workflow_duration_ms: None,
+            ..Default::default()
         };
         let orch = orch_with(reg, None).with_task_notifications(Arc::new(OnceTaskNotifications(
             std::sync::Mutex::new(vec![bash]),
@@ -9989,6 +10077,12 @@ mod memory_update_reminder_tests {
             killed_by: None,
             worktree_path: None,
             worktree_branch: None,
+            workflow_failures: Vec::new(),
+            workflow_agent_count: None,
+            workflow_total_tokens: None,
+            workflow_total_tool_calls: None,
+            workflow_duration_ms: None,
+            ..Default::default()
         }
     }
 

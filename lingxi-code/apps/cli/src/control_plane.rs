@@ -1049,6 +1049,7 @@ mod tests {
     fn outbound_line(msg: OutboundMsg) -> String {
         match msg {
             OutboundMsg::Line(line) => line,
+            OutboundMsg::StreamEvent(line) => line,
             OutboundMsg::Heartbeats(_) => panic!("unexpected heartbeat message"),
             OutboundMsg::Flush(_) => panic!("unexpected flush message"),
         }

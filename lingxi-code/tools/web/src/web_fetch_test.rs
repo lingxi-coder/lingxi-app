@@ -75,6 +75,13 @@ mod tests {
         assert_eq!(TOOL_NAME, "WebFetch");
     }
 
+    #[test]
+    fn tool_max_result_size_matches_claude_limit() {
+        let (ctx, _http, _sink) = make_web_ctx();
+        let tool = WebFetchTool::new(ctx);
+        assert_eq!(tool.max_result_size_chars(), 100_000);
+    }
+
     // PARITY (#88): the body is cached/returned in FULL — there is NO
     // pre-return truncation; the 100k cap only fires inside the apply step.
     // `body_exceeds_markdown_cap` is just the source of the `truncated` flag.

@@ -104,6 +104,7 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         workflow_keyword_trigger_enabled: next
             .workflow_keyword_trigger_enabled
             .or(prev.workflow_keyword_trigger_enabled),
+        enable_workflows: next.enable_workflows.or(prev.enable_workflows),
         workflow_size_guideline: next
             .workflow_size_guideline
             .or(prev.workflow_size_guideline),
@@ -449,12 +450,14 @@ mod tests {
         let prev = SettingsJson {
             model: Some("sonnet".into()),
             telemetry_enabled: Some(false),
+            enable_workflows: Some(true),
             workflow_size_guideline: Some("small".into()),
             ..Default::default()
         };
         let next = SettingsJson {
             model: Some("opus".into()),
             telemetry_enabled: None,
+            enable_workflows: Some(false),
             workflow_size_guideline: Some("large".into()),
             ..Default::default()
         };
@@ -464,6 +467,11 @@ mod tests {
             merged.telemetry_enabled,
             Some(false),
             "next is None, so prev survives"
+        );
+        assert_eq!(
+            merged.enable_workflows,
+            Some(false),
+            "enableWorkflows is scalar-override"
         );
         assert_eq!(
             merged.workflow_size_guideline.as_deref(),

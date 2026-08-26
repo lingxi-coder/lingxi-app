@@ -425,7 +425,11 @@ impl TodoStore {
         ids.sort_by_key(|id| id.parse::<i64>().unwrap_or(i64::MAX));
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
-            if let Some(task) = self.get(&id).await {
+            let content = match std::fs::read_to_string(self.task_path(&id)) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            if let Ok(task) = serde_json::from_str::<TodoTask>(&content) {
                 out.push(task);
             }
         }

@@ -618,6 +618,156 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+struct GrepWalkArgs {
+    canon_base: PathBuf,
+    overrides: ignore::overrides::Override,
+    types_filter: Option<ignore::types::Types>,
+    matcher: RegexMatcher,
+    cwd_for_rel: PathBuf,
+    deadline: Instant,
+    content_mode: bool,
+    files_mode: bool,
+    count_mode: bool,
+    only_matching: bool,
+    show_line_numbers: bool,
+    multiline: bool,
+    ctx_before: Option<usize>,
+    ctx_after: Option<usize>,
+}
+
+struct GrepWalkResult {
+    content_lines: Vec<String>,
+    count_lines: Vec<String>,
+    files_matched: Vec<(PathBuf, SystemTime)>,
+    total_matches: u64,
+    timed_out: bool,
+}
+
+fn grep_walk(args: GrepWalkArgs) -> GrepWalkResult {
+    let GrepWalkArgs {
+        canon_base,
+        overrides,
+        types_filter,
+        matcher,
+        cwd_for_rel,
+        deadline,
+        content_mode,
+        files_mode,
+        count_mode,
+        only_matching,
+        show_line_numbers,
+        multiline,
+        ctx_before,
+        ctx_after,
+    } = args;
+
+    let mut wb = WalkBuilder::new(&canon_base);
+    wb.hidden(false); // --hidden: search dotfiles
+    wb.overrides(overrides);
+    if let Some(t) = types_filter {
+        wb.types(t);
+    }
+
+    let mut content_lines: Vec<String> = Vec::new();
+    let mut count_lines: Vec<String> = Vec::new();
+    let mut files_matched: Vec<(PathBuf, SystemTime)> = Vec::new();
+    let mut total_matches: u64 = 0;
+    let mut timed_out = false;
+
+    for entry in wb.build() {
+        if Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+
+        let mut sb = SearcherBuilder::new();
+        sb.multi_line(multiline);
+        sb.line_number(content_mode && show_line_numbers);
+        if let Some(b) = ctx_before {
+            sb.before_context(b);
+        }
+        if let Some(a) = ctx_after {
+            sb.after_context(a);
+        }
+        let mut searcher = sb.build();
+
+        let mut sink = GrepSink {
+            records: Vec::new(),
+            match_count: 0,
+            overflow: false,
+            record_lines: content_mode,
+            first_match_only: files_mode,
+        };
+        let _ = searcher.search_path(&matcher, path, &mut sink);
+
+        total_matches += sink.match_count as u64;
+        if sink.match_count == 0 {
+            continue;
+        }
+
+        if content_mode {
+            let rel = to_relative_path(path, &cwd_for_rel);
+            for (lnum, text, is_context) in &sink.records {
+                // ST-14: `-o` applies to MATCHING lines only. The oracle
+                // pushes `-o` and the `-C/-B/-A` block independently
+                // (`if(d&&o==="content")_.push("-o")` … `if(o==="content"){…}`,
+                // @289928728), and ripgrep prints context lines in full
+                // under `-o` — verified:
+                //   `rg -n -o -C 1 'MATCH[0-9]?'` → `2-bbb`, `3:MATCH`,
+                //   `3:MATCH2`, `4-ccc`.
+                if only_matching && !*is_context {
+                    // rg -o: one matched substring per output line (a line
+                    // with multiple matches yields multiple output lines).
+                    // ST-13: `--max-columns` measures the EMITTED match here,
+                    // not its source line.
+                    for m in only_matching_spans(&matcher, text) {
+                        let m = apply_max_columns(m, false);
+                        let line = match (show_line_numbers, lnum) {
+                            (true, Some(n)) => format!("{rel}:{n}:{m}"),
+                            _ => format!("{rel}:{m}"),
+                        };
+                        content_lines.push(line);
+                    }
+                } else {
+                    let text = apply_max_columns(text.clone(), *is_context);
+                    let line = match (show_line_numbers, lnum) {
+                        (true, Some(n)) => format!("{rel}:{n}:{text}"),
+                        _ => format!("{rel}:{text}"),
+                    };
+                    content_lines.push(line);
+                }
+            }
+        } else if count_mode {
+            let rel = to_relative_path(path, &cwd_for_rel);
+            count_lines.push(format!("{rel}:{}", sink.match_count));
+        } else {
+            // files_with_matches: defer relativize until after sort.
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            files_matched.push((path.to_path_buf(), mtime));
+        }
+    }
+
+    GrepWalkResult {
+        content_lines,
+        count_lines,
+        files_matched,
+        total_matches,
+        timed_out,
+    }
+}
+
 #[async_trait]
 impl Tool for GrepTool {
     fn name(&self) -> &str {
@@ -813,6 +963,12 @@ impl Tool for GrepTool {
             .case_insensitive(case_insensitive)
             .multi_line(multiline)
             .dot_matches_new_line(multiline)
+            // Keep grep-regex's upstream defaults intact here:
+            //   size_limit = 100 MiB
+            //   dfa_size_limit = 1000 MiB
+            //   nest_limit = 250
+            // Claude/ripgrep do not impose LingXi-specific lower caps, and the
+            // smaller 10 MiB / 10 MiB / 50 overrides rejected valid patterns.
             .build(pattern)
         {
             Ok(m) => m,
@@ -879,9 +1035,9 @@ impl Tool for GrepTool {
             None => None,
         };
 
-        // Effective context windows: context > -C > (-B and/or -A). Content only,
-        // and never with `-o` (rg -o ignores context entirely).
-        let (ctx_before, ctx_after) = if content_mode && !only_matching {
+        // Effective context windows: context > -C > (-B and/or -A). Content only.
+        // `-o` still preserves full context lines; it only changes matching lines.
+        let (ctx_before, ctx_after) = if content_mode {
             if let Some(c) = context_param {
                 (Some(c), Some(c))
             } else if let Some(c) = context_c {
@@ -893,19 +1049,7 @@ impl Tool for GrepTool {
             (None, None)
         };
 
-        // --- Walk + search ---
-        let mut wb = WalkBuilder::new(&canon_base);
-        wb.hidden(false); // --hidden: search dotfiles
-        wb.overrides(overrides);
-        if let Some(t) = types_filter {
-            wb.types(t);
-        }
-
-        let mut content_lines: Vec<String> = Vec::new();
-        let mut count_lines: Vec<String> = Vec::new();
-        let mut files_matched: Vec<(PathBuf, SystemTime)> = Vec::new();
-        let mut total_matches: u64 = 0;
-
+        // --- Walk + search (sync CPU/IO; run off the async runtime) ---
         // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
         // `LINGXI_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
         // The in-process equivalent of `rg`'s execFile timeout is a deadline
@@ -914,92 +1058,34 @@ impl Tool for GrepTool {
         // spelling ("wsl") — compared by value so this file needs no `sandbox` dep.
         let is_wsl = self.ctx.platform.as_str() == "wsl";
         let deadline = started + ripgrep_timeout(is_wsl);
-        let mut timed_out = false;
+        let cwd_for_rel_in_worker = cwd_for_rel.clone();
 
-        for entry in wb.build() {
-            if Instant::now() >= deadline {
-                timed_out = true;
-                break;
-            }
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                continue;
-            }
-            let path = entry.path();
-
-            let mut sb = SearcherBuilder::new();
-            sb.multi_line(multiline);
-            sb.line_number(content_mode && show_line_numbers);
-            if let Some(b) = ctx_before {
-                sb.before_context(b);
-            }
-            if let Some(a) = ctx_after {
-                sb.after_context(a);
-            }
-            let mut searcher = sb.build();
-
-            let mut sink = GrepSink {
-                records: Vec::new(),
-                match_count: 0,
-                overflow: false,
-                record_lines: content_mode,
-                first_match_only: files_mode,
-            };
-            let _ = searcher.search_path(&matcher, path, &mut sink);
-
-            total_matches += sink.match_count as u64;
-            if sink.match_count == 0 {
-                continue;
-            }
-
-            if content_mode {
-                let rel = to_relative_path(path, &cwd_for_rel);
-                for (lnum, text, is_context) in &sink.records {
-                    // ST-14: `-o` applies to MATCHING lines only. The oracle
-                    // pushes `-o` and the `-C/-B/-A` block independently
-                    // (`if(d&&o==="content")_.push("-o")` … `if(o==="content"){…}`,
-                    // @289928728), and ripgrep prints context lines in full
-                    // under `-o` — verified:
-                    //   `rg -n -o -C 1 'MATCH[0-9]?'` → `2-bbb`, `3:MATCH`,
-                    //   `3:MATCH2`, `4-ccc`.
-                    if only_matching && !*is_context {
-                        // rg -o: one matched substring per output line (a line
-                        // with multiple matches yields multiple output lines).
-                        // ST-13: `--max-columns` measures the EMITTED match here,
-                        // not its source line.
-                        for m in only_matching_spans(&matcher, text) {
-                            let m = apply_max_columns(m, false);
-                            let line = match (show_line_numbers, lnum) {
-                                (true, Some(n)) => format!("{rel}:{n}:{m}"),
-                                _ => format!("{rel}:{m}"),
-                            };
-                            content_lines.push(line);
-                        }
-                    } else {
-                        let text = apply_max_columns(text.clone(), *is_context);
-                        let line = match (show_line_numbers, lnum) {
-                            (true, Some(n)) => format!("{rel}:{n}:{text}"),
-                            _ => format!("{rel}:{text}"),
-                        };
-                        content_lines.push(line);
-                    }
-                }
-            } else if count_mode {
-                let rel = to_relative_path(path, &cwd_for_rel);
-                count_lines.push(format!("{rel}:{}", sink.match_count));
-            } else {
-                // files_with_matches: defer relativize until after sort.
-                let mtime = entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                files_matched.push((path.to_path_buf(), mtime));
-            }
-        }
+        let GrepWalkResult {
+            content_lines,
+            count_lines,
+            mut files_matched,
+            total_matches,
+            timed_out,
+        } = tokio::task::spawn_blocking(move || {
+            grep_walk(GrepWalkArgs {
+                canon_base,
+                overrides,
+                types_filter,
+                matcher,
+                cwd_for_rel: cwd_for_rel_in_worker,
+                deadline,
+                content_mode,
+                files_mode,
+                count_mode,
+                only_matching,
+                show_line_numbers,
+                multiline,
+                ctx_before,
+                ctx_after,
+            })
+        })
+        .await
+        .map_err(|e| ToolError::Io(e.to_string()))?;
 
         // Mirror `utils/ripgrep.ts:444-454`: a timeout with NO results is a hard
         // error (so the model knows the search didn't complete rather than
@@ -1146,7 +1232,9 @@ impl Tool for GrepTool {
             // content mode's `\n\n[Showing …]`.
             let model = if num_files == 0 {
                 if applied_offset.is_some() && total_files > 0 {
-                    format!("No entries at this offset. [Showing results with pagination = {limit_info}]")
+                    format!(
+                        "No entries at this offset. [Showing results with pagination = {limit_info}]"
+                    )
                 } else {
                     "No files found".to_string()
                 }
@@ -1725,6 +1813,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn content_mode_only_matching_keeps_context_lines() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "line1\nmatch here\nline3\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+
+        let before_after = tool
+            .call(
+                json!({
+                    "pattern": "match",
+                    "output_mode": "content",
+                    "-o": true,
+                    "-B": 1,
+                    "-A": 1
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            content_str(&before_after),
+            "a.txt:1:line1\na.txt:2:match\na.txt:3:line3"
+        );
+
+        let context_param = tool
+            .call(
+                json!({
+                    "pattern": "match",
+                    "output_mode": "content",
+                    "-o": true,
+                    "context": 1
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            content_str(&context_param),
+            "a.txt:1:line1\na.txt:2:match\na.txt:3:line3"
+        );
+    }
+
+    #[tokio::test]
     async fn content_mode_head_limit_pagination() {
         let tmp = TempDir::new().unwrap();
         let body: String = (0..10).map(|i| format!("fn f{i}\n")).collect();
@@ -1948,6 +2081,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content_str(&result), "Found 1 file\na.go");
+    }
+
+    #[tokio::test]
+    async fn accepts_deeply_nested_regex_groups() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("nested.txt"), "x\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        // This valid regex is deeper than the old manual `.nest_limit(50)`.
+        // The tool should accept it by preserving grep-regex's upstream
+        // defaults instead of reintroducing lower LingXi-specific caps.
+        let pattern = format!("{}x{}", "(".repeat(55), ")".repeat(55));
+        let result = tool
+            .call(
+                json!({ "pattern": pattern, "output_mode": "count" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            content_str(&result),
+            "nested.txt:1\n\nFound 1 total occurrence across 1 file."
+        );
+        assert_eq!(result.data["numMatches"], 1);
     }
 
     #[tokio::test]

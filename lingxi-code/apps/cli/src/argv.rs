@@ -534,8 +534,8 @@ pub struct Argv {
     //
     // WIRED: threads raw into `DesktopConfig.cli_agents_json`;
     // `engine_desktop::build` parses it with the strict flag-record schema
-    // (`agent::parse_agents_from_flag_json`, the `QXt` @223080769 port —
-    // invalid JSON/definitions LOG and yield no agents, never abort) and
+    // (`agent::parse_agents_from_flag_json_checked` at the CLI boundary;
+    // invalid JSON/definitions abort before runtime construction) and
     // merges the result over dir-loaded agents (`flagSettings` precedence).
     // Ignored (warn) in safe mode; survives `--bare`.
     #[arg(long = "agents", value_name = "json")]

@@ -75,12 +75,21 @@ pub fn relative_time_ago(modified: std::time::SystemTime, now: std::time::System
 /// than this — mirroring claude-code's `displayedLogs.length > visibleCount`.
 pub const VISIBLE_ROWS: usize = 10;
 
+/// Number of resumable sessions enriched into the picker at a time. Claude
+/// Code 2.1.246 uses `rQe = 50`: the first page contains up to 50 rows and the
+/// next page is revealed when navigation reaches the loaded tail.
+pub const RESUME_PAGE_SIZE: usize = 50;
+
 /// Pure state for the Resume picker: the rows plus the selected index and the
 /// type-to-search query.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResumeState {
     /// Display rows, newest-first (the loader already sorts mtime desc).
     pub rows: Vec<ResumeRow>,
+    /// Catalog rows not yet exposed to the renderer. Keeping these separate
+    /// reproduces Claude's `allStatLogs` + `nextIndex` picker shape without
+    /// forcing the terminal to render every historical session at startup.
+    remaining_rows: Vec<ResumeRow>,
     /// Index into the FILTERED rows of the highlighted row.
     pub selected: usize,
     /// Type-to-search query — filters rows by title (case-insensitive substring).
@@ -94,12 +103,33 @@ impl ResumeState {
     /// Build from display rows. Selects the first row.
     #[must_use]
     pub fn new(rows: Vec<ResumeRow>) -> Self {
+        let mut rows = rows;
+        let remaining_rows = if rows.len() > RESUME_PAGE_SIZE {
+            rows.split_off(RESUME_PAGE_SIZE)
+        } else {
+            Vec::new()
+        };
         Self {
             rows,
+            remaining_rows,
             selected: 0,
             query: String::new(),
             in_search_mode: false,
         }
+    }
+
+    /// Whether another 50-row page remains behind the currently rendered
+    /// catalog tail.
+    #[must_use]
+    pub fn has_more(&self) -> bool {
+        !self.remaining_rows.is_empty()
+    }
+
+    /// Reveal the next Claude-sized page. Returns the number of rows appended.
+    fn load_more(&mut self) -> usize {
+        let count = self.remaining_rows.len().min(RESUME_PAGE_SIZE);
+        self.rows.extend(self.remaining_rows.drain(..count));
+        count
     }
 
     /// `true` when there are no sessions to resume at all (empty-state).
@@ -108,8 +138,10 @@ impl ResumeState {
         self.rows.is_empty()
     }
 
-    /// Rows visible under the current query (all rows when empty),
-    /// case-insensitive title-substring match.
+    /// Rows visible under the current query (all loaded rows when empty),
+    /// case-insensitive title-substring match. Search spans the full catalog,
+    /// including pages not yet revealed in list mode, so a session older than
+    /// the first 50 remains directly discoverable.
     #[must_use]
     pub fn filtered(&self) -> Vec<&ResumeRow> {
         if self.query.is_empty() {
@@ -118,6 +150,7 @@ impl ResumeState {
             let q = self.query.to_lowercase();
             self.rows
                 .iter()
+                .chain(self.remaining_rows.iter())
                 .filter(|r| r.title.to_lowercase().contains(&q))
                 .collect()
         }
@@ -159,13 +192,20 @@ pub enum ResumeOutcome {
 /// - anything else → `Stay`.
 #[must_use]
 pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcome {
-    let n = state.filtered().len();
+    let mut n = state.filtered().len();
     match key.code {
         KeyCode::Up => {
             state.selected = state.selected.saturating_sub(1);
             ResumeOutcome::Stay
         }
         KeyCode::Down => {
+            // Claude 2.1.246 `/resume` initially enriches 50 rows and invokes
+            // `onLoadMore` at the loaded tail. Reveal the next page before
+            // advancing so one Down press moves naturally onto its first row.
+            if n > 0 && state.selected + 1 >= n && state.has_more() {
+                state.load_more();
+                n = state.filtered().len();
+            }
             if n > 0 {
                 state.selected = (state.selected + 1).min(n - 1);
             }
@@ -327,13 +367,24 @@ pub fn run_resume_picker(rows: Vec<ResumeRow>) -> std::io::Result<Option<Uuid>> 
     let outcome = (|| -> std::io::Result<Option<Uuid>> {
         loop {
             terminal.draw(|f| {
-                let para = Paragraph::new(resume_lines(&state, &theme));
                 let area = ratatui::layout::Rect {
                     x: f.area().x + 1,
                     y: f.area().y + 1,
                     width: f.area().width.saturating_sub(2),
                     height: f.area().height.saturating_sub(2),
                 };
+                let lines = resume_lines(&state, &theme);
+                let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+                let selected = u16::try_from(selected_title_line_index(&state)).unwrap_or(0);
+                let scroll = if area.height == 0 || total <= area.height {
+                    0
+                } else {
+                    selected
+                        .saturating_add(2)
+                        .saturating_sub(area.height)
+                        .min(total - area.height)
+                };
+                let para = Paragraph::new(lines).scroll((scroll, 0));
                 f.render_widget(para, area);
             })?;
             match crossterm::event::read()? {
@@ -402,6 +453,26 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_past_the_first_fifty_reveals_the_next_page() {
+        let rows: Vec<ResumeRow> = (0..55).map(|i| row(&format!("session {i}"))).collect();
+        let mut s = ResumeState::new(rows);
+
+        assert_eq!(s.rows.len(), RESUME_PAGE_SIZE);
+        assert!(s.has_more());
+        for _ in 0..RESUME_PAGE_SIZE - 1 {
+            let _ = handle_resume_key(&mut s, key(KeyCode::Down));
+        }
+        assert_eq!(s.selected, RESUME_PAGE_SIZE - 1);
+        assert_eq!(s.rows.len(), RESUME_PAGE_SIZE);
+
+        let _ = handle_resume_key(&mut s, key(KeyCode::Down));
+        assert_eq!(s.selected, RESUME_PAGE_SIZE);
+        assert_eq!(s.rows.len(), 55);
+        assert!(!s.has_more());
+        assert_eq!(s.selected_row().unwrap().title, "session 50");
+    }
+
+    #[test]
     fn enter_resumes_selected_uuid() {
         let rows = vec![row("a"), row("b")];
         let want = rows[1].uuid;
@@ -436,6 +507,26 @@ mod tests {
         let _ = handle_resume_key(&mut s, key(KeyCode::Esc));
         assert!(s.query.is_empty());
         assert_eq!(s.filtered().len(), 2);
+    }
+
+    #[test]
+    fn search_finds_a_session_beyond_the_first_page() {
+        let mut rows: Vec<ResumeRow> = (0..RESUME_PAGE_SIZE)
+            .map(|i| row(&format!("recent {i}")))
+            .collect();
+        let wanted = row("old release investigation");
+        let wanted_uuid = wanted.uuid;
+        rows.push(wanted);
+        let mut s = ResumeState::new(rows);
+
+        for c in "release".chars() {
+            let _ = handle_resume_key(&mut s, key(KeyCode::Char(c)));
+        }
+
+        assert_eq!(s.filtered().len(), 1);
+        assert_eq!(s.selected_uuid(), Some(wanted_uuid));
+        assert_eq!(s.rows.len(), RESUME_PAGE_SIZE);
+        assert!(s.has_more(), "search must not flatten list-mode pagination");
     }
 
     #[test]

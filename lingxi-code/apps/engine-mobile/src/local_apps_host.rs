@@ -514,8 +514,7 @@ fn latest_custom_title(transcript: &str, session_id: &str) -> Option<(String, bo
         let Some(title) = value.get("customTitle").and_then(Value::as_str) else {
             continue;
         };
-        let mobile_marker =
-            value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1);
+        let mobile_marker = value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1);
         latest = Some((title.to_string(), mobile_marker));
     }
     latest
@@ -600,7 +599,10 @@ pub(crate) async fn reconcile_app_init_session_title(
     };
     let path = app_session_file(lingxi_home, data_root, record, init_id);
     let Some(path_str) = path.to_str() else {
-        return Err(format!("init-session path is not UTF-8: {}", path.display()));
+        return Err(format!(
+            "init-session path is not UTF-8: {}",
+            path.display()
+        ));
     };
     let Ok(file) = fs.read_file(path_str, None, None).await else {
         return Ok(false);
@@ -842,9 +844,9 @@ impl LocalAppsHostBroker {
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
             port_allocation: Mutex::new(()),
             dependency_snapshot_locks: Mutex::new(HashMap::new()),
-            scaffold_reservations: Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
+            scaffold_reservations: Arc::new(
+                std::sync::Mutex::new(std::collections::HashSet::new()),
+            ),
             session_catalog: OnceLock::new(),
             next_request_id: AtomicU64::new(1),
         });
@@ -2311,11 +2313,13 @@ impl LocalAppsHostBroker {
         let layout = self.layout(&app_id)?;
         let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
         let query = normalize_query(&input)?;
-        tokio::task::spawn_blocking(move || AppDataStore::open(layout)?.query(&manifest, &query))
-            .await
-            .map_err(|error| format!("data query worker failed: {error}"))?
-            .map(|page| json!(page))
-            .map_err(|error| error.to_string())
+        tokio::task::spawn_blocking(move || {
+            AppDataStore::with_cached(layout, |store| store.query(&manifest, &query))
+        })
+        .await
+        .map_err(|error| format!("data query worker failed: {error}"))?
+        .map(|page| json!(page))
+        .map_err(|error| error.to_string())
     }
 
     async fn mutate_data_value(
@@ -2346,8 +2350,7 @@ impl LocalAppsHostBroker {
                 u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
             });
         tokio::task::spawn_blocking(move || {
-            let mut store = AppDataStore::open(layout)?;
-            store.mutate(&manifest, &mutations, now_ms)
+            AppDataStore::with_cached(layout, |store| store.mutate(&manifest, &mutations, now_ms))
         })
         .await
         .map_err(|error| format!("data mutation worker failed: {error}"))?
@@ -6558,8 +6561,7 @@ mod tests {
     }
 
     fn workspace_of(root: &TempDir, app_id: &str) -> PathBuf {
-        let layout =
-            AppLayout::new(root.path().to_path_buf(), app_id.to_string()).expect("layout");
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id.to_string()).expect("layout");
         root.path().join(layout.workspace_rel())
     }
 
@@ -6652,8 +6654,7 @@ mod tests {
         );
 
         // The surface is on the manifest, and the seed is the canvas one.
-        let layout =
-            AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
         let manifest = load_manifest(&layout).expect("manifest");
         assert_eq!(manifest.surface, Some(local_apps::AppSurface::Canvas));
         assert_eq!(manifest.name, "打飞机");
@@ -6829,9 +6830,7 @@ mod tests {
         proposed.brief = "b".into();
 
         let contend = |root: PathBuf, app_id: String| {
-            tokio::task::spawn_blocking(move || {
-                local_apps::storage::lock_app_build(&root, &app_id)
-            })
+            tokio::task::spawn_blocking(move || local_apps::storage::lock_app_build(&root, &app_id))
         };
         let contender = contend(root.path().to_path_buf(), shell.id.clone())
             .await
@@ -6854,9 +6853,7 @@ mod tests {
             "the landing must WAIT for the build lock before it writes anything"
         );
         assert!(
-            !workspace_of(&root, &shell.id)
-                .join("app/app.jsx")
-                .exists(),
+            !workspace_of(&root, &shell.id).join("app/app.jsx").exists(),
             "and it must not have seeded while it was waiting"
         );
 
@@ -6901,8 +6898,11 @@ mod tests {
             .await
             .expect("the first scaffold must land");
         let workspace = workspace_of(&root, &shell.id);
-        fs::write(workspace.join("app/screens/mine.jsx"), b"// the user's own work")
-            .expect("write user source");
+        fs::write(
+            workspace.join("app/screens/mine.jsx"),
+            b"// the user's own work",
+        )
+        .expect("write user source");
 
         let error = broker
             .scaffold_shell_app_value(scaffold_input(&shell.id, "B", "b", "dom"))
@@ -6916,8 +6916,7 @@ mod tests {
         );
         let after = service.record(&shell.id).await.expect("record");
         assert_eq!(after.name, "A", "the committed name must be untouched");
-        let contract =
-            fs::read_to_string(workspace.join("LINGXI.md")).expect("read the contract");
+        let contract = fs::read_to_string(workspace.join("LINGXI.md")).expect("read the contract");
         assert!(
             contract.contains("# Local App: A"),
             "the one-and-only contract must be untouched: {contract}"
@@ -6972,8 +6971,7 @@ mod tests {
     async fn the_manifest_name_may_only_be_written_before_any_database_exists() {
         let (root, service, broker) = create_broker(false, None).await;
         let shell = shell_app_fixture(&broker, &service).await;
-        let layout =
-            AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
         assert!(
             !layout.database_path().exists(),
             "the write window is exactly 'no data store yet'"
@@ -7581,7 +7579,10 @@ mod tests {
     #[test]
     fn capture_without_a_rect_keeps_the_whole_frame_behaviour() {
         let value = capture_ui_value(&json!({ "app_id": "demo" })).unwrap();
-        assert_eq!(value, None, "no rect means the whole view, exactly as before");
+        assert_eq!(
+            value, None,
+            "no rect means the whole view, exactly as before"
+        );
     }
 
     #[test]
@@ -7609,7 +7610,10 @@ mod tests {
             json!({ "x": 0, "y": 0, "width": 10 }),
         ] {
             let out = capture_ui_value(&json!({ "app_id": "demo", "rect": bad }));
-            assert!(out.is_err(), "invalid rect must be refused host-side: {bad}");
+            assert!(
+                out.is_err(),
+                "invalid rect must be refused host-side: {bad}"
+            );
         }
     }
 
@@ -8999,9 +9003,9 @@ mod tests {
         fn transcript(&self) -> PathBuf {
             self.lingxi_home
                 .join("projects")
-                .join(session::jsonl::path::project_dir_name(&canonical_cwd_string(
-                    &self.root.path().join(&self.workspace_rel),
-                )))
+                .join(session::jsonl::path::project_dir_name(
+                    &canonical_cwd_string(&self.root.path().join(&self.workspace_rel)),
+                ))
                 .join(format!("{}.jsonl", self.init_session_id))
         }
 
@@ -9227,17 +9231,20 @@ mod tests {
     #[test]
     fn only_the_mobile_marker_distinguishes_a_placeholder_from_a_user_rename() {
         let session = "11111111-2222-3333-4444-555555555555";
-        let anchor =
-            format!(r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}","mobileEmptySession":1}}"#);
-        let renamed =
-            format!(r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}"}}"#);
-        let other_session =
-            r#"{"type":"custom-title","customTitle":"elsewhere","sessionId":"99999999-2222-3333-4444-555555555555"}"#;
+        let anchor = format!(
+            r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}","mobileEmptySession":1}}"#
+        );
+        let renamed = format!(
+            r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}"}}"#
+        );
+        let other_session = r#"{"type":"custom-title","customTitle":"elsewhere","sessionId":"99999999-2222-3333-4444-555555555555"}"#;
 
         assert!(latest_custom_title_is_mobile_placeholder(&anchor, session));
         // Same TITLE TEXT, no marker — a user who renamed the session to the
         // placeholder string is still a user rename.
-        assert!(!latest_custom_title_is_mobile_placeholder(&renamed, session));
+        assert!(!latest_custom_title_is_mobile_placeholder(
+            &renamed, session
+        ));
         // Last effective record wins, in both directions.
         assert!(!latest_custom_title_is_mobile_placeholder(
             &format!("{anchor}\n{renamed}"),

@@ -21,8 +21,11 @@ pub const JOURNAL_STARTED_HIT_RESPAWN: &str = "tengu_workflow_journal_started_hi
 /// `/workflows` "Save dynamic workflow" dialog (oracle `eya`
 /// `M("tengu_workflow_saved", {scope, overwrite, script_size_chars})`).
 pub const SAVED: &str = "tengu_workflow_saved";
+/// `tengu_workflow_size_warning_shown` — the `/workflows` UI surfaced Claude
+/// Code's large-workflow warning for a run.
+pub const SIZE_WARNING_SHOWN: &str = "tengu_workflow_size_warning_shown";
 
-/// All 7 reachable workflow telemetry event names (string-lock only, NOT in ALL_EVENT_NAMES).
+/// All 8 reachable workflow telemetry event names (string-lock only, NOT in ALL_EVENT_NAMES).
 pub const NAMES: &[&str] = &[
     LAUNCHED,
     COMPLETED,
@@ -31,6 +34,7 @@ pub const NAMES: &[&str] = &[
     BUDGET_CAP_EXCEEDED,
     JOURNAL_STARTED_HIT_RESPAWN,
     SAVED,
+    SIZE_WARNING_SHOWN,
 ];
 
 // Unreachable events (no LingXi trigger):

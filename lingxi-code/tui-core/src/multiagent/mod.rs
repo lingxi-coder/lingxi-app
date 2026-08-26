@@ -10,6 +10,7 @@ pub mod event;
 pub mod fixture;
 pub mod poller;
 pub mod state;
+pub mod workflow_size_warning;
 pub mod workflow_spool;
 
 pub use adapter::{pump_once, MultiAgentFeed};
@@ -20,5 +21,8 @@ pub use poller::{
 };
 pub use state::{
     MultiAgentState, TaskRow, WorkerRow, WorkflowAgentRow, WorkflowPhase, WorkflowRow,
+};
+pub use workflow_size_warning::{
+    workflow_size_warning, WorkflowSizeWarning, WorkflowSizeWarningAxis, WorkflowSizeWarningInput,
 };
 pub use workflow_spool::parse_workflow_spool;

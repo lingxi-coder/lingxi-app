@@ -27,6 +27,7 @@ use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use tokio_util::sync::CancellationToken;
+use tool_workflow::{UltracodeGate, WorkflowSizeGuideline};
 use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
 use tui_core::computer_access_bridge::ComputerAccessExchange;
 use tui_core::message::CurrentTodo;
@@ -874,12 +875,16 @@ impl ChatWidget {
     /// Advance time-based modal behavior once per app tick. In particular,
     /// this lets an idle AskUserQuestion countdown resolve its response
     /// channel and pop the view without requiring a key press.
-    pub fn pump_view_timeout(&mut self) {
+    pub fn pump_view_timeout(&mut self) -> bool {
+        let had_prompt = self.has_open_interactive_prompt();
         let outcome = self.bottom_pane.handle_view_tick(Instant::now());
         let chat_outcome = self.on_pane_outcome(outcome);
         debug_assert!(matches!(chat_outcome, ChatOutcome::Continue));
         self.open_next_queued_prompt();
         self.pump_held_peer();
+        // If a modal was open this tick, redraw even if it just popped
+        // (otherwise the expired view stays on screen until the next key).
+        had_prompt
     }
 
     fn pump_held_peer(&mut self) {
@@ -2243,6 +2248,20 @@ impl ChatWidget {
         self.current_turn.is_some()
     }
 
+    /// True when the 20 Hz tick must redraw even without new input (spinner,
+    /// compacting, retry countdown, paste burst, or an open modal).
+    #[must_use]
+    pub fn needs_animated_redraw(&self) -> bool {
+        self.current_turn.is_some()
+            || self.compacting_started_at.is_some()
+            || self.api_retry.is_some()
+            || self.pending_backgrounding.is_some()
+            || self.paste_burst_pending()
+            || self.has_open_interactive_prompt()
+            || !self.foreground_agents.is_empty()
+            || !self.background_agents.is_empty()
+    }
+
     // ===== Registry-dispatched command handlers (`crate::command::BUILTIN`) =====
 
     /// `/help`: open the shortcuts + slash-commands screen.
@@ -2564,21 +2583,105 @@ impl ChatWidget {
         runtime.block_on(handle.large_memory_warnings())
     }
 
+    /// Read the live, session-owned dynamic-workflow gate through the engine
+    /// handle. The TUI runs on a blocking-pool thread, so this mirrors the
+    /// existing synchronous bridges used by `/workflows` and core commands.
+    fn dynamic_workflows_state(&self) -> Result<(bool, bool), String> {
+        let handle = self
+            .orchestrator
+            .clone()
+            .ok_or_else(|| "no engine handle wired".to_string())?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        Ok((
+            runtime.block_on(handle.dynamic_workflows_enabled()),
+            runtime.block_on(handle.dynamic_workflows_managed()),
+        ))
+    }
+
+    fn workflow_size_guideline_state(
+        &self,
+    ) -> Result<traits::session_flags::WorkflowSizeGuidelineSnapshot, String> {
+        let Some(handle) = self.orchestrator.clone() else {
+            return Ok(traits::session_flags::workflow_size_guideline_snapshot());
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        Ok(runtime.block_on(handle.workflow_size_guideline_state()))
+    }
+
+    fn set_dynamic_workflows_state(&self, enabled: bool) -> Result<(), String> {
+        let handle = self
+            .orchestrator
+            .clone()
+            .ok_or_else(|| "enableWorkflows is unavailable (no engine handle wired)".to_string())?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("enableWorkflows update failed: {error}"))?;
+        if runtime.block_on(handle.dynamic_workflows_managed()) {
+            return Err("enableWorkflows is managed by enterprise policy".to_string());
+        }
+        runtime
+            .block_on(handle.set_dynamic_workflows_enabled(enabled, false))
+            .map_err(|error| format!("enableWorkflows update failed: {error}"))
+    }
+
+    fn set_workflow_size_guideline_state(&self, value: &str) -> Result<(), String> {
+        let Some(handle) = self.orchestrator.clone() else {
+            if traits::session_flags::workflow_size_guideline_is_managed() {
+                return Err("workflowSizeGuideline is managed by enterprise policy".to_string());
+            }
+            let _ = traits::session_flags::set_workflow_size_guideline(value, false);
+            return Ok(());
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("workflowSizeGuideline update failed: {error}"))?;
+        if runtime.block_on(handle.workflow_size_guideline_managed()) {
+            return Err("workflowSizeGuideline is managed by enterprise policy".to_string());
+        }
+        runtime
+            .block_on(handle.set_workflow_size_guideline(value.to_string(), false, false))
+            .map_err(|error| format!("workflowSizeGuideline update failed: {error}"))
+    }
+
     /// `/config`: bare → open the settings screen; `key=value [key=value …]` →
     /// set settings directly (claude-code 2.1.205's `/config` shorthand). The
     /// format/unknown-key/bad-value errors are byte-exact with the reference;
     /// the settable keys are the ones LingXi applies live this session (`vim`,
-    /// `verbose`, `theme`, `leftArrowOpensAgents`) plus the persisted-only
-    /// `workflowSizeGuideline` and `defaultToAgentsView` (those take effect
-    /// next session). Each set is also persisted best-effort to
-    /// `~/.lingxi/settings.json` — see [`Self::apply_config_shorthand`].
+    /// `verbose`, `theme`, `enableWorkflows`, `leftArrowOpensAgents`) plus the
+    /// `defaultToAgentsView` (that one still takes effect next session).
+    /// `workflowSizeGuideline` now updates the live session-owned carrier AND
+    /// persists best-effort to `~/.lingxi/settings.json` for future sessions —
+    /// see [`Self::apply_config_shorthand`].
     pub(crate) fn cmd_config(&mut self, args: &str) -> ChatOutcome {
         let args = args.trim();
         if args.is_empty() {
+            let dynamic_workflows_enabled = self
+                .dynamic_workflows_state()
+                .map(|state| state.0)
+                .unwrap_or_else(|_| {
+                    tui_core::theme_persist::load_enable_workflows().unwrap_or(true)
+                });
+            let workflow_size_guideline = self
+                .workflow_size_guideline_state()
+                .map(|state| state.value.to_string())
+                .unwrap_or_else(|_| {
+                    tui_core::theme_persist::load_workflow_size_guideline()
+                        .unwrap_or_else(|| "medium".to_string())
+                });
             let view = ScreenView::settings(
                 self.theme_name,
                 self.bottom_pane.vim_enabled(),
                 self.transcript.verbose(),
+                dynamic_workflows_enabled,
+                &workflow_size_guideline,
                 // Agents-view rows (2.1.220): shown only while agent view is
                 // enabled, mirroring the oracle's `...$H()?[row]:[]` /
                 // `...H7e()?[row]:[]` spreads.
@@ -2673,12 +2776,17 @@ impl ChatWidget {
                 tui_core::theme_persist::save_theme_setting(setting);
                 Ok(format!("Set theme to {value}."))
             }
+            "enableWorkflows" => {
+                let want = parse_bool("enableWorkflows")?;
+                self.set_dynamic_workflows_state(want)?;
+                tui_core::theme_persist::save_enable_workflows(want);
+                Ok(format!("Set enableWorkflows to {want}."))
+            }
             // parity 2.1.207 "Dynamic workflow size": the `workflowSizeGuideline`
             // enum (`unrestricted`/`small`/`medium`/`large`) that flavors the
-            // Workflow tool's prompt appendix. Persisted to settings.json and
-            // read back at startup (the Workflow tool freezes the value per
-            // session, like the binary's `Jvd` cache), so a change takes effect
-            // for the NEXT session.
+            // Workflow tool's prompt appendix and workflow warning cap.
+            // Persisted to settings.json for future sessions and also applied
+            // live to the current session-owned carrier.
             "workflowSizeGuideline" => {
                 const CHOICES: [&str; 4] = ["unrestricted", "small", "medium", "large"];
                 if !CHOICES.contains(&value) {
@@ -2687,11 +2795,8 @@ impl ChatWidget {
                         CHOICES.join(", ")
                     ));
                 }
-                if traits::session_flags::workflow_size_guideline_is_managed() {
-                    return Err("workflowSizeGuideline is managed by enterprise policy".to_string());
-                }
                 tui_core::theme_persist::save_workflow_size_guideline(value);
-                let _ = traits::session_flags::set_workflow_size_guideline(value, false);
+                self.set_workflow_size_guideline_state(value)?;
                 Ok(format!("Set workflowSizeGuideline to {value}."))
             }
             // parity 2.1.220 agents-view settings (the `/config` rows
@@ -3215,6 +3320,37 @@ impl ChatWidget {
         let records = runtime
             .block_on(registry.list_workflows())
             .unwrap_or_default();
+        let live_effort = self
+            .orchestrator
+            .as_ref()
+            .and_then(|handle| runtime.block_on(handle.current_effort()));
+        let workflows_enabled = self
+            .orchestrator
+            .as_ref()
+            .is_some_and(|handle| runtime.block_on(handle.dynamic_workflows_enabled()));
+        let current_model = self
+            .session
+            .models
+            .iter()
+            .find(|model| model.is_current)
+            .map_or("", |model| model.request_model.as_str());
+        let warning_config = crate::bottom_pane::workflows_view::WorkflowWarningConfig {
+            ultracode_active: UltracodeGate {
+                model: current_model,
+                effort: live_effort.as_deref(),
+                workflows_enabled,
+            }
+            .active(),
+            guideline_agent_cap: self
+                .workflow_size_guideline_state()
+                .ok()
+                .and_then(|state| {
+                    (!state.is_default)
+                        .then(|| WorkflowSizeGuideline::from_wire(state.value).agent_cap())
+                })
+                .flatten(),
+            ..Default::default()
+        };
         let mut rows: Vec<tui_core::multiagent::WorkflowRow> = records
             .into_iter()
             .map(|rec| {
@@ -3224,7 +3360,7 @@ impl ChatWidget {
                 if let Ok(chunk) = runtime.block_on(registry.output(&task_id, None)) {
                     let (agents, phases) =
                         tui_core::multiagent::parse_workflow_spool(&chunk.content);
-                    row.agent_count = agents;
+                    row.agent_count = row.agent_count.max(agents);
                     row.phases = phases;
                 }
                 row
@@ -3232,7 +3368,7 @@ impl ChatWidget {
             .collect();
         // Newest-first — the backing registry (a HashMap) has no inherent order.
         tui_core::multiagent::sort_workflows_newest_first(&mut rows);
-        self.bottom_pane.show_workflows(rows);
+        self.bottom_pane.show_workflows(rows, warning_config);
         ChatOutcome::Continue
     }
 
@@ -5272,6 +5408,7 @@ mod tests {
     fn cmd_config_shorthand_sets_and_reports_errors() {
         let prior_workflow = traits::session_flags::workflow_size_guideline();
         let prior_workflow_managed = traits::session_flags::workflow_size_guideline_is_managed();
+        let prior_workflow_default = traits::session_flags::workflow_size_guideline_is_default();
         let _ = traits::session_flags::set_workflow_size_guideline("medium", false);
 
         // vim=true applies live and confirms.
@@ -5329,19 +5466,72 @@ mod tests {
         );
         assert!(sys.is_error());
 
-        let _ = traits::session_flags::set_workflow_size_guideline(
+        let _ = traits::session_flags::set_workflow_size_guideline_with_source(
             prior_workflow,
             prior_workflow_managed,
+            prior_workflow_default,
         );
     }
 
     #[test]
-    fn managed_workflow_size_cannot_be_overridden_by_config_shorthand() {
-        let prior = traits::session_flags::workflow_size_guideline();
-        let prior_managed = traits::session_flags::workflow_size_guideline_is_managed();
-        let _ = traits::session_flags::set_workflow_size_guideline("large", true);
+    fn dynamic_workflows_config_is_live_session_scoped_and_managed_safe() {
+        use crate::bottom_pane::screen_view::ScreenView;
 
-        let mut w = widget();
+        let _guard = crate::ENV_LOCK.lock().unwrap();
+        let prior_config_dir = std::env::var_os("LINGXI_CONFIG_DIR");
+        let config_dir = std::env::temp_dir().join(format!(
+            "lingxi_dynamic_workflows_config_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var("LINGXI_CONFIG_DIR", &config_dir);
+
+        let (mut w, mock) = widget_with_orchestrator();
+        mock.set_dynamic_workflows_gate(true, false);
+        assert!(matches!(
+            w.cmd_config("enableWorkflows=false"),
+            ChatOutcome::Continue
+        ));
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(sys.body(), "Set enableWorkflows to false.");
+        assert!(!sys.is_error());
+        assert_eq!(
+            tui_core::theme_persist::load_enable_workflows_from(&config_dir.join("settings.json")),
+            Some(false)
+        );
+
+        w.cmd_config("");
+        let body = w
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|view| view.as_any().downcast_ref::<ScreenView>())
+            .expect("settings screen")
+            .body_text();
+        assert!(body.contains("Dynamic workflows") && body.contains("off"));
+
+        mock.set_dynamic_workflows_gate(false, true);
+        let mut managed_widget = widget();
+        managed_widget.set_orchestrator(mock);
+        managed_widget.cmd_config("enableWorkflows=true");
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&managed_widget, 0);
+        assert_eq!(
+            sys.body(),
+            "enableWorkflows is managed by enterprise policy"
+        );
+        assert!(sys.is_error());
+
+        match prior_config_dir {
+            Some(value) => std::env::set_var("LINGXI_CONFIG_DIR", value),
+            None => std::env::remove_var("LINGXI_CONFIG_DIR"),
+        }
+        std::fs::remove_dir_all(config_dir).ok();
+    }
+
+    #[test]
+    fn managed_workflow_size_cannot_be_overridden_by_config_shorthand() {
+        let (mut w, mock) = widget_with_orchestrator();
+        mock.set_workflow_size_guideline("large", true, false);
         w.cmd_config("workflowSizeGuideline=small");
         let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
         assert_eq!(
@@ -5349,9 +5539,57 @@ mod tests {
             "workflowSizeGuideline is managed by enterprise policy"
         );
         assert!(sys.is_error());
-        assert_eq!(traits::session_flags::workflow_size_guideline(), "large");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        assert_eq!(
+            runtime.block_on(traits::OrchestratorHandle::workflow_size_guideline(
+                mock.as_ref()
+            )),
+            "large"
+        );
+    }
 
-        let _ = traits::session_flags::set_workflow_size_guideline(prior, prior_managed);
+    #[test]
+    fn workflow_size_config_is_live_session_scoped() {
+        use crate::bottom_pane::screen_view::ScreenView;
+
+        let (mut w, mock) = widget_with_orchestrator();
+        mock.set_workflow_size_guideline("medium", false, true);
+        assert!(matches!(
+            w.cmd_config("workflowSizeGuideline=small"),
+            ChatOutcome::Continue
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        assert_eq!(
+            runtime.block_on(traits::OrchestratorHandle::workflow_size_guideline(
+                mock.as_ref()
+            )),
+            "small"
+        );
+        assert!(
+            !runtime.block_on(
+                traits::OrchestratorHandle::workflow_size_guideline_is_default(mock.as_ref())
+            ),
+            "live /config changes are explicit, not built-in defaults"
+        );
+
+        w.cmd_config("");
+        let body = w
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|view| view.as_any().downcast_ref::<ScreenView>())
+            .expect("settings screen")
+            .body_text();
+        assert!(
+            body.contains("Dynamic workflow size") && body.contains("small"),
+            "{body}"
+        );
     }
 
     /// parity 2.1.220: the `/config` shorthand resolves keys against the SAME
@@ -8544,7 +8782,10 @@ mod tests {
     #[test]
     fn workflow_events_reach_an_already_open_picker() {
         let mut widget = widget();
-        widget.bottom_pane.show_workflows(Vec::new());
+        widget.bottom_pane.show_workflows(
+            Vec::new(),
+            crate::bottom_pane::workflows_view::WorkflowWarningConfig::default(),
+        );
 
         widget.apply_turn_event(TurnEvent::MultiAgent(
             tui_core::multiagent::MultiAgentEvent::WorkflowUpsert(

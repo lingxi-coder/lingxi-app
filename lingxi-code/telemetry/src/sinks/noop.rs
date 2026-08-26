@@ -16,12 +16,14 @@ pub struct NoOpSink;
 #[async_trait]
 impl AnalyticsSink for NoOpSink {
     async fn log_event(&self, name: &str, metadata: LogEventMetadata) {
-        tracing::debug!(
-            sink = "noop",
-            event = name,
-            field_count = metadata.len(),
-            "telemetry event discarded by NoOpSink",
-        );
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!(
+                sink = "noop",
+                event = name,
+                field_count = metadata.len(),
+                "telemetry event discarded by NoOpSink",
+            );
+        }
     }
 
     async fn log_event_async(&self, name: &str, metadata: LogEventMetadata) {

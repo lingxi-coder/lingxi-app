@@ -103,7 +103,7 @@ pub async fn dispatch_event(
             //
             // stream-json P4: emit the reconstructed SSE event for
             // --include-partial-messages BEFORE the normal handling.
-            {
+            if output.wants_partial_stream_events() {
                 let usage_val = json!({
                     "input_tokens": response.usage.billable_tokens.input,
                     "cache_creation_input_tokens": response.usage.billable_tokens.cache_write,
@@ -138,7 +138,7 @@ pub async fn dispatch_event(
             content_block,
         } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
-            {
+            if output.wants_partial_stream_events() {
                 let cb_val = reconstruct_content_block_json(&content_block);
                 let event_json = serde_json::to_string(&json!({
                     "type": "content_block_start",
@@ -199,7 +199,7 @@ pub async fn dispatch_event(
         }
         LlmEvent::ContentBlockDelta { index, delta } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
-            {
+            if output.wants_partial_stream_events() {
                 let delta_val = reconstruct_delta_json(&delta);
                 let event_json = serde_json::to_string(&json!({
                     "type": "content_block_delta",
@@ -246,7 +246,7 @@ pub async fn dispatch_event(
         }
         LlmEvent::ContentBlockStop { index } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
-            {
+            if output.wants_partial_stream_events() {
                 let event_json = serde_json::to_string(&json!({
                     "type": "content_block_stop",
                     "index": index
@@ -299,7 +299,7 @@ pub async fn dispatch_event(
         }
         LlmEvent::MessageDelta { delta, usage } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
-            {
+            if output.wants_partial_stream_events() {
                 let usage_val = usage.as_ref().map(|u| {
                     json!({
                         "output_tokens": u.billable_tokens.output
@@ -358,11 +358,13 @@ pub async fn dispatch_event(
         // in the response field but we forward the already-accumulated blocks).
         LlmEvent::MessageStop | LlmEvent::Completed { .. } => {
             // stream-json P4: emit message_stop for --include-partial-messages.
-            let event_json = serde_json::to_string(&json!({
-                "type": "message_stop"
-            }))
-            .unwrap_or_default();
-            output.emit_stream_event(&event_json, false).await;
+            if output.wants_partial_stream_events() {
+                let event_json = serde_json::to_string(&json!({
+                    "type": "message_stop"
+                }))
+                .unwrap_or_default();
+                output.emit_stream_event(&event_json, false).await;
+            }
             Ok(RouterAction::EndOfStream)
         }
     }

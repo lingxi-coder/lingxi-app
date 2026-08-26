@@ -307,12 +307,23 @@ final class ConversationModel: ObservableObject {
     static let mainAgentID = "main"
 
     /// The full visible transcript (user + assistant turns).
-    @Published var messages: [Message]
+    @Published var messages: [Message] {
+        didSet {
+            if !suppressIndexRebuild {
+                rebuildMessageIndex()
+            }
+        }
+    }
     /// The chat surface's ordered render list: plain messages plus per-turn
     /// execution traces / shell cards. `messages` remains the compatibility
     /// transcript used by voice/setup surfaces.
     @Published var items: [ConversationRenderItem] {
-        didSet { timelineGroupsCache = nil }
+        didSet {
+            timelineGroupsCache = nil
+            if !suppressIndexRebuild {
+                rebuildItemIndex()
+            }
+        }
     }
 
     /// Session-scoped agent roster.  The first row is always the root agent;
@@ -374,6 +385,58 @@ final class ConversationModel: ObservableObject {
     }
 
     private var timelineGroupsCache: [ConversationTimelineGroup]?
+    private var messageIndexByID: [UUID: Int] = [:]
+    private var itemIndexByMessageID: [UUID: Int] = [:]
+    private var suppressIndexRebuild = false
+
+    /// Subscript updates that preserve array shape and element identities do
+    /// not require rebuilding the UUID maps. Streaming uses this around token
+    /// replacements and run-card updates; structural append/replace paths keep
+    /// the normal observer rebuild.
+    func withIndexRebuildSuppressed<T>(_ body: () -> T) -> T {
+        suppressIndexRebuild = true
+        defer { suppressIndexRebuild = false }
+        return body()
+    }
+
+    func indexOfMessage(id: UUID) -> Int? {
+        if let cached = messageIndexByID[id],
+           messages.indices.contains(cached),
+           messages[cached].id == id {
+            return cached
+        }
+        rebuildMessageIndex()
+        return messageIndexByID[id]
+    }
+
+    func indexOfMessageItem(id: UUID) -> Int? {
+        if let cached = itemIndexByMessageID[id],
+           items.indices.contains(cached),
+           case let .message(existing) = items[cached],
+           existing.id == id {
+            return cached
+        }
+        rebuildItemIndex()
+        return itemIndexByMessageID[id]
+    }
+
+    private func rebuildMessageIndex() {
+        var map = [UUID: Int](minimumCapacity: messages.count)
+        for (index, message) in messages.enumerated() {
+            map[message.id] = index
+        }
+        messageIndexByID = map
+    }
+
+    private func rebuildItemIndex() {
+        var map = [UUID: Int]()
+        for (index, item) in items.enumerated() {
+            if case let .message(message) = item {
+                map[message.id] = index
+            }
+        }
+        itemIndexByMessageID = map
+    }
 
     /// Number of times the projection was actually rebuilt. Test-only signal;
     /// production code must not branch on it.
@@ -550,6 +613,8 @@ final class ConversationModel: ObservableObject {
         self.permissionOptions = [
             "default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"
         ].map { ConversationPermissionOption(id: $0, available: true, disabledReason: nil) }
+        rebuildMessageIndex()
+        rebuildItemIndex()
     }
 
     /// Replace the agent roster while retaining the selected row when it is
@@ -2036,18 +2101,15 @@ final class MockConversationSource: ConversationSource {
                 tag: message.tag,
                 text: message.text
             )
-            model.messages[streamingIndex] = stableMessage
-            if let itemIndex = streamingItemIndex,
-               model.items.indices.contains(itemIndex) {
-                model.items[itemIndex] = .message(stableMessage)
-            } else if let itemIndex = model.items.firstIndex(where: { item in
-                if case let .message(existing) = item {
-                    return existing.id == oldMessage.id
+            model.withIndexRebuildSuppressed {
+                model.messages[streamingIndex] = stableMessage
+                if let itemIndex = streamingItemIndex,
+                   model.items.indices.contains(itemIndex) {
+                    model.items[itemIndex] = .message(stableMessage)
+                } else if let itemIndex = model.indexOfMessageItem(id: oldMessage.id) {
+                    model.items[itemIndex] = .message(stableMessage)
+                    streamingItemIndex = itemIndex
                 }
-                return false
-            }) {
-                model.items[itemIndex] = .message(stableMessage)
-                streamingItemIndex = itemIndex
             }
             model.messageDetails.removeValue(forKey: oldMessage.id)
             if let detail {
@@ -2060,17 +2122,16 @@ final class MockConversationSource: ConversationSource {
             with message: Message,
             detail: ConversationMessageDetail?
         ) {
-            guard let messageIndex = model.messages.firstIndex(where: { $0.id == id }) else {
+            guard let messageIndex = model.indexOfMessage(id: id) else {
                 appendMessage(message, detail: detail)
                 return
             }
             let stableMessage = Message(id: id, role: message.role, tag: message.tag, text: message.text)
-            model.messages[messageIndex] = stableMessage
-            if let itemIndex = model.items.firstIndex(where: { item in
-                guard case let .message(existing) = item else { return false }
-                return existing.id == id
-            }) {
-                model.items[itemIndex] = .message(stableMessage)
+            model.withIndexRebuildSuppressed {
+                model.messages[messageIndex] = stableMessage
+                if let itemIndex = model.indexOfMessageItem(id: id) {
+                    model.items[itemIndex] = .message(stableMessage)
+                }
             }
             model.messageDetails.removeValue(forKey: id)
             if let detail {
@@ -2101,7 +2162,9 @@ final class MockConversationSource: ConversationSource {
             mutate(&run)
             if let itemIndex = activeRunItemIndex,
                model.items.indices.contains(itemIndex) {
-                model.items[itemIndex] = .run(run)
+                model.withIndexRebuildSuppressed {
+                    model.items[itemIndex] = .run(run)
+                }
             }
             return run
         }
@@ -2244,7 +2307,9 @@ final class MockConversationSource: ConversationSource {
                     else { continue }
                     run.activeWorkers = 0
                     if let team { run.coordinatorTeam = team }
-                    model.items[itemIndex] = .run(run)
+                    model.withIndexRebuildSuppressed {
+                        model.items[itemIndex] = .run(run)
+                    }
                 }
                 return
             }
@@ -2253,7 +2318,9 @@ final class MockConversationSource: ConversationSource {
                case var .run(run) = model.items[itemIndex] {
                 run.activeWorkers = activeWorkers
                 run.coordinatorTeam = team
-                model.items[itemIndex] = .run(run)
+                model.withIndexRebuildSuppressed {
+                    model.items[itemIndex] = .run(run)
+                }
                 return
             }
 
@@ -2268,7 +2335,9 @@ final class MockConversationSource: ConversationSource {
             else { return }
             run.activeWorkers = activeWorkers
             run.coordinatorTeam = team
-            model.items[itemIndex] = .run(run)
+            model.withIndexRebuildSuppressed {
+                model.items[itemIndex] = .run(run)
+            }
         }
 
         private func acceptTurnEvent(_ event: ClientEvent) -> Bool {

@@ -12,7 +12,7 @@ use fs2::FileExt;
 use futures_core::stream::Stream;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use traits::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use traits::{FileContent, FileEvent, FileSystem, FileSystemCacheIdentity, FlockGuard, FsError};
 
 /// Concrete [`FileSystem`] backed by `tokio::fs`.
 ///
@@ -30,32 +30,93 @@ impl PosixFileSystem {
     }
 }
 
+async fn read_utf8_windowed(
+    path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> Result<FileContent, FsError> {
+    if offset.is_none() && limit.is_none() {
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        return Ok(traits::apply_line_window(content, None, None));
+    }
+    use tokio::io::AsyncBufReadExt;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| FsError::Io(e.to_string()))?;
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut total_lines = 0u64;
+    let skip = offset.unwrap_or(0);
+    let mut taken = 0u64;
+    let mut out = String::new();
+    loop {
+        line.clear();
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        total_lines += 1;
+        if total_lines <= skip {
+            continue;
+        }
+        if let Some(lim) = limit {
+            if taken >= lim {
+                continue;
+            }
+        }
+        let stripped = line.trim_end_matches(['\n', '\r']);
+        if taken > 0 {
+            out.push('\n');
+        }
+        out.push_str(stripped);
+        taken += 1;
+    }
+    Ok(FileContent {
+        content: out,
+        total_lines,
+        truncated: false,
+    })
+}
+
+async fn read_utf8_prefix(path: &str, max_bytes: usize) -> Result<FileContent, FsError> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| FsError::Io(e.to_string()))?;
+    let mut buf = vec![0u8; max_bytes];
+    let n = file
+        .read(&mut buf)
+        .await
+        .map_err(|e| FsError::Io(e.to_string()))?;
+    traits::file_content_from_prefix_bytes(path, buf, n, max_bytes)
+}
+
 #[async_trait]
 impl FileSystem for PosixFileSystem {
+    fn cache_identity(&self) -> Option<FileSystemCacheIdentity> {
+        Some(FileSystemCacheIdentity::new(
+            "posix",
+            self.workspace_root.clone(),
+            0,
+        ))
+    }
+
     async fn read_file(
         &self,
         path: &str,
         offset: Option<u64>,
         limit: Option<u64>,
     ) -> Result<FileContent, FsError> {
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| FsError::Io(e.to_string()))?;
-        let mut lines: Vec<&str> = content.lines().collect();
-        let total_lines = lines.len() as u64;
-        if let Some(off) = offset {
-            let off_usize = usize::try_from(off).unwrap_or(usize::MAX);
-            lines = lines.into_iter().skip(off_usize).collect();
-        }
-        if let Some(lim) = limit {
-            let lim_usize = usize::try_from(lim).unwrap_or(usize::MAX);
-            lines.truncate(lim_usize);
-        }
-        Ok(FileContent {
-            content: lines.join("\n"),
-            total_lines,
-            truncated: false,
-        })
+        read_utf8_windowed(path, offset, limit).await
+    }
+
+    async fn read_file_prefix(&self, path: &str, max_bytes: usize) -> Result<FileContent, FsError> {
+        read_utf8_prefix(path, max_bytes).await
     }
 
     async fn write_file(&self, path: &str, content: &str) -> Result<(), FsError> {
@@ -309,6 +370,14 @@ mod tests {
 
     fn fs_at(root: &std::path::Path) -> PosixFileSystem {
         PosixFileSystem::new(root.to_path_buf())
+    }
+
+    #[test]
+    fn cache_identity_is_stable_across_instances_for_the_same_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = fs_at(dir.path());
+        let second = fs_at(dir.path());
+        assert_eq!(first.cache_identity(), second.cache_identity());
     }
 
     // ---- T4: exclusive-create (O_CREAT | O_EXCL | O_NOFOLLOW) --------------

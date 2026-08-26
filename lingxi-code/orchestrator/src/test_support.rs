@@ -759,6 +759,10 @@ pub struct MockOrchestratorHandle {
     permission_mode: StdMutex<Option<String>>,
     /// Live effort value used by `/effort` command tests.
     effort: StdMutex<Option<String>>,
+    /// Session-owned dynamic-workflow gate exposed through the handle.
+    dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate,
+    /// Session-owned workflow-size state exposed through the handle.
+    workflow_size_guideline: traits::session_flags::WorkflowSizeGuidelineState,
     /// If `Some`, the next `set_permission_mode` call returns `ActionFailed(_)`.
     permission_mode_error: StdMutex<Option<String>>,
     /// Set by `request_exit`. Readable via `was_exit_requested`.
@@ -821,6 +825,8 @@ impl MockOrchestratorHandle {
             switch_model_error: StdMutex::new(None),
             permission_mode: StdMutex::new(Some("default".to_string())),
             effort: StdMutex::new(None),
+            dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate::new(false, false),
+            workflow_size_guideline: traits::session_flags::WorkflowSizeGuidelineState::default(),
             permission_mode_error: StdMutex::new(None),
             exit_requested: AtomicBool::new(false),
             memory_path: StdMutex::new(None),
@@ -912,6 +918,18 @@ impl MockOrchestratorHandle {
     /// Make the next `set_permission_mode` call return `ActionFailed(reason)`.
     pub fn set_permission_mode_error(&self, reason: String) {
         *self.permission_mode_error.lock().unwrap() = Some(reason);
+    }
+    /// Seed the session-owned dynamic-workflow gate.
+    pub fn set_dynamic_workflows_gate(&self, enabled: bool, managed: bool) {
+        self.dynamic_workflows_gate.set(enabled, managed);
+    }
+
+    pub fn set_workflow_size_guideline(&self, value: &str, managed: bool, is_default: bool) {
+        assert!(
+            self.workflow_size_guideline
+                .set_with_source(value, managed, is_default),
+            "test must use a valid workflow size guideline"
+        );
     }
     /// Pre-load the full `CostSnapshot` returned by `snapshot_cost`. If set,
     /// the snapshot is returned verbatim (with `session_id` overwritten to
@@ -1083,6 +1101,59 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn current_effort(&self) -> Option<String> {
         self.effort.lock().unwrap().clone()
+    }
+
+    async fn dynamic_workflows_enabled(&self) -> bool {
+        self.dynamic_workflows_gate.enabled()
+    }
+
+    async fn dynamic_workflows_managed(&self) -> bool {
+        self.dynamic_workflows_gate.managed()
+    }
+
+    async fn workflow_size_guideline(&self) -> String {
+        self.workflow_size_guideline.value().to_string()
+    }
+
+    async fn workflow_size_guideline_managed(&self) -> bool {
+        self.workflow_size_guideline.managed()
+    }
+
+    async fn workflow_size_guideline_state(
+        &self,
+    ) -> traits::session_flags::WorkflowSizeGuidelineSnapshot {
+        self.workflow_size_guideline.snapshot()
+    }
+
+    async fn workflow_size_guideline_is_default(&self) -> bool {
+        self.workflow_size_guideline.is_default()
+    }
+
+    async fn set_dynamic_workflows_enabled(
+        &self,
+        enabled: bool,
+        managed: bool,
+    ) -> Result<(), HandleError> {
+        self.dynamic_workflows_gate.set(enabled, managed);
+        Ok(())
+    }
+
+    async fn set_workflow_size_guideline(
+        &self,
+        value: String,
+        managed: bool,
+        is_default: bool,
+    ) -> Result<(), HandleError> {
+        if self
+            .workflow_size_guideline
+            .set_with_source(&value, managed, is_default)
+        {
+            Ok(())
+        } else {
+            Err(HandleError::ActionFailed(format!(
+                "invalid workflowSizeGuideline: {value}"
+            )))
+        }
     }
 
     async fn set_effort_level(&self, effort: Option<String>) -> Result<(), HandleError> {

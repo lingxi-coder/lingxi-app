@@ -14,6 +14,8 @@
 //! and `os_version` to `"<os> <arch>"`; these helpers feed the real values.
 #![forbid(unsafe_code)]
 
+use std::sync::OnceLock;
+
 const WINDOWS_NT: &str = "Windows_NT";
 const WINDOWS_POWERSHELL_EXE: &str = "powershell.exe";
 const WINDOWS_CMD_EXE: &str = "cmd.exe";
@@ -258,34 +260,39 @@ where
 /// back to a non-empty stub.
 #[must_use]
 pub fn os_version_string() -> String {
-    os_version_string_with(
-        cfg!(windows),
-        || {
-            if let Ok(out) = std::process::Command::new("uname")
-                .arg("-s")
-                .arg("-r")
-                .output()
-            {
-                if out.status.success() {
-                    return parse_uname_sr(&out.stdout);
-                }
-            }
-            None
-        },
-        || {
-            if let Ok(out) = std::process::Command::new("cmd")
-                .args(["/C", "ver"])
-                .output()
-            {
-                if out.status.success() {
-                    return Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
-                }
-            }
-            None
-        },
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-    )
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            os_version_string_with(
+                cfg!(windows),
+                || {
+                    if let Ok(out) = std::process::Command::new("uname")
+                        .arg("-s")
+                        .arg("-r")
+                        .output()
+                    {
+                        if out.status.success() {
+                            return parse_uname_sr(&out.stdout);
+                        }
+                    }
+                    None
+                },
+                || {
+                    if let Ok(out) = std::process::Command::new("cmd")
+                        .args(["/C", "ver"])
+                        .output()
+                    {
+                        if out.status.success() {
+                            return Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
+                        }
+                    }
+                    None
+                },
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+            )
+        })
+        .clone()
 }
 
 /// Local-date string in `YYYY-MM-DD` form, e.g. `2026-06-20`.

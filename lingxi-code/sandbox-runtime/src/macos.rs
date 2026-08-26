@@ -36,7 +36,7 @@
 //!   access to the nested deny. It re-denies only non-glob deny paths STRICTLY
 //!   inside a re-allowed subpath, so it never over-denies.
 
-use crate::env::{encode_sandboxed_command, generate_proxy_env_vars, Platform};
+use crate::env::{encode_sandboxed_command, Platform};
 use crate::fs_args::{ReadConfig, WriteConfig};
 use crate::path_utils::{
     contains_glob_chars, get_dangerous_directories, glob_to_regex, normalize_path_for_sandbox,
@@ -891,6 +891,8 @@ pub struct WrapParams<'a> {
     /// TS this is resolved inside `generateProxyEnvVars`; here the caller
     /// resolves it (mirroring [`generate_proxy_env_vars`]'s pure signature).
     pub tmpdir: &'a str,
+    /// Optional per-session token that validates per-command proxy credentials.
+    pub proxy_auth_token: Option<&'a str>,
 }
 
 /// Wrap a command with the macOS Seatbelt sandbox.
@@ -942,12 +944,14 @@ pub fn wrap_command_with_sandbox_macos(params: &WrapParams<'_>) -> std::io::Resu
     });
 
     // Proxy env vars (KEY=value strings) via the shared utility.
-    let proxy_env_args: Vec<String> = generate_proxy_env_vars(
+    let proxy_env_args: Vec<String> = crate::env::generate_proxy_env_vars_with_auth(
         params.http_proxy_port,
         params.socks_proxy_port,
         params.ca_cert_path,
         Platform::Macos,
         params.tmpdir,
+        Some(params.command),
+        params.proxy_auth_token,
     )
     .into_iter()
     .map(|(k, v)| format!("{k}={v}"))

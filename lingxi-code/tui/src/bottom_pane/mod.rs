@@ -812,17 +812,27 @@ impl BottomPane {
     /// lifecycle events keep the mounted list/detail live. Oracle
     /// `NH_`: with EXACTLY one run, jump straight into its detail view instead
     /// of the list (the initial read is synchronous, so there is no loading gate).
-    pub fn show_workflows(&mut self, rows: Vec<tui_core::multiagent::WorkflowRow>) {
+    pub fn show_workflows(
+        &mut self,
+        rows: Vec<tui_core::multiagent::WorkflowRow>,
+        warning_config: workflows_view::WorkflowWarningConfig,
+    ) {
+        let warning_registry = workflows_view::WorkflowWarningRegistry::default();
         if rows.len() == 1 {
             self.view_stack
                 .push(Box::new(workflows_view::WorkflowDetailView::new(
                     rows[0].clone(),
                     self.theme,
+                    warning_config,
+                    warning_registry,
                 )));
         } else {
             self.view_stack
                 .push(Box::new(workflows_view::WorkflowsView::new(
-                    rows, self.theme,
+                    rows,
+                    self.theme,
+                    warning_config,
+                    warning_registry,
                 )));
         }
     }

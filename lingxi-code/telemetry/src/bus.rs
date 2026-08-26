@@ -59,7 +59,7 @@ impl AnalyticsBus {
             return;
         }
         mirror_analytics_event(name, &metadata);
-        if let Some(sink) = self.sink.read().await.as_ref() {
+        if let Some(sink) = self.sink.read().await.as_ref().cloned() {
             sink.log_event(name, metadata).await;
         } else {
             self.buffer(QueuedEvent {

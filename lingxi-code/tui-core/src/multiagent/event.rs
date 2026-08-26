@@ -26,6 +26,15 @@ pub struct WorkflowProgressEvent {
     pub phase_title: Option<String>,
     /// Latest agent lifecycle state (`start`/`done`/`error`/`cached`).
     pub state: Option<String>,
+    /// Queue timestamp for an agent that has been scheduled but not yet
+    /// allocated, when the runtime supplied one.
+    pub queued_at_ms: Option<u64>,
+    /// Start timestamp for an agent that has actually allocated, when known.
+    pub started_at_ms: Option<u64>,
+    /// Latest aggregate token count reported for the agent.
+    pub tokens: Option<u64>,
+    /// Latest aggregate tool-call count reported for the agent.
+    pub tool_calls: Option<u64>,
 }
 
 /// One multi-agent state update. Task/worker compatibility feeds retain their
@@ -101,14 +110,35 @@ pub fn apply_workflow_progress(row: &mut WorkflowRow, progress: &WorkflowProgres
                 if let Some(state) = progress.state.as_ref() {
                     agent.state.clone_from(state);
                 }
+                if let Some(queued_at_ms) = progress.queued_at_ms {
+                    agent.queued_at_ms.get_or_insert(queued_at_ms);
+                }
+                if let Some(started_at_ms) = progress.started_at_ms {
+                    agent.started_at_ms.get_or_insert(started_at_ms);
+                }
+                if let Some(tokens) = progress.tokens {
+                    agent.tokens = tokens;
+                }
+                if let Some(tool_calls) = progress.tool_calls {
+                    agent.tool_calls = tool_calls;
+                }
             } else {
                 phase.agents.push(WorkflowAgentRow {
                     index: progress.index,
                     label: progress.label.clone().unwrap_or_default(),
                     state: progress.state.clone().unwrap_or_default(),
+                    queued_at_ms: progress.queued_at_ms,
+                    started_at_ms: progress.started_at_ms,
+                    tokens: progress.tokens.unwrap_or(0),
+                    tool_calls: progress.tool_calls.unwrap_or(0),
                 });
             }
             row.agent_count = row.phases.iter().map(|phase| phase.agents.len()).sum();
+            row.total_tokens = row
+                .phases
+                .iter()
+                .flat_map(|phase| phase.agents.iter())
+                .fold(0, |total, agent| total.saturating_add(agent.tokens));
             true
         }
         _ => false,

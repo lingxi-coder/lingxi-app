@@ -13,6 +13,43 @@ use std::sync::Arc;
 use crate::config::NetworkConfig;
 use crate::host::{canonicalize_host, is_valid_host, strip_brackets};
 
+/// Denial reason for an invalid/malformed host byte sequence.
+pub const NETWORK_REASON_MALFORMED_HOST: &str = "malformed host";
+/// Denial reason when the host matches an explicit deny rule.
+pub const NETWORK_REASON_DENY_LIST: &str = "host is on the deny list";
+/// Denial reason when no allow rule matches.
+pub const NETWORK_REASON_NOT_ON_ALLOW_LIST: &str = "host is not on the allow list";
+/// Denial reason when the interactive callback refused the request.
+pub const NETWORK_REASON_USER_DENIED: &str = "user denied";
+/// Denial reason when the interactive callback failed.
+pub const NETWORK_REASON_PERMISSION_PROMPT_FAILED: &str = "permission prompt failed";
+
+/// Final allow/deny decision for one network request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkRequestDecision {
+    /// The request is allowed to proceed.
+    Allow,
+    /// The request is denied with the surfaced reason string.
+    Deny(&'static str),
+}
+
+impl NetworkRequestDecision {
+    /// Whether the request may proceed.
+    #[must_use]
+    pub fn is_allowed(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+
+    /// The surfaced denial reason, when denied.
+    #[must_use]
+    pub fn denied_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Allow => None,
+            Self::Deny(reason) => Some(reason),
+        }
+    }
+}
+
 /// Error returned by an [`AskFn`] callback when it cannot reach a decision (the
 /// Rust analogue of the TS `sandboxAskCallback` throwing). The manager treats
 /// any such error as a denial (`filterNetworkRequest`'s `catch` returns
@@ -95,6 +132,56 @@ pub fn filter_network_request(port: u16, host: &str, config: &NetworkConfig) -> 
     false
 }
 
+/// Full decision variant of [`filter_network_request_with_ask`], including the
+/// user-facing denial reason the proxy records into `<sandbox_violations>`.
+pub async fn filter_network_request_with_ask_decision(
+    port: u16,
+    host: &str,
+    config: &NetworkConfig,
+    ask: Option<&AskFn>,
+) -> NetworkRequestDecision {
+    if !is_valid_host(host) {
+        let quoted = serde_json::to_string(host).unwrap_or_else(|_| format!("{host:?}"));
+        yo(&format!("Denying malformed host: {quoted}:{port}"));
+        return NetworkRequestDecision::Deny(NETWORK_REASON_MALFORMED_HOST);
+    }
+    let canonical = canonicalize_host(host).unwrap_or_else(|| host.to_string());
+    for denied in &config.denied_domains {
+        if matches_domain_pattern(&canonical, denied) {
+            yo(&format!("Denied by config rule: {host}:{port}"));
+            return NetworkRequestDecision::Deny(NETWORK_REASON_DENY_LIST);
+        }
+    }
+    for allowed in &config.allowed_domains {
+        if matches_domain_pattern(&canonical, allowed) {
+            yo(&format!("Allowed by config rule: {host}:{port}"));
+            return NetworkRequestDecision::Allow;
+        }
+    }
+    let strict = config.strict_allowlist == Some(true);
+    let Some(cb) = ask.filter(|_| !strict) else {
+        yo(&format!("No matching config rule, denying: {host}:{port}"));
+        return NetworkRequestDecision::Deny(NETWORK_REASON_NOT_ON_ALLOW_LIST);
+    };
+    yo(&format!(
+        "No matching config rule, asking user: {host}:{port}"
+    ));
+    match cb(host, port).await {
+        Ok(true) => {
+            yo(&format!("User allowed: {host}:{port}"));
+            NetworkRequestDecision::Allow
+        }
+        Ok(false) => {
+            yo(&format!("User denied: {host}:{port}"));
+            NetworkRequestDecision::Deny(NETWORK_REASON_USER_DENIED)
+        }
+        Err(e) => {
+            yo(&format!("Error in permission callback: {e}"));
+            NetworkRequestDecision::Deny(NETWORK_REASON_PERMISSION_PROMPT_FAILED)
+        }
+    }
+}
+
 /// The stderr line `yo(...)` emits for `msg`, or `None` when it stays silent.
 ///
 /// 2.1.220 `yo` @229781624:
@@ -156,51 +243,9 @@ pub async fn filter_network_request_with_ask(
     config: &NetworkConfig,
     ask: Option<&AskFn>,
 ) -> bool {
-    if !is_valid_host(host) {
-        // `Denying malformed host: ${JSON.stringify(t)}:${e}`.
-        let quoted = serde_json::to_string(host).unwrap_or_else(|_| format!("{host:?}"));
-        yo(&format!("Denying malformed host: {quoted}:{port}"));
-        return false;
-    }
-    let canonical = canonicalize_host(host).unwrap_or_else(|| host.to_string());
-    for denied in &config.denied_domains {
-        if matches_domain_pattern(&canonical, denied) {
-            yo(&format!("Denied by config rule: {host}:{port}"));
-            return false;
-        }
-    }
-    for allowed in &config.allowed_domains {
-        if matches_domain_pattern(&canonical, allowed) {
-            yo(&format!("Allowed by config rule: {host}:{port}"));
-            return true;
-        }
-    }
-    // Unmatched — `if(!r||xl.network.strictAllowlist)`: no callback OR strict
-    // mode ⇒ deterministic deny BEFORE the callback is consulted (2.1.219
-    // `strictAllowlist` — strict must never fire the interactive ask).
-    let strict = config.strict_allowlist == Some(true);
-    let Some(cb) = ask.filter(|_| !strict) else {
-        yo(&format!("No matching config rule, denying: {host}:{port}"));
-        return false;
-    };
-    yo(&format!(
-        "No matching config rule, asking user: {host}:{port}"
-    ));
-    match cb(host, port).await {
-        Ok(true) => {
-            yo(&format!("User allowed: {host}:{port}"));
-            true
-        }
-        Ok(false) => {
-            yo(&format!("User denied: {host}:{port}"));
-            false
-        }
-        // A callback error (the TS callback throwing) denies — the TS `catch`.
-        Err(e) => {
-            yo(&format!("Error in permission callback: {e}"));
-            false
-        }
-    }
+    filter_network_request_with_ask_decision(port, host, config, ask)
+        .await
+        .is_allowed()
 }
 
 #[cfg(test)]

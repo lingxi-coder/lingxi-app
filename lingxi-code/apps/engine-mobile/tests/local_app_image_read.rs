@@ -18,7 +18,7 @@ fn engine_mobile_manifest_declares_tool_file_image_read() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let manifest_path = Path::new(manifest_dir).join("Cargo.toml");
     let manifest_text = std::fs::read_to_string(&manifest_path).expect(
-        "Failed to read engine-mobile Cargo.toml; test must run via `cargo test -p engine-mobile`"
+        "Failed to read engine-mobile Cargo.toml; test must run via `cargo test -p engine-mobile`",
     );
 
     let tool_file_line = manifest_text

@@ -754,10 +754,7 @@ mod deferred_tool_resume_tests {
     #[async_trait]
     impl BuiltinHookHandler for CaptureTraceHook {
         async fn handle(&self, _event: &HookEvent, ctx: &HookContext) -> HookResult {
-            self.seen
-                .lock()
-                .unwrap()
-                .push(ctx.trace_context.clone());
+            self.seen.lock().unwrap().push(ctx.trace_context.clone());
             HookResult {
                 outcome: HookOutcome::Success,
                 stdout: String::new(),
@@ -981,7 +978,8 @@ mod deferred_tool_resume_tests {
             .await
             .expect("read transcript");
         assert_eq!(
-            raw.matches(r#""tool_use_id":"toolu_resume_deferred""#).count(),
+            raw.matches(r#""tool_use_id":"toolu_resume_deferred""#)
+                .count(),
             1,
             "one persisted tool_result line after first resume"
         );

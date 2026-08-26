@@ -173,35 +173,59 @@ object AndroidDeviceControlController {
             )?.use { cursor ->
                 val idColumn = cursor.getColumnIndexOrThrow(ContactsContract.Contacts._ID)
                 val nameColumn = cursor.getColumnIndexOrThrow(ContactsContract.Contacts.DISPLAY_NAME)
-                while (cursor.moveToNext() && result.length() < limit) {
+                val ids = ArrayList<String>(limit)
+                val names = LinkedHashMap<String, String>()
+                while (cursor.moveToNext() && ids.size < limit) {
                     val id = cursor.getString(idColumn)
-                    val phones = JSONArray()
-                    ctx.contentResolver.query(
-                        ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                        arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
-                        "${ContactsContract.CommonDataKinds.Phone.CONTACT_ID} = ?",
-                        arrayOf(id),
-                        null,
-                    )?.use { phoneCursor ->
-                        val numberColumn = phoneCursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER)
-                        while (phoneCursor.moveToNext()) phones.put(phoneCursor.getString(numberColumn))
+                    ids.add(id)
+                    names[id] = cursor.getString(nameColumn) ?: ""
+                }
+                if (ids.isEmpty()) {
+                    return@use
+                }
+                val inClause = ids.joinToString(",") { "?" }
+                val phonesById = HashMap<String, JSONArray>()
+                ctx.contentResolver.query(
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    arrayOf(
+                        ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER,
+                    ),
+                    "${ContactsContract.CommonDataKinds.Phone.CONTACT_ID} IN ($inClause)",
+                    ids.toTypedArray(),
+                    null,
+                )?.use { phoneCursor ->
+                    val idCol = phoneCursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.CONTACT_ID)
+                    val numberColumn = phoneCursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                    while (phoneCursor.moveToNext()) {
+                        val id = phoneCursor.getString(idCol)
+                        phonesById.getOrPut(id) { JSONArray() }.put(phoneCursor.getString(numberColumn))
                     }
-                    val emails = JSONArray()
-                    ctx.contentResolver.query(
-                        ContactsContract.CommonDataKinds.Email.CONTENT_URI,
-                        arrayOf(ContactsContract.CommonDataKinds.Email.ADDRESS),
-                        "${ContactsContract.CommonDataKinds.Email.CONTACT_ID} = ?",
-                        arrayOf(id),
-                        null,
-                    )?.use { emailCursor ->
-                        val addressColumn = emailCursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.ADDRESS)
-                        while (emailCursor.moveToNext()) emails.put(emailCursor.getString(addressColumn))
+                }
+                val emailsById = HashMap<String, JSONArray>()
+                ctx.contentResolver.query(
+                    ContactsContract.CommonDataKinds.Email.CONTENT_URI,
+                    arrayOf(
+                        ContactsContract.CommonDataKinds.Email.CONTACT_ID,
+                        ContactsContract.CommonDataKinds.Email.ADDRESS,
+                    ),
+                    "${ContactsContract.CommonDataKinds.Email.CONTACT_ID} IN ($inClause)",
+                    ids.toTypedArray(),
+                    null,
+                )?.use { emailCursor ->
+                    val idCol = emailCursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.CONTACT_ID)
+                    val addressColumn = emailCursor.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Email.ADDRESS)
+                    while (emailCursor.moveToNext()) {
+                        val id = emailCursor.getString(idCol)
+                        emailsById.getOrPut(id) { JSONArray() }.put(emailCursor.getString(addressColumn))
                     }
+                }
+                for (id in ids) {
                     result.put(JSONObject()
                         .put("id", id)
-                        .put("display_name", cursor.getString(nameColumn) ?: "")
-                        .put("phones", phones)
-                        .put("emails", emails))
+                        .put("display_name", names[id] ?: "")
+                        .put("phones", phonesById[id] ?: JSONArray())
+                        .put("emails", emailsById[id] ?: JSONArray()))
                 }
             }
             result.toString()

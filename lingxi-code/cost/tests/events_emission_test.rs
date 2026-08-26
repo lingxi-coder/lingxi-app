@@ -64,7 +64,7 @@ async fn emit_api_success_fires_with_field_subset() {
             is_non_interactive_session: false,
             print: false,
             is_tty: false,
-            query_source: "user".into(),
+            query_source: "repl_main_thread".into(),
             permission_mode: "default".into(),
             ttft_ms: Some(42),
             fast_mode: true,
@@ -204,7 +204,7 @@ async fn emit_api_success_fires_with_field_subset() {
         other => panic!("isTTY must be Bool, got {other:?}"),
     }
     match &payload["querySource"] {
-        AnalyticsValue::String(s) => assert_eq!(s, "user"),
+        AnalyticsValue::String(s) => assert_eq!(s, "repl_main_thread"),
         other => panic!("querySource must be String, got {other:?}"),
     }
     match &payload["permissionMode"] {
@@ -261,7 +261,7 @@ async fn emit_api_success_omits_absent_optional_fields() {
             is_non_interactive_session: false,
             print: false,
             is_tty: false,
-            query_source: "user".into(),
+            query_source: "repl_main_thread".into(),
             permission_mode: "default".into(),
             ttft_ms: None,
             fast_mode: false,

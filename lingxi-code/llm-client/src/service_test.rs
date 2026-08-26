@@ -1317,6 +1317,24 @@ mod tests {
     }
 
     #[test]
+    fn build_api_metadata_user_id_reloads_extra_metadata_each_call() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_EXTRA_METADATA", r#"{"team":"first"}"#);
+        assert_eq!(
+            ApiService::build_api_metadata_user_id("dev", "acct", "sess", None),
+            r#"{"team":"first","device_id":"dev","account_uuid":"acct","session_id":"sess"}"#
+        );
+
+        std::env::set_var("CLAUDE_CODE_EXTRA_METADATA", r#"{"team":"second"}"#);
+        assert_eq!(
+            ApiService::build_api_metadata_user_id("dev", "acct", "sess", None),
+            r#"{"team":"second","device_id":"dev","account_uuid":"acct","session_id":"sess"}"#
+        );
+
+        std::env::remove_var("CLAUDE_CODE_EXTRA_METADATA");
+    }
+
+    #[test]
     fn fallback_signature_stripping_only_changes_assistant_authenticated_blocks() {
         let text = || crate::ContentBlock::Text {
             text: "keep".to_string(),
@@ -1402,6 +1420,29 @@ mod tests {
             mt < foo,
             "colliding key keeps its position; new key appends at the tail: {keys:?}"
         );
+
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+        clear_thinking_env();
+    }
+
+    #[tokio::test]
+    async fn extra_body_reloads_each_call() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
+
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"foo":"first"}"#);
+        let first = body_after_inject(&adapter, &request).await;
+        assert_eq!(first["foo"], serde_json::json!("first"));
+
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"foo":"second"}"#);
+        let second = body_after_inject(&adapter, &request).await;
+        assert_eq!(second["foo"], serde_json::json!("second"));
 
         std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
         clear_thinking_env();
@@ -1605,9 +1646,11 @@ mod tests {
             ..Default::default()
         });
         let body = body_after_inject(&adapter, &request).await;
-        assert!(body["anthropic_beta"].as_array().is_some_and(|betas| betas
-            .iter()
-            .any(|beta| { beta.as_str() == Some(crate::model::betas::TOOL_SEARCH_TOOL_3P) })));
+        assert!(body["anthropic_beta"].as_array().is_some_and(|betas| {
+            betas
+                .iter()
+                .any(|beta| beta.as_str() == Some(crate::model::betas::TOOL_SEARCH_TOOL_3P))
+        }));
         assert!(body.get("anthropic-beta").is_none());
     }
 
@@ -3757,6 +3800,79 @@ mod tests {
             };
             Box::pin(async move { resp })
         }
+    }
+
+    /// A transport whose connect/header phase never resolves.
+    struct HangingOpenTransport {
+        calls: Mutex<usize>,
+    }
+
+    impl HangingOpenTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::new(0),
+            })
+        }
+
+        fn call_count(&self) -> usize {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    impl Transport for HangingOpenTransport {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            Box::pin(async {
+                Err(LlmError::Transport {
+                    message: "execute not scripted".to_string(),
+                })
+            })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            *self.calls.lock().unwrap() += 1;
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// 2.1.245/246 first-byte parity: a request that never receives response
+    /// headers retries once, then terminates with the exact user-facing copy.
+    #[tokio::test(start_paused = true)]
+    async fn streaming_first_byte_timeout_retries_once_then_stops() {
+        let transport = HangingOpenTransport::new();
+        let adapter = make_adapter(Arc::clone(&transport) as Arc<dyn Transport>)
+            .with_stream_first_byte_timeout_override(std::time::Duration::from_millis(50));
+
+        let error = match adapter
+            .stream(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("a permanently silent connect phase must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            crate::model::stream_watchdog::is_stream_no_response(&error),
+            "expected StreamNoResponse marker, got {error:?}"
+        );
+        assert_eq!(
+            crate::error::error_display_text(&error),
+            "No response from API"
+        );
+        assert_eq!(transport.call_count(), 2, "must retry exactly once");
     }
 
     /// 3c-T1 pin: a connect-phase 429 with `retry-after: 7` on the streaming

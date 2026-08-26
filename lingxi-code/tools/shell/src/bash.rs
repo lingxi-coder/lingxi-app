@@ -267,13 +267,28 @@ pub fn resolve_timeout_ms(input: &Value) -> u64 {
 /// the env var is absent, empty, or names an unsupported shell.
 ///
 /// The return value is either the env-var string (leaked to `'static` so the
-/// signature stays `&'static str`) or a compile-time constant.
+/// signature stays `&'static str`) or a compile-time constant. Unique env
+/// values are leaked at most once (tests may mutate `LINGXI_SHELL`).
 #[must_use]
 pub fn resolve_shell_path() -> &'static str {
-    if let Ok(v) = std::env::var("LINGXI_SHELL") {
-        if !v.is_empty() && (v.contains("bash") || v.contains("zsh")) {
-            return Box::leak(v.into_boxed_str());
+    static CACHE: std::sync::Mutex<Option<(String, &'static str)>> = std::sync::Mutex::new(None);
+    let env_key = std::env::var("LINGXI_SHELL").unwrap_or_default();
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((k, v)) = cache.as_ref() {
+        if k == &env_key {
+            return v;
         }
+    }
+    let resolved = resolve_shell_path_uncached(&env_key);
+    *cache = Some((env_key, resolved));
+    resolved
+}
+
+fn resolve_shell_path_uncached(env_key: &str) -> &'static str {
+    if !env_key.is_empty() && (env_key.contains("bash") || env_key.contains("zsh")) {
+        return Box::leak(env_key.to_string().into_boxed_str());
     }
     // Windows: Git Bash discovery (cc 2.1.219 `MQ`/`P6n`) — env override with
     // validation, then Program Files probes, then git-on-PATH. Falls through to
@@ -641,6 +656,24 @@ fn is_within_allowed(cwd: &std::path::Path, dir: &std::path::Path) -> bool {
 
 /// The interrupt/abort marker appended to stderr (`BashTool.tsx:602-604`).
 const ABORT_MARKER: &str = "<error>Command was aborted before completion</error>";
+const SANDBOX_VIOLATIONS_OPEN: &str = "<sandbox_violations>";
+const SANDBOX_VIOLATIONS_CLOSE: &str = "</sandbox_violations>";
+
+fn append_sandbox_violations(stderr: &str, violations: &[String]) -> String {
+    if violations.is_empty() {
+        return stderr.to_string();
+    }
+    let mut out = stderr.to_string();
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(SANDBOX_VIOLATIONS_OPEN);
+    out.push('\n');
+    out.push_str(&violations.join("\n"));
+    out.push('\n');
+    out.push_str(SANDBOX_VIOLATIONS_CLOSE);
+    out
+}
 
 /// Build the MODEL-facing `tool_result` content string exactly as claude-code's
 /// Bash result mapper: `content: [c, u, d].filter(Boolean).join("\n")`
@@ -882,6 +915,7 @@ fn build_interrupted_result(
     stderr_partial: &str,
     cmd_str: &str,
     timeout_ms: Option<u64>,
+    sandbox_violations: &[String],
 ) -> ToolCallResult {
     let (stdout_clean, _ansi_out) = strip_ansi_count(stdout_partial);
     let (stderr_clean, _ansi_err) = strip_ansi_count(stderr_partial);
@@ -898,6 +932,7 @@ fn build_interrupted_result(
         }
         None => stderr_clean,
     };
+    let stderr_clean = append_sandbox_violations(&stderr_clean, sandbox_violations);
     let normalized =
         crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(&stdout_clean));
     // no-truncation: A1/STEP-4. 2.1.220 hands `data.stdout` to the result
@@ -2516,6 +2551,12 @@ impl Tool for BashTool {
         // state (e.g. bwrap mount points). No-op for the default
         // `LegacyWrapRunner`; only the live runner has anything to clean up.
         self.ctx.sandbox_runner.cleanup_after_command().await;
+        let sandbox_violation_lines = self
+            .ctx
+            .sandbox_runner
+            .command_violations(&spawn_cmd)
+            .await
+            .lines;
         // claude-code surfaces a timed-out/interrupted command as a SUCCESSFUL
         // result with `interrupted: true` plus whatever partial output it
         // produced (`BashTool.tsx` ~602-605 / 720), NOT a hard error. Both
@@ -2592,6 +2633,7 @@ impl Tool for BashTool {
                     &out.stderr,
                     &cmd_str,
                     Some(timeout_ms),
+                    &sandbox_violation_lines,
                 ))
             }
             Ok(traits::ForegroundOutcome::Completed(out)) => {
@@ -2729,6 +2771,8 @@ impl Tool for BashTool {
                     ),
                     None => stderr_clean,
                 };
+                let stderr_clean =
+                    append_sandbox_violations(&stderr_clean, &sandbox_violation_lines);
                 // Model-facing stdout normalization (claude-code): strip leading
                 // whitespace-only lines + trimEnd, then drop outer empty lines.
                 let normalized = crate::shared::strip_empty_lines(
@@ -2941,7 +2985,13 @@ impl Tool for BashTool {
                 // kill, so no partial output is available on this arm — emit the
                 // correct interrupted shape with empty partial. (The
                 // `Ok(timed_out)` arm above DOES carry partial bytes.)
-                Ok(build_interrupted_result("", "", &cmd_str, Some(timeout_ms)))
+                Ok(build_interrupted_result(
+                    "",
+                    "",
+                    &cmd_str,
+                    Some(timeout_ms),
+                    &sandbox_violation_lines,
+                ))
             }
             Err(e) => {
                 emit_failed(&self.ctx.bus, &request_id, "spawn_failed", started_at).await;
@@ -3018,7 +3068,7 @@ mod tests {
 
     #[test]
     fn timeout_result_prepends_duration_annotation_to_stderr() {
-        let r = build_interrupted_result("out", "boom", "sleep 200", Some(120_000));
+        let r = build_interrupted_result("out", "boom", "sleep 200", Some(120_000), &[]);
         let mc = r.model_content.unwrap();
         // claude `uqh`: annotation, space, partial stderr — then the abort marker.
         assert!(
@@ -3030,7 +3080,7 @@ mod tests {
             "abort marker missing: {mc}"
         );
         // A plain interrupt (no timeout) carries NO duration annotation.
-        let plain = build_interrupted_result("out", "boom", "cmd", None);
+        let plain = build_interrupted_result("out", "boom", "cmd", None, &[]);
         assert!(!plain
             .model_content
             .unwrap()
@@ -5164,6 +5214,7 @@ mod tests {
     struct RecordingSandboxRunner {
         wrap_calls: std::sync::Mutex<Vec<WrapCall>>,
         cleanups: std::sync::atomic::AtomicUsize,
+        violations: std::sync::Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -5187,6 +5238,15 @@ mod tests {
         async fn cleanup_after_command(&self) {
             self.cleanups
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        async fn command_violations(
+            &self,
+            _command: &str,
+        ) -> tool_api::sandbox_runner::SandboxCommandViolations {
+            tool_api::sandbox_runner::SandboxCommandViolations {
+                lines: self.violations.lock().unwrap().clone(),
+            }
         }
     }
 
@@ -5236,6 +5296,35 @@ mod tests {
             1,
             "cleanup_after_command must be invoked once"
         );
+    }
+
+    #[tokio::test]
+    async fn sandbox_violations_are_appended_to_stderr_even_on_exit_zero() {
+        let runner = Arc::new(RecordingSandboxRunner::default());
+        runner.violations.lock().unwrap().push(
+            "deny network-outbound denied.example:443 (host is not on the allow list)".into(),
+        );
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.sandbox_available = true;
+        ctx.sandbox_runtime.excluded_commands = vec![];
+        ctx.session_cwd
+            .swap(std::path::PathBuf::from("/tmp"), ctx.trusted_dirs());
+        ctx.sandbox_runner = runner;
+        let tool = BashTool::new(ctx);
+        let res = tool
+            .call(json!({"command": "echo hi"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        let stderr = res.data["stderr"].as_str().unwrap();
+        assert_eq!(
+            stderr,
+            "<sandbox_violations>\ndeny network-outbound denied.example:443 (host is not on the allow list)\n</sandbox_violations>"
+        );
+        assert!(res
+            .model_content
+            .as_deref()
+            .unwrap()
+            .contains("<sandbox_violations>"));
     }
 
     #[tokio::test]

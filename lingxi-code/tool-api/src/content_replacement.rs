@@ -1,4 +1,10 @@
 //! Content replacement state — tracks per-turn cleared tool results.
+//!
+//! Claude Code 2.1.245 threads an extra `storageV5` argument through
+//! `insertContentReplacement` / content-replacement apply / subagent-exit
+//! precompute. That store is Anthropic's remote session backend; this module
+//! keeps the in-memory map only. The extra persist arg is a no-op without that
+//! backend (same scope cut as `performCompactTranscriptV5`).
 
 use protocol::ToolUseId;
 use std::collections::HashMap;

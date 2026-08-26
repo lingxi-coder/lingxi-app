@@ -35,11 +35,11 @@ const AGENT_COLOR_NAMES: [&str; 8] = [
     "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
 ];
 
-/// User-addressable permission-mode strings — claude `PERMISSION_MODES`
-/// (`EXTERNAL_PERMISSION_MODES`; `'auto'` is feature-gated in claude and not
-/// surfaced here). Used to validate and preserve the raw frontmatter value.
-const PERMISSION_MODES: [&str; 5] = [
+/// User-addressable permission-mode strings — claude `PERMISSION_MODES`.
+/// Used to validate and preserve the raw frontmatter / `--agents` value.
+const PERMISSION_MODES: [&str; 6] = [
     "acceptEdits",
+    "auto",
     "bypassPermissions",
     "default",
     "dontAsk",
@@ -760,6 +760,7 @@ fn parse_permission_mode(value: Option<&serde_yaml::Value>, path: &Path) -> Agen
     match raw.as_str() {
         "default" => AgentPermissionMode::Default,
         "acceptEdits" => AgentPermissionMode::AcceptEdits,
+        "auto" => AgentPermissionMode::Auto,
         "dontAsk" => AgentPermissionMode::DontAsk,
         "bypassPermissions" => AgentPermissionMode::BypassPermissions,
         "plan" => AgentPermissionMode::Plan,
@@ -998,6 +999,7 @@ pub fn parse_agent_from_json(
             match raw.as_str() {
                 "default" => AgentPermissionMode::Default,
                 "acceptEdits" => AgentPermissionMode::AcceptEdits,
+                "auto" => AgentPermissionMode::Auto,
                 "dontAsk" => AgentPermissionMode::DontAsk,
                 "bypassPermissions" => AgentPermissionMode::BypassPermissions,
                 "plan" => AgentPermissionMode::Plan,
@@ -1101,14 +1103,13 @@ pub fn parse_agent_from_json(
         }
     };
 
-    // isolation: `z.enum(['worktree'])` (3P) / `z.enum(['worktree','remote'])`
-    // (ant). On non-ant, `'remote'` is NOT in the enum and therefore throws.
-    let ant = std::env::var("USER_TYPE").as_deref() == Ok("ant");
+    // isolation: `z.enum(['worktree','remote'])`. Availability of the remote
+    // runner is checked later; the public JSON schema accepts both values.
     let isolation = match obj.get("isolation") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) => match s.as_str() {
             "worktree" => Some(AgentIsolation::Worktree),
-            "remote" if ant => Some(AgentIsolation::Remote),
+            "remote" => Some(AgentIsolation::Remote),
             _ => {
                 tracing::debug!("Error parsing agent '{name}' from JSON: invalid isolation");
                 return None;
@@ -1120,15 +1121,24 @@ pub fn parse_agent_from_json(
         }
     };
 
-    // observer / observerMessage / observeSubagents are a single declaration.
-    // JSON agents use the throwing schema: present fields with the wrong type
+    // observer / observerMessage / observeSubagents are independently optional
+    // schema fields. Message/fanout values without an observer are valid and
+    // simply have no runtime effect; present values with the wrong type still
     // drop the whole definition.
     let observer = match obj.get("observer") {
         None | Some(serde_json::Value::Null) => {
-            if obj.get("observerMessage").is_some() || obj.get("observeSubagents").is_some() {
-                tracing::debug!(
-                    "Error parsing agent '{name}' from JSON: observerMessage/observeSubagents require observer"
-                );
+            if !matches!(
+                obj.get("observerMessage"),
+                None | Some(serde_json::Value::Null | serde_json::Value::String(_))
+            ) {
+                tracing::debug!("Error parsing agent '{name}' from JSON: invalid observerMessage");
+                return None;
+            }
+            if !matches!(
+                obj.get("observeSubagents"),
+                None | Some(serde_json::Value::Null | serde_json::Value::Bool(_))
+            ) {
+                tracing::debug!("Error parsing agent '{name}' from JSON: invalid observeSubagents");
                 return None;
             }
             None
@@ -1214,58 +1224,293 @@ pub fn parse_agents_from_json(
         .collect()
 }
 
-/// Parse the `--agents <json>` CLI flag payload (claude 2.1.198 `QXt(e,
-/// "flagSettings")` @223080769: `DBm().parse(e)` where `DBm = A.record(
-/// A.string(), r2l())`, then per-entry `s2l(name, def, "flagSettings")`).
-///
-/// STRICTER than [`parse_agents_from_json`] (the `parseAgentsFromJson` file
-/// loader, which filters bad entries): the flag path validates the WHOLE
-/// record with a throwing zod schema, so ANY invalid agent definition drops
-/// ALL flag agents (`catch` → `C(\`Error parsing agents from JSON: ${msg}\`,
-/// {level:"error"})` → `[]`). The only per-entry drop that survives the
-/// record parse is `s2l`'s leading-`-` name check (`Agent '${name}' has an
-/// invalid name: names must not start with '-'` → that agent only).
-///
-/// A JSON *syntax* error is caught one frame up in the binary (`try{let g=
-/// Ba(r); …}catch(g){De(g)}` — logged, non-fatal); mirrored here so callers
-/// hand us the raw flag string. Every failure path returns `[]` and logs —
-/// the flag NEVER aborts startup.
-#[must_use]
-pub fn parse_agents_from_flag_json(raw: &str) -> Vec<AgentDefinition> {
-    // `Ba(r)` — JSON.parse of the flag string; a syntax error is logged
-    // (`De(g)`) and yields no agents.
-    let value: serde_json::Value = match serde_json::from_str(raw) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("Error parsing agents from JSON: {e}");
-            return Vec::new();
-        }
+/// Return Claude/Zod's JSON type label for an input value.
+fn json_input_type(value: Option<&serde_json::Value>) -> &'static str {
+    match value {
+        None => "undefined",
+        Some(serde_json::Value::Null) => "null",
+        Some(serde_json::Value::Bool(_)) => "boolean",
+        Some(serde_json::Value::Number(_)) => "number",
+        Some(serde_json::Value::String(_)) => "string",
+        Some(serde_json::Value::Array(_)) => "array",
+        Some(serde_json::Value::Object(_)) => "object",
+    }
+}
+
+fn invalid_json_type(path: &str, expected: &str, value: Option<&serde_json::Value>) -> String {
+    format!(
+        "{path}: Invalid input: expected {expected}, received {}",
+        json_input_type(value)
+    )
+}
+
+fn validate_string_array(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    agent: &str,
+    field: &str,
+) -> Result<(), String> {
+    let Some(value) = obj.get(field) else {
+        return Ok(());
     };
-    // `DBm().parse` — the top level must be a record (object).
-    let Some(obj) = value.as_object() else {
-        tracing::error!("Error parsing agents from JSON: expected an object of agent definitions");
-        return Vec::new();
+    let path = format!("{agent}.{field}");
+    let serde_json::Value::Array(items) = value else {
+        return Err(invalid_json_type(&path, "array", Some(value)));
     };
-    // All-or-nothing record validation: every entry must parse (zod record
-    // schema throws on the first invalid definition → [] overall).
-    let mut out = Vec::with_capacity(obj.len());
-    for (name, def) in obj {
-        // `s2l` name guard — drops ONLY this agent (post-record-parse check).
-        if name.starts_with('-') {
-            tracing::error!("Agent '{name}' has an invalid name: names must not start with '-'");
-            continue;
+    for (index, item) in items.iter().enumerate() {
+        if !item.is_string() {
+            return Err(invalid_json_type(
+                &format!("{path}.{index}"),
+                "string",
+                Some(item),
+            ));
         }
-        match parse_agent_from_json(name, def, AgentSource::Flag) {
-            Some(a) => out.push(a),
-            None => {
-                tracing::error!(
-                    "Error parsing agents from JSON: invalid definition for agent '{name}'"
-                );
-                return Vec::new();
+    }
+    Ok(())
+}
+
+fn validate_mcp_servers_schema(value: &serde_json::Value, agent: &str) -> Result<(), String> {
+    let path = format!("{agent}.mcpServers");
+    let serde_json::Value::Array(items) = value else {
+        return Err(invalid_json_type(&path, "array", Some(value)));
+    };
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            serde_json::Value::String(_) => {}
+            serde_json::Value::Object(entries) => {
+                if entries
+                    .values()
+                    .any(|entry| !mcp::server_entry_shape_is_valid(entry))
+                {
+                    return Err(format!("{path}.{index}: Invalid input"));
+                }
+            }
+            _ => return Err(format!("{path}.{index}: Invalid input")),
+        }
+    }
+    Ok(())
+}
+
+fn validate_hooks_schema(value: &serde_json::Value, agent: &str) -> Result<(), String> {
+    let path = format!("{agent}.hooks");
+    let serde_json::Value::Object(events) = value else {
+        return Err(invalid_json_type(&path, "record", Some(value)));
+    };
+    for (event, groups) in events {
+        let event_path = format!("{path}.{event}");
+        let serde_json::Value::Array(groups) = groups else {
+            return Err(invalid_json_type(&event_path, "array", Some(groups)));
+        };
+        for (index, group) in groups.iter().enumerate() {
+            let group_path = format!("{event_path}.{index}");
+            let Some(group) = group.as_object() else {
+                return Err(invalid_json_type(&group_path, "object", Some(group)));
+            };
+            if let Some(matcher) = group.get("matcher") {
+                if !matcher.is_string() {
+                    return Err(invalid_json_type(
+                        &format!("{group_path}.matcher"),
+                        "string",
+                        Some(matcher),
+                    ));
+                }
+            }
+            let hooks_path = format!("{group_path}.hooks");
+            let hooks = group.get("hooks");
+            let Some(serde_json::Value::Array(entries)) = hooks else {
+                return Err(invalid_json_type(&hooks_path, "array", hooks));
+            };
+            for (hook_index, entry) in entries.iter().enumerate() {
+                if !entry.is_object() {
+                    return Err(invalid_json_type(
+                        &format!("{hooks_path}.{hook_index}"),
+                        "object",
+                        Some(entry),
+                    ));
+                }
             }
         }
     }
-    out
+    Ok(())
+}
+
+fn validate_flag_agent_schema(name: &str, definition: &serde_json::Value) -> Result<(), String> {
+    let Some(obj) = definition.as_object() else {
+        return Err(invalid_json_type(name, "object", Some(definition)));
+    };
+
+    for (field, empty_message) in [
+        ("description", "Description cannot be empty"),
+        ("prompt", "Prompt cannot be empty"),
+    ] {
+        let path = format!("{name}.{field}");
+        match obj.get(field) {
+            Some(serde_json::Value::String(value)) if !value.is_empty() => {}
+            Some(serde_json::Value::String(_)) => {
+                return Err(format!("{path}: {empty_message}"));
+            }
+            value => return Err(invalid_json_type(&path, "string", value)),
+        }
+    }
+
+    for field in ["tools", "disallowedTools", "skills"] {
+        validate_string_array(obj, name, field)?;
+    }
+
+    if let Some(value) = obj.get("model") {
+        let path = format!("{name}.model");
+        match value {
+            serde_json::Value::String(model) if !model.trim().is_empty() => {}
+            serde_json::Value::String(_) => return Err(format!("{path}: Model cannot be empty")),
+            other => return Err(invalid_json_type(&path, "string", Some(other))),
+        }
+    }
+
+    if let Some(value) = obj.get("permissionMode") {
+        let valid = value
+            .as_str()
+            .is_some_and(|mode| PERMISSION_MODES.contains(&mode));
+        if !valid {
+            return Err(format!(
+                "{name}.permissionMode: Invalid option: expected one of \"acceptEdits\"|\"auto\"|\"bypassPermissions\"|\"default\"|\"dontAsk\"|\"plan\""
+            ));
+        }
+    }
+
+    if let Some(value) = obj.get("maxTurns") {
+        let path = format!("{name}.maxTurns");
+        let serde_json::Value::Number(number) = value else {
+            return Err(invalid_json_type(&path, "number", Some(value)));
+        };
+        let Some(turns) = json_int_value(number) else {
+            return Err(format!(
+                "{path}: Invalid input: expected int, received number"
+            ));
+        };
+        if turns <= 0 {
+            return Err(format!("{path}: Too small: expected number to be >0"));
+        }
+    }
+
+    if let Some(value) = obj.get("background") {
+        if !value.is_boolean() {
+            return Err(invalid_json_type(
+                &format!("{name}.background"),
+                "boolean",
+                Some(value),
+            ));
+        }
+    }
+
+    for (field, values) in [
+        ("memory", &["user", "project", "local"][..]),
+        ("isolation", &["worktree", "remote"][..]),
+    ] {
+        if let Some(value) = obj.get(field) {
+            let valid = value
+                .as_str()
+                .is_some_and(|candidate| values.contains(&candidate));
+            if !valid {
+                let joined = values
+                    .iter()
+                    .map(|value| format!("\"{value}\""))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                return Err(format!(
+                    "{name}.{field}: Invalid option: expected one of {joined}"
+                ));
+            }
+        }
+    }
+
+    if let Some(value) = obj.get("effort") {
+        let valid = value
+            .as_str()
+            .is_some_and(|level| EFFORT_LEVELS.contains(&level))
+            || value.as_number().and_then(json_int_value).is_some();
+        if !valid {
+            return Err(format!("{name}.effort: Invalid input"));
+        }
+    }
+
+    for field in ["initialPrompt", "observer", "observerMessage"] {
+        if let Some(value) = obj.get(field) {
+            if !value.is_string() {
+                return Err(invalid_json_type(
+                    &format!("{name}.{field}"),
+                    "string",
+                    Some(value),
+                ));
+            }
+        }
+    }
+    if let Some(value) = obj.get("observeSubagents") {
+        if !value.is_boolean() {
+            return Err(invalid_json_type(
+                &format!("{name}.observeSubagents"),
+                "boolean",
+                Some(value),
+            ));
+        }
+    }
+    if let Some(value) = obj.get("mcpServers") {
+        validate_mcp_servers_schema(value, name)?;
+    }
+    if let Some(value) = obj.get("hooks") {
+        validate_hooks_schema(value, name)?;
+    }
+    if name.starts_with('-') {
+        return Err(format!("{name}: agent names must not start with '-'"));
+    }
+    Ok(())
+}
+
+/// Strict `--agents <json>` parser. Claude Code 2.1.245 and earlier logged and
+/// ignored schema failures; 2.1.246 rejects them before runtime construction.
+/// The error payload is the line printed after `Invalid --agents configuration:`.
+pub fn parse_agents_from_flag_json_checked(raw: &str) -> Result<Vec<AgentDefinition>, String> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        let trimmed = raw.trim();
+        let detail = if trimmed.starts_with('{') && !trimmed.ends_with('}') {
+            "Expected '}'".to_string()
+        } else if trimmed.starts_with('[') && !trimmed.ends_with(']') {
+            "Expected ']'".to_string()
+        } else {
+            error.to_string()
+        };
+        format!("invalid JSON: JSON Parse error: {detail}")
+    })?;
+    let Some(obj) = value.as_object() else {
+        return Err(format!(
+            "Invalid input: expected record, received {}",
+            json_input_type(Some(&value))
+        ));
+    };
+    for (name, definition) in obj {
+        validate_flag_agent_schema(name, definition)?;
+    }
+    let mut out = Vec::with_capacity(obj.len());
+    for (name, definition) in obj {
+        let parsed = parse_agent_from_json(name, definition, AgentSource::Flag)
+            .ok_or_else(|| format!("{name}: Invalid input"))?;
+        out.push(parsed);
+    }
+    Ok(out)
+}
+
+/// Parse the `--agents <json>` CLI flag payload.
+///
+/// The checked variant owns the 2.1.246 fatal error payload. This compatibility
+/// wrapper remains for non-CLI composition roots and logs before returning an
+/// empty catalog; the CLI calls the checked variant and exits before build.
+#[must_use]
+pub fn parse_agents_from_flag_json(raw: &str) -> Vec<AgentDefinition> {
+    match parse_agents_from_flag_json_checked(raw) {
+        Ok(agents) => agents,
+        Err(error) => {
+            tracing::error!("Invalid --agents configuration: {error}");
+            Vec::new()
+        }
+    }
 }
 
 /// Read a JSON value as a string only when it is a JSON string.
@@ -1323,9 +1568,14 @@ fn parse_mcp_servers_json_strict(
         match item {
             serde_json::Value::String(s) => out.push(AgentMcpServerSpec::ByName(s.clone())),
             serde_json::Value::Object(map) => {
-                // Keep the raw record. Empty/multi-key/invalid bodies are
-                // diagnosed and skipped by `agent_mcp_specs_to_scoped_configs`
-                // / `build_server_from_json_entry`, preserving the agent.
+                if map
+                    .values()
+                    .any(|entry| !mcp::server_entry_shape_is_valid(entry))
+                {
+                    return Err(());
+                }
+                // Keep the raw record. Empty/multi-key records are diagnosed
+                // and skipped by `agent_mcp_specs_to_scoped_configs`.
                 out.push(AgentMcpServerSpec::Record(map.clone()));
             }
             _ => return Err(()),
@@ -1568,11 +1818,21 @@ mod tests {
         assert_eq!(observer.message.as_deref(), Some("watch"));
         assert!(!observer.observe_subagents);
 
+        for valid_without_observer in [
+            serde_json::json!({"description":"d","prompt":"p","observerMessage":"watch"}),
+            serde_json::json!({"description":"d","prompt":"p","observeSubagents":false}),
+        ] {
+            let parsed =
+                parse_agent_from_json("worker", &valid_without_observer, AgentSource::Flag)
+                    .expect("independently optional observer fields are schema-valid");
+            assert!(parsed.observer.is_none());
+        }
+
         for invalid in [
             serde_json::json!({"description":"d","prompt":"p","observer":true}),
             serde_json::json!({"description":"d","prompt":"p","observer":"x","observerMessage":3}),
             serde_json::json!({"description":"d","prompt":"p","observer":"x","observeSubagents":"yes"}),
-            serde_json::json!({"description":"d","prompt":"p","observeSubagents":false}),
+            serde_json::json!({"description":"d","prompt":"p","observerMessage":3}),
         ] {
             assert!(parse_agent_from_json("worker", &invalid, AgentSource::Flag).is_none());
         }
@@ -2192,15 +2452,8 @@ mod tests {
             AgentSource::Flag
         )
         .is_none());
-        // bad isolation (non-ant: 'remote' not in enum; assumes test env != ant).
-        if std::env::var("USER_TYPE").as_deref() != Ok("ant") {
-            assert!(parse_agent_from_json(
-                "a",
-                &base(serde_json::json!({"isolation": "remote"})),
-                AgentSource::Flag
-            )
-            .is_none());
-        }
+        // bad isolation. `remote` is schema-valid for every user type; runtime
+        // availability is checked later.
         assert!(parse_agent_from_json(
             "a",
             &base(serde_json::json!({"isolation": "bogus"})),
@@ -2250,6 +2503,12 @@ mod tests {
         assert!(parse_agent_from_json(
             "a",
             &base(serde_json::json!({"mcpServers": [123]})),
+            AgentSource::Flag
+        )
+        .is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"mcpServers": [{"srv": 123}]})),
             AgentSource::Flag
         )
         .is_none());
@@ -2387,12 +2646,71 @@ mod tests {
     }
 
     #[test]
-    fn flag_json_dash_name_drops_only_that_agent() {
-        // `s2l`'s leading-`-` name guard is per-entry (post-record-parse).
+    fn flag_json_dash_name_rejects_the_record() {
         let raw = r#"{"-bad": {"description": "d", "prompt": "p"},
                       "good": {"description": "d", "prompt": "p"}}"#;
-        let out = parse_agents_from_flag_json(raw);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].agent_type, "good");
+        assert_eq!(
+            parse_agents_from_flag_json_checked(raw).unwrap_err(),
+            "-bad: agent names must not start with '-'"
+        );
+        assert!(parse_agents_from_flag_json(raw).is_empty());
+    }
+
+    #[test]
+    fn checked_flag_json_reports_2_1_246_schema_errors() {
+        assert_eq!(
+            parse_agents_from_flag_json_checked("{bad").unwrap_err(),
+            "invalid JSON: JSON Parse error: Expected '}'"
+        );
+        assert_eq!(
+            parse_agents_from_flag_json_checked("[]").unwrap_err(),
+            "Invalid input: expected record, received array"
+        );
+        assert_eq!(
+            parse_agents_from_flag_json_checked(r#"{"x":{"description":3,"prompt":"p"}}"#)
+                .unwrap_err(),
+            "x.description: Invalid input: expected string, received number"
+        );
+        assert_eq!(
+            parse_agents_from_flag_json_checked(
+                r#"{"x":{"description":"d","prompt":"p","tools":null}}"#
+            )
+            .unwrap_err(),
+            "x.tools: Invalid input: expected array, received null"
+        );
+        assert_eq!(
+            parse_agents_from_flag_json_checked(
+                r#"{"x":{"description":"d","prompt":"p","hooks":{"PreToolUse":[{"foo":"bar"}]}}}"#
+            )
+            .unwrap_err(),
+            "x.hooks.PreToolUse.0.hooks: Invalid input: expected array, received undefined"
+        );
+        assert_eq!(
+            parse_agents_from_flag_json_checked(
+                r#"{"x":{"description":"d","prompt":"p","mcpServers":[{"srv":123}]}}"#
+            )
+            .unwrap_err(),
+            "x.mcpServers.0: Invalid input"
+        );
+    }
+
+    #[test]
+    fn checked_flag_json_accepts_auto_and_remote() {
+        let parsed = parse_agents_from_flag_json_checked(
+            r#"{"x":{"description":"d","prompt":"p","permissionMode":"auto","isolation":"remote"}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].permission_mode, AgentPermissionMode::Auto);
+        assert_eq!(parsed[0].isolation, Some(AgentIsolation::Remote));
+
+        for raw in [
+            r#"{"x":{"description":"d","prompt":"p","observerMessage":"hi"}}"#,
+            r#"{"x":{"description":"d","prompt":"p","observeSubagents":false}}"#,
+        ] {
+            let parsed = parse_agents_from_flag_json_checked(raw).unwrap();
+            assert_eq!(parsed.len(), 1);
+            assert!(parsed[0].observer.is_none());
+        }
     }
 }

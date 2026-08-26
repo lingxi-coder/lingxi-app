@@ -95,12 +95,12 @@ pub fn parse_pr_number(raw: &str) -> Option<u64> {
 /// | `worktree_states` | ✅ implemented (gap #5) | `"worktree-state"` |
 /// | `prNumbers/prUrls/prRepositories` | ✅ implemented | `"pr-link"` |
 /// | `bridgeSessionIds/bridgeLastSeqs/bridgeDialogKindsBySession` | ⏭ deferred — bridge subsystem absent | `"bridge-session"` |
-/// | `contextCollapseCommits/contextCollapseSnapshot` | ⏭ deferred — context-collapse is REFUTED/inert (prior audit) | `"marble-origami-*"` |
+/// | `contextCollapseCommits/contextCollapseSnapshot` | ✅ cold-load/reset routing implemented; runtime producer/consumer is still feature-gated and tracked separately | `"marble-origami-*"` |
 /// | `attributionSnapshots` | ⏭ deferred — attribution subsystem absent | `"attribution-snapshot"` |
 /// | `forkContextRefs` | ⏭ deferred — fork-context subsystem absent | `"fork-context-ref"` |
-/// | `contentReplacements/agentContentReplacements` | ⏭ deferred — context-collapse-tied | `"content-replacement"` |
+/// | `contentReplacements/agentContentReplacements` | ✅ cold-load routing implemented; session replacements are carried into `/branch` | `"content-replacement"` |
 /// | `isolationLatches` | ⏭ deferred — isolation/worktree out-of-process-scope | `"isolation-latch"` |
-/// | `atisLatch` | ⏭ deferred (SC-11) — see below | `"atis-latch"` |
+/// | `atisLatch` | ✅ cold-load / re-append / `/branch` carry implemented; live Anthropic response producer remains transport-owned | `"atis-latch"` |
 /// | `fileHistorySnapshots` | ⏭ deferred — file-history-snapshot subsystem absent | `"file-history-snapshot"` |
 /// | `agentColors` | ⏭ already handled by `agent_color.rs` (confirmed correct C6) | `"agent-color"` |
 ///
@@ -111,14 +111,10 @@ pub fn parse_pr_number(raw: &str) -> Option<u64> {
 /// `/^[\x21-\x7e]*$/` validator. Its VALUE has no derivation in the port: it
 /// is `TCe()` (@281057624) = `conversationAtisLatch`, an opaque server-supplied
 /// token captured off an Anthropic API response, latched per conversation and
-/// echoed as a request header (@286976717). LingXi carries no per-conversation
-/// latch infrastructure at all (`stickyBetas` and friends are likewise absent),
-/// and the transport it belongs to is Anthropic-specific. Adding the record
-/// slot alone would emit nothing — the gate is `!== undefined` on a value that
-/// is never set — so the field is left out rather than added as dead weight.
-/// A foreign transcript carrying such lines is unaffected: an unrecognized
-/// sidecar type is skipped without error by the router below, and
-/// [`crate::jsonl::re_append`] never plans a type it does not itself write.
+/// echoed as a request header (@286976717). The session layer preserves a
+/// valid foreign/current latch even though the live response producer belongs
+/// to the Anthropic transport, preventing resume, re-append, and fork from
+/// silently discarding it.
 #[derive(Debug, Clone, Default)]
 pub struct LoadedTranscript {
     /// Number of non-empty lines dropped because they were malformed JSON or
@@ -175,11 +171,11 @@ pub struct LoadedTranscript {
     /// accumulated `[...(prev??[]), tag]`; CC has since switched to `.set` single
     /// value, so a re-tag overwrites rather than appends).
     pub tags: HashMap<String, String>,
-    /// `agent-name` entries: keyed by `agentId` → agent display name.
-    /// Binary `Yle`: `agentNames.set(N.agentId, N.agentName)`.
+    /// `agent-name` entries: keyed by `sessionId` → agent display name.
+    /// Binary `Yle`: `agentNames.set(N.sessionId, N.agentName)`.
     pub agent_names: HashMap<String, String>,
-    /// `agent-setting` entries: keyed by `agentId` → raw JSON value of the setting.
-    /// Binary `Yle`: `agentSettings.set(N.agentId, N)`.
+    /// `agent-setting` entries: keyed by `sessionId` → the inner setting payload.
+    /// Binary `Yle`: `agentSettings.set(N.sessionId, N.agentSetting)`.
     pub agent_settings: HashMap<String, Value>,
     /// LingXi compatibility extension: immutable, versioned resolved-agent
     /// snapshots keyed by session id. Older Claude-compatible records omit it.
@@ -198,6 +194,28 @@ pub struct LoadedTranscript {
     /// rehydrate the session's active worktree so `ExitWorktree` operates instead
     /// of no-oping ("No-op: there is no active EnterWorktree session to exit").
     pub worktree_states: HashMap<String, Value>,
+    /// Flattened session-level `content-replacement` entries keyed by `sessionId`.
+    /// Each new line appends its `replacements` array onto the accumulated tail.
+    pub content_replacements: HashMap<String, Vec<Value>>,
+    /// Flattened agent-level `content-replacement` entries keyed by `agentId`.
+    /// Each new line appends its `replacements` array onto the accumulated tail.
+    pub agent_content_replacements: HashMap<String, Vec<Value>>,
+    /// Latest non-empty `relocatedCwd` per session, used by `/branch` and
+    /// resume-time cwd recovery. Empty writes do not clear the previous value.
+    pub relocated_cwds: HashMap<String, String>,
+    /// Whether the transcript contains any `history-suppression` record.
+    /// A transcript file belongs to one session, matching `createFork`'s
+    /// source scan, which deliberately does not filter this record by id.
+    pub session_history_suppressed: bool,
+    /// Latest validated `atis-latch` per session. The oracle accepts only
+    /// ASCII bytes in `[0x21, 0x7e]`; the `*` quantifier also accepts empty.
+    pub atis_latches: HashMap<String, String>,
+    /// `marble-origami-commit` entries in source order, cleared by a later
+    /// `marble-origami-reset`.
+    pub context_collapse_commits: Vec<Value>,
+    /// Latest `marble-origami-snapshot`, cleared by a later
+    /// `marble-origami-reset`.
+    pub context_collapse_snapshot: Option<Value>,
 }
 
 /// Failure modes for [`JsonlReader`].
@@ -288,14 +306,13 @@ impl JsonlReader {
     /// is the only complete line in the buffer).
     pub async fn read_lite(&self) -> Result<SessionMetadata, ReaderError> {
         let path_str = self.path.to_str().expect("UTF-8 path");
-        // Read first ~64 KiB worth of lines. The trait's `read_file` window
-        // is line-indexed (offset/limit are line counts, not byte offsets),
-        // so we ask for the full file and inspect line 1 only — line 1 is
-        // always small enough for the lite path to be cheap. The
-        // `LITE_READ_BUF_SIZE` byte budget is preserved here as a guard:
-        // we slice the first N bytes of the read result for downstream
-        // extraction so very long line-1 payloads still cap at 64 KiB.
-        let read = self.fs.read_file(path_str, None, None).await?;
+        // Prefix read: at most `LITE_READ_BUF_SIZE` bytes from the file head.
+        // Line 1 is extracted from that window (a very long line-1 payload is
+        // still capped at 64 KiB).
+        let read = self
+            .fs
+            .read_file_prefix(path_str, super::LITE_READ_BUF_SIZE)
+            .await?;
         // Strip a leading UTF-8 BOM (claude-code parseJSONLBuffer, live in
         // v2.1.193) so `extract_json_string_field` sees a clean line 1 — without
         // it a BOM-prefixed transcript's first line yields no sessionId/cwd.
@@ -516,10 +533,61 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
             ) {
                 out.worktree_states.insert(sid.to_string(), ws.clone());
             }
+        } else if ty == "content-replacement" {
+            if let Some(agent_id) = value.get("agentId").and_then(Value::as_str) {
+                if let Some(replacements) = value.get("replacements").and_then(Value::as_array) {
+                    out.agent_content_replacements
+                        .entry(agent_id.to_string())
+                        .or_default()
+                        .extend(replacements.iter().cloned());
+                }
+            } else if let Some(session_id) = value.get("sessionId").and_then(Value::as_str) {
+                if let Some(replacements) = value.get("replacements").and_then(Value::as_array) {
+                    out.content_replacements
+                        .entry(session_id.to_string())
+                        .or_default()
+                        .extend(replacements.iter().cloned());
+                }
+            }
+        } else if ty == "relocated" {
+            if let (Some(session_id), Some(relocated_cwd)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("relocatedCwd").and_then(Value::as_str),
+            ) {
+                if !relocated_cwd.is_empty() {
+                    out.relocated_cwds
+                        .insert(session_id.to_string(), relocated_cwd.to_string());
+                }
+            }
+        } else if ty == "history-suppression" {
+            out.session_history_suppressed = true;
+        } else if ty == "atis-latch" {
+            if let (Some(session_id), Some(atis)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("atis").and_then(Value::as_str),
+            ) {
+                if is_valid_atis_latch(atis) {
+                    out.atis_latches
+                        .insert(session_id.to_string(), atis.to_string());
+                }
+            }
+        } else if ty == "marble-origami-commit" {
+            out.context_collapse_commits.push(value.clone());
+        } else if ty == "marble-origami-snapshot" {
+            out.context_collapse_snapshot = Some(value.clone());
+        } else if ty == "marble-origami-reset" {
+            out.context_collapse_commits.clear();
+            out.context_collapse_snapshot = None;
         }
         // else: Tier-2 / unknown / deferred subsystem → ignored (no error).
     }
     out
+}
+
+/// Claude 2.1.245's `/^[\x21-\x7e]*$/` ATIS validator.
+#[must_use]
+pub(crate) fn is_valid_atis_latch(value: &str) -> bool {
+    value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
 }
 
 /// 1:1 port of `claude-code/src/utils/sessionStoragePortable.ts:53-76`.

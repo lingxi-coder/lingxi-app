@@ -2933,7 +2933,7 @@ fn resume_title_ambiguous(arg: &str, matches: &[SessionMetadata]) -> String {
 }
 
 /// Every resumable row for the cwd's project, unbounded — the search corpus for
-/// [`resolve_resume_title`]. [`load_resume_rows`] caps at 5 for the picker.
+/// [`resolve_resume_title`] and the backing catalog for the paged picker.
 async fn load_resume_rows_all() -> Result<Vec<SessionMetadata>, LoaderError> {
     let lingxi_home = lingxi_home_dir();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -3778,14 +3778,16 @@ async fn load_resume_rows() -> Result<Vec<SessionMetadata>, LoaderError> {
 /// Production disk→[`SessionMetadata`] path with the inputs passed in (no env /
 /// process-cwd reads), so it is directly testable. Builds the same disk-backed
 /// [`platform_posix::PosixFileSystem`] the live branches use and
-/// asks the M5-08 loader for up to 5 most-recent rows.
+/// asks the M5-08 loader for the complete sorted catalog. The picker itself
+/// exposes this in 50-row pages (`tui::resume::RESUME_PAGE_SIZE`), matching
+/// Claude Code 2.1.246's `allStatLogs` / `nextIndex` behavior.
 async fn load_resume_rows_from(
     lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
     let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd.to_path_buf()));
-    list_recent_sessions(lingxi_home, &cwd_str, 5, fs).await
+    list_recent_sessions(lingxi_home, &cwd_str, usize::MAX, fs).await
 }
 
 /// Map M5-08 loader metadata into the picker's lean [`tui::resume::ResumeRow`]s
@@ -4043,8 +4045,9 @@ mod tests {
     }
 
     /// Write one valid `<uuid>.jsonl` session file (a single first-user message
-    /// in the M5-07/M5-08 on-disk format) into `project_dir`, stamp its mtime,
-    /// and return the uuid. `prompt` becomes the row's extracted title.
+    /// in the M5-07/M5-08 on-disk format) into `project_dir`, stamp both its
+    /// transcript timestamp and mtime from `mtime`, and return the uuid.
+    /// `prompt` becomes the row's extracted title.
     fn write_session(project_dir: &std::path::Path, prompt: &str, mtime: SystemTime) -> Uuid {
         let uuid = Uuid::new_v4();
         let path = project_dir.join(format!("{uuid}.jsonl"));
@@ -4053,7 +4056,8 @@ mod tests {
             "uuid": uuid.to_string(),
             "parentUuid": null,
             "sessionId": uuid.to_string(),
-            "timestamp": "2026-05-25T12:00:00.000Z",
+            "timestamp": chrono::DateTime::<chrono::Utc>::from(mtime)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "cwd": "/tmp/workproj",
             "version": "0.8.0",
             "isSidechain": false,
@@ -4138,7 +4142,7 @@ mod tests {
         let cwd_str = cwd.to_string_lossy().into_owned();
         let project_dir = make_project_dir(&lingxi_home, &cwd_str);
 
-        // Three sessions with staggered mtimes; "newest" has the latest mtime.
+        // Three sessions with staggered transcript timestamps.
         let base = SystemTime::now();
         let _oldest = write_session(&project_dir, "oldest prompt", base);
         let _middle = write_session(
@@ -4151,13 +4155,20 @@ mod tests {
             "newest prompt",
             base + Duration::from_secs(20),
         );
+        // Touch every file to the same later mtime. Claude sorts by
+        // min(lastMessageAtMs, file mtime), so the transcript timestamps still
+        // determine the order and a forward touch cannot reshuffle the picker.
+        let touched = filetime::FileTime::from_system_time(base + Duration::from_secs(60));
+        for id in [_oldest, _middle, newest] {
+            filetime::set_file_mtime(project_dir.join(format!("{id}.jsonl")), touched).unwrap();
+        }
 
         let rows = load_resume_rows_from(&lingxi_home, &cwd)
             .await
             .expect("loader should produce rows");
 
         assert_eq!(rows.len(), 3, "all three sessions surface as rows");
-        // Newest-first (mtime desc).
+        // Newest-first by the clamped transcript activity timestamp.
         assert_eq!(rows[0].uuid, newest);
         assert_eq!(rows[0].title, "newest prompt");
         assert_eq!(rows[1].title, "middle prompt");
@@ -4169,6 +4180,31 @@ mod tests {
         for row in &rows {
             assert_eq!(row.message_count, 1, "one message per fixture session");
         }
+    }
+
+    #[tokio::test]
+    async fn load_resume_rows_from_keeps_sessions_beyond_the_first_page() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let lingxi_home = temp.path().join("home");
+        let cwd = std::path::PathBuf::from("/tmp/many-sessions");
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let project_dir = make_project_dir(&lingxi_home, &cwd_str);
+        let base = SystemTime::now();
+
+        for i in 0..55 {
+            write_session(
+                &project_dir,
+                &format!("session {i}"),
+                base + Duration::from_secs(i),
+            );
+        }
+
+        let rows = load_resume_rows_from(&lingxi_home, &cwd)
+            .await
+            .expect("loader should retain the complete picker catalog");
+        assert_eq!(rows.len(), 55);
+        assert_eq!(rows[0].title, "session 54");
+        assert_eq!(rows[54].title, "session 0");
     }
 
     #[tokio::test]
@@ -4687,6 +4723,7 @@ mod tests {
     fn outbound_line(msg: crate::stream_json::OutboundMsg) -> String {
         match msg {
             crate::stream_json::OutboundMsg::Line(line) => line,
+            crate::stream_json::OutboundMsg::StreamEvent(line) => line,
             crate::stream_json::OutboundMsg::Heartbeats(_) => {
                 panic!("unexpected heartbeat message")
             }

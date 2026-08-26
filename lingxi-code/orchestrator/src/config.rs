@@ -24,6 +24,26 @@ pub const MAX_TURNS_DEFAULT: u32 = 0;
 /// tests.
 pub const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
+/// Main-query `querySource` for the CLI TUI, stdio REPL, and `--print`.
+pub const QUERY_SOURCE_REPL_MAIN_THREAD: &str = "repl_main_thread";
+
+/// Main-query `querySource` for SDK / bridge / transport hosts.
+pub const QUERY_SOURCE_SDK: &str = "sdk";
+
+fn default_query_source() -> String {
+    QUERY_SOURCE_REPL_MAIN_THREAD.to_string()
+}
+
+/// Claude Code 2.1.245 `E_`: collapse `agent:custom:<id>` to `agent:custom`.
+#[must_use]
+pub fn sanitize_query_source(raw: &str) -> &str {
+    if raw.starts_with("agent:custom:") {
+        "agent:custom"
+    } else {
+        raw
+    }
+}
+
 /// Runtime configuration for [`crate::ConversationOrchestrator`].
 //
 // Independent feature/auth flags — claude-code carries these as separate
@@ -95,6 +115,27 @@ pub struct OrchestratorConfig {
     /// prompts remotely while still needing headless/SDK session semantics.
     #[serde(default)]
     pub interactive_session: bool,
+
+    /// Claude Code 2.1.245 `querySource` for the main query generator.
+    ///
+    /// CLI TUI / stdio REPL / `--print` → [`QUERY_SOURCE_REPL_MAIN_THREAD`].
+    /// SDK / bridge / transport hosts → [`QUERY_SOURCE_SDK`]. The previous
+    /// port hardcoded `"user"`, which is not in the 2.1.245 allowlist
+    /// (`repl_main_thread*` + `sdk` + agent/compact/hook auxiliaries).
+    #[serde(default = "default_query_source")]
+    pub query_source: String,
+
+    /// Claude Code 2.1.245 `print` (`-p` / `--print`). Distinct from
+    /// [`Self::interactive_session`]: an SDK session is non-interactive but
+    /// is not print mode.
+    #[serde(default)]
+    pub print: bool,
+
+    /// Claude Code 2.1.245 `process.stdout.isTTY??!1` (`tengu_api_success.isTTY`).
+    /// Independent of [`Self::print`]: `-p` in a terminal is `print=true` and
+    /// `is_tty=true`. Default `false` for SDK / bridge / mobile / tests.
+    #[serde(default)]
+    pub is_tty: bool,
 
     /// If `Some(id)`, the orchestrator was started via `--resume <id>` or
     /// `/resume <id>` (M5-08) and must replay messages from the on-disk
@@ -384,6 +425,9 @@ impl Default for OrchestratorConfig {
             exclude_dynamic_system_prompt_sections: false,
             interactive_permissions: false,
             interactive_session: false,
+            query_source: default_query_source(),
+            print: false,
+            is_tty: false,
             resume_session_id: None,
             escalate_max_output_tokens: false,
             enable_token_budget: false,
@@ -446,6 +490,9 @@ mod tests {
             exclude_dynamic_system_prompt_sections: false,
             interactive_permissions: true,
             interactive_session: true,
+            query_source: QUERY_SOURCE_SDK.to_string(),
+            print: true,
+            is_tty: true,
             resume_session_id: None,
             escalate_max_output_tokens: true,
             enable_token_budget: true,
@@ -479,6 +526,9 @@ mod tests {
         assert_eq!(back.system_prompt_override.as_deref(), Some("custom"));
         assert!(back.interactive_permissions);
         assert!(back.interactive_session);
+        assert_eq!(back.query_source, QUERY_SOURCE_SDK);
+        assert!(back.print);
+        assert!(back.is_tty);
         assert!(back.resume_session_id.is_none());
         assert!(back.escalate_max_output_tokens);
         assert!(back.enable_token_budget);
@@ -580,6 +630,33 @@ mod tests {
     #[test]
     fn default_interactive_session_is_false() {
         assert!(!OrchestratorConfig::default().interactive_session);
+    }
+
+    #[test]
+    fn default_query_source_is_repl_main_thread_and_print_is_false() {
+        let cfg = OrchestratorConfig::default();
+        assert_eq!(cfg.query_source, QUERY_SOURCE_REPL_MAIN_THREAD);
+        assert!(!cfg.print);
+        assert!(!cfg.is_tty);
+        assert_eq!(
+            sanitize_query_source("agent:custom:reviewer"),
+            "agent:custom"
+        );
+        assert_eq!(
+            sanitize_query_source("repl_main_thread"),
+            "repl_main_thread"
+        );
+        assert_eq!(sanitize_query_source("sdk"), "sdk");
+        assert_eq!(sanitize_query_source(""), "");
+    }
+
+    #[test]
+    fn query_source_and_print_default_when_absent_from_json() {
+        let s = r#"{"max_turns":7,"model":"m"}"#;
+        let back: OrchestratorConfig = serde_json::from_str(s).unwrap();
+        assert_eq!(back.query_source, QUERY_SOURCE_REPL_MAIN_THREAD);
+        assert!(!back.print);
+        assert!(!back.is_tty);
     }
 
     #[test]

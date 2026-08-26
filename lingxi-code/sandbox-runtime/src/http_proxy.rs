@@ -21,6 +21,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
@@ -35,7 +36,7 @@ use crate::config::{
     current_network_config, shared_network_config, NetworkConfig, SharedNetworkConfig,
 };
 use crate::dial::{dial_direct, parse_connect_target, CONNECT_TIMEOUT};
-use crate::matcher::{filter_network_request_with_ask, AskFn};
+use crate::matcher::{filter_network_request_with_ask_decision, AskFn};
 use crate::mitm_ca::MitmCa;
 use crate::parent_proxy::{
     connect_via_parent_proxy, proxy_auth_header, select_parent_proxy_url,
@@ -43,6 +44,7 @@ use crate::parent_proxy::{
 };
 use crate::request_filter::{decide_and_respond, FilterOutcome, FilterRequestFn};
 use crate::tls_terminate::{peek_client_hello, terminate_and_forward, TlsTarget};
+use crate::violation_store::{SandboxViolationStore, Violation};
 
 /// Options for the forward proxy server.
 ///
@@ -80,6 +82,10 @@ pub struct ProxyOptions {
     /// thread its ask-callback into the live filter; existing callers set it to
     /// `None`.
     pub ask: Option<AskFn>,
+    /// Optional per-session token that validates per-command proxy credentials.
+    pub proxy_auth_token: Option<String>,
+    /// Optional violation store for `<sandbox_violations>` attribution.
+    pub violation_store: Option<Arc<SandboxViolationStore>>,
 }
 
 impl ProxyOptions {
@@ -103,6 +109,8 @@ impl ProxyOptions {
             mitm_ca,
             tls_terminate_upstream_ca,
             ask,
+            proxy_auth_token: None,
+            violation_store: None,
         }
     }
 }
@@ -119,6 +127,8 @@ impl std::fmt::Debug for ProxyOptions {
                 &self.tls_terminate_upstream_ca.as_ref().map(|c| c.len()),
             )
             .field("ask", &self.ask.is_some())
+            .field("proxy_auth_token", &self.proxy_auth_token.is_some())
+            .field("violation_store", &self.violation_store.is_some())
             .finish()
     }
 }
@@ -196,6 +206,62 @@ fn full_body(s: &str) -> ProxyBody {
         .boxed()
 }
 
+fn format_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn decode_authenticated_command(
+    headers: &http::HeaderMap,
+    proxy_auth_token: Option<&str>,
+) -> Option<String> {
+    let expected = proxy_auth_token?;
+    let header = headers
+        .get(http::header::PROXY_AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let basic = header.strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(basic)
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (username, password) = decoded.split_once(':')?;
+    if password != expected {
+        return None;
+    }
+    username.strip_prefix("srt.").map(ToString::to_string)
+}
+
+fn record_network_violation(
+    options: &ProxyOptions,
+    encoded_command: Option<String>,
+    host: &str,
+    port: u16,
+    reason: &str,
+) {
+    let Some(store) = options.violation_store.as_ref() else {
+        return;
+    };
+    let Some(encoded_command) = encoded_command else {
+        return;
+    };
+    let line = format!(
+        "deny network-outbound {} ({reason})",
+        format_host_port(host, port)
+    );
+    store.add_violation(Violation {
+        encoded_command,
+        line: Some(line),
+        host: Some(host.to_string()),
+        port: Some(port),
+        operation: Some("connect".into()),
+        ..Default::default()
+    });
+}
+
 // ─────────────────────────────── CONNECT ───────────────────────────────
 
 /// `server.on('connect', ...)` (http-proxy.js:12-145). Filter, dial (parent or
@@ -223,7 +289,12 @@ async fn handle_connect(
     // Read the CURRENT live config (clone the inner Arc), then DROP the guard
     // before the await — the std RwLock is never held across a suspension point.
     let net = current_network_config(&options.config);
-    if !filter_network_request_with_ask(port, &hostname, &net, options.ask.as_ref()).await {
+    let encoded_command =
+        decode_authenticated_command(req.headers(), options.proxy_auth_token.as_deref());
+    let decision =
+        filter_network_request_with_ask_decision(port, &hostname, &net, options.ask.as_ref()).await;
+    if let Some(reason) = decision.denied_reason() {
+        record_network_violation(options, encoded_command, &hostname, port, reason);
         tracing::debug!(%hostname, port, "CONNECT blocked by allowlist");
         return blocked_by_allowlist();
     }
@@ -370,7 +441,12 @@ async fn handle_plain(req: Request<Incoming>, options: &Arc<ProxyOptions>) -> Re
     // Read the CURRENT live config (clone the inner Arc), then DROP the guard
     // before the await — the std RwLock is never held across a suspension point.
     let net = current_network_config(&options.config);
-    if !filter_network_request_with_ask(port, &hostname, &net, options.ask.as_ref()).await {
+    let encoded_command =
+        decode_authenticated_command(req.headers(), options.proxy_auth_token.as_deref());
+    let decision =
+        filter_network_request_with_ask_decision(port, &hostname, &net, options.ask.as_ref()).await;
+    if let Some(reason) = decision.denied_reason() {
+        record_network_violation(options, encoded_command, &hostname, port, reason);
         tracing::debug!(%hostname, port, "HTTP request blocked by allowlist");
         return blocked_by_allowlist();
     }
@@ -560,6 +636,8 @@ fn bad_gateway() -> Response<ProxyBody> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::sandbox_proxy_username;
+    use crate::violation_store::SandboxViolationStore;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -647,6 +725,32 @@ mod tests {
         let head = String::from_utf8_lossy(&buf[..n]).into_owned();
         let line = head.lines().next().unwrap_or("").to_string();
         (line, s)
+    }
+
+    async fn connect_via_proxy_with_auth(
+        proxy_port: u16,
+        target: &str,
+        command: &str,
+        token: &str,
+    ) -> String {
+        let basic = base64::engine::general_purpose::STANDARD
+            .encode(format!("{}:{token}", sandbox_proxy_username(command)));
+        let mut s = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
+        s.write_all(
+            format!(
+                "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Basic {basic}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut buf = vec![0u8; 128];
+        let n = s.read(&mut buf).await.unwrap();
+        String::from_utf8_lossy(&buf[..n])
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
     }
 
     #[tokio::test]
@@ -1071,6 +1175,8 @@ mod tests {
             mitm_ca: None,
             tls_terminate_upstream_ca: None,
             ask: None,
+            proxy_auth_token: None,
+            violation_store: None,
         });
         let pport = start_proxy(options).await;
 
@@ -1118,5 +1224,28 @@ mod tests {
         let mut buf = [0u8; 4];
         tun.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"pong");
+    }
+
+    #[tokio::test]
+    async fn denied_connect_with_proxy_auth_records_violation_line() {
+        let store = Arc::new(SandboxViolationStore::new());
+        let token = "tok_123";
+        let options = Arc::new(ProxyOptions {
+            config: shared_network_config(NetworkConfig::default()),
+            parent_proxy: None,
+            filter_request: None,
+            mitm_ca: None,
+            tls_terminate_upstream_ca: None,
+            ask: None,
+            proxy_auth_token: Some(token.to_string()),
+            violation_store: Some(Arc::clone(&store)),
+        });
+        let pport = start_proxy(options).await;
+        let line = connect_via_proxy_with_auth(pport, "denied.example:443", "echo hi", token).await;
+        assert!(line.contains("403"), "expected 403, got {line}");
+        assert_eq!(
+            store.get_violation_lines_for_command("echo hi"),
+            vec!["deny network-outbound denied.example:443 (host is not on the allow list)"]
+        );
     }
 }

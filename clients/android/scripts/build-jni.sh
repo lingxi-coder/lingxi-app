@@ -199,6 +199,22 @@ for t in "${TARGETS[@]}"; do
   log "  ${abi}/${SONAME} ($(du -h "${so}" | awk '{print $1}'))"
 done
 
+if [[ "${PROFILE}" == "release" ]]; then
+  case "$(uname -s)" in
+    Darwin) _NDK_HOST_TAG="darwin-x86_64" ;;
+    Linux) _NDK_HOST_TAG="linux-x86_64" ;;
+    *) _NDK_HOST_TAG="unknown" ;;
+  esac
+  _LLVM_STRIP="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/${_NDK_HOST_TAG}/bin/llvm-strip"
+  if [[ -x "${_LLVM_STRIP}" ]]; then
+    for t in "${TARGETS[@]}"; do
+      abi="$(abi_of "${t}")"
+      so="${JNILIBS_DIR}/${abi}/${SONAME}"
+      "${_LLVM_STRIP}" "${so}" || log "  WARN: llvm-strip failed for ${so}"
+    done
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 1b. Bundled shell binaries — mksh + toybox as lib*.so (P5a)
 # ---------------------------------------------------------------------------

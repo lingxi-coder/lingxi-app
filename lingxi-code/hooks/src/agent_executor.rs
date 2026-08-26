@@ -126,6 +126,7 @@ impl AgentExecutor {
             team_name: None,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
             mode: None,
             isolation: None,
             cwd: None,

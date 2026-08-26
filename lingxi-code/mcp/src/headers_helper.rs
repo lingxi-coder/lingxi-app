@@ -4,6 +4,7 @@ use crate::{ConfigScope, McpServerConfig};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use traits::{McpError, McpHeaders, McpTransportSpec};
 
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -108,25 +109,101 @@ async fn run_helper(
         process.env("CLAUDE_PLUGIN_ROOT", plugin_root);
     }
 
-    let output = tokio::time::timeout(HELPER_TIMEOUT, process.output())
-        .await
-        .map_err(|_| {
-            McpError::Connection(format!(
-                "headersHelper for MCP server \"{server_name}\" timed out after 10s"
-            ))
-        })?
-        .map_err(|error| {
+    let mut child = process.spawn().map_err(|error| {
+        McpError::Connection(format!(
+            "headersHelper for MCP server \"{server_name}\" failed to start: {error}"
+        ))
+    })?;
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        McpError::Connection(format!(
+            "headersHelper for MCP server \"{server_name}\" failed to start: missing stdout"
+        ))
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        McpError::Connection(format!(
+            "headersHelper for MCP server \"{server_name}\" failed to start: missing stderr"
+        ))
+    })?;
+
+    let read_stdout = async {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 8192];
+        loop {
+            let n = stdout.read(&mut tmp).await.map_err(|error| {
+                McpError::Connection(format!(
+                    "headersHelper for MCP server \"{server_name}\" failed to start: {error}"
+                ))
+            })?;
+            if n == 0 {
+                break;
+            }
+            if buf.len().saturating_add(n) > MAX_HELPER_STDOUT {
+                return Err(McpError::Connection(format!(
+                    "headersHelper for MCP server \"{server_name}\" returned more than 1 MiB"
+                )));
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        Ok::<_, McpError>(buf)
+    };
+    let read_stderr = async {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 8192];
+        loop {
+            let n = match stderr.read(&mut tmp).await {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if n == 0 {
+                break;
+            }
+            let take = n.min(MAX_HELPER_STDOUT.saturating_sub(buf.len()));
+            buf.extend_from_slice(&tmp[..take]);
+            if buf.len() >= MAX_HELPER_STDOUT {
+                // Stop retaining diagnostics at the cap, but keep draining
+                // the pipe so a noisy helper cannot block before exit.
+                loop {
+                    match stderr.read(&mut tmp).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                break;
+            }
+        }
+        Ok::<_, McpError>(buf)
+    };
+
+    let collect = async {
+        let (stdout_bytes, stderr_bytes) = tokio::try_join!(read_stdout, read_stderr)?;
+        let status = child.wait().await.map_err(|error| {
             McpError::Connection(format!(
                 "headersHelper for MCP server \"{server_name}\" failed to start: {error}"
             ))
         })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        Ok::<_, McpError>((status, stdout_bytes, stderr_bytes))
+    };
+
+    let (status, stdout_bytes, stderr_bytes) =
+        match tokio::time::timeout(HELPER_TIMEOUT, collect).await {
+            Ok(Ok(parts)) => parts,
+            Ok(Err(error)) => {
+                let _ = child.start_kill();
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = child.start_kill();
+                return Err(McpError::Connection(format!(
+                    "headersHelper for MCP server \"{server_name}\" timed out after 10s"
+                )));
+            }
+        };
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
         let detail = stderr.trim();
         return Err(McpError::Connection(format!(
             "headersHelper for MCP server \"{server_name}\" exited {}{}",
-            output
-                .status
+            status
                 .code()
                 .map_or_else(|| "without a status".to_string(), |code| code.to_string()),
             if detail.is_empty() {
@@ -136,12 +213,7 @@ async fn run_helper(
             }
         )));
     }
-    if output.stdout.len() > MAX_HELPER_STDOUT {
-        return Err(McpError::Connection(format!(
-            "headersHelper for MCP server \"{server_name}\" returned more than 1 MiB"
-        )));
-    }
-    parse_helper_output(&output.stdout, server_name)
+    parse_helper_output(&stdout_bytes, server_name)
 }
 
 #[cfg(unix)]
@@ -261,5 +333,29 @@ mod tests {
         );
         assert_eq!(headers["X-Plugin"], plugin.path().to_string_lossy());
         assert_eq!(headers["X-Static"], "new");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn helper_kills_process_when_stdout_exceeds_cap() {
+        let session = tempfile::tempdir().unwrap();
+        let config = McpServerConfig {
+            name: "remote".into(),
+            spec: McpTransportSpec::Http {
+                url: "https://mcp.example/rpc".into(),
+                headers: McpHeaders::new(),
+                headers_helper: Some("dd if=/dev/zero bs=1048576 count=2 2>/dev/null".into()),
+                oauth: None,
+            },
+            scope: ConfigScope::User,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            config_error: None,
+        };
+        let error = resolve_headers_helper_in(&config, session.path(), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("more than 1 MiB"), "{error}");
     }
 }

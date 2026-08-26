@@ -7,7 +7,7 @@ license.workspace = true
 
 # The `Workflow` tool: launch a model-authored workflow script as a background
 # `LocalWorkflow` task. The byte-exact model-facing surface (name, long-form
-# description, input schema) is reproduced from the claude-code v2.1.185 binary;
+# description, input schema) is reproduced from the claude-code v2.1.245 binary;
 # the launch goes through the injected `WorkflowLauncher` seam (wired by the
 # composition root over the task registry).
 

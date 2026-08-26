@@ -37,7 +37,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 use crate::config::{shared_network_config, SandboxRuntimeConfig, SharedNetworkConfig};
-use crate::env::Platform;
+use crate::env::{generate_proxy_auth_token, Platform};
 use crate::fs_args::{ReadConfig, WriteConfig};
 use crate::http_proxy::{serve, ProxyOptions};
 use crate::linux::{
@@ -134,6 +134,8 @@ struct RunningState {
     /// `network` here so an allow/deny change is live with no rebind (the TS
     /// per-request read of the shared module `config`).
     shared_network: SharedNetworkConfig,
+    /// Per-session token that validates per-command proxy credentials.
+    proxy_auth_token: Option<String>,
 }
 
 /// Errors from [`SandboxManager`] operations.
@@ -181,7 +183,7 @@ pub struct SandboxManager {
     /// disabled (the TS `config === undefined`).
     config: Option<SandboxRuntimeConfig>,
     /// The session violation store (the TS process-wide singleton, here owned).
-    violation_store: SandboxViolationStore,
+    violation_store: Arc<SandboxViolationStore>,
     /// The live infrastructure; `Some` between `initialize` and `reset`.
     running: Option<RunningState>,
     /// The interactive ask-callback threaded into the live proxy filters.
@@ -200,7 +202,7 @@ impl SandboxManager {
     pub fn new() -> Self {
         Self {
             config: None,
-            violation_store: SandboxViolationStore::new(),
+            violation_store: Arc::new(SandboxViolationStore::new()),
             running: None,
             ask_callback: None,
         }
@@ -209,7 +211,14 @@ impl SandboxManager {
     /// `SandboxManager.getSandboxViolationStore()`.
     #[must_use]
     pub fn violation_store(&self) -> &SandboxViolationStore {
-        &self.violation_store
+        self.violation_store.as_ref()
+    }
+
+    /// User-facing sandbox violation lines recorded for `command`.
+    #[must_use]
+    pub fn violation_lines_for_command(&self, command: &str) -> Vec<String> {
+        self.violation_store
+            .get_violation_lines_for_command(command)
     }
 
     /// `SandboxManager.getConfig()` — the active config, or `None` if not
@@ -383,6 +392,11 @@ impl SandboxManager {
             resolve_parent_proxy(net.parent_proxy.as_ref(), &env_map()).map(Arc::new);
         // The LIVE, swappable network config both proxies read per request.
         let shared_network = shared_network_config(net.clone());
+        let proxy_auth_token = if net.http_proxy_port.is_none() {
+            Some(generate_proxy_auth_token())
+        } else {
+            None
+        };
 
         // ── HTTP proxy ──
         let (http_port, http_task) = if let Some(p) = net.http_proxy_port {
@@ -408,6 +422,8 @@ impl SandboxManager {
                 mitm_ca: mitm_ca.clone(),
                 tls_terminate_upstream_ca: None,
                 ask: self.ask_callback.clone(),
+                proxy_auth_token: proxy_auth_token.clone(),
+                violation_store: Some(Arc::clone(&self.violation_store)),
             });
             let task = tokio::spawn(async move { serve(listener, options).await });
             (port, Some(task))
@@ -428,6 +444,8 @@ impl SandboxManager {
                 config: Arc::clone(&shared_network),
                 parent_proxy: parent_proxy.clone(),
                 ask: self.ask_callback.clone(),
+                proxy_auth_token: proxy_auth_token.clone(),
+                violation_store: Some(Arc::clone(&self.violation_store)),
             });
             let task = tokio::spawn(async move {
                 let _ = serve_socks(listener, options).await;
@@ -460,6 +478,7 @@ impl SandboxManager {
             http_socket_path,
             socks_socket_path,
             shared_network,
+            proxy_auth_token,
         });
         Ok(())
     }
@@ -611,6 +630,11 @@ impl SandboxManager {
         } else {
             None
         };
+        let proxy_auth_token = if proxy_live {
+            running.and_then(|r| r.proxy_auth_token.as_deref())
+        } else {
+            None
+        };
 
         let seccomp = active.and_then(|c| c.seccomp.as_ref());
         let ripgrep_cmd = active
@@ -655,6 +679,7 @@ impl SandboxManager {
             cwd,
             platform: Platform::Linux,
             tmpdir: &tmpdir,
+            proxy_auth_token,
         };
         wrap_command_with_sandbox_linux(&params).map_err(|e| ManagerError::Io(e.to_string()))
     }
@@ -695,6 +720,11 @@ impl SandboxManager {
         } else {
             None
         };
+        let proxy_auth_token = if proxy_live {
+            running.and_then(|r| r.proxy_auth_token.as_deref())
+        } else {
+            None
+        };
 
         let net = active.map(|c| &c.network);
         let allow_unix_sockets = net.and_then(|n| n.allow_unix_sockets.as_deref());
@@ -729,6 +759,7 @@ impl SandboxManager {
             allow_apple_events,
             bin_shell,
             tmpdir: &tmpdir,
+            proxy_auth_token,
         };
         let wrapped = wrap_command_with_sandbox_macos(&params)
             .map_err(|e| ManagerError::Io(e.to_string()))?;
@@ -953,6 +984,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn violation_lines_for_command_delegate_to_store() {
+        let mgr = SandboxManager::new();
+        mgr.violation_store()
+            .add_violation(crate::violation_store::Violation {
+                encoded_command: crate::env::encode_sandboxed_command("echo hi"),
+                line: Some(
+                    "deny network-outbound denied.example:443 (host is not on the allow list)"
+                        .into(),
+                ),
+                ..Default::default()
+            });
+        assert_eq!(
+            mgr.violation_lines_for_command("echo hi"),
+            vec!["deny network-outbound denied.example:443 (host is not on the allow list)"]
+        );
+    }
+
+    #[tokio::test]
+    async fn external_http_internal_socks_does_not_mint_proxy_auth_token() {
+        let mut mgr = SandboxManager::new();
+        let cfg = SandboxRuntimeConfig {
+            network: NetworkConfig {
+                allowed_domains: vec!["github.com".into()],
+                http_proxy_port: Some(3128),
+                ..Default::default()
+            },
+            filesystem: FilesystemConfig::default(),
+            ..Default::default()
+        };
+        mgr.initialize(cfg, None, false)
+            .await
+            .expect("initialize should succeed");
+
+        assert_eq!(
+            mgr.running
+                .as_ref()
+                .and_then(|running| running.proxy_auth_token.as_deref()),
+            None
+        );
+
+        mgr.reset();
+    }
+
     /// `wrap_with_sandbox` on macOS wraps the command into the Seatbelt
     /// `sandbox-exec` shell string (the macOS backend is wired) and returns an
     /// empty mount-point list (no bwrap artifacts on macOS). Drives an
@@ -988,6 +1063,37 @@ mod tests {
             "wrapped: {wrapped}"
         );
         assert!(mounts.is_empty(), "macOS has no mount-point artifacts");
+        mgr.reset();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn external_http_internal_socks_wrap_uses_plain_proxy_urls() {
+        use crate::config::{FilesystemConfig, NetworkConfig};
+
+        let mut mgr = SandboxManager::new();
+        let cfg = SandboxRuntimeConfig {
+            network: NetworkConfig {
+                allowed_domains: vec!["github.com".into()],
+                http_proxy_port: Some(3128),
+                ..Default::default()
+            },
+            filesystem: FilesystemConfig::default(),
+            ..Default::default()
+        };
+        mgr.initialize(cfg, None, false)
+            .await
+            .expect("initialize should succeed on macOS");
+
+        let socks_port = mgr.socks_proxy_port().expect("socks proxy port");
+        let (wrapped, mounts) = mgr
+            .wrap_with_sandbox("echo hi", Some("bash"), None, "/tmp")
+            .expect("wrap should succeed on macOS");
+        assert!(mounts.is_empty(), "macOS has no mount-point artifacts");
+        assert!(wrapped.contains("HTTP_PROXY=http://localhost:3128"));
+        assert!(wrapped.contains(&format!("ALL_PROXY=socks5h://localhost:{socks_port}")));
+        assert!(!wrapped.contains("srt."), "wrapped: {wrapped}");
+
         mgr.reset();
     }
 
@@ -1183,5 +1289,58 @@ mod tests {
             TcpListener::bind(("127.0.0.1", http_port)).await.is_ok(),
             "HTTP proxy port should be released after reset"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn external_http_internal_socks_wrap_omits_runner_auth() {
+        let mut mgr = SandboxManager::new();
+
+        {
+            let probe = {
+                let mut m = SandboxManager::new();
+                m.config = Some(github_config());
+                m.check_dependencies()
+            };
+            if !probe.errors.is_empty() {
+                eprintln!("skipping: sandbox deps unavailable: {:?}", probe.errors);
+                return;
+            }
+        }
+
+        let cfg = SandboxRuntimeConfig {
+            network: NetworkConfig {
+                allowed_domains: vec!["github.com".into()],
+                http_proxy_port: Some(3128),
+                ..Default::default()
+            },
+            filesystem: FilesystemConfig::default(),
+            ..Default::default()
+        };
+        mgr.initialize(cfg, None, false)
+            .await
+            .expect("initialize should succeed with deps present");
+
+        let (wrapped, _mounts) = mgr
+            .wrap_with_sandbox(
+                "git ls-remote git@github.com:anthropics/claude-code.git",
+                Some("bash"),
+                None,
+                "/tmp",
+            )
+            .expect("wrap should succeed on Linux with deps");
+        assert!(
+            wrapped.contains("--setenv HTTP_PROXY http://localhost:3128"),
+            "wrapped: {wrapped}"
+        );
+        assert!(
+            wrapped.contains("--setenv ALL_PROXY socks5h://localhost:1080"),
+            "wrapped: {wrapped}"
+        );
+        assert!(wrapped.contains("GIT_SSH_COMMAND"), "wrapped: {wrapped}");
+        assert!(!wrapped.contains("proxyauth="), "wrapped: {wrapped}");
+        assert!(!wrapped.contains("srt."), "wrapped: {wrapped}");
+
+        mgr.reset();
     }
 }

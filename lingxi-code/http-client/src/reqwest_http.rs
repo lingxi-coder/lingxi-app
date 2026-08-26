@@ -29,6 +29,12 @@ use url::Url;
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 const RESPONSES_WEBSOCKETS_V2_BETA: &str = "responses_websockets=2026-02-06";
 const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
+/// TCP/TLS connect budget. Applied on the `reqwest::Client`, never as a
+/// request-level timeout (that would kill long-lived SSE bodies).
+const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Cap on buffered (non-SSE) HTTP response bodies. Matches JSON-RPC/MCP
+/// `DEFAULT_MAX_FRAME_SIZE` so a runaway peer cannot exhaust memory.
+const MAX_HTTP_RESPONSE_BODY: usize = 16 * 1024 * 1024;
 
 /// Production HTTP transport using `reqwest::Client`.
 ///
@@ -87,12 +93,16 @@ impl ReqwestHttp {
         let websocket_tls = tls.websocket_client_config();
         Self {
             client: tls
-                .apply_to_builder(reqwest::Client::builder())
+                .apply_to_builder(
+                    reqwest::Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT),
+                )
                 .build()
                 .expect("reqwest client init"),
             no_redirect_client: tls
                 .apply_to_builder(
-                    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()),
+                    reqwest::Client::builder()
+                        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+                        .redirect(reqwest::redirect::Policy::none()),
                 )
                 .build()
                 .expect("reqwest no-redirect client init"),
@@ -107,7 +117,7 @@ impl ReqwestHttp {
         resolved: &ResolvedAddressOverride,
         no_redirect: bool,
     ) -> Result<reqwest::Client, HttpError> {
-        let mut builder = reqwest::Client::builder();
+        let mut builder = reqwest::Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT);
         if no_redirect {
             builder = builder.redirect(reqwest::redirect::Policy::none());
         }
@@ -134,6 +144,7 @@ impl ReqwestHttp {
             _ if no_redirect => self.no_redirect_client.clone(),
             _ => self.client.clone(),
         };
+        let is_head = matches!(req.method, protocol::HttpMethod::Head);
         let resp = build_reqwest(&client, req)
             .send()
             .await
@@ -144,16 +155,32 @@ impl ReqwestHttp {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
-        let raw = resp
-            .bytes()
-            .await
-            .map_err(|e| HttpError::InvalidResponse(e.to_string()))?;
+        if !is_head
+            && resp
+                .content_length()
+                .is_some_and(|len| len > MAX_HTTP_RESPONSE_BODY as u64)
+        {
+            return Err(HttpError::InvalidResponse(format!(
+                "response body exceeds {MAX_HTTP_RESPONSE_BODY} bytes"
+            )));
+        }
+        let mut raw = Vec::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| HttpError::InvalidResponse(e.to_string()))?;
+            if raw.len().saturating_add(chunk.len()) > MAX_HTTP_RESPONSE_BODY {
+                return Err(HttpError::InvalidResponse(format!(
+                    "response body exceeds {MAX_HTTP_RESPONSE_BODY} bytes"
+                )));
+            }
+            raw.extend_from_slice(&chunk);
+        }
         let body = String::from_utf8_lossy(&raw).into_owned();
         Ok(HttpResponse {
             status,
             headers,
             body,
-            body_bytes: raw.to_vec(),
+            body_bytes: raw,
         })
     }
 }
@@ -184,6 +211,21 @@ fn to_reqwest_method(method: protocol::HttpMethod) -> reqwest::Method {
 /// [`HttpTransport::stream_sse_with_meta`] / [`HttpTransport::stream_raw_bytes`])
 /// calls it.
 fn build_reqwest(client: &reqwest::Client, req: HttpRequest) -> reqwest::RequestBuilder {
+    build_reqwest_inner(client, req, true)
+}
+
+/// Streaming constructors must not apply `HttpRequest::timeout` — that budget
+/// covers the whole body, which for SSE is unbounded. Connect is still bounded
+/// by [`DEFAULT_CONNECT_TIMEOUT`] on the client.
+fn build_reqwest_stream(client: &reqwest::Client, req: HttpRequest) -> reqwest::RequestBuilder {
+    build_reqwest_inner(client, req, false)
+}
+
+fn build_reqwest_inner(
+    client: &reqwest::Client,
+    req: HttpRequest,
+    apply_request_timeout: bool,
+) -> reqwest::RequestBuilder {
     let mut rb = client.request(to_reqwest_method(req.method), &req.url);
     for (k, v) in &req.headers {
         rb = rb.header(k, v);
@@ -194,8 +236,10 @@ fn build_reqwest(client: &reqwest::Client, req: HttpRequest) -> reqwest::Request
     } else if let Some(body) = req.body {
         rb = rb.body(body);
     }
-    if let Some(timeout) = req.timeout {
-        rb = rb.timeout(timeout);
+    if apply_request_timeout {
+        if let Some(timeout) = req.timeout {
+            rb = rb.timeout(timeout);
+        }
     }
     rb
 }
@@ -476,7 +520,7 @@ impl HttpTransport for ReqwestHttp {
     }
 
     async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
-        let resp = build_reqwest(&self.client, req)
+        let resp = build_reqwest_stream(&self.client, req)
             .send()
             .await
             .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
@@ -517,7 +561,7 @@ impl HttpTransport for ReqwestHttp {
     /// implementation in `traits`). Those callers produce empty headers as
     /// before — no behaviour change for default-impl transports.
     async fn stream_sse_with_meta(&self, req: HttpRequest) -> Result<SseStreamWithMeta, HttpError> {
-        let resp = build_reqwest(&self.client, req)
+        let resp = build_reqwest_stream(&self.client, req)
             .send()
             .await
             .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
@@ -561,7 +605,7 @@ impl HttpTransport for ReqwestHttp {
     }
 
     async fn stream_raw_bytes(&self, req: HttpRequest) -> Result<RawByteStream, HttpError> {
-        let resp = build_reqwest(&self.client, req)
+        let resp = build_reqwest_stream(&self.client, req)
             .send()
             .await
             .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
@@ -597,7 +641,7 @@ impl HttpTransport for ReqwestHttp {
         &self,
         req: HttpRequest,
     ) -> Result<RawByteStreamWithMeta, HttpError> {
-        let resp = build_reqwest(&self.client, req)
+        let resp = build_reqwest_stream(&self.client, req)
             .send()
             .await
             .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;
@@ -654,7 +698,7 @@ impl HttpTransport for ReqwestHttp {
             Some(resolved) => self.client_for_resolved_request(resolved, true)?,
             _ => self.no_redirect_client.clone(),
         };
-        let resp = build_reqwest(&client, req)
+        let resp = build_reqwest_stream(&client, req)
             .send()
             .await
             .map_err(|e| map_reqwest_connection_error(e, self.detailed_connection_errors))?;

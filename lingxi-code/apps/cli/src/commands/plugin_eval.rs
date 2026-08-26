@@ -6,7 +6,7 @@
 //! permission policy, sandboxing, hooks, model selection, and cost accounting
 //! therefore use the same production path as an ordinary print-mode turn.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal as _, Write as _};
 use std::path::{Component, Path, PathBuf};
@@ -14,6 +14,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
+use serde::ser::SerializeStruct as _;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value as YamlValue};
 
@@ -23,12 +24,14 @@ const PARTIAL_EXIT: i32 = 2;
 const RESULT_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_RUNS: u32 = 3;
 const DEFAULT_MAX_TURNS: u32 = 20;
-const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
+const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
+const JSON_STDOUT_SENTINEL: &str = "\u{1f}stdout";
 const MAX_CASE_FILES: usize = 1_000;
 const MAX_STAGE_FILES: usize = 20_000;
 const MAX_STAGE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 1_048_576;
 const MAX_GRADER_OUTPUT_BYTES: usize = 262_144;
+const CLAUDE_PLUGIN_MANIFEST_DIR: &str = ".claude-plugin";
 
 /// The eval directory used when neither `--eval-dir` nor the manifest's
 /// `experimental.evals` names one (oracle: "else evals/").
@@ -82,7 +85,7 @@ pub struct Cli {
         long,
         value_name = "path",
         num_args = 0..=1,
-        default_missing_value = "-"
+        default_missing_value = JSON_STDOUT_SENTINEL
     )]
     pub json: Option<String>,
 
@@ -96,8 +99,19 @@ pub struct Cli {
 
     /// Optional hard cost ceiling; abort and report partial results if hit
     /// (exit 2). Overrun is bounded to one agent run.
-    #[arg(long = "max-cost-usd", value_name = "usd", value_parser = parse_positive_f64)]
+    #[arg(long = "max-cost-usd", value_name = "usd", value_parser = parse_non_negative_f64)]
     pub max_cost_usd: Option<f64>,
+
+    /// Mock stand-ins for MCP servers, from <eval dir>/mocks/ (record | off;
+    /// default: record — off spawns the real servers, gated by --allow-tools
+    /// as usual).
+    #[arg(
+        long,
+        value_name = "mode",
+        value_parser = ["record", "off"],
+        default_value = "record"
+    )]
+    pub mocks: String,
 
     /// Override model for all cases.
     #[arg(long, value_name = "model")]
@@ -266,7 +280,7 @@ pub struct EvalCase {
 }
 
 /// A free deterministic grader or an LLM rubric grader.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GraderDefinition {
     /// Match the output with a regular expression.
@@ -325,6 +339,45 @@ pub enum GraderDefinition {
     },
 }
 
+impl Serialize for GraderDefinition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("GraderDefinition", 5)?;
+        state.serialize_field("name", self.name())?;
+        let (kind, markdown, config) = match self {
+            Self::Regex { pattern, .. } => {
+                ("regex", None, serde_json::json!({ "pattern": pattern }))
+            }
+            Self::ToolOrder { tools, .. } => {
+                ("tool_order", None, serde_json::json!({ "tools": tools }))
+            }
+            Self::ToolUsed { tool, .. } => ("tool_used", None, serde_json::json!({ "tool": tool })),
+            Self::FileExists { path, .. } => {
+                ("file_exists", None, serde_json::json!({ "path": path }))
+            }
+            Self::Llm { rubric, .. } => (
+                "llm",
+                Some(rubric.as_str()),
+                serde_json::json!({ "criteria": rubric, "focus": "last_message" }),
+            ),
+            Self::Baseline { rubric, .. } => (
+                "baseline",
+                Some(rubric.as_str()),
+                serde_json::json!({ "criteria": rubric, "focus": "last_message" }),
+            ),
+        };
+        state.serialize_field("type", kind)?;
+        state.serialize_field("weight", &self.weight())?;
+        if let Some(markdown) = markdown {
+            state.serialize_field("graderMarkdown", markdown)?;
+        }
+        state.serialize_field("config", &config)?;
+        state.end()
+    }
+}
+
 impl GraderDefinition {
     fn name(&self) -> &str {
         match self {
@@ -354,8 +407,7 @@ impl GraderDefinition {
 }
 
 /// One grader verdict.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GraderResult {
     /// Grader name.
     pub name: String,
@@ -363,15 +415,60 @@ pub struct GraderResult {
     pub score: Option<f64>,
     /// Whether the grader met its full-credit threshold.
     pub passed: bool,
+    /// Configured grader weight.
+    pub weight: f64,
     /// Human-readable reason.
     pub reason: String,
     /// Whether budget policy skipped this grader.
     pub skipped: bool,
+    /// Whether this grader applies only to the with-plugin arm.
+    pub with_only: bool,
+    /// Whether the grader contributes to the score.
+    pub scored: bool,
+}
+
+impl Serialize for GraderResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("GraderResult", 7)?;
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("passed", &self.passed)?;
+        state.serialize_field("weight", &self.weight)?;
+        if let Some(score) = self.score {
+            state.serialize_field("score", &score)?;
+        }
+        state.serialize_field("explanation", &self.reason)?;
+        state.serialize_field("withOnly", &self.with_only)?;
+        state.serialize_field("scored", &self.scored)?;
+        state.end()
+    }
+}
+
+impl GraderResult {
+    fn from_definition(
+        definition: &GraderDefinition,
+        score: Option<f64>,
+        passed: bool,
+        reason: String,
+        skipped: bool,
+    ) -> Self {
+        Self {
+            name: definition.name().to_string(),
+            score,
+            passed,
+            weight: definition.weight(),
+            reason,
+            skipped,
+            with_only: false,
+            scored: !skipped,
+        }
+    }
 }
 
 /// One isolated agent run and its graders.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize)]
 pub struct EvalRunResult {
     /// Arm name (`with` or `without`).
     pub arm: String,
@@ -405,6 +502,104 @@ pub struct EvalRunResult {
     /// Optional execution error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Mock expectation that deliberately stopped scoring this run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aborted: Option<EvalMockAborted>,
+    /// Mock-server metadata for `--mocks record` with-plugin arms.
+    pub mocks: Option<EvalMocks>,
+}
+
+impl Serialize for EvalRunResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("EvalRunResult", 13)?;
+        state.serialize_field("score", &self.score)?;
+        state.serialize_field("passed", &self.passed)?;
+        state.serialize_field("turns", &self.turns)?;
+        state.serialize_field("costUsd", &self.cost_usd)?;
+        state.serialize_field("judgeCostUsd", &self.judge_cost_usd)?;
+        state.serialize_field("durationSeconds", &self.duration_seconds)?;
+        state.serialize_field("startedAt", &self.started_at)?;
+        if let Some(error) = &self.error {
+            state.serialize_field("error", error)?;
+        }
+        if let Some(aborted) = &self.aborted {
+            state.serialize_field("aborted", aborted)?;
+        }
+        if let Some(path) = &self.trace_path {
+            state.serialize_field("tracePath", path)?;
+        }
+        state.serialize_field("skippedPaidGraders", &self.skipped_paid_graders)?;
+        if let Some(mocks) = &self.mocks {
+            state.serialize_field("mocks", mocks)?;
+        }
+        state.serialize_field("graders", &self.graders)?;
+        state.end()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Mock-server metadata captured for one with-plugin run.
+pub struct EvalMocks {
+    /// Mock servers registered for the run.
+    pub servers: Vec<EvalMockServer>,
+    /// Non-fatal mock configuration warnings.
+    pub warnings: Vec<String>,
+    /// Aggregate mock call counters.
+    pub calls: EvalMockCalls,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One mock MCP server exposed to the evaluated plugin.
+pub struct EvalMockServer {
+    /// MCP server name.
+    pub server: String,
+    /// Server kind (`shadow` or `standalone`).
+    pub kind: String,
+    /// Mocked tools on the server.
+    pub tools: Vec<EvalMockTool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One mocked MCP tool.
+pub struct EvalMockTool {
+    /// Tool name.
+    pub tool: String,
+    /// Responder kind.
+    pub responder: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Call counters emitted by the mock runtime.
+pub struct EvalMockCalls {
+    /// Total mock calls.
+    pub total: u64,
+    /// Calls that returned an error.
+    pub errors: u64,
+    /// Calls attempted against unmocked tools.
+    pub unmocked: Vec<EvalMockUnmocked>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Count of calls attempted against one unmocked tool.
+pub struct EvalMockUnmocked {
+    /// Tool name.
+    pub tool: String,
+    /// Number of rejected calls.
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Mock expectation that aborted one eval run.
+pub struct EvalMockAborted {
+    /// Mock server directory name.
+    pub server: String,
+    /// Mock tool name.
+    pub tool: String,
+    /// Stable human-readable abort reason.
+    pub reason: String,
 }
 
 /// Per-arm run collection.
@@ -446,7 +641,7 @@ pub struct EvalResult {
     /// Case directory.
     pub dir: PathBuf,
     /// Source case path.
-    pub source: PathBuf,
+    pub source: String,
     /// Original prompt markdown.
     pub prompt_markdown: String,
     /// Effective model override.
@@ -459,6 +654,7 @@ pub struct EvalResult {
     /// Per-run turn limit.
     pub max_turns: u32,
     /// Tags copied from the case.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// Normalized graders.
     pub graders: Vec<GraderDefinition>,
@@ -473,6 +669,8 @@ pub struct EvalResult {
 pub struct EvalSuitePlugin {
     /// Display name or id.
     pub name: String,
+    /// Manifest version.
+    pub version: String,
     /// Canonical plugin root.
     pub path: PathBuf,
 }
@@ -492,11 +690,13 @@ pub struct EvalSuiteResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_override: Option<String>,
     /// Judge model.
+    #[serde(skip_serializing_if = "is_default_judge_model")]
     pub judge_model: String,
     /// Name filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub case_filter: Option<String>,
     /// Tag filters.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tag_filters: Vec<String>,
     /// Pass threshold.
     pub threshold: f64,
@@ -516,6 +716,9 @@ pub struct EvalAggregates {
     pub overall_score: f64,
     /// Passed-case ratio.
     pub overall_pass_rate: f64,
+    /// Mean with-minus-without score delta.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_delta: Option<f64>,
 }
 
 /// Complete machine-readable evaluation result.
@@ -534,6 +737,9 @@ pub struct AggregateResult {
     pub cost_usd: f64,
     /// Whether budget or execution failure made this partial.
     pub partial: bool,
+    /// Stable reason for a partial result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial_reason: Option<String>,
     /// Effective suite.
     pub suite: EvalSuiteResult,
     /// Per-case results.
@@ -605,6 +811,18 @@ impl Drop for RunTemp {
 
 /// Run the eval command.
 pub async fn run(cli: &Cli, plugins_dir: &Path, home: &Path, cwd: &Path) -> i32 {
+    if let Some(path) = cli.json.as_deref() {
+        if path != JSON_STDOUT_SENTINEL && !path.ends_with(".json") {
+            eprintln!(
+                "Error: --json output path must end in .json (got '{path}'). If that is your eval target, put it before --json."
+            );
+            return RUNTIME_ERROR;
+        }
+    }
+    if !plugin_eval_enabled_from_env(std::env::var("CLAUDE_CODE_WALNUT_SPIRE").ok().as_deref()) {
+        eprintln!("`plugin eval` is currently in early access");
+        return RUNTIME_ERROR;
+    }
     if let Some(EvalSub::Init(args)) = &cli.command {
         return run_init(args, cli.eval_dir.as_deref(), cwd).await;
     }
@@ -616,8 +834,26 @@ pub async fn run(cli: &Cli, plugins_dir: &Path, home: &Path, cwd: &Path) -> i32 
     }
     match run_evaluation(cli, plugins_dir, home, cwd).await {
         Ok((result, exit)) => {
-            if result.cases.is_empty() {
-                eprintln!("No eval cases found under {}.", result.suite.root.display());
+            if result.cases.is_empty() && !result.partial {
+                let eval_dir = resolve_eval_dir(cli.eval_dir.as_deref(), &result.suite.root)
+                    .unwrap_or_else(|_| DEFAULT_EVAL_DIR.to_string());
+                if cli.json.is_some() {
+                    eprintln!("No eval cases found under {}.", result.suite.root.display());
+                    if let Err(error) = emit_empty_json(cli, &result, cwd) {
+                        eprintln!("lingxi-cli plugin eval: {error}");
+                        return PARTIAL_EXIT;
+                    }
+                } else {
+                    eprintln!(
+                        "{}",
+                        no_eval_cases_message(
+                            &result.suite.root,
+                            &eval_dir,
+                            cli.eval_dir.as_deref(),
+                        )
+                    );
+                }
+                return RUNTIME_ERROR;
             }
             if let Err(error) = emit_outputs(cli, &result, cwd) {
                 eprintln!("lingxi-cli plugin eval: {error}");
@@ -632,6 +868,79 @@ pub async fn run(cli: &Cli, plugins_dir: &Path, home: &Path, cwd: &Path) -> i32 
     }
 }
 
+fn no_eval_cases_message(root: &Path, eval_dir: &str, flag: Option<&str>) -> String {
+    let manifest = plugin_manifest_path(root);
+    let source = if flag.is_some() {
+        "from --eval-dir".to_string()
+    } else if manifest_eval_dir(root).is_some() {
+        format!("from {}; pass --eval-dir to override", manifest.display())
+    } else {
+        "the default".to_string()
+    };
+    let eval_dir_flag = flag.map(|_| format!(" --eval-dir {eval_dir}"));
+    let eval_dir_flag = eval_dir_flag.as_deref().unwrap_or_default();
+    format!(
+        "No eval cases found under {}.\nCases are expected in a {eval_dir}/ directory under {} ({source}), each case a directory containing case.yaml or prompt.md.\nRun `claude plugin eval init{eval_dir_flag}` for a guided interview, or `claude plugin eval init --bare <name>{eval_dir_flag}` to scaffold a blank case.",
+        root.display(),
+        root.display()
+    )
+}
+
+fn plugin_eval_enabled_from_env(value: Option<&str>) -> bool {
+    migrations::context::is_env_truthy(value)
+}
+
+fn is_default_judge_model(model: &String) -> bool {
+    model == "haiku"
+}
+
+fn emit_empty_json(cli: &Cli, result: &AggregateResult, cwd: &Path) -> Result<(), String> {
+    let mut json = serialize_result_pretty(result)?;
+    json.push('\n');
+    match cli.json.as_deref() {
+        Some(JSON_STDOUT_SENTINEL) => print!("{json}"),
+        Some(path) => {
+            atomic_write(&resolve_output_path(cwd, Path::new(path)), json.as_bytes())?;
+            println!("Wrote {path}");
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn serialize_result_pretty(result: &AggregateResult) -> Result<String, String> {
+    let mut value = serde_json::to_value(result)
+        .map_err(|error| format!("failed to serialize eval result: {error}"))?;
+    normalize_js_numbers(&mut value);
+    serde_json::to_string_pretty(&value)
+        .map_err(|error| format!("failed to serialize eval result: {error}"))
+}
+
+fn normalize_js_numbers(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            values.iter_mut().for_each(normalize_js_numbers);
+        }
+        serde_json::Value::Object(values) => {
+            values.values_mut().for_each(normalize_js_numbers);
+        }
+        serde_json::Value::Number(number) => {
+            const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+            if number.is_f64() {
+                if let Some(number) = number.as_f64() {
+                    if number.is_finite()
+                        && number.fract() == 0.0
+                        && number.abs() <= MAX_SAFE_INTEGER
+                    {
+                        *value = serde_json::Value::Number(serde_json::Number::from(number as i64));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn run_evaluation(
     cli: &Cli,
     plugins_dir: &Path,
@@ -642,12 +951,25 @@ async fn run_evaluation(
     let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let target_text = cli.target.clone().unwrap_or_else(|| ".".to_string());
     let target = resolve_target(&target_text, plugins_dir, home, cwd).await?;
+    if cli.eval_dir.is_none() {
+        if let Some(warning) = manifest_eval_setting(&target.root).warning {
+            eprintln!("{warning}");
+        }
+    }
     let eval_dir = resolve_eval_dir(cli.eval_dir.as_deref(), &target.root)?;
+    if cli.json.is_none() && cli.eval_dir.is_none() && manifest_eval_dir(&target.root).is_some() {
+        eprintln!(
+            "Using eval directory {eval_dir}/ from {}",
+            plugin_manifest_path(&target.root).display()
+        );
+    }
     let mut cases = discover_cases(&target.root, &eval_dir)?;
     cases.retain(|case| selected_case(case, cli));
 
+    let plugin_manifest = plugin_manifest_path(&target.root);
+    let plugin_resolved = target.kind == TargetKind::Named || plugin_manifest.is_file();
     let ablation = cli.ablation.clone().unwrap_or_else(|| {
-        if target.kind == TargetKind::Named {
+        if !cases.is_empty() && plugin_resolved {
             "with-without".to_string()
         } else {
             "none".to_string()
@@ -662,15 +984,12 @@ async fn run_evaluation(
         case_filter: cli.case_filter.clone(),
         tag_filters: cli.tag.clone(),
         threshold: cli.threshold,
-        plugins: if target.kind == TargetKind::Named
-            || target
-                .root
-                .join(branding::PLUGIN_MANIFEST_DIR)
-                .join("plugin.json")
-                .is_file()
-        {
+        plugins: if !cases.is_empty() && plugin_resolved {
+            let (name, version) = plugin_manifest_identity(&target.root)
+                .unwrap_or_else(|| (target.original.clone(), "unknown".to_string()));
             vec![EvalSuitePlugin {
-                name: target.original.clone(),
+                name,
+                version,
                 path: target.root.clone(),
             }]
         } else {
@@ -681,11 +1000,12 @@ async fn run_evaluation(
         return Ok((
             AggregateResult {
                 schema_version: RESULT_SCHEMA_VERSION,
-                claude_version: env!("CARGO_PKG_VERSION").to_string(),
+                claude_version: traits::CLAUDE_CODE_VERSION.to_string(),
                 started_at,
-                duration_seconds: started.elapsed().as_secs_f64(),
+                duration_seconds: 0.0,
                 cost_usd: 0.0,
                 partial: false,
+                partial_reason: None,
                 suite,
                 cases: Vec::new(),
                 aggregates: EvalAggregates {
@@ -693,10 +1013,16 @@ async fn run_evaluation(
                     cases_passed: 0,
                     overall_score: 0.0,
                     overall_pass_rate: 0.0,
+                    mean_delta: None,
                 },
             },
             RUNTIME_ERROR,
         ));
+    }
+    if cli.ablation.is_none() && plugin_resolved {
+        eprintln!(
+            "Ablation: defaulting to with-without — a plugin resolved from this path, so each case also runs a no-plugin baseline arm (2× runs) and reports Δ; graders marked with-only (including `tool_used: Skill`) become a plugin-fired indicator rather than part of the score. Pass --ablation none for the previous single-arm run and scoring."
+        );
     }
     let temp = RunTemp::create(cli.keep_temp)?;
     if cli.keep_temp {
@@ -709,7 +1035,7 @@ async fn run_evaluation(
     let mut total_cost = 0.0;
     let mut partial = false;
     let mut results = Vec::new();
-    for case in cases {
+    'case_loop: for case in cases {
         let run_count = cli.runs.or(case.runs).unwrap_or(DEFAULT_RUNS);
         let mut runs = Vec::new();
         for run_number in 1..=run_count {
@@ -733,7 +1059,7 @@ async fn run_evaluation(
                 )
                 .await;
                 total_cost += baseline.cost_usd;
-                partial |= !baseline.success || baseline.skipped_paid_graders;
+                partial |= baseline.skipped_paid_graders;
                 baseline_output = Some(baseline.output.clone());
                 runs.push(baseline);
                 if budget_reached(cli.max_cost_usd, total_cost) {
@@ -755,8 +1081,12 @@ async fn run_evaluation(
             )
             .await;
             total_cost += plugin_run.cost_usd;
-            partial |= !plugin_run.success || plugin_run.skipped_paid_graders;
+            partial |= plugin_run.skipped_paid_graders;
             runs.push(plugin_run);
+        }
+        if runs.is_empty() && budget_reached(cli.max_cost_usd, total_cost) {
+            partial = true;
+            break 'case_loop;
         }
         let mut with_plugin = Vec::new();
         let mut without_plugin = Vec::new();
@@ -772,14 +1102,25 @@ async fn run_evaluation(
         let score_without = (ablation == "with-without").then(|| run_average(&without_plugin));
         let pass_rate_without =
             (ablation == "with-without").then(|| run_pass_rate(&without_plugin));
-        let case_dir = case.source.parent().unwrap_or(&target.root).to_path_buf();
+        let case_dir = case.source.parent().unwrap_or(&target.root);
+        let case_dir = case_dir
+            .strip_prefix(&target.root)
+            .unwrap_or(case_dir)
+            .to_path_buf();
+        let case_source =
+            if case.source.file_name().and_then(|name| name.to_str()) == Some("case.yaml") {
+                "yaml"
+            } else {
+                "prose"
+            }
+            .to_string();
         results.push(EvalResult {
             name: case.name,
             dir: case_dir,
-            source: case.source,
+            source: case_source,
             prompt_markdown: case.prompt,
             model: cli.model.clone().or(case.model),
-            runs_per_case: run_count,
+            runs_per_case: case.runs.unwrap_or(DEFAULT_RUNS),
             timeout_seconds: case.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS),
             max_turns: case.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
             tags: case.tags,
@@ -811,9 +1152,44 @@ async fn run_evaluation(
         .filter(|case| case.aggregates.score >= cli.threshold)
         .count();
     let cases_total = results.len();
-    let pass_rate = cases_passed as f64 / cases_total as f64;
-    let threshold_failed = cases_passed != cases_total;
-    let exit = if partial || budget_reached(cli.max_cost_usd, total_cost) {
+    let pass_rate = if cases_total == 0 {
+        0.0
+    } else {
+        cases_passed as f64 / cases_total as f64
+    };
+    let deltas = results
+        .iter()
+        .filter_map(|case| case.aggregates.delta)
+        .collect::<Vec<_>>();
+    let mean_delta = (!deltas.is_empty()).then(|| deltas.iter().sum::<f64>() / deltas.len() as f64);
+    let run_failed = results.iter().any(|case| {
+        case.arms
+            .with_plugin
+            .iter()
+            .chain(case.arms.without_plugin.iter().flatten())
+            .any(|run| run.error.is_some() || run.aborted.is_some())
+    });
+    let threshold_failed = cases_passed != cases_total || run_failed;
+    let auth_failed = results
+        .iter()
+        .flat_map(|case| {
+            case.arms
+                .with_plugin
+                .iter()
+                .chain(case.arms.without_plugin.iter().flatten())
+        })
+        .filter_map(|run| run.error.as_deref())
+        .any(|error| error.contains("Not logged in"));
+    let cost_ceiling = budget_reached(cli.max_cost_usd, total_cost);
+    partial |= auth_failed || cost_ceiling;
+    let partial_reason = if auth_failed {
+        Some("auth_failed".to_string())
+    } else if cost_ceiling {
+        Some("cost_ceiling".to_string())
+    } else {
+        None
+    };
+    let exit = if partial {
         PARTIAL_EXIT
     } else if threshold_failed {
         RUNTIME_ERROR
@@ -823,11 +1199,12 @@ async fn run_evaluation(
     Ok((
         AggregateResult {
             schema_version: RESULT_SCHEMA_VERSION,
-            claude_version: env!("CARGO_PKG_VERSION").to_string(),
+            claude_version: traits::CLAUDE_CODE_VERSION.to_string(),
             started_at,
             duration_seconds: started.elapsed().as_secs_f64(),
             cost_usd: total_cost,
             partial,
+            partial_reason,
             suite,
             cases: results,
             aggregates: EvalAggregates {
@@ -835,6 +1212,7 @@ async fn run_evaluation(
                 cases_passed,
                 overall_score: score,
                 overall_pass_rate: pass_rate,
+                mean_delta,
             },
         },
         exit,
@@ -855,6 +1233,14 @@ async fn run_one_arm(
     baseline_output: Option<&str>,
 ) -> EvalRunResult {
     let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let discovered_mocks = if plugin_enabled && cli.mocks == "record" {
+        match discover_eval_mocks(cli, plugin_root, case) {
+            Ok(mocks) => mocks,
+            Err(error) => return failed_run(arm, run_number, error),
+        }
+    } else {
+        None
+    };
     let run_dir = temp_root
         .join(safe_segment(&case.name))
         .join(format!("{arm}-{run_number}"));
@@ -880,6 +1266,22 @@ async fn run_one_arm(
         }
     }
 
+    let prepared_mocks = match discovered_mocks.as_ref() {
+        Some(mocks) => match prepare_mock_runtime(plugin_root, &run_dir, mocks) {
+            Ok(runtime) => Some(runtime),
+            Err(error) => return failed_run(arm, run_number, error),
+        },
+        None => None,
+    };
+    let prepared_plugin = if plugin_enabled && prepared_mocks.is_none() {
+        match prepare_eval_plugin(plugin_root) {
+            Ok(plugin) => plugin,
+            Err(error) => return failed_run(arm, run_number, error),
+        }
+    } else {
+        None
+    };
+
     let model = cli.model.as_deref().or(case.model.as_deref());
     let mut allowed_tools = case.allowed_tools.clone();
     for tool in &cli.allow_tools {
@@ -887,44 +1289,89 @@ async fn run_one_arm(
             allowed_tools.push(tool.clone());
         }
     }
-    let output = run_agent(
+    if let Some(runtime) = &prepared_mocks {
+        for tool in &runtime.mocked_tools {
+            if !allowed_tools.contains(tool) {
+                allowed_tools.push(tool.clone());
+            }
+        }
+    }
+    let plugin_for_agent = prepared_mocks
+        .as_ref()
+        .map(|runtime| runtime.plugin_root.as_path())
+        .or_else(|| {
+            prepared_plugin
+                .as_ref()
+                .map(|plugin| plugin.plugin_root.as_path())
+        })
+        .or_else(|| plugin_enabled.then_some(plugin_root));
+    let mut output = run_agent(
         &case.prompt,
         model,
         &allowed_tools,
-        plugin_enabled.then_some(plugin_root),
+        plugin_for_agent,
         disabled_plugin_ids,
         &run_dir,
         case.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
         case.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS),
         cli.verbose,
         case.append_system_prompt.as_deref(),
+        prepared_mocks.as_ref(),
     )
     .await;
+    let mut mocks = discovered_mocks.map(|mocks| mocks.report);
+    let mut aborted = None;
+    if let (Some(runtime), Some(report)) = (&prepared_mocks, &mut mocks) {
+        match aggregate_mock_calls(&runtime.call_logs) {
+            Ok((calls, mock_abort)) => {
+                let observed_mock_tool = output
+                    .tools_used
+                    .iter()
+                    .any(|tool| runtime.mocked_tools.contains(tool));
+                if observed_mock_tool && calls.total == 0 {
+                    output.success = false;
+                    output.error = Some(
+                        "mocked tool calls appeared in the agent trace without a matching stand-in record"
+                            .to_string(),
+                    );
+                }
+                report.calls = calls;
+                aborted = mock_abort;
+            }
+            Err(error) => {
+                output.success = false;
+                output.error = Some(error);
+            }
+        }
+    }
     let mut run_cost = output.cost_usd;
     let mut judge_cost = 0.0;
     let mut grader_results = Vec::new();
     for grader in &case.graders {
+        if aborted.is_some() {
+            break;
+        }
         if matches!(grader, GraderDefinition::Baseline { .. }) && baseline_output.is_none() {
             if arm == "without" {
                 continue;
             }
-            grader_results.push(GraderResult {
-                name: grader.name().to_string(),
-                score: Some(0.0),
-                passed: false,
-                reason: "baseline grader requires --ablation with-without".to_string(),
-                skipped: false,
-            });
+            grader_results.push(GraderResult::from_definition(
+                grader,
+                Some(0.0),
+                false,
+                "baseline grader requires --ablation with-without".to_string(),
+                false,
+            ));
             continue;
         }
         if grader.is_paid() && budget_reached(cli.max_cost_usd, prior_cost + run_cost) {
-            grader_results.push(GraderResult {
-                name: grader.name().to_string(),
-                score: None,
-                passed: false,
-                reason: "skipped after cost ceiling was reached".to_string(),
-                skipped: true,
-            });
+            grader_results.push(GraderResult::from_definition(
+                grader,
+                None,
+                false,
+                "skipped after cost ceiling was reached".to_string(),
+                true,
+            ));
             continue;
         }
         let (result, grader_cost) = grade_output(
@@ -942,13 +1389,17 @@ async fn run_one_arm(
         judge_cost += grader_cost;
         grader_results.push(result);
     }
-    let score = weighted_score(&grader_results, &case.graders, output.success);
+    let score = if aborted.is_some() {
+        0.0
+    } else {
+        weighted_score(&grader_results, &case.graders, output.success)
+    };
     let skipped_paid_graders = grader_results.iter().any(|result| result.skipped);
     EvalRunResult {
         arm: arm.to_string(),
         run: run_number,
-        success: output.success,
-        passed: output.success && score >= 1.0,
+        success: output.success && aborted.is_none(),
+        passed: output.success && aborted.is_none() && score >= 1.0,
         output: output.text,
         cost_usd: run_cost,
         judge_cost_usd: judge_cost,
@@ -960,7 +1411,562 @@ async fn run_one_arm(
         graders: grader_results,
         score,
         error: output.error,
+        aborted,
+        mocks,
     }
+}
+
+#[derive(Default)]
+struct MockServerAccumulator {
+    tools: BTreeMap<String, MockResponderAccumulator>,
+    described_tools: BTreeMap<String, serde_json::Value>,
+}
+
+struct MockResponderAccumulator {
+    kind: String,
+    body: String,
+    base_dir: PathBuf,
+    error: bool,
+    expect: Option<serde_json::Value>,
+}
+
+struct DiscoveredEvalMocks {
+    report: EvalMocks,
+    runtime: Vec<RuntimeMockServer>,
+}
+
+struct RuntimeMockServer {
+    registered_name: String,
+    spec: crate::commands::plugin_eval_mock::MockServerSpec,
+}
+
+struct PreparedMockRuntime {
+    _staging: RunTemp,
+    plugin_root: PathBuf,
+    mcp_config: String,
+    call_logs: Vec<PathBuf>,
+    mocked_tools: Vec<String>,
+}
+
+struct PreparedEvalPlugin {
+    _staging: RunTemp,
+    plugin_root: PathBuf,
+}
+
+fn prepare_mock_runtime(
+    plugin_root: &Path,
+    run_dir: &Path,
+    discovered: &DiscoveredEvalMocks,
+) -> Result<PreparedMockRuntime, String> {
+    let staging = RunTemp::create(false)?;
+    let staged_plugin = staging.path.join("plugin");
+    copy_plugin_snapshot(plugin_root, &staged_plugin)?;
+    adapt_staged_plugin_manifest(&staged_plugin)?;
+    strip_staged_plugin_mcp(&staged_plugin)?;
+
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve current executable: {error}"))?;
+    let runtime_dir = run_dir.join("mock-runtime");
+    fs::create_dir_all(&runtime_dir).map_err(|error| {
+        format!(
+            "failed to create mock runtime directory {}: {error}",
+            runtime_dir.display()
+        )
+    })?;
+    set_private_dir_permissions(&runtime_dir)?;
+
+    let mut configs = serde_json::Map::new();
+    let mut call_logs = Vec::new();
+    let mut mocked_tools = Vec::new();
+    for (index, server) in discovered.runtime.iter().enumerate() {
+        let spec_path = runtime_dir.join(format!("server-{index}.json"));
+        let call_log = runtime_dir.join(format!("calls-{index}.jsonl"));
+        let bytes = serde_json::to_vec(&server.spec)
+            .map_err(|error| format!("failed to serialize mock server spec: {error}"))?;
+        atomic_write(&spec_path, &bytes)?;
+        let launch_env = serde_json::Map::from_iter([
+            (
+                crate::commands::plugin_eval_mock::SPEC_ENV.to_string(),
+                serde_json::json!(spec_path.to_string_lossy()),
+            ),
+            (
+                crate::commands::plugin_eval_mock::CALLS_ENV.to_string(),
+                serde_json::json!(call_log.to_string_lossy()),
+            ),
+        ]);
+        configs.insert(
+            server.registered_name.clone(),
+            serde_json::json!({
+                "type": "stdio",
+                "command": executable.to_string_lossy(),
+                "args": [],
+                "env": launch_env,
+            }),
+        );
+        let normalized_server = protocol::normalize_name_for_mcp(&server.registered_name);
+        mocked_tools.extend(server.spec.tools.iter().map(|tool| {
+            format!(
+                "mcp__{normalized_server}__{}",
+                protocol::normalize_name_for_mcp(&tool.name)
+            )
+        }));
+        call_logs.push(call_log);
+    }
+    Ok(PreparedMockRuntime {
+        _staging: staging,
+        plugin_root: staged_plugin,
+        mcp_config: serde_json::json!({ "mcpServers": configs }).to_string(),
+        call_logs,
+        mocked_tools,
+    })
+}
+
+fn prepare_eval_plugin(plugin_root: &Path) -> Result<Option<PreparedEvalPlugin>, String> {
+    let parity_manifest = plugin_manifest_path(plugin_root);
+    if !parity_manifest.is_file() {
+        return Ok(None);
+    }
+    let staging = RunTemp::create(false)?;
+    let staged_plugin = staging.path.join("plugin");
+    copy_plugin_snapshot(plugin_root, &staged_plugin)?;
+    adapt_staged_plugin_manifest(&staged_plugin)?;
+    Ok(Some(PreparedEvalPlugin {
+        _staging: staging,
+        plugin_root: staged_plugin,
+    }))
+}
+
+fn adapt_staged_plugin_manifest(plugin_root: &Path) -> Result<(), String> {
+    let source = plugin_manifest_path(plugin_root);
+    if !source.is_file() {
+        return Ok(());
+    }
+    let destination = plugin_root
+        .join(branding::PLUGIN_MANIFEST_DIR)
+        .join("plugin.json");
+    let bytes = fs::read(&source)
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
+    atomic_write(&destination, &bytes)
+}
+
+fn strip_staged_plugin_mcp(plugin_root: &Path) -> Result<(), String> {
+    let root_mcp = plugin_root.join(".mcp.json");
+    if root_mcp.is_file() {
+        fs::remove_file(&root_mcp)
+            .map_err(|error| format!("failed to remove {}: {error}", root_mcp.display()))?;
+    }
+    let manifests = BTreeSet::from([
+        plugin_root.join("plugin.json"),
+        plugin_root
+            .join(CLAUDE_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+        plugin_root
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+    ]);
+    for manifest in manifests {
+        if !manifest.is_file() {
+            continue;
+        }
+        let raw = fs::read_to_string(&manifest)
+            .map_err(|error| format!("failed to read {}: {error}", manifest.display()))?;
+        let mut value = serde_json::from_str::<serde_json::Value>(&raw)
+            .map_err(|error| format!("invalid {}: {error}", manifest.display()))?;
+        if value
+            .as_object_mut()
+            .and_then(|object| object.remove("mcpServers"))
+            .is_some()
+        {
+            let bytes = serde_json::to_vec(&value)
+                .map_err(|error| format!("failed to serialize {}: {error}", manifest.display()))?;
+            atomic_write(&manifest, &bytes)?;
+        }
+    }
+    Ok(())
+}
+
+fn aggregate_mock_calls(
+    paths: &[PathBuf],
+) -> Result<(EvalMockCalls, Option<EvalMockAborted>), String> {
+    let mut total = 0u64;
+    let mut errors = 0u64;
+    let mut unmocked = BTreeMap::<String, u64>::new();
+    let mut aborted = None;
+    for path in paths {
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to read mock call log {}: {error}",
+                    path.display()
+                ));
+            }
+        };
+        for (index, line) in raw.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record =
+                serde_json::from_str::<crate::commands::plugin_eval_mock::MockCallRecord>(line)
+                    .map_err(|error| {
+                        format!(
+                            "invalid mock call record in {} on line {}: {error}",
+                            path.display(),
+                            index + 1
+                        )
+                    })?;
+            total = total.saturating_add(1);
+            if record.error.is_some() {
+                errors = errors.saturating_add(1);
+            }
+            if record.unmocked {
+                *unmocked.entry(record.tool.clone()).or_default() += 1;
+            }
+            if aborted.is_none() {
+                if let Some(reason) = record.abort_reason {
+                    aborted = Some(EvalMockAborted {
+                        server: record.server,
+                        tool: record.tool,
+                        reason: record.error.unwrap_or(reason),
+                    });
+                }
+            }
+        }
+    }
+    Ok((
+        EvalMockCalls {
+            total,
+            errors,
+            unmocked: unmocked
+                .into_iter()
+                .map(|(tool, count)| EvalMockUnmocked { tool, count })
+                .collect(),
+        },
+        aborted,
+    ))
+}
+
+fn discover_eval_mocks(
+    cli: &Cli,
+    plugin_root: &Path,
+    case: &EvalCase,
+) -> Result<Option<DiscoveredEvalMocks>, String> {
+    let eval_dir = resolve_eval_dir(cli.eval_dir.as_deref(), plugin_root)?;
+    let mut servers = BTreeMap::<String, MockServerAccumulator>::new();
+    load_mock_tree(&plugin_root.join(eval_dir).join("mocks"), &mut servers)?;
+    if let Some(case_dir) = case.source.parent() {
+        load_mock_tree(&case_dir.join("mocks"), &mut servers)?;
+    }
+    if servers.is_empty() {
+        return Ok(None);
+    }
+
+    let declared_servers = plugin_declared_mcp_servers(plugin_root);
+    let plugin_name = plugin_runtime_name(plugin_root);
+    let mut warnings = Vec::new();
+    let mut runtime = Vec::new();
+    let report_servers = servers
+        .into_iter()
+        .map(|(server, data)| {
+            let shadow = declared_servers.contains(&server);
+            let registered_name = if shadow {
+                plugin_name
+                    .as_deref()
+                    .map(|name| format!("plugin:{name}:{server}"))
+                    .unwrap_or_else(|| server.clone())
+            } else {
+                server.clone()
+            };
+            let missing_descriptions = data
+                .tools
+                .keys()
+                .filter(|tool| !data.described_tools.contains_key(*tool))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing_descriptions.is_empty() {
+                warnings.push(format!(
+                    "{server}: no _tools.json entry for {} — served with a permissive schema and no description; save the server's tools/list response as mocks/{server}/_tools.json so the model sees the real tool",
+                    missing_descriptions.join(", ")
+                ));
+            }
+            let report_tools = data
+                .tools
+                .iter()
+                .map(|(tool, responder)| EvalMockTool {
+                    tool: tool.clone(),
+                    responder: responder.kind.clone(),
+                })
+                .collect();
+            let mut runtime_tools = BTreeMap::<String, crate::commands::plugin_eval_mock::MockToolSpec>::new();
+            for (tool, description) in &data.described_tools {
+                runtime_tools.insert(
+                    tool.clone(),
+                    mock_tool_spec_from_description(tool, description),
+                );
+            }
+            for (tool, responder) in data.tools {
+                let entry = runtime_tools.entry(tool.clone()).or_insert_with(|| {
+                    crate::commands::plugin_eval_mock::MockToolSpec {
+                        name: tool.clone(),
+                        description: String::new(),
+                        input_schema: serde_json::json!({
+                            "type": "object",
+                            "additionalProperties": true
+                        }),
+                        responder: None,
+                    }
+                });
+                entry.responder = Some(crate::commands::plugin_eval_mock::FixedResponderSpec {
+                    responder_type: responder.kind,
+                    body: Some(responder.body),
+                    base_dir: Some(responder.base_dir),
+                    content: None,
+                    error: responder.error,
+                    expect: responder.expect,
+                });
+            }
+            runtime.push(RuntimeMockServer {
+                registered_name,
+                spec: crate::commands::plugin_eval_mock::MockServerSpec {
+                    server: server.clone(),
+                    tools: runtime_tools.into_values().collect(),
+                },
+            });
+            EvalMockServer {
+                server,
+                kind: if shadow { "shadow" } else { "standalone" }.to_string(),
+                tools: report_tools,
+            }
+        })
+        .collect();
+    Ok(Some(DiscoveredEvalMocks {
+        report: EvalMocks {
+            servers: report_servers,
+            warnings,
+            calls: EvalMockCalls {
+                total: 0,
+                errors: 0,
+                unmocked: Vec::new(),
+            },
+        },
+        runtime,
+    }))
+}
+
+fn mock_tool_spec_from_description(
+    fallback_name: &str,
+    value: &serde_json::Value,
+) -> crate::commands::plugin_eval_mock::MockToolSpec {
+    crate::commands::plugin_eval_mock::MockToolSpec {
+        name: value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(fallback_name)
+            .to_string(),
+        description: value
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        input_schema: value
+            .get("inputSchema")
+            .cloned()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(
+                || serde_json::json!({ "type": "object", "additionalProperties": true }),
+            ),
+        responder: None,
+    }
+}
+
+fn plugin_runtime_name(plugin_root: &Path) -> Option<String> {
+    let candidates = [
+        plugin_manifest_path(plugin_root),
+        plugin_root
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+    ];
+    candidates.into_iter().find_map(|manifest| {
+        let raw = fs::read_to_string(manifest).ok()?;
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()?
+            .get("name")?
+            .as_str()
+            .map(str::to_string)
+    })
+}
+
+fn plugin_declared_mcp_servers(plugin_root: &Path) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let root_config = plugin_root.join(".mcp.json");
+    if let Ok(raw) = fs::read_to_string(root_config) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let servers = value
+                .get("mcpServers")
+                .and_then(serde_json::Value::as_object)
+                .or_else(|| value.as_object());
+            if let Some(servers) = servers {
+                names.extend(servers.keys().cloned());
+            }
+        }
+    }
+    for manifest in [
+        plugin_manifest_path(plugin_root),
+        plugin_root
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+    ] {
+        if let Ok(raw) = fs::read_to_string(manifest) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(servers) = value
+                    .get("mcpServers")
+                    .and_then(serde_json::Value::as_object)
+                {
+                    names.extend(servers.keys().cloned());
+                }
+            }
+        }
+    }
+    names
+}
+
+fn load_mock_tree(
+    root: &Path,
+    servers: &mut BTreeMap<String, MockServerAccumulator>,
+) -> Result<(), String> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    reject_symlink(root)?;
+    let mut entries = fs::read_dir(root)
+        .map_err(|error| format!("failed to read mocks directory {}: {error}", root.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!(
+                "failed to inspect mocks directory {}: {error}",
+                root.display()
+            )
+        })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let ty = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect {}: {error}", entry.path().display()))?;
+        if ty.is_symlink() || !ty.is_dir() {
+            continue;
+        }
+        let server_name = entry.file_name().to_string_lossy().into_owned();
+        if !is_safe_mock_segment(&server_name) {
+            return Err(format!(
+                "mock server directory name {server_name:?} must use only letters, digits, '_' and '-'"
+            ));
+        }
+        let server_dir = entry.path();
+        let server = servers.entry(server_name).or_default();
+        load_mock_server(&server_dir, server)?;
+    }
+    Ok(())
+}
+
+fn load_mock_server(root: &Path, server: &mut MockServerAccumulator) -> Result<(), String> {
+    let server_prompt = root.join("_server.md");
+    if server_prompt.is_file() {
+        return Err(format!(
+            "{} uses an agent mock responder, which Claude Code 2.1.245 does not support yet",
+            server_prompt.display()
+        ));
+    }
+
+    let tools_path = root.join("_tools.json");
+    if tools_path.is_file() {
+        let raw = fs::read_to_string(&tools_path)
+            .map_err(|error| format!("failed to read {}: {error}", tools_path.display()))?;
+        let value = serde_json::from_str::<serde_json::Value>(&raw)
+            .map_err(|error| format!("invalid {}: {error}", tools_path.display()))?;
+        let tools = value
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .or_else(|| value.as_array());
+        if let Some(tools) = tools {
+            for tool in tools {
+                if let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) {
+                    if !is_safe_mock_segment(name) {
+                        return Err(format!(
+                            "mock tool name {name:?} in {} must use only letters, digits, '_' and '-'",
+                            tools_path.display()
+                        ));
+                    }
+                    server
+                        .described_tools
+                        .insert(name.to_string(), tool.clone());
+                }
+            }
+        }
+    }
+
+    let mut entries = fs::read_dir(root)
+        .map_err(|error| format!("failed to read mock server {}: {error}", root.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to inspect mock server {}: {error}", root.display()))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let ty = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+        if ty.is_symlink()
+            || !ty.is_file()
+            || path.extension().and_then(|ext| ext.to_str()) != Some("md")
+        {
+            continue;
+        }
+        let Some(tool) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if tool == "_server" {
+            continue;
+        }
+        if !is_safe_mock_segment(tool) {
+            return Err(format!(
+                "mock tool filename {tool:?} must use only letters, digits, '_' and '-'"
+            ));
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        let (frontmatter, body) = parse_markdown_frontmatter(&raw, &path)?;
+        let kind = yaml_string(&frontmatter, "type").unwrap_or_else(|| "fixed".to_string());
+        if kind != "fixed" {
+            return Err(format!(
+                "{} uses unsupported mock responder type {kind:?}; Claude Code 2.1.245 accepts only fixed responders",
+                path.display()
+            ));
+        }
+        let expect = yaml_value(&frontmatter, "expect")
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| format!("invalid expect in {}: {error}", path.display()))?;
+        server.tools.insert(
+            tool.to_string(),
+            MockResponderAccumulator {
+                kind,
+                body,
+                base_dir: path.parent().unwrap_or(root).to_path_buf(),
+                error: yaml_value(&frontmatter, "error")
+                    .and_then(YamlValue::as_bool)
+                    .unwrap_or(false),
+                expect,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn is_safe_mock_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn failed_run(arm: &str, run: u32, error: String) -> EvalRunResult {
@@ -980,6 +1986,8 @@ fn failed_run(arm: &str, run: u32, error: String) -> EvalRunResult {
         graders: Vec::new(),
         score: 0.0,
         error: Some(error),
+        aborted: None,
+        mocks: None,
     }
 }
 
@@ -994,6 +2002,7 @@ async fn run_agent(
     timeout_seconds: u64,
     verbose: bool,
     append_system_prompt: Option<&str>,
+    mock_runtime: Option<&PreparedMockRuntime>,
 ) -> AgentOutput {
     // `--settings {"enabledPlugins": ...}` is retained below as
     // defense-in-depth, but the desktop composition root intentionally reads
@@ -1051,6 +2060,14 @@ async fn run_agent(
     }
     if let Some(root) = plugin_root {
         command.arg("--plugin-dir").arg(root);
+    }
+    if let Some(runtime) = mock_runtime {
+        command
+            .arg("--mcp-config")
+            .arg(&runtime.mcp_config)
+            .arg("--strict-mcp-config")
+            .arg("--disallowedTools")
+            .arg("MCP");
     }
     if !disabled_plugin_ids.is_empty() {
         let disabled = disabled_plugin_ids
@@ -1255,26 +2272,26 @@ async fn grade_output(
     baseline_output: Option<&str>,
 ) -> (GraderResult, f64) {
     match grader {
-        GraderDefinition::Regex { name, pattern, .. } => {
+        GraderDefinition::Regex { pattern, .. } => {
             let matched = regex::Regex::new(pattern)
                 .map(|regex| regex.is_match(output))
                 .unwrap_or(false);
             (
-                GraderResult {
-                    name: name.clone(),
-                    score: Some(if matched { 1.0 } else { 0.0 }),
-                    passed: matched,
-                    reason: if matched {
+                GraderResult::from_definition(
+                    grader,
+                    Some(if matched { 1.0 } else { 0.0 }),
+                    matched,
+                    if matched {
                         format!("output matched /{pattern}/")
                     } else {
                         format!("output did not match /{pattern}/")
                     },
-                    skipped: false,
-                },
+                    false,
+                ),
                 0.0,
             )
         }
-        GraderDefinition::ToolOrder { name, tools, .. } => {
+        GraderDefinition::ToolOrder { tools, .. } => {
             let mut cursor = 0;
             let matched = tools.iter().all(|wanted| {
                 let found = tools_used[cursor..]
@@ -1288,11 +2305,11 @@ async fn grade_output(
                 }
             });
             (
-                GraderResult {
-                    name: name.clone(),
-                    score: Some(if matched { 1.0 } else { 0.0 }),
-                    passed: matched,
-                    reason: if matched {
+                GraderResult::from_definition(
+                    grader,
+                    Some(if matched { 1.0 } else { 0.0 }),
+                    matched,
+                    if matched {
                         format!("tools appeared in order: {}", tools.join(", "))
                     } else {
                         format!(
@@ -1301,45 +2318,45 @@ async fn grade_output(
                             tools_used.join(", ")
                         )
                     },
-                    skipped: false,
-                },
+                    false,
+                ),
                 0.0,
             )
         }
-        GraderDefinition::ToolUsed { name, tool, .. } => {
+        GraderDefinition::ToolUsed { tool, .. } => {
             let matched = tools_used.iter().any(|actual| tool_matches(tool, actual));
             (
-                GraderResult {
-                    name: name.clone(),
-                    score: Some(if matched { 1.0 } else { 0.0 }),
-                    passed: matched,
-                    reason: if matched {
+                GraderResult::from_definition(
+                    grader,
+                    Some(if matched { 1.0 } else { 0.0 }),
+                    matched,
+                    if matched {
                         format!("tool {tool:?} was used")
                     } else {
                         format!("tool {tool:?} was not used")
                     },
-                    skipped: false,
-                },
+                    false,
+                ),
                 0.0,
             )
         }
-        GraderDefinition::FileExists { name, path, .. } => {
+        GraderDefinition::FileExists { path, .. } => {
             let exists = confined_output_path(cwd, path)
                 .and_then(|path| fs::metadata(path).map_err(|error| error.to_string()))
                 .map(|metadata| metadata.is_file())
                 .unwrap_or(false);
             (
-                GraderResult {
-                    name: name.clone(),
-                    score: Some(if exists { 1.0 } else { 0.0 }),
-                    passed: exists,
-                    reason: if exists {
+                GraderResult::from_definition(
+                    grader,
+                    Some(if exists { 1.0 } else { 0.0 }),
+                    exists,
+                    if exists {
                         format!("{} exists", path.display())
                     } else {
                         format!("{} does not exist", path.display())
                     },
-                    skipped: false,
-                },
+                    false,
+                ),
                 0.0,
             )
         }
@@ -1375,13 +2392,13 @@ async fn grade_output(
             let judge_dir = cwd.join("judges").join(safe_segment(name));
             if let Err(error) = fs::create_dir_all(&judge_dir) {
                 return (
-                    GraderResult {
-                        name: name.clone(),
-                        score: Some(0.0),
-                        passed: false,
-                        reason: format!("failed to create judge directory: {error}"),
-                        skipped: false,
-                    },
+                    GraderResult::from_definition(
+                        grader,
+                        Some(0.0),
+                        false,
+                        format!("failed to create judge directory: {error}"),
+                        false,
+                    ),
                     0.0,
                 );
             }
@@ -1396,6 +2413,7 @@ async fn grade_output(
                 DEFAULT_TIMEOUT_SECONDS,
                 false,
                 None,
+                None,
             )
             .await;
             let parsed = parse_judge_result(&judged.text);
@@ -1408,13 +2426,7 @@ async fn grade_output(
                 )
             });
             (
-                GraderResult {
-                    name: name.clone(),
-                    score: Some(score),
-                    passed: score >= 1.0,
-                    reason,
-                    skipped: false,
-                },
+                GraderResult::from_definition(grader, Some(score), score >= 1.0, reason, false),
                 judged.cost_usd,
             )
         }
@@ -2307,7 +3319,7 @@ fn grader_from_parts(
 fn parse_markdown_frontmatter(raw: &str, path: &Path) -> Result<(Mapping, String), String> {
     let normalized = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     if !normalized.starts_with("---\n") {
-        return Ok((Mapping::new(), normalized.to_string()));
+        return Ok((Mapping::new(), normalized.trim().to_string()));
     }
     let rest = &normalized[4..];
     let Some(end) = rest.find("\n---\n") else {
@@ -2322,10 +3334,7 @@ fn parse_markdown_frontmatter(raw: &str, path: &Path) -> Result<(Mapping, String
         .as_mapping()
         .cloned()
         .ok_or_else(|| format!("frontmatter in {} must be an object", path.display()))?;
-    Ok((
-        mapping,
-        rest[end + 5..].trim_start_matches('\n').to_string(),
-    ))
+    Ok((mapping, rest[end + 5..].trim().to_string()))
 }
 
 fn grader_value(map: &Mapping) -> Result<String, String> {
@@ -2407,9 +3416,22 @@ fn glob_matches(pattern: &str, value: &str) -> bool {
 
 async fn run_init(args: &InitArgs, parent_eval_dir: Option<&str>, cwd: &Path) -> i32 {
     let name = args.name.as_deref().unwrap_or("eval");
+    let explicit_eval_dir = args.eval_dir.as_deref().or(parent_eval_dir);
+    if explicit_eval_dir.is_none() && !is_plugin_or_skill_root(cwd) {
+        eprintln!(
+            "Error: {} is not a plugin or skill folder — run `claude plugin eval init` from the plugin's root folder, or pass --eval-dir to scaffold here on purpose.",
+            cwd.display()
+        );
+        return RUNTIME_ERROR;
+    }
+    if explicit_eval_dir.is_none() {
+        if let Some(warning) = manifest_eval_setting(cwd).warning {
+            eprintln!("{warning}");
+        }
+    }
     // `evalDir: c.evalDir ?? a.opts().evalDir` — init's own flag, else the
     // parent `plugin eval --eval-dir`, else the manifest / `evals/`.
-    let eval_dir = match resolve_eval_dir(args.eval_dir.as_deref().or(parent_eval_dir), cwd) {
+    let eval_dir = match resolve_eval_dir(explicit_eval_dir, cwd) {
         Ok(dir) => dir,
         Err(error) => {
             eprintln!("lingxi-cli plugin eval init: {error}");
@@ -2528,6 +3550,10 @@ async fn run_init(args: &InitArgs, parent_eval_dir: Option<&str>, cwd: &Path) ->
             RUNTIME_ERROR
         }
     }
+}
+
+fn is_plugin_or_skill_root(root: &Path) -> bool {
+    plugin_manifest_path(root).is_file() || root.join("SKILL.md").is_file()
 }
 
 fn copy_plugin_snapshot(source: &Path, destination: &Path) -> Result<(), String> {
@@ -2653,40 +3679,123 @@ fn resolve_eval_dir(flag: Option<&str>, plugin_root: &Path) -> Result<String, St
     if let Some(name) = flag {
         return validate_eval_dir_name(name);
     }
-    match manifest_eval_dir(plugin_root) {
-        Some(name) => validate_eval_dir_name(&name),
-        None => Ok(DEFAULT_EVAL_DIR.to_string()),
+    Ok(manifest_eval_setting(plugin_root)
+        .value
+        .unwrap_or_else(|| DEFAULT_EVAL_DIR.to_string()))
+}
+
+#[derive(Default)]
+struct ManifestEvalSetting {
+    value: Option<String>,
+    warning: Option<String>,
+}
+
+fn manifest_eval_setting(plugin_root: &Path) -> ManifestEvalSetting {
+    let manifest = plugin_manifest_path(plugin_root);
+    let Ok(text) = fs::read_to_string(&manifest) else {
+        return ManifestEvalSetting::default();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return ManifestEvalSetting::default();
+    };
+    if let Some(raw) = value
+        .get("experimental")
+        .and_then(|experimental| experimental.get("evals"))
+    {
+        let Some(raw_name) = raw.as_str() else {
+            return ManifestEvalSetting {
+                value: None,
+                warning: Some(format!(
+                    "Warning: ignoring experimental.evals {} in {} — it must be a string naming a directory relative to the plugin root, set as \"experimental\": {{\"evals\": \"quality/evals\"}}; using evals/ (fix the manifest or pass --eval-dir)",
+                    raw,
+                    manifest.display()
+                )),
+            };
+        };
+        return match validate_eval_dir_name(raw_name) {
+            Ok(name) => ManifestEvalSetting {
+                value: Some(name),
+                warning: None,
+            },
+            Err(_) => {
+                let reason = if Path::new(raw_name).is_absolute() {
+                    "it must be a relative path inside the plugin (e.g. quality/evals), not absolute"
+                } else {
+                    "it must stay inside the plugin and may not contain a parent-directory component"
+                };
+                ManifestEvalSetting {
+                    value: None,
+                    warning: Some(format!(
+                        "Warning: ignoring experimental.evals {raw_name:?} in {} — {reason}; using evals/ (fix the manifest or pass --eval-dir)",
+                        manifest.display()
+                    )),
+                }
+            }
+        };
+    }
+    if let Some(raw) = value.get("evals") {
+        return ManifestEvalSetting {
+            value: None,
+            warning: Some(format!(
+                "Warning: ignoring the top-level \"evals\" key in {} — set it as \"experimental\": {{\"evals\": {raw}}} (or pass --eval-dir); using evals/",
+                manifest.display()
+            )),
+        };
+    }
+    ManifestEvalSetting::default()
+}
+
+/// Valid `experimental.evals` from the selected plugin manifest.
+fn manifest_eval_dir(plugin_root: &Path) -> Option<String> {
+    manifest_eval_setting(plugin_root).value
+}
+
+fn plugin_manifest_path(plugin_root: &Path) -> PathBuf {
+    let packaged = plugin_root
+        .join(CLAUDE_PLUGIN_MANIFEST_DIR)
+        .join("plugin.json");
+    if packaged.is_file() {
+        packaged
+    } else {
+        plugin_root.join("plugin.json")
     }
 }
 
-/// `experimental.evals` from the plugin manifest at `<root>/<manifest dir>/
-/// plugin.json`, when it is a non-empty string.
-fn manifest_eval_dir(plugin_root: &Path) -> Option<String> {
-    let manifest = plugin_root
-        .join(branding::PLUGIN_MANIFEST_DIR)
-        .join("plugin.json");
-    let text = fs::read_to_string(manifest).ok()?;
+fn plugin_manifest_identity(plugin_root: &Path) -> Option<(String, String)> {
+    let text = fs::read_to_string(plugin_manifest_path(plugin_root)).ok()?;
     let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
-    value
-        .get("experimental")?
-        .get("evals")?
-        .as_str()
-        .map(str::to_string)
+    Some((
+        value.get("name")?.as_str()?.to_string(),
+        value
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+    ))
 }
 
-/// The eval dir names ONE directory below the plugin root — no separators, no
-/// traversal. A trailing `/` (the manifest's `evals/` spelling) is tolerated.
+/// The eval dir is a relative directory below the plugin root. A trailing `/`
+/// (the manifest's `evals/` spelling) is tolerated; absolute paths, `.` and
+/// `..` components, backslashes, and file-like empty components are refused.
 fn validate_eval_dir_name(name: &str) -> Result<String, String> {
     let trimmed = name.trim().trim_end_matches('/');
-    if trimmed.is_empty()
-        || trimmed.contains('/')
-        || trimmed.contains('\\')
-        || trimmed.contains("..")
-        || trimmed == "."
-    {
+    if trimmed.is_empty() || trimmed.contains('\\') {
         return Err(format!("invalid eval dir {name:?}"));
     }
-    Ok(trimmed.to_string())
+    let mut segments = Vec::new();
+    for component in Path::new(trimmed).components() {
+        let Component::Normal(segment) = component else {
+            return Err(format!("invalid eval dir {name:?}"));
+        };
+        let Some(segment) = segment.to_str() else {
+            return Err(format!("invalid eval dir {name:?}"));
+        };
+        segments.push(segment);
+    }
+    if segments.is_empty() {
+        return Err(format!("invalid eval dir {name:?}"));
+    }
+    Ok(segments.join("/"))
 }
 
 fn write_bare_template(suite_dir: &Path, _name: &str) -> Result<(), String> {
@@ -2707,34 +3816,39 @@ fn write_bare_template(suite_dir: &Path, _name: &str) -> Result<(), String> {
 }
 
 fn emit_outputs(cli: &Cli, result: &AggregateResult, cwd: &Path) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(result)
-        .map_err(|error| format!("failed to serialize eval result: {error}"))?;
-    // "results go to … ./<dir>/results/ with this flag, else ./evals/results/"
-    // — the CWD-relative results dir tracks the FLAG, not a manifest default.
-    let results_root = cli
-        .eval_dir
-        .as_deref()
-        .map(validate_eval_dir_name)
-        .transpose()?
-        .unwrap_or_else(|| DEFAULT_EVAL_DIR.to_string());
+    let mut json = serialize_result_pretty(result)?;
+    json.push('\n');
+    let results_root = resolve_eval_dir(cli.eval_dir.as_deref(), &result.suite.root)?;
+    let results_base = if result.suite.plugin_id.is_some() {
+        cwd.to_path_buf()
+    } else {
+        result.suite.root.clone()
+    };
     let output_dir = cli.output_dir.clone().unwrap_or_else(|| {
-        cwd.join(&results_root)
+        results_base
+            .join(&results_root)
             .join("results")
-            .join(chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string())
+            .join(result.started_at.replace(':', "-").replace('.', "-"))
     });
     fs::create_dir_all(&output_dir)
         .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
     atomic_write(&output_dir.join("aggregate-result.json"), json.as_bytes())?;
 
-    if let Some(path) = &cli.report {
-        atomic_write(
-            &resolve_output_path(cwd, path),
-            render_html_report(result).as_bytes(),
-        )?;
-    }
+    let report_path = cli
+        .report
+        .as_deref()
+        .map(|path| resolve_output_path(cwd, path))
+        .unwrap_or_else(|| output_dir.join("report.html"));
+    atomic_write(&report_path, render_html_report(result).as_bytes())?;
+    let displayed_report = fs::canonicalize(&report_path).unwrap_or(report_path);
+    eprintln!("Report: {}", displayed_report.display());
     match cli.json.as_deref() {
-        Some("-") => println!("{json}"),
-        Some(path) => atomic_write(&resolve_output_path(cwd, Path::new(path)), json.as_bytes())?,
+        Some(JSON_STDOUT_SENTINEL) => print!("{json}"),
+        Some(path) => {
+            let output_path = resolve_output_path(cwd, Path::new(path));
+            atomic_write(&output_path, json.as_bytes())?;
+            println!("Wrote {}", output_path.display());
+        }
         None => {
             if result.cases.is_empty() {
                 return Ok(());
@@ -2968,14 +4082,14 @@ fn truncate_utf8(value: &str, max: usize) -> &str {
     &value[..end]
 }
 
-fn parse_positive_f64(value: &str) -> Result<f64, String> {
+fn parse_non_negative_f64(value: &str) -> Result<f64, String> {
     let parsed: f64 = value
         .parse()
-        .map_err(|_| "value must be a positive finite number".to_string())?;
-    if parsed.is_finite() && parsed > 0.0 {
+        .map_err(|_| "--max-cost-usd must be a non-negative number".to_string())?;
+    if parsed.is_finite() && parsed >= 0.0 {
         Ok(parsed)
     } else {
-        Err("value must be a positive finite number".to_string())
+        Err("--max-cost-usd must be a non-negative number".to_string())
     }
 }
 
@@ -3045,6 +4159,8 @@ mod tests {
             "with-without",
             "--runs",
             "2",
+            "--mocks",
+            "off",
             ".",
         ])
         .unwrap();
@@ -3057,6 +4173,7 @@ mod tests {
         assert_eq!(eval.json.as_deref(), Some("result.json"));
         assert_eq!(eval.model.as_deref(), Some("opus"));
         assert_eq!(eval.runs, Some(2));
+        assert_eq!(eval.mocks, "off");
         assert_eq!(eval.target.as_deref(), Some("."));
 
         let parsed =
@@ -3075,6 +4192,278 @@ mod tests {
                 ..
             })) if name == "smoke"
         ));
+    }
+
+    #[test]
+    fn mocks_default_and_early_access_env_match_the_oracle() {
+        let eval = parse_eval(["lingxi-cli", "plugin", "eval", "."]);
+        assert_eq!(eval.mocks, "record");
+        assert!(plugin_eval_enabled_from_env(Some("1")));
+        assert!(plugin_eval_enabled_from_env(Some(" TRUE ")));
+        assert!(!plugin_eval_enabled_from_env(None));
+        assert!(!plugin_eval_enabled_from_env(Some("0")));
+    }
+
+    #[tokio::test]
+    async fn zero_cost_ceiling_returns_defined_partial_empty_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plugin");
+        fs::create_dir_all(root.join(CLAUDE_PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            root.join(CLAUDE_PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            br#"{"name":"demo","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        let case_dir = root.join(DEFAULT_EVAL_DIR).join("case");
+        fs::create_dir_all(&case_dir).unwrap();
+        fs::write(case_dir.join("prompt.md"), "hello\n").unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        let cli = parse_eval([
+            "lingxi-cli",
+            "plugin",
+            "eval",
+            "--ablation",
+            "none",
+            "--max-cost-usd",
+            "0",
+            &root_text,
+        ]);
+        let (result, exit) =
+            run_evaluation(&cli, &temp.path().join("plugins"), temp.path(), temp.path())
+                .await
+                .unwrap();
+        assert_eq!(exit, PARTIAL_EXIT);
+        assert!(result.partial);
+        assert_eq!(result.partial_reason.as_deref(), Some("cost_ceiling"));
+        assert!(result.cases.is_empty());
+        assert_eq!(result.aggregates.cases_total, 0);
+        assert_eq!(result.aggregates.cases_passed, 0);
+        assert_eq!(result.aggregates.overall_score, 0.0);
+        assert_eq!(result.aggregates.overall_pass_rate, 0.0);
+        assert_eq!(result.aggregates.mean_delta, None);
+    }
+
+    #[test]
+    fn max_cost_accepts_zero_and_rejects_negative_or_non_finite_values() {
+        assert_eq!(parse_non_negative_f64("0").unwrap(), 0.0);
+        assert!(parse_non_negative_f64("-1").is_err());
+        assert!(parse_non_negative_f64("NaN").is_err());
+        assert!(parse_non_negative_f64("inf").is_err());
+    }
+
+    #[test]
+    fn record_mocks_discover_server_tool_and_oracle_warning() {
+        let temp = tempfile::tempdir().unwrap();
+        let case_dir = temp.path().join("evals").join("smoke");
+        fs::create_dir_all(&case_dir).unwrap();
+        fs::write(case_dir.join("prompt.md"), "Say hello\n").unwrap();
+        let mock_dir = temp.path().join("evals").join("mocks").join("demo-server");
+        fs::create_dir_all(&mock_dir).unwrap();
+        fs::write(mock_dir.join("echo.md"), "mocked\n").unwrap();
+        let case = discover_cases(temp.path(), DEFAULT_EVAL_DIR)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let cli = parse_eval(["lingxi-cli", "plugin", "eval", "."]);
+        let mocks = discover_eval_mocks(&cli, temp.path(), &case)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&mocks.report).unwrap(),
+            serde_json::json!({
+                "servers": [{
+                    "server": "demo-server",
+                    "kind": "standalone",
+                    "tools": [{"tool": "echo", "responder": "fixed"}]
+                }],
+                "warnings": [
+                    "demo-server: no _tools.json entry for echo — served with a permissive schema and no description; save the server's tools/list response as mocks/demo-server/_tools.json so the model sees the real tool"
+                ],
+                "calls": {"total": 0, "errors": 0, "unmocked": []}
+            })
+        );
+        assert_eq!(mocks.runtime.len(), 1);
+        assert_eq!(mocks.runtime[0].registered_name, "demo-server");
+        assert_eq!(mocks.runtime[0].spec.tools.len(), 1);
+        assert_eq!(
+            mocks.runtime[0].spec.tools[0]
+                .responder
+                .as_ref()
+                .unwrap()
+                .body
+                .as_deref(),
+            Some("mocked")
+        );
+    }
+
+    #[test]
+    fn declared_plugin_server_is_shadowed_with_full_tools_list_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp
+            .path()
+            .join(CLAUDE_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(
+            &manifest,
+            br#"{"name":"demo","mcpServers":{"jira":{"command":"real-server"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join(".mcp.json"),
+            br#"{"mcpServers":{"jira":{"command":"also-real"}}}"#,
+        )
+        .unwrap();
+        let case_dir = temp.path().join("evals").join("smoke");
+        fs::create_dir_all(&case_dir).unwrap();
+        fs::write(case_dir.join("prompt.md"), "Use Jira\n").unwrap();
+        let mock_dir = temp.path().join("evals").join("mocks").join("jira");
+        fs::create_dir_all(&mock_dir).unwrap();
+        fs::write(
+            mock_dir.join("_tools.json"),
+            br#"{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{"summary":{"type":"string"}}}},{"name":"unserved","description":"Denied","inputSchema":{"type":"object"}}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            mock_dir.join("echo.md"),
+            "---\ntype: fixed\nerror: true\nexpect:\n  summary: hello\n---\n\n{{input.summary}}\n",
+        )
+        .unwrap();
+        let case = discover_cases(temp.path(), DEFAULT_EVAL_DIR)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let cli = parse_eval(["lingxi-cli", "plugin", "eval", "."]);
+        let mocks = discover_eval_mocks(&cli, temp.path(), &case)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mocks.report.servers[0].kind, "shadow");
+        assert!(mocks.report.warnings.is_empty());
+        assert_eq!(mocks.runtime[0].registered_name, "plugin:demo:jira");
+        assert_eq!(mocks.runtime[0].spec.tools.len(), 2);
+        let echo = mocks.runtime[0]
+            .spec
+            .tools
+            .iter()
+            .find(|tool| tool.name == "echo")
+            .unwrap();
+        assert_eq!(echo.description, "Echo");
+        assert!(echo.responder.as_ref().unwrap().error);
+        assert!(mocks.runtime[0]
+            .spec
+            .tools
+            .iter()
+            .find(|tool| tool.name == "unserved")
+            .unwrap()
+            .responder
+            .is_none());
+    }
+
+    #[test]
+    fn staged_plugin_removes_both_mcp_declaration_forms() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plugin");
+        fs::create_dir_all(root.join(CLAUDE_PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            root.join(CLAUDE_PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            br#"{"name":"demo","mcpServers":{"real":{"command":"server"}},"description":"keep"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".mcp.json"),
+            br#"{"mcpServers":{"real":{"command":"server"}}}"#,
+        )
+        .unwrap();
+        adapt_staged_plugin_manifest(&root).unwrap();
+        strip_staged_plugin_mcp(&root).unwrap();
+        assert!(!root.join(".mcp.json").exists());
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join(CLAUDE_PLUGIN_MANIFEST_DIR).join("plugin.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest.get("mcpServers").is_none());
+        assert_eq!(manifest["description"], "keep");
+        let adapted: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(adapted.get("mcpServers").is_none());
+        assert_eq!(adapted["name"], "demo");
+    }
+
+    #[test]
+    fn mock_call_logs_aggregate_errors_unmocked_and_abort() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("calls.jsonl");
+        let records = [
+            crate::commands::plugin_eval_mock::MockCallRecord {
+                server: "jira".to_string(),
+                tool: "echo".to_string(),
+                arguments: serde_json::json!({"summary":"ok"}),
+                error: None,
+                abort_reason: None,
+                unmocked: false,
+            },
+            crate::commands::plugin_eval_mock::MockCallRecord {
+                server: "jira".to_string(),
+                tool: "missing".to_string(),
+                arguments: serde_json::json!({}),
+                error: Some("unmocked".to_string()),
+                abort_reason: None,
+                unmocked: true,
+            },
+            crate::commands::plugin_eval_mock::MockCallRecord {
+                server: "jira".to_string(),
+                tool: "echo".to_string(),
+                arguments: serde_json::json!({"summary":1}),
+                error: Some("expect mismatch".to_string()),
+                abort_reason: Some("expect_mismatch".to_string()),
+                unmocked: false,
+            },
+        ];
+        let mut raw = records
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        raw.push('\n');
+        atomic_write(&log, raw.as_bytes()).unwrap();
+        let (calls, aborted) = aggregate_mock_calls(&[log]).unwrap();
+        assert_eq!(calls.total, 3);
+        assert_eq!(calls.errors, 2);
+        assert_eq!(calls.unmocked.len(), 1);
+        assert_eq!(calls.unmocked[0].tool, "missing");
+        assert_eq!(calls.unmocked[0].count, 1);
+        let aborted = aborted.unwrap();
+        assert_eq!(aborted.server, "jira");
+        assert_eq!(aborted.tool, "echo");
+        assert_eq!(aborted.reason, "expect mismatch");
+    }
+
+    #[test]
+    fn empty_suite_diagnostic_matches_enabled_oracle_and_writes_no_result() {
+        assert_eq!(
+            no_eval_cases_message(Path::new("/tmp/plugin"), "evals", None),
+            "No eval cases found under /tmp/plugin.\nCases are expected in a evals/ directory under /tmp/plugin (the default), each case a directory containing case.yaml or prompt.md.\nRun `claude plugin eval init` for a guided interview, or `claude plugin eval init --bare <name>` to scaffold a blank case."
+        );
+        assert_eq!(
+            no_eval_cases_message(Path::new("/tmp/plugin"), "checks", Some("checks")),
+            "No eval cases found under /tmp/plugin.\nCases are expected in a checks/ directory under /tmp/plugin (from --eval-dir), each case a directory containing case.yaml or prompt.md.\nRun `claude plugin eval init --eval-dir checks` for a guided interview, or `claude plugin eval init --bare <name> --eval-dir checks` to scaffold a blank case."
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = plugin_manifest_path(temp.path());
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, r#"{"experimental":{"evals":"checks"}}"#).unwrap();
+        assert_eq!(
+            no_eval_cases_message(temp.path(), "checks", None),
+            format!(
+                "No eval cases found under {}.\nCases are expected in a checks/ directory under {} (from {}; pass --eval-dir to override), each case a directory containing case.yaml or prompt.md.\nRun `claude plugin eval init` for a guided interview, or `claude plugin eval init --bare <name>` to scaffold a blank case.",
+                temp.path().display(),
+                temp.path().display(),
+                manifest.display()
+            )
+        );
     }
 
     // CLI-04/CLI-05 (cc 2.1.238): the four flags 2.1.238 added to the
@@ -3143,15 +4532,21 @@ mod tests {
         assert_eq!(resolve_eval_dir(None, root).unwrap(), DEFAULT_EVAL_DIR);
         assert_eq!(resolve_eval_dir(Some("checks"), root).unwrap(), "checks");
 
-        let manifest_dir = root.join(branding::PLUGIN_MANIFEST_DIR);
+        let manifest_dir = root.join(CLAUDE_PLUGIN_MANIFEST_DIR);
         fs::create_dir_all(&manifest_dir).unwrap();
         fs::write(
             manifest_dir.join("plugin.json"),
             br#"{"name":"p","experimental":{"evals":"nested/suites"}}"#,
         )
         .unwrap();
-        // A manifest value naming a nested path is refused, not silently joined.
-        assert!(resolve_eval_dir(None, root).is_err());
+        assert_eq!(resolve_eval_dir(None, root).unwrap(), "nested/suites");
+
+        fs::write(
+            manifest_dir.join("plugin.json"),
+            br#"{"name":"p","experimental":{"evals":"nested//./suites"}}"#,
+        )
+        .unwrap();
+        assert_eq!(resolve_eval_dir(None, root).unwrap(), "nested/suites");
 
         // The manifest's `evals/` spelling (trailing slash) is tolerated.
         fs::write(
@@ -3181,6 +4576,65 @@ mod tests {
     }
 
     #[test]
+    fn invalid_manifest_eval_dir_warns_and_falls_back_to_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp
+            .path()
+            .join(CLAUDE_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(
+            &manifest,
+            br#"{"name":"p","experimental":{"evals":"/tmp/escape"}}"#,
+        )
+        .unwrap();
+        let setting = manifest_eval_setting(temp.path());
+        assert_eq!(setting.value, None);
+        assert!(setting
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("not absolute; using evals/"));
+        assert_eq!(
+            resolve_eval_dir(None, temp.path()).unwrap(),
+            DEFAULT_EVAL_DIR
+        );
+
+        fs::write(&manifest, br#"{"name":"p","evals":"checks"}"#).unwrap();
+        let setting = manifest_eval_setting(temp.path());
+        assert_eq!(setting.value, None);
+        assert!(setting
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("ignoring the top-level \"evals\" key"));
+    }
+
+    #[test]
+    fn plugin_eval_manifest_prefers_packaged_then_accepts_root_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let root_manifest = root.join("plugin.json");
+        fs::write(
+            &root_manifest,
+            br#"{"name":"root","experimental":{"evals":"root-evals"}}"#,
+        )
+        .unwrap();
+        assert_eq!(plugin_manifest_path(root), root_manifest);
+        assert_eq!(resolve_eval_dir(None, root).unwrap(), "root-evals");
+
+        let packaged_manifest = root.join(CLAUDE_PLUGIN_MANIFEST_DIR).join("plugin.json");
+        fs::create_dir_all(packaged_manifest.parent().unwrap()).unwrap();
+        fs::write(
+            &packaged_manifest,
+            br#"{"name":"packaged","experimental":{"evals":"packaged-evals"}}"#,
+        )
+        .unwrap();
+        assert_eq!(plugin_manifest_path(root), packaged_manifest);
+        assert_eq!(resolve_eval_dir(None, root).unwrap(), "packaged-evals");
+    }
+
+    #[test]
     fn bare_json_flag_uses_stdout_sentinel() {
         let parsed = Argv::from_iter(["lingxi-cli", "plugin", "eval", "--json"]).unwrap();
         let crate::commands::Commands::Plugin(plugin) = parsed.command.unwrap() else {
@@ -3189,8 +4643,19 @@ mod tests {
         let crate::commands::plugin::Sub::Eval(eval) = plugin.command.unwrap() else {
             panic!("expected eval command");
         };
-        assert_eq!(eval.json.as_deref(), Some("-"));
+        assert_eq!(eval.json.as_deref(), Some(JSON_STDOUT_SENTINEL));
         assert_eq!(eval.target, None);
+    }
+
+    #[tokio::test]
+    async fn explicit_dash_json_path_is_rejected_before_early_access_gate() {
+        let eval = parse_eval(["lingxi-cli", "plugin", "eval", "--json", "-", "."]);
+        assert_eq!(eval.json.as_deref(), Some("-"));
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            run(&eval, temp.path(), temp.path(), temp.path()).await,
+            RUNTIME_ERROR
+        );
     }
 
     #[test]
@@ -3367,6 +4832,47 @@ mod tests {
         assert!(eval_suite_dir(temp.path(), DEFAULT_EVAL_DIR, "../escape").is_err());
     }
 
+    #[tokio::test]
+    async fn init_bare_requires_plugin_or_skill_root_without_eval_dir_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let args = InitArgs {
+            bare: true,
+            eval_dir: None,
+            interactive: false,
+            interview: false,
+            name: Some("smoke".to_string()),
+        };
+        assert_eq!(run_init(&args, None, temp.path()).await, RUNTIME_ERROR);
+        assert!(!temp.path().join(DEFAULT_EVAL_DIR).exists());
+
+        let branded_manifest = temp
+            .path()
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json");
+        fs::create_dir_all(branded_manifest.parent().unwrap()).unwrap();
+        fs::write(
+            branded_manifest,
+            r#"{"name":"lingxi-only","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        assert_eq!(run_init(&args, None, temp.path()).await, RUNTIME_ERROR);
+        assert!(!temp.path().join(DEFAULT_EVAL_DIR).exists());
+
+        let manifest = temp
+            .path()
+            .join(CLAUDE_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(manifest, r#"{"name":"smoke","version":"0.0.1"}"#).unwrap();
+        assert_eq!(run_init(&args, None, temp.path()).await, SUCCESS);
+        assert!(temp
+            .path()
+            .join(DEFAULT_EVAL_DIR)
+            .join("smoke")
+            .join("prompt.md")
+            .is_file());
+    }
+
     #[test]
     fn empty_aggregate_uses_v1_camel_case_schema() {
         let result = AggregateResult {
@@ -3376,6 +4882,7 @@ mod tests {
             duration_seconds: 0.0,
             cost_usd: 0.0,
             partial: false,
+            partial_reason: None,
             suite: EvalSuiteResult {
                 root: PathBuf::from("/tmp/plugin"),
                 ablation: "none".to_string(),
@@ -3393,16 +4900,32 @@ mod tests {
                 cases_passed: 0,
                 overall_score: 0.0,
                 overall_pass_rate: 0.0,
+                mean_delta: None,
             },
         };
-        let json = serde_json::to_value(result).unwrap();
+        let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["schemaVersion"], 1);
         assert_eq!(json["durationSeconds"], 0.0);
         assert_eq!(json["costUsd"], 0.0);
-        assert_eq!(json["suite"]["tagFilters"], serde_json::json!([]));
+        assert!(json["suite"].get("judgeModel").is_none());
+        assert!(json["suite"].get("tagFilters").is_none());
         assert_eq!(json["aggregates"]["casesTotal"], 0);
         assert_eq!(json["aggregates"]["overallPassRate"], 0.0);
         assert_eq!(json["cases"], serde_json::json!([]));
+
+        let rendered = serialize_result_pretty(&result).unwrap();
+        assert!(rendered.contains("\"durationSeconds\": 0,"));
+        assert!(rendered.contains("\"threshold\": 1,"));
+        assert!(!rendered.contains("\"judgeModel\""));
+        assert!(!rendered.contains("\"tagFilters\""));
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut cli = parse_eval(["lingxi-cli", "plugin", "eval", "--json", "empty.json", "."]);
+        cli.output_dir = Some(temp.path().join("must-not-exist"));
+        emit_empty_json(&cli, &result, temp.path()).unwrap();
+        let bytes = fs::read(temp.path().join("empty.json")).unwrap();
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        assert!(!temp.path().join("must-not-exist").exists());
     }
 
     #[test]
@@ -3418,8 +4941,11 @@ mod tests {
             name: "regex".to_string(),
             score: Some(1.0),
             passed: true,
+            weight: 2.0,
             reason: String::new(),
             skipped: false,
+            with_only: false,
+            scored: true,
         }];
         assert_eq!(weighted_score(&results, &definitions, true), 1.0);
     }
@@ -3443,11 +4969,16 @@ mod tests {
                 name: "<grader>".to_string(),
                 score: Some(0.0),
                 passed: false,
+                weight: 1.0,
                 reason: "<img src=x onerror=y>".to_string(),
                 skipped: false,
+                with_only: false,
+                scored: true,
             }],
             score: 0.0,
             error: Some("<b>error</b>".to_string()),
+            aborted: None,
+            mocks: None,
         };
         let result = AggregateResult {
             schema_version: 1,
@@ -3456,6 +4987,7 @@ mod tests {
             duration_seconds: 0.0,
             cost_usd: 0.0,
             partial: false,
+            partial_reason: None,
             suite: EvalSuiteResult {
                 root: PathBuf::from("."),
                 ablation: "none".to_string(),
@@ -3470,7 +5002,7 @@ mod tests {
             cases: vec![EvalResult {
                 name: "<img onerror=x>".to_string(),
                 dir: PathBuf::from("."),
-                source: PathBuf::from("prompt.md"),
+                source: "prose".to_string(),
                 prompt_markdown: "<iframe>prompt</iframe>".to_string(),
                 model: None,
                 runs_per_case: 1,
@@ -3495,6 +5027,7 @@ mod tests {
                 cases_passed: 1,
                 overall_score: 1.0,
                 overall_pass_rate: 1.0,
+                mean_delta: None,
             },
         };
         let html = render_html_report(&result);
@@ -3506,6 +5039,17 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"));
         assert!(html.contains("&lt;iframe&gt;"));
         assert!(html.contains("&lt;grader&gt;"));
+
+        let temp = tempfile::tempdir().unwrap();
+        let output_dir = temp.path().join("results").join("run");
+        let mut cli = parse_eval(["lingxi-cli", "plugin", "eval", "--json", "result.json", "."]);
+        cli.output_dir = Some(output_dir.clone());
+        emit_outputs(&cli, &result, temp.path()).unwrap();
+        let requested = fs::read(temp.path().join("result.json")).unwrap();
+        let aggregate = fs::read(output_dir.join("aggregate-result.json")).unwrap();
+        assert_eq!(requested, aggregate);
+        assert_eq!(aggregate.last(), Some(&b'\n'));
+        assert!(output_dir.join("report.html").is_file());
     }
 
     #[cfg(unix)]

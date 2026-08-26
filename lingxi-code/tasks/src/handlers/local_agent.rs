@@ -46,7 +46,7 @@ use agent::{StreamingSubagentSpawner, SubagentEvent};
 use async_trait::async_trait;
 use protocol::AgentId;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 use traits::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
@@ -78,6 +78,19 @@ const HANDLER_NAME: &str = "local_agent";
 pub struct WorkerCancel {
     handle: BackgroundTaskHandle,
     runtime: Arc<dyn RuntimeSpawner>,
+    persistent_teardown: Option<PersistentTeardown>,
+}
+
+struct PersistentTeardown {
+    agent_id: Arc<StdMutex<Option<AgentId>>>,
+}
+
+impl WorkerCancel {
+    fn take_persistent_agent_id(&self) -> Option<AgentId> {
+        self.persistent_teardown
+            .as_ref()
+            .and_then(|teardown| teardown.agent_id.lock().unwrap().take())
+    }
 }
 
 /// Local-agent task handler.
@@ -101,11 +114,19 @@ pub struct LocalAgentHandler {
     /// `task_id` → the resting agent's id, for `send_message` resume routing.
     /// Populated for a live persistent agent; removed when it terminates.
     agent_ids: Arc<Mutex<HashMap<String, AgentId>>>,
+    /// `task_id` → the carried isolation worktree for a live PERSISTENT agent.
+    /// A kill/cleanup that cancels the outer event-pump still must run the
+    /// terminal keep/cleanup judgment before publishing `Killed`.
+    persistent_worktrees: Arc<Mutex<HashMap<String, traits::worktree::WorktreeHandle>>>,
     /// `task_id` → the SKILL this agent is, when a `context: fork` skill
     /// launched it. The fork identity the resume gate corroborates against the
     /// on-disk scoping record. Kept beside [`Self::agent_ids`] and torn down
     /// with it.
     fork_names: Arc<Mutex<HashMap<String, String>>>,
+    /// `task_id` → the LAST rest payload for a persistent agent. If the agent
+    /// is killed after coming to rest, cancelling the outer worker still leaves
+    /// enough terminal payload to match the normal completion path.
+    persistent_outcomes: Arc<Mutex<HashMap<String, traits::task_registry::AgentTerminalOutcome>>>,
     /// Consulted before a parked agent is resumed: a forked skill whose
     /// permission scoping cannot be re-established must NOT resume under the
     /// parent's (wider) permissions. `None` ⇒ no gate, which is correct for a
@@ -129,10 +150,10 @@ pub struct LocalAgentHandler {
     /// spawn; the worker removes its own entry on exit, and [`Task::kill`]
     /// removes + cancels it if still present.
     workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
-    /// `task_id` → record queued for teardown by the synchronous
-    /// [`TaskHandle::cleanup`] closure (which cannot await). Drained by
-    /// [`LocalAgentHandler::drain_pending_kills`].
-    pending_kill: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+    /// Task ids queued for teardown by the synchronous [`TaskHandle::cleanup`]
+    /// closure (which cannot await). The closure records the request here so a
+    /// contended async mutex cannot silently drop cancellation.
+    pending_kill: Arc<StdMutex<Vec<String>>>,
     /// Runs the terminal keep/cleanup judgment on a background agent's
     /// isolation worktree (`SubagentSpawnRequest::worktree`) — claude-code
     /// hands its `getWorktreeResult` closure to the detached async lifecycle,
@@ -165,7 +186,9 @@ impl LocalAgentHandler {
             spawner,
             streaming_spawner: None,
             agent_ids: Arc::new(Mutex::new(HashMap::new())),
+            persistent_worktrees: Arc::new(Mutex::new(HashMap::new())),
             fork_names: Arc::new(Mutex::new(HashMap::new())),
+            persistent_outcomes: Arc::new(Mutex::new(HashMap::new())),
             fork_resume_gate: None,
             parked_store: None,
             tool_invoker,
@@ -173,7 +196,7 @@ impl LocalAgentHandler {
             output_manager,
             status_sink: Arc::new(NoopStatusSink),
             workers: Arc::new(Mutex::new(HashMap::new())),
-            pending_kill: Arc::new(Mutex::new(HashMap::new())),
+            pending_kill: Arc::new(StdMutex::new(Vec::new())),
             worktree_manager: None,
         }
     }
@@ -249,19 +272,99 @@ impl LocalAgentHandler {
     /// task already reached a terminal status (a raced pending-kill record must
     /// not clobber a real Completed/Failed with `Killed`).
     pub async fn drain_pending_kills(&self) {
-        let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
-        for (task_id, rec) in pending {
+        let pending = {
+            let mut pending = self.pending_kill.lock().unwrap();
+            std::mem::take(&mut *pending)
+        };
+        for task_id in pending {
+            let Some(rec) = self.workers.lock().await.remove(&task_id) else {
+                continue;
+            };
             let _ = rec.runtime.cancel(&rec.handle).await;
+            let fallback_agent_id = rec.take_persistent_agent_id();
             // Don't overwrite an already-reported terminal status: a subagent
             // that finished on its own before this (possibly raced) record was
             // drained keeps its real terminal status rather than being flipped
             // to Killed.
-            if !self.status_sink.is_terminal(&task_id).await {
+            let already_terminal = self.status_sink.is_terminal(&task_id).await;
+            if !self
+                .finish_persistent_terminal(
+                    &task_id,
+                    TaskStatus::Killed,
+                    fallback_agent_id,
+                    !already_terminal,
+                )
+                .await
+                && !already_terminal
+            {
                 self.status_sink
                     .set_status(&task_id, TaskStatus::Killed)
                     .await;
             }
         }
+    }
+
+    async fn finish_persistent_terminal(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        fallback_agent_id: Option<AgentId>,
+        publish_terminal: bool,
+    ) -> bool {
+        // `fallback_agent_id` closes the post-spawn/pre-map-registration kill
+        // window. Prefer the routing-map entry once present, but consume only
+        // one id so the same inner runner is never stopped twice.
+        // When spawn_persistent has returned but the worker is still waiting
+        // to publish into `agent_ids`, kill already owns the same id through
+        // the cancel record. Do not wait on the routing-map lock before
+        // stopping that inner runner: doing so can leave its pool slot live
+        // for the whole registration window. The cancelled worker cannot
+        // complete a future insert; after stop, take the lock and erase any
+        // registration that raced cancellation.
+        let used_fallback = fallback_agent_id.is_some();
+        let agent_id = match fallback_agent_id {
+            Some(agent_id) => Some(agent_id),
+            None => self.agent_ids.lock().await.remove(task_id),
+        };
+        let worktree = self.persistent_worktrees.lock().await.remove(task_id);
+        let had_fork = self.fork_names.lock().await.remove(task_id).is_some();
+        let mut outcome = self
+            .persistent_outcomes
+            .lock()
+            .await
+            .remove(task_id)
+            .unwrap_or_default();
+
+        if agent_id.is_none() && worktree.is_none() && !had_fork && outcome == Default::default() {
+            return false;
+        }
+
+        if let Some(streaming) = &self.streaming_spawner {
+            if let Some(agent_id) = agent_id {
+                let _ = streaming.stop(&agent_id).await;
+                if let Some(store) = &self.parked_store {
+                    store.unpark(agent_id).await;
+                }
+            }
+        }
+        if used_fallback {
+            self.agent_ids.lock().await.remove(task_id);
+        }
+
+        if let (Some(mgr), Some(handle)) = (&self.worktree_manager, worktree.as_ref()) {
+            if let Some((path, branch)) =
+                traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await
+            {
+                outcome.worktree_path = Some(path);
+                outcome.worktree_branch = Some(branch);
+            }
+        }
+
+        if publish_terminal {
+            self.status_sink.set_agent_outcome(task_id, outcome).await;
+            self.status_sink.set_status(task_id, status).await;
+        }
+        true
     }
 }
 
@@ -291,6 +394,7 @@ impl Task for LocalAgentHandler {
             tool_use_id: _,
             creator_teammate_name,
             creator_team_name,
+            creator_agent_id,
             spawn_request,
             inheritance,
         } = input
@@ -340,6 +444,7 @@ impl Task for LocalAgentHandler {
             team_name: None,
             creator_teammate_name,
             creator_team_name,
+            creator_agent_id,
             mode: None,
             isolation: None,
             cwd: None,
@@ -393,8 +498,13 @@ impl Task for LocalAgentHandler {
         let worker_spool_path = spool_path.clone();
         let worker_task_id = task_id.clone();
         let streaming = self.streaming_spawner.clone();
+        let persistent_agent_id = Arc::new(StdMutex::new(None));
+        let worker_streaming = streaming.clone();
+        let worker_persistent_agent_id = persistent_agent_id.clone();
         let agent_ids = self.agent_ids.clone();
+        let persistent_worktrees = self.persistent_worktrees.clone();
         let fork_names = self.fork_names.clone();
+        let persistent_outcomes = self.persistent_outcomes.clone();
         let parked_store = self.parked_store.clone();
         let (activation_tx, activation_rx) = if status_sink.requires_explicit_activation() {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -403,14 +513,14 @@ impl Task for LocalAgentHandler {
             (None, None)
         };
         let worker: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
-            if is_backgrounded && streaming.is_some() {
+            if is_backgrounded && worker_streaming.is_some() {
                 // ── PERSISTENT / resumable path (local_agent "comes to rest"). ──
                 // The agent emits ONE Completed per turn-set, then the runner
                 // PARKS awaiting the next message (delivered by `send_message` →
                 // `StreamingSubagentSpawner::resume`). Each rest appends to the
                 // spool and KEEPS the task alive (status stays Running → not
                 // evicted). Terminal only on Failed / Killed / channel-close.
-                let streaming = streaming.expect("is_some checked");
+                let streaming = worker_streaming.expect("is_some checked");
                 Box::pin(async move {
                     if let Some(activation_rx) = activation_rx {
                         if activation_rx.await.is_err() {
@@ -451,11 +561,18 @@ impl Task for LocalAgentHandler {
                             return;
                         }
                     };
+                    *worker_persistent_agent_id.lock().unwrap() = Some(agent_id);
                     // Register the live agent id so `send_message` can resume it.
                     agent_ids
                         .lock()
                         .await
                         .insert(worker_task_id.clone(), agent_id);
+                    if let Some(handle) = agent_worktree.clone() {
+                        persistent_worktrees
+                            .lock()
+                            .await
+                            .insert(worker_task_id.clone(), handle);
+                    }
                     if let Some(name) = fork_name.clone() {
                         fork_names.lock().await.insert(worker_task_id.clone(), name);
                     }
@@ -540,8 +657,19 @@ impl Task for LocalAgentHandler {
                                 if rest_usage.is_some() {
                                     outcome.usage = rest_usage.clone();
                                 }
+                                persistent_outcomes
+                                    .lock()
+                                    .await
+                                    .insert(worker_task_id.clone(), outcome.clone());
                                 status_sink
-                                    .notify_rest(&worker_task_id, rest_result, rest_usage)
+                                    .notify_rest(
+                                        &worker_task_id,
+                                        rest_result,
+                                        rest_usage,
+                                        Some(agent_id),
+                                        parked_request.name.clone(),
+                                        parked_request.team_name.clone(),
+                                    )
                                     .await;
                             }
                             Some(SubagentEvent::Failed { error, .. }) => {
@@ -587,6 +715,8 @@ impl Task for LocalAgentHandler {
                     if let Some(store) = &parked_store {
                         store.unpark(agent_id).await;
                     }
+                    persistent_worktrees.lock().await.remove(&worker_task_id);
+                    persistent_outcomes.lock().await.remove(&worker_task_id);
                     // Payload BEFORE status — the drain is terminal-gated (see
                     // the sync branch below for the full note).
                     status_sink
@@ -747,6 +877,9 @@ impl Task for LocalAgentHandler {
             WorkerCancel {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
+                persistent_teardown: streaming.as_ref().map(|_| PersistentTeardown {
+                    agent_id: persistent_agent_id.clone(),
+                }),
             },
         );
         drop(workers);
@@ -757,19 +890,13 @@ impl Task for LocalAgentHandler {
         //    (called by the registry on agent teardown) performs the real
         //    `RuntimeSpawner::cancel`. Authoritative cancellation also flows
         //    through `Task::kill`.
-        let cleanup_workers = self.workers.clone();
         let cleanup_pending = self.pending_kill.clone();
         let cleanup_task_id = task_id.clone();
         let cleanup: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let (Ok(mut workers), Ok(mut pending)) =
-                (cleanup_workers.try_lock(), cleanup_pending.try_lock())
-            {
-                if let Some(rec) = workers.remove(&cleanup_task_id) {
-                    pending.insert(cleanup_task_id.clone(), rec);
-                }
-                // If no live record remains the worker already exited; nothing
-                // to queue (the terminal status was already reported).
-            }
+            cleanup_pending
+                .lock()
+                .unwrap()
+                .push(cleanup_task_id.clone());
         });
 
         let handle = TaskHandle::new(task_id, Some(cleanup));
@@ -787,32 +914,34 @@ impl Task for LocalAgentHandler {
         // + `unregisterCleanup()`. An absent record ⇒ the subagent already
         // terminated ⇒ graceful no-op (claude-code `status !== 'running'`).
         let rec = self.workers.lock().await.remove(task_id);
-        if let Some(rec) = rec {
-            rec.runtime
-                .cancel(&rec.handle)
-                .await
-                .map_err(|e| TaskError::Io(e.to_string()))?;
-        }
-        // For a PERSISTENT agent, cancelling the OUTER event-pump worker above
-        // is not enough: the inner pool runner "comes to rest" between turn-sets
-        // and parks on its event channel, holding its `max_concurrent` pool slot
-        // — nothing frees it (the `spawn_persistent` return path has no dealloc
-        // owner), so repeated kill would exhaust the pool. Deliver `UserExit` +
-        // deallocate the slot through the streaming seam, using the `agent_ids`
-        // map already maintained for resume routing. Mirrors
-        // `in_process_teammate::kill`. `stop` is idempotent (already-gone ⇒ Ok).
-        if let Some(streaming) = &self.streaming_spawner {
-            let agent_id = self.agent_ids.lock().await.remove(task_id);
-            if let Some(agent_id) = agent_id {
-                let _ = streaming.stop(&agent_id).await;
+        let mut cancel_error = None;
+        let fallback_agent_id = if let Some(rec) = rec {
+            if let Err(error) = rec.runtime.cancel(&rec.handle).await {
+                cancel_error = Some(TaskError::Io(error.to_string()));
             }
-        }
+            rec.take_persistent_agent_id()
+        } else {
+            None
+        };
         // A raced kill must not clobber a real terminal outcome that the worker
         // has already reported through the sink.
-        if !self.status_sink.is_terminal(task_id).await {
+        let already_terminal = self.status_sink.is_terminal(task_id).await;
+        if !self
+            .finish_persistent_terminal(
+                task_id,
+                TaskStatus::Killed,
+                fallback_agent_id,
+                !already_terminal,
+            )
+            .await
+            && !already_terminal
+        {
             self.status_sink
                 .set_status(task_id, TaskStatus::Killed)
                 .await;
+        }
+        if let Some(error) = cancel_error {
+            return Err(error);
         }
         Ok(())
     }
@@ -1140,6 +1269,32 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingParkedStore {
+        parked: StdMutex<Vec<(String, AgentId, String)>>,
+        unparked: StdMutex<Vec<AgentId>>,
+    }
+    #[async_trait]
+    impl traits::parked_agent_store::ParkedAgentStore for RecordingParkedStore {
+        async fn park(
+            &self,
+            task_id: &str,
+            agent_id: AgentId,
+            description: &str,
+            _request: &SubagentSpawnRequest,
+        ) {
+            self.parked.lock().unwrap().push((
+                task_id.to_string(),
+                agent_id,
+                description.to_string(),
+            ));
+        }
+
+        async fn unpark(&self, agent_id: AgentId) {
+            self.unparked.lock().unwrap().push(agent_id);
+        }
+    }
+
     fn isolation_worktree_handle() -> traits::worktree::WorktreeHandle {
         traits::worktree::WorktreeHandle {
             path: PathBuf::from("/repo/.lingxi/worktrees/agent-1"),
@@ -1164,6 +1319,7 @@ mod tests {
             team_name: None,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
             mode: None,
             isolation: Some("worktree".into()),
             cwd: Some("/repo/.lingxi/worktrees/agent-1".into()),
@@ -1195,6 +1351,7 @@ mod tests {
             tool_use_id: None,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
             spawn_request: Some(request_with_worktree(prompt)),
             inheritance: None,
         }
@@ -1207,7 +1364,15 @@ mod tests {
         statuses: StdMutex<Vec<(String, TaskStatus)>>,
         explicit_activation: bool,
         rest_count: StdMutex<usize>,
-        last_rest: StdMutex<Option<(Option<String>, Option<traits::task_registry::AgentRunUsage>)>>,
+        last_rest: StdMutex<
+            Option<(
+                Option<String>,
+                Option<traits::task_registry::AgentRunUsage>,
+                Option<protocol::AgentId>,
+                Option<String>,
+                Option<String>,
+            )>,
+        >,
         /// The terminal notification payload, and the call ORDER relative to the
         /// terminal `set_status` — the drain is terminal-gated, so the payload
         /// must land first.
@@ -1242,9 +1407,13 @@ mod tests {
             _task_id: &str,
             result: Option<String>,
             usage: Option<traits::task_registry::AgentRunUsage>,
+            agent_id: Option<protocol::AgentId>,
+            agent_name: Option<String>,
+            team_name: Option<String>,
         ) {
             *self.rest_count.lock().unwrap() += 1;
-            *self.last_rest.lock().unwrap() = Some((result, usage));
+            *self.last_rest.lock().unwrap() =
+                Some((result, usage, agent_id, agent_name, team_name));
         }
         async fn is_terminal(&self, task_id: &str) -> bool {
             self.statuses
@@ -1304,6 +1473,7 @@ mod tests {
             tool_use_id: None,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
             spawn_request: None,
             inheritance: None,
         }
@@ -2172,6 +2342,184 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn kill_stops_persistent_inner_runner_before_agent_id_registration_lands() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
+            Arc::new(StdMutex::new(None));
+        let streaming = MockStreamingSpawner::new(
+            tx_slot.clone(),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        let handler = Arc::new(
+            make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink.clone())
+                .with_streaming_spawner(streaming.clone()),
+        );
+        let ctx = make_ctx(fs);
+
+        let agent_ids_guard = handler.agent_ids.lock().await;
+        let handle = handler
+            .spawn(local_agent_input("start"), ctx.clone())
+            .await
+            .unwrap();
+        let task_id = handle.task_id.clone();
+        let workers = handler.workers_map();
+
+        for _ in 0..200 {
+            if tx_slot.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        for _ in 0..200 {
+            let ready = {
+                let workers = workers.lock().await;
+                workers.get(&task_id).is_some_and(|rec| {
+                    rec.persistent_teardown
+                        .as_ref()
+                        .and_then(|teardown| *teardown.agent_id.lock().unwrap())
+                        .is_some()
+                })
+            };
+            if ready {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let spawned_id = streaming.spawned_id.lock().unwrap().expect("spawn ran");
+
+        let kill = tokio::spawn({
+            let handler = handler.clone();
+            let task_id = task_id.clone();
+            let ctx = ctx.clone();
+            async move { handler.kill(&task_id, ctx).await }
+        });
+
+        for _ in 0..200 {
+            if streaming.stopped.lock().unwrap().as_slice() == &[spawned_id] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            streaming.stopped.lock().unwrap().as_slice(),
+            &[spawned_id],
+            "kill must stop the inner runner even before agent_ids registration finishes"
+        );
+
+        drop(agent_ids_guard);
+        kill.await
+            .expect("kill join should succeed")
+            .expect("kill should succeed");
+
+        assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
+        assert!(matches!(
+            handler.send_message(&task_id, "hi".into(), ctx).await,
+            Err(TaskError::TerminatedTask)
+        ));
+    }
+
+    #[tokio::test]
+    async fn killing_rested_persistent_agent_runs_terminal_teardown() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
+            Arc::new(StdMutex::new(None));
+        let streaming = MockStreamingSpawner::new(
+            tx_slot.clone(),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+            changed_files: 0,
+            commits: 0,
+        }));
+        let parked = Arc::new(RecordingParkedStore::default());
+        let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink.clone())
+            .with_streaming_spawner(streaming.clone())
+            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>)
+            .with_parked_agent_store(
+                parked.clone() as Arc<dyn traits::parked_agent_store::ParkedAgentStore>
+            );
+        let ctx = make_ctx(fs);
+
+        let handle = handler
+            .spawn(input_with_worktree("start"), ctx.clone())
+            .await
+            .unwrap();
+        let task_id = handle.task_id.clone();
+
+        let tx = {
+            let mut got = None;
+            for _ in 0..200 {
+                if let Some(t) = tx_slot.lock().unwrap().clone() {
+                    got = Some(t);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            got.expect("spawn_persistent should have run")
+        };
+        let spawned_id = streaming.spawned_id.lock().unwrap().expect("spawn ran");
+
+        tx.send(SubagentEvent::Completed {
+            agent_id: AgentId::new(),
+            result: json!({ "text": "rest answer" }),
+            usage: llm_client::Usage::default(),
+            total_tool_use_count: 3,
+            total_duration_ms: 1500,
+            assistant_message_count: 0,
+            last_request_id: None,
+        })
+        .await
+        .unwrap();
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(sink.rest_count(), 1, "first turn-set came to rest");
+        assert_eq!(
+            parked.parked.lock().unwrap().len(),
+            1,
+            "rest parked the agent"
+        );
+
+        handler
+            .kill(&task_id, ctx)
+            .await
+            .expect("kill should succeed");
+
+        assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
+        assert_eq!(
+            sink.calls(),
+            vec!["outcome", "status"],
+            "terminal payload lands before Killed"
+        );
+        let outcome = sink.outcome();
+        assert_eq!(outcome.result.as_deref(), Some("rest answer"));
+        assert_eq!(outcome.usage.as_ref().map(|u| u.tool_uses), Some(3));
+        assert_eq!(wt.removed_count(), 1, "kill runs worktree judgment");
+        assert_eq!(
+            parked.unparked.lock().unwrap().as_slice(),
+            &[spawned_id],
+            "kill removes the durable parked-agent row"
+        );
+        assert_eq!(
+            streaming.stopped.lock().unwrap().as_slice(),
+            &[spawned_id],
+            "kill deallocates the inner persistent runner"
+        );
+        assert!(matches!(
+            handler
+                .send_message(&task_id, "hi".into(), make_ctx(Arc::new(InMemoryFs::new())))
+                .await,
+            Err(TaskError::TerminatedTask)
+        ));
+        tx_slot.lock().unwrap().take();
+        drop(tx);
+    }
+
     /// A raced kill must not overwrite a terminal status the sink already
     /// observed, even if the worker-cancel record is still live.
     #[tokio::test]
@@ -2297,13 +2645,13 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // Fire the synchronous cleanup closure (moves record to pending_kill).
+        // Fire the synchronous cleanup closure (records a pending teardown
+        // request without needing the async worker map lock).
         (handle.cleanup.as_ref().unwrap())();
 
-        // The record left the live map.
         assert!(
-            !workers.lock().await.contains_key(&handle.task_id),
-            "cleanup moved the record out of the live map"
+            workers.lock().await.contains_key(&handle.task_id),
+            "cleanup itself no longer mutates the live worker map"
         );
 
         // Drain performs the real async cancel + flips status.
@@ -2409,6 +2757,7 @@ mod tests {
             tool_use_id: None,
             creator_teammate_name: None,
             creator_team_name: None,
+            creator_agent_id: None,
             spawn_request: None,
             inheritance: None,
         };
@@ -2437,6 +2786,7 @@ mod tests {
 
         let inherited_invoker: Arc<dyn ToolInvoker> = Arc::new(MockInvoker);
         let inherited_budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(MockBudget);
+        let creator_agent_id = protocol::AgentId::new();
         let expected = SubagentSpawnRequest {
             subagent_type: "code-reviewer".into(),
             prompt: "inspect the background request".into(),
@@ -2450,6 +2800,7 @@ mod tests {
             team_name: Some("team-a".into()),
             creator_teammate_name: Some("lead".into()),
             creator_team_name: Some("alpha".into()),
+            creator_agent_id: Some(creator_agent_id),
             mode: Some("plan".into()),
             isolation: Some("worktree".into()),
             cwd: Some("/workspace/subdir".into()),
@@ -2481,6 +2832,7 @@ mod tests {
             tool_use_id: Some("toolu_background".into()),
             creator_teammate_name: Some("lead".into()),
             creator_team_name: Some("alpha".into()),
+            creator_agent_id: Some(creator_agent_id),
             spawn_request: Some(expected.clone()),
             inheritance: Some(SubagentInheritance {
                 tool_invoker: inherited_invoker.clone(),
@@ -2532,8 +2884,13 @@ mod tests {
                     run_id: None,
                     invocation_mode: None,
                     workflow_source: None,
+                    script_is_verbatim_builtin: None,
                     transcript_subdir: None,
                     launched_from_subagent: false,
+                    tool_use_id: None,
+                    creator_teammate_name: None,
+                    creator_team_name: None,
+                    creator_agent_id: None,
                 },
                 make_ctx(fs),
             )

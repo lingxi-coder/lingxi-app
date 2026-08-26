@@ -98,6 +98,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         mcp_paths: vec![cwd.join(".mcp.json")],
         use_noop_permission_gate: true,
         deny_unresolved_ask: false,
+        is_tty: false,
         injected_permission_gate: None,
         ask_user_question_tx: None,
         computer_access_tx: None,

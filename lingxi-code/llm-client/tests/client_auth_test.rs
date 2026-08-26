@@ -587,7 +587,7 @@ async fn prepare_count_tokens_rejects_non_anthropic_routes() {
 
 /// Fix 4 RED → GREEN: A `Value::Null` body must be signed as the SHA-256 of
 /// the 4-byte string "null" (exactly what `LlmTransportBridge` sends on the
-/// wire via `body_json.to_string()`), NOT as SHA-256 of empty bytes.
+/// wire via `ProviderRequest::wire_body_bytes()`), NOT as SHA-256 of empty bytes.
 ///
 /// Before the fix, `client.rs` signed empty bytes for `Null` while the bridge
 /// sent "null" → signature mismatch → 403.
@@ -707,9 +707,9 @@ async fn sigv4_null_body_content_sha256_via_client() {
         .expect("prepare must succeed");
 
     // The AnthropicMessages codec produces a real JSON body (not null).
-    // The important invariant: x-amz-content-sha256 == SHA-256(body_json.to_string()).
+    // The important invariant: x-amz-content-sha256 == SHA-256(wire_body_bytes()).
     // Verify by re-signing with the same body and comparing hashes.
-    let body_bytes = prepared.provider_request.body_json.to_string().into_bytes();
+    let body_bytes = prepared.provider_request.wire_body_bytes().unwrap();
     let url = &prepared.provider_request.url;
     let method = &prepared.provider_request.method;
     let pre_sign_headers: std::collections::BTreeMap<String, String> = prepared
@@ -746,7 +746,7 @@ async fn sigv4_null_body_content_sha256_via_client() {
         .expect("x-amz-content-sha256 must be set");
     assert_eq!(
         actual_hash, &re_signed.x_amz_content_sha256,
-        "x-amz-content-sha256 must equal SHA-256(body_json.to_string())"
+        "x-amz-content-sha256 must equal SHA-256(wire_body_bytes())"
     );
 
     // The body is not null for AnthropicMessages, so hash must differ from SHA-256("null").
@@ -859,7 +859,7 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
     // Re-derive the expected Authorization from the same inputs.
     // This exercises the full client pipeline (encode → body bytes → sign).
     // We use sigv4::sign_request with the same body bytes the client used.
-    let body_bytes = prepared.provider_request.body_json.to_string().into_bytes();
+    let body_bytes = prepared.provider_request.wire_body_bytes().unwrap();
     let url = &prepared.provider_request.url;
     let method = &prepared.provider_request.method;
 

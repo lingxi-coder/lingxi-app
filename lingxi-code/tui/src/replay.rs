@@ -244,7 +244,7 @@ fn push_user_block(
     out: &mut Vec<RenderedMessage>,
 ) {
     match block {
-        ContentBlock::Text { text } => {
+        ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
             out.push(RenderedMessage::UserText {
                 body: text.clone(),
                 timestamp: 0,
@@ -315,7 +315,7 @@ fn push_assistant_block(
     out: &mut Vec<RenderedMessage>,
 ) {
     match block {
-        ContentBlock::Text { text } => {
+        ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
             out.push(RenderedMessage::AssistantText {
                 body: text.clone(),
                 timestamp: 0,

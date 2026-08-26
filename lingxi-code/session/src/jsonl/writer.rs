@@ -625,6 +625,67 @@ impl JsonlWriter {
         self.append_side_record(&value).await
     }
 
+    /// Append one ordered context-collapse commit record.
+    ///
+    /// The field order is the upstream `{type, sessionId, ...commit}` spread
+    /// order and is intentionally locked because transcript JSONL is a byte-level
+    /// compatibility surface.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_context_collapse_commit(
+        &self,
+        session_id: &str,
+        collapse_id: &str,
+        summary_uuid: &str,
+        summary_content: &str,
+        summary: &str,
+        first_archived_uuid: &str,
+        last_archived_uuid: &str,
+    ) -> Result<(), WriterError> {
+        let value = serde_json::json!({
+            "type": "marble-origami-commit",
+            "sessionId": session_id,
+            "collapseId": collapse_id,
+            "summaryUuid": summary_uuid,
+            "summaryContent": summary_content,
+            "summary": summary,
+            "firstArchivedUuid": first_archived_uuid,
+            "lastArchivedUuid": last_archived_uuid,
+        });
+        self.append_side_record(&value).await
+    }
+
+    /// Append the last-wins staged-queue/spawn-state snapshot.
+    pub async fn append_context_collapse_snapshot(
+        &self,
+        session_id: &str,
+        staged: &serde_json::Value,
+        armed: bool,
+        last_spawn_tokens: u64,
+    ) -> Result<(), WriterError> {
+        let value = serde_json::json!({
+            "type": "marble-origami-snapshot",
+            "sessionId": session_id,
+            "staged": staged,
+            "armed": armed,
+            "lastSpawnTokens": last_spawn_tokens,
+        });
+        self.append_side_record(&value).await
+    }
+
+    /// Append a context-collapse reset tombstone.
+    pub async fn append_context_collapse_reset(
+        &self,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<(), WriterError> {
+        let value = serde_json::json!({
+            "type": "marble-origami-reset",
+            "sessionId": session_id,
+            "reason": reason,
+        });
+        self.append_side_record(&value).await
+    }
+
     /// Shared body for the metadata side-record appenders ([`Self::append_custom_title`],
     /// [`Self::append_agent_setting`]): serialize one JSON object + `\n` and append
     /// it under the same lock / dir-mode (0o700) / file-mode (0o600) contract as
@@ -680,6 +741,54 @@ mod tests {
         let fs: Arc<dyn FileSystem> =
             Arc::new(platform_posix::fs::PosixFileSystem::new(dir.clone()));
         (dir, path.clone(), JsonlWriter::new(path, fs))
+    }
+
+    #[tokio::test]
+    async fn context_collapse_side_records_are_byte_exact() {
+        let (dir, path, writer) = temp_writer("context-collapse-records");
+        let session_id = "11111111-2222-4333-8444-555555555555";
+        writer
+            .append_context_collapse_commit(
+                session_id,
+                "0000000000000001",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "<collapsed id=\"0000000000000001\">summary</collapsed>",
+                "summary",
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            )
+            .await
+            .expect("commit");
+        writer
+            .append_context_collapse_snapshot(
+                session_id,
+                &serde_json::json!([{
+                    "startUuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    "endUuid": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "summary": "next",
+                    "risk": 0.25,
+                    "stagedAt": 123,
+                }]),
+                true,
+                90_000,
+            )
+            .await
+            .expect("snapshot");
+        writer
+            .append_context_collapse_reset(session_id, "compact")
+            .await
+            .expect("reset");
+
+        let bytes = std::fs::read_to_string(&path).expect("read transcript");
+        assert_eq!(
+            bytes,
+            concat!(
+                "{\"type\":\"marble-origami-commit\",\"sessionId\":\"11111111-2222-4333-8444-555555555555\",\"collapseId\":\"0000000000000001\",\"summaryUuid\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"summaryContent\":\"<collapsed id=\\\"0000000000000001\\\">summary</collapsed>\",\"summary\":\"summary\",\"firstArchivedUuid\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"lastArchivedUuid\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\"}\n",
+                "{\"type\":\"marble-origami-snapshot\",\"sessionId\":\"11111111-2222-4333-8444-555555555555\",\"staged\":[{\"startUuid\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"endUuid\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"summary\":\"next\",\"risk\":0.25,\"stagedAt\":123}],\"armed\":true,\"lastSpawnTokens\":90000}\n",
+                "{\"type\":\"marble-origami-reset\",\"sessionId\":\"11111111-2222-4333-8444-555555555555\",\"reason\":\"compact\"}\n",
+            )
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The backstop counter accounts every appended byte (payload INCLUDING the

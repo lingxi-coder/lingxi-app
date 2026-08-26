@@ -1073,10 +1073,25 @@ present this turn, the skill is loaded — follow it directly rather than callin
         // skill instructions across the compact boundary even though the
         // boundary summary drops the verbatim body. The content is the expanded
         // prompt the model receives (the binary's `d`); the path is the skill's
-        // base dir (`u`). `agentId` is `None`: every LingXi orchestrator runs as
-        // the main thread, so the key is `":{command_name}"`.
+        // base dir (`u`). LingXi additionally scopes the registry row by the
+        // live session + agent identity so concurrent orchestrators/subagents
+        // invoking the same skill name do not overwrite each other.
         let skill_path = desc.skill_root.clone().unwrap_or_default();
-        compaction::invoked_skills::register(&command_name, &skill_path, &expanded_prompt, None);
+        let session_id = if let Some(session) = ctx.session.as_ref() {
+            Some(session.lock().await.session_id.to_string())
+        } else {
+            self.ctx.session_id.map(|id| id.to_string())
+        };
+        let agent_id = ctx.agent_id.as_ref().map(ToString::to_string);
+        compaction::invoked_skills::register_scoped(
+            &command_name,
+            &skill_path,
+            &expanded_prompt,
+            compaction::invoked_skills::InvokedSkillScopeRef::new(
+                session_id.as_deref(),
+                agent_id.as_deref(),
+            ),
+        );
 
         let new_messages = vec![protocol::ConversationMessage::user(
             protocol::MessageId::new(),

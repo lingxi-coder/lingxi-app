@@ -36,6 +36,12 @@ pub use boundary::{
     preserved_segment_for_tail, CompactActiveGoalState, CompactBoundaryMetadata, CompactTrigger,
     PreservedMessages, PreservedSegment, BOUNDARY_CONTENT,
 };
+pub use context_collapse::{
+    is_context_collapse_enabled, CollapseResult, ContextCollapse, ContextCollapseCommit,
+    ContextCollapseHealth, ContextCollapseReset, ContextCollapseSnapshot, ContextCollapseStats,
+    DrainResult, StagedCollapse, COMMIT_RECORD_TYPE, CONTEXT_COLLAPSE_ENV, RESET_RECORD_TYPE,
+    SNAPSHOT_RECORD_TYPE,
+};
 pub use context_window::{
     context_window_for_model, max_output_tokens_for_model, max_thinking_tokens_for_model,
     CONTEXT_1M_BETA_HEADER, MODEL_CONTEXT_WINDOW_DEFAULT,
@@ -51,10 +57,11 @@ pub use partial::{
 };
 pub use post_compact::{
     budget_post_compact_files, estimate_content_tokens, is_main_thread_compact,
-    render_invoked_skills_attachment, restore_post_compact_files, restore_post_compact_skills,
-    run_post_compact_cleanup, select_post_compact_files, truncate_skill_content,
-    AttachedSkillContent, FileRestoreCandidate, PostCompactBuilder, PostCompactMessages,
-    RestoredFile, RestoredSkill, SkillRestoreCandidate, INVOKED_SKILLS_ATTACHMENT_PREAMBLE,
+    render_invoked_skills_attachment, render_invoked_skills_attachment_with_sidecar,
+    restore_post_compact_files, restore_post_compact_skills, run_post_compact_cleanup,
+    select_post_compact_files, truncate_skill_content, AttachedSkillContent, FileRestoreCandidate,
+    PostCompactBuilder, PostCompactMessages, RenderedInvokedSkillsAttachment, RestoredFile,
+    RestoredSkill, SkillRestoreCandidate, INVOKED_SKILLS_ATTACHMENT_PREAMBLE,
     SKILL_TRUNCATION_MARKER,
 };
 pub use prompt::{

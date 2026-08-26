@@ -27,7 +27,7 @@
 
 use crate::file::MemoryFile;
 use crate::memdir::{scan_memdir, MemdirRoots};
-use crate::selector::{memory_entry_to_memory_file, MemorySelector};
+use crate::selector::{memory_entry_to_memory_file_with_frontmatter, MemorySelector};
 use crate::surfacing::SurfacedMemory;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -154,6 +154,21 @@ impl MemoryPrefetch {
     /// roots are home-based and bound at construction. It is retained for a
     /// future project-scoped memdir root.
     pub async fn start(&self, query: String, _memory_dir: PathBuf) -> PendingMemoryPrefetch {
+        self.start_for_session(query, _memory_dir, None).await
+    }
+
+    /// Start a prefetch while excluding the live session's own memory artifact.
+    ///
+    /// A session-memory extraction can complete between model-loop iterations.
+    /// Passing the current session id here prevents that newly-written file from
+    /// becoming selector input for the same live session while leaving memories
+    /// from prior sessions eligible for surfacing.
+    pub async fn start_for_session(
+        &self,
+        query: String,
+        _memory_dir: PathBuf,
+        current_session_id: Option<String>,
+    ) -> PendingMemoryPrefetch {
         let (tx, rx) = oneshot::channel();
 
         if let Some(fixed) = self.fixed_result.clone() {
@@ -184,7 +199,9 @@ impl MemoryPrefetch {
             .spawn(
                 "memory-prefetch",
                 Box::pin(async move {
-                    let surfaced = select_surfaced(&selector, &roots, &query).await;
+                    let surfaced =
+                        select_surfaced(&selector, &roots, &query, current_session_id.as_deref())
+                            .await;
                     let _ = tx.send(surfaced);
                 }),
             )
@@ -265,18 +282,33 @@ async fn select_surfaced(
     selector: &MemorySelector,
     roots: &MemdirRoots,
     query: &str,
+    current_session_id: Option<&str>,
 ) -> Vec<SurfacedMemory> {
-    // `scan_memdir` is blocking fs I/O over a small directory; run inline.
-    let Ok(snapshot) = scan_memdir(roots) else {
+    let Some(mut snapshot) = scan_snapshot(roots.clone()).await else {
         return Vec::new();
     };
+    if let Some(session_id) = current_session_id {
+        let current_session_path = roots.session_memdir.join(format!(
+            "{}.md",
+            crate::session_memory::sanitize_session_id(session_id)
+        ));
+        snapshot
+            .entries
+            .retain(|entry| entry.path != current_session_path);
+        snapshot.frontmatter.remove(&current_session_path);
+    }
     if snapshot.entries.is_empty() {
         return Vec::new();
     }
     let files: Vec<MemoryFile> = snapshot
         .entries
         .iter()
-        .map(memory_entry_to_memory_file)
+        .map(|entry| {
+            memory_entry_to_memory_file_with_frontmatter(
+                entry,
+                snapshot.frontmatter.get(&entry.path),
+            )
+        })
         .collect();
     let already: HashSet<PathBuf> = HashSet::new();
     let Ok(selected) = selector.select_relevant(query, &files, &[], &already).await else {
@@ -287,7 +319,10 @@ async fn select_surfaced(
         .iter()
         .filter_map(|p| {
             snapshot.entries.iter().find(|e| &e.path == p).map(|e| {
-                let f = memory_entry_to_memory_file(e);
+                let f = memory_entry_to_memory_file_with_frontmatter(
+                    e,
+                    snapshot.frontmatter.get(&e.path),
+                );
                 SurfacedMemory {
                     path: e.path.clone(),
                     content: truncate_surfaced_content(&f.content, &e.path),
@@ -297,6 +332,13 @@ async fn select_surfaced(
             })
         })
         .collect()
+}
+
+async fn scan_snapshot(roots: MemdirRoots) -> Option<crate::memdir::MemdirSnapshot> {
+    tokio::task::spawn_blocking(move || scan_memdir(&roots).ok())
+        .await
+        .ok()
+        .flatten()
 }
 
 #[cfg(test)]
@@ -337,13 +379,19 @@ mod tests {
     /// drives the scan → select → surface pipeline deterministically with no LLM.
     struct PickClient {
         names: Vec<String>,
+        prompts: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
     }
     #[async_trait]
     impl SideQueryClient for PickClient {
         async fn query(
             &self,
-            _request: SideQueryRequest,
+            request: SideQueryRequest,
         ) -> Result<SideQueryResponse, SideQueryError> {
+            if let Some(prompts) = &self.prompts {
+                if let Some(message) = request.messages.first() {
+                    prompts.lock().unwrap().push(message.text_content());
+                }
+            }
             Ok(SideQueryResponse {
                 text: None,
                 structured: Some(serde_json::json!({ "filenames": self.names })),
@@ -361,13 +409,24 @@ mod tests {
         let home = tempfile::tempdir().expect("tmp home");
         let memdir = home.path().join(".lingxi").join("memdir");
         std::fs::create_dir_all(&memdir).expect("mk memdir");
-        std::fs::write(memdir.join("fd.md"), "USE FD NOT FIND").expect("write fd");
+        std::fs::write(
+            memdir.join("fd.md"),
+            concat!(
+                "---\n",
+                "description: shell helper\n",
+                "---\n",
+                "creds: AKIAIOSFODNN7EXAMPLE\n",
+                "USE FD NOT FIND"
+            ),
+        )
+        .expect("write fd");
         std::fs::write(memdir.join("rg.md"), "USE RG NOT GREP").expect("write rg");
 
         let roots = memdir_path(home.path(), false);
         // The selector "picks" fd.md only.
         let selector = Arc::new(MemorySelector::new(Arc::new(PickClient {
             names: vec!["fd.md".into()],
+            prompts: None,
         })));
         let prefetch = MemoryPrefetch::new(selector, Arc::new(InlineRuntime), roots);
 
@@ -392,6 +451,100 @@ mod tests {
             "content: {:?}",
             surfaced[0].content
         );
+        assert!(
+            surfaced[0].content.contains("[REDACTED:"),
+            "secret content must be redacted before surfacing: {:?}",
+            surfaced[0].content
+        );
+        assert!(
+            !surfaced[0].content.contains("description: shell helper"),
+            "frontmatter must be stripped before surfacing: {:?}",
+            surfaced[0].content
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_receives_redacted_memdir_frontmatter_description() {
+        let home = tempfile::tempdir().expect("tmp home");
+        let memdir = home.path().join(".lingxi").join("memdir");
+        std::fs::create_dir_all(&memdir).expect("mk memdir");
+        std::fs::write(
+            memdir.join("fd.md"),
+            "---\ndescription: shell helper\n---\nUSE FD NOT FIND",
+        )
+        .expect("write fd");
+
+        let prompts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let selector = Arc::new(MemorySelector::new(Arc::new(PickClient {
+            names: vec!["fd.md".into()],
+            prompts: Some(prompts.clone()),
+        })));
+        let prefetch = MemoryPrefetch::new(
+            selector,
+            Arc::new(InlineRuntime),
+            memdir_path(home.path(), false),
+        );
+
+        let surfaced = prefetch
+            .start("how do I search files".into(), PathBuf::from("/work"))
+            .await
+            .take()
+            .await;
+
+        assert_eq!(surfaced.len(), 1);
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].contains("fd.md: shell helper"),
+            "selector prompt must retain frontmatter metadata: {}",
+            prompts[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn live_session_memory_is_excluded_before_selection() {
+        let home = tempfile::tempdir().expect("tmp home");
+        let roots = memdir_path(home.path(), false);
+        std::fs::create_dir_all(&roots.session_memdir).expect("mk session memdir");
+        let live_id = "sess:11111111-1111-1111-1111-111111111111";
+        let live_name = "11111111-1111-1111-1111-111111111111.md";
+        let prior_name = "22222222-2222-2222-2222-222222222222.md";
+        std::fs::write(
+            roots.session_memdir.join(live_name),
+            "---\ndescription: live session\n---\nCURRENT SESSION",
+        )
+        .expect("write live session memory");
+        std::fs::write(
+            roots.session_memdir.join(prior_name),
+            "---\ndescription: prior session\n---\nPRIOR SESSION",
+        )
+        .expect("write prior session memory");
+
+        let prompts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let selector = Arc::new(MemorySelector::new(Arc::new(PickClient {
+            names: vec![live_name.into(), prior_name.into()],
+            prompts: Some(prompts.clone()),
+        })));
+        let prefetch = MemoryPrefetch::new(selector, Arc::new(InlineRuntime), roots);
+
+        let surfaced = prefetch
+            .start_for_session(
+                "continue the work".into(),
+                PathBuf::from("/work"),
+                Some(live_id.into()),
+            )
+            .await
+            .take()
+            .await;
+
+        assert_eq!(surfaced.len(), 1);
+        assert!(surfaced[0].path.ends_with(prior_name));
+        assert!(surfaced[0].content.contains("PRIOR SESSION"));
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains(prior_name));
+        assert!(!prompts[0].contains(live_name));
+        assert!(!prompts[0].contains("live session"));
     }
 
     #[tokio::test]
@@ -402,6 +555,7 @@ mod tests {
         let roots = memdir_path(home.path(), false);
         let selector = Arc::new(MemorySelector::new(Arc::new(PickClient {
             names: vec!["x.md".into()],
+            prompts: None,
         })));
         let prefetch = MemoryPrefetch::new(selector, Arc::new(InlineRuntime), roots);
 
@@ -466,5 +620,26 @@ mod tests {
             "\n> This memory file was truncated (4096 byte limit). Use the Read tool to view the complete file at: /m/wide.md",
             "byte-limit notice appended to an empty body when line 1 alone exceeds the cap"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scan_snapshot_runs_on_blocking_pool() {
+        let caller_thread = std::thread::current().id();
+        let worker_thread = tokio::task::spawn_blocking(|| std::thread::current().id())
+            .await
+            .expect("blocking task joined");
+        assert_ne!(
+            worker_thread, caller_thread,
+            "spawn_blocking must not reuse the async runtime thread"
+        );
+
+        let home = tempfile::tempdir().expect("tmp home");
+        let memdir = home.path().join(".lingxi").join("memdir");
+        std::fs::create_dir_all(&memdir).expect("mk memdir");
+        std::fs::write(memdir.join("fd.md"), "USE FD NOT FIND").expect("write fd");
+        let roots = memdir_path(home.path(), false);
+
+        let snapshot = scan_snapshot(roots).await.expect("snapshot");
+        assert_eq!(snapshot.entries.len(), 1);
     }
 }

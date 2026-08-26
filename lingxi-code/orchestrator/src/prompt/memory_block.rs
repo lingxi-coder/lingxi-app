@@ -42,6 +42,12 @@ pub trait MemoryHierarchyProvider: Send + Sync {
     /// oracle, whose `read_eacces` / `read_failed` reports are a separate
     /// unported family.
     async fn load(&self, cwd: &Path) -> Vec<MemoryFile>;
+
+    /// Compiled `claudeMdExcludes` matcher shared with lazy/nested loaders.
+    /// Static and custom providers default to no exclusions.
+    fn excluder(&self) -> Option<memory::lingxi_md::LingxiMdExcluder> {
+        None
+    }
 }
 
 /// Production implementation — wraps `memory::lingxi_md::walk` +
@@ -55,6 +61,63 @@ pub trait MemoryHierarchyProvider: Send + Sync {
 /// `conditional_rules_reminder_message`).
 pub struct RealMemoryHierarchyProvider;
 
+fn load_memory_files(
+    cwd: &Path,
+    excluder: Option<&memory::lingxi_md::LingxiMdExcluder>,
+) -> Vec<MemoryFile> {
+    // LINGXI_DISABLE_LINGXI_MDS (binary `yOe` @208938221:
+    // `je.LINGXI_DISABLE_LINGXI_MDS ? [] : await Mv()`). A plain truthy
+    // env check — ANY non-empty value (incl. "0") disables all LINGXI.md
+    // loading; safe-mode sets it to "1".
+    if std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|v| !v.is_empty()) {
+        return Vec::new();
+    }
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let managed = memory::lingxi_md::hierarchy::managed_path();
+    let h = memory::lingxi_md::hierarchy::walk(cwd, &home, Some(&managed));
+    let mut entries = h.entries;
+    entries.reverse();
+
+    let mut processed: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    let external_includes_approved =
+        migrations::global_config::global_config_path().is_some_and(|path| {
+            migrations::global_config::check_has_lingxi_md_external_includes_approved(&path, cwd)
+        });
+    let mut out = Vec::new();
+    for e in entries {
+        let include_external = include_external_for(e.tier, external_includes_approved);
+        let expanded = memory::lingxi_md::loader::expand_memory_file_with_excluder(
+            &e.path,
+            &mut processed,
+            include_external,
+            cwd,
+            Some(&home),
+            0,
+            e.tier,
+            excluder,
+        );
+        for (idx, entry) in expanded.into_iter().enumerate() {
+            let body = entry.body.trim().to_string();
+            if body.is_empty() {
+                continue;
+            }
+            out.push(MemoryFile {
+                path: entry.path,
+                body,
+                is_local_override: idx == 0 && e.is_local_override,
+                tier: e.tier,
+                globs: entry.globs,
+                raw_content: entry.raw_content,
+                content_differs_from_disk: entry.content_differs_from_disk,
+            });
+        }
+    }
+    out
+}
+
 /// Discover external `@import` targets that would require project approval.
 ///
 /// User-tier memory is intentionally excluded because Claude Code always
@@ -63,6 +126,15 @@ pub struct RealMemoryHierarchyProvider;
 /// hierarchy order for the startup warning.
 #[must_use]
 pub fn pending_external_include_paths(cwd: &Path) -> Vec<std::path::PathBuf> {
+    pending_external_include_paths_with_excluder(cwd, None)
+}
+
+/// Exclude-aware variant of [`pending_external_include_paths`].
+#[must_use]
+pub fn pending_external_include_paths_with_excluder(
+    cwd: &Path,
+    excluder: Option<&memory::lingxi_md::LingxiMdExcluder>,
+) -> Vec<std::path::PathBuf> {
     if std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|v| !v.is_empty()) {
         return Vec::new();
     }
@@ -79,10 +151,12 @@ pub fn pending_external_include_paths(cwd: &Path) -> Vec<std::path::PathBuf> {
         if matches!(entry.tier, memory::lingxi_md::LingxiMdTier::User) {
             continue;
         }
-        for path in memory::lingxi_md::loader::discover_external_include_paths(
+        for path in memory::lingxi_md::loader::discover_external_include_paths_with_excluder(
             &entry.path,
             cwd,
             Some(&home),
+            entry.tier,
+            excluder,
         ) {
             if seen.insert(path.clone()) {
                 paths.push(path);
@@ -95,93 +169,7 @@ pub fn pending_external_include_paths(cwd: &Path) -> Vec<std::path::PathBuf> {
 #[async_trait]
 impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
     async fn load(&self, cwd: &Path) -> Vec<MemoryFile> {
-        // LINGXI_DISABLE_LINGXI_MDS (binary `yOe` @208938221:
-        // `je.LINGXI_DISABLE_LINGXI_MDS ? [] : await Mv()`). A plain truthy
-        // env check — ANY non-empty value (incl. "0") disables all LINGXI.md
-        // loading; safe-mode sets it to "1".
-        if std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|v| !v.is_empty()) {
-            return Vec::new();
-        }
-        let Some(home) = dirs::home_dir() else {
-            return Vec::new();
-        };
-        // Managed tier (`<managed>/LINGXI.md` + `<managed>/.lingxi/rules/**`)
-        // is always probed (never settings-gated). `managed_path()` consults
-        // the `LINGXI_MANAGED_DIR` override and falls back to the platform
-        // default.
-        let managed = memory::lingxi_md::hierarchy::managed_path();
-        let h = memory::lingxi_md::hierarchy::walk(cwd, &home, Some(&managed));
-        // walk() returns innermost-first; reverse to managed → home → outer →
-        // cwd. Within the same dir, the walk emits `LINGXI.local.md` BEFORE
-        // `LINGXI.md` (so local-override shadows canonical). After reverse()
-        // that flips: canonical comes first at each level, local-override LAST
-        // — matching claude-code splice order.
-        let mut entries = h.entries;
-        entries.reverse();
-
-        // `@import` expansion (claude-code processMemoryFile): a single
-        // `processed` set is shared across the whole hierarchy load so an
-        // imported file is spliced at most once, and each top-level file is
-        // expanded at depth 0. Each `@import`'d file becomes its own
-        // `MemoryFile` entry, parent before children.
-        let mut processed: std::collections::HashSet<std::path::PathBuf> =
-            std::collections::HashSet::new();
-        // External-include approval (claudemd.ts:826-846): the User tier always
-        // resolves external `@import`s; Managed/Project/Local do so ONLY when the
-        // per-project `hasLingxiMdExternalIncludesApproved` flag is set in
-        // `~/.lingxi.json` (read once per load). Startup preflight owns the
-        // interactive warning and persists the decision before engine creation.
-        let external_includes_approved = migrations::global_config::global_config_path()
-            .map(|p| {
-                migrations::global_config::check_has_lingxi_md_external_includes_approved(&p, cwd)
-            })
-            .unwrap_or(false);
-        let mut out = Vec::new();
-        for e in entries {
-            let include_external = include_external_for(e.tier, external_includes_approved);
-            let expanded = memory::lingxi_md::loader::expand_memory_file(
-                &e.path,
-                &mut processed,
-                include_external,
-                cwd,
-                Some(&home),
-                0,
-            );
-            for (idx, entry) in expanded.into_iter().enumerate() {
-                let body = entry.body.trim().to_string();
-                if body.is_empty() {
-                    continue;
-                }
-                // §F Gap-2 part-2: conditional (`paths:`-gated) rules are NO
-                // LONGER dropped here. They flow through with their `globs`
-                // intact so the orchestrator can lazily activate them when an
-                // edited/opened file matches (claudemd.ts `processConditionedMdRules`).
-                // The *eager* exclusion now lives in [`format`], which filters to
-                // `globs.is_none()` so the system-prompt block stays byte-identical
-                // (claudemd.ts:773 `conditionalRule:false`).
-                out.push(MemoryFile {
-                    path: entry.path,
-                    body,
-                    // Only the hierarchy entry itself can be a
-                    // `LINGXI.local.md`; `@import`'d children are plain files.
-                    is_local_override: idx == 0 && e.is_local_override,
-                    // `@import`'d children inherit the parent's tier (TS passes
-                    // `type` down through processMemoryFile recursion).
-                    tier: e.tier,
-                    // Carry the `paths:` globs through: `None` = unconditional
-                    // (eager); `Some(_)` = conditional (lazy activation only).
-                    globs: entry.globs,
-                    // Disk-fidelity pair (claude-code `rawContent` /
-                    // `contentDiffersFromDisk`). NOTE these ride the UNtrimmed
-                    // loader values on purpose: `body` above is trimmed for the
-                    // prompt block, but the read-state seed must record the
-                    // bytes on disk.
-                    raw_content: entry.raw_content,
-                    content_differs_from_disk: entry.content_differs_from_disk,
-                });
-            }
-        }
-        out
+        load_memory_files(cwd, None)
     }
 }
 
@@ -200,29 +188,27 @@ pub fn real_provider() -> Arc<dyn MemoryHierarchyProvider> {
 /// [`real_provider`] when no patterns are configured (byte-identical to before).
 #[must_use]
 pub fn real_provider_with_excludes(excludes: Vec<String>) -> Arc<dyn MemoryHierarchyProvider> {
-    let excluder = memory::lingxi_md::LingxiMdExcluder::new(&excludes);
-    if excluder.is_empty() {
+    let matcher = memory::lingxi_md::LingxiMdExcluder::new(&excludes);
+    if matcher.is_empty() {
         return real_provider();
     }
-    Arc::new(ExcludeFilterProvider {
-        inner: Arc::new(RealMemoryHierarchyProvider),
-        excluder,
-    })
+    Arc::new(ExcludeFilterProvider { excluder: matcher })
 }
 
 /// Wraps a [`MemoryHierarchyProvider`] and filters its result through the
 /// `claudeMdExcludes` gate (see [`real_provider_with_excludes`]).
 struct ExcludeFilterProvider {
-    inner: Arc<dyn MemoryHierarchyProvider>,
     excluder: memory::lingxi_md::LingxiMdExcluder,
 }
 
 #[async_trait]
 impl MemoryHierarchyProvider for ExcludeFilterProvider {
     async fn load(&self, cwd: &Path) -> Vec<MemoryFile> {
-        let mut files = self.inner.load(cwd).await;
-        files.retain(|f| !self.excluder.is_excluded(&f.path, f.tier));
-        files
+        load_memory_files(cwd, Some(&self.excluder))
+    }
+
+    fn excluder(&self) -> Option<memory::lingxi_md::LingxiMdExcluder> {
+        Some(self.excluder.clone())
     }
 }
 
@@ -238,7 +224,11 @@ fn include_external_for(tier: memory::lingxi_md::LingxiMdTier, approved: bool) -
 
 #[cfg(test)]
 mod external_include_tests {
-    use super::{include_external_for, pending_external_include_paths};
+    use super::{
+        include_external_for, pending_external_include_paths,
+        pending_external_include_paths_with_excluder,
+    };
+    use memory::lingxi_md::LingxiMdExcluder;
     use memory::lingxi_md::LingxiMdTier::{Local, Managed, Project, User};
 
     #[test]
@@ -273,52 +263,41 @@ mod external_include_tests {
 
         assert_eq!(pending_external_include_paths(&cwd), vec![outside]);
     }
+
+    #[test]
+    fn pending_scan_with_excluder_skips_excluded_subtree() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cwd = root.path().join("project");
+        let nested = cwd.join("secret");
+        std::fs::create_dir_all(&nested).expect("mkdir nested");
+        let outside = root.path().join("shared.md");
+        std::fs::write(cwd.join(branding::MEMORY_FILE), "@./secret/LINGXI.md\n")
+            .expect("write root memory");
+        std::fs::write(
+            nested.join("LINGXI.md"),
+            format!("@{}\n", outside.display()),
+        )
+        .expect("write nested memory");
+
+        let excluder = LingxiMdExcluder::new(&["**/secret/LINGXI.md".to_string()]);
+        assert_eq!(
+            pending_external_include_paths_with_excluder(&cwd, Some(&excluder)),
+            Vec::<std::path::PathBuf>::new()
+        );
+    }
 }
 
 #[cfg(test)]
 mod exclude_filter_tests {
     use super::*;
     use memory::lingxi_md::LingxiMdTier;
-    use std::path::PathBuf;
 
-    struct StaticInner(Vec<MemoryFile>);
-    #[async_trait]
-    impl MemoryHierarchyProvider for StaticInner {
-        async fn load(&self, _cwd: &Path) -> Vec<MemoryFile> {
-            self.0.clone()
-        }
-    }
-
-    fn mf(path: &str, tier: LingxiMdTier) -> MemoryFile {
-        MemoryFile {
-            path: PathBuf::from(path),
-            body: "x".into(),
-            is_local_override: matches!(tier, LingxiMdTier::Local),
-            tier,
-            globs: None,
-            raw_content: "x".into(),
-            content_differs_from_disk: false,
-        }
-    }
-
-    #[tokio::test]
-    async fn filter_drops_matching_user_project_local_keeps_managed() {
-        let inner = Arc::new(StaticInner(vec![
-            mf("/mgr/LINGXI.md", LingxiMdTier::Managed), // matches `**/LINGXI.md` but Managed → kept
-            mf("/a/secret/LINGXI.md", LingxiMdTier::Project), // excluded
-            mf("/a/public/LINGXI.md", LingxiMdTier::User), // excluded by `**/LINGXI.md`
-        ]));
-        let provider = ExcludeFilterProvider {
-            inner,
-            excluder: memory::lingxi_md::LingxiMdExcluder::new(&["**/LINGXI.md".to_string()]),
-        };
-        let paths: Vec<String> = provider
-            .load(Path::new("/a"))
-            .await
-            .iter()
-            .map(|f| f.path.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(paths, vec!["/mgr/LINGXI.md".to_string()]);
+    #[test]
+    fn filter_drops_matching_user_project_local_keeps_managed() {
+        let excluder = memory::lingxi_md::LingxiMdExcluder::new(&["**/LINGXI.md".to_string()]);
+        assert!(!excluder.is_excluded(Path::new("/mgr/LINGXI.md"), LingxiMdTier::Managed));
+        assert!(excluder.is_excluded(Path::new("/a/secret/LINGXI.md"), LingxiMdTier::Project));
+        assert!(excluder.is_excluded(Path::new("/a/public/LINGXI.md"), LingxiMdTier::User));
     }
 
     #[test]
@@ -397,6 +376,8 @@ pub fn build_session_memory_handle(
         runner,
         config_home,
         runtime,
+        in_flight: std::sync::atomic::AtomicBool::new(false),
+        generation: std::sync::atomic::AtomicU64::new(0),
     })
 }
 

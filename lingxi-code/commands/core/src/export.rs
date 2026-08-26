@@ -96,7 +96,9 @@ fn render_blocks(content: &[ContentBlock]) -> String {
     let mut lines: Vec<String> = Vec::with_capacity(content.len());
     for block in content {
         match block {
-            ContentBlock::Text { text } => lines.push(text.clone()),
+            ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+                lines.push(text.clone())
+            }
             ContentBlock::ToolUse { name, input, .. } => {
                 lines.push(format!("[tool: {name}] {input}"));
             }

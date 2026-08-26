@@ -252,7 +252,8 @@ fn decode_response(resp: llm_client::LlmResponse, want_structured: bool) -> Side
 
     for block in resp.content {
         match block {
-            llm_client::ContentBlock::Text { text, .. } => text_acc.push_str(&text),
+            llm_client::ContentBlock::Text { text, .. }
+            | llm_client::ContentBlock::TextJsUtf16 { text, .. } => text_acc.push_str(&text),
             llm_client::ContentBlock::ToolCall { id, name, input } => {
                 tool_calls.push(serde_json::json!({
                     "id": id,
@@ -446,6 +447,14 @@ fn convert_content_block(
     match block {
         protocol::ContentBlock::Text { text } => Ok(llm_client::ContentBlock::Text {
             text,
+            cache_control: None,
+        }),
+        protocol::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+        } => Ok(llm_client::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
             cache_control: None,
         }),
         protocol::ContentBlock::ToolUse {

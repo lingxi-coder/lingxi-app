@@ -2,6 +2,345 @@
 
 use super::*;
 
+mod session_memory_context_tests {
+    use super::*;
+
+    #[test]
+    fn extraction_context_appends_messages_after_the_cache_safe_prefix() {
+        let prefix = ConversationMessage::user(MessageId::new(), "cached prefix".to_string());
+        let recent =
+            ConversationMessage::user(MessageId::new(), "recent tool evidence".to_string());
+        let history = vec![prefix.clone(), recent];
+        let mut fork_context = vec![prefix];
+
+        extend_session_memory_fork_context(&mut fork_context, &history);
+
+        assert_eq!(fork_context, history);
+    }
+
+    #[test]
+    fn extraction_context_replaces_a_stale_prefix_after_history_rewrite() {
+        let mut fork_context = vec![ConversationMessage::user(
+            MessageId::new(),
+            "pre-compact history".to_string(),
+        )];
+        let history = vec![ConversationMessage::user(
+            MessageId::new(),
+            "compact summary".to_string(),
+        )];
+
+        extend_session_memory_fork_context(&mut fork_context, &history);
+
+        assert_eq!(fork_context, history);
+    }
+}
+
+mod invoked_skill_lifecycle_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn dropping_orchestrator_clears_its_invoked_skills() {
+        let _registry_lock = compaction::invoked_skills::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        compaction::invoked_skills::reset_for_test();
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::path::PathBuf::from("/work"),
+        );
+        let session_id = orch
+            .session
+            .try_lock()
+            .expect("new orchestrator is not running a turn")
+            .session_id
+            .to_string();
+        compaction::invoked_skills::register_scoped(
+            "build",
+            std::path::Path::new("/skill/build"),
+            "body",
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None),
+        );
+
+        drop(orch);
+
+        assert!(compaction::invoked_skills::filter_for_scope(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None)
+        )
+        .is_empty());
+        compaction::invoked_skills::reset_for_test();
+    }
+}
+
+mod session_memory_background_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use async_trait::async_trait;
+    use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+    use tool_api::context::ToolUseOptions;
+
+    struct TokioRuntime;
+
+    #[async_trait]
+    impl traits::RuntimeSpawner for TokioRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            tokio::spawn(task);
+            Ok(traits::BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: 0,
+            })
+        }
+
+        async fn sleep(&self, duration: std::time::Duration) {
+            tokio::time::sleep(duration).await;
+        }
+
+        async fn cancel(
+            &self,
+            _handle: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    struct BlockingSideQuery {
+        started: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl SideQueryClient for BlockingSideQuery {
+        async fn query(
+            &self,
+            _request: SideQueryRequest,
+        ) -> Result<SideQueryResponse, SideQueryError> {
+            self.started.notify_waiters();
+            self.release.notified().await;
+            Ok(SideQueryResponse {
+                text: Some("durable notes from the old session".to_string()),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".to_string()),
+                retry_count: 0,
+            })
+        }
+    }
+
+    fn cache_safe_params() -> sidequery::CacheSafeParams {
+        sidequery::CacheSafeParams {
+            system_prompt: Arc::from("SYS"),
+            user_context: std::collections::HashMap::new(),
+            system_context: std::collections::HashMap::new(),
+            tool_use_options: ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: "haiku".to_string(),
+                model_profile: None,
+                max_budget_nano_usd: None,
+                mcp_clients: vec![],
+                is_non_interactive_session: false,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            fork_context_messages: Vec::new(),
+            transcript_path: None,
+            generation: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_does_not_wait_for_network_extraction_or_commit_stale_result() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let client = Arc::new(BlockingSideQuery {
+            started: Notify::new(),
+            release: Notify::new(),
+        });
+        let runner = Arc::new(
+            sidequery::ForkedAgentRunner::new()
+                .with_side_query_client(client.clone(), "haiku".to_string()),
+        );
+        let handle = Arc::new(SessionMemoryHandle {
+            extractor: tokio::sync::Mutex::new(
+                memory::session_memory::SessionMemoryExtractor::new(
+                    memory::session_memory::SessionMemoryConfig {
+                        enabled: true,
+                        initialization_threshold: 0,
+                        update_threshold: 0,
+                        extraction_model: "haiku".to_string(),
+                    },
+                ),
+            ),
+            runner,
+            config_home: dir.path().to_path_buf(),
+            runtime: Arc::new(TokioRuntime),
+            in_flight: std::sync::atomic::AtomicBool::new(false),
+            generation: std::sync::atomic::AtomicU64::new(0),
+        });
+        let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+        slot.save(cache_safe_params()).await;
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_cache_safe_slot(slot)
+        .with_session_memory(handle.clone());
+        let old_session_id = orch.session.lock().await.session_id.to_string();
+        let stale_path = memory::session_memory::session_memory_path(dir.path(), &old_session_id);
+
+        let started = client.started.notified();
+        orch.maybe_extract_session_memory().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), started)
+            .await
+            .expect("background extraction started");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            traits::OrchestratorHandle::clear_session(&orch),
+        )
+        .await
+        .expect("clear must not wait for the side query")
+        .expect("clear succeeds");
+        assert!(!stale_path.exists());
+
+        client.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while handle.in_flight.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stale extraction finished");
+        assert!(
+            !stale_path.exists(),
+            "an extraction invalidated by clear must not write its old-session file"
+        );
+        assert!(!handle.extractor.lock().await.is_initialized());
+    }
+}
+
+mod bounded_post_compact_read_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn post_compact_reader_never_loads_past_its_byte_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("large.txt");
+        std::fs::write(&path, "x".repeat(64 * 1024)).expect("write fixture");
+
+        let read = read_utf8_prefix(&path, 1_023, 1_023)
+            .await
+            .expect("bounded read");
+
+        assert_eq!(read.content.len(), 1_023);
+        assert!(read.content.bytes().all(|byte| byte == b'x'));
+        assert!(read.truncated);
+    }
+
+    #[tokio::test]
+    async fn post_compact_reader_drops_only_a_split_utf8_tail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("utf8.txt");
+        std::fs::write(&path, "aéz").expect("write fixture");
+
+        let read = read_utf8_prefix(&path, 2, 2).await.expect("bounded read");
+
+        assert_eq!(read.content, "a");
+        assert!(read.truncated);
+    }
+
+    #[tokio::test]
+    async fn post_compact_reader_discards_utf8_padding_after_the_character_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("padding.txt");
+        std::fs::write(&path, "x".repeat(60_003)).expect("write fixture");
+
+        let read = read_utf8_prefix(&path, 60_003, 20_000)
+            .await
+            .expect("bounded read");
+
+        assert_eq!(read.content.len(), 20_000);
+        assert_eq!(read.content.chars().count(), 20_000);
+        assert!(read.truncated);
+    }
+
+    #[tokio::test]
+    async fn post_compact_reader_handles_a_four_byte_scalar_split_in_the_padding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("padding-utf8.txt");
+        std::fs::write(&path, format!("{}🦀", "x".repeat(20_000))).expect("write fixture");
+
+        let read = read_utf8_prefix(&path, 60_003, 20_000)
+            .await
+            .expect("bounded read");
+
+        assert_eq!(read.content, "x".repeat(20_000));
+        assert!(read.truncated);
+    }
+
+    #[tokio::test]
+    async fn post_compact_reader_distinguishes_an_exact_fit_from_truncation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("exact.txt");
+        std::fs::write(&path, "x".repeat(20_000)).expect("write fixture");
+
+        let read = read_utf8_prefix(&path, 60_003, 20_000)
+            .await
+            .expect("bounded read");
+
+        assert_eq!(read.content.len(), 20_000);
+        assert!(!read.truncated);
+    }
+
+    #[tokio::test]
+    async fn post_compact_reader_counts_utf16_units_for_cjk_and_astral_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("unicode.txt");
+        let content = format!("{}🦀", "界".repeat(20_000));
+        std::fs::write(&path, &content).expect("write fixture");
+
+        let read = read_utf8_prefix(
+            &path,
+            compaction::thresholds::POST_COMPACT_MAX_BYTES_PER_FILE_READ,
+            compaction::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ,
+        )
+        .await
+        .expect("bounded read");
+
+        assert_eq!(read.content, "界".repeat(20_000));
+        assert!(
+            read.truncated,
+            "the trailing astral scalar exceeds the unit cap"
+        );
+        assert_eq!(read.content.encode_utf16().count(), 20_000);
+    }
+}
+
 impl ConversationOrchestrator {
     async fn restore_post_compact_attachments(&self) -> Vec<protocol::ConversationMessage> {
         self.restore_post_compact_attachments_against(&[]).await
@@ -8497,6 +8836,22 @@ mod post_compact_file_restore_tests {
             .collect()
     }
 
+    async fn register_invoked_skill(
+        orch: &ConversationOrchestrator,
+        name: &str,
+        path: &std::path::Path,
+        content: &str,
+        agent_id: Option<&str>,
+    ) {
+        let session_id = orch.session.lock().await.session_id.to_string();
+        compaction::invoked_skills::register_scoped(
+            name,
+            path,
+            content,
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), agent_id),
+        );
+    }
+
     #[tokio::test]
     async fn reread_restores_fresh_content_not_stale_snapshot() {
         let _rg = registry_guard();
@@ -8530,6 +8885,33 @@ mod post_compact_file_restore_tests {
     }
 
     #[tokio::test]
+    async fn oversized_reread_uses_exact_compact_file_reference_attachment() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("large.txt");
+        std::fs::write(&path, "x".repeat(20_001)).expect("write file");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        set(&map, path.clone(), stale_entry("stale"));
+
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored[0].text_content(),
+            format!(
+                "<system-reminder>\nNote: {} was read before the last conversation was summarized, but the contents are too large to include. Use Read tool if you need to access it.\n</system-reminder>",
+                path.display()
+            )
+        );
+        assert_eq!(
+            restore_names(&sink.events().await),
+            vec!["tengu_post_compact_file_restore_success".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn preserved_file_attachment_is_not_restored_twice() {
         let _rg = registry_guard();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8544,6 +8926,31 @@ mod post_compact_file_restore_tests {
             format!(
                 "<system-reminder>\nReferenced file {} (restored after compaction):\ncurrent\n</system-reminder>",
                 path.display()
+            ),
+        );
+
+        let restored = orch
+            .restore_post_compact_attachments_against(&[boundary])
+            .await;
+        assert!(restored.is_empty());
+        assert!(restore_names(&sink.events().await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn preserved_oversized_reference_and_escaped_path_are_not_restored_twice() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("already<&>.txt");
+        std::fs::write(&path, "current").expect("write file");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        set(&map, path.clone(), stale_entry("stale"));
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+        let escaped = crate::prompt::sanitize::escape_reminder_path(&path.to_string_lossy());
+        let boundary = protocol::ConversationMessage::user_meta(
+            protocol::MessageId::new(),
+            format!(
+                "<system-reminder>\nNote: {escaped} was read before the last conversation was summarized, but the contents are too large to include. Use Read tool if you need to access it.\n</system-reminder>"
             ),
         );
 
@@ -8633,6 +9040,61 @@ mod post_compact_file_restore_tests {
     }
 
     #[tokio::test]
+    async fn cancelled_compact_keeps_model_visible_read_state_untouched() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("live.txt");
+        std::fs::write(&path, "current").expect("write file");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        set(&map, path.clone(), stale_entry("model-visible snapshot"));
+        let orch = orch_with_bus(
+            dir.path().to_path_buf(),
+            map.clone(),
+            Arc::new(telemetry::InMemorySink::new()),
+        )
+        .await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let result = compaction::IterationCompactionResult {
+            messages: vec![ConversationMessage::user(
+                MessageId::new(),
+                "summary".to_string(),
+            )],
+            layers_applied: vec![compaction::CompactionLayer::Autocompact],
+            total_tokens_freed: 1,
+            cache_hit: false,
+            consecutive_failures: 0,
+            was_compacted: true,
+            rapid_refill_breaker_tripped: false,
+            consecutive_rapid_refills: 0,
+            messages_to_preserve: Vec::new(),
+            media_analysis_to_preserve: Vec::new(),
+            compaction_usage: None,
+            compaction_model: None,
+        };
+
+        let applied = orch
+            .apply_post_compact(
+                result,
+                compaction::CompactTrigger::Manual,
+                1,
+                1,
+                1,
+                std::time::Instant::now(),
+                Some(&cancel),
+            )
+            .await;
+
+        assert!(applied.is_none());
+        assert_eq!(
+            tool_api::read_file_state::get(&map, &path)
+                .expect("cancel must preserve read-state")
+                .content,
+            "model-visible snapshot"
+        );
+    }
+
+    #[tokio::test]
     async fn success_and_error_events_fire_per_file() {
         let _rg = registry_guard();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8689,12 +9151,14 @@ mod post_compact_file_restore_tests {
         let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
 
         // A skill was invoked before the compaction (main thread → agentId None).
-        compaction::invoked_skills::register(
+        register_invoked_skill(
+            &orch,
             "deploy",
             std::path::Path::new("/skills/deploy"),
             "Deploy guidelines: run the pipeline.",
             None,
-        );
+        )
+        .await;
 
         let restored = orch.restore_post_compact_attachments().await;
         assert_eq!(restored.len(), 1, "one invoked_skills meta message");
@@ -8715,6 +9179,81 @@ mod post_compact_file_restore_tests {
     }
 
     #[tokio::test]
+    async fn invoked_skill_split_surrogate_reaches_attachment_with_exact_utf16_sidecar() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with_bus(
+            dir.path().to_path_buf(),
+            tool_api::read_file_state::new_read_file_state_map(),
+            Arc::new(telemetry::InMemorySink::new()),
+        )
+        .await;
+        let body = format!("{}😀{}", "x".repeat(19_899), "y".repeat(200));
+        register_invoked_skill(
+            &orch,
+            "utf16",
+            std::path::Path::new("/skills/utf16"),
+            &body,
+            None,
+        )
+        .await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+
+        assert_eq!(restored.len(), 1);
+        let protocol::ConversationMessage::User { content, .. } = &restored[0] else {
+            panic!("post-compact attachment must be a user message");
+        };
+        let protocol::ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } = &content[0]
+        else {
+            panic!("split surrogate attachment must retain its UTF-16 sidecar");
+        };
+        assert!(
+            utf16_code_units
+                .windows(2)
+                .any(|window| window == [0xD83D, 0x000A]),
+            "exact attachment must retain the high surrogate before the truncation marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoked_skill_never_restores_into_another_session() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = orch_with_bus(
+            dir.path().to_path_buf(),
+            tool_api::read_file_state::new_read_file_state_map(),
+            Arc::new(telemetry::InMemorySink::new()),
+        )
+        .await;
+        let other = orch_with_bus(
+            dir.path().to_path_buf(),
+            tool_api::read_file_state::new_read_file_state_map(),
+            Arc::new(telemetry::InMemorySink::new()),
+        )
+        .await;
+        assert_ne!(
+            source.session.lock().await.session_id,
+            other.session.lock().await.session_id
+        );
+        register_invoked_skill(
+            &source,
+            "deploy",
+            std::path::Path::new("/skills/deploy"),
+            "source-only body",
+            None,
+        )
+        .await;
+
+        assert!(other.restore_post_compact_attachments().await.is_empty());
+        let restored = source.restore_post_compact_attachments().await;
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0].text_content().contains("source-only body"));
+    }
+
+    #[tokio::test]
     async fn invoked_skill_already_in_preserved_attachment_is_not_duplicated() {
         let _rg = registry_guard();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8723,12 +9262,14 @@ mod post_compact_file_restore_tests {
         let orch = orch_with_bus(dir.path().to_path_buf(), map, sink).await;
 
         let content = "Deploy guidelines: run the pipeline.";
-        compaction::invoked_skills::register(
+        register_invoked_skill(
+            &orch,
             "deploy",
             std::path::Path::new("/skills/deploy"),
             content,
             None,
-        );
+        )
+        .await;
         let preserved = orch.restore_post_compact_attachments().await;
         assert_eq!(preserved.len(), 1, "first compaction restores the skill");
 
@@ -8750,12 +9291,14 @@ mod post_compact_file_restore_tests {
         let orch = orch_with_bus(dir.path().to_path_buf(), map, sink).await;
 
         let content = "Deploy the first stage.\n\n---\n\nThen deploy the second stage.";
-        compaction::invoked_skills::register(
+        register_invoked_skill(
+            &orch,
             "deploy",
             std::path::Path::new("/skills/deploy"),
             content,
             None,
-        );
+        )
+        .await;
 
         let first = orch.restore_post_compact_attachments().await;
         assert_eq!(first.len(), 1, "first compaction restores the skill");
@@ -8819,12 +9362,14 @@ mod post_compact_file_restore_tests {
 
         // A skill invoked under a subagent (agentId Some) must NOT surface on the
         // main-thread (agentId None) restore — `kGo` filters by agentId.
-        compaction::invoked_skills::register(
+        register_invoked_skill(
+            &orch,
             "child-skill",
             std::path::Path::new("/skills/child"),
             "child body",
             Some("agent:child"),
-        );
+        )
+        .await;
 
         let restored = orch.restore_post_compact_attachments().await;
         assert!(

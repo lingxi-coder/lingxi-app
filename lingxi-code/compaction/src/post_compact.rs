@@ -11,7 +11,7 @@ use crate::thresholds::{
     POST_COMPACT_MAX_TOKENS_PER_SKILL, POST_COMPACT_SKILLS_TOKEN_BUDGET, POST_COMPACT_TOKEN_BUDGET,
 };
 use crate::warning_state::clear_compact_warning_suppression;
-use protocol::ConversationMessage;
+use protocol::{ContentBlock, ConversationMessage};
 
 /// Marker appended to skill content truncated to fit the per-skill budget.
 ///
@@ -31,9 +31,62 @@ pub const SKILL_TRUNCATION_MARKER: &str =
 /// `Math.round` for the per-file / per-skill / running-budget comparisons.
 #[must_use]
 pub fn estimate_content_tokens(content: &str) -> u64 {
+    let utf16_len = utf16_code_units(content);
     // Math.round(len/4) = floor((len + 2) / 4) for the half-up rounding the
     // binary uses (`len.length` is always a non-negative integer).
-    (u64::try_from(content.len()).unwrap_or(u64::MAX)).saturating_add(2) / 4
+    utf16_len.saturating_add(2) / 4
+}
+
+#[must_use]
+fn utf16_code_units(content: &str) -> u64 {
+    content.chars().map(utf16_scalar_units).sum()
+}
+
+const fn utf16_scalar_units(ch: char) -> u64 {
+    if ch.len_utf16() == 1 {
+        1
+    } else {
+        2
+    }
+}
+
+#[must_use]
+fn utf16_scalar_prefix_boundary(content: &str, max_units: u64) -> usize {
+    let mut used = 0u64;
+    let mut boundary = 0usize;
+    for (idx, ch) in content.char_indices() {
+        let char_units = utf16_scalar_units(ch);
+        if used.saturating_add(char_units) > max_units {
+            break;
+        }
+        used = used.saturating_add(char_units);
+        boundary = idx + ch.len_utf8();
+    }
+    boundary
+}
+
+#[must_use]
+fn utf16_units_vec(content: &str) -> Vec<u16> {
+    content.encode_utf16().collect()
+}
+
+#[must_use]
+fn estimated_tokens_for_exact_utf16(display_text: &str, exact_utf16: Option<&[u16]>) -> u64 {
+    exact_utf16.map_or_else(
+        || estimate_content_tokens(display_text),
+        |units| {
+            u64::try_from(units.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(2)
+                / 4
+        },
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TruncatedText {
+    display_text: String,
+    exact_utf16: Option<Vec<u16>>,
 }
 
 /// Truncate `content` to fit within `max_tokens`, appending
@@ -44,28 +97,61 @@ pub fn estimate_content_tokens(content: &str) -> u64 {
 /// function o3p(e,t){ if($f(e)<=t) return e; let n=t*4-Ael.length; return e.slice(0,n)+Ael }
 /// ```
 /// When `$f(content) <= max_tokens` the content is returned verbatim; otherwise
-/// it is sliced to `max_tokens*4 − marker.len()` chars and the marker appended.
-/// The slice is byte-based (the binary slices by UTF-16 code units; for ASCII
-/// skill text the two coincide — non-ASCII slicing snaps to the nearest char
-/// boundary to stay valid UTF-8).
+/// it is sliced to `max_tokens*4 − marker.length` UTF-16 code units and the
+/// marker appended. The returned [`TruncatedText`] always carries a valid UTF-8
+/// `display_text`; when the exact JS `slice(0, keep)` result would end on the
+/// first half of a surrogate pair, `display_text` snaps down to the previous
+/// scalar value and `exact_utf16` preserves the true provider-visible UTF-16
+/// wire image.
+#[must_use]
+fn truncate_content_with_marker_exact(
+    content: &str,
+    max_tokens: u64,
+    marker: &str,
+) -> TruncatedText {
+    if estimate_content_tokens(content) <= max_tokens {
+        return TruncatedText {
+            display_text: content.to_string(),
+            exact_utf16: None,
+        };
+    }
+    let marker_len = utf16_code_units(marker);
+    let keep = (max_tokens.saturating_mul(4)).saturating_sub(marker_len);
+    let boundary = utf16_scalar_prefix_boundary(content, keep);
+    let mut display_text = content[..boundary].to_string();
+    display_text.push_str(marker);
+
+    let mut exact_utf16 = None;
+    let mut exact_units = utf16_units_vec(content);
+    if let (Ok(total), Ok(keep)) = (
+        usize::try_from(utf16_code_units(content)),
+        usize::try_from(keep),
+    ) {
+        if keep <= total {
+            exact_units.truncate(keep);
+            exact_units.extend(marker.encode_utf16());
+            if exact_units != display_text.encode_utf16().collect::<Vec<_>>() {
+                exact_utf16 = Some(exact_units);
+            }
+        }
+    }
+
+    TruncatedText {
+        display_text,
+        exact_utf16,
+    }
+}
+
+/// Truncate skill content to fit within `max_tokens`, appending
+/// [`SKILL_TRUNCATION_MARKER`] when it overflows.
 #[must_use]
 pub fn truncate_skill_content(content: &str, max_tokens: u64) -> String {
-    if estimate_content_tokens(content) <= max_tokens {
-        return content.to_string();
-    }
-    let marker_len = SKILL_TRUNCATION_MARKER.len() as u64;
-    let keep = (max_tokens.saturating_mul(4)).saturating_sub(marker_len);
-    let keep = usize::try_from(keep)
-        .unwrap_or(usize::MAX)
-        .min(content.len());
-    // Snap to a char boundary so the slice stays valid UTF-8 (ASCII is exact).
-    let mut boundary = keep;
-    while boundary > 0 && !content.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    let mut out = content[..boundary].to_string();
-    out.push_str(SKILL_TRUNCATION_MARKER);
-    out
+    truncate_content_with_marker_exact(content, max_tokens, SKILL_TRUNCATION_MARKER).display_text
+}
+
+#[must_use]
+fn truncate_skill_content_exact(content: &str, max_tokens: u64) -> TruncatedText {
+    truncate_content_with_marker_exact(content, max_tokens, SKILL_TRUNCATION_MARKER)
 }
 
 /// A file eligible for post-compact restoration: the path, the content the
@@ -102,6 +188,9 @@ pub struct SkillRestoreCandidate {
     pub path: std::path::PathBuf,
     /// Full skill content (truncated per [`POST_COMPACT_MAX_TOKENS_PER_SKILL`]).
     pub content: String,
+    /// Exact JS UTF-16 wire image for `content`, when it differs from the
+    /// display-safe UTF-8 string.
+    pub content_exact_utf16: Option<Vec<u16>>,
     /// When the skill was last invoked; restoration sorts descending on this.
     pub invoked_at_ms: i64,
 }
@@ -183,28 +272,89 @@ pub const INVOKED_SKILLS_ATTACHMENT_PREAMBLE: &str = "The following skills were 
 /// the preamble is joined to the blocks by a blank line. Emitted as a single
 /// `isMeta` user message (the caller wraps it in
 /// [`protocol::ConversationMessage::user_meta`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedInvokedSkillsAttachment {
+    /// Display-safe attachment body.
+    pub display_text: String,
+    /// Exact JS UTF-16 code units to preserve on the provider wire.
+    pub exact_utf16: Option<Vec<u16>>,
+}
+
+impl RenderedInvokedSkillsAttachment {
+    /// Convert the rendered attachment into a normal text block or, when the
+    /// JS slice split a surrogate pair, the exact UTF-16 sidecar variant.
+    #[must_use]
+    pub fn into_content_block(self) -> ContentBlock {
+        match self.exact_utf16 {
+            Some(utf16_code_units) => ContentBlock::TextJsUtf16 {
+                text: self.display_text,
+                utf16_code_units,
+            },
+            None => ContentBlock::Text {
+                text: self.display_text,
+            },
+        }
+    }
+}
+
+/// Render restored skills while retaining an exact UTF-16 sidecar when a JS
+/// truncation boundary cannot be represented by a Rust `String`.
 #[must_use]
-pub fn render_invoked_skills_attachment(skills: &[RestoredSkill]) -> Option<String> {
+pub fn render_invoked_skills_attachment_with_sidecar(
+    skills: &[RestoredSkill],
+) -> Option<RenderedInvokedSkillsAttachment> {
     if skills.is_empty() {
         return None;
     }
-    let joined = skills
-        .iter()
-        .map(|s| {
-            format!(
-                "### Skill: {}\nPath: {}\n\n{}",
-                s.name,
-                s.path.display(),
-                s.content
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n");
-    Some(format!("{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n\n{joined}"))
+    let mut display_parts = Vec::with_capacity(skills.len());
+    let mut exact_utf16 = Vec::new();
+    let mut has_exact = false;
+    exact_utf16.extend(INVOKED_SKILLS_ATTACHMENT_PREAMBLE.encode_utf16());
+    exact_utf16.extend("\n\n".encode_utf16());
+
+    for (index, skill) in skills.iter().enumerate() {
+        if index > 0 {
+            display_parts.push("---".to_string());
+            exact_utf16.extend("\n\n---\n\n".encode_utf16());
+        }
+        let header = format!(
+            "### Skill: {}\nPath: {}\n\n",
+            skill.name,
+            skill.path.display()
+        );
+        exact_utf16.extend(header.encode_utf16());
+        display_parts.push(format!("{header}{}", skill.content));
+        if let Some(units) = &skill.content_exact_utf16 {
+            exact_utf16.extend(units.iter().copied());
+            has_exact = true;
+        } else {
+            exact_utf16.extend(skill.content.encode_utf16());
+        }
+    }
+
+    let display_text = format!(
+        "{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n\n{}",
+        display_parts.join("\n\n")
+    );
+
+    Some(RenderedInvokedSkillsAttachment {
+        display_text,
+        exact_utf16: has_exact.then_some(exact_utf16),
+    })
 }
 
-/// A restored file attachment: the path plus the (possibly per-file-capped)
-/// content that survived the running token budget.
+/// Render restored skills as display-safe UTF-8 text.
+///
+/// Production provider wiring should use
+/// [`render_invoked_skills_attachment_with_sidecar`] so a rare split-surrogate
+/// boundary remains byte-exact on the Claude-family JSON wire.
+#[must_use]
+pub fn render_invoked_skills_attachment(skills: &[RestoredSkill]) -> Option<String> {
+    render_invoked_skills_attachment_with_sidecar(skills).map(|rendered| rendered.display_text)
+}
+
+/// A restored file attachment: the path plus content that stayed within both
+/// the per-file reader limit and the running token budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoredFile {
     /// Absolute file path.
@@ -222,6 +372,9 @@ pub struct RestoredSkill {
     pub path: std::path::PathBuf,
     /// The (possibly truncated) skill content included in the attachment.
     pub content: String,
+    /// Exact JS UTF-16 code units for `content` when the display-safe string
+    /// cannot represent the provider-visible body byte-for-byte.
+    pub content_exact_utf16: Option<Vec<u16>>,
 }
 
 /// Select the recent files to restore after a compaction — the **selection**
@@ -254,14 +407,16 @@ pub fn select_post_compact_files(
     selected
 }
 
-/// Apply the per-file cap + running token budget to (freshly re-read) file
+/// Apply the per-file + running token budgets to (freshly re-read) file
 /// candidates — the **budgeting** half of `eRg`.
 ///
 /// Each candidate's `content` is the fresh disk re-read the caller performed
 /// (with `fileReadingLimits:{maxTokens:z0g}`); this:
-/// 1. Caps each file's content at [`POST_COMPACT_MAX_TOKENS_PER_FILE`]
-///    (`z0g = 5000`) — the binary's re-reader applies its own maxTokens
-///    truncation; here the per-file cap truncates the supplied content.
+/// 1. Drops content above [`POST_COMPACT_MAX_TOKENS_PER_FILE`] (`z0g = 5000`).
+///    The production orchestrator turns the file reader's
+///    `truncatedByTokenCap` result into the binary's `compact_file_reference`
+///    attachment before this pure content-only helper is reached; inventing a
+///    file-content truncation marker here would be observably different.
 /// 2. Keeps files greedily while the running total stays `<=`
 ///    [`POST_COMPACT_TOKEN_BUDGET`] (`V0g = 50000`); a file that would overflow
 ///    is dropped (NOT truncated to fit) and iteration continues, exactly like
@@ -275,18 +430,16 @@ pub fn budget_post_compact_files(candidates: Vec<FileRestoreCandidate>) -> Vec<R
     let mut running = 0u64;
     let mut out = Vec::new();
     for candidate in candidates {
-        // Per-file cap (`fileReadingLimits:{maxTokens:z0g}`): truncate content
-        // exceeding the per-file token budget. Reuse the skill truncation shape
-        // (the binary's re-reader applies its own maxTokens truncation; the
-        // observable effect is a per-file ceiling).
-        let content = truncate_skill_content(&candidate.content, POST_COMPACT_MAX_TOKENS_PER_FILE);
-        let cost = estimate_content_tokens(&content);
+        let cost = estimate_content_tokens(&candidate.content);
+        if cost > POST_COMPACT_MAX_TOKENS_PER_FILE {
+            continue;
+        }
         // Running budget: keep while total + cost <= V0g; else DROP (continue).
         if running.saturating_add(cost) <= POST_COMPACT_TOKEN_BUDGET {
             running = running.saturating_add(cost);
             out.push(RestoredFile {
                 path: candidate.path,
-                content,
+                content: candidate.content,
             });
         }
     }
@@ -357,26 +510,43 @@ pub fn restore_post_compact_skills(
         // `let c=l==="body"` — a body match still counts but never writes back.
         let is_body = dedup == SkillDedup::Body;
         // `u=sRg(a.content,K0g)` — per-skill truncation.
-        let truncated = truncate_skill_content(&skill.content, POST_COMPACT_MAX_TOKENS_PER_SKILL);
+        let truncated =
+            truncate_skill_content_exact(&skill.content, POST_COMPACT_MAX_TOKENS_PER_SKILL);
         // `d=cy(u)` — token estimate of the truncated content.
-        let cost = estimate_content_tokens(&truncated);
+        let truncated_exact_utf16 = if truncated.display_text == skill.content {
+            skill
+                .content_exact_utf16
+                .clone()
+                .or(truncated.exact_utf16.clone())
+        } else {
+            truncated.exact_utf16.clone()
+        };
+        let cost = estimated_tokens_for_exact_utf16(
+            &truncated.display_text,
+            truncated_exact_utf16.as_deref(),
+        );
         // `if(n+d>Y0g){if(!c)n_n(s,"");continue}` — budget overflow: clear the
         // registry content (unless a body match) and DROP (do not truncate-to-fit).
         if running.saturating_add(cost) > POST_COMPACT_SKILLS_TOKEN_BUDGET {
             if !is_body {
-                crate::invoked_skills::write_back(&skill.key, "");
+                crate::invoked_skills::write_back(&skill.key, "", None);
             }
             continue;
         }
         // `n+=d;` then `if(!c&&u!==a.content)n_n(s,u)` — persist truncation.
         running = running.saturating_add(cost);
-        if !is_body && truncated != skill.content {
-            crate::invoked_skills::write_back(&skill.key, &truncated);
+        if !is_body && truncated.display_text != skill.content {
+            crate::invoked_skills::write_back(
+                &skill.key,
+                &truncated.display_text,
+                truncated.exact_utf16.as_deref(),
+            );
         }
         out.push(RestoredSkill {
             name: skill.name,
             path: skill.path,
-            content: truncated,
+            content: truncated.display_text,
+            content_exact_utf16: truncated_exact_utf16,
         });
     }
     out
@@ -428,12 +598,11 @@ pub fn run_post_compact_cleanup(query_source: Option<&str>) {
     reset_microcompact_state();
 
     // TS: if feature('CONTEXT_COLLAPSE') && isMainThreadCompact ->
-    // resetContextCollapse(). The Rust context-collapse layer
-    // (`crate::context_collapse`) is stateless (pure functions over passed-in
-    // history), so there is no module-level store to reset.
+    // resetContextCollapse(). Rust keeps that state on the session-owned
+    // CompactionOrchestrator, so the conversation layer resets it immediately
+    // after this process-global cleanup returns.
     if is_main_thread_compact {
-        // TS postCompactCleanup.ts: resetContextCollapse — no Rust module state
-        // to reset (context_collapse is stateless).
+        // No process-global context-collapse state to reset here.
 
         // TS: getUserContext.cache.clear() + resetGetMemoryFilesCache('compact').
         // These memory-file caches live in the orchestrator/session layer, not
@@ -612,6 +781,7 @@ mod tests {
             name: name.to_string(),
             path: PathBuf::from(path),
             content: content.to_string(),
+            content_exact_utf16: None,
             invoked_at_ms: invoked,
         }
     }
@@ -624,6 +794,9 @@ mod tests {
         assert_eq!(estimate_content_tokens("a"), 0); // round(1/4)=round(0.25)=0
         assert_eq!(estimate_content_tokens("abc"), 1); // round(3/4)=round(0.75)=1
         assert_eq!(estimate_content_tokens("abcd"), 1); // round(4/4)=1
+        assert_eq!(estimate_content_tokens("你好"), 1); // 2 UTF-16 code units
+        assert_eq!(estimate_content_tokens("😀"), 1); // surrogate pair = 2 units
+        assert_eq!(estimate_content_tokens("😀😀😀"), 2); // round(6/4)=2
         assert_eq!(estimate_content_tokens(&"x".repeat(4000)), 1000);
     }
 
@@ -639,9 +812,49 @@ mod tests {
         let big = "x".repeat(40_000);
         let out = truncate_skill_content(&big, 5_000);
         assert!(out.ends_with(SKILL_TRUNCATION_MARKER));
-        // kept = 5_000*4 - marker.len() chars + marker.
-        let expected_kept = 5_000 * 4 - SKILL_TRUNCATION_MARKER.len();
+        // kept = 5_000*4 - marker.length UTF-16 code units + marker.
+        let expected_kept = 5_000 * 4
+            - usize::try_from(utf16_code_units(SKILL_TRUNCATION_MARKER)).expect("marker fits");
         assert_eq!(out.len(), expected_kept + SKILL_TRUNCATION_MARKER.len());
+    }
+
+    #[test]
+    fn truncate_content_with_marker_uses_utf16_units_for_cjk() {
+        let out = truncate_content_with_marker_exact("你好吗世界啊", 1, "[]");
+        assert_eq!(out.display_text, "你好[]");
+        assert!(out.exact_utf16.is_none());
+    }
+
+    #[test]
+    fn truncate_content_with_marker_matches_js_slice_when_prefix_is_scalar_aligned() {
+        let out = truncate_content_with_marker_exact("😀BCDE", 1, "[]");
+        assert_eq!(out.display_text, "😀[]");
+        assert!(out.exact_utf16.is_none());
+    }
+
+    #[test]
+    fn truncate_content_with_marker_carries_exact_utf16_when_js_slice_would_need_lone_surrogate() {
+        let keep = 2usize;
+        let js_prefix_units = "A😀BCD".encode_utf16().take(keep).collect::<Vec<_>>();
+        assert!(
+            std::char::decode_utf16(js_prefix_units.iter().copied())
+                .last()
+                .expect("split surrogate yields trailing unit")
+                .is_err(),
+            "JS slice(0, {keep}) would end with a lone surrogate that Rust String cannot represent"
+        );
+
+        let out = truncate_content_with_marker_exact("A😀BCD", 1, "[]");
+        assert_eq!(out.display_text, "A[]");
+        assert_eq!(
+            out.exact_utf16,
+            Some(vec![0x0041, 0xD83D, 0x005B, 0x005D]),
+            "wire image must preserve the lone surrogate before the marker"
+        );
+        assert!(
+            estimate_content_tokens(&out.display_text) <= 1,
+            "snap-down path must still satisfy the caller's token budget"
+        );
     }
 
     #[test]
@@ -667,39 +880,23 @@ mod tests {
     }
 
     #[test]
-    fn restore_files_respects_total_budget() {
-        // Two files each ~30_000 tokens (per-file cap 5_000 → each truncated to
-        // ~5_000 tokens ≈ 20_000 chars). Running budget Y9p=50_000 → both fit.
-        // A third file would still fit (3*5000=15000 <= 50000). Build files that
-        // EXCEED the total budget AFTER per-file capping by using 11 files: each
-        // capped to ~5_000 tokens → 11*5_000 = 55_000 > 50_000 → the 11th drops.
+    fn restore_files_drops_snapshot_content_above_the_reader_limit() {
+        // The pure builder cannot represent `compact_file_reference`
+        // attachments. Oversized snapshot content is therefore dropped instead
+        // of being rendered with a marker that Claude Code never emits.
         let candidates: Vec<_> = (0..11)
             .map(|i| file(&format!("/f{i}"), &"x".repeat(40_000), i64::from(i)))
             .collect();
-        // Only the top-5 by timestamp are even considered → all 5 ~5_000 each =
-        // 25_000 <= 50_000 → all 5 kept.
         let restored = restore_post_compact_files(candidates, &[]);
-        assert_eq!(restored.len(), 5, "top-5 each ~5k tokens, total 25k <= 50k");
-        // Each file content is per-file capped (truncation marker present).
-        assert!(restored
-            .iter()
-            .all(|r| r.content.ends_with(SKILL_TRUNCATION_MARKER)));
+        assert!(restored.is_empty());
     }
 
     #[test]
     fn restore_files_drops_overflowing_file_keeps_smaller_one() {
-        // Construct exactly two candidates where the first (most recent) is huge
-        // (per-file capped to 5_000 tokens) and a contrived budget edge: with the
-        // total budget 50_000, two capped 5_000-token files (10_000) easily fit.
-        // To exercise the DROP branch, give the first file ~5_000 tokens and make
-        // the remaining 4 each also ~5_000; all fit. So instead verify the
-        // greedy drop: first file fills near budget, a later file overflows.
-        // 9 capped files * 5_000 = 45_000 ; 10th would be 50_000 (still <=).
-        // Use bodies that cap to ~5_000 tokens and a total over 50_000 within
-        // the top-5 isn't reachable (5*5000=25000). So directly test the filter:
-        let big = "x".repeat(40_000); // caps to ~5_000 tokens
+        let big = "x".repeat(40_000); // above the per-file content limit
         let small = "tiny"; // ~1 token
-                            // timestamps: big files newest so they're selected first.
+                            // Timestamps put the oversized files first; dropping them must not stop
+                            // the later eligible file from being considered.
         let candidates = vec![
             file("/b1", &big, 5),
             file("/b2", &big, 4),
@@ -708,10 +905,11 @@ mod tests {
             file("/small", small, 1),
         ];
         let restored = restore_post_compact_files(candidates, &[]);
-        // 4 big (~5_000 each = 20_000) + small (~1) = 20_001 <= 50_000 → all kept.
-        assert_eq!(restored.len(), 5);
-        assert_eq!(restored[4].path, PathBuf::from("/small"));
-        assert_eq!(restored[4].content, "tiny");
+        // The four oversized content-only candidates are dropped; production
+        // emits compact-file references for them. The small file survives.
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].path, PathBuf::from("/small"));
+        assert_eq!(restored[0].content, "tiny");
     }
 
     #[test]
@@ -742,23 +940,31 @@ mod tests {
     }
 
     #[test]
-    fn budget_files_caps_each_and_respects_running_budget() {
-        // Budgeting half of `eRg`: per-file cap + running budget over the
+    fn budget_files_drops_oversized_content_and_preserves_order() {
+        // Budgeting half of `eRg`: per-file limit + running budget over the
         // caller-supplied (fresh) contents; order is preserved.
-        let big = "x".repeat(40_000); // caps to ~5_000 tokens
+        let big = "x".repeat(40_000); // above the 5_000-token reader limit
         let candidates = vec![
             file("/b1", &big, 5),
             file("/b2", &big, 4),
             file("/small", "tiny", 1),
         ];
         let restored = budget_post_compact_files(candidates);
-        // 2 big (~5_000 each = 10_000) + small (~1) = 10_001 <= 50_000 → all kept,
-        // order preserved (no re-sort in the budgeting half).
-        assert_eq!(restored.len(), 3);
-        assert_eq!(restored[0].path, PathBuf::from("/b1"));
-        assert!(restored[0].content.ends_with(SKILL_TRUNCATION_MARKER));
-        assert_eq!(restored[2].path, PathBuf::from("/small"));
-        assert_eq!(restored[2].content, "tiny");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].path, PathBuf::from("/small"));
+        assert_eq!(restored[0].content, "tiny");
+    }
+
+    #[test]
+    fn post_compact_file_read_budgets_match_token_limit_contract() {
+        assert_eq!(
+            crate::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ,
+            usize::try_from(POST_COMPACT_MAX_TOKENS_PER_FILE).expect("token cap fits usize") * 4
+        );
+        assert_eq!(
+            crate::thresholds::POST_COMPACT_MAX_BYTES_PER_FILE_READ,
+            crate::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ * 3 + 3
+        );
     }
 
     #[test]
@@ -783,6 +989,7 @@ mod tests {
         assert_eq!(restored[0].content, "short");
         assert_eq!(restored[1].name, "A");
         assert!(restored[1].content.ends_with(SKILL_TRUNCATION_MARKER));
+        assert!(restored[1].content_exact_utf16.is_none());
     }
 
     #[test]
@@ -858,11 +1065,13 @@ mod tests {
                 name: "deploy".into(),
                 path: PathBuf::from("/skills/deploy"),
                 content: "Deploy guidelines".into(),
+                content_exact_utf16: None,
             },
             RestoredSkill {
                 name: "build".into(),
                 path: PathBuf::from("/skills/build"),
                 content: "Build guidelines".into(),
+                content_exact_utf16: None,
             },
         ];
         let body = render_invoked_skills_attachment(&restored).expect("non-empty");
@@ -879,6 +1088,30 @@ mod tests {
         assert!(body.contains("their guidelines.\n\nIMPORTANT: Do NOT"));
         // Empty → None (no attachment).
         assert!(render_invoked_skills_attachment(&[]).is_none());
+    }
+
+    #[test]
+    fn render_invoked_skills_attachment_exposes_text_js_utf16_sidecar() {
+        let restored = vec![RestoredSkill {
+            name: "skill".into(),
+            path: PathBuf::from("/skills/skill"),
+            content: "A[]".into(),
+            content_exact_utf16: Some(vec![0x0041, 0xD83D, 0x005B, 0x005D]),
+        }];
+        let rendered = render_invoked_skills_attachment_with_sidecar(&restored).expect("non-empty");
+        let block = rendered.into_content_block();
+        match block {
+            ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+            } => {
+                assert!(text.contains("### Skill: skill"));
+                assert!(utf16_code_units
+                    .windows(4)
+                    .any(|w| w == [0x0041, 0xD83D, 0x005B, 0x005D]));
+            }
+            other => panic!("expected TextJsUtf16 block, got {other:?}"),
+        }
     }
 
     #[test]

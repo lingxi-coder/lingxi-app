@@ -261,6 +261,32 @@ fn route_lines_tracks_content_replacements_and_marble_state_exactly() {
 }
 
 #[test]
+fn route_lines_compact_boundary_clears_pre_boundary_marble_state() {
+    let routed = route_lines(concat!(
+        r#"{"type":"marble-origami-commit","sessionId":"sid-1","commit":"pre-boundary"}"#,
+        "\n",
+        r#"{"type":"marble-origami-snapshot","sessionId":"sid-1","snapshot":"pre-boundary"}"#,
+        "\n",
+        r#"{"type":"system","subtype":"compact_boundary","uuid":"11111111-1111-4111-8111-111111111111","parentUuid":null,"sessionId":"11111111-1111-4111-8111-111111111111","cwd":"/tmp","timestamp":"2026-08-25T00:00:00.000Z","message":{"role":"system","content":"Conversation compacted"}}"#,
+        "\n",
+        r#"{"type":"marble-origami-commit","sessionId":"sid-1","commit":"post-boundary"}"#,
+        "\n",
+        r#"{"type":"marble-origami-snapshot","sessionId":"sid-1","snapshot":"post-boundary"}"#,
+        "\n",
+    ));
+
+    assert_eq!(routed.context_collapse_commits.len(), 1);
+    assert_eq!(
+        routed.context_collapse_commits[0]["commit"],
+        "post-boundary"
+    );
+    assert_eq!(
+        routed.context_collapse_snapshot.as_ref().unwrap()["snapshot"],
+        "post-boundary"
+    );
+}
+
+#[test]
 fn route_lines_tracks_branch_sidecars_with_oracle_validation() {
     let routed = route_lines(concat!(
         r#"{"type":"relocated","sessionId":"sid-1","relocatedCwd":"/old"}"#,

@@ -50,7 +50,13 @@ fn to_http_request(request: &ProviderRequest) -> Result<HttpRequest, LlmError> {
     let body = if request.body_bytes.is_some() {
         None
     } else {
-        Some(request.body_json.to_string())
+        Some(
+            String::from_utf8(request.wire_body_bytes()?).map_err(|err| {
+                LlmError::InvalidRequest {
+                    message: format!("provider request body was not valid UTF-8 JSON: {err}"),
+                }
+            })?,
+        )
     };
     Ok(HttpRequest {
         method,

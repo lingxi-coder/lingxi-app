@@ -40,6 +40,18 @@ pub enum ContentBlock {
         /// The text body.
         text: String,
     },
+    /// Display-safe text carrying an exact JS UTF-16 request-wire image.
+    ///
+    /// This is used only for narrow byte-parity cases where the provider wire
+    /// must preserve lone surrogates (for example a `slice(0, n)` boundary in
+    /// JS). `text` remains valid UTF-8 for display/history helpers; the exact
+    /// provider-visible string lives in `utf16_code_units`.
+    TextJsUtf16 {
+        /// Display-safe text body.
+        text: String,
+        /// Exact UTF-16 code units that must be emitted on the provider wire.
+        utf16_code_units: Vec<u16>,
+    },
     /// A tool invocation requested by the assistant.
     ToolUse {
         /// Identifier echoed back in the matching `ToolResult`.
@@ -448,6 +460,22 @@ impl ConversationMessage {
         }
     }
 
+    /// Construct a synthetic/meta user message whose text block preserves an
+    /// exact JS UTF-16 wire image when the provider request is serialized.
+    #[must_use]
+    pub fn user_meta_js_utf16(id: MessageId, text: String, utf16_code_units: Vec<u16>) -> Self {
+        Self::User {
+            id,
+            content: vec![ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+            }],
+            is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }
+    }
+
     /// Construct a synthetic/meta user message carrying one media-analysis block.
     #[must_use]
     pub fn user_media_analysis(id: MessageId, analysis: MediaAnalysis) -> Self {
@@ -605,7 +633,9 @@ impl ConversationMessage {
             Self::User { content, .. } | Self::Assistant { content, .. } => content
                 .iter()
                 .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
+                    ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+                        Some(text.as_str())
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -831,6 +861,22 @@ mod tests {
         let back: ConversationMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(back, m);
         assert!(back.is_meta());
+    }
+
+    #[test]
+    fn user_meta_js_utf16_preserves_display_text_and_sidecar() {
+        let m = ConversationMessage::user_meta_js_utf16(
+            MessageId::new(),
+            "A".to_string(),
+            vec![0x0041, 0xD83D],
+        );
+        assert!(m.is_meta());
+        assert_eq!(m.text_content(), "A");
+        let line = serde_json::to_string(&m).unwrap();
+        assert!(line.contains("\"type\":\"text_js_utf16\""), "{line}");
+        assert!(line.contains("\"utf16_code_units\":[65,55357]"), "{line}");
+        let back: ConversationMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, m);
     }
 
     #[test]

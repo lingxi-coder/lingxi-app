@@ -581,7 +581,7 @@ fn load_settings_emoji_completion_enabled(
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
 /// glob patterns / absolute paths of `LINGXI.md` files to exclude from the
 /// system prompt (claude-code `isLingxiMdExcluded`). Empty when unset.
-fn load_lingxi_md_excludes(include_user: bool, include_project: bool) -> Vec<String> {
+pub(crate) fn load_lingxi_md_excludes(include_user: bool, include_project: bool) -> Vec<String> {
     load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.lingxi_md_excludes)
         .unwrap_or_default()

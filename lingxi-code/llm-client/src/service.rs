@@ -3303,10 +3303,7 @@ impl ApiService {
                 .contains_key(DISPATCH_ID_HEADER);
 
             let provider = &prepared.route.resolved_route.provider_id;
-            let body_bytes = prepared.provider_request.body_bytes.as_ref().map_or_else(
-                || prepared.provider_request.body_json.to_string().len(),
-                Vec::len,
-            );
+            let body_bytes = prepared.provider_request.wire_body_bytes()?.len();
             let first_byte_timeout = self.stream_first_byte_timeout_override.or_else(|| {
                 crate::model::stream_watchdog::resolve_stream_first_byte_timeout(
                     provider, body_bytes,

@@ -8,12 +8,12 @@
 //! content survives compaction even though the boundary summary drops the
 //! verbatim skill body.
 //!
-//! Keyed `"{agentId}:{skillName}"` (an empty agent prefix for the main thread),
-//! each row stores `{skillName, skillPath, content, invokedAt, agentId}` exactly
-//! like the binary. Unlike the per-conversation `readFileState`, the binary's
-//! `Pt.invokedSkills` is a true process global, so this is a `Lazy<Mutex<..>>`
-//! and is deliberately NOT cleared by post-compact cleanup — skill content must
-//! outlive the compaction (see [`crate::run_post_compact_cleanup`]).
+//! Legacy rows keep the binary's `"{agentId}:{skillName}"` key. Production rows
+//! additionally carry the owning session because `LingXi` can host multiple
+//! orchestrators in one process. The registry remains a `Lazy<Mutex<..>>` and
+//! is deliberately NOT cleared by post-compact cleanup — skill content must
+//! outlive compaction — but the host removes a session's rows when that session
+//! is cleared or replaced (see [`clear_session`]).
 //!
 //! 1:1 with the binary quartet (`bin/claude.exe`, v2.1.207):
 //! - `zSr(e,t,r,n=null)` → [`register`] (stamps `invokedAt = Date.now()`).
@@ -36,8 +36,30 @@ struct InvokedSkillEntry {
     skill_name: String,
     skill_path: PathBuf,
     content: String,
+    content_exact_utf16: Option<Vec<u16>>,
     invoked_at_ms: i64,
+    session_id: Option<String>,
     agent_id: Option<String>,
+}
+
+/// Scope that owns an invoked-skill registry row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvokedSkillScopeRef<'a> {
+    /// Owning session/conversation identity, if known.
+    pub session_id: Option<&'a str>,
+    /// Owning subagent identity, if known.
+    pub agent_id: Option<&'a str>,
+}
+
+impl<'a> InvokedSkillScopeRef<'a> {
+    /// Construct a borrowed registry scope.
+    #[must_use]
+    pub const fn new(session_id: Option<&'a str>, agent_id: Option<&'a str>) -> Self {
+        Self {
+            session_id,
+            agent_id,
+        }
+    }
 }
 
 /// The process-global registry (`Pt.invokedSkills`), keyed `"{agentId}:{name}"`.
@@ -50,11 +72,22 @@ fn lock() -> std::sync::MutexGuard<'static, HashMap<String, InvokedSkillEntry>> 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// `${agentId ?? ""}:${skillName}` — the registry key. `agent_id = None` (the
-/// main thread) yields a leading `:` (empty agent prefix).
+/// Registry key for a scoped invoked skill.
+///
+/// Legacy agent-only rows keep the historical `${agentId ?? ""}:${skillName}`
+/// shape so existing tests/helpers still see `":skill"` for main-thread rows
+/// when no session identity is available. Session-scoped rows add an explicit
+/// `session:...|agent:...|skill:...` prefix so two orchestrators or a leader
+/// and subagent can invoke the same skill name without colliding.
 #[must_use]
-pub fn registry_key(agent_id: Option<&str>, skill_name: &str) -> String {
-    format!("{}:{}", agent_id.unwrap_or(""), skill_name)
+pub fn registry_key(scope: InvokedSkillScopeRef<'_>, skill_name: &str) -> String {
+    match scope.session_id {
+        Some(session_id) => format!(
+            "session:{session_id}|agent:{}|skill:{skill_name}",
+            scope.agent_id.unwrap_or("")
+        ),
+        None => format!("{}:{}", scope.agent_id.unwrap_or(""), skill_name),
+    }
 }
 
 /// `Date.now()` in ms since the Unix epoch (saturating for the pre-1970 edge).
@@ -70,16 +103,33 @@ fn now_ms() -> i64 {
 /// skill, stamping `invokedAt = Date.now()`.
 ///
 /// The Skill tool calls this at invocation time with the expanded skill content
-/// the model receives; `agent_id` is `None` for the main thread (every LingXi
+/// the model receives; `agent_id` is `None` for the main thread (every `LingXi`
 /// orchestrator runs as the main thread → key `":{name}"`).
 pub fn register(skill_name: &str, skill_path: &Path, content: &str, agent_id: Option<&str>) {
-    let key = registry_key(agent_id, skill_name);
+    register_scoped(
+        skill_name,
+        skill_path,
+        content,
+        InvokedSkillScopeRef::new(None, agent_id),
+    );
+}
+
+/// Register a skill under the provided conversation/session + agent scope.
+pub fn register_scoped(
+    skill_name: &str,
+    skill_path: &Path,
+    content: &str,
+    scope: InvokedSkillScopeRef<'_>,
+) {
+    let key = registry_key(scope, skill_name);
     let entry = InvokedSkillEntry {
         skill_name: skill_name.to_string(),
         skill_path: skill_path.to_path_buf(),
         content: content.to_string(),
+        content_exact_utf16: None,
         invoked_at_ms: now_ms(),
-        agent_id: agent_id.map(str::to_string),
+        session_id: scope.session_id.map(str::to_string),
+        agent_id: scope.agent_id.map(str::to_string),
     };
     lock().insert(key, entry);
 }
@@ -90,25 +140,85 @@ pub fn register(skill_name: &str, skill_path: &Path, content: &str, agent_id: Op
 /// main-thread rows.
 #[must_use]
 pub fn filter_for_agent(agent_id: Option<&str>) -> Vec<SkillRestoreCandidate> {
+    filter_for_scope(InvokedSkillScopeRef::new(None, agent_id))
+}
+
+/// The registry rows whose session + agent scope matches exactly.
+#[must_use]
+pub fn filter_for_scope(scope: InvokedSkillScopeRef<'_>) -> Vec<SkillRestoreCandidate> {
     lock()
         .iter()
-        .filter(|(_, e)| e.agent_id.as_deref() == agent_id)
+        .filter(|(_, e)| {
+            e.session_id.as_deref() == scope.session_id && e.agent_id.as_deref() == scope.agent_id
+        })
         .map(|(key, e)| SkillRestoreCandidate {
             key: key.clone(),
             name: e.skill_name.clone(),
             path: e.skill_path.clone(),
             content: e.content.clone(),
+            content_exact_utf16: e.content_exact_utf16.clone(),
             invoked_at_ms: e.invoked_at_ms,
         })
         .collect()
 }
 
+/// Remove every invoked-skill row owned by a completed/replaced session.
+pub fn clear_session(session_id: &str) {
+    lock().retain(|_, entry| entry.session_id.as_deref() != Some(session_id));
+}
+
+/// RAII owner for one orchestrator's session-scoped registry rows.
+///
+/// Hosts that expose an explicit session-end seam still clear eagerly, but
+/// desktop/mobile runtimes can also be dropped or rebuilt without firing that
+/// seam. Keeping this guard inside the orchestrator makes teardown synchronous
+/// and unconditional; replacing the live session clears the previous scope.
+pub struct InvokedSkillSessionGuard {
+    session_id: Mutex<String>,
+}
+
+impl InvokedSkillSessionGuard {
+    /// Bind a guard to the orchestrator's initial session id.
+    #[must_use]
+    pub fn new(session_id: String) -> Self {
+        Self {
+            session_id: Mutex::new(session_id),
+        }
+    }
+
+    /// Move ownership to `session_id`, clearing the previously-owned rows.
+    pub fn replace(&self, session_id: String) {
+        let mut current = self
+            .session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *current == session_id {
+            return;
+        }
+        clear_session(&current);
+        *current = session_id;
+    }
+}
+
+impl Drop for InvokedSkillSessionGuard {
+    fn drop(&mut self) {
+        let session_id = self
+            .session_id
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_session(session_id);
+    }
+}
+
 /// `n_n(key, content)` — overwrite an existing entry's content. A no-op when the
 /// key is absent (`if(r)…`, exactly like the binary). `content == ""` clears the
-/// stored skill body so a later compaction won't re-attach it.
-pub fn write_back(key: &str, content: &str) {
+/// stored skill body so a later compaction won't re-attach it. When
+/// `content_exact_utf16` is `Some`, the entry preserves the exact JS UTF-16
+/// wire image that produced `content`.
+pub fn write_back(key: &str, content: &str, content_exact_utf16: Option<&[u16]>) {
     if let Some(e) = lock().get_mut(key) {
         e.content = content.to_string();
+        e.content_exact_utf16 = content_exact_utf16.map(ToOwned::to_owned);
     }
 }
 
@@ -127,6 +237,13 @@ pub fn reset_for_test() {
 #[must_use]
 pub fn content_for_test(key: &str) -> Option<String> {
     lock().get(key).map(|e| e.content.clone())
+}
+
+/// Test-only: the stored exact UTF-16 sidecar for `key`, or `None`.
+#[doc(hidden)]
+#[must_use]
+pub fn content_exact_utf16_for_test(key: &str) -> Option<Vec<u16>> {
+    lock().get(key).and_then(|e| e.content_exact_utf16.clone())
 }
 
 /// Test-only serial lock guarding the process-global registry so tests across
@@ -192,24 +309,95 @@ mod tests {
     fn write_back_overwrites_and_clears() {
         let _g = guard();
         register("s", Path::new("/s"), "body", None);
-        write_back(":s", "truncated");
+        write_back(":s", "truncated", Some(&[0x0074, 0xD83D]));
         assert_eq!(content_for_test(":s").as_deref(), Some("truncated"));
+        assert_eq!(
+            content_exact_utf16_for_test(":s"),
+            Some(vec![0x0074, 0xD83D])
+        );
         // "" clears the content.
-        write_back(":s", "");
+        write_back(":s", "", None);
         assert_eq!(content_for_test(":s").as_deref(), Some(""));
+        assert_eq!(content_exact_utf16_for_test(":s"), None);
     }
 
     #[test]
     fn write_back_absent_key_is_noop() {
         let _g = guard();
-        write_back(":missing", "x");
+        write_back(":missing", "x", None);
         assert!(content_for_test(":missing").is_none());
     }
 
     #[test]
     fn registry_key_uses_empty_prefix_for_main_thread() {
-        assert_eq!(registry_key(None, "foo"), ":foo");
-        assert_eq!(registry_key(Some("agent:a"), "foo"), "agent:a:foo");
+        assert_eq!(
+            registry_key(InvokedSkillScopeRef::new(None, None), "foo"),
+            ":foo"
+        );
+        assert_eq!(
+            registry_key(InvokedSkillScopeRef::new(None, Some("agent:a")), "foo"),
+            "agent:a:foo"
+        );
+    }
+
+    #[test]
+    fn scoped_rows_do_not_collide_across_session_or_agent() {
+        let _g = guard();
+        let session_a_main = InvokedSkillScopeRef::new(Some("sess:a"), None);
+        let other_session_main = InvokedSkillScopeRef::new(Some("sess:b"), None);
+        let session_a_agent = InvokedSkillScopeRef::new(Some("sess:a"), Some("agent:x"));
+
+        register_scoped("build", Path::new("/sa"), "main a", session_a_main);
+        register_scoped("build", Path::new("/sb"), "main b", other_session_main);
+        register_scoped("build", Path::new("/sx"), "agent a", session_a_agent);
+
+        let rows = filter_for_scope(session_a_main);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "main a");
+        assert_eq!(
+            rows[0].key,
+            registry_key(session_a_main, "build"),
+            "scoped key must be stable for write-back"
+        );
+
+        let rows = filter_for_scope(other_session_main);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "main b");
+
+        let rows = filter_for_scope(session_a_agent);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "agent a");
+    }
+
+    #[test]
+    fn clearing_one_session_preserves_other_scopes() {
+        let _g = guard();
+        let session_a = InvokedSkillScopeRef::new(Some("sess:a"), None);
+        let session_b = InvokedSkillScopeRef::new(Some("sess:b"), None);
+        register_scoped("build", Path::new("/a"), "a", session_a);
+        register_scoped("build", Path::new("/b"), "b", session_b);
+
+        clear_session("sess:a");
+
+        assert!(filter_for_scope(session_a).is_empty());
+        assert_eq!(filter_for_scope(session_b).len(), 1);
+    }
+
+    #[test]
+    fn session_guard_clears_on_replace_and_drop() {
+        let _g = guard();
+        let session_a = InvokedSkillScopeRef::new(Some("sess:a"), None);
+        let session_b = InvokedSkillScopeRef::new(Some("sess:b"), None);
+        register_scoped("build", Path::new("/a"), "a", session_a);
+        register_scoped("build", Path::new("/b"), "b", session_b);
+
+        let owner = InvokedSkillSessionGuard::new("sess:a".to_string());
+        owner.replace("sess:b".to_string());
+        assert!(filter_for_scope(session_a).is_empty());
+        assert_eq!(filter_for_scope(session_b).len(), 1);
+
+        drop(owner);
+        assert!(filter_for_scope(session_b).is_empty());
     }
 
     // --- rRg write-back semantics (n_n) via restore_post_compact_skills ----- //
@@ -229,6 +417,10 @@ mod tests {
             "truncated content persisted to the registry"
         );
         assert_eq!(stored, restored[0].content);
+        assert_eq!(
+            content_exact_utf16_for_test(":trunc"),
+            restored[0].content_exact_utf16
+        );
         assert_ne!(stored, big, "the full body no longer occupies the row");
     }
 
@@ -241,6 +433,7 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].content, "tiny body");
         assert_eq!(content_for_test(":short").as_deref(), Some("tiny body"));
+        assert_eq!(content_exact_utf16_for_test(":short"), None);
     }
 
     #[test]
@@ -259,6 +452,7 @@ mod tests {
             Some(big.as_str()),
             "body match → no write-back; registry unchanged"
         );
+        assert_eq!(content_exact_utf16_for_test(":bm"), None);
     }
 
     #[test]
@@ -289,5 +483,29 @@ mod tests {
         assert_eq!(restored.len(), 2);
         assert_eq!(restored[0].name, "new", "most recent first");
         assert_eq!(restored[1].name, "old");
+    }
+
+    #[test]
+    fn restore_preserves_exact_utf16_sidecar_across_repeated_compactions() {
+        let _g = guard();
+        let big = format!("{}😀{}", "x".repeat(19_899), "y".repeat(200));
+        register("repeat", Path::new("/r"), &big, None);
+
+        let first = restore_post_compact_skills(filter_for_agent(None), &[]);
+        assert_eq!(first.len(), 1);
+        let first_exact = first[0]
+            .content_exact_utf16
+            .clone()
+            .expect("first restore must persist exact utf16 sidecar");
+        assert!(
+            first_exact
+                .windows(2)
+                .any(|w| w == [0xD83D, 0x000A] || w == [0xD83D, 0x005B]),
+            "wire image must retain the split surrogate at the truncation boundary"
+        );
+
+        let second = restore_post_compact_skills(filter_for_agent(None), &[]);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].content_exact_utf16, Some(first_exact));
     }
 }

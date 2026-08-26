@@ -929,7 +929,7 @@ fn encode_message(message: &crate::Message, input: &mut Vec<Value>) {
 
     for block in &message.content {
         match block {
-            ContentBlock::Text { text, .. } => {
+            ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
                 parts.push(serde_json::json!({"type": text_part_type, "text": text}));
             }
             ContentBlock::Image { media_type, bytes } => {

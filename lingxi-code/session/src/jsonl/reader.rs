@@ -211,10 +211,10 @@ pub struct LoadedTranscript {
     /// ASCII bytes in `[0x21, 0x7e]`; the `*` quantifier also accepts empty.
     pub atis_latches: HashMap<String, String>,
     /// `marble-origami-commit` entries in source order, cleared by a later
-    /// `marble-origami-reset`.
+    /// `marble-origami-reset` or compact boundary.
     pub context_collapse_commits: Vec<Value>,
     /// Latest `marble-origami-snapshot`, cleared by a later
-    /// `marble-origami-reset`.
+    /// `marble-origami-reset` or compact boundary.
     pub context_collapse_snapshot: Option<Value>,
 }
 
@@ -385,8 +385,18 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
                 out.malformed_line_count += 1;
                 continue;
             };
+            // A full compact boundary makes every earlier collapse span stale:
+            // its archived UUIDs are outside the new active chain. Claude's
+            // forward reader clears both side stores at this exact point; later
+            // marble records in the file build the post-boundary state anew.
+            let clears_context_collapse = msg.message_type == "system"
+                && msg.extra.get("subtype").and_then(Value::as_str) == Some("compact_boundary");
             out.by_uuid.insert(msg.uuid.clone(), msg.clone());
             out.messages_in_order.push(msg);
+            if clears_context_collapse {
+                out.context_collapse_commits.clear();
+                out.context_collapse_snapshot = None;
+            }
         } else if ty == "summary" {
             // `summaries.set(entry.leafUuid, entry.summary)` — keyed by leafUuid.
             if let (Some(leaf), Some(summary)) = (

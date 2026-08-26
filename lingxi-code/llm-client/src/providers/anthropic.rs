@@ -44,9 +44,10 @@ impl AnthropicMessagesCodec {
         &self,
         request: &LlmRequest,
     ) -> Result<ProviderRequest, LlmError> {
-        let body = base_body(request)?;
+        let (body, json_string_overrides) = base_body(request)?;
         let mut provider_request =
             ProviderRequest::post_json(self.count_tokens_url(), Value::Object(body));
+        provider_request.json_string_overrides = json_string_overrides;
         provider_request.headers.insert(
             "anthropic-version".to_string(),
             self.anthropic_version.clone(),
@@ -77,7 +78,7 @@ impl AnthropicMessagesCodec {
 
 impl WireCodec for AnthropicMessagesCodec {
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
-        let mut body = base_body(request)?;
+        let (mut body, json_string_overrides) = base_body(request)?;
 
         body.insert(
             "max_tokens".to_string(),
@@ -125,6 +126,7 @@ impl WireCodec for AnthropicMessagesCodec {
 
         let mut provider_request =
             ProviderRequest::post_json(self.messages_url(), Value::Object(body));
+        provider_request.json_string_overrides = json_string_overrides;
         provider_request.headers.insert(
             "anthropic-version".to_string(),
             self.anthropic_version.clone(),
@@ -199,11 +201,21 @@ impl StreamDecoder for AnthropicStreamDecoder {
 /// `JsonObject` is deliberately still rejected: the oracle only ever sends
 /// `{type:"json_schema", schema}`, and there is no evidence the beta accepts a
 /// bare JSON-object mode. Inventing one would be guessing at a wire contract.
-fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, LlmError> {
+fn base_body(
+    request: &LlmRequest,
+) -> Result<
+    (
+        serde_json::Map<String, Value>,
+        std::collections::BTreeMap<String, Vec<u16>>,
+    ),
+    LlmError,
+> {
+    let mut json_string_overrides = std::collections::BTreeMap::new();
     let messages = request
         .messages
         .iter()
-        .map(encode_message)
+        .enumerate()
+        .map(|(index, message)| encode_message(message, index, &mut json_string_overrides))
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut body = serde_json::Map::new();
@@ -268,7 +280,7 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
         // `service::beta_context` to add the fast-mode beta). First-party only.
         body.insert("speed".to_string(), Value::String(speed.clone()));
     }
-    Ok(body)
+    Ok((body, json_string_overrides))
 }
 
 fn insert_output_effort(body: &mut serde_json::Map<String, Value>, effort: Value) {
@@ -281,11 +293,16 @@ fn insert_output_effort(body: &mut serde_json::Map<String, Value>, effort: Value
     }
 }
 
-fn encode_message(message: &crate::Message) -> Result<Value, LlmError> {
+fn encode_message(
+    message: &crate::Message,
+    message_index: usize,
+    overrides: &mut std::collections::BTreeMap<String, Vec<u16>>,
+) -> Result<Value, LlmError> {
     let content = message
         .content
         .iter()
-        .map(encode_content_block)
+        .enumerate()
+        .map(|(index, block)| encode_content_block(block, message_index, index, overrides))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(serde_json::json!({
@@ -323,7 +340,12 @@ fn with_cache_control(mut block: Value, cache_control: Option<crate::CacheContro
     block
 }
 
-fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
+fn encode_content_block(
+    block: &ContentBlock,
+    message_index: usize,
+    block_index: usize,
+    overrides: &mut std::collections::BTreeMap<String, Vec<u16>>,
+) -> Result<Value, LlmError> {
     match block {
         ContentBlock::Text {
             text,
@@ -332,6 +354,20 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             serde_json::json!({"type": "text", "text": text}),
             *cache_control,
         )),
+        ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            cache_control,
+        } => {
+            overrides.insert(
+                format!("/messages/{message_index}/content/{block_index}/text"),
+                utf16_code_units.clone(),
+            );
+            Ok(with_cache_control(
+                serde_json::json!({"type": "text", "text": text}),
+                *cache_control,
+            ))
+        }
         ContentBlock::Image { media_type, bytes } => Ok(serde_json::json!({
             "type": "image",
             "source": {
@@ -910,13 +946,16 @@ mod effort_codec_tests {
     #[test]
     fn effort_emitted_as_output_config_effort() {
         // A level string.
-        let body = base_body(&req_with_effort(Some(json!("high")))).unwrap();
+        let (body, overrides) = base_body(&req_with_effort(Some(json!("high")))).unwrap();
+        assert!(overrides.is_empty());
         assert_eq!(body["output_config"]["effort"], json!("high"));
         // An integer budget passes through verbatim.
-        let body = base_body(&req_with_effort(Some(json!(8000)))).unwrap();
+        let (body, overrides) = base_body(&req_with_effort(Some(json!(8000)))).unwrap();
+        assert!(overrides.is_empty());
         assert_eq!(body["output_config"]["effort"], json!(8000));
         // Unset ⇒ no output_config from effort (zero effect on existing requests).
-        let body = base_body(&req_with_effort(None)).unwrap();
+        let (body, overrides) = base_body(&req_with_effort(None)).unwrap();
+        assert!(overrides.is_empty());
         assert!(body.get("output_config").is_none());
     }
 
@@ -929,14 +968,17 @@ mod effort_codec_tests {
             speed: Some("fast".into()),
             ..Default::default()
         };
-        let body = base_body(&req).unwrap();
+        let (body, overrides) = base_body(&req).unwrap();
+        assert!(overrides.is_empty());
         assert_eq!(body["speed"], json!("fast"));
         // Unset ⇒ no `speed` key (byte-identical to a pre-fast-mode request).
         let req = LlmRequest {
             model: "claude-opus-4-8".into(),
             ..Default::default()
         };
-        assert!(base_body(&req).unwrap().get("speed").is_none());
+        let (body, overrides) = base_body(&req).unwrap();
+        assert!(overrides.is_empty());
+        assert!(body.get("speed").is_none());
     }
 
     #[test]
@@ -951,7 +993,8 @@ mod effort_codec_tests {
             }),
             ..Default::default()
         };
-        let body = base_body(&req).unwrap();
+        let (body, overrides) = base_body(&req).unwrap();
+        assert!(overrides.is_empty());
         assert_eq!(
             body["output_config"],
             json!({"format": {"type": "json_schema", "schema": schema}})
@@ -970,7 +1013,9 @@ mod effort_codec_tests {
             model: "claude-opus-4-8".into(),
             ..Default::default()
         };
-        assert!(base_body(&plain).unwrap().get("output_config").is_none());
+        let (body, overrides) = base_body(&plain).unwrap();
+        assert!(overrides.is_empty());
+        assert!(body.get("output_config").is_none());
         assert!(codec
             .encode_request(&plain)
             .unwrap()
@@ -993,5 +1038,37 @@ mod effort_codec_tests {
             matches!(&err, LlmError::InvalidRequest { message } if message.contains("json_object")),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn text_js_utf16_registers_override_and_serializes_exact_wire_body() {
+        let req = LlmRequest {
+            model: "claude-opus-4-8".into(),
+            messages: vec![crate::Message {
+                role: "user".into(),
+                content: vec![crate::ContentBlock::TextJsUtf16 {
+                    text: "A[]".into(),
+                    utf16_code_units: vec![0x0041, 0xD83D, 0x005B, 0x005D],
+                    cache_control: None,
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let (body, overrides) = base_body(&req).unwrap();
+        assert_eq!(
+            overrides.get("/messages/0/content/0/text"),
+            Some(&vec![0x0041, 0xD83D, 0x005B, 0x005D])
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["text"],
+            json!("A[]"),
+            "display-safe body remains valid Unicode"
+        );
+
+        let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+        let encoded = codec.encode_request(&req).unwrap();
+        let wire = String::from_utf8(encoded.wire_body_bytes().unwrap()).unwrap();
+        assert!(wire.contains("\"text\":\"A\\ud83d[]\""), "{wire}");
     }
 }

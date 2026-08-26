@@ -788,7 +788,8 @@ fn translate_response_blocks(content: &[llm_client::ContentBlock]) -> Vec<protoc
     content
         .iter()
         .filter_map(|b| match b {
-            llm_client::ContentBlock::Text { text, .. } => {
+            llm_client::ContentBlock::Text { text, .. }
+            | llm_client::ContentBlock::TextJsUtf16 { text, .. } => {
                 Some(protocol::ContentBlock::Text { text: text.clone() })
             }
             llm_client::ContentBlock::ToolCall { id, name, input } => {

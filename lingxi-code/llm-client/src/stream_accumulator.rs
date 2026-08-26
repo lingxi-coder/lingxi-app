@@ -302,7 +302,7 @@ fn tool_use_json_parse(index: u32, reason: &str, buffer: &str) -> LlmError {
 /// Mirrors `orchestrator::sse::event_router`'s `ContentBlockStart` arm.
 fn block_kind_of(content_block: &ContentBlock) -> BlockKind {
     match content_block {
-        ContentBlock::Text { .. } => BlockKind::Text,
+        ContentBlock::Text { .. } | ContentBlock::TextJsUtf16 { .. } => BlockKind::Text,
         ContentBlock::ToolCall { id, name, .. } => BlockKind::ToolCall {
             id: id.clone(),
             name: name.clone(),

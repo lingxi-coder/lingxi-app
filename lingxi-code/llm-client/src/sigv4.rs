@@ -57,10 +57,12 @@ pub struct SignedHeaders {
 /// ## Body-bytes note
 ///
 /// The `SigV4` payload hash is computed over the **exact bytes** that will be
-/// sent on the wire.  `LlmTransportBridge` serialises `ProviderRequest.body_json`
-/// as `body_json.to_string()` (compact JSON, no trailing newline).  Callers
-/// must pass those exact bytes here so the `x-amz-content-sha256` header and
-/// the `Authorization` signature cover the same bytes as the transport.
+/// sent on the wire. `LlmTransportBridge` uses
+/// `ProviderRequest::wire_body_bytes()`, which is normally compact
+/// `body_json.to_string()` but can preserve exact UTF-16 JSON-string escapes or
+/// a raw `body_bytes` payload. Callers must pass those exact bytes here so the
+/// `x-amz-content-sha256` header and `Authorization` signature cover the same
+/// bytes as the transport.
 #[allow(clippy::too_many_arguments)]
 pub fn sign_request(
     method: &str,

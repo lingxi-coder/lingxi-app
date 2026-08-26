@@ -12,6 +12,8 @@ use protocol::{ContentBlock, MessageId};
 use std::sync::{Arc, Mutex as StdMutex};
 use tool_api::registry::ToolRegistry;
 
+static CONTEXT_COLLAPSE_ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
 #[derive(Default)]
 struct RecordingPreparer {
     paths: StdMutex<Vec<ModelCallPath>>,
@@ -74,6 +76,70 @@ fn request_contains_marker(messages: &[ConversationMessage], marker: &str) -> bo
             .any(|block| matches!(block, ContentBlock::Text { text } if text == marker)),
         _ => false,
     })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn context_collapse_projects_initial_and_retry_snapshots_without_mutating_history() {
+    let _env_guard = CONTEXT_COLLAPSE_ENV_LOCK.lock().unwrap();
+    let saved = std::env::var(compaction::CONTEXT_COLLAPSE_ENV).ok();
+    std::env::set_var(compaction::CONTEXT_COLLAPSE_ENV, "true");
+
+    let first = "11111111-1111-4111-8111-111111111111";
+    let last = "22222222-2222-4222-8222-222222222222";
+    let tail = "33333333-3333-4333-8333-333333333333";
+    let summary_uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let raw = vec![
+        ConversationMessage::user(MessageId::parse_prefixed(first).unwrap(), "one".into()),
+        ConversationMessage::user(MessageId::parse_prefixed(last).unwrap(), "two".into()),
+        ConversationMessage::user(MessageId::parse_prefixed(tail).unwrap(), "tail".into()),
+    ];
+    let compactor = Arc::new(compaction::CompactionOrchestrator::new(1_000_000));
+    compactor.context_collapse.restore_from_entries(
+        vec![compaction::ContextCollapseCommit {
+            collapse_id: "0000000000000001".into(),
+            summary_uuid: summary_uuid.into(),
+            summary_content: "<collapsed id=\"0000000000000001\">summary</collapsed>".into(),
+            summary: "summary".into(),
+            first_archived_uuid: first.into(),
+            last_archived_uuid: last.into(),
+        }],
+        None,
+    );
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_compaction(compactor);
+
+    let prepared = orch.apply_context_collapse_projection(PreparedModelCall {
+        history_snapshot: raw.clone(),
+        model: "test-model".into(),
+        model_profile: None,
+        outgoing_history_rewriter: None,
+    });
+    assert_eq!(prepared.history_snapshot.len(), 2);
+    assert_eq!(
+        prepared.history_snapshot[0].text_content(),
+        "<collapsed id=\"0000000000000001\">summary</collapsed>"
+    );
+
+    let retry = orch
+        .rewrite_outgoing_history(raw.clone(), prepared.outgoing_history_rewriter.as_ref())
+        .await
+        .expect("retry projection");
+    assert_eq!(retry, prepared.history_snapshot);
+    assert_eq!(raw.len(), 3, "raw REPL history remains intact");
+
+    match saved {
+        Some(value) => std::env::set_var(compaction::CONTEXT_COLLAPSE_ENV, value),
+        None => std::env::remove_var(compaction::CONTEXT_COLLAPSE_ENV),
+    }
 }
 
 #[tokio::test]

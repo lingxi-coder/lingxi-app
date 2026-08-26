@@ -3366,7 +3366,7 @@ pub(crate) async fn startup_preflight(argv: &Argv) -> bool {
     if trust_gate().await == TrustGateOutcome::Decline {
         return false;
     }
-    external_includes_gate().await;
+    external_includes_gate(argv).await;
     let (bypass_mode, _) = crate::resolve_permission_mode(argv);
     let is_bypass = bypass_mode == permission::PermissionMode::BypassPermissions;
     let skip_set = read_skip_dangerous_prompt();
@@ -3386,7 +3386,7 @@ pub(crate) async fn startup_preflight(argv: &Argv) -> bool {
     }
 }
 
-async fn external_includes_gate() {
+async fn external_includes_gate(argv: &Argv) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let Some(config_path) = migrations::global_config::global_config_path() else {
         return;
@@ -3394,7 +3394,14 @@ async fn external_includes_gate() {
     if !external_includes_gate_should_prompt(&cwd, &config_path, is_full_tty()) {
         return;
     }
-    let paths = orchestrator::prompt::memory_block::pending_external_include_paths(&cwd);
+    let (include_user, include_project) =
+        crate::init::setting_source_flags(argv.setting_sources.as_deref());
+    let excludes = crate::init::load_lingxi_md_excludes(include_user, include_project);
+    let excluder = memory::lingxi_md::LingxiMdExcluder::new(&excludes);
+    let paths = orchestrator::prompt::memory_block::pending_external_include_paths_with_excluder(
+        &cwd,
+        Some(&excluder),
+    );
     if paths.is_empty() {
         return;
     }

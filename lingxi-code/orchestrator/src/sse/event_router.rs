@@ -149,7 +149,9 @@ pub async fn dispatch_event(
                 output.emit_stream_event(&event_json, false).await;
             }
             let kind = match &content_block {
-                LlmContentBlock::Text { .. } => BlockKind::Text,
+                LlmContentBlock::Text { .. } | LlmContentBlock::TextJsUtf16 { .. } => {
+                    BlockKind::Text
+                }
                 LlmContentBlock::ToolCall { id, name, .. } => BlockKind::ToolUse {
                     // The provider-issued id IS the canonical ToolUseId (byte
                     // parity with claude-code). The provider_id sidecar is left
@@ -376,7 +378,9 @@ pub async fn dispatch_event(
 /// (used in the `content_block_start` SSE event for P4 partial-messages).
 fn reconstruct_content_block_json(block: &LlmContentBlock) -> Value {
     match block {
-        LlmContentBlock::Text { .. } => json!({"type": "text", "text": ""}),
+        LlmContentBlock::Text { .. } | LlmContentBlock::TextJsUtf16 { .. } => {
+            json!({"type": "text", "text": ""})
+        }
         LlmContentBlock::ToolCall { id, name, .. } => {
             json!({"type": "tool_use", "id": id, "name": name, "input": {}})
         }

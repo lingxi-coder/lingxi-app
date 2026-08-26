@@ -719,7 +719,10 @@ fn encode_message(
 
     for block in &message.content {
         match block {
-            ContentBlock::Text { text: block_text, .. } => {
+            ContentBlock::Text { text: block_text, .. }
+            | ContentBlock::TextJsUtf16 {
+                text: block_text, ..
+            } => {
                 if !text.is_empty() {
                     text.push('\n');
                 }

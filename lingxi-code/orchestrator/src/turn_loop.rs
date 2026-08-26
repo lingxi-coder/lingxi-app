@@ -1238,7 +1238,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
         .await
         .last_compact_failure_detail = None;
 
-    // (1) Blocking-limit preempt. `is_at_blocking_limit` is
+    // (1) Blocking-limit preempt. Context collapse bypasses this proactive
+    // guard so a real overflow can first drain its staged summaries. When the
+    // feature is off, `is_at_blocking_limit` is
     // `token_usage >= effective_window − MANUAL_COMPACT_BUFFER_TOKENS`
     // (`autoCompact.ts` `calculateTokenWarningState`). `auto_compact_enabled`
     // is `true` to mirror the always-on default of this port (no GrowthBook).
@@ -1306,7 +1308,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         .emit_context_pressure(banner, used_fraction, estimate, context_window)
         .await;
 
-    if warning.is_at_blocking_limit {
+    if warning.is_at_blocking_limit && !compaction::is_context_collapse_enabled() {
         tracing::warn!(
             estimate,
             model,
@@ -1458,6 +1460,46 @@ pub(crate) async fn call_api_with_ptl_recovery(
             return Err(other.into());
         }
     };
+
+    // Context-collapse overflow recovery: drain every already-summarized staged
+    // span, persist the resulting append-only commits + last-wins snapshot, and
+    // retry once with the read-time projection. Do this before destructive head
+    // truncation or full reactive compact. A second overflow falls through to
+    // the established recovery chain; the staged queue is now empty, so the
+    // drain is naturally one-shot.
+    if compaction::is_context_collapse_enabled() {
+        if let Some(compactor) = orch.compaction.as_ref() {
+            let raw_history = {
+                let session = orch.session.lock().await;
+                session.history.clone()
+            };
+            let drained = compactor
+                .context_collapse
+                .recover_from_overflow(raw_history.clone());
+            if !drained.commits.is_empty() {
+                orch.persist_context_collapse_drain(&drained).await;
+                let mut retry = orch
+                    .rewrite_outgoing_history(raw_history, outgoing_history_rewriter.as_ref())
+                    .await?;
+                orch.reattach_outgoing_context(
+                    &mut retry,
+                    deferred_tools_reminder.as_ref(),
+                    date_change_reminder.as_ref(),
+                    turn_reminders,
+                )
+                .await;
+                match orch
+                    .api
+                    .messages_create(model, profile, system, retry, tools.clone())
+                    .await
+                {
+                    Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
+                    Err(LlmError::ContextOverflow { .. }) => {}
+                    Err(other) => return Err(other.into()),
+                }
+            }
+        }
+    }
 
     // (3) PTL retry loop: drop oldest API-round groups and retry, ≤ MAX retries.
     for _attempt in 0..compaction::MAX_PTL_RETRIES {
@@ -2633,7 +2675,10 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
     content
         .iter()
         .filter_map(|b| match b {
-            LlmContentBlock::Text { text, .. } => Some(ContentBlock::Text { text: text.clone() }),
+            LlmContentBlock::Text { text, .. }
+            | LlmContentBlock::TextJsUtf16 { text, .. } => {
+                Some(ContentBlock::Text { text: text.clone() })
+            }
             LlmContentBlock::ToolCall { id, name, input } => {
                 // The provider-issued id (e.g. Anthropic `toolu_…`, OpenAI
                 // `call_…`) IS the canonical `ToolUseId`, so JSONL/resume bytes

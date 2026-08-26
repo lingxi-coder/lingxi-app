@@ -1,6 +1,7 @@
 //! Canonical protocol types and codec traits.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -328,6 +329,21 @@ pub enum ContentBlock {
     Text {
         /// Text payload.
         text: String,
+        /// Optional prompt-cache breakpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    /// Display-safe text carrying an exact JS UTF-16 wire image.
+    ///
+    /// `text` remains valid UTF-8 for display/debug paths. When this block is
+    /// serialized for a Claude-family provider request, `utf16_code_units`
+    /// drives the exact JSON string bytes so lone surrogates survive as
+    /// `\\udxxx` escapes.
+    TextJsUtf16 {
+        /// Display-safe text payload.
+        text: String,
+        /// Exact provider-visible UTF-16 code units.
+        utf16_code_units: Vec<u16>,
         /// Optional prompt-cache breakpoint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
@@ -689,6 +705,11 @@ pub struct ProviderRequest {
     pub headers: BTreeMap<String, String>,
     /// JSON request body.
     pub body_json: Value,
+    /// Exact UTF-16 overrides for specific JSON string leaves inside
+    /// [`body_json`], keyed by JSON Pointer. When empty, body serialization is
+    /// identical to `body_json.to_string()`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub json_string_overrides: BTreeMap<String, Vec<u16>>,
     /// Which transport should be used for streaming this request.
     ///
     /// Defaults to [`ProviderStreamTransport::Http`]; route selection may set
@@ -732,10 +753,149 @@ impl ProviderRequest {
             url: url.into(),
             headers: BTreeMap::new(),
             body_json,
+            json_string_overrides: BTreeMap::new(),
             stream_transport: ProviderStreamTransport::Http,
             stream_framing: StreamFraming::Sse,
             body_bytes: None,
             websocket_connect_timeout_ms: None,
+        }
+    }
+
+    /// Serialize the request body exactly as the transport/signing layers will
+    /// send it on the wire.
+    pub fn wire_body_bytes(&self) -> Result<Vec<u8>, LlmError> {
+        if let Some(body_bytes) = &self.body_bytes {
+            return Ok(body_bytes.clone());
+        }
+        if self.json_string_overrides.is_empty() {
+            return Ok(self.body_json.to_string().into_bytes());
+        }
+        for pointer in self.json_string_overrides.keys() {
+            if !matches!(self.body_json.pointer(pointer), Some(Value::String(_))) {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "UTF-16 JSON override does not target a string leaf: {pointer}"
+                    ),
+                });
+            }
+        }
+        let mut out = Vec::new();
+        write_json_value_with_overrides(
+            &mut out,
+            &self.body_json,
+            &self.json_string_overrides,
+            "",
+        )?;
+        Ok(out)
+    }
+}
+
+fn write_json_value_with_overrides(
+    out: &mut Vec<u8>,
+    value: &Value,
+    overrides: &BTreeMap<String, Vec<u16>>,
+    pointer: &str,
+) -> Result<(), LlmError> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => serde_json::to_writer(out, value)
+            .map_err(|err| LlmError::InvalidRequest {
+                message: format!("failed to encode JSON leaf: {err}"),
+            }),
+        Value::String(text) => {
+            if let Some(units) = overrides.get(pointer) {
+                write_json_string_from_utf16(out, units);
+                Ok(())
+            } else {
+                serde_json::to_writer(out, text).map_err(|err| LlmError::InvalidRequest {
+                    message: format!("failed to encode JSON string: {err}"),
+                })
+            }
+        }
+        Value::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                let child_pointer = format!("{pointer}/{index}");
+                write_json_value_with_overrides(out, item, overrides, &child_pointer)?;
+            }
+            out.push(b']');
+            Ok(())
+        }
+        Value::Object(map) => {
+            out.push(b'{');
+            for (index, (key, item)) in map.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                serde_json::to_writer(&mut *out, key).map_err(|err| LlmError::InvalidRequest {
+                    message: format!("failed to encode JSON object key: {err}"),
+                })?;
+                out.push(b':');
+                let child_pointer = format!("{pointer}/{}", escape_json_pointer_token(key));
+                write_json_value_with_overrides(out, item, overrides, &child_pointer)?;
+            }
+            out.push(b'}');
+            Ok(())
+        }
+    }
+}
+
+fn escape_json_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+fn write_json_string_from_utf16(out: &mut Vec<u8>, utf16_code_units: &[u16]) {
+    out.push(b'"');
+    let mut idx = 0usize;
+    while idx < utf16_code_units.len() {
+        let unit = utf16_code_units[idx];
+        if matches!(unit, 0xD800..=0xDBFF)
+            && utf16_code_units
+                .get(idx + 1)
+                .is_some_and(|next| matches!(next, 0xDC00..=0xDFFF))
+        {
+            let high = unit;
+            let low = utf16_code_units[idx + 1];
+            let scalar =
+                0x1_0000 + ((((u32::from(high)) - 0xD800) << 10) | ((u32::from(low)) - 0xDC00));
+            write_json_char(
+                out,
+                char::from_u32(scalar).expect("valid surrogate pair yields scalar"),
+            );
+            idx += 2;
+            continue;
+        }
+        if matches!(unit, 0xD800..=0xDFFF) {
+            write!(out, "\\u{unit:04x}").expect("vec writes cannot fail");
+            idx += 1;
+            continue;
+        }
+        write_json_char(
+            out,
+            char::from_u32(u32::from(unit)).expect("BMP non-surrogate is scalar"),
+        );
+        idx += 1;
+    }
+    out.push(b'"');
+}
+
+fn write_json_char(out: &mut Vec<u8>, ch: char) {
+    match ch {
+        '"' => out.extend_from_slice(br#"\""#),
+        '\\' => out.extend_from_slice(br"\\"),
+        '\u{08}' => out.extend_from_slice(br"\b"),
+        '\u{0C}' => out.extend_from_slice(br"\f"),
+        '\n' => out.extend_from_slice(br"\n"),
+        '\r' => out.extend_from_slice(br"\r"),
+        '\t' => out.extend_from_slice(br"\t"),
+        ch if ch <= '\u{1F}' => {
+            write!(out, "\\u{:04x}", u32::from(ch)).expect("vec writes cannot fail");
+        }
+        _ => {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
         }
     }
 }
@@ -925,6 +1085,7 @@ pub fn validate_capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn with_profile_sets_field_and_new_defaults_none() {
@@ -935,6 +1096,45 @@ mod tests {
                 .profile
                 .as_deref(),
             Some("openai")
+        );
+    }
+
+    #[test]
+    fn wire_body_bytes_preserve_registered_utf16_override() {
+        let mut request = ProviderRequest::post_json(
+            "https://example.test",
+            json!({"messages":[{"content":[{"text":"A[]"}]}]}),
+        );
+        request.json_string_overrides.insert(
+            "/messages/0/content/0/text".into(),
+            vec![0x0041, 0xD83D, 0x005B, 0x005D],
+        );
+        let wire = String::from_utf8(request.wire_body_bytes().unwrap()).unwrap();
+        assert_eq!(wire, r#"{"messages":[{"content":[{"text":"A\ud83d[]"}]}]}"#);
+    }
+
+    #[test]
+    fn wire_body_bytes_prefer_body_bytes_over_json_and_overrides() {
+        let mut request = ProviderRequest::post_json("https://example.test", json!({"a":"b"}));
+        request
+            .json_string_overrides
+            .insert("/a".into(), vec![0x0062, 0xD83D]);
+        request.body_bytes = Some(br#"{"raw":true}"#.to_vec());
+        assert_eq!(request.wire_body_bytes().unwrap(), br#"{"raw":true}"#);
+    }
+
+    #[test]
+    fn wire_body_bytes_reject_missing_utf16_override_target() {
+        let mut request = ProviderRequest::post_json("https://example.test", json!({"a":"b"}));
+        request
+            .json_string_overrides
+            .insert("/missing".into(), vec![0xD83D]);
+        let error = request.wire_body_bytes().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not target a string leaf: /missing"),
+            "{error}"
         );
     }
 }

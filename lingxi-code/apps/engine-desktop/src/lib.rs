@@ -131,6 +131,19 @@ fn is_env_truthy(key: &str) -> bool {
     traits::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
+/// Session-memory writes persist into the same memdir-backed Session tier that
+/// per-turn prefetch reads from, so enabling writes must also enable the read
+/// path. Prefetch-only remains independently available.
+fn resolve_memory_feature_gates(
+    memdir_prefetch_enabled: bool,
+    session_memory_enabled: bool,
+) -> (bool, bool) {
+    (
+        memdir_prefetch_enabled || session_memory_enabled,
+        session_memory_enabled,
+    )
+}
+
 /// Port of `getAPIProvider()` (`utils/model/providers.ts:6-14`).
 fn api_provider() -> ApiProvider {
     if is_env_truthy("CLAUDE_CODE_USE_BEDROCK") {
@@ -9574,7 +9587,11 @@ pub async fn build(
     // prefetch IS the gate — claude-code keeps this behind `tengu_moth_copse`
     // (default false), so unset/false leaves the surfacing channel inert and the
     // locked fixtures byte-identical (`memory_prefetch.is_some() == false`).
-    let orch_builder = match (is_env_truthy("LINGXI_MEMDIR_PREFETCH"), dirs::home_dir()) {
+    let (memory_prefetch_on, session_memory_on) = resolve_memory_feature_gates(
+        is_env_truthy("LINGXI_MEMDIR_PREFETCH"),
+        is_env_truthy("LINGXI_SESSION_MEMORY"),
+    );
+    let orch_builder = match (memory_prefetch_on, dirs::home_dir()) {
         (true, Some(home)) => {
             orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
                 side_query_client.clone(),
@@ -9641,7 +9658,7 @@ pub async fn build(
     // scan re-loads next session. Thresholds are unpinned upstream (spec §6.5) —
     // 30/30 tool calls is a tunable default. Unset/false ⇒ no handle ⇒ inert, so
     // the locked fixtures stay byte-identical.
-    let orch_builder = match (is_env_truthy("LINGXI_SESSION_MEMORY"), dirs::home_dir()) {
+    let orch_builder = match (session_memory_on, dirs::home_dir()) {
         (true, Some(home)) => {
             orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
                 side_query_client.clone(),
@@ -10531,9 +10548,10 @@ pub async fn build(
 mod tests {
     use super::{
         build, desktop_tool_registry, model_deprecation_warning, parse_worktree_slash_action,
-        resolve_workflow_session_enabled, resolve_workflow_size_guideline,
-        sandbox_network_ask_callback, CoordinatorWiring, DesktopConfig, DesktopSessionComposition,
-        WorktreeSlashAction, QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
+        resolve_memory_feature_gates, resolve_workflow_session_enabled,
+        resolve_workflow_size_guideline, sandbox_network_ask_callback, CoordinatorWiring,
+        DesktopConfig, DesktopSessionComposition, WorktreeSlashAction,
+        QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
     };
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10578,6 +10596,14 @@ mod tests {
         let deny = sandbox_network_ask_callback(deny_gate.clone());
         assert!(!deny("api.example.test", 8443).await.unwrap());
         assert_eq!(deny_gate.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn memory_feature_gates_keep_prefetch_and_session_memory_in_sync() {
+        assert_eq!(resolve_memory_feature_gates(false, false), (false, false));
+        assert_eq!(resolve_memory_feature_gates(true, false), (true, false));
+        assert_eq!(resolve_memory_feature_gates(false, true), (true, true));
+        assert_eq!(resolve_memory_feature_gates(true, true), (true, true));
     }
 
     #[test]

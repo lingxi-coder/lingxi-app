@@ -588,6 +588,14 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             text,
             cache_control: None,
         }),
+        ProtoBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+        } => Ok(LlmBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            cache_control: None,
+        }),
         ProtoBlock::ToolUse {
             id,
             name,

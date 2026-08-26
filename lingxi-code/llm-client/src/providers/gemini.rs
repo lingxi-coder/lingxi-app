@@ -536,7 +536,10 @@ fn encode_messages(
         let mut parts = Vec::new();
         for block in &message.content {
             match block {
-                ContentBlock::Text { text, .. } => parts.push(serde_json::json!({"text": text})),
+                ContentBlock::Text { text, .. }
+                | ContentBlock::TextJsUtf16 { text, .. } => {
+                    parts.push(serde_json::json!({"text": text}))
+                }
                 ContentBlock::Image { media_type, bytes }
                 | ContentBlock::Document { media_type, bytes } => {
                     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);

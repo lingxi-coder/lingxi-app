@@ -1002,10 +1002,7 @@ impl DefaultLlmClient {
                 };
 
                 // Body bytes: sign exactly what LlmTransportBridge sends on the wire.
-                // LlmTransportBridge calls `body_json.to_string()` unconditionally —
-                // Value::Null serialises to the 4-byte string "null", not an empty body.
-                // Signing empty bytes for Null would diverge from the wire payload → 403.
-                let body_bytes = request.body_json.to_string().into_bytes();
+                let body_bytes = request.wire_body_bytes()?;
 
                 // Use the injected clock (now) for the timestamp.
                 // Production code passes SystemTime::now(); tests pass a fixed instant.

@@ -26,6 +26,7 @@
 
 use super::MemoryFile;
 use memory::lingxi_md::hierarchy::{self, HierarchyEntry};
+use memory::lingxi_md::LingxiMdExcluder;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -50,6 +51,7 @@ fn expand(
     home: &Path,
     include_external: bool,
     seen: &mut HashSet<PathBuf>,
+    excluder: Option<&LingxiMdExcluder>,
 ) -> Vec<MemoryFile> {
     let mut out = Vec::new();
     for e in entries {
@@ -64,13 +66,15 @@ fn expand(
         // entry here is always one this probe just claimed — never one a prior
         // `@import` expansion already spliced.
         seen.remove(&e.path);
-        let expanded = memory::lingxi_md::loader::expand_memory_file(
+        let expanded = memory::lingxi_md::loader::expand_memory_file_with_excluder(
             &e.path,
             seen,
             include_external,
             cwd,
             Some(home),
             0,
+            e.tier,
+            excluder,
         );
         for (idx, entry) in expanded.into_iter().enumerate() {
             let body = entry.body.trim().to_string();
@@ -121,6 +125,18 @@ pub fn discover(
     home: &Path,
     managed_dir: Option<&Path>,
 ) -> Vec<MemoryFile> {
+    discover_with_excludes(trigger, cwd, home, managed_dir, None)
+}
+
+/// Exclude-aware variant of [`discover`].
+#[must_use]
+pub fn discover_with_excludes(
+    trigger: &Path,
+    cwd: &Path,
+    home: &Path,
+    managed_dir: Option<&Path>,
+    excluder: Option<&LingxiMdExcluder>,
+) -> Vec<MemoryFile> {
     let mut out: Vec<MemoryFile> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
@@ -136,12 +152,12 @@ pub fn discover(
         if let Some(managed) = managed_dir {
             hierarchy::probe_managed_rules(managed, &mut managed_entries, &mut seen);
         }
-        let managed_files = expand(managed_entries, cwd, home, false, &mut seen);
+        let managed_files = expand(managed_entries, cwd, home, false, &mut seen, excluder);
         out.extend(matching_conditional(managed_files, trigger, cwd));
 
         let mut user_entries = Vec::new();
         hierarchy::probe_user_rules(home, &mut user_entries, &mut seen);
-        let user_files = expand(user_entries, cwd, home, true, &mut seen);
+        let user_files = expand(user_entries, cwd, home, true, &mut seen, excluder);
         out.extend(matching_conditional(user_files, trigger, cwd));
     }
 
@@ -154,7 +170,7 @@ pub fn discover(
     for dir in &ancestors.nested {
         let mut entries = Vec::new();
         hierarchy::probe_dir_nested(dir, &mut entries, &mut seen);
-        let files = expand(entries, cwd, home, false, &mut seen);
+        let files = expand(entries, cwd, home, false, &mut seen, excluder);
         let (conditional, unconditional): (Vec<_>, Vec<_>) =
             files.into_iter().partition(|f| f.globs.is_some());
         out.extend(unconditional);
@@ -165,9 +181,50 @@ pub fn discover(
     for dir in &ancestors.cwd_level {
         let mut entries = Vec::new();
         hierarchy::probe_dir_cwd_level(dir, &mut entries, &mut seen);
-        let files = expand(entries, cwd, home, false, &mut seen);
+        let files = expand(entries, cwd, home, false, &mut seen, excluder);
         out.extend(matching_conditional(files, trigger, cwd));
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{discover_with_excludes, MemoryFile};
+    use memory::lingxi_md::LingxiMdExcluder;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn names(files: &[MemoryFile]) -> Vec<PathBuf> {
+        files.iter().map(|f| f.path.clone()).collect()
+    }
+
+    #[test]
+    fn discover_with_excludes_skips_excluded_nested_rule_and_its_imports() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("repo");
+        let managed = tmp.path().join("managed");
+        let home = tmp.path().join("home");
+        let trigger = cwd.join("src/lib.rs");
+        let nested_rules = cwd.join(".lingxi/rules");
+        fs::create_dir_all(&nested_rules).expect("mkdir nested rules");
+        fs::create_dir_all(trigger.parent().expect("parent")).expect("mkdir trigger parent");
+        fs::create_dir_all(home.join(".lingxi/rules")).expect("mkdir home rules");
+        fs::create_dir_all(managed.join(".lingxi/rules")).expect("mkdir managed rules");
+        fs::write(&trigger, "fn main() {}\n").expect("write trigger");
+        fs::write(
+            nested_rules.join("secret.md"),
+            "---\npaths: src/**\n---\nsecret\n@./child.md\n",
+        )
+        .expect("write secret rule");
+        fs::write(nested_rules.join("child.md"), "child\n").expect("write child");
+
+        let excluder = LingxiMdExcluder::new(&["**/secret.md".to_string()]);
+        let files = discover_with_excludes(&trigger, &cwd, &home, Some(&managed), Some(&excluder));
+
+        assert!(
+            names(&files).is_empty(),
+            "excluded nested rules must not survive discovery"
+        );
+    }
 }

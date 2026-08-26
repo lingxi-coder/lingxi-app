@@ -5,6 +5,7 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::{AgentId, SessionId};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, StubProcess};
     use traits::process::ProcessOutput;
 
@@ -1260,6 +1261,97 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         );
         // A skill NOT invoked leaves no row.
         assert!(compaction::invoked_skills::content_for_test(":other").is_none());
+
+        compaction::invoked_skills::reset_for_test();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn invocation_registers_skill_under_session_and_agent_scope() {
+        let _g = compaction::invoked_skills::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        compaction::invoked_skills::reset_for_test();
+
+        let desc = SkillDescriptor {
+            skill_root: Some(std::path::PathBuf::from("/skills/regtest")),
+            ..prompt_desc("regtest")
+        };
+        let session_id = SessionId::nil();
+        let agent_id = AgentId::nil();
+        let mut builtin_ctx = shell_test_ctx(dummy_out());
+        builtin_ctx.session_id = Some(session_id);
+        let tool = SkillTool::with_loader(builtin_ctx, Arc::new(FixedLoader(Some(desc))));
+        let mut call_ctx = fresh_ctx();
+        call_ctx.agent_id = Some(agent_id);
+
+        tool.call(json!({"skill": "regtest"}), call_ctx, fresh_tx())
+            .await
+            .expect("ok");
+
+        let scoped_key = compaction::invoked_skills::registry_key(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(
+                Some(&session_id.to_string()),
+                Some(&agent_id.to_string()),
+            ),
+            "regtest",
+        );
+        let content = compaction::invoked_skills::content_for_test(&scoped_key)
+            .expect("skill registered under scoped key");
+        assert!(
+            content.contains("body here"),
+            "registered content must carry the expanded skill body; got: {content}"
+        );
+        assert!(
+            compaction::invoked_skills::content_for_test(":regtest").is_none(),
+            "scoped registration must not leak into the legacy main-thread key"
+        );
+
+        compaction::invoked_skills::reset_for_test();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn invocation_prefers_the_live_call_session_over_the_construction_session() {
+        let _g = compaction::invoked_skills::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        compaction::invoked_skills::reset_for_test();
+
+        let desc = SkillDescriptor {
+            skill_root: Some(std::path::PathBuf::from("/skills/regtest")),
+            ..prompt_desc("regtest")
+        };
+        let stale_session_id = SessionId::new();
+        let live_session_id = SessionId::new();
+        let mut builtin_ctx = shell_test_ctx(dummy_out());
+        builtin_ctx.session_id = Some(stale_session_id);
+        let tool = SkillTool::with_loader(builtin_ctx, Arc::new(FixedLoader(Some(desc))));
+        let mut call_ctx = fresh_ctx();
+        call_ctx.session = Some(Arc::new(tokio::sync::Mutex::new(
+            engine::SessionState::empty(live_session_id, "model".into()),
+        )));
+
+        tool.call(json!({"skill": "regtest"}), call_ctx, fresh_tx())
+            .await
+            .expect("ok");
+
+        let live_key = compaction::invoked_skills::registry_key(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(
+                Some(&live_session_id.to_string()),
+                None,
+            ),
+            "regtest",
+        );
+        let stale_key = compaction::invoked_skills::registry_key(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(
+                Some(&stale_session_id.to_string()),
+                None,
+            ),
+            "regtest",
+        );
+        assert!(compaction::invoked_skills::content_for_test(&live_key).is_some());
+        assert!(compaction::invoked_skills::content_for_test(&stale_key).is_none());
 
         compaction::invoked_skills::reset_for_test();
     }

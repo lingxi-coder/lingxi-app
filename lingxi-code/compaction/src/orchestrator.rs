@@ -2,10 +2,10 @@
 //! cheaper layers leave us over the autocompact threshold.
 //!
 //! Order mirrors the TS query pipeline (`query.ts:400-467`): **snip →
-//! microcompact → autocompact**. The `contextCollapse` layer that TS runs
-//! between microcompact and autocompact is feature-gated and absent from the
-//! reference checkout, so it is **intentionally omitted here** (documented as a
-//! known gap, not a divergence).
+//! microcompact → context-collapse projection → autocompact**. Context collapse
+//! is session-owned and default-off; the conversation layer replays its
+//! committed projection on every outgoing request while this orchestrator owns
+//! the store and the prompt-too-long drain primitive.
 //!
 //! Autocompact is gated through [`crate::threshold_calc::should_auto_compact`]
 //! and guarded by the circuit breaker from `autoCompactIfNeeded`
@@ -16,6 +16,7 @@
 
 use crate::autocompact::{Autocompactor, CompactionError};
 use crate::cached_microcompact::CachedMicrocompact;
+use crate::context_collapse::ContextCollapse;
 use crate::microcompact::{Microcompactor, TimeBasedMCConfig};
 use crate::snip::SnipCompactor;
 use crate::thresholds::{
@@ -126,6 +127,8 @@ pub struct CompactionOrchestrator {
     pub micro: Microcompactor,
     /// Same-input cache for microcompact results.
     pub cached_micro: CachedMicrocompact,
+    /// Read-time context-collapse commit/staging store.
+    pub context_collapse: ContextCollapse,
     /// Autocompact layer.
     pub auto: Autocompactor,
     /// Token threshold above which autocompact fires.
@@ -142,6 +145,7 @@ impl CompactionOrchestrator {
                 config: TimeBasedMCConfig::default(),
             },
             cached_micro: CachedMicrocompact::default(),
+            context_collapse: ContextCollapse::default(),
             auto: Autocompactor::new(),
             autocompact_threshold,
         }
@@ -163,6 +167,7 @@ impl CompactionOrchestrator {
                 config: TimeBasedMCConfig::default(),
             },
             cached_micro: CachedMicrocompact::default(),
+            context_collapse: ContextCollapse::default(),
             auto,
             autocompact_threshold,
         }
@@ -387,7 +392,11 @@ impl CompactionOrchestrator {
             messages = micro.messages;
         }
 
-        // --- (collapse layer intentionally omitted — known gap) ----------- //
+        // Context collapse is a read-time projection over the untouched REPL
+        // history. It is applied by the conversation layer immediately before
+        // model calls (and by its retry-safe history rewriter), not folded into
+        // this mutation-oriented result. Keeping it outside this return value is
+        // what prevents committed summaries from leaking into session history.
 
         // --- Layer 3: autocompact (threshold + circuit-breaker gated) ----- //
         let mut was_compacted = false;

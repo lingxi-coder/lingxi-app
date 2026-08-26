@@ -334,6 +334,7 @@ fn errored_compactor() -> Arc<CompactionOrchestrator> {
         },
         auto: Autocompactor::with_forked_runner(runner, slot),
         cached_micro: compaction::cached_microcompact::CachedMicrocompact::default(),
+        context_collapse: compaction::ContextCollapse::default(),
         // Threshold 1 token → autocompact ALWAYS fires.
         autocompact_threshold: 1,
     };

@@ -39,7 +39,9 @@ fn content_blocks_to_api(blocks: &[protocol::ContentBlock]) -> Value {
     let arr: Vec<Value> = blocks
         .iter()
         .map(|b| match b {
-            ContentBlock::Text { text } => json!({"type": "text", "text": text}),
+            ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+                json!({"type": "text", "text": text})
+            }
             ContentBlock::ToolUse {
                 id,
                 name,

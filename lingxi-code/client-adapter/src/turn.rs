@@ -117,7 +117,9 @@ pub fn lower_content_block_with(
     index: &mut ToolUseIndex,
 ) -> Option<MessageBlockDto> {
     match block {
-        ContentBlock::Text { text } => Some(MessageBlockDto::Text { text: text.clone() }),
+        ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+            Some(MessageBlockDto::Text { text: text.clone() })
+        }
         ContentBlock::Thinking {
             thinking,
             signature,

@@ -64,6 +64,18 @@ impl ConversationOrchestrator {
     /// these caches would make the new session depend on the previously mounted
     /// transcript.
     async fn reset_session_scoped_runtime(&self) {
+        let session_id = self.session.lock().await.session_id.to_string();
+        compaction::invoked_skills::clear_session(&session_id);
+        if let Some(compactor) = self.compaction.as_ref() {
+            let _ = compactor.context_collapse.reset("session_boundary");
+        }
+        if let Some(handle) = self.session_memory.as_ref() {
+            let mut extractor = handle.extractor.lock().await;
+            handle
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            extractor.reset();
+        }
         if let Some(tracker) = self.cost_tracker.as_ref() {
             tracker.reset().await;
         }
@@ -99,6 +111,7 @@ impl ConversationOrchestrator {
             .clear();
         self.orphan_forced_decisions.lock().await.clear();
         self.sent_conditional_rules.lock().await.clear();
+        self.sent_nested_memory.lock().await.clear();
         self.sent_skill_names.lock().await.clear();
         self.sent_agent_names.lock().await.clear();
         self.surfaced_memory_paths.lock().await.clear();
@@ -116,6 +129,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn clear_session(&self) -> Result<(), HandleError> {
+        // Session replacement must serialize with the turn loop. In
+        // particular, this keeps maybe_extract_session_memory's history +
+        // generation snapshot on the same side of the clear/resume boundary.
+        let _turn_guard = self.turn_gate.lock().await;
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during clear_session");
@@ -129,6 +146,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         s.active_goal = None;
         s.message_timing = engine::session::MessageTimingState::default();
         s.session_id = protocol::SessionId::new();
+        let new_session_id = s.session_id.to_string();
         self.compaction_cumulative_dropped_tokens
             .store(0, std::sync::atomic::Ordering::Relaxed);
         // Reset the JSONL parent-uuid chain (M5-07) since we minted a new
@@ -136,6 +154,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // session's last entry.
         *self.last_jsonl_uuid.lock().await = None;
         drop(s);
+        self.invoked_skill_session_guard.replace(new_session_id);
         // (review #8) Reset the autocompact circuit-breaker / rapid-refill
         // tracking. claude-code's clearConversation restarts the query loop with
         // a fresh autoCompactTracking accumulator; LingXi's long-lived
@@ -176,6 +195,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
         active_goal: Option<ActiveGoalSnapshot>,
         runtime: traits::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
+        // See clear_session: a resumed history and its session-memory epoch
+        // must be published atomically with respect to an active turn.
+        let _turn_guard = self.turn_gate.lock().await;
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during resume_session");
@@ -227,6 +249,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
         s.session_id = session_id;
         drop(s);
+        self.invoked_skill_session_guard
+            .replace(session_id.to_string());
         if let Some(selection) = resumed_reasoning {
             self.restore_reasoning_selection_from_resume(
                 &resumed_model,
@@ -842,6 +866,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during request_exit");
         }
+        let session_id = self.session.lock().await.session_id.to_string();
+        compaction::invoked_skills::clear_session(&session_id);
         self.should_exit.store(true, Ordering::SeqCst);
     }
 
@@ -1567,6 +1593,184 @@ mod tests {
         StaticMemoryProvider,
     };
     use std::sync::Arc;
+
+    struct InvokedSkillRegistryGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl InvokedSkillRegistryGuard {
+        fn acquire() -> Self {
+            let guard = compaction::invoked_skills::TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            compaction::invoked_skills::reset_for_test();
+            Self(guard)
+        }
+    }
+
+    impl Drop for InvokedSkillRegistryGuard {
+        fn drop(&mut self) {
+            compaction::invoked_skills::reset_for_test();
+        }
+    }
+
+    struct SessionMemoryTestRuntime;
+
+    #[async_trait::async_trait]
+    impl traits::RuntimeSpawner for SessionMemoryTestRuntime {
+        async fn spawn(
+            &self,
+            _name: &str,
+            _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            Err(traits::RuntimeError::Internal(
+                "unused session-memory test runtime".to_string(),
+            ))
+        }
+
+        async fn sleep(&self, _duration: std::time::Duration) {}
+
+        async fn cancel(
+            &self,
+            _handle: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_invalidates_stale_session_memory_tasks_and_resets_progress() {
+        let handle = Arc::new(crate::conversation::SessionMemoryHandle {
+            extractor: tokio::sync::Mutex::new(
+                memory::session_memory::SessionMemoryExtractor::new(
+                    memory::session_memory::SessionMemoryConfig {
+                        enabled: true,
+                        initialization_threshold: 3,
+                        update_threshold: 3,
+                        extraction_model: "haiku".to_string(),
+                    },
+                ),
+            ),
+            runner: Arc::new(sidequery::ForkedAgentRunner::new()),
+            config_home: std::env::temp_dir(),
+            runtime: Arc::new(SessionMemoryTestRuntime),
+            in_flight: std::sync::atomic::AtomicBool::new(true),
+            generation: std::sync::atomic::AtomicU64::new(7),
+        });
+        {
+            let mut extractor = handle.extractor.lock().await;
+            extractor.mark_extracted_through(Some(protocol::MessageId::new()));
+            extractor.record_compaction_boundary(Some(protocol::MessageId::new()), 2);
+        }
+        let captured_generation = handle.generation.load(Ordering::Acquire);
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_session_memory(handle.clone());
+        orch.sent_nested_memory
+            .lock()
+            .await
+            .insert(std::path::PathBuf::from("/old-session/nested.md"));
+
+        traits::OrchestratorHandle::clear_session(&orch)
+            .await
+            .expect("clear session");
+
+        assert_ne!(
+            handle.generation.load(Ordering::Acquire),
+            captured_generation,
+            "a task captured before clear must fail its generation check"
+        );
+        let extractor = handle.extractor.lock().await;
+        assert!(!extractor.is_initialized());
+        assert_eq!(extractor.pending_tool_calls(), 0);
+        drop(extractor);
+        assert!(
+            orch.sent_nested_memory.lock().await.is_empty(),
+            "clear must not carry nested-memory sent state into the new session"
+        );
+        assert!(
+            handle.in_flight.load(Ordering::Acquire),
+            "the stale task owns releasing its reservation; clear must not open a concurrent slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_exit_clears_only_the_current_sessions_invoked_skills() {
+        let _registry = InvokedSkillRegistryGuard::acquire();
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let session_id = orch.session.lock().await.session_id.to_string();
+        let other_session_id = protocol::SessionId::new().to_string();
+        let current_scope =
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+        let other_scope =
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&other_session_id), None);
+        compaction::invoked_skills::register_scoped(
+            "current",
+            std::path::Path::new("/current"),
+            "current body",
+            current_scope,
+        );
+        compaction::invoked_skills::register_scoped(
+            "other",
+            std::path::Path::new("/other"),
+            "other body",
+            other_scope,
+        );
+
+        traits::OrchestratorHandle::request_exit(&orch).await;
+
+        assert!(compaction::invoked_skills::filter_for_scope(current_scope).is_empty());
+        assert_eq!(
+            compaction::invoked_skills::filter_for_scope(other_scope).len(),
+            1,
+            "exiting one session must not clear another session's registry rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_end_teardown_clears_the_current_sessions_invoked_skills() {
+        let _registry = InvokedSkillRegistryGuard::acquire();
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let session_id = orch.session.lock().await.session_id.to_string();
+        let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(
+            Some(&session_id),
+            Some("agent:child"),
+        );
+        compaction::invoked_skills::register_scoped(
+            "child",
+            std::path::Path::new("/child"),
+            "child body",
+            scope,
+        );
+
+        orch.fire_session_end("prompt_input_exit").await;
+
+        assert!(compaction::invoked_skills::filter_for_scope(scope).is_empty());
+    }
 
     /// A transcript can carry a PROVIDER-QUALIFIED model reference with no
     /// `modelProfile` alongside it — written by an older engine, by another

@@ -1054,6 +1054,36 @@ pub(crate) trait OutgoingHistoryRewriter: Send + Sync {
     ) -> Result<Vec<ConversationMessage>, OrchestratorError>;
 }
 
+/// Retry-safe composition of an existing product-specific history rewrite
+/// (for example vision media preparation) with context collapse's read-time
+/// projection. The full session history remains untouched.
+struct ContextCollapseHistoryRewriter {
+    inner: Option<Arc<dyn OutgoingHistoryRewriter>>,
+    compactor: Arc<compaction::CompactionOrchestrator>,
+}
+
+#[async_trait]
+impl OutgoingHistoryRewriter for ContextCollapseHistoryRewriter {
+    async fn rewrite(
+        &self,
+        orch: &ConversationOrchestrator,
+        raw_history: Vec<ConversationMessage>,
+    ) -> Result<Vec<ConversationMessage>, OrchestratorError> {
+        let rewritten = match self.inner.as_ref() {
+            Some(inner) => inner.rewrite(orch, raw_history).await?,
+            None => raw_history,
+        };
+        if !compaction::is_context_collapse_enabled() {
+            return Ok(rewritten);
+        }
+        Ok(self
+            .compactor
+            .context_collapse
+            .apply_collapses_if_needed(rewritten)
+            .messages)
+    }
+}
+
 /// Shared output from the pre-call preparation seam used by both main loops.
 #[derive(Clone)]
 pub(crate) struct PreparedModelCall {
@@ -1110,10 +1140,13 @@ pub struct ConversationOrchestrator {
     pub(crate) perms: Arc<dyn PermissionGate>,
     pub(crate) output: Arc<dyn OutputStream>,
     pub(crate) session: Arc<Mutex<SessionState>>,
+    /// Owns cleanup of process-global invoked-skill rows even when a host drops
+    /// or rebuilds this orchestrator without an explicit SessionEnd callback.
+    pub(crate) invoked_skill_session_guard: compaction::invoked_skills::InvokedSkillSessionGuard,
     /// Serializes user, queued, and async-hook re-wake turns. A background hook
     /// may finish while a user turn is still streaming; waiting here makes its
     /// re-wake the next turn instead of racing two model loops over one history.
-    turn_gate: Arc<Mutex<()>>,
+    pub(crate) turn_gate: Arc<Mutex<()>>,
     /// Live main-loop effort. Unlike `config.effort`, this can change through
     /// stream-json control requests and in-place resume.
     pub(crate) current_effort: std::sync::RwLock<Option<String>>,
@@ -1873,11 +1906,12 @@ pub struct ConversationOrchestrator {
 
 /// Everything [`ConversationOrchestrator::maybe_extract_session_memory`] needs to
 /// run a standalone session-memory extraction (§6.5): the threshold-stateful
-/// extractor (behind a `Mutex` — `extract` advances its watermark), the forked
+/// extractor (behind a `Mutex` for short decision/commit sections), the forked
 /// runner that issues the distillation, the resolved config-home for the write
 /// path, and a runtime to background-spawn the fork so it never blocks a turn.
 pub struct SessionMemoryHandle {
-    /// The threshold-gated extractor; `Mutex` because `extract` is `&mut`.
+    /// The threshold-gated extractor. Never hold this across a side-query
+    /// await; extraction uses a decision/run/validated-commit sequence.
     pub extractor: Mutex<memory::session_memory::SessionMemoryExtractor>,
     /// Forked-agent runner that issues the distillation off the cache prefix.
     pub runner: Arc<sidequery::ForkedAgentRunner>,
@@ -1885,6 +1919,113 @@ pub struct SessionMemoryHandle {
     pub config_home: std::path::PathBuf,
     /// Runtime used to background-spawn the extraction fork.
     pub runtime: Arc<dyn traits::RuntimeSpawner>,
+    /// One extraction at a time per conversation. The flag is claimed before
+    /// spawning so scheduler reordering cannot let an older history snapshot
+    /// run after a newer extraction and move the watermark backwards.
+    pub(crate) in_flight: std::sync::atomic::AtomicBool,
+    /// Invalidates extraction tasks captured before `/clear` or in-place
+    /// resume. A stale task checks this after acquiring the extractor lock, so
+    /// the reset either waits for its commit or makes it exit without mutation.
+    pub(crate) generation: std::sync::atomic::AtomicU64,
+}
+
+/// Keep the parent's cacheable prefix byte-identical while appending messages
+/// that landed after the successful API call which produced that prefix. A
+/// prefix mismatch (for example after a history rewrite) falls back to the live
+/// history: correctness takes precedence over a cache hit.
+fn extend_session_memory_fork_context(
+    fork_context_messages: &mut Vec<ConversationMessage>,
+    history: &[ConversationMessage],
+) {
+    if history.starts_with(fork_context_messages) {
+        let cached_len = fork_context_messages.len();
+        fork_context_messages.extend_from_slice(&history[cached_len..]);
+    } else {
+        *fork_context_messages = history.to_vec();
+    }
+}
+
+/// Owns the extraction reservation until the background task has finished (or
+/// the parent future is dropped before the task is spawned). Keeping the handle
+/// in the guard closes the cancellation window between the CAS and `spawn`.
+struct SessionMemoryInFlightReset(Arc<SessionMemoryHandle>);
+
+impl Drop for SessionMemoryInFlightReset {
+    fn drop(&mut self) {
+        self.0
+            .in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BoundedUtf8Read {
+    content: String,
+    truncated: bool,
+}
+
+/// Read at most `max_bytes` without allocating for the complete file, plus one
+/// look-ahead byte so the caller can distinguish an exact-fit file from a
+/// truncated prefix. Invalid UTF-8 in the retained prefix remains an error,
+/// matching `read_to_string`; only an incomplete scalar at a bounded-read edge
+/// is discarded.
+async fn read_utf8_prefix(
+    path: &std::path::Path,
+    max_bytes: usize,
+    max_chars: usize,
+) -> std::io::Result<BoundedUtf8Read> {
+    use tokio::io::AsyncReadExt as _;
+
+    let file = tokio::fs::File::open(path).await?;
+    let read_limit = max_bytes.saturating_add(1);
+    let mut bytes = Vec::with_capacity(read_limit.min(64 * 1024));
+    file.take(u64::try_from(read_limit).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)
+        .await?;
+    let mut truncated = bytes.len() > max_bytes;
+    bytes.truncate(max_bytes);
+    let mut text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text.to_string(),
+        Err(error) if error.error_len().is_none() => {
+            truncated = true;
+            bytes.truncate(error.valid_up_to());
+            String::from_utf8(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+        }
+        Err(error) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+    };
+    // Claude's limit is JavaScript `String.length` (UTF-16 code units), not
+    // Rust scalar count. Never split a scalar, and count astral characters as
+    // two units just like the model-facing implementation.
+    let mut utf16_units = 0usize;
+    let mut truncate_at = None;
+    for (byte_index, ch) in text.char_indices() {
+        let units = ch.len_utf16();
+        if utf16_units.saturating_add(units) > max_chars {
+            truncate_at = Some(byte_index);
+            break;
+        }
+        utf16_units = utf16_units.saturating_add(units);
+    }
+    if let Some(byte_index) = truncate_at {
+        text.truncate(byte_index);
+        truncated = true;
+    }
+    Ok(BoundedUtf8Read {
+        content: text,
+        truncated,
+    })
+}
+
+/// Model-visible body for Claude Code's `compact_file_reference` attachment.
+///
+/// Byte-exact with the 2.1.246 attachment renderer (`F7r`) after substituting
+/// its escaped filename and the active Read tool name.
+fn compact_file_reference_body(path: &std::path::Path, read_tool_name: &str) -> String {
+    let path = crate::prompt::sanitize::escape_reminder_path(&path.to_string_lossy());
+    format!(
+        "Note: {path} was read before the last conversation was summarized, but the contents are too large to include. Use {read_tool_name} tool if you need to access it."
+    )
 }
 
 /// Find the assistant message carrying a `tool_use` with `tool_use_id` that has
@@ -2012,6 +2153,7 @@ impl ConversationOrchestrator {
                 && tool_search_supported_for_request(&config.model, None),
         );
         let session = SessionState::empty(SessionId::new(), config.model.clone());
+        let invoked_skill_session_id = session.session_id.to_string();
         let current_effort = config.effort.clone();
         let current_reasoning_selection = current_effort
             .as_ref()
@@ -2028,6 +2170,9 @@ impl ConversationOrchestrator {
             perms,
             output,
             session: Arc::new(Mutex::new(session)),
+            invoked_skill_session_guard: compaction::invoked_skills::InvokedSkillSessionGuard::new(
+                invoked_skill_session_id,
+            ),
             turn_gate: Arc::new(Mutex::new(())),
             current_effort: std::sync::RwLock::new(current_effort),
             dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate::default(),
@@ -2184,14 +2329,37 @@ impl ConversationOrchestrator {
                 outgoing_history_rewriter: None,
             }
         };
-        match self.model_call_preparer.as_ref() {
+        let prepared = match self.model_call_preparer.as_ref() {
             Some(preparer) => {
                 preparer
                     .prepare(self, path, system_prompt, cancel, draft)
                     .await
             }
             None => Ok(draft),
+        }?;
+        Ok(self.apply_context_collapse_projection(prepared))
+    }
+
+    fn apply_context_collapse_projection(
+        &self,
+        mut prepared: PreparedModelCall,
+    ) -> PreparedModelCall {
+        let Some(compactor) = self.compaction.clone() else {
+            return prepared;
+        };
+        if !compaction::is_context_collapse_enabled() {
+            return prepared;
         }
+
+        prepared.history_snapshot = compactor
+            .context_collapse
+            .apply_collapses_if_needed(prepared.history_snapshot)
+            .messages;
+        prepared.outgoing_history_rewriter = Some(Arc::new(ContextCollapseHistoryRewriter {
+            inner: prepared.outgoing_history_rewriter.take(),
+            compactor,
+        }));
+        prepared
     }
 
     /// Apply a retry-safe outgoing-history rewrite when a recovery path rebuilds
@@ -2204,6 +2372,82 @@ impl ConversationOrchestrator {
         match rewriter {
             Some(rewriter) => rewriter.rewrite(self, raw_history).await,
             None => Ok(raw_history),
+        }
+    }
+
+    /// Persist the append-only commits followed by the last-wins staged-state
+    /// snapshot produced by a collapse drain. Failures are best-effort, matching
+    /// transcript side-record writes: the in-memory projection remains usable
+    /// for the current retry even if durable persistence is unavailable.
+    pub(crate) async fn persist_context_collapse_drain(&self, drain: &compaction::DrainResult) {
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return;
+        };
+        let session_id = self.session.lock().await.session_id.as_uuid().to_string();
+        for commit in &drain.commits {
+            if let Err(error) = writer
+                .append_context_collapse_commit(
+                    &session_id,
+                    &commit.collapse_id,
+                    &commit.summary_uuid,
+                    &commit.summary_content,
+                    &commit.summary,
+                    &commit.first_archived_uuid,
+                    &commit.last_archived_uuid,
+                )
+                .await
+            {
+                tracing::warn!(%error, "failed to persist context-collapse commit");
+            }
+        }
+        let staged = serde_json::to_value(&drain.snapshot.staged)
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+        if let Err(error) = writer
+            .append_context_collapse_snapshot(
+                &session_id,
+                &staged,
+                drain.snapshot.armed,
+                drain.snapshot.last_spawn_tokens,
+            )
+            .await
+        {
+            tracing::warn!(%error, "failed to persist context-collapse snapshot");
+        }
+    }
+
+    /// Restore context-collapse side records from a tolerant transcript load.
+    /// Strict no-op when no compactor is wired; callers may invoke this
+    /// unconditionally during resume so an empty record set clears stale state.
+    pub fn restore_context_collapse_from_json(
+        &self,
+        commits: &[serde_json::Value],
+        snapshot: Option<&serde_json::Value>,
+    ) -> Result<(), serde_json::Error> {
+        let Some(compactor) = self.compaction.as_ref() else {
+            return Ok(());
+        };
+        compactor
+            .context_collapse
+            .restore_from_json_entries(commits, snapshot)
+    }
+
+    async fn reset_context_collapse_after_compact(&self) {
+        if !compaction::is_context_collapse_enabled() {
+            return;
+        }
+        let Some(compactor) = self.compaction.as_ref() else {
+            return;
+        };
+        let reset = compactor.context_collapse.reset("compact");
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return;
+        };
+        let session_id = self.session.lock().await.session_id.as_uuid().to_string();
+        if let Err(error) = writer
+            .append_context_collapse_reset(&session_id, &reset.reason)
+            .await
+        {
+            tracing::warn!(%error, "failed to persist context-collapse reset");
         }
     }
 
@@ -2938,6 +3182,8 @@ impl ConversationOrchestrator {
                 .expect("with_session_id runs at construction, before any turn holds the lock");
             s.session_id = session_id;
         }
+        self.invoked_skill_session_guard
+            .replace(session_id.to_string());
         self
     }
 
@@ -3143,12 +3389,34 @@ impl ConversationOrchestrator {
         let Some(handle) = self.session_memory.clone() else {
             return;
         };
+        if handle
+            .in_flight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
+        // Own the reservation immediately. If any await below is cancelled,
+        // this guard drops and releases the flag; after spawn succeeds the
+        // spawned future owns the same guard until extraction completes.
+        let in_flight_reset = SessionMemoryInFlightReset(handle.clone());
         // The fork shares the parent's cache-safe prefix; without it (early in a
         // session) skip — a later turn re-checks.
         let Some(slot) = self.cache_safe_slot.as_ref() else {
+            handle
+                .in_flight
+                .store(false, std::sync::atomic::Ordering::Release);
             return;
         };
-        let Some(params) = slot.get_last().await else {
+        let Some(mut params) = slot.get_last().await else {
+            handle
+                .in_flight
+                .store(false, std::sync::atomic::Ordering::Release);
             return;
         };
         // Snapshot history + id without holding the session lock across the fork.
@@ -3156,27 +3424,65 @@ impl ConversationOrchestrator {
             let s = self.session.lock().await;
             (s.history.clone(), s.session_id)
         };
+        extend_session_memory_fork_context(&mut params.fork_context_messages, &history);
         let runtime = handle.runtime.clone();
-        let _ = runtime
+        let generation = handle.generation.load(std::sync::atomic::Ordering::Acquire);
+        let task_handle = handle.clone();
+        let spawn_result = runtime
             .spawn(
                 "session-memory-extract",
                 Box::pin(async move {
-                    let mut ex = handle.extractor.lock().await;
-                    if !ex.should_extract(&history) {
+                    let _in_flight = in_flight_reset;
+                    let covered_through = params
+                        .fork_context_messages
+                        .last()
+                        .map(ConversationMessage::id);
+                    let revision = {
+                        let mut ex = task_handle.extractor.lock().await;
+                        if task_handle
+                            .generation
+                            .load(std::sync::atomic::Ordering::Acquire)
+                            != generation
+                            || !ex.should_extract(&history)
+                        {
+                            return;
+                        }
+                        ex.state_revision()
+                    };
+
+                    let Ok(content) =
+                        memory::session_memory::SessionMemoryExtractor::run_extraction(
+                            &task_handle.runner,
+                            params,
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+
+                    let mut ex = task_handle.extractor.lock().await;
+                    if task_handle
+                        .generation
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        != generation
+                        || ex.state_revision() != revision
+                    {
                         return;
                     }
-                    let _ = ex
-                        .extract(
-                            &handle.runner,
-                            params,
-                            &session_id.to_string(),
-                            &history,
-                            &handle.config_home,
-                        )
-                        .await;
+                    let _ = ex.commit_extraction(
+                        &content,
+                        &session_id.to_string(),
+                        covered_through,
+                        &task_handle.config_home,
+                    );
                 }),
             )
             .await;
+        if spawn_result.is_err() {
+            handle
+                .in_flight
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// Wire the source of completed background (`async`) hook responses, folded
@@ -4030,8 +4336,8 @@ impl ConversationOrchestrator {
             )
             .await
         else {
-            // Esc landed during the post-compact tail (file re-reads /
-            // SessionStart hooks): the swap was skipped, history is untouched.
+            // Esc landed before the post-compact commit phase: no auxiliary
+            // state or history has been changed.
             return Err(traits::HandleError::ActionFailed(
                 "compaction cancelled".into(),
             ));
@@ -4070,14 +4376,14 @@ impl ConversationOrchestrator {
     /// a compaction the read-file-state is cleared (its entries no longer match
     /// the summarized history) and up to
     /// [`compaction::POST_COMPACT_MAX_FILES_TO_RESTORE`] of the most-recently-read
-    /// files are re-attached — capped at
-    /// [`compaction::POST_COMPACT_MAX_TOKENS_PER_FILE`] each and a running
+    /// files are re-attached — content capped at
+    /// [`compaction::POST_COMPACT_MAX_TOKENS_PER_FILE`] each (oversized reads
+    /// become `compact_file_reference` attachments) and a running
     /// [`compaction::POST_COMPACT_TOKEN_BUDGET`] total — so the model keeps the
     /// freshest file context across the boundary. Selection is the pure
     /// [`compaction::select_post_compact_files`]; each survivor is then RE-READ
-    /// from disk (the byte-faithful `eRg`/`XQn` behaviour — see below) before
-    /// [`compaction::budget_post_compact_files`] budgets the fresh contents, and
-    /// each survivor is rendered as a `<system-reminder>` meta user message.
+    /// from disk (the byte-faithful `eRg`/`XQn` behaviour — see below), budgeted,
+    /// and rendered as a `<system-reminder>` meta user message.
     ///
     /// P2-12 / `eRg` (`bin/claude.exe` offset ~91938880): the binary re-reads
     /// each selected file at compact time via `XQn(filename,
@@ -4091,10 +4397,11 @@ impl ConversationOrchestrator {
     /// its last read.
     ///
     /// SKILL restoration (`rRg`/`kGo`) IS wired here (P2-12): the Skill tool
-    /// records each invocation in the process-global
+    /// records each invocation in the process-global but session-scoped
     /// [`compaction::invoked_skills`] registry (`zSr`), and after the file arm we
-    /// [`compaction::invoked_skills::filter_for_agent`] the main-thread rows
-    /// (`agentId = None`), run [`compaction::restore_post_compact_skills`]
+    /// [`compaction::invoked_skills::filter_for_scope`] the current session's
+    /// main-thread rows (`agentId = None`), run
+    /// [`compaction::restore_post_compact_skills`]
     /// (`rRg`: `invokedAt` DESC, per-skill truncate 5000, budget 25000, registry
     /// write-back on truncation/overflow), and emit the survivors as ONE `isMeta`
     /// user message in the byte-faithful `invoked_skills` attachment shape
@@ -4139,17 +4446,23 @@ impl ConversationOrchestrator {
         }
 
         // ── SKILL restoration (`rRg`) ──
-        // Source candidates from the process-global invoked-skill registry
-        // (`kGo` on the main thread, `agentId = None`), budget them (`rRg`), and
+        // Source candidates from this session's rows in the process-global
+        // invoked-skill registry (`kGo` on the main thread, `agentId = None`),
+        // budget them (`rRg`), and
         // emit the survivors as ONE `isMeta` user message in the byte-faithful
         // `invoked_skills` attachment shape. Preserve the binary's LQn
         // deduplication against both plain message bodies and skill content
         // that already survived in an earlier invoked-skills attachment.
-        let skill_candidates = compaction::invoked_skills::filter_for_agent(None);
+        let session_id = self.session.lock().await.session_id.to_string();
+        let skill_candidates = compaction::invoked_skills::filter_for_scope(
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None),
+        );
         let already_attached_skills = self.post_compact_attached_skill_contents(boundary_context);
         let restored_skills =
             compaction::restore_post_compact_skills(skill_candidates, &already_attached_skills);
-        if let Some(body) = compaction::render_invoked_skills_attachment(&restored_skills) {
+        if let Some(rendered) =
+            compaction::render_invoked_skills_attachment_with_sidecar(&restored_skills)
+        {
             let message_id = protocol::MessageId::new();
             let contents = restored_skills
                 .iter()
@@ -4159,15 +4472,19 @@ impl ConversationOrchestrator {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(message_id, contents);
-            out.push(protocol::ConversationMessage::user_meta(message_id, body));
+            out.push(protocol::ConversationMessage::User {
+                id: message_id,
+                content: vec![rendered.into_content_block()],
+                is_meta: true,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+            });
         }
 
         out
     }
 
-    fn post_compact_attached_file_paths(
-        messages: &[protocol::ConversationMessage],
-    ) -> Vec<std::path::PathBuf> {
+    fn post_compact_attached_file_paths(messages: &[protocol::ConversationMessage]) -> Vec<String> {
         messages
             .iter()
             .flat_map(|message| {
@@ -4175,12 +4492,29 @@ impl ConversationOrchestrator {
                     .text_content()
                     .lines()
                     .filter_map(|line| {
-                        line.strip_prefix("Referenced file ").map(|rest| {
-                            let path = rest
-                                .split_once(" (restored after compaction):")
-                                .map_or(rest, |(path, _)| path);
+                        let path = line
+                            .strip_prefix("Referenced file ")
+                            .map(|rest| {
+                                rest.split_once(" (restored after compaction):")
+                                    .map_or(rest, |(path, _)| path)
+                            })
+                            .or_else(|| {
+                                line.strip_prefix("Note: ").and_then(|rest| {
+                                    rest.split_once(
+                                        " was read before the last conversation was summarized",
+                                    )
+                                    .map(|(path, _)| path)
+                                })
+                            })?;
+                        // The rendered path is already escaped. Normalize its
+                        // lexical form but do not escape it a second time (an
+                        // actual filename containing the literal `&lt;` must
+                        // remain distinguishable from a filename containing `<`).
+                        Some(
                             crate::turn_loop::normalize_lexically(std::path::Path::new(path))
-                        })
+                                .to_string_lossy()
+                                .into_owned(),
+                        )
                     })
                     .collect::<Vec<_>>()
             })
@@ -4225,7 +4559,7 @@ impl ConversationOrchestrator {
     async fn restore_post_compact_files_arm(
         &self,
         snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)>,
-        already_attached: &[std::path::PathBuf],
+        already_attached: &[String],
         plan_file: &std::path::Path,
     ) -> Vec<protocol::ConversationMessage> {
         let candidates: Vec<compaction::FileRestoreCandidate> = snapshot
@@ -4245,25 +4579,55 @@ impl ConversationOrchestrator {
             .into_iter()
             .filter(|candidate| {
                 let path = crate::turn_loop::normalize_lexically(&candidate.path);
-                path != plan_file && !already_attached.iter().any(|attached| attached == &path)
+                let rendered_path =
+                    crate::prompt::sanitize::escape_reminder_path(&path.to_string_lossy());
+                path != plan_file
+                    && !already_attached
+                        .iter()
+                        .any(|attached| attached == &rendered_path)
             })
             .collect();
         let selected = compaction::select_post_compact_files(candidates, &[]);
+
+        enum FreshFileAttachment {
+            Content {
+                path: std::path::PathBuf,
+                content: String,
+            },
+            Reference {
+                path: std::path::PathBuf,
+            },
+        }
 
         // RE-READ each selected file from disk (`XQn`), firing the restore
         // telemetry per file. A file that changed since its last read yields the
         // FRESH content; a deleted/unreadable file is dropped (never restoring the
         // stale snapshot content the model would otherwise have carried across the
         // boundary).
-        let mut fresh: Vec<compaction::FileRestoreCandidate> = Vec::with_capacity(selected.len());
+        let mut fresh = Vec::with_capacity(selected.len());
         for candidate in selected {
-            match tokio::fs::read_to_string(&candidate.path).await {
-                Ok(content) => {
+            match read_utf8_prefix(
+                &candidate.path,
+                compaction::thresholds::POST_COMPACT_MAX_BYTES_PER_FILE_READ,
+                compaction::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ,
+            )
+            .await
+            {
+                Ok(read) => {
                     self.fire_post_compact_file_restore(true).await;
-                    fresh.push(compaction::FileRestoreCandidate {
-                        content,
-                        ..candidate
-                    });
+                    if read.truncated
+                        || compaction::estimate_content_tokens(&read.content)
+                            > compaction::POST_COMPACT_MAX_TOKENS_PER_FILE
+                    {
+                        fresh.push(FreshFileAttachment::Reference {
+                            path: candidate.path,
+                        });
+                    } else {
+                        fresh.push(FreshFileAttachment::Content {
+                            path: candidate.path,
+                            content: read.content,
+                        });
+                    }
                 }
                 Err(_) => {
                     // Unreadable/deleted at compact time → drop; `XQn` returns
@@ -4273,23 +4637,33 @@ impl ConversationOrchestrator {
             }
         }
 
-        // Budgeting half of `eRg`: per-file cap (maxTokens 5000) + running budget
-        // (50000) over the FRESH re-read contents, preserving the DESC order.
-        let restored = compaction::budget_post_compact_files(fresh);
-
-        restored
+        let read_tool_name = self
+            .tools
+            .find_by_name("Read")
+            .map_or_else(|| "Read".to_string(), |tool| tool.name().to_string());
+        let mut running_tokens = 0u64;
+        fresh
             .into_iter()
-            .map(|file| {
-                // Render the restored file as a `<system-reminder>` meta user
-                // message carrying the (per-file-capped) content. Mirrors the
-                // `compact_file_reference` / `type:"file"` attachment surfacing a
-                // "Referenced file {path}" body with the file content.
-                let body = format!(
-                    "<system-reminder>\nReferenced file {} (restored after compaction):\n{}\n</system-reminder>",
-                    file.path.display(),
-                    file.content
-                );
-                protocol::ConversationMessage::user_meta(protocol::MessageId::new(), body)
+            .filter_map(|attachment| {
+                let body = match attachment {
+                    FreshFileAttachment::Content { path, content } => format!(
+                        "Referenced file {} (restored after compaction):\n{}",
+                        crate::prompt::sanitize::escape_reminder_path(&path.to_string_lossy()),
+                        crate::prompt::sanitize::escape_closing_system_reminder(&content)
+                    ),
+                    FreshFileAttachment::Reference { path } => {
+                        compact_file_reference_body(&path, &read_tool_name)
+                    }
+                };
+                let cost = compaction::estimate_content_tokens(&body);
+                if running_tokens.saturating_add(cost) > compaction::POST_COMPACT_TOKEN_BUDGET {
+                    return None;
+                }
+                running_tokens = running_tokens.saturating_add(cost);
+                Some(protocol::ConversationMessage::user_meta(
+                    protocol::MessageId::new(),
+                    format!("<system-reminder>\n{body}\n</system-reminder>"),
+                ))
             })
             .collect()
     }
@@ -4315,10 +4689,11 @@ impl ConversationOrchestrator {
             .await;
     }
 
-    /// `cancel`: the manual `/compact` path threads its Esc token so an abort
-    /// that lands during this tail (file re-reads, SessionStart hooks) still
-    /// skips the history swap — `None` (auto/reactive callers, which have no
-    /// user-cancellable surface) never returns `None`.
+    /// `cancel`: the manual `/compact` path threads its Esc token to the
+    /// post-summary commit boundary. Cancellation before that boundary leaves
+    /// both history and auxiliary state untouched; after commit begins the
+    /// transition finishes atomically. `None` (auto/reactive callers, which
+    /// have no user-cancellable surface) never returns `None`.
     pub(crate) async fn apply_post_compact(
         &self,
         result: compaction::IterationCompactionResult,
@@ -4400,6 +4775,26 @@ impl ConversationOrchestrator {
             anchor_uuid.as_ref(),
         );
 
+        // This is the commit boundary for the post-compact transition. Every
+        // phase below mutates live auxiliary state (read-state, invoked-skill
+        // budgets, cleanup registries, and lifecycle hooks), some of which
+        // cannot be rolled back. Honour cancellation before entering that phase;
+        // once it starts, finish the transition so history and auxiliary state
+        // cannot disagree.
+        if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return None;
+        }
+        let session_memory_progress = if let Some(handle) = self.session_memory.clone() {
+            let history = self.session.lock().await.history.clone();
+            let mut extractor = handle.extractor.lock().await;
+            let pending = extractor.pending_tool_calls_for_history(&history);
+            let revision = extractor.state_revision();
+            drop(extractor);
+            Some((handle, pending, revision))
+        } else {
+            None
+        };
+
         // #59: snapshot the read-file-state BEFORE clearing it, then restore the
         // most-recent files as post-compact attachments. Mirrors `Iqn`
         // (`bin/claude.exe` offset 202817825): `let f=eOt(d.readFileState);
@@ -4418,6 +4813,7 @@ impl ConversationOrchestrator {
         // skills. Run the module-state cleanup first so the reload observes a
         // fresh post-compact state rather than the pre-compact caches.
         compaction::run_post_compact_cleanup(None);
+        self.reset_context_collapse_after_compact().await;
         self.fire_instructions_loaded_with_reason(hooks::events::InstructionsLoadReason::Compact)
             .await;
         let session_start_messages = self.collect_session_start_messages("compact").await;
@@ -4454,6 +4850,19 @@ impl ConversationOrchestrator {
         // `hookResults` slot in Claude's `buildPostCompactMessages` order.
         history_after.extend(session_start_messages.iter().cloned());
 
+        if let Some((handle, pending_tool_calls, revision)) = session_memory_progress {
+            let mut extractor = handle.extractor.lock().await;
+            // A background extraction may have committed while post-compact
+            // hooks/files were being assembled. In that case its newer state
+            // owns the watermark; do not overwrite it with the stale snapshot.
+            if extractor.state_revision() == revision {
+                extractor.record_compaction_boundary(
+                    history_after.last().map(ConversationMessage::id),
+                    pending_tool_calls,
+                );
+            }
+        }
+
         // Claude mutates the boundary metadata only after the complete
         // post-compact message set has been assembled. This includes the
         // boundary, summary, preserved tail, vision sidecars, restored
@@ -4464,14 +4873,6 @@ impl ConversationOrchestrator {
             u64::try_from(compact_started.elapsed().as_millis()).unwrap_or(u64::MAX)
         }));
         let dropped_this_pass = pre_tokens_estimate.saturating_sub(post_tokens);
-        // LAST cancel checkpoint (CC re-checks `signal.aborted` between
-        // phases): everything above is side-effect-free w.r.t. session state,
-        // so an Esc that landed during the attachment re-reads / SessionStart
-        // hooks aborts here — before the cumulative counter, the history swap,
-        // the JSONL persist, and the CompactionCompleted emit.
-        if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-            return None;
-        }
         let previous_dropped = self
             .compaction_cumulative_dropped_tokens
             .fetch_add(dropped_this_pass, std::sync::atomic::Ordering::Relaxed);
@@ -4871,6 +5272,15 @@ impl ConversationOrchestrator {
             // No compactor wired — strict no-op (history untouched).
             return;
         };
+
+        // Context collapse owns proactive headroom while enabled. Its committed
+        // view is applied later by `prepare_model_call_snapshot`; prompt-too-long
+        // recovery drains staged collapses before the ordinary compact fallback.
+        // The gate is default-off, so the established autocompact path remains
+        // byte-identical unless explicitly enabled.
+        if compaction::is_context_collapse_enabled() {
+            return;
+        }
 
         // #54 per-turn turn-counter increment + `tengu_post_autocompact_turn`
         // emit (binary `if(le?.compacted)le.turnCounter++,G(
@@ -8719,6 +9129,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 ctx,
             )
             .await;
+        compaction::invoked_skills::clear_session(&session_id.to_string());
     }
 
     /// Whether any registered hook subscribes to the `Notification` event.
@@ -14057,15 +14468,20 @@ message with multiple tool uses so they run concurrently."
         let cwd = tokio::fs::canonicalize(self.session_cwd.cwd())
             .await
             .unwrap_or_else(|_| self.session_cwd.cwd());
+        let excluder = self.memory.excluder();
 
         let mut surfaced: Vec<crate::prompt::MemoryFile> = Vec::new();
         {
             let mut sent = self.sent_nested_memory.lock().await;
             let mut sent_rules = self.sent_conditional_rules.lock().await;
             for trigger in &touched {
-                for f in
-                    crate::prompt::nested_memory::discover(trigger, &cwd, &home, managed.as_deref())
-                {
+                for f in crate::prompt::nested_memory::discover_with_excludes(
+                    trigger,
+                    &cwd,
+                    &home,
+                    managed.as_deref(),
+                    excluder.as_ref(),
+                ) {
                     if sent.contains(&f.path) {
                         continue;
                     }
@@ -14227,9 +14643,10 @@ message with multiple tool uses so they run concurrently."
         // Latest REAL user message = the turn query. Compact summaries,
         // transcript-only rows, Stop-hook feedback, and tool-result user rows
         // are synthetic context rather than user intent.
-        let query = {
+        let (query, session_id) = {
             let s = self.session.lock().await;
-            s.history
+            let query = s
+                .history
                 .iter()
                 .rev()
                 .find_map(|message| match message {
@@ -14252,13 +14669,16 @@ message with multiple tool uses so they run concurrently."
                     }
                     _ => None,
                 })
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (query, s.session_id.to_string())
         };
         // Task 5 (worktree 206 session-cwd plumbing): the live cwd, so a future
         // non-stub prefetch derives the memdir from the post-swap worktree, not
         // the frozen boot cwd. Currently inert (the stub prefetch ignores its
         // cwd argument), so this is a no-behavior-change correctness fix.
-        let pending = prefetch.start(query, self.session_cwd.cwd()).await;
+        let pending = prefetch
+            .start_for_session(query, self.session_cwd.cwd(), Some(session_id))
+            .await;
         *self.pending_memory_prefetch.lock().await = Some(pending);
     }
 

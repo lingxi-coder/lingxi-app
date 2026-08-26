@@ -25,7 +25,7 @@
 //! m3-02 plan invented one). `enabled == false` keeps the whole subsystem inert,
 //! so the ~4000 locked fixtures stay byte-identical.
 
-use crate::file::MemoryError;
+use crate::file::{parse_markdown_with_frontmatter, MemoryError, MemoryFrontmatter};
 use protocol::{ConversationMessage, MessageId};
 use sidequery::{CacheSafeParams, ForkPurpose, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
 use std::path::{Path, PathBuf};
@@ -78,6 +78,16 @@ pub struct SessionMemoryExtractor {
     /// the initialization-vs-update threshold choice and the "tool calls since"
     /// window. `None` until the first extraction completes.
     last_extracted_message_id: Option<MessageId>,
+    /// Most recently observed "tool calls since extraction" count while the
+    /// extraction watermark was still visible. When compaction drops that
+    /// watermark, this becomes the carried-forward baseline.
+    observed_tool_calls_since_extraction: u32,
+    /// After compaction removes the extraction watermark from retained history,
+    /// count newly visible tool calls from this compacted tail onward.
+    post_compaction_anchor_message_id: Option<MessageId>,
+    /// Monotonic revision used to reject compact snapshots that span an
+    /// intervening background extraction.
+    state_revision: u64,
 }
 
 impl SessionMemoryExtractor {
@@ -87,6 +97,9 @@ impl SessionMemoryExtractor {
         Self {
             config,
             last_extracted_message_id: None,
+            observed_tool_calls_since_extraction: 0,
+            post_compaction_anchor_message_id: None,
+            state_revision: 0,
         }
     }
 
@@ -103,6 +116,56 @@ impl SessionMemoryExtractor {
         self.last_extracted_message_id.is_some()
     }
 
+    /// Borrow the last extraction watermark, if any.
+    #[must_use]
+    pub fn extraction_watermark(&self) -> Option<&MessageId> {
+        self.last_extracted_message_id.as_ref()
+    }
+
+    /// The accumulated "tool calls since extraction" count currently tracked by
+    /// this extractor, including any carried progress across compaction.
+    #[must_use]
+    pub fn pending_tool_calls(&self) -> u32 {
+        self.observed_tool_calls_since_extraction
+    }
+
+    /// Revision of mutable extraction progress.
+    #[must_use]
+    pub fn state_revision(&self) -> u64 {
+        self.state_revision
+    }
+
+    fn bump_state_revision(&mut self) {
+        self.state_revision = self.state_revision.wrapping_add(1);
+    }
+
+    /// Mark a successful extraction as covering messages through
+    /// `covered_through`, resetting any carried threshold progress.
+    pub fn mark_extracted_through(&mut self, covered_through: Option<MessageId>) {
+        self.last_extracted_message_id = covered_through;
+        self.observed_tool_calls_since_extraction = 0;
+        self.post_compaction_anchor_message_id = None;
+        self.bump_state_revision();
+    }
+
+    /// Reset conversation-scoped extraction state when an orchestrator clears
+    /// or replaces its active session.
+    pub fn reset(&mut self) {
+        self.mark_extracted_through(None);
+    }
+
+    /// Preserve exact pre-compaction threshold progress and resume counting
+    /// newly visible tool calls from the compacted tail afterwards.
+    pub fn record_compaction_boundary(
+        &mut self,
+        compacted_tail_message_id: Option<MessageId>,
+        tool_calls_since_extraction: u32,
+    ) {
+        self.observed_tool_calls_since_extraction = tool_calls_since_extraction;
+        self.post_compaction_anchor_message_id = compacted_tail_message_id;
+        self.bump_state_revision();
+    }
+
     /// Whether enough tool calls have accrued since the last extraction to
     /// trigger another one (spec §6.5 `should_extract`).
     ///
@@ -115,27 +178,7 @@ impl SessionMemoryExtractor {
         if !self.config.enabled {
             return false;
         }
-        // A completed compaction can remove the exact watermark message. Treat
-        // the current compacted tail as the new baseline instead of recounting
-        // the entire retained window (which would repeatedly extract the same
-        // tool calls). Subsequent messages are measured from this anchor.
-        if self
-            .last_extracted_message_id
-            .as_ref()
-            .is_some_and(|id| !history.iter().any(|message| &message.id() == id))
-        {
-            if let Some(last) = history.last() {
-                self.last_extracted_message_id = Some(last.id());
-            }
-            return false;
-        }
-        // Thresholds are `u32`; clamp the count into `u32` for the compare (a
-        // tool-call count beyond `u32::MAX` is not reachable in a real session).
-        let n = u32::try_from(count_tool_calls_since(
-            history,
-            self.last_extracted_message_id.as_ref(),
-        ))
-        .unwrap_or(u32::MAX);
+        let n = self.pending_tool_calls_for_history(history);
         if self.is_initialized() {
             n >= self.config.update_threshold
         } else {
@@ -169,6 +212,49 @@ impl SessionMemoryExtractor {
         history: &[ConversationMessage],
         config_home: &Path,
     ) -> Result<String, MemoryError> {
+        self.extract_with_coverage(
+            runner,
+            cache_safe_params,
+            session_id,
+            history.last().map(ConversationMessage::id),
+            config_home,
+        )
+        .await
+    }
+
+    /// Run one forked extraction, persist the result, and mark only the
+    /// message range that actually reached the extractor as covered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::SelectorUnavailable`] if the forked extraction
+    /// call fails, or [`MemoryError::Io`] if the file write fails.
+    pub async fn extract_with_coverage(
+        &mut self,
+        runner: &ForkedAgentRunner,
+        cache_safe_params: CacheSafeParams,
+        session_id: &str,
+        covered_through: Option<MessageId>,
+        config_home: &Path,
+    ) -> Result<String, MemoryError> {
+        let content = Self::run_extraction(runner, cache_safe_params).await?;
+        self.commit_extraction(&content, session_id, covered_through, config_home)?;
+        Ok(content)
+    }
+
+    /// Run the model request for an extraction without mutating extractor
+    /// state or writing its result. Callers can therefore release their state
+    /// lock while the potentially slow side query is in flight, then validate
+    /// the captured session/revision before committing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::SelectorUnavailable`] when the forked request
+    /// fails.
+    pub async fn run_extraction(
+        runner: &ForkedAgentRunner,
+        cache_safe_params: CacheSafeParams,
+    ) -> Result<String, MemoryError> {
         let request = ForkedAgentRequest {
             prompt_messages: vec![ConversationMessage::user(
                 MessageId::new(),
@@ -184,22 +270,86 @@ impl SessionMemoryExtractor {
             .run(request)
             .await
             .map_err(|e| MemoryError::SelectorUnavailable(e.to_string()))?;
-        let content = result.final_text;
+        Ok(normalize_session_memory_document(&result.final_text))
+    }
 
+    /// Persist a previously generated extraction and advance its coverage
+    /// watermark. The orchestrator calls this only after revalidating the
+    /// session generation and extractor revision under its short state lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Io`] if the session-memory file cannot be written.
+    pub fn commit_extraction(
+        &mut self,
+        content: &str,
+        session_id: &str,
+        covered_through: Option<MessageId>,
+        config_home: &Path,
+    ) -> Result<(), MemoryError> {
         let path = session_memory_path(config_home, session_id);
-        write_session_memory(&path, &content)?;
+        write_session_memory(&path, content)?;
 
-        // Advance the watermark to the last message we covered so the next
-        // `should_extract` measures tool calls *since this extraction*.
-        self.last_extracted_message_id = history.last().map(ConversationMessage::id);
-
-        Ok(content)
+        // Advance the watermark only to the last message that actually reached
+        // the extraction fork so unseen newer history is not marked extracted.
+        self.mark_extracted_through(covered_through);
+        Ok(())
     }
 
     /// The `ForkPurpose` tag this extractor forks under (telemetry/log shape).
     #[must_use]
     pub fn fork_purpose() -> ForkPurpose {
         ForkPurpose::SessionMemoryExtraction
+    }
+
+    fn realign_after_compaction_if_needed(&mut self, history: &[ConversationMessage]) {
+        let Some(anchor) = self.active_count_anchor() else {
+            return;
+        };
+        if history.iter().any(|message| &message.id() == anchor) {
+            return;
+        }
+        let carried = if self.post_compaction_anchor_message_id.is_some() {
+            self.pending_tool_calls_for_history_without_realign(history)
+        } else {
+            self.observed_tool_calls_since_extraction
+        };
+        self.observed_tool_calls_since_extraction = carried;
+        self.post_compaction_anchor_message_id = history.last().map(ConversationMessage::id);
+    }
+
+    /// Return the exact threshold progress represented by `history`, carrying
+    /// previously observed progress across a compaction boundary when the old
+    /// extraction watermark is no longer present.
+    #[must_use]
+    pub fn pending_tool_calls_for_history(&mut self, history: &[ConversationMessage]) -> u32 {
+        self.realign_after_compaction_if_needed(history);
+        let total = self.pending_tool_calls_for_history_without_realign(history);
+        self.observed_tool_calls_since_extraction = total;
+        if self.post_compaction_anchor_message_id.is_some() {
+            self.post_compaction_anchor_message_id = history.last().map(ConversationMessage::id);
+        }
+        total
+    }
+
+    fn pending_tool_calls_for_history_without_realign(
+        &self,
+        history: &[ConversationMessage],
+    ) -> u32 {
+        let visible = u32::try_from(count_tool_calls_since(history, self.active_count_anchor()))
+            .unwrap_or(u32::MAX);
+        if self.post_compaction_anchor_message_id.is_some() {
+            self.observed_tool_calls_since_extraction
+                .saturating_add(visible)
+        } else {
+            visible
+        }
+    }
+
+    fn active_count_anchor(&self) -> Option<&MessageId> {
+        self.post_compaction_anchor_message_id
+            .as_ref()
+            .or(self.last_extracted_message_id.as_ref())
     }
 }
 
@@ -235,10 +385,63 @@ pub fn count_tool_calls_since(history: &[ConversationMessage], since: Option<&Me
 /// files under `<configHome>/.../session-memory/*.md` as `"session_memory"`.
 #[must_use]
 pub fn session_memory_path(config_home: &Path, session_id: &str) -> PathBuf {
+    let safe_session_id = sanitize_session_id(session_id);
     config_home
         .join("agents")
         .join("session-memory")
-        .join(format!("{session_id}.md"))
+        .join(format!("{safe_session_id}.md"))
+}
+
+/// Convert the external/session-facing identifier into a portable filename.
+/// `SessionId::Display` is `sess:<uuid>`; the prefix and colon are not part of
+/// the durable identity and the colon is illegal in Windows filenames.
+pub(crate) fn sanitize_session_id(session_id: &str) -> String {
+    let raw = session_id.strip_prefix("sess:").unwrap_or(session_id);
+    let mut safe = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            safe.push(ch);
+        } else {
+            safe.push('_');
+        }
+    }
+    if safe.is_empty() {
+        "unknown-session".to_string()
+    } else {
+        safe
+    }
+}
+
+/// Ensure persisted session memories carry the metadata required by the
+/// selector. The extractor is asked for frontmatter, but this fallback keeps
+/// malformed/legacy model output discoverable instead of silently producing an
+/// opaque UUID file with empty selector metadata.
+fn normalize_session_memory_document(raw: &str) -> String {
+    let (mut frontmatter, body) = parse_markdown_with_frontmatter(raw)
+        .unwrap_or_else(|_| (MemoryFrontmatter::default(), raw.to_string()));
+    if frontmatter.memory_type.is_empty() {
+        frontmatter.memory_type = "session_memory".to_string();
+    }
+    if frontmatter.description.trim().is_empty() {
+        frontmatter.description = body
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.trim_start_matches('#').trim())
+            .map_or_else(
+                || "Durable notes extracted from a previous session".to_string(),
+                |line| line.chars().take(160).collect(),
+            );
+    }
+    if frontmatter.when_to_use.is_none() {
+        frontmatter.when_to_use =
+            Some("When a future session needs durable context from this session.".to_string());
+    }
+    if frontmatter.tags.is_empty() {
+        frontmatter.tags.push("session".to_string());
+    }
+    let yaml = serde_yaml::to_string(&frontmatter).unwrap_or_default();
+    format!("---\n{yaml}---\n{body}")
 }
 
 /// Write `content` to `path`, creating parent directories as needed.
@@ -247,10 +450,21 @@ pub fn session_memory_path(config_home: &Path, session_id: &str) -> PathBuf {
 ///
 /// Returns [`MemoryError::Io`] if directory creation or the write fails.
 fn write_session_memory(path: &Path, content: &str) -> Result<(), MemoryError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| MemoryError::Io(e.to_string()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| MemoryError::Io("session-memory path has no parent".to_string()))?;
+    std::fs::create_dir_all(parent).map_err(|error| MemoryError::Io(error.to_string()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| MemoryError::Io("session-memory path has no file name".to_string()))?;
+    let mut options = traits::rooted_fs::AtomicWriteOptions::default();
+    #[cfg(unix)]
+    if let Ok(metadata) = std::fs::metadata(path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        options.file_mode = metadata.permissions().mode() & 0o777;
     }
-    std::fs::write(path, content).map_err(|e| MemoryError::Io(e.to_string()))
+    traits::rooted_fs::atomic_write(parent, Path::new(file_name), content.as_bytes(), options)
+        .map_err(|error| MemoryError::Io(error.to_string()))
 }
 
 /// Resolve the config-home directory used for session-memory writes:
@@ -274,7 +488,7 @@ pub fn config_home_dir() -> PathBuf {
 /// Distillation instruction handed to the forked extractor. Kept terse — the
 /// fork replays the parent's full cache-safe prefix (the conversation), so this
 /// only needs to steer the distillation, not restate the history.
-const SESSION_MEMORY_EXTRACTION_PROMPT: &str = "Distil durable, reusable notes from this session that a future session should remember — stable facts about the project, conventions, tooling, and decisions. Omit transient state and anything already obvious from the code. Respond with the notes only, as concise markdown.";
+const SESSION_MEMORY_EXTRACTION_PROMPT: &str = "Distil durable, reusable notes from this session that a future session should remember — stable facts about the project, conventions, tooling, and decisions. Omit transient state and anything already obvious from the code. Respond with ONE concise markdown document and no surrounding commentary. It MUST begin with YAML frontmatter containing memory_type: session_memory, a useful one-line description, when_to_use, and tags, followed by the notes body.";
 
 #[cfg(test)]
 mod tests {
@@ -331,6 +545,20 @@ mod tests {
     }
 
     #[test]
+    fn reset_clears_watermark_and_carried_progress() {
+        let mut ex = SessionMemoryExtractor::new(enabled_config(10, 3));
+        let watermark = user("watermark");
+        ex.mark_extracted_through(Some(watermark.id()));
+        ex.record_compaction_boundary(Some(user("tail").id()), 2);
+
+        ex.reset();
+
+        assert!(!ex.is_initialized());
+        assert_eq!(ex.pending_tool_calls(), 0);
+        assert!(ex.post_compaction_anchor_message_id.is_none());
+    }
+
+    #[test]
     fn should_extract_uses_initialization_threshold_before_first_extraction() {
         let mut ex = SessionMemoryExtractor::new(enabled_config(3, 1));
         assert!(!ex.is_initialized());
@@ -345,7 +573,7 @@ mod tests {
         let mut ex = SessionMemoryExtractor::new(enabled_config(10, 2));
         // Simulate a completed first extraction by setting the watermark.
         let watermark = user("watermark");
-        ex.last_extracted_message_id = Some(watermark.id());
+        ex.mark_extracted_through(Some(watermark.id()));
         assert!(ex.is_initialized());
 
         // History: watermark, then 1 tool call (since the watermark) => below
@@ -372,20 +600,55 @@ mod tests {
     }
 
     #[test]
-    fn missing_watermark_realigns_without_recounting_compacted_history() {
-        let mut ex = SessionMemoryExtractor::new(enabled_config(10, 1));
-        ex.last_extracted_message_id = Some(MessageId::new());
-        let history = vec![assistant_tools(3)];
-        let stale = MessageId::new();
-        assert_eq!(count_tool_calls_since(&history, Some(&stale)), 0);
-        assert!(!ex.should_extract(&history));
+    fn missing_watermark_preserves_pending_progress_across_compaction() {
+        let mut ex = SessionMemoryExtractor::new(enabled_config(10, 3));
+        let watermark = user("watermark");
+        ex.mark_extracted_through(Some(watermark.id()));
+
+        let pre_compact = vec![watermark, assistant_tools(1), assistant_tools(1)];
+        assert!(!ex.should_extract(&pre_compact));
+        assert_eq!(ex.pending_tool_calls(), 2);
+
+        let compacted = vec![user("compacted tail")];
+        assert!(!ex.should_extract(&compacted));
+        assert_eq!(ex.pending_tool_calls(), 2);
         assert_eq!(
-            ex.last_extracted_message_id,
-            history.last().map(ConversationMessage::id)
+            ex.post_compaction_anchor_message_id,
+            compacted.last().map(ConversationMessage::id)
         );
-        let mut next = history;
+
+        let mut next = compacted;
         next.push(assistant_tools(1));
         assert!(ex.should_extract(&next));
+        assert_eq!(ex.pending_tool_calls(), 3);
+    }
+
+    #[test]
+    fn record_compaction_boundary_resumes_from_compacted_tail() {
+        let mut ex = SessionMemoryExtractor::new(enabled_config(10, 3));
+        let watermark = user("watermark");
+        let compacted_tail = user("compacted tail");
+        ex.mark_extracted_through(Some(watermark.id()));
+        let revision_before_compaction = ex.state_revision();
+        ex.record_compaction_boundary(Some(compacted_tail.id()), 2);
+
+        assert_ne!(
+            ex.state_revision(),
+            revision_before_compaction,
+            "an in-flight extraction must reject its pre-compaction state snapshot"
+        );
+
+        assert!(!ex.should_extract(std::slice::from_ref(&compacted_tail)));
+        assert_eq!(ex.pending_tool_calls(), 2);
+
+        let after = vec![compacted_tail, assistant_tools(1)];
+        assert!(ex.should_extract(&after));
+        assert_eq!(ex.pending_tool_calls(), 3);
+        assert!(
+            ex.should_extract(&after),
+            "re-checking unchanged history is stable"
+        );
+        assert_eq!(ex.pending_tool_calls(), 3, "must not double-count the tail");
     }
 
     #[test]
@@ -452,13 +715,134 @@ mod tests {
             .await
             .expect("extract succeeds");
 
-        assert_eq!(written, "DISTILLED NOTES");
+        assert!(written.starts_with("---\n"));
+        let (frontmatter, body) = parse_markdown_with_frontmatter(&written).unwrap();
+        assert_eq!(frontmatter.memory_type, "session_memory");
+        assert_eq!(frontmatter.description, "DISTILLED NOTES");
+        assert_eq!(body, "DISTILLED NOTES");
         // File landed under agents/session-memory/<id>.md.
         let path = session_memory_path(dir.path(), "sess-xyz");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "DISTILLED NOTES");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
         // Watermark advanced to the last message so the next window starts fresh.
         assert_eq!(ex.last_extracted_message_id, Some(last_id));
         assert!(ex.is_initialized());
+        assert_eq!(ex.pending_tool_calls(), 0);
+    }
+
+    #[test]
+    fn session_memory_path_sanitizes_display_ids_for_all_platforms() {
+        let path = session_memory_path(
+            Path::new("/cfg"),
+            "sess:01234567-89ab-cdef-0123-456789abcdef",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from("/cfg/agents/session-memory/01234567-89ab-cdef-0123-456789abcdef.md")
+        );
+    }
+
+    #[test]
+    fn normalize_session_memory_document_adds_selector_metadata_to_plain_output() {
+        let normalized =
+            normalize_session_memory_document("# Project convention\nUse cargo test.\n");
+        let (frontmatter, body) = parse_markdown_with_frontmatter(&normalized).unwrap();
+        assert_eq!(frontmatter.memory_type, "session_memory");
+        assert_eq!(frontmatter.description, "Project convention");
+        assert!(frontmatter.when_to_use.is_some());
+        assert_eq!(frontmatter.tags, vec!["session"]);
+        assert_eq!(body, "# Project convention\nUse cargo test.\n");
+    }
+
+    #[tokio::test]
+    async fn extract_with_coverage_only_advances_to_visible_watermark() {
+        use async_trait::async_trait;
+        use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+        use tool_api::context::ToolUseOptions;
+
+        struct Client;
+        #[async_trait]
+        impl SideQueryClient for Client {
+            async fn query(
+                &self,
+                _req: SideQueryRequest,
+            ) -> Result<SideQueryResponse, SideQueryError> {
+                Ok(SideQueryResponse {
+                    text: Some("DISTILLED NOTES".into()),
+                    structured: None,
+                    tool_calls: Vec::new(),
+                    usage: cost::Usage::default(),
+                    stop_reason: Some("end_turn".into()),
+                    retry_count: 0,
+                })
+            }
+        }
+
+        let runner = ForkedAgentRunner::new()
+            .with_side_query_client(Arc::new(Client), "claude-haiku-4-5".into());
+        let cache_safe = CacheSafeParams {
+            system_prompt: Arc::from("SYS"),
+            user_context: std::collections::HashMap::new(),
+            system_context: std::collections::HashMap::new(),
+            tool_use_options: ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: "claude-haiku-4-5".into(),
+                model_profile: None,
+                max_budget_nano_usd: None,
+                mcp_clients: vec![],
+                is_non_interactive_session: false,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            fork_context_messages: vec![],
+            transcript_path: None,
+            generation: 1,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut ex = SessionMemoryExtractor::new(enabled_config(1, 1));
+        let visible = user("visible");
+        let unseen = user("unseen");
+
+        ex.extract_with_coverage(
+            &runner,
+            cache_safe,
+            "sess-xyz",
+            Some(visible.id()),
+            dir.path(),
+        )
+        .await
+        .expect("extract succeeds");
+
+        assert_eq!(ex.extraction_watermark(), Some(&visible.id()));
+        assert_ne!(ex.extraction_watermark(), Some(&unseen.id()));
+        assert_eq!(ex.pending_tool_calls(), 0);
+    }
+
+    #[test]
+    fn atomic_write_rejects_a_directory_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blocked.md");
+        std::fs::create_dir(&path).unwrap();
+
+        write_session_memory(&path, "notes").expect_err("directory replacement must fail");
+        assert!(path.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sess.md");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        write_session_memory(&path, "new").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
     }
 
     #[test]

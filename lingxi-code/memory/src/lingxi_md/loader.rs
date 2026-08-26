@@ -46,6 +46,7 @@
 //! before sanitisation) and has been
 //! removed.
 
+use crate::lingxi_md::{LingxiMdExcluder, LingxiMdTier};
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -281,8 +282,8 @@ pub async fn emit_file_too_large(
 //     `<!-- -->` inside one is treated as normal text.
 //   - Emphasis/link markup wrapping a bare `@path` may leave trailing markup
 //     in the captured path.
-//   - Symlink resolution (safeResolvePath) is not performed; the cycle guard
-//     compares lexically-normalised paths.
+//   - Symlink identities are resolved for exclusion/dedupe, while emitted paths
+//     retain the lexical spelling discovered by the hierarchy walker.
 // These edges do not occur in any LINGXI.md we ship and are documented here.
 // ---------------------------------------------------------------------------
 
@@ -352,17 +353,34 @@ pub fn discover_external_include_paths(
     cwd: &Path,
     home: Option<&Path>,
 ) -> Vec<PathBuf> {
+    discover_external_include_paths_with_excluder(path, cwd, home, LingxiMdTier::Project, None)
+}
+
+/// Exclude-aware variant of [`discover_external_include_paths`].
+#[must_use]
+pub fn discover_external_include_paths_with_excluder(
+    path: &Path,
+    cwd: &Path,
+    home: Option<&Path>,
+    tier: LingxiMdTier,
+    excluder: Option<&LingxiMdExcluder>,
+) -> Vec<PathBuf> {
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         path: &Path,
         cwd: &Path,
         home: Option<&Path>,
         depth: usize,
+        tier: LingxiMdTier,
+        excluder: Option<&LingxiMdExcluder>,
         processed: &mut HashSet<PathBuf>,
         external_seen: &mut HashSet<PathBuf>,
         external: &mut Vec<PathBuf>,
     ) {
-        let key = lexical_normalize(path);
-        if depth >= MAX_INCLUDE_DEPTH || !processed.insert(key) {
+        if is_memory_path_excluded(path, tier, excluder) {
+            return;
+        }
+        if depth >= MAX_INCLUDE_DEPTH || !claim_path_identities(path, processed) {
             return;
         }
         let Ok(loaded) = load_file(path, None) else {
@@ -377,8 +395,18 @@ pub fn discover_external_include_paths(
                 continue;
             }
             if !path_in_working_path(&include, cwd) {
+                // Apply the same exclusion policy to the external target
+                // itself before exposing it in the startup approval list. The
+                // target may not exist yet, so `is_memory_path_excluded` checks
+                // both lexical and canonical identities when available.
+                if is_memory_path_excluded(&include, tier, excluder) {
+                    continue;
+                }
                 let normalized =
                     std::fs::canonicalize(&include).unwrap_or_else(|_| lexical_normalize(&include));
+                if is_memory_path_excluded(&normalized, tier, excluder) {
+                    continue;
+                }
                 if external_seen.insert(normalized.clone()) {
                     external.push(normalized);
                 }
@@ -389,6 +417,8 @@ pub fn discover_external_include_paths(
                 cwd,
                 home,
                 depth + 1,
+                tier,
+                excluder,
                 processed,
                 external_seen,
                 external,
@@ -404,6 +434,8 @@ pub fn discover_external_include_paths(
         cwd,
         home,
         0,
+        tier,
+        excluder,
         &mut processed,
         &mut external_seen,
         &mut external,
@@ -416,9 +448,9 @@ pub fn discover_external_include_paths(
 /// directive order — matching claude-code `processMemoryFile`
 /// (claudemd.ts:661-684: "Add the main file first (parent before children)").
 ///
-/// - `processed`: shared cycle guard. A file is recorded (by lexically
-///   normalised path) BEFORE it is read, so a file that imports an ancestor
-///   is skipped (claudemd.ts:629-645).
+/// - `processed`: shared cycle guard. A file's lexical and resolved identities
+///   are recorded BEFORE it is read, so imports through symlink aliases cannot
+///   replay an ancestor (claudemd.ts:629-645).
 /// - `include_external`: when `false`, includes resolving OUTSIDE `cwd` are
 ///   skipped (claudemd.ts:667-670). User memory passes `true`.
 /// - `cwd`: original working dir used for the external-include gate.
@@ -444,14 +476,38 @@ pub fn expand_memory_file<S: std::hash::BuildHasher>(
     home: Option<&Path>,
     depth: usize,
 ) -> Vec<MemoryEntry> {
-    let key = lexical_normalize(path);
-    // Skip if already processed or max depth exceeded (claudemd.ts:630).
-    if depth >= MAX_INCLUDE_DEPTH || processed.contains(&key) {
+    expand_memory_file_with_excluder(
+        path,
+        processed,
+        include_external,
+        cwd,
+        home,
+        depth,
+        LingxiMdTier::Project,
+        None,
+    )
+}
+
+/// Exclude-aware variant of [`expand_memory_file`].
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn expand_memory_file_with_excluder<S: std::hash::BuildHasher>(
+    path: &Path,
+    processed: &mut HashSet<PathBuf, S>,
+    include_external: bool,
+    cwd: &Path,
+    home: Option<&Path>,
+    depth: usize,
+    tier: LingxiMdTier,
+    excluder: Option<&LingxiMdExcluder>,
+) -> Vec<MemoryEntry> {
+    if is_memory_path_excluded(path, tier, excluder) {
         return Vec::new();
     }
-    // Record before reading so cycles terminate even on read failure
-    // (claudemd.ts:645).
-    processed.insert(key);
+    // Skip if already processed or max depth exceeded (claudemd.ts:630).
+    if depth >= MAX_INCLUDE_DEPTH || !claim_path_identities(path, processed) {
+        return Vec::new();
+    }
 
     // Read; a stat-guard skip is logged + reported here rather than inside
     // `load_file`, matching the oracle's split: `EG` only stats and returns
@@ -507,17 +563,56 @@ pub fn expand_memory_file<S: std::hash::BuildHasher>(
         if is_external && !include_external {
             continue;
         }
-        result.extend(expand_memory_file(
+        result.extend(expand_memory_file_with_excluder(
             &inc,
             processed,
             include_external,
             cwd,
             home,
             depth + 1,
+            tier,
+            excluder,
         ));
     }
 
     result
+}
+
+fn is_memory_path_excluded(
+    path: &Path,
+    tier: LingxiMdTier,
+    excluder: Option<&LingxiMdExcluder>,
+) -> bool {
+    excluder.is_some_and(|excluder| {
+        excluder.is_excluded(path, tier)
+            || std::fs::canonicalize(path)
+                .ok()
+                .is_some_and(|resolved| excluder.is_excluded(&resolved, tier))
+    })
+}
+
+/// Claim both the lexical path and its resolved filesystem identity. This keeps
+/// symlink aliases from replaying one memory file or bypassing a cycle guard.
+fn claim_path_identities<S: std::hash::BuildHasher>(
+    path: &Path,
+    processed: &mut HashSet<PathBuf, S>,
+) -> bool {
+    let lexical = lexical_normalize(path);
+    let resolved = std::fs::canonicalize(path)
+        .ok()
+        .map(|path| lexical_normalize(&path));
+    if processed.contains(&lexical)
+        || resolved
+            .as_ref()
+            .is_some_and(|resolved| processed.contains(resolved))
+    {
+        return false;
+    }
+    processed.insert(lexical);
+    if let Some(resolved) = resolved {
+        processed.insert(resolved);
+    }
+    true
 }
 
 /// claude-code text-file extension allowlist (binary `cwd` Set @197189020). An
@@ -1081,6 +1176,12 @@ fn build_scannable_text(content: &str) -> String {
     while i < lines.len() {
         let probe = lines[i].trim_end_matches(['\r', '\n']);
 
+        if is_indented_code_line(probe) {
+            buf.push('\n');
+            i += 1;
+            continue;
+        }
+
         if let Some((fc, fl)) = fence {
             if is_closing_fence(probe, fc, fl) {
                 fence = None;
@@ -1226,6 +1327,10 @@ fn count_leading_spaces(s: &str) -> usize {
 fn strip_leading_spaces_max3(s: &str) -> &str {
     let n = count_leading_spaces(s).min(3);
     &s[n..]
+}
+
+fn is_indented_code_line(s: &str) -> bool {
+    s.starts_with('\t') || count_leading_spaces(s) >= 4
 }
 
 /// Lexically normalise a path (resolve `.` / `..` components) WITHOUT touching
@@ -1729,6 +1834,117 @@ mod import_tests {
     }
 
     #[test]
+    fn exclude_aware_discovery_skips_excluded_internal_parent_subtree() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("repo");
+        let nested_dir = cwd.join("secret");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let outside = tmp.path().join("outside.md");
+        fs::write(cwd.join("LINGXI.md"), "root\n@./secret/LINGXI.md\n").unwrap();
+        fs::write(nested_dir.join("LINGXI.md"), "@../../outside.md\n").unwrap();
+
+        let excluder = LingxiMdExcluder::new(&["**/secret/LINGXI.md".to_string()]);
+        let found = discover_external_include_paths_with_excluder(
+            &cwd.join("LINGXI.md"),
+            &cwd,
+            Some(tmp.path()),
+            LingxiMdTier::Project,
+            Some(&excluder),
+        );
+
+        assert!(
+            found.is_empty(),
+            "excluded parents must not leak external imports"
+        );
+        assert!(
+            !outside.exists(),
+            "preflight must not require the external target to exist"
+        );
+    }
+
+    #[test]
+    fn exclude_aware_discovery_skips_directly_excluded_external_target() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        let outside = tmp.path().join("private.md");
+        fs::write(&outside, "PRIVATE").unwrap();
+        fs::write(
+            cwd.join("LINGXI.md"),
+            format!("root\n@{}\n", outside.display()),
+        )
+        .unwrap();
+
+        let excluder = LingxiMdExcluder::new(&[outside.to_string_lossy().into_owned()]);
+        let found = discover_external_include_paths_with_excluder(
+            &cwd.join("LINGXI.md"),
+            &cwd,
+            Some(tmp.path()),
+            LingxiMdTier::Project,
+            Some(&excluder),
+        );
+
+        assert!(
+            found.is_empty(),
+            "excluded external targets must not be exposed"
+        );
+    }
+
+    #[test]
+    fn exclude_aware_expand_skips_excluded_import_subtree() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("repo");
+        let nested_dir = cwd.join("secret");
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::write(
+            cwd.join("LINGXI.md"),
+            "root\n@./secret/LINGXI.md\n@./allowed.md\n",
+        )
+        .unwrap();
+        fs::write(nested_dir.join("LINGXI.md"), "secret\n@./child.md\n").unwrap();
+        fs::write(nested_dir.join("child.md"), "child").unwrap();
+        fs::write(cwd.join("allowed.md"), "allowed").unwrap();
+
+        let excluder = LingxiMdExcluder::new(&["**/secret/LINGXI.md".to_string()]);
+        let mut processed = HashSet::new();
+        let entries = expand_memory_file_with_excluder(
+            &cwd.join("LINGXI.md"),
+            &mut processed,
+            true,
+            &cwd,
+            Some(tmp.path()),
+            0,
+            LingxiMdTier::Project,
+            Some(&excluder),
+        );
+
+        assert_eq!(
+            bodies(&entries),
+            vec!["root\n@./secret/LINGXI.md\n@./allowed.md", "allowed"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_alias_to_an_ancestor_is_not_loaded_twice() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        let root = cwd.join("LINGXI.md");
+        let alias = cwd.join("alias.md");
+        fs::write(&root, "root\n@./alias.md\n").unwrap();
+        symlink(&root, &alias).unwrap();
+
+        let mut processed = HashSet::new();
+        let entries = expand_memory_file(&root, &mut processed, true, &cwd, Some(tmp.path()), 0);
+
+        assert_eq!(entries.len(), 1, "symlink alias must share one identity");
+        assert_eq!(entries[0].path, root);
+    }
+
+    #[test]
     fn frontmatter_block_is_stripped_from_body() {
         let raw = "---\ntitle: secret\npaths: src/**\n---\nVISIBLE BODY\n";
         let parsed = parse_memory_content(raw, Path::new("/x/LINGXI.md"), None);
@@ -1865,6 +2081,13 @@ done
 ```
 inline `@./inline.md` here
 ";
+        let paths = extract_include_paths(content, Path::new("/base"), None);
+        assert_eq!(paths, vec![PathBuf::from("/base/real.md")]);
+    }
+
+    #[test]
+    fn import_inside_indented_code_block_is_not_extracted() {
+        let content = "    @./four-space.md\n\t@./tab.md\n@./real.md\n";
         let paths = extract_include_paths(content, Path::new("/base"), None);
         assert_eq!(paths, vec![PathBuf::from("/base/real.md")]);
     }

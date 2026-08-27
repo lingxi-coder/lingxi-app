@@ -14,6 +14,7 @@ body {
 @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes slide-in-r { from { opacity: 0; transform: translateX(8px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes shimmer { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.85; } }
+@keyframes text-sweep { from { background-position: 120% 0, 0 0; } to { background-position: -120% 0, 0 0; } }
 @keyframes pulse-ring { 0% { box-shadow: 0 0 0 0 var(--ring); } 100% { box-shadow: 0 0 0 8px transparent; } }
 @keyframes cursor-blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
 @keyframes scan { 0% { transform: translateY(-100%); } 100% { transform: translateY(100%); } }
@@ -60,8 +61,36 @@ body {
   text-overflow: ellipsis;
 }
 
+.running-sweep {
+  color: transparent !important;
+  background-image:
+    linear-gradient(
+      100deg,
+      transparent 0%,
+      transparent 42%,
+      var(--sweep-highlight) 50%,
+      transparent 58%,
+      transparent 100%
+    ),
+    linear-gradient(var(--sweep-base), var(--sweep-base));
+  background-repeat: no-repeat;
+  background-size: 240% 100%, 100% 100%;
+  background-position: 120% 0, 0 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: text-sweep 2.2s linear infinite;
+}
+
 button { font-family: inherit; }
 textarea, input { font-family: inherit; }
 :focus-visible { outline: 2px solid oklch(72% 0.18 268); outline-offset: 2px; }
 .drag-region { -webkit-app-region: drag; }
 .no-drag { -webkit-app-region: no-drag; }
+
+@media (prefers-reduced-motion: reduce) {
+  .running-sweep {
+    animation: none;
+    background-image: none;
+    color: var(--sweep-base) !important;
+  }
+}

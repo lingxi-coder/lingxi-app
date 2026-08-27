@@ -1,8 +1,7 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
 import type { RunItem } from '../model/runItem';
 import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './collapseStore';
-import { Icon } from './Icon';
 import { Disclosure } from './Disclosure';
 import { MarkdownContent } from './MarkdownContent';
 import { ToolCall } from './ToolCall';
@@ -63,10 +62,15 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
         onToggle={() => onSetOpen(item.id, !open)}
         buttonStyle={{ padding: '2px 6px 2px 2px', borderRadius: 6, fontSize: 12.5, fontWeight: 500 }}
         summary={
-          <>
-            <Icon name="spark" size={12} stroke={1.8} />
-            <span>{item.done ? 'Thought' : 'Thinking…'}</span>
-          </>
+          <span
+            className={item.done ? undefined : 'running-sweep'}
+            style={item.done ? undefined : {
+              '--sweep-base': t.text3,
+              '--sweep-highlight': t.text,
+            } as CSSProperties}
+          >
+            {item.done ? 'Thought' : 'Thinking…'}
+          </span>
         }
       >
         <div
@@ -179,7 +183,6 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           if (item.type === 'thinking') {
             return (
               <div key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
-                <GutterRule />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <ThinkingBlock
                     item={item}
@@ -226,16 +229,16 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
         {/* Streaming affordance — shown at the tail while a live turn runs. */}
         {running && (
           <div style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
-            <GutterRule />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: t.text3, fontSize: 13.5 }}>
+            <div style={{ display: 'flex', alignItems: 'center', color: t.text3, fontSize: 13.5 }}>
               <span
+                className="running-sweep"
                 style={{
-                  width: 10, height: 10, borderRadius: 99, background: t.accent,
-                  boxShadow: `0 0 0 4px color-mix(in oklab, ${t.accent} 22%, transparent)`,
-                  animation: 'shimmer 1.3s infinite', flexShrink: 0,
-                }}
-              />
-              <span style={{ animation: 'cursor-blink 1.1s step-end infinite' }}>Thinking…</span>
+                  '--sweep-base': t.text3,
+                  '--sweep-highlight': t.text,
+                } as CSSProperties}
+              >
+                Thinking…
+              </span>
             </div>
           </div>
         )}

@@ -29,7 +29,7 @@ export interface DisclosureProps {
   open: boolean;
   /** Toggle request. The caller decides what "open" means for this id. */
   onToggle(): void;
-  /** Summary content rendered inside the button, after the chevron. */
+  /** Summary content rendered inside the button, before the chevron. */
   summary: ReactNode;
   /** Body content. Rendered only while {@link open}. */
   children: ReactNode;
@@ -76,8 +76,8 @@ export function Disclosure({
         aria-label={label}
         style={{ color: t.text3, ...TRIGGER_BASE, ...buttonStyle }}
       >
-        <Icon name={open ? 'chevron' : 'chevronR'} size={13} stroke={2} />
         {summary}
+        <Icon name={open ? 'chevron' : 'chevronR'} size={13} stroke={2} />
       </button>
       {open && (
         <div id={bodyId} style={bodyStyle}>

@@ -29,6 +29,7 @@ import { tokens } from '../src/renderer/theme/tokens';
 import { LRM } from '../src/renderer/components/bidi';
 import { DiffView } from '../src/renderer/components/DiffView';
 import { PermissionPrompt } from '../src/renderer/components/PermissionPrompt';
+import { Stage } from '../src/renderer/components/Stage';
 import { ToolCall } from '../src/renderer/components/ToolCall';
 import type { ToolRunItem } from '../src/renderer/model/runItem';
 
@@ -65,6 +66,20 @@ const DIFF: StructuredDiffDto = {
   truncated_rows: 0,
   rows: [{ kind: 'add', line_no: 12, hunk: 0, segments: [{ text: 'let a = 2;', class: 'plain' }] }],
 };
+
+test('active agent thinking shimmers the text without a leading indicator', () => {
+  const html = render(React.createElement(Stage, {
+    liveItems: [{ type: 'thinking', id: 'thinking-1', text: 'Working', streamed: true }],
+    running: true,
+    sessionKey: 'session-a',
+  }));
+
+  assert.match(html, /class="running-sweep"[^>]*>Thinking…</);
+  assert.doesNotMatch(html, /width:10px;height:10px|border-radius:99px|box-shadow:0 0 0 4px/);
+  const thinking = html.indexOf('Thinking…');
+  const firstIcon = html.indexOf('<svg');
+  assert.ok(firstIcon === -1 || thinking < firstIcon, 'Thinking text must not have a leading icon');
+});
 
 // ── Defect 1: `direction: rtl` and the leading slash ─────────────────────────
 

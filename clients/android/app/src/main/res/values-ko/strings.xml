@@ -564,7 +564,7 @@
     <string name="local_apps_next">다음</string>
     <string name="local_apps_no_checkpoints">체크포인트가 없습니다</string>
     <string name="local_apps_not_found">앱이 존재하지 않습니다</string>
-    <string name="local_apps_open_preview">미리보기 열기</string>
+    <string name="local_apps_open_preview">앱 열기</string>
     <string name="local_apps_permission_data_mutation">에이전트가 앱 데이터를 수정하도록 허용하시겠습니까?</string>
     <string name="local_apps_permission_mutation_requires">데이터 수정이나 UI 제어는 처음에 권한이 필요합니다</string>
     <string name="local_apps_permission_network">앱의 네트워크 접근을 허용하시겠습니까?</string>
@@ -580,9 +580,9 @@
     <string name="local_apps_permissions_title">앱 권한</string>
     <string name="local_apps_please_select">선택해 주세요</string>
     <string name="local_apps_preview_confirm_title">미리보기 확인</string>
-    <string name="local_apps_preview_not_ready">미리보기가 아직 준비되지 않았습니다</string>
-    <string name="local_apps_preview_not_running">미리보기가 실행 중이 아닙니다</string>
-    <string name="local_apps_preview_not_running_detail">앱을 시작하면 Rust 로컬 서비스에서 페이지를 불러옵니다.</string>
+    <string name="local_apps_preview_not_ready">앱이 아직 준비되지 않았습니다</string>
+    <string name="local_apps_preview_not_running">앱이 실행 중이 아닙니다</string>
+    <string name="local_apps_preview_not_running_detail">앱을 시작하면 화면이 여기에 표시됩니다.</string>
     <string name="local_apps_previous">이전</string>
     <string name="local_apps_process_exited">로컬 앱 프로세스가 종료되었습니다</string>
     <string name="local_apps_restart">다시 시작</string>
@@ -590,6 +590,9 @@
     <string name="local_apps_restore_checkpoint_title">코드 체크포인트를 복원하시겠습니까?</string>
     <string name="local_apps_restore_code">코드 복원</string>
     <string name="local_apps_retry_generate">다시 생성</string>
+    <string name="local_apps_run_exit">앱 종료</string>
+    <string name="local_apps_run_pause">앱 일시정지</string>
+    <string name="local_apps_run_start">앱 시작</string>
     <string name="local_apps_runtime_failed_title">실행 실패</string>
     <string name="local_apps_runtime_mode">실행 모드</string>
     <string name="local_apps_runtime_vite">Vite 로컬 서비스</string>
@@ -609,7 +612,7 @@
     <string name="local_apps_section_network">네트워크</string>
     <string name="local_apps_section_overview">개요</string>
     <string name="local_apps_section_permissions">권한</string>
-    <string name="local_apps_section_preview">미리보기</string>
+    <string name="local_apps_section_preview">실행</string>
     <string name="local_apps_source">소스 코드</string>
     <string name="local_apps_source_detail">전체 텍스트 소스 코드를 보고 편집할 수 있습니다. 심볼릭 링크, 빌드 결과물, 작업 공간 밖의 경로는 표시되지 않습니다. 고정 의존성 수정 사항은 저장할 수 있지만, 빌드 검증에서 지원되지 않는 버전이나 설치 작업은 거부됩니다.</string>
     <string name="local_apps_source_empty">편집 가능한 소스 코드가 없습니다</string>
@@ -1160,13 +1163,13 @@
     <string name="local_apps_no_checkpoints_detail">아직 체크포인트가 없습니다.</string>
     <string name="local_apps_no_collections">이 앱은 영구 컬렉션을 선언하지 않았습니다.</string>
     <string name="local_apps_no_domains_detail">없음 (기본 CSP가 외부 네트워크를 차단합니다)</string>
-    <string name="local_apps_not_running_detail">시작한 후 여기서 미리 볼 수 있습니다.</string>
+    <string name="local_apps_not_running_detail">시작하면 앱이 여기서 실행됩니다.</string>
     <string name="local_apps_not_running_title">앱이 아직 실행되지 않았습니다</string>
     <string name="local_apps_permission_data_mutation_plain">앱 데이터 수정을 허용하시겠습니까?</string>
     <string name="local_apps_permission_network_short">앱의 네트워크 연결을 허용하시겠습니까?</string>
     <string name="local_apps_permissions_reset_confirm_detail">세션 권한과 영구 권한이 모두 지워집니다. 다음에 데이터를 수정하거나 화면을 제어하거나 도메인에 접근할 때 다시 물어봅니다.</string>
     <string name="local_apps_preview_not_ready_detail">미리보기 서비스가 아직 준비되지 않았지만, 수정 사항은 여전히 승인하거나 제출할 수 있습니다.</string>
-    <string name="local_apps_preview_title">앱 미리보기</string>
+    <string name="local_apps_preview_title">로컬 앱</string>
     <string name="local_apps_request_suggestion">에이전트에게 디자인 제안 요청</string>
     <string name="local_apps_required_suffix"> · 필수</string>
     <string name="local_apps_restore_checkpoint_confirm_detail">\"%1$s\"(으)로 복원됩니다. 현재 소스 코드는 먼저 pre_restore로 저장되며, 앱 데이터는 그대로 유지됩니다.</string>
@@ -1369,6 +1372,9 @@
     <string name="settings_skill_seed_polish_desc">중국어 → 영어 글쓰기 다듬기, 원래 의미 유지</string>
     <string name="settings_skill_bundled_create_local_app_desc">로컬 앱의 설계, 의존성, 생성, 빌드, 검증을 통합 진행</string>
     <string name="settings_skill_bundled_frontend_design_desc">대상 플랫폼과 폼 팩터에 맞는 네이티브 프런트엔드 방향을 설계</string>
+    <string name="settings_skill_bundled_ionic_react_local_app_desc">고정된 Ionic React 스캐폴드와 네이티브 WebView 브리지 제약을 지켜 로컬 앱 구현</string>
+    <string name="settings_skill_bundled_canvas_2d_local_app_desc">결정적 Canvas 2D 장면과 네이티브 느낌 오버레이로 로컬 앱 구축</string>
+    <string name="settings_skill_bundled_threejs_local_app_desc">Three.js 장면으로 로컬 앱을 구축하고 수명 주기, 입력, 리소스 해제를 명시적으로 관리</string>
     <string name="settings_skill_bundled_frontend_qa_desc">Browser와 네이티브 WebView로 UI와 상호작용을 검증</string>
     <string name="settings_skill_bundled_accessibility_desc">시맨틱, 키보드 접근, 터치 대상, 대비, 동적 글꼴을 점검</string>
     <string name="settings_skill_bundled_react_best_practices_desc">React 상태, 이펙트, 성능, 전체 UI 상태를 점검</string>
@@ -1688,4 +1694,13 @@
     <string name="local_apps_draft_card_subtitle">만드는 중</string>
     <string name="local_apps_creation_result_unknown">생성 결과를 알 수 없습니다. 앱 라이브러리에서 확인하세요.</string>
     <string name="local_apps_widget_add">홈 화면에 Widget 추가</string>
+    <string name="local_apps_profile_proposal_title">앱이 어시스턴트 지침 업데이트를 요청했습니다</string>
+    <string name="local_apps_profile_proposal_navigation_title">어시스턴트 지침</string>
+    <string name="local_apps_profile_proposal_apply">적용</string>
+    <string name="local_apps_widget_setup_title">Widget 추가</string>
+    <string name="local_apps_widget_setup_step_1">1. 홈 화면의 빈 곳을 길게 누릅니다.</string>
+    <string name="local_apps_widget_setup_step_2">2. 왼쪽 상단 버튼을 눌러 Widget 갤러리를 엽니다.</string>
+    <string name="local_apps_widget_setup_step_3">3. 灵犀 앱을 검색해 로컬 앱 Widget을 추가합니다.</string>
+    <string name="local_apps_widget_setup_continue">계속</string>
+    <string name="local_apps_error_widget_snapshot">홈 화면 Widget 데이터를 업데이트하지 못했습니다.</string>
 </resources>

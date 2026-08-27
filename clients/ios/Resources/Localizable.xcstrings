@@ -21450,6 +21450,40 @@
         }
       }
     },
+    "local_apps_error_widget_snapshot": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法更新主屏幕 Widget 的数据。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法更新主畫面 Widget 的資料。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't update the Home Screen Widget data."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ホーム画面 Widget のデータを更新できませんでした。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "홈 화면 Widget 데이터를 업데이트하지 못했습니다."
+          }
+        }
+      }
+    },
     "local_apps_external_link_title": {
       "localizations": {
         "zh-Hans": {
@@ -22645,31 +22679,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "启动后可在此预览。"
+            "value": "启动后应用会在这里运行。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "啟動後可在此預覽。"
+            "value": "啟動後應用會在這裡執行。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "You can preview here once it's started."
+            "value": "Once started, the app runs here."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "起動するとここでプレビューできます。"
+            "value": "起動するとアプリがここで実行されます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "시작한 후 여기서 미리 볼 수 있습니다."
+            "value": "시작하면 앱이 여기서 실행됩니다."
           }
         }
       }
@@ -22713,31 +22747,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "打开预览"
+            "value": "打开应用"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "開啟預覽"
+            "value": "開啟應用"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open Preview"
+            "value": "Open App"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "プレビューを開く"
+            "value": "アプリを開く"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "미리보기 열기"
+            "value": "앱 열기"
           }
         }
       }
@@ -23631,31 +23665,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "预览尚未准备好"
+            "value": "应用尚未准备好"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "預覽尚未準備好"
+            "value": "應用尚未準備好"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Preview isn't ready yet"
+            "value": "The app isn't ready yet"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "プレビューはまだ準備できていません"
+            "value": "アプリはまだ準備できていません"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "미리보기가 아직 준비되지 않았습니다"
+            "value": "앱이 아직 준비되지 않았습니다"
           }
         }
       }
@@ -23699,31 +23733,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "预览尚未运行"
+            "value": "应用未在运行"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "預覽尚未執行"
+            "value": "應用未在執行"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Preview isn't running yet"
+            "value": "The app isn't running"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "プレビューはまだ実行されていません"
+            "value": "アプリは実行されていません"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "미리보기가 실행 중이 아닙니다"
+            "value": "앱이 실행 중이 아닙니다"
           }
         }
       }
@@ -23733,31 +23767,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "启动应用后，页面将从 Rust 回环服务加载。"
+            "value": "启动应用后，界面会在这里加载。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "啟動應用後，頁面將從 Rust 迴環服務載入。"
+            "value": "啟動應用後，介面會在這裡載入。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Once the app starts, the page will load from the Rust loopback service."
+            "value": "Once the app starts, its interface loads here."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "アプリを起動すると、ページは Rust のループバックサービスから読み込まれます。"
+            "value": "アプリを起動すると、画面がここに読み込まれます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "앱을 시작하면 Rust 로컬 서비스에서 페이지를 불러옵니다."
+            "value": "앱을 시작하면 화면이 여기에 표시됩니다."
           }
         }
       }
@@ -23767,31 +23801,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "应用预览"
+            "value": "本地应用"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "應用預覽"
+            "value": "本地應用"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "App preview"
+            "value": "Local app"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "アプリプレビュー"
+            "value": "ローカルアプリ"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "앱 미리보기"
+            "value": "로컬 앱"
           }
         }
       }
@@ -23860,6 +23894,108 @@
           "stringUnit": {
             "state": "translated",
             "value": "로컬 앱 프로세스가 종료되었습니다"
+          }
+        }
+      }
+    },
+    "local_apps_profile_proposal_apply": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "采用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "採用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apply"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "適用"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "적용"
+          }
+        }
+      }
+    },
+    "local_apps_profile_proposal_navigation_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "助手指令"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "助手指令"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Assistant Instructions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アシスタントの指示"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "어시스턴트 지침"
+          }
+        }
+      }
+    },
+    "local_apps_profile_proposal_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用请求更新助手指令"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "應用請求更新助手指令"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This app wants to update its assistant instructions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリがアシスタントの指示の更新を求めています"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱이 어시스턴트 지침 업데이트를 요청했습니다"
           }
         }
       }
@@ -24268,6 +24404,108 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@ 작업"
+          }
+        }
+      }
+    },
+    "local_apps_run_exit": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出应用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出應用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close App"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリを終了"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 종료"
+          }
+        }
+      }
+    },
+    "local_apps_run_pause": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂停应用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暫停應用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pause App"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリを一時停止"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 일시정지"
+          }
+        }
+      }
+    },
+    "local_apps_run_start": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "启动应用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "啟動應用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start App"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アプリを起動"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "앱 시작"
           }
         }
       }
@@ -25365,31 +25603,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "预览"
+            "value": "运行"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "預覽"
+            "value": "執行"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Preview"
+            "value": "Run"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "プレビュー"
+            "value": "実行"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "미리보기"
+            "value": "실행"
           }
         }
       }
@@ -26920,6 +27158,244 @@
           "stringUnit": {
             "state": "translated",
             "value": "현재 런처는 Widget 자동 추가를 지원하지 않습니다. 나중에 수동으로 추가하세요."
+          }
+        }
+      }
+    },
+    "local_apps_widget_setup_continue": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "继续"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "繼續"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "続ける"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계속"
+          }
+        }
+      }
+    },
+    "local_apps_widget_setup_message %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按以下步骤把 %@ 放到主屏幕。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "依照以下步驟把 %@ 放到主畫面。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Follow these steps to put %@ on your Home Screen."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次の手順で %@ をホーム画面に追加します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다음 단계에 따라 %@을(를) 홈 화면에 추가하세요."
+          }
+        }
+      }
+    },
+    "local_apps_widget_setup_step_1": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1. 长按主屏幕的空白处。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1. 長按主畫面的空白處。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1. Touch and hold an empty area of the Home Screen."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1. ホーム画面の空いている場所を長押しします。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1. 홈 화면의 빈 곳을 길게 누릅니다."
+          }
+        }
+      }
+    },
+    "local_apps_widget_setup_step_2": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2. 点按左上角的按钮，打开 Widget 库。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2. 點按左上角的按鈕，開啟 Widget 資料庫。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2. Tap the button in the top-left corner to open the Widget gallery."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2. 左上のボタンをタップして Widget ギャラリーを開きます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2. 왼쪽 상단 버튼을 눌러 Widget 갤러리를 엽니다."
+          }
+        }
+      }
+    },
+    "local_apps_widget_setup_step_3": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "3. 搜索「灵犀」，添加它的本地应用 Widget。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "3. 搜尋「灵犀」，新增它的本地應用 Widget。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "3. Search for Lingxi and add its local app Widget."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "3. 「灵犀」を検索し、ローカルアプリの Widget を追加します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "3. 灵犀 앱을 검색해 로컬 앱 Widget을 추가합니다."
+          }
+        }
+      }
+    },
+    "local_apps_widget_setup_step_4 %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "4. 长按刚添加的 Widget，选择「编辑 Widget」，再把应用设为 %@。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "4. 長按剛新增的 Widget，選擇「編輯 Widget」，再把應用設為 %@。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "4. Touch and hold the new Widget, choose Edit Widget, then pick %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "4. 追加した Widget を長押しして「Widget を編集」を選び、アプリに %@ を指定します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "4. 추가한 Widget을 길게 누르고 'Widget 편집'을 선택한 다음 앱으로 %@을(를) 지정합니다."
+          }
+        }
+      }
+    },
+    "local_apps_widget_setup_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加 Widget"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增 Widget"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add the Widget"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Widget を追加"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Widget 추가"
           }
         }
       }

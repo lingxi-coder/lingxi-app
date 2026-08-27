@@ -586,6 +586,10 @@ private struct LocalAppPermissionsSection: View {
 }
 
 struct LocalAppPreviewView: View {
+    /// The close control pops this route. `dismiss` keeps the construction site
+    /// (LocalAppsLibraryView.destination) at two arguments and works whether the
+    /// route was pushed from the detail screen or seeded by the widget deep link.
+    @Environment(\.dismiss) private var dismiss
     @Bindable var store: LocalAppsStore
     let appID: String
 
@@ -607,13 +611,77 @@ struct LocalAppPreviewView: View {
     var body: some View {
         Group {
             if let url = previewURL {
-                LocalAppWebView(
-                    appID: appID,
-                    url: url,
-                    onBridgeRequest: { request in
-                        Task { await store.executeBridge(request) }
-                    }
-                )
+                // The running app draws its own header, so a host navigation bar
+                // would be a second stacked bar over it. Give the page the screen
+                // below the status bar and float the run controls on top.
+                ZStack(alignment: .bottomLeading) {
+                    LocalAppWebView(
+                        appID: appID,
+                        url: url,
+                        onBridgeRequest: { request in
+                            Task { await store.executeBridge(request) }
+                        }
+                    )
+                    // LocalAppWebView already ignores `.bottom` for its own
+                    // consumers; widening it to the horizontal edges here (rather
+                    // than inside that view) keeps LocalAppEmbeddedPreview — the
+                    // detail page's tab — laid out below the picker exactly as it
+                    // is today.
+                    //
+                    // ⚠️ Do NOT "tidy" this back to `.all`. The TOP inset is kept
+                    // deliberately, because the page cannot recover from losing it:
+                    // a page's only source of a top inset is the injected
+                    // readInsets() probe over env(safe-area-inset-top), and
+                    // lingxi-provider.jsx writes that reading onto
+                    // document.documentElement.style as a FIXED px string that
+                    // foundation.css maps to --ion-safe-area-top. An inline style
+                    // outranks the :root env() fallback, so once a 0px reading is
+                    // written the live env() can never win it back. The only re-read
+                    // is resync() on resize / orientationchange / visualViewport
+                    // resize — and under viewport-fit=cover the layout viewport does
+                    // NOT change when a WKWebView's safeAreaInsets do. A page that
+                    // paints before the first reading arrives would therefore keep a
+                    // 0px top inset for the whole session and park its own Ionic
+                    // header under the status-bar clock. Keeping the top inset makes
+                    // env(safe-area-inset-top) legitimately 0 and matches Android,
+                    // whose whole local-apps route is wrapped in
+                    // windowInsetsPadding(WindowInsets.systemBars) at RootScreen.kt
+                    // and so structurally cannot go under the status bar either.
+                    // The host navigation bar stays hidden; there is still one bar.
+                    .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
+
+                    // Bottom-LEADING, not trailing: Ionic's IonFab defaults to
+                    // vertical="bottom" horizontal="end", which resolves to
+                    // bottom:10px; right:calc(10px + var(--ion-safe-area-right,0px))
+                    // with a 56px button — so the bottom-trailing corner is exactly
+                    // where a hosted app parks its own furniture, and the host
+                    // control would sit on top of it. The ZStack itself stays inside
+                    // the safe area, so the control clears the home indicator
+                    // without reading insets.
+                    //
+                    // No `isRunning` parameter. `previewURL` is
+                    // `store.runtimes[appID]?.url`, and `LocalAppRuntimeStatus.url`
+                    // returns non-nil ONLY out of `case .running(url)` — so inside
+                    // `if let url = previewURL` the status IS `.running`, and the
+                    // old argument was literally `previewURL != nil` at a site
+                    // already guarded by `previewURL != nil`. Its start branch was
+                    // unreachable. Re-deriving the flag from `store.runtimes[appID]`
+                    // would not fix that: it is the same fact spelled differently,
+                    // and it would still be a constant `true` here. So running-ness
+                    // is not passed at all — the control shows pause because the
+                    // thing it floats over is, by construction of the enum, a live
+                    // runtime, which is a derivation that cannot disagree with what
+                    // is rendered. Starting a STOPPED runtime belongs to the
+                    // placeholder arms below, where the user actually is when there
+                    // is nothing to pause; Android says the same thing at its own
+                    // else branch ("no app content to fill the screen, so no pill —
+                    // the centred placeholder keeps its own start button").
+                    LocalAppRunControl(
+                        onPause: { Task { await store.stop(appID: appID) } },
+                        onExit: { dismiss() }
+                    )
+                    .padding(16)
+                }
             } else {
                 switch placeholder {
                 case .transient, .none:
@@ -651,5 +719,107 @@ struct LocalAppPreviewView: View {
         }
         .navigationTitle("local_apps_section_preview")
         .navigationBarTitleDisplayMode(.inline)
+        // Only the running surface goes full-bleed. Deleting the title outright
+        // and hiding the bar in every state would strand the user on the
+        // placeholders: they carry no pill, so the host bar's back button is
+        // their only way out once the runtime is stopped.
+        .toolbar(previewURL == nil ? .visible : .hidden, for: .navigationBar)
+    }
+}
+
+/// The floating run control for the running app surface.
+///
+/// Not named `Pill` — `Pill` is already a text chip in
+/// Components/SharedComponents.swift. "Pill" here is a shape, not a type.
+///
+/// Every accessibility identifier sits on a leaf `Button`. An identifier on the
+/// enclosing capsule would replace its children's identifiers at runtime, so the
+/// ids greppable here would not exist on device.
+private struct LocalAppRunControl: View {
+    @Environment(\.theme) private var theme
+
+    let onPause: () -> Void
+    let onExit: () -> Void
+
+    @State private var expanded = false
+
+    /// Every button, collapsed one included, is this square.
+    ///
+    /// 44, not 40. 40 is under Apple's 44x44pt minimum, and it is also under the
+    /// `--platform-control-min` the host itself publishes to hosted pages for
+    /// iOS (`controlDensity: 44` in local-apps/templates/*/lib/platform-adapter.js)
+    /// — the host was holding its own guests to a bar it did not meet. There is
+    /// no fallback for a missed tap here: with the navigation bar hidden this is
+    /// the only host affordance on the screen, and for an app generated from the
+    /// CANVAS scaffold it is the only affordance at all — that template's
+    /// game-screen.jsx renders a `<canvas>` plus overlays and contains no
+    /// IonPage, IonHeader or IonToolbar anywhere in the template.
+    private static let tapTarget: CGFloat = 44
+
+    /// Icon-only, but the `Label` keeps its localized title as the VoiceOver
+    /// label, and the square frame plus `contentShape` gives a real tap target.
+    private func glyph(_ title: LocalizedStringKey, _ systemName: String) -> some View {
+        Label(title, systemImage: systemName)
+            .labelStyle(.iconOnly)
+            .frame(width: Self.tapTarget, height: Self.tapTarget)
+            .contentShape(Rectangle())
+    }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            // FIRST, not last. The capsule is anchored bottom-LEADING, so the
+            // leading-most child sits on fixed pixels and everything after it
+            // grows away from the corner. With the toggle last, expanding slid
+            // it away by one button and dropped the newly composed first child
+            // onto the exact rect the finger had just tapped — and on this
+            // client that first child was CLOSE, so tapping the same pixel twice
+            // popped the route instead of collapsing the control. Keeping the
+            // toggle leading-most makes its hit rect identical in both states —
+            // the frame is fixed at 44 and `.padding(.horizontal, 4)` puts its
+            // leading edge 4pt inside the capsule no matter how many siblings
+            // follow — so tap-tap always means expand-then-collapse.
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { expanded.toggle() }
+            } label: {
+                // `local_apps_more` ("More"), not the surface's own title: the
+                // Label's title IS the VoiceOver label under `.iconOnly`, and with
+                // the host navigation bar hidden this is the only host control on
+                // the screen — a noun there announces as "本地应用，按钮". Android's
+                // collapsed button already uses this same key.
+                //
+                // One STATIC glyph, like Android's `Icons.Rounded.MoreVert`. The
+                // chevron pair it replaces made the resting control read as a
+                // drawer handle on iOS and as a menu on Android, for the same
+                // "More" label.
+                glyph("local_apps_more", "ellipsis")
+            }
+            .accessibilityIdentifier("local-apps.run.controls")
+
+            if expanded {
+                // Stopping the runtime IS the pause: the URL goes nil and the
+                // placeholder comes back. There is no freeze-the-frame pause.
+                Button(action: onPause) {
+                    glyph("local_apps_run_pause", "pause.fill")
+                }
+                .accessibilityIdentifier("local-apps.run.pause")
+
+                Button(action: onExit) {
+                    glyph("local_apps_run_exit", "xmark")
+                }
+                .accessibilityIdentifier("local-apps.run.exit")
+            }
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 15, weight: .semibold))
+        .foregroundStyle(theme.text)
+        .padding(.horizontal, 4)
+        .background(theme.surface.opacity(0.92), in: Capsule())
+        .overlay(Capsule().strokeBorder(theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
+        // Resting state stays out of the app's way; a tap brings it forward.
+        // 0.6 is Android's resting alpha (RunPill's `alpha(if (expanded) 1f else 0.6f)`);
+        // 0.45 made the only affordance on a full-bleed canvas harder to find than
+        // its twin on the other client.
+        .opacity(expanded ? 1 : 0.6)
     }
 }

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -124,6 +125,15 @@ fun DrawerContent(
     onOpenCron: (String) -> Unit = {},
     onCreateCron: () -> Unit = {},
     appsCount: Int = 0,
+    /**
+     * Create a local app and land the conversation in it. The drawer only
+     * announces the intent; the create is asynchronous and the hand-off arrives
+     * later on `LocalAppsViewModel.createdAppLandings` (`RootScreen.kt`), so
+     * this callback closes the drawer itself rather than waiting for a landing
+     * that may be seconds away — or, if the create fails, never come.
+     */
+    onCreateApp: () -> Unit = {},
+    /** Browse the app library. */
     onOpenApps: () -> Unit = {},
     /** The active local-app scope's name + sessions, or null outside app scope. */
     appScope: DrawerAppScope? = null,
@@ -239,6 +249,7 @@ fun DrawerContent(
 
                 DrawerSection.Apps -> AppsSection(
                     appsCount = appsCount,
+                    onCreateApp = onCreateApp,
                     onOpenApps = onOpenApps,
                 )
             }
@@ -423,8 +434,37 @@ private fun SectionTabs(
     }
 }
 
+/**
+ * The minimum height of a tappable drawer row.
+ *
+ * 48dp is Android's documented minimum touch target, the same number the local
+ * app run surface states for its own controls (`RunPillTapTarget`,
+ * LocalAppsScreen.kt). Stated as a height rather than left to the rows'
+ * padding: both rows below size themselves from `fontSize` plus a small
+ * vertical inset, which lands them near 38dp and 32dp — comfortably legible and
+ * comfortably under the minimum.
+ */
+private val DrawerRowTapTarget = 48.dp
+
+/**
+ * The 应用 tab.
+ *
+ * Two affordances, deliberately unequal — the same split iOS's drawer makes
+ * (`Drawer.swift`, `dashedButton(drawer_create_app)` beside
+ * `LocalAppsDrawerSection.onOpenLibrary`):
+ *
+ * - [onCreateApp] is PRIMARY and keeps the filled, accented row. Creating an app
+ *   is what a user opens this tab to do, and the create now finishes in the
+ *   app's own conversation rather than on a library page.
+ * - [onOpenApps] is the browse affordance and stays wired to the library. Its
+ *   label 「打开应用库」 already described that action correctly, so it is not
+ *   relabelled — only its 「+」 moved to the row that now creates, since a plus
+ *   on a browse row reads as a second create button.
+ *
+ * Both rows are held to [DrawerRowTapTarget]; neither reaches it on its own.
+ */
 @Composable
-private fun AppsSection(appsCount: Int, onOpenApps: () -> Unit) {
+private fun AppsSection(appsCount: Int, onCreateApp: () -> Unit, onOpenApps: () -> Unit) {
     val t = LingXiTheme.palette
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -452,16 +492,42 @@ private fun AppsSection(appsCount: Int, onOpenApps: () -> Unit) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp),
+            // 11dp of vertical padding around a 13sp label measured about 38dp
+            // — under the 48dp minimum, and this is the row a user opens this
+            // tab to press. [DrawerRowTapTarget] raises the whole node, so the
+            // background, the border and the `clickable` hit rect all grow with
+            // it (the constraint is applied OUTSIDE them in this chain); the
+            // padding stays as the visual inset for anything taller.
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = DrawerRowTapTarget)
                 .clip(RoundedCornerShape(10.dp))
                 .background(t.surfaceActive)
                 .border(0.5.dp, t.border, RoundedCornerShape(10.dp))
-                .clickable(onClick = onOpenApps)
+                .clickable(onClick = onCreateApp)
                 .padding(horizontal = 14.dp, vertical = 11.dp),
         ) {
             LXIcon(name = LXIconName.Plus, size = 15.dp, color = t.accent, stroke = 1.8f)
-            Text(stringResource(R.string.drawer_open_apps_library), color = t.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(stringResource(R.string.drawer_create_app), color = t.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            // The smaller of the two — 8dp of padding around a 12sp label, about
+            // 32dp — and the one with no background at all, so nothing on screen
+            // hints at where it can be pressed. Same [DrawerRowTapTarget] as the
+            // create row above and as the run surface's `RunPillTapTarget`
+            // (LocalAppsScreen.kt): 48dp is Android's documented minimum, and a
+            // secondary affordance is not a reason to fall under it.
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = DrawerRowTapTarget)
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(onClick = onOpenApps)
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            LXIcon(name = LXIconName.Book, size = 13.dp, color = t.text3, stroke = 1.8f)
+            Text(stringResource(R.string.drawer_open_apps_library), color = t.text3, fontSize = 12.sp)
         }
     }
 }

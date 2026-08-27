@@ -38,6 +38,9 @@ final class LocalAppsStore {
     /// library so the user lands on the new app's detail screen. The FALLBACK
     /// landing — the preferred signal is [`createdAppLanding`], which opens the
     /// app's own conversation.
+    ///
+    /// Armed ONLY for a create started from inside the library cover, the one
+    /// surface that consumes it — see [`pendingCreateArmsLibraryFallback`].
     private(set) var createdAppID: String?
     /// Where a freshly created app hands the user off: into the app's OWN
     /// conversation, whose cwd is the app workspace.
@@ -97,6 +100,32 @@ final class LocalAppsStore {
     /// longer possible either: a shell create sends `brief: ""`, so every
     /// concurrent shell would match every other one.
     @ObservationIgnored private var pendingCreateRequestID: String?
+    /// Whether the create in flight should arm [`createdAppID`] — the library's
+    /// FALLBACK landing — when it resolves.
+    ///
+    /// `false` for a create started with NO `LocalAppsRootView` mounted: the
+    /// drawer's affordances. That fallback has exactly one consumer,
+    /// `LocalAppsLibraryView.openCreatedAppIfNeeded`, driven by the library
+    /// screen's `onAppear`/`onChange(of: store.createdAppID)`. With the cover
+    /// never mounted, nothing consumes the id and it survives for the process
+    /// lifetime. It used to be harmless because a drawer create opened the
+    /// library first, so the id was always drained while the app was still an
+    /// unscaffolded shell and hit that fallback's own early-out. Now the create
+    /// conversation SCAFFOLDS the app, so a later, unrelated "View all" would
+    /// drain the stale id and drop the user on that old app's details page
+    /// instead of the library list.
+    ///
+    /// Refused at the SOURCE rather than drained at the landing: the primary
+    /// landing rides on `AppRecordChanged`, which is not guaranteed to arrive,
+    /// and a drain that never runs leaves exactly the stale id this prevents.
+    ///
+    /// Initialised and reset to `false` — the REFUSING value — so the unsafe
+    /// behaviour is never what a caller gets by accident. Every create sets it
+    /// explicitly from its own argument (see `createShellApp`), so this value
+    /// governs only an event arriving with no create in flight, where arming a
+    /// landing nobody asked for is the bug. Android's twin field is `false`
+    /// for the same reason.
+    @ObservationIgnored private var pendingCreateArmsLibraryFallback = false
     /// Stop-loss timer for [`pendingCreateRequestID`]. Cancelled the moment
     /// the create resolves either way.
     @ObservationIgnored private var createResultTimeoutTask: Task<Void, Never>?
@@ -305,6 +334,56 @@ final class LocalAppsStore {
         errorMessage = "应用不存在或已删除"
     }
 
+    #if DEBUG
+        /// The environment variable that asks for [`seedForUITesting`].
+        ///
+        /// Opt-in per launch, like every other `LINGXI_UI_TEST_*` switch, and
+        /// deliberately NOT folded into `LINGXI_UI_TESTING=1`: the apps tab's
+        /// empty state is itself pinned by
+        /// `testEverySidebarRoutePresentsAndLeavesTheSidebar`, which asserts
+        /// `drawer.apps.view-all` is absent. Seeding unconditionally would
+        /// turn that assertion red.
+        static let uiTestSeedEnvironmentKey = "LINGXI_UI_TEST_LOCAL_APPS"
+
+        /// The id of the app [`seedForUITesting`] plants. The drawer renders it
+        /// as `drawer.apps.row.<id>`.
+        static let uiTestSeedAppID = "ui-test-seeded-app"
+
+        /// Plant one app in the catalog so the surfaces gated on a non-empty
+        /// catalog are reachable from a UI test.
+        ///
+        /// Under `LINGXI_UI_TESTING=1`, `ConversationSource.make` returns
+        /// `MockConversationSource`, whose `submitEngineCommand` is the no-op
+        /// protocol-extension default. `apps` is written in exactly two
+        /// places — `handle(event:)`'s `.appsChanged` arm and `upsertApp`,
+        /// both engine-event handlers — so with no engine behind the mock,
+        /// `.listApps` resolves into nothing and the catalog is permanently
+        /// empty. Everything gated on it is then unreachable: `Drawer`'s
+        /// `appsSection` (hence `drawer.apps.view-all`, the only surviving
+        /// drawer route to `LocalAppsRootView`) and the library's own list.
+        ///
+        /// Assigns `apps` directly rather than replaying an `.appsChanged`
+        /// event: this is a fixture, not an engine, and that arm also fires
+        /// `scheduleWidgetSnapshotPublish` and `scheduleWebsiteDataCleanup`,
+        /// which write to app-group storage a UI test has no business
+        /// touching.
+        ///
+        /// `scaffolded: true` on purpose — a shell renders as the placeholder
+        /// draft card, and this fixture exists to be an ordinary listed app.
+        func seedForUITesting() {
+            apps = [
+                LocalAppSummary(
+                    id: Self.uiTestSeedAppID,
+                    name: "UI 测试应用",
+                    brief: "UI 测试用的本地应用",
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                    workflow: .ready,
+                    workspaceRelativePath: "apps/\(Self.uiTestSeedAppID)/workspace"
+                )
+            ]
+        }
+    #endif
+
     func refresh() async {
         if let refreshTask {
             await refreshTask.value
@@ -411,7 +490,22 @@ final class LocalAppsStore {
     /// Returns whether the command reached the engine — NOT whether the app
     /// was created. The outcome arrives out of band on `AppCreated` /
     /// `AppOperationFailed`, correlated by `request_id`.
-    func createShellApp() async -> Bool {
+    ///
+    /// `armLibraryFallback` says whether a `LocalAppsRootView` is mounted to
+    /// consume [`createdAppID`]. The library's "+" is the only caller that can
+    /// answer yes; the drawer's affordances create with the cover down and pass
+    /// `false`. See [`pendingCreateArmsLibraryFallback`].
+    ///
+    /// Deliberately UNDEFAULTED, matching Android's
+    /// `LocalAppsViewModel.createShellApp(armLibraryFallback:)`. The only
+    /// value a default could plausibly carry is `true` — the library's — and
+    /// `true` is the DANGEROUS one: it arms a one-shot landing whose sole
+    /// consumer lives inside a cover that may never be mounted, and an id
+    /// armed with nothing to drain it survives for the process lifetime and
+    /// hijacks the user's next unrelated "View all". A caller that says
+    /// nothing would inherit exactly that. So every caller states where it is
+    /// creating from.
+    func createShellApp(armLibraryFallback: Bool) async -> Bool {
         guard pendingCreateRequestID == nil else {
             errorMessage = String(localized: "local_apps_error_create_in_progress")
             return false
@@ -422,6 +516,11 @@ final class LocalAppsStore {
             // the engine can emit `AppCreated` from inside that call. Arming
             // afterwards drops the event this whole mechanism exists to catch.
             pendingCreateRequestID = requestID
+            // Recorded with the correlation key, not read at event time from a
+            // view: by the time `AppCreated` lands the cover may have been
+            // opened or closed for unrelated reasons, and what decides this is
+            // where the create STARTED.
+            pendingCreateArmsLibraryFallback = armLibraryFallback
             armCreateResultTimeout(requestID: requestID)
             let succeeded = await send(
                 .createApp(
@@ -478,6 +577,7 @@ final class LocalAppsStore {
     private func clearPendingCreate(requestID: String) {
         guard pendingCreateRequestID == requestID else { return }
         pendingCreateRequestID = nil
+        pendingCreateArmsLibraryFallback = false
         createResultTimeoutTask?.cancel()
         createResultTimeoutTask = nil
     }
@@ -831,8 +931,13 @@ final class LocalAppsStore {
                       let requestId,
                       requestId == pending
                 else { break }
+                // Read before `clearPendingCreate`, which restores the
+                // default.
+                let armsLibraryFallback = pendingCreateArmsLibraryFallback
                 clearPendingCreate(requestID: pending)
-                createdAppID = summary.id
+                // The library's fallback landing, armed only when the library
+                // is there to consume it.
+                if armsLibraryFallback { createdAppID = summary.id }
                 // The hand-off target: the app's own conversation, whose cwd is
                 // the app workspace. Everything the agent does for this app has
                 // to run THERE.

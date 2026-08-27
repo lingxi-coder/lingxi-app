@@ -264,6 +264,114 @@ class LocalAppsViewModelTest {
         }
     }
 
+    /// A DRAWER create must not leave the library parked on Details.
+    ///
+    /// `openApp` is the library's fallback landing — a screen behind the
+    /// hand-off in case the scope switch is refused — and its only consumer is
+    /// the apps cover, which this path never opens (`RootScreen.kt` closes the
+    /// drawer and waits for `createdAppLandings`). Written with nothing mounted
+    /// to draw or pop it, the destination survives on this Activity-scoped
+    /// ViewModel and the user's next unrelated 「打开应用库」 opens onto this
+    /// app's Details page instead of the library.
+    ///
+    /// The sibling test below is the other half: one assertion here cannot tell
+    /// "the origin fork was read" from "it never opens Details for anyone".
+    @Test
+    fun `a drawer create hands off without parking the library on details`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
+            val job = launch { viewModel.createdAppLandings.collect { landings += it } }
+
+            viewModel.createAppFromDrawer()
+            runCurrent()
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+            val created = appRecord(id = "shell", scaffolded = false).copy(initSessionId = null)
+            source.emit(ClientEvent.AppsChanged(listOf(created)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, requestId)))
+            runCurrent()
+
+            assertEquals(
+                "a drawer create must leave the cover's destination alone",
+                LocalAppsDestination.Library,
+                viewModel.uiState.value.destination,
+            )
+            assertNull("nothing selected it", viewModel.uiState.value.selectedAppId)
+            assertTrue(
+                "openApp was not called, so it asked for no details either",
+                source.commands.none { it == ClientCommand.GetAppDetails("shell") },
+            )
+
+            // Skipping the fallback must not cost the hand-off: the pin arrives
+            // on the engine's own pushed record update, not as a reply to the
+            // `GetAppDetails` that was just proven absent.
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppRecordChanged(created.copy(initSessionId = "session-9")),
+                ),
+            )
+            runCurrent()
+
+            val landing = landings.single()
+            assertEquals("shell", landing.appId)
+            assertEquals("session-9", landing.initSessionId)
+            job.cancel()
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// The other half of the pair above: the LIBRARY's own 「+」 still parks on
+    /// Details, because there the cover IS mounted to render it and it is what
+    /// the user falls back to if the scope switch is refused.
+    @Test
+    fun `a library create still parks on details behind the hand-off`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            val landings = mutableListOf<LocalAppsViewModel.CreatedAppLanding>()
+            val job = launch { viewModel.createdAppLandings.collect { landings += it } }
+
+            viewModel.onAction(LocalAppsAction.Create)
+            runCurrent()
+            val requestId = source.commands.filterIsInstance<ClientCommand.CreateApp>()
+                .single().requestId
+            val created = appRecord(id = "shell", scaffolded = false).copy(initSessionId = null)
+            source.emit(ClientEvent.AppsChanged(listOf(created)))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppCreated(created, requestId)))
+            runCurrent()
+
+            assertEquals(
+                LocalAppsDestination.Details("shell", LocalAppDetailsTab.Sessions),
+                viewModel.uiState.value.destination,
+            )
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppRecordChanged(created.copy(initSessionId = "session-9")),
+                ),
+            )
+            runCurrent()
+
+            assertEquals("shell", landings.single().appId)
+            job.cancel()
+        } finally {
+            releaseMain()
+        }
+    }
+
     /// An `AppCreated` for a DIFFERENT request must be ignored outright.
     ///
     /// The engine emits this event for BOTH creation paths, so an agent
@@ -1109,6 +1217,163 @@ class LocalAppsViewModelTest {
             assertNull(
                 "a deleted app's cached session catalog must not survive it",
                 viewModel.uiState.value.appSessions[APP_ID],
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// Exiting the run surface pops ONE level: back to the Details page the run
+    /// surface was pushed over.
+    ///
+    /// ⚠️ This test is the half that can tell a real recording from a decorative
+    /// one. `previewReturnDestination` is initialized to Library, so a push site
+    /// that "records" Library records nothing — the pop behaves exactly like the
+    /// unconditional collapse it replaced and every Library-origin test stays
+    /// green. Only an origin that is NOT the initializer's value separates the
+    /// two, which is why this test seeds Details first and why its sibling
+    /// (`a run surface pushed over the library still pops to the library`) is
+    /// not enough on its own.
+    ///
+    /// The tab assertion is part of the same behaviour, not decoration:
+    /// `LocalAppDetailsScreen` renders `selectedDetailsTab`, and pushing the run
+    /// surface sets that field to Preview — restoring the destination without it
+    /// would drop the user on the right page showing the wrong tab.
+    @Test
+    fun `the run surface returns to the details page it was pushed from`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.READY))))
+            runCurrent()
+
+            // Descend from the library onto this app's Details page.
+            viewModel.onAction(LocalAppsAction.OpenApp(APP_ID))
+            runCurrent()
+            assertEquals(
+                LocalAppsDestination.Details(APP_ID, LocalAppDetailsTab.Sessions),
+                viewModel.uiState.value.destination,
+            )
+
+            // The widget for the SAME app, tapped while that page is up: the run
+            // surface is pushed straight over it (RootScreen.kt raises the cover
+            // in the same effect without resetting the destination).
+            viewModel.openFromWidget(appId = APP_ID, autostart = false)
+            runCurrent()
+            assertEquals(
+                LocalAppsDestination.Preview(APP_ID),
+                viewModel.uiState.value.destination,
+            )
+            assertEquals(LocalAppDetailsTab.Preview, viewModel.uiState.value.selectedDetailsTab)
+
+            viewModel.onAction(LocalAppsAction.Back)
+            runCurrent()
+
+            assertEquals(
+                "exiting the run surface must pop ONE level, back to the page it was pushed over",
+                LocalAppsDestination.Details(APP_ID, LocalAppDetailsTab.Sessions),
+                viewModel.uiState.value.destination,
+            )
+            assertEquals(
+                "the restored page must show the tab the user left, not the run surface's",
+                LocalAppDetailsTab.Sessions,
+                viewModel.uiState.value.selectedDetailsTab,
+            )
+
+            // And the level below THAT is still the library — one more press.
+            viewModel.onAction(LocalAppsAction.Back)
+            runCurrent()
+            assertEquals(LocalAppsDestination.Library, viewModel.uiState.value.destination)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// The other half of the fork: with nothing underneath it, the run surface
+    /// still pops to the library — so "pop one level" did not become "always
+    /// return to some remembered page".
+    @Test
+    fun `a run surface pushed over the library still pops to the library`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.READY))))
+            runCurrent()
+            assertEquals(LocalAppsDestination.Library, viewModel.uiState.value.destination)
+
+            viewModel.openFromWidget(appId = APP_ID, autostart = false)
+            runCurrent()
+            assertEquals(LocalAppsDestination.Preview(APP_ID), viewModel.uiState.value.destination)
+
+            viewModel.onAction(LocalAppsAction.Back)
+            runCurrent()
+
+            assertEquals(
+                "a widget deep link with nothing underneath it exits to the library",
+                LocalAppsDestination.Library,
+                viewModel.uiState.value.destination,
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// A leftover Details page belonging to a DIFFERENT app is not a level the
+    /// user descended from — the widget deep link arrives from outside this
+    /// surface, so whatever it landed on top of may be from a visit finished long
+    /// ago. Exiting collapses to the library rather than handing the user another
+    /// app's page.
+    ///
+    /// Without this the same-app guard could be deleted and both tests above
+    /// would still pass.
+    @Test
+    fun `a run surface pushed over another app's details exits to the library`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(
+                ClientEvent.AppsChanged(
+                    listOf(
+                        appRecord(workflow = AppWorkflowStateDto.READY),
+                        appRecord(OTHER_APP_ID, "订单", AppWorkflowStateDto.READY),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.OpenApp(OTHER_APP_ID))
+            runCurrent()
+            assertEquals(
+                LocalAppsDestination.Details(OTHER_APP_ID, LocalAppDetailsTab.Sessions),
+                viewModel.uiState.value.destination,
+            )
+
+            viewModel.openFromWidget(appId = APP_ID, autostart = false)
+            runCurrent()
+            assertEquals(LocalAppsDestination.Preview(APP_ID), viewModel.uiState.value.destination)
+
+            viewModel.onAction(LocalAppsAction.Back)
+            runCurrent()
+
+            assertEquals(
+                "exiting must never hand the user a page belonging to a different app",
+                LocalAppsDestination.Library,
+                viewModel.uiState.value.destination,
             )
         } finally {
             releaseMain()

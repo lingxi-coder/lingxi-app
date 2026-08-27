@@ -564,7 +564,7 @@
     <string name="local_apps_next">Next</string>
     <string name="local_apps_no_checkpoints">No checkpoints yet</string>
     <string name="local_apps_not_found">App not found</string>
-    <string name="local_apps_open_preview">Open Preview</string>
+    <string name="local_apps_open_preview">Open App</string>
     <string name="local_apps_permission_data_mutation">Allow the agent to modify app data?</string>
     <string name="local_apps_permission_mutation_requires">Modifying data or controlling the UI requires authorization the first time</string>
     <string name="local_apps_permission_network">Allow this app to access the network?</string>
@@ -580,9 +580,9 @@
     <string name="local_apps_permissions_title">App Permissions</string>
     <string name="local_apps_please_select">Please Select</string>
     <string name="local_apps_preview_confirm_title">Preview Confirmation</string>
-    <string name="local_apps_preview_not_ready">Preview isn\'t ready yet</string>
-    <string name="local_apps_preview_not_running">Preview isn\'t running yet</string>
-    <string name="local_apps_preview_not_running_detail">Once the app starts, the page will load from the Rust loopback service.</string>
+    <string name="local_apps_preview_not_ready">The app isn\'t ready yet</string>
+    <string name="local_apps_preview_not_running">The app isn\'t running</string>
+    <string name="local_apps_preview_not_running_detail">Once the app starts, its interface loads here.</string>
     <string name="local_apps_previous">Previous</string>
     <string name="local_apps_process_exited">The local app process has exited</string>
     <string name="local_apps_restart">Restart</string>
@@ -590,6 +590,9 @@
     <string name="local_apps_restore_checkpoint_title">Restore this code checkpoint?</string>
     <string name="local_apps_restore_code">Restore Code</string>
     <string name="local_apps_retry_generate">Retry Generation</string>
+    <string name="local_apps_run_exit">Close App</string>
+    <string name="local_apps_run_pause">Pause App</string>
+    <string name="local_apps_run_start">Start App</string>
     <string name="local_apps_runtime_failed_title">Runtime failed</string>
     <string name="local_apps_runtime_mode">Run Mode</string>
     <string name="local_apps_runtime_vite">Vite Local Server</string>
@@ -609,7 +612,7 @@
     <string name="local_apps_section_network">Network</string>
     <string name="local_apps_section_overview">Overview</string>
     <string name="local_apps_section_permissions">Permissions</string>
-    <string name="local_apps_section_preview">Preview</string>
+    <string name="local_apps_section_preview">Run</string>
     <string name="local_apps_source">Source</string>
     <string name="local_apps_source_detail">View and edit the full text source; symlinks, build artifacts, and paths outside the workspace aren\'t shown. Changes to pinned dependencies can be saved, but build validation will reject unsupported versions or installs.</string>
     <string name="local_apps_source_empty">No editable source yet</string>
@@ -1160,13 +1163,13 @@
     <string name="local_apps_no_checkpoints_detail">No checkpoints yet.</string>
     <string name="local_apps_no_collections">This app has not declared any persistent collections.</string>
     <string name="local_apps_no_domains_detail">None (the default CSP blocks external network access)</string>
-    <string name="local_apps_not_running_detail">You can preview here once it\'s started.</string>
+    <string name="local_apps_not_running_detail">Once started, the app runs here.</string>
     <string name="local_apps_not_running_title">The app isn\'t running yet</string>
     <string name="local_apps_permission_data_mutation_plain">Allow modifying app data?</string>
     <string name="local_apps_permission_network_short">Allow the app to access the network?</string>
     <string name="local_apps_permissions_reset_confirm_detail">Both session and persistent authorizations will be cleared. You\'ll be asked again the next time the app modifies data, controls the UI, or accesses a domain.</string>
     <string name="local_apps_preview_not_ready_detail">The preview service isn\'t ready yet; you can still approve or submit changes.</string>
-    <string name="local_apps_preview_title">App preview</string>
+    <string name="local_apps_preview_title">Local app</string>
     <string name="local_apps_request_suggestion">Ask the Agent for design suggestions</string>
     <string name="local_apps_required_suffix"> · Required</string>
     <string name="local_apps_restore_checkpoint_confirm_detail">This will restore to “%1$s”. The current source will first be saved as pre_restore; app data stays unchanged.</string>
@@ -1369,6 +1372,9 @@
     <string name="settings_skill_seed_polish_desc">Chinese-to-English writing polish that preserves the original meaning</string>
     <string name="settings_skill_bundled_create_local_app_desc">Orchestrates the design, dependencies, generation, build, and verification of a local app</string>
     <string name="settings_skill_bundled_frontend_design_desc">Designs a native frontend direction for the target platform and form factor</string>
+    <string name="settings_skill_bundled_ionic_react_local_app_desc">Builds local apps in the pinned Ionic React scaffold with the native WebView bridge</string>
+    <string name="settings_skill_bundled_canvas_2d_local_app_desc">Builds local apps around a deterministic Canvas 2D scene with native-feeling overlays</string>
+    <string name="settings_skill_bundled_threejs_local_app_desc">Builds local apps with Three.js scenes and explicit lifecycle, input, and disposal rules</string>
     <string name="settings_skill_bundled_frontend_qa_desc">Validates UI and interactions with Browser and the native WebView</string>
     <string name="settings_skill_bundled_accessibility_desc">Checks semantics, keyboard access, touch targets, contrast, and dynamic type</string>
     <string name="settings_skill_bundled_react_best_practices_desc">Checks React state, effects, performance, and complete UI states</string>
@@ -1694,4 +1700,13 @@
     <string name="local_apps_draft_card_subtitle">Creating…</string>
     <string name="local_apps_creation_result_unknown">The creation result is unknown. Check your app library.</string>
     <string name="local_apps_widget_add">Add Widget to Home Screen</string>
+    <string name="local_apps_profile_proposal_title">This app wants to update its assistant instructions</string>
+    <string name="local_apps_profile_proposal_navigation_title">Assistant Instructions</string>
+    <string name="local_apps_profile_proposal_apply">Apply</string>
+    <string name="local_apps_widget_setup_title">Add the Widget</string>
+    <string name="local_apps_widget_setup_step_1">1. Touch and hold an empty area of the Home Screen.</string>
+    <string name="local_apps_widget_setup_step_2">2. Tap the button in the top-left corner to open the Widget gallery.</string>
+    <string name="local_apps_widget_setup_step_3">3. Search for Lingxi and add its local app Widget.</string>
+    <string name="local_apps_widget_setup_continue">Continue</string>
+    <string name="local_apps_error_widget_snapshot">Couldn\'t update the Home Screen Widget data.</string>
 </resources>

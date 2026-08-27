@@ -564,7 +564,7 @@
     <string name="local_apps_next">次へ</string>
     <string name="local_apps_no_checkpoints">チェックポイントはまだありません</string>
     <string name="local_apps_not_found">アプリが見つかりません</string>
-    <string name="local_apps_open_preview">プレビューを開く</string>
+    <string name="local_apps_open_preview">アプリを開く</string>
     <string name="local_apps_permission_data_mutation">Agent によるアプリデータの変更を許可しますか？</string>
     <string name="local_apps_permission_mutation_requires">データの変更や UI の操作には初回のみ許可が必要です</string>
     <string name="local_apps_permission_network">アプリのネットワークアクセスを許可しますか？</string>
@@ -580,9 +580,9 @@
     <string name="local_apps_permissions_title">アプリの権限</string>
     <string name="local_apps_please_select">選択してください</string>
     <string name="local_apps_preview_confirm_title">プレビューの確認</string>
-    <string name="local_apps_preview_not_ready">プレビューはまだ準備できていません</string>
-    <string name="local_apps_preview_not_running">プレビューはまだ実行されていません</string>
-    <string name="local_apps_preview_not_running_detail">アプリを起動すると、ページは Rust のループバックサービスから読み込まれます。</string>
+    <string name="local_apps_preview_not_ready">アプリはまだ準備できていません</string>
+    <string name="local_apps_preview_not_running">アプリは実行されていません</string>
+    <string name="local_apps_preview_not_running_detail">アプリを起動すると、画面がここに読み込まれます。</string>
     <string name="local_apps_previous">前へ</string>
     <string name="local_apps_process_exited">ローカルアプリのプロセスが終了しました</string>
     <string name="local_apps_restart">再起動</string>
@@ -590,6 +590,9 @@
     <string name="local_apps_restore_checkpoint_title">コードのチェックポイントを復元しますか？</string>
     <string name="local_apps_restore_code">コードを復元</string>
     <string name="local_apps_retry_generate">生成を再試行</string>
+    <string name="local_apps_run_exit">アプリを終了</string>
+    <string name="local_apps_run_pause">アプリを一時停止</string>
+    <string name="local_apps_run_start">アプリを起動</string>
     <string name="local_apps_runtime_failed_title">実行に失敗しました</string>
     <string name="local_apps_runtime_mode">実行モード</string>
     <string name="local_apps_runtime_vite">Vite ローカルサービス</string>
@@ -609,7 +612,7 @@
     <string name="local_apps_section_network">ネットワーク</string>
     <string name="local_apps_section_overview">概要</string>
     <string name="local_apps_section_permissions">権限</string>
-    <string name="local_apps_section_preview">プレビュー</string>
+    <string name="local_apps_section_preview">実行</string>
     <string name="local_apps_source">ソースコード</string>
     <string name="local_apps_source_detail">完全なテキストソースコードの閲覧・編集ができます。シンボリックリンク、ビルド成果物、ワークスペース外のパスは表示されません。固定された依存関係の変更は保存できますが、サポート対象外のバージョンやインストール操作はビルド検証で拒否されます。</string>
     <string name="local_apps_source_empty">編集可能なソースコードはまだありません</string>
@@ -1160,13 +1163,13 @@
     <string name="local_apps_no_checkpoints_detail">チェックポイントはまだありません。</string>
     <string name="local_apps_no_collections">このアプリは永続化コレクションを宣言していません。</string>
     <string name="local_apps_no_domains_detail">なし（デフォルトの CSP は外部ネットワークを禁止）</string>
-    <string name="local_apps_not_running_detail">起動するとここでプレビューできます。</string>
+    <string name="local_apps_not_running_detail">起動するとアプリがここで実行されます。</string>
     <string name="local_apps_not_running_title">アプリはまだ実行されていません</string>
     <string name="local_apps_permission_data_mutation_plain">アプリデータの変更を許可しますか？</string>
     <string name="local_apps_permission_network_short">アプリのネットワーク接続を許可しますか？</string>
     <string name="local_apps_permissions_reset_confirm_detail">セッション権限と永続的な権限の両方がクリアされます。次回データを変更したり、UI を操作したり、ドメインにアクセスする際に再度確認します。</string>
     <string name="local_apps_preview_not_ready_detail">プレビューサービスはまだ準備できていませんが、変更の承認や送信は引き続き可能です。</string>
-    <string name="local_apps_preview_title">アプリプレビュー</string>
+    <string name="local_apps_preview_title">ローカルアプリ</string>
     <string name="local_apps_request_suggestion">Agent にデザインの提案を求める</string>
     <string name="local_apps_required_suffix"> · 必須</string>
     <string name="local_apps_restore_checkpoint_confirm_detail">「%1$s」に復元します。現在のソースコードは先に pre_restore として保存され、アプリのデータは変更されません。</string>
@@ -1369,6 +1372,9 @@
     <string name="settings_skill_seed_polish_desc">中国語から英語への文章を、原意を保ったまま校正</string>
     <string name="settings_skill_bundled_create_local_app_desc">ローカルアプリの設計、依存関係、生成、ビルド、検証を一貫して進行</string>
     <string name="settings_skill_bundled_frontend_design_desc">対象プラットフォームとフォームファクターに合わせてネイティブフロントエンドの方向性を設計</string>
+    <string name="settings_skill_bundled_ionic_react_local_app_desc">固定の Ionic React スキャフォールドで、ネイティブ WebView ブリッジ対応のローカルアプリを実装</string>
+    <string name="settings_skill_bundled_canvas_2d_local_app_desc">決定的な Canvas 2D シーンとネイティブ風オーバーレイでローカルアプリを構築</string>
+    <string name="settings_skill_bundled_threejs_local_app_desc">Three.js シーンでローカルアプリを構築し、ライフサイクル、入力、リソース破棄を明示的に管理</string>
     <string name="settings_skill_bundled_frontend_qa_desc">Browser とネイティブ WebView で UI と操作を検証</string>
     <string name="settings_skill_bundled_accessibility_desc">セマンティクス、キーボード操作、タッチターゲット、コントラスト、動的文字サイズを確認</string>
     <string name="settings_skill_bundled_react_best_practices_desc">React の状態、エフェクト、パフォーマンス、UI 状態の網羅性を確認</string>
@@ -1688,4 +1694,13 @@
     <string name="local_apps_draft_card_subtitle">作成中</string>
     <string name="local_apps_creation_result_unknown">作成結果が不明です。アプリライブラリで確認してください。</string>
     <string name="local_apps_widget_add">ホーム画面に Widget を追加</string>
+    <string name="local_apps_profile_proposal_title">アプリがアシスタントの指示の更新を求めています</string>
+    <string name="local_apps_profile_proposal_navigation_title">アシスタントの指示</string>
+    <string name="local_apps_profile_proposal_apply">適用</string>
+    <string name="local_apps_widget_setup_title">Widget を追加</string>
+    <string name="local_apps_widget_setup_step_1">1. ホーム画面の空いている場所を長押しします。</string>
+    <string name="local_apps_widget_setup_step_2">2. 左上のボタンをタップして Widget ギャラリーを開きます。</string>
+    <string name="local_apps_widget_setup_step_3">3. 「灵犀」を検索し、ローカルアプリの Widget を追加します。</string>
+    <string name="local_apps_widget_setup_continue">続ける</string>
+    <string name="local_apps_error_widget_snapshot">ホーム画面 Widget のデータを更新できませんでした。</string>
 </resources>

@@ -9,9 +9,12 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -26,6 +29,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.createSavedStateHandle
@@ -342,8 +346,31 @@ fun RootScreen(
         )
         onLocalAppLaunchHandled()
     }
-    LaunchedEffect(localAppsState.pendingAuthorization, localAppsState.pendingUiAction) {
-        if (localAppsState.pendingAuthorization != null || localAppsState.pendingUiAction != null) {
+    // Modal channels whose ONLY presenter lives inside `LocalAppsScreen`: raise
+    // the cover so the user can answer them.
+    //
+    // `pendingProfileProposal` joins the other two here. Its dialog
+    // (`ProfileProposalDialog`) is private to `LocalAppsScreen` and composed only
+    // under `if (showingApps)`, and the per-app MCP tool
+    // `<app>_agent_profile_propose_update` returns `approval_required: true` with
+    // the engine holding the approval token until it is answered. That was
+    // survivable while the cover was the only way to reach a local app; with the
+    // drawer's 「创建应用」 the default path now ends in the app's CONVERSATION
+    // with the cover never mounted, so the agent would wait forever on an
+    // approval the user was never shown. iOS rehomed the same sheet to its root
+    // for the same reason (`RootView.localAppProfileProposalItem`); Android
+    // already answers this class of request by raising the cover, so it does
+    // that rather than growing a second presenter.
+    LaunchedEffect(
+        localAppsState.pendingAuthorization,
+        localAppsState.pendingUiAction,
+        localAppsState.pendingProfileProposal,
+    ) {
+        if (
+            localAppsState.pendingAuthorization != null ||
+            localAppsState.pendingUiAction != null ||
+            localAppsState.pendingProfileProposal != null
+        ) {
             showingApps = true
         }
     }
@@ -1198,6 +1225,24 @@ fun RootScreen(
                             onOpenCronSettings(null)
                         },
                         appsCount = localAppsState.apps.size,
+                        // Create, then land in the new app's own conversation.
+                        //
+                        // `closeDrawer()` here rather than on the landing: the
+                        // landing collector below closes the apps cover, but
+                        // nothing on that path touches the drawer, and it fires
+                        // seconds later — or never, if the create fails. The
+                        // drawer must not sit open over either outcome.
+                        //
+                        // The apps cover is deliberately NOT opened. That is the
+                        // whole point of this row: the user ends up in a
+                        // conversation, not on a library page. It is also why
+                        // `createAppFromDrawer` passes `armLibraryFallback =
+                        // false`, and why `LocalAppsErrorDialog` (at the bottom
+                        // of this file) has to exist at all.
+                        onCreateApp = {
+                            closeDrawer()
+                            localAppsViewModel.createAppFromDrawer()
+                        },
                         onOpenApps = {
                             showingApps = true
                             closeDrawer()
@@ -1454,7 +1499,51 @@ fun RootScreen(
             message = projectState.errorMessage,
             onDismiss = projectStore::clearError,
         )
+        // The local-apps error channel needs a presenter with the apps cover
+        // DOWN. `uiState.error`'s only renderer is the dialog inside
+        // `LocalAppsScreen`, which is composed only under `if (showingApps)`
+        // — so a create started from the drawer (the cover is never opened on
+        // that path) failed silently: "已有一个本地应用正在创建中",
+        // "此构建未包含本地应用引擎", "创建结果未知，请在应用库确认" all landed on
+        // state nobody drew. Same hole iOS plugged with its root-level alert
+        // (`RootView.localAppErrorPresented`).
+        //
+        // Gated on `!showingApps`, which makes the two presenters PROVABLY
+        // exclusive rather than merely unlikely to collide: `showingApps` is
+        // the single boolean that decides whether `LocalAppsRoute` — and with
+        // it the cover's own dialog — is in the composition at all. Yielding
+        // costs nothing, because the cover coming up does not clear `error`;
+        // the message is simply drawn by the other presenter.
+        //
+        // Same title and dismiss action as that dialog, so the copy does not
+        // depend on which surface happened to be up.
+        LocalAppsErrorDialog(
+            message = if (showingApps) null else localAppsState.error,
+            onDismiss = { localAppsViewModel.onAction(LocalAppsAction.DismissError) },
+        )
     }
+}
+
+/**
+ * Root-level presenter for `LocalAppsUiState.error`, for the states in which no
+ * apps cover is mounted to show it. Deliberately shaped like
+ * [ProjectErrorDialog] — the existing root-level error idiom — but titled with
+ * the local-apps string, which is why it is not that composable reused.
+ */
+@Composable
+private fun LocalAppsErrorDialog(
+    message: String?,
+    onDismiss: () -> Unit,
+) {
+    if (message == null) return
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.local_apps_action_failed_title)) },
+        text = { Text(message) },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_got_it)) }
+        },
+    )
 }
 
 internal fun computerUseSetupStatus(

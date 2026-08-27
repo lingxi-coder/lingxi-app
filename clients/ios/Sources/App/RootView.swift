@@ -191,6 +191,19 @@ struct RootView: View {
             eventCenter.subscribe { event in providers.handle(event: event) }
             eventCenter.subscribe { event in localApps.handle(event: event) }
         #endif
+        #if DEBUG
+            // A UI test asking for a non-empty app catalog. Under
+            // `LINGXI_UI_TESTING=1` the conversation source is the mock, whose
+            // `submitEngineCommand` is a no-op, so `.listApps` never resolves
+            // and nothing else can ever put a row in `localApps.apps` — see
+            // `LocalAppsStore.seedForUITesting`. Seeded HERE, before the store
+            // reaches the view tree, so the drawer's apps tab is already
+            // populated on first render and no test has to wait on an engine
+            // round-trip that will not happen.
+            if ProcessInfo.processInfo.environment[LocalAppsStore.uiTestSeedEnvironmentKey] == "1" {
+                localApps.seedForUITesting()
+            }
+        #endif
         _providerRepository = State(initialValue: providers)
         _localAppsStore = State(initialValue: localApps)
         _clientEventCenter = State(initialValue: eventCenter)
@@ -428,6 +441,126 @@ struct RootView: View {
             ) { prompt in
                 LocalAppPermissionSheet(store: localAppsStore, prompt: prompt)
             }
+            // The store's error channel needs a presenter with the cover down:
+            // a create started from the drawer has no `LocalAppsRootView`
+            // mounted, so without this the failure is silent.
+            .alert(
+                "local_apps_error_title",
+                isPresented: localAppErrorPresented
+            ) {
+                Button("common_ok", role: .cancel, action: localAppsStore.clearError)
+            } message: {
+                Text(localAppsStore.errorMessage ?? String(localized: "common_unknown_error"))
+            }
+            // Same rehoming as the alert, for the same reason. The per-app MCP
+            // tool `<app>_agent_profile_propose_update` returns
+            // `approval_required: true` and the engine holds the approval token
+            // until this is answered. Its only presenter was the sheet inside
+            // `LocalAppsRootView`, so on the new default path — create from the
+            // drawer, land in the conversation, cover never mounted — no sheet
+            // appeared anywhere and the agent waited forever on an approval the
+            // user could not give.
+            .sheet(item: localAppProfileProposalItem) { proposal in
+                LocalAppProfileProposalSheet(store: localAppsStore, proposal: proposal)
+            }
+    }
+
+    /// Whether THIS presenter owns the local-apps error channel right now.
+    ///
+    /// One controller presents one modal. While the local-apps cover is up its
+    /// own alert owns the message (`LocalAppsLibraryView`), and UIKit refuses
+    /// to raise an alert from a controller that is already presenting — so
+    /// this one also yields to the settings sheet and to the permission sheet
+    /// and picks the message up once they are down. `errorMessage` is not
+    /// cleared by yielding, so nothing is lost in the meantime.
+    private var localAppErrorPresenterIsFree: Bool {
+        navigation.presentedRoute == nil
+            && !navigation.settingsOpen
+            && localAppsStore.pendingPermission == nil
+    }
+
+    /// The same gate guards the SETTER, not only the getter. Without it, the
+    /// cover coming up flips `get` to false, SwiftUI writes that `false` back,
+    /// and `clearError()` destroys the very message the cover's own alert was
+    /// about to show.
+    private var localAppErrorPresented: Binding<Bool> {
+        Binding(
+            get: { localAppErrorPresenterIsFree && localAppsStore.errorMessage != nil },
+            set: { if !$0, localAppErrorPresenterIsFree { localAppsStore.clearError() } }
+        )
+    }
+
+    /// Whether THIS presenter owns the profile-proposal channel right now.
+    ///
+    /// Built ON TOP of `localAppErrorPresenterIsFree` rather than by repeating
+    /// its three terms, which is what makes the two RootView presenters
+    /// PROVABLY exclusive: the alert shows when
+    /// `localAppErrorPresenterIsFree && errorMessage != nil`, this sheet when
+    /// `localAppErrorPresenterIsFree && errorMessage == nil` — the same prefix
+    /// and contradictory second terms, so the conjunction is `false` for every
+    /// state. Strict priority (the alert wins) rather than mutual yielding is
+    /// deliberate: two gates each waiting for the other to be empty would
+    /// deadlock both channels the moment an error and a proposal are pending at
+    /// once. Yielding costs nothing — `pendingProfileProposal` is not cleared
+    /// while this is false (see the setter), so the sheet comes up as soon as
+    /// the alert, the settings sheet, the permission sheet and the local-apps
+    /// cover are all down.
+    private var localAppProfileProposalPresenterIsFree: Bool {
+        localAppErrorPresenterIsFree && localAppsStore.errorMessage == nil
+    }
+
+    /// The proposal to present from the root, or `nil` while another presenter
+    /// owns the controller.
+    ///
+    /// The SETTER carries the same gate as the getter, exactly like
+    /// `localAppErrorPresented`. When the cover comes up (or an error arrives)
+    /// the gate flips, SwiftUI dismisses this sheet and writes `nil` back —
+    /// ungated, that write would answer the proposal on the user's behalf and
+    /// destroy the very thing the cover's own sheet was about to present.
+    ///
+    /// A dismissal that IS this presenter's own — the user swiping the sheet
+    /// away — declines. Silently dropping it would leave the engine holding the
+    /// approval token, which is the hang this whole presenter exists to end.
+    /// `resolveProfileProposal` no-ops when nothing is pending, so the sheet's
+    /// own Apply/Cancel buttons cannot double-answer through this write-back.
+    private var localAppProfileProposalItem: Binding<LocalAppProfileProposal?> {
+        Binding(
+            get: {
+                localAppProfileProposalPresenterIsFree
+                    ? localAppsStore.pendingProfileProposal
+                    : nil
+            },
+            set: { proposal in
+                guard proposal == nil,
+                      localAppProfileProposalPresenterIsFree else { return }
+                localAppsStore.resolveProfileProposal(false)
+            }
+        )
+    }
+
+    /// The drawer's create affordances. Extracted from the `Drawer(...)`
+    /// argument list rather than inlined — this file's body has blown the
+    /// type-checker's budget before.
+    ///
+    /// `closeSidebar()` is explicit because this path does not go through
+    /// `navigation.openLocalApps`, which is what collapsed the sidebar for
+    /// free while these buttons merely opened the library. `switchScope` does
+    /// close it, but only once the landing fires — seconds later, and never at
+    /// all if the create fails.
+    ///
+    /// No landing logic here on purpose: `landCreatedAppIfReady` already
+    /// observes `createdAppLanding` and hands off to `openCreatedAppSession`.
+    ///
+    /// `armLibraryFallback: false` because no `LocalAppsRootView` is mounted on
+    /// this path. `createdAppID` — the library's fallback landing — has exactly
+    /// one consumer, and it lives inside that cover; armed from here the id is
+    /// never consumed and survives for the process lifetime, so the user's next
+    /// unrelated "View all" would be hijacked onto this app's details page. The
+    /// library's "+" still arms it, and its `pendingWidgetSetup` drain
+    /// (`LocalAppsLibraryView`) is untouched.
+    private func createLocalAppFromDrawer() {
+        navigation.closeSidebar()
+        Task { _ = await localAppsStore.createShellApp(armLibraryFallback: false) }
     }
 
     private var sidebar: some View {
@@ -440,6 +573,7 @@ struct RootView: View {
             openSettings: { navigation.showSettings() },
             openTerminal: openCurrentWorkspaceTerminal,
             openApps: { appID in navigation.openLocalApps(appID: appID) },
+            createApp: createLocalAppFromDrawer,
             onSelectProject: { switchProject(to: $0) },
             onSelectSession: { switchProject(to: $0, resumeSessionID: $1) },
             onNewChat: { switchProject(to: $0, startNew: true) },

@@ -320,7 +320,12 @@ private struct LocalAppsLibraryScreen: View {
     private func createShellApp() async {
         guard !creating else { return }
         creating = true
-        _ = await store.createShellApp()
+        // `armLibraryFallback` spelled out rather than left to the default:
+        // this screen IS the fallback landing's only consumer
+        // (`openCreatedAppIfNeeded` below), and it is the only caller that can
+        // truthfully claim the cover is mounted to consume it. The drawer's
+        // create passes `false` for exactly that reason.
+        _ = await store.createShellApp(armLibraryFallback: true)
         creating = false
     }
 

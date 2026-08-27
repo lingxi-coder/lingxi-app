@@ -23,6 +23,11 @@ struct Drawer: View {
     let openSettings: () -> Void
     let openTerminal: () -> Void
     let openApps: (String?) -> Void
+    /// Creates an app and hands the conversation over to it. Separate from
+    /// `openApps` because the create affordances must create, not browse; the
+    /// drawer has no self-dismiss path, so this closure is also what collapses
+    /// the sidebar (see the type comment above).
+    let createApp: () -> Void
     let onSelectProject: (String?) -> Void
     let onSelectSession: (String?, String) -> Void
     let onNewChat: (String?) -> Void
@@ -51,6 +56,7 @@ struct Drawer: View {
         openSettings: @escaping () -> Void,
         openTerminal: @escaping () -> Void,
         openApps: @escaping (String?) -> Void,
+        createApp: @escaping () -> Void,
         onSelectProject: @escaping (String?) -> Void,
         onSelectSession: @escaping (String?, String) -> Void,
         onNewChat: @escaping (String?) -> Void,
@@ -65,6 +71,7 @@ struct Drawer: View {
         self.openSettings = openSettings
         self.openTerminal = openTerminal
         self.openApps = openApps
+        self.createApp = createApp
         self.onSelectProject = onSelectProject
         self.onSelectSession = onSelectSession
         self.onNewChat = onNewChat
@@ -321,7 +328,7 @@ struct Drawer: View {
                 projectCreationMenu
             }
             if !searching, section == .apps {
-                dashedButton(String(localized: "drawer_create_app")) { openApps(nil) }
+                dashedButton(String(localized: "drawer_create_app"), action: createApp)
                     // Same identifier as the populated section's own create row
                     // (they never render together), so the apps route has one
                     // addressable entry point whether or not any app exists.
@@ -350,6 +357,7 @@ struct Drawer: View {
     private var appsSection: some View {
         LocalAppsDrawerSection(
             apps: localApps,
+            onCreateApp: createApp,
             onOpenLibrary: { openApps(nil) },
             onOpenApp: { openApps($0) }
         )

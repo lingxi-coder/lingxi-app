@@ -361,6 +361,17 @@ sealed interface LocalAppsAction {
         val error: String?,
     ) : LocalAppsAction
     data class SelectDetailsTab(val tab: LocalAppDetailsTab) : LocalAppsAction
+
+    /**
+     * 「打开应用」 on the details page: push the full-bleed run surface.
+     *
+     * Exists because [LocalAppsViewModel.openFromWidget] used to be the ONLY
+     * writer of [LocalAppsDestination.Preview], which made the whole run
+     * experience — hidden host bar, floating run control, one-level pop —
+     * reachable only by tapping a home-screen widget. iOS opens the same
+     * surface from the app's detail page; this is Android's equivalent.
+     */
+    data class OpenRunSurface(val appId: String) : LocalAppsAction
     data object Back : LocalAppsAction
     data object DismissError : LocalAppsAction
 }

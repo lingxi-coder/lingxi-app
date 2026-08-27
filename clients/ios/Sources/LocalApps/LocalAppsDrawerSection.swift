@@ -3,12 +3,16 @@ import SwiftUI
 struct LocalAppsDrawerSection: View {
     @Environment(\.theme) private var theme
     let apps: [LocalAppSummary]
+    /// Creates an app outright. Distinct from `onOpenLibrary` on purpose: the
+    /// create row used to open the library cover, which is a browse action
+    /// wearing a create label.
+    let onCreateApp: () -> Void
     let onOpenLibrary: () -> Void
     let onOpenApp: (String) -> Void
 
     var body: some View {
         VStack(spacing: 6) {
-            Button(action: onOpenLibrary) {
+            Button(action: onCreateApp) {
                 Label("local_apps_create", systemImage: "plus")
                     .font(.system(size: 13.5, weight: .medium))
                     .foregroundStyle(theme.accent)
@@ -54,12 +58,15 @@ struct LocalAppsDrawerSection: View {
                 .accessibilityIdentifier("drawer.apps.row.\(app.id)")
             }
 
+            // Keeps opening the library — this is the browse affordance, and
+            // now the only drawer route to the cover.
             Button("local_apps_view_all", systemImage: "square.grid.2x2", action: onOpenLibrary)
                 .font(.system(size: 13))
                 .foregroundStyle(theme.text3)
                 .frame(maxWidth: .infinity)
                 .padding(10)
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("drawer.apps.view-all")
         }
     }
 }

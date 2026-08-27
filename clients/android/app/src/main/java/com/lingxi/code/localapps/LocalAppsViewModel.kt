@@ -115,6 +115,27 @@ class LocalAppsViewModel(
      * resolves normally cannot be "timed out" by a stale job afterwards.
      */
     private var pendingCreateTimeout: Job? = null
+
+    /**
+     * Whether the create identified by [pendingCreateRequestId] may leave the
+     * library parked on the new app's Details page.
+     *
+     * [openApp] is the library's FALLBACK landing — a screen behind the
+     * hand-off in case the scope switch is refused — and its only consumer is
+     * the apps cover. A create started from the DRAWER runs with that cover
+     * down, so the destination it writes is never rendered and never popped: it
+     * survives on this Activity-scoped ViewModel until the user's next
+     * unrelated 「打开应用库」, which would then open on this app's Details page
+     * instead of the library. Same hazard iOS spells `armLibraryFallback`
+     * (`LocalAppsStore.createShellApp`), handled the same way — only the
+     * library's own 「+」 arms it.
+     *
+     * Recorded WITH the correlation key rather than read at event time from the
+     * UI state: by the time `AppCreated` lands the cover may have been opened or
+     * closed for unrelated reasons, and what decides this is where the create
+     * STARTED.
+     */
+    private var pendingCreateArmsLibraryFallback = false
     private val widgetPinRequestChannel = Channel<String>(Channel.BUFFERED)
     val widgetPinRequests = widgetPinRequestChannel.receiveAsFlow()
     private val createdAppLandingChannel = Channel<CreatedAppLanding>(Channel.BUFFERED)
@@ -168,6 +189,73 @@ class LocalAppsViewModel(
      * request, or an unsolicited push) or APPENDS them (a 「加载更多」 page).
      */
     private val sessionRequestOffsets = mutableMapOf<String, ULong?>()
+
+    /**
+     * The level BELOW the full-screen run surface — where [navigateBack] returns
+     * when [LocalAppsDestination.Preview] is popped.
+     *
+     * Exists because [LocalAppsDestination] holds one destination rather than a
+     * stack, so "pop one level" has no structure to read and must be RECORDED by
+     * whoever pushes Preview. Every site that navigates into Preview must write
+     * it, and must write it from live state via [originBelowPreview] — there is
+     * exactly one such site today ([openFromWidget]).
+     *
+     * ⚠️ The initializer is a cold-start placeholder, not the policy. Recording
+     * the same value the initializer already holds is indistinguishable from not
+     * recording at all: the pop then behaves exactly like the constant it was
+     * meant to replace, with nothing red to say so. [originBelowPreview] is
+     * where the value actually comes from, and the paired tests
+     * `the run surface returns to the details page it was pushed from` /
+     * `a run surface pushed over the library still pops to the library` exist to
+     * keep the two answers apart.
+     */
+    private var previewReturnDestination: LocalAppsDestination = LocalAppsDestination.Library
+
+    /**
+     * The level a run surface for [appId] is about to be pushed ON TOP OF —
+     * read from the live destination at push time, which is the only moment it
+     * is knowable.
+     *
+     * Two rules, and both of them earn their place:
+     *
+     * - A Details page for THIS app is a real level below: the user descended
+     *   from it, and iOS's twin pops back to it (`path.append(.preview(appID))`
+     *   from the detail route, so `dismiss()` lands on the detail page). This is
+     *   reachable today — the widget deep link does not reset the destination
+     *   (RootScreen.kt flips `showingApps` on in the same effect and calls
+     *   [openFromWidget] directly), so tapping an app's widget while standing on
+     *   that same app's Details page pushes the run surface straight over it.
+     * - ANY OTHER destination collapses to [LocalAppsDestination.Library].
+     *   A widget deep link arrives from OUTSIDE this surface, so a Details page
+     *   for a DIFFERENT app underneath it is an unrelated leftover from a visit
+     *   the user finished long ago; returning there would be worse than
+     *   returning to the library, which is also where iOS's widget-seeded stack
+     *   pops to (`path = [shouldOpenPreview ? .preview(id) : .details(id)]` in
+     *   LocalAppsLibraryView.swift). The not-ready branch of [openFromWidget]
+     *   lands on Details and pops to Library as well, so both widget outcomes
+     *   still take exactly one back press to reach the library.
+     */
+    private fun originBelowPreview(appId: String): LocalAppsDestination {
+        val current = _uiState.value.destination
+        val below = when (current) {
+            // A run surface REPLACES a run surface rather than stacking on one
+            // (a widget tap arriving while one is already up), so the level
+            // below is still whatever the surface being replaced recorded — not
+            // that surface itself, which would make the pop a no-op.
+            is LocalAppsDestination.Preview -> previewReturnDestination
+            else -> current
+        }
+        return when (below) {
+            is LocalAppsDestination.Details ->
+                below.takeIf { it.appId == appId } ?: LocalAppsDestination.Library
+            // Unreachable: `below` is either a non-Preview destination or a
+            // previously recorded origin, and only Library/Details are ever
+            // recorded. Named rather than folded into an `else` so a fourth
+            // destination breaks this compile instead of silently picking one.
+            is LocalAppsDestination.Preview -> LocalAppsDestination.Library
+            LocalAppsDestination.Library -> LocalAppsDestination.Library
+        }
+    }
 
     init {
         webStorageCleanup.retryConfirmed()
@@ -228,7 +316,9 @@ class LocalAppsViewModel(
     fun onAction(action: LocalAppsAction) {
         when (action) {
             LocalAppsAction.Refresh -> submit { requestSnapshots(it) }
-            LocalAppsAction.Create -> createShellApp()
+            // The library's own 「+」: the cover IS mounted, so it may arm the
+            // fallback landing. See [pendingCreateArmsLibraryFallback].
+            LocalAppsAction.Create -> createShellApp(armLibraryFallback = true)
             is LocalAppsAction.Search -> _uiState.update { it.copy(query = action.query) }
             is LocalAppsAction.RequestWidget -> requestWidgetPin(action.appId)
             is LocalAppsAction.OpenApp -> openAppFromLibrary(action.appId)
@@ -262,6 +352,7 @@ class LocalAppsViewModel(
                     destination = LocalAppsDestination.Details(appId, action.tab),
                 )
             }
+            is LocalAppsAction.OpenRunSurface -> openRunSurface(action.appId)
             LocalAppsAction.Back -> navigateBack()
             LocalAppsAction.DismissError -> _uiState.update { it.copy(error = null) }
         }
@@ -304,8 +395,14 @@ class LocalAppsViewModel(
      *   started at.
      * - `workflowModel = null` — follow the session model; there is no picker
      *   any more and no other caller of that field on Android.
+     *
+     * [armLibraryFallback] says whether the apps cover is mounted to render the
+     * Details page [openApp] would park it on; see
+     * [pendingCreateArmsLibraryFallback]. Every caller states it explicitly —
+     * there is no default — because getting it wrong is invisible until an
+     * unrelated 「打开应用库」 lands on the wrong screen.
      */
-    private fun createShellApp() {
+    private fun createShellApp(armLibraryFallback: Boolean) {
         if (pendingCreateRequestId != null) {
             error(
                 strings.resolve(
@@ -329,6 +426,7 @@ class LocalAppsViewModel(
         }
         val requestId = UUID.randomUUID().toString()
         pendingCreateRequestId = requestId
+        pendingCreateArmsLibraryFallback = armLibraryFallback
         armCreateTimeout(requestId)
         submit(
             ClientCommand.CreateApp(
@@ -348,6 +446,33 @@ class LocalAppsViewModel(
             // keeps the button usable; `submit` raises the failure itself.
             clearPendingCreate()
         }
+    }
+
+    /**
+     * The drawer's 「创建应用」 row: the same shell create, started with the apps
+     * cover DOWN.
+     *
+     * A public function rather than a [LocalAppsAction], because
+     * [LocalAppsAction] is the cover's own intent vocabulary — `onAction` is
+     * only ever reached from `LocalAppsScreen` — and the drawer already talks to
+     * this ViewModel directly the way [openLibrary] and [openFromWidget] do
+     * (`RootScreen.kt`). It also keeps `LocalAppsAction.Create` a `data object`,
+     * which is what the cover's two call sites pass.
+     *
+     * No landing logic here on purpose: the hand-off is [createdAppLandings],
+     * already collected in `RootScreen.kt`, which switches the conversation into
+     * the app's scope and sends `R.string.local_apps_kickoff`. This path adds
+     * nothing to it — it only starts the create.
+     *
+     * `armLibraryFallback = false`: nothing is mounted to render [openApp]'s
+     * Details destination, and leaving it written would hijack the next
+     * 「打开应用库」. See [pendingCreateArmsLibraryFallback].
+     *
+     * Failures still reach the user: they land on `uiState.error`, which
+     * `RootScreen` now presents itself while the cover is down.
+     */
+    fun createAppFromDrawer() {
+        createShellApp(armLibraryFallback = false)
     }
 
     /**
@@ -385,6 +510,7 @@ class LocalAppsViewModel(
             // coroutine IS the stop-loss, and that helper would cancel the job
             // currently executing this line.
             pendingCreateRequestId = null
+            pendingCreateArmsLibraryFallback = false
             pendingCreateTimeout = null
             error(
                 strings.resolve(
@@ -398,6 +524,13 @@ class LocalAppsViewModel(
     /** Release the create claim and its stop-loss together — always both. */
     private fun clearPendingCreate() {
         pendingCreateRequestId = null
+        // Cleared WITH the key it qualifies. Not a live bug fix — the flag is
+        // only ever read under `pendingCreateRequestId != null`, and every
+        // create writes it before arming the key — but the invariant it holds
+        // up ("this is meaningful only alongside a pending key") is what makes
+        // that argument checkable at a glance. The hand-rolled release inside
+        // `armCreateTimeout` clears it for the same reason.
+        pendingCreateArmsLibraryFallback = false
         pendingCreateTimeout?.cancel()
         pendingCreateTimeout = null
     }
@@ -475,12 +608,33 @@ class LocalAppsViewModel(
                     destination = LocalAppsDestination.Details(appId, LocalAppDetailsTab.Sessions),
                     error = strings.resolve(
                         R.string.local_apps_preview_not_ready,
-                        "预览尚未准备好",
+                        "应用尚未准备好",
                     ),
                 )
             }
             return
         }
+        pushRunSurface(appId)
+        if (autostart) startRuntimeIfNeeded(appId)
+    }
+
+    /**
+     * The ONLY writer of [LocalAppsDestination.Preview], shared by the widget
+     * entrance and the details page's 「打开应用」 so the
+     * [previewReturnDestination] discipline has exactly one implementation.
+     *
+     * Read the origin from the LIVE destination, never a constant: a push while
+     * the user is standing on this app's Details page must give that page back
+     * on exit. Assigning a constant here — any constant — makes the line
+     * indistinguishable from the property's own initializer and turns the whole
+     * mechanism back into the collapse-to-Library it replaced. See
+     * [originBelowPreview] for which origins survive and why.
+     *
+     * The assignment happens BEFORE the `update` that writes Preview,
+     * deliberately: afterwards the destination it has to read is already gone.
+     */
+    private fun pushRunSurface(appId: String) {
+        previewReturnDestination = originBelowPreview(appId)
         _uiState.update {
             it.copy(
                 selectedAppId = appId,
@@ -488,7 +642,23 @@ class LocalAppsViewModel(
                 destination = LocalAppsDestination.Preview(appId),
             )
         }
-        if (autostart) startRuntimeIfNeeded(appId)
+    }
+
+    /**
+     * 「打开应用」 on the details page.
+     *
+     * Refuses a app that is not [LocalAppWorkflow.Ready] with the same message
+     * the widget path uses, rather than pushing a surface whose only content
+     * would be the not-running placeholder.
+     */
+    private fun openRunSurface(appId: String) {
+        val app = _uiState.value.apps.firstOrNull { it.id == appId } ?: return
+        if (app.workflow != LocalAppWorkflow.Ready) {
+            error(strings.resolve(R.string.local_apps_preview_not_ready, "应用尚未准备好"))
+            return
+        }
+        pushRunSurface(appId)
+        startRuntimeIfNeeded(appId)
     }
 
     fun openLibrary() {
@@ -678,12 +848,53 @@ class LocalAppsViewModel(
         _uiState.update { state -> state.copy(pendingUiAction = null) }
     }
 
+    /**
+     * Leave the current destination by popping exactly ONE level, the way iOS's
+     * `dismiss()` pops one `NavigationStack` route.
+     *
+     * [LocalAppsDestination] is a single value rather than a stack, so the run
+     * surface's "one level down" has to be recorded when it is entered — that is
+     * [previewReturnDestination], written from live state by
+     * [originBelowPreview]. Collapsing Preview straight to
+     * [LocalAppsDestination.Library] discarded whatever screen the run surface
+     * had been opened ON TOP of; iOS's twin returns to it (its detail route
+     * pushes the run route with `path.append(.preview(appID))`, so `dismiss()`
+     * lands back on the detail page).
+     *
+     * Details still pops to Library because Library IS the level below it: it is
+     * pushed from a library card ([openApp]), from a create's fallback landing,
+     * from the ui-control prompt, and from [openFromWidget]'s not-ready branch —
+     * never from another Details page and never from the run surface.
+     *
+     * Reached only through [LocalAppsAction.Back], which three call sites
+     * dispatch — RootScreen.kt's system-back `BackHandler`, the run surface's
+     * RunPill exit button, and the Details top bar's back chevron (plus the
+     * not-running run surface's own top bar, restored to mirror iOS). All four
+     * mean the same thing, so all four go through this one function.
+     */
     private fun navigateBack() {
         _uiState.update { state ->
             when (state.destination) {
                 LocalAppsDestination.Library -> state
-                is LocalAppsDestination.Preview,
-                is LocalAppsDestination.Details -> state.copy(destination = LocalAppsDestination.Library)
+                is LocalAppsDestination.Preview -> {
+                    val origin = previewReturnDestination
+                    state.copy(
+                        destination = origin,
+                        // The tab travels with the page. `LocalAppDetailsScreen`
+                        // renders `state.selectedDetailsTab`, NOT the
+                        // destination's own `tab`, and pushing the run surface
+                        // set that field to Preview — so restoring the origin
+                        // alone would drop the user back on the page they came
+                        // from with a tab they never chose, and leave the two
+                        // fields disagreeing about the same screen.
+                        selectedDetailsTab = when (origin) {
+                            is LocalAppsDestination.Details -> origin.tab
+                            else -> state.selectedDetailsTab
+                        },
+                    )
+                }
+                is LocalAppsDestination.Details ->
+                    state.copy(destination = LocalAppsDestination.Library)
             }
         }
     }
@@ -905,8 +1116,18 @@ class LocalAppsViewModel(
                 val createdRequestId = event.requestId
                 val pending = pendingCreateRequestId
                 if (createdRequestId != null && pending != null && createdRequestId == pending) {
+                    // Read BEFORE `clearPendingCreate`, which resets it along
+                    // with the key it belongs to.
+                    val armsLibraryFallback = pendingCreateArmsLibraryFallback
                     clearPendingCreate()
-                    openApp(event.record.id)
+                    // Only when a cover is mounted to render it. A drawer create
+                    // skips this: `openApp` writes a Details destination that
+                    // nothing would draw and nothing would pop, and the next
+                    // 「打开应用库」 would open onto it. Skipping cannot cost the
+                    // hand-off — the pin arrives on the engine's own pushed
+                    // `AppEvent::RecordChanged` (`local_apps_bridge.rs`), not as
+                    // a reply to the `GetAppDetails` this issues.
+                    if (armsLibraryFallback) openApp(event.record.id)
                     // Arm the hand-off; the init-session pin is minted AFTER
                     // this event and arrives on `AppRecordChanged`.
                     landingAwaitingPin = CreatedAppLanding(

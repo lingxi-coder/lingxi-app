@@ -1873,6 +1873,19 @@ final class LocalAppsStoreTests: XCTestCase {
         // SHELL and the interview happens inside the app's own conversation,
         // so the only thing tying an `AppCreated` back to the tap that caused
         // it is the client-generated `request_id`.
+        //
+        // `createShellApp` takes NO default for `armLibraryFallback`, so every
+        // call below names it. The tests in this run of the section are the
+        // LIBRARY's "+" — the caller that mounts the cover — and pass `true`.
+        // That is not bookkeeping: three of them assert
+        // `consumeCreatedAppID()` is nil for an event that is not theirs
+        // (`testOnlyTheAppCreatedCarryingOurRequestIdIsClaimed`,
+        // `testAnAppCreatedWithoutARequestIdIsNeverClaimed`,
+        // `testAReconnectClearsPendingAndRefusesToClaimALaterEvent`), and
+        // under `false` the store never arms `createdAppID` for ANY event, so
+        // those three would pass without exercising the correlation they
+        // exist to pin. The drawer's `false` is covered by the two tests at
+        // the end of the section.
 
         /// "+" sends exactly one `CreateApp`, in shell mode, with a client
         /// correlation key and nothing the user was never asked for.
@@ -1887,7 +1900,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            let started = await store.createShellApp()
+            let started = await store.createShellApp(armLibraryFallback: true)
 
             XCTAssertTrue(started)
             XCTAssertEqual(submitted.count, 1)
@@ -1926,7 +1939,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp()
+            _ = await store.createShellApp(armLibraryFallback: true)
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
 
             let theirs = shellRecord(id: "theirs", name: "untitled")
@@ -1954,7 +1967,7 @@ final class LocalAppsStoreTests: XCTestCase {
             let store = LocalAppsStore()
             store.configure { _ in }
 
-            _ = await store.createShellApp()
+            _ = await store.createShellApp(armLibraryFallback: true)
             let agents = shellRecord(id: "agents", name: "untitled")
             store.handle(event: .appEvent(event: .appCreated(record: agents, requestId: nil)))
             store.handle(event: .appEvent(event: .appRecordChanged(record: agents)))
@@ -1976,7 +1989,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp()
+            _ = await store.createShellApp(armLibraryFallback: true)
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
             let created = shellRecord(id: "notes", name: "untitled")
             store.handle(event: .appEvent(event: .appCreated(record: created, requestId: key)))
@@ -2005,7 +2018,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp()
+            _ = await store.createShellApp(armLibraryFallback: true)
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
             let created = shellRecord(id: "notes", name: "untitled")
             store.handle(event: .appEvent(event: .appCreated(record: created, requestId: key)))
@@ -2044,7 +2057,7 @@ final class LocalAppsStoreTests: XCTestCase {
             store.createResultTimeout = .milliseconds(30)
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp()
+            _ = await store.createShellApp(armLibraryFallback: true)
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
             try await Task.sleep(for: .milliseconds(300))
 
@@ -2063,7 +2076,7 @@ final class LocalAppsStoreTests: XCTestCase {
                 "a create that already timed out must not hijack the user later")
 
             // …and the store is usable again rather than latched shut.
-            let again = await store.createShellApp()
+            let again = await store.createShellApp(armLibraryFallback: true)
             XCTAssertTrue(again, "the timeout is a stop-loss, not a permanent latch")
         }
 
@@ -2077,7 +2090,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp()
+            _ = await store.createShellApp(armLibraryFallback: true)
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
 
             await store.refreshAfterEngineRebind()
@@ -2105,7 +2118,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp()
+            _ = await store.createShellApp(armLibraryFallback: true)
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
 
             store.handle(event: .appOperationFailed(
@@ -2120,7 +2133,7 @@ final class LocalAppsStoreTests: XCTestCase {
             _ = store.consumeCreatedAppLanding()
 
             submitted.removeAll()
-            _ = await store.createShellApp()
+            _ = await store.createShellApp(armLibraryFallback: true)
             let second = try XCTUnwrap(sentCreateRequestID(submitted))
             store.handle(event: .appOperationFailed(
                 appId: nil, code: .io, message: "创建失败", requestId: second))
@@ -2140,8 +2153,8 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            let first = await store.createShellApp()
-            let second = await store.createShellApp()
+            let first = await store.createShellApp(armLibraryFallback: true)
+            let second = await store.createShellApp(armLibraryFallback: true)
 
             XCTAssertTrue(first)
             XCTAssertFalse(second, "only one create may be in flight at a time")
@@ -2150,6 +2163,151 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(
                 store.errorMessage,
                 String(localized: "local_apps_error_create_in_progress"))
+        }
+
+        /// The drawer's create runs the SAME store path as the library's
+        /// "+", and a create that fails leaves its message on the store for a
+        /// presenter to read.
+        ///
+        /// This is the store half of the drawer create: the drawer creates
+        /// with NO cover mounted, so `LocalAppsRootView`'s alert — the only
+        /// presenter of `errorMessage` before this change — is not on screen
+        /// when the engine reports the failure. Written so a store that
+        /// swallowed the failure, or that disarmed the create without saying
+        /// anything, FAILS: the message is compared against the engine's own
+        /// text rather than merely checked for non-nil, the failure is
+        /// correlated by the key the store actually put on the wire, and the
+        /// channel is re-exercised after `clearError()` because dismissing
+        /// the alert is what calls it.
+        func testADrawerCreateSendsOneCreateAndLeavesTheFailureForAPresenter() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            // The DRAWER's own argument. There is no default to fall back to
+            // any more — `createShellApp` refuses to guess — so this line is
+            // what makes the test a DRAWER create rather than a library one
+            // wearing a drawer's name.
+            let started = await store.createShellApp(armLibraryFallback: false)
+
+            XCTAssertTrue(
+                started,
+                "the drawer calls the same store method the library's + calls")
+            XCTAssertEqual(
+                submitted.count, 1,
+                "one tap, one CreateApp — the drawer opens no library on the way")
+            let key = try XCTUnwrap(
+                sentCreateRequestID(submitted),
+                "without a correlation key a failure cannot be matched back to this tap")
+            XCTAssertNil(store.errorMessage, "nothing has failed yet")
+
+            store.handle(event: .appOperationFailed(
+                appId: nil, code: .io, message: "创建失败：磁盘写入被拒绝", requestId: key))
+
+            XCTAssertEqual(
+                store.errorMessage, "创建失败：磁盘写入被拒绝",
+                "with no cover mounted the message must survive on the store, "
+                    + "which is the only thing a root-level presenter can read")
+            XCTAssertNil(
+                store.createdAppLanding,
+                "a create that failed must not land a session on the conversation")
+            XCTAssertNil(
+                store.createdAppID,
+                "nor may a FAILED create arm any landing — `createdAppID` is "
+                    + "written on AppCreated, and no AppCreated arrived")
+            // NOTE: the line above pins the FAILURE path and nothing else. It
+            // says nothing about `armLibraryFallback`: `createdAppID` is
+            // assigned in exactly one place — the `.appCreated` arm's
+            // `if armsLibraryFallback { createdAppID = summary.id }` — which
+            // this test never reaches, so it is nil here for `true` and
+            // `false` alike. The parameter is pinned, in both directions and
+            // on the SUCCESS path, by
+            // `testOnlyALibraryCreateArmsTheLibrarysFallbackLanding` below.
+
+            // Dismissing the alert clears the channel — and does not wedge it.
+            store.clearError()
+            XCTAssertNil(store.errorMessage)
+
+            submitted.removeAll()
+            let again = await store.createShellApp(armLibraryFallback: false)
+            XCTAssertTrue(
+                again, "the failed create was disarmed, so the drawer may create again")
+            let second = try XCTUnwrap(sentCreateRequestID(submitted))
+            XCTAssertNotEqual(second, key, "each tap mints its own correlation key")
+            store.handle(event: .appOperationFailed(
+                appId: nil, code: .io, message: "创建失败：引擎已断开", requestId: second))
+            XCTAssertEqual(
+                store.errorMessage, "创建失败：引擎已断开",
+                "the second failure must reach the presenter too")
+        }
+
+        /// The library's fallback landing is armed by a LIBRARY create and
+        /// refused to a DRAWER one.
+        ///
+        /// `createdAppID` has exactly ONE consumer,
+        /// `LocalAppsLibraryView.openCreatedAppIfNeeded`, driven by that
+        /// screen's `onAppear` / `onChange(of: store.createdAppID)`. A drawer
+        /// create runs with the cover down, so an id armed there is never
+        /// drained where it was meant to be: it survives for the process
+        /// lifetime and the user's next unrelated "View all" consumes it and
+        /// drops them on that stale app's details page instead of the list.
+        ///
+        /// Both directions are asserted deliberately, because either half
+        /// alone passes for a store that IGNORES `armLibraryFallback`: one
+        /// that always arms satisfies the library half, one that never arms
+        /// satisfies the drawer half. Only the pair pins the parameter. And
+        /// the PRIMARY landing is asserted armed in both halves, so the
+        /// drawer's "not armed" cannot be satisfied by a create that quietly
+        /// did nothing at all.
+        func testOnlyALibraryCreateArmsTheLibrarysFallbackLanding() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            // The drawer — `RootView.createLocalAppFromDrawer` passes false.
+            let drawerStarted = await store.createShellApp(armLibraryFallback: false)
+            XCTAssertTrue(drawerStarted, "the drawer's create must still reach the engine")
+            let drawerKey = try XCTUnwrap(sentCreateRequestID(submitted))
+            let drawerApp = shellRecord(id: "from-drawer", name: "untitled")
+            store.handle(event: .appEvent(
+                event: .appCreated(record: drawerApp, requestId: drawerKey)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: drawerApp)))
+
+            XCTAssertNil(
+                store.createdAppID,
+                "a drawer create mounts no library cover, so an armed createdAppID "
+                    + "is never consumed where it was armed: the next unrelated "
+                    + "View all drains it and hijacks the user onto this app")
+            XCTAssertEqual(
+                store.createdAppLanding?.appID, "from-drawer",
+                "only the FALLBACK is refused — the drawer create's own landing "
+                    + "into the app's conversation must still arm")
+            _ = store.consumeCreatedAppLanding()
+
+            // The library's "+" — `LocalAppsLibraryView.createShellApp` passes true.
+            submitted.removeAll()
+            let libraryStarted = await store.createShellApp(armLibraryFallback: true)
+            XCTAssertTrue(
+                libraryStarted, "the resolved drawer create must not wedge the next one")
+            let libraryKey = try XCTUnwrap(sentCreateRequestID(submitted))
+            XCTAssertNotEqual(
+                libraryKey, drawerKey, "each create mints its own correlation key")
+            let libraryApp = shellRecord(id: "from-library", name: "untitled")
+            store.handle(event: .appEvent(
+                event: .appCreated(record: libraryApp, requestId: libraryKey)))
+            store.handle(event: .appEvent(event: .appRecordChanged(record: libraryApp)))
+
+            XCTAssertEqual(
+                store.createdAppID, "from-library",
+                "the library's + is the fallback's only consumer: unarmed, its "
+                    + "onAppear/onChange landing has nothing to fire on")
+            XCTAssertEqual(
+                store.consumeCreatedAppID(), "from-library",
+                "and the cover must be able to drain exactly that id")
+            XCTAssertNil(store.createdAppID, "the fallback landing is one-shot")
+            XCTAssertEqual(
+                store.createdAppLanding?.appID, "from-library",
+                "the primary landing arms for a library create too")
         }
 
         /// The kickoff message resolves to real copy, in every locale the

@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,6 +23,8 @@ import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.OpenInFull
+import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Stop
@@ -56,6 +59,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -428,23 +432,38 @@ private fun LocalAppPreviewScreen(
     onExternalNavigation: (String) -> Unit,
 ) {
     val app = state.apps.firstOrNull { it.id == appId }
+    val previewUrl = state.previewUrl(appId)
+    // The host bar is hidden for the RUNNING state only, and restored for every other
+    // one — the exact conditional iOS spells as
+    //   .toolbar(previewURL == nil ? .visible : .hidden, for: .navigationBar)
+    // in LocalAppDetailView.swift's LocalAppPreviewView.
+    //
+    // Hidden while running because the app draws its OWN header inside the WebView, so
+    // a host bar stacked above it read as two title bars; the start/pause and exit
+    // controls live in the floating RunPill instead.
+    //
+    // VISIBLE when there is nothing to render, because the placeholder carries no pill
+    // — the pill is composed inside the `previewUrl != null` branch below. Removing the
+    // bar unconditionally left that state with no title AND no back affordance: a bare
+    // centred Column with a Start button. On a gesture-navigation device with an app
+    // that is slow to start, that is a screen with no VISIBLE way off it. System back
+    // does still leave the destination in both states (RootScreen.kt's BackHandler maps
+    // a back press on a non-Library destination to LocalAppsAction.Back, which is what
+    // this navigation icon dispatches too), but "still works" is not "discoverable".
+    //
+    // `local_apps_section_preview` 「运行」 is the same key iOS puts on
+    // `.navigationTitle`, so the two clients name this screen identically.
     Scaffold(
         topBar = {
-            LocalAppsTopBar(
-                localAppDisplayName(
-                    app,
-                    draftTitle = stringResource(R.string.local_apps_draft_card_title),
-                    fallback = stringResource(R.string.local_apps_preview_title),
-                ),
-                onBack = { onAction(LocalAppsAction.Back) },
-            )
+            if (previewUrl == null) {
+                LocalAppsTopBar(
+                    stringResource(R.string.local_apps_section_preview),
+                    onBack = { onAction(LocalAppsAction.Back) },
+                )
+            }
         },
     ) { padding ->
-        Column(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
-        ) {
-            val previewUrl = state.previewUrl(appId)
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             if (previewUrl != null) {
                 BoundLocalAppWebView(
                     appId = appId,
@@ -452,9 +471,86 @@ private fun LocalAppPreviewScreen(
                     state = state,
                     onAction = onAction,
                     onExternalNavigation = onExternalNavigation,
-                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    modifier = Modifier.fillMaxSize(),
+                )
+                // "running" is read off the SAME chain the render predicate resolves.
+                // previewUrl() (LocalAppsContract.kt) is
+                //   apps.firstOrNull { it.id == appId }?.runtime?.url ?: details[appId]?.runtime?.url
+                // — it FALLS BACK to `details`. Reading the state off the `apps` row alone
+                // let the two disagree whenever `apps` has no row for an app that is
+                // already running: a widget deep link straight into this destination
+                // before ListApps lands, or the momentary empty window while reduceApps()
+                // rebuilds the list. The WebView then rendered a live app while the pill
+                // showed ▶, and tapping it dispatched StartRuntime on a running runtime.
+                // `takeIf { it.url != null }` is what makes this elvis land on the same
+                // side as previewUrl's: the `apps` runtime wins here exactly when it is
+                // the one that supplied the url being rendered.
+                val runtime = app?.runtime?.takeIf { it.url != null } ?: state.details[appId]?.runtime
+                // Exhaustive `when`, no `else`: a state added to LocalAppRuntimeState
+                // must break this compile rather than silently pick a button.
+                //
+                // STOPPING counts as running, and that is the whole point of this
+                // block. A url OUTLIVES the running state on three independent layers:
+                //   · the wire — `lower_runtime_details` (local_apps_bridge.rs:402)
+                //     builds `loopback_url: runtime.port.map(|port| …)`, a pure
+                //     function of the PORT that never consults the state;
+                //   · the engine — `stop_runtime` (local_apps_host.rs) writes
+                //     `update_runtime_record(app_id, Stopping, runtime.port, …)`, i.e.
+                //     it keeps the port through the whole shutdown window;
+                //   · this client — the AppRuntimeChanged reducer's
+                //     `?: app.runtime.copy(state = …)` preserves the previous url
+                //     whenever the event arrives without a details payload.
+                // So `previewUrl` stays non-null across a shutdown, this pill stays
+                // composed over the page, and calling STOPPING "not running" would draw
+                // ▶ / local_apps_run_start and dispatch StartRuntime into a runtime the
+                // engine is tearing down — which nothing downstream catches:
+                // `startRuntimeIfNeeded` short-circuits only on Running/Starting, so
+                // Stopping falls straight through to `ClientCommand.StartApp`.
+                // Offering "stop" instead costs nothing: `stop_runtime` has already
+                // removed the entry from its in-memory table by the time the record
+                // says Stopping, so a second StopApp hits the `None =>` arm and returns
+                // `{"state":"stopped"}` without touching the runtime.
+                val running = when (runtime?.state) {
+                    LocalAppRuntimeState.Running,
+                    LocalAppRuntimeState.Starting,
+                    LocalAppRuntimeState.Stopping -> true
+                    // A stale url outliving a dead runtime: the page on screen cannot
+                    // be paused, and ▶ genuinely does bring it back, so start is the
+                    // honest offer here.
+                    LocalAppRuntimeState.Stopped,
+                    LocalAppRuntimeState.Failed -> false
+                    // Unreachable — `previewUrl != null` means one of the two sources
+                    // above resolved a runtime — but named rather than folded into an
+                    // `else`, so this stays a compile-time exhaustive match.
+                    null -> false
+                }
+                RunPill(
+                    running = running,
+                    onToggle = {
+                        if (running) {
+                            onAction(LocalAppsAction.StopRuntime(appId))
+                        } else {
+                            onAction(LocalAppsAction.StartRuntime(appId))
+                        }
+                    },
+                    onExit = { onAction(LocalAppsAction.Back) },
+                    // Bottom-START, not bottom-end, and it must stay that way: an Ionic
+                    // page parks its OWN furniture in the bottom-end corner — IonFab
+                    // defaults to vertical="bottom" horizontal="end", and the right-most
+                    // IonTabBar tab lands there too — so a host control pinned bottom-end
+                    // sits on top of the app's own button. iOS's twin is .bottomLeading
+                    // (LocalAppDetailView.swift) for the same reason; the two clients must
+                    // match. Alignment.BottomStart is layout-direction aware, so this is
+                    // the leading corner in RTL as well.
+                    //
+                    // A plain padding, deliberately: RootScreen.kt wraps this whole route in
+                    // windowInsetsPadding(WindowInsets.systemBars), which CONSUMES the insets,
+                    // so a navigationBarsPadding() here would measure zero on device.
+                    modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
                 )
             } else {
+                // Not running: no app content to fill the screen, so no pill — the centred
+                // placeholder keeps its own start button, and back still exits.
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(stringResource(R.string.local_apps_not_running_detail))
@@ -462,6 +558,97 @@ private fun LocalAppPreviewScreen(
                             Text(stringResource(R.string.common_start))
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Every button in [RunPill], the collapsed toggle included.
+ *
+ * 48dp is Android's documented minimum touch target (iOS's twin uses 44pt, its
+ * own platform minimum, at `LocalAppRunControl.tapTarget`). Stated explicitly
+ * rather than left to Material3's `minimumInteractiveComponentSize()` because
+ * this is a load-bearing size, not a default worth inheriting silently: with
+ * the host bar hidden this pill is the ONLY host affordance on the screen, and
+ * for an app generated from the canvas scaffold it is the only affordance at
+ * all — that template renders a `<canvas>` and overlays, with no header of its
+ * own. A missed tap here has no fallback.
+ */
+private val RunPillTapTarget = 48.dp
+
+/**
+ * The run surface's only host control: a floating pill over the running app.
+ * Collapsed it is one dimmed button so it stays out of the app's way; tapping it
+ * expands to pause/start and exit, and tapping it AGAIN collapses it back — the
+ * toggle is composed in both states, exactly like iOS's `expanded.toggle()`.
+ * "Pause" stops the runtime — the app content disappears and the placeholder
+ * returns; there is no freeze-the-frame pause.
+ *
+ * Child order is strictly [toggle, pause-or-start, exit], identical to iOS's
+ * `LocalAppRunControl`.
+ */
+@Composable
+private fun RunPill(
+    running: Boolean,
+    onToggle: () -> Unit,
+    onExit: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = RoundedCornerShape(24.dp),
+        modifier = modifier.alpha(if (expanded) 1f else 0.6f),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(horizontal = 4.dp),
+        ) {
+            // FIRST, and outside the `if` — both halves matter.
+            //
+            // OUTSIDE, and it flips rather than sets: this button used to live in an
+            // `else` branch and only ever assign `expanded = true`, so the single
+            // writer of the state stopped being composed the instant it ran. Nothing
+            // left in the tree could set it back, and the expanded pill stayed pinned
+            // at full opacity over the app's own corner for the rest of the visit.
+            //
+            // FIRST rather than last: the pill is anchored bottom-START, so the
+            // leading-most child sits on fixed pixels and every sibling after it grows
+            // away from the corner. With the toggle last, expanding slid it away by one
+            // button and dropped the newly composed FIRST child — pause/stop — onto the
+            // exact rect the finger had just tapped, so a second tap at the same point
+            // stopped the runtime instead of collapsing the control. Leading-most, its
+            // hit rect is identical in both states (a fixed [RunPillTapTarget] square
+            // whose leading edge is the Row's 4dp padding regardless of how many
+            // siblings follow), so tap-tap always means expand-then-collapse. iOS says
+            // the same thing at the same place: "FIRST, not last."
+            IconButton(
+                onClick = { expanded = !expanded },
+                modifier = Modifier.size(RunPillTapTarget),
+            ) {
+                Icon(Icons.Rounded.MoreVert, contentDescription = stringResource(R.string.local_apps_more))
+            }
+            if (expanded) {
+                IconButton(onClick = onToggle, modifier = Modifier.size(RunPillTapTarget)) {
+                    Icon(
+                        // Icons.Rounded.Pause, not Icons.Rounded.Stop. The label under
+                        // this glyph is local_apps_run_pause 「暂停应用」, and a filled
+                        // square is the universal STOP mark — the glyph and its own
+                        // accessibility label were saying different things, and the
+                        // square also collided with the library card's genuine stop
+                        // button (LocalAppCard), which does use Icons.Rounded.Stop.
+                        // iOS draws "pause.fill" here for the same key.
+                        if (running) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = stringResource(
+                            if (running) R.string.local_apps_run_pause else R.string.local_apps_run_start,
+                        ),
+                    )
+                }
+                IconButton(onClick = onExit, modifier = Modifier.size(RunPillTapTarget)) {
+                    Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.local_apps_run_exit))
                 }
             }
         }
@@ -487,6 +674,25 @@ private fun LocalAppDetailsScreen(
                     fallback = stringResource(R.string.local_apps_detail_title),
                 ),
                 onBack = { onAction(LocalAppsAction.Back) },
+                // The details page is the ONLY in-app entrance to the full-bleed
+                // run surface — without it `openFromWidget` is the sole writer of
+                // `LocalAppsDestination.Preview` and the whole run experience is
+                // reachable only from a home-screen widget. Mirrors iOS's
+                // 「打开应用」 button on the app's overview.
+                //
+                // Hidden for an app that is not Ready: the surface would show
+                // nothing but the not-running placeholder, and the Preview TAB
+                // below already covers inspecting a half-built app.
+                actions = {
+                    if (app?.workflow == LocalAppWorkflow.Ready) {
+                        IconButton(onClick = { onAction(LocalAppsAction.OpenRunSurface(appId)) }) {
+                            Icon(
+                                Icons.Rounded.OpenInFull,
+                                contentDescription = stringResource(R.string.local_apps_open_preview),
+                            )
+                        }
+                    }
+                },
             )
         },
     ) { padding ->
@@ -999,7 +1205,11 @@ private fun AuthorizationDialog(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LocalAppsTopBar(title: String, onBack: () -> Unit) {
+private fun LocalAppsTopBar(
+    title: String,
+    onBack: () -> Unit,
+    actions: @Composable RowScope.() -> Unit = {},
+) {
     TopAppBar(
         title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         navigationIcon = {
@@ -1007,6 +1217,7 @@ private fun LocalAppsTopBar(title: String, onBack: () -> Unit) {
                 Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = stringResource(R.string.local_apps_ui_action_back))
             }
         },
+        actions = actions,
     )
 }
 

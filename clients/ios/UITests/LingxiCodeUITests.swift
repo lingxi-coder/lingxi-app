@@ -409,9 +409,32 @@ final class LingxiCodeUITests: XCTestCase {
     /// (`closeDrawerThen` + `Task.yield()`) because dismissing the hand-written
     /// drawer and changing presentation state in one animated transaction made
     /// SwiftUI drop the presentation. `NavigationSplitView` removed that
-    /// coupling and the deferral went with it, so all three remaining presentation shapes
-    /// are pinned here: a sheet, a push, and two full-screen covers. Each must
-    /// arrive AND leave the sidebar behind.
+    /// coupling and the deferral went with it, so every presentation shape the
+    /// sidebar can still reach under this fixture is pinned here: a sheet and a
+    /// push. Each must arrive AND leave the sidebar behind.
+    ///
+    /// The full-screen cover is no longer among them, and the apps leg says so
+    /// with an assertion rather than a comment. The drawer's create affordance
+    /// creates an app now instead of opening the library cover
+    /// (`RootView.createLocalAppFromDrawer`), and the only remaining drawer
+    /// route to that cover — `drawer.apps.view-all` — is rendered by
+    /// `Drawer.appsSection`, which `Drawer.sectionBody` mounts only when
+    /// `localApps` is non-empty. `LocalAppsStore.apps` is written in exactly
+    /// two places and both are engine-event handlers (`handle(event:)`'s
+    /// `.appsChanged` arm and `upsertApp`), while under `LINGXI_UI_TESTING=1`
+    /// `ConversationSource.make` returns `MockConversationSource`, whose
+    /// `submitEngineCommand` is the no-op protocol-extension default. So
+    /// `.listApps` never reaches an engine, no app ever arrives, and the apps
+    /// tab is permanently in its empty state — which renders `drawer.apps.create`
+    /// and nothing else. There is no route to the cover left for this test to
+    /// walk, so the leg pins the new contract instead of faking one.
+    ///
+    /// The cover itself is not left uncovered: it is mounted and asserted by
+    /// `testTheDrawersViewAllMountsTheLocalAppsCover` below, which seeds the
+    /// catalog (`LINGXI_UI_TEST_LOCAL_APPS=1`) so `drawer.apps.view-all` renders
+    /// and the route exists to walk. That switch is deliberately opt-in per
+    /// launch: folding it into `LINGXI_UI_TESTING=1` would populate the apps tab
+    /// here too and turn this test's empty-state assertion red.
     func testEverySidebarRoutePresentsAndLeavesTheSidebar() {
         // Settings — a sheet.
         openDrawer()
@@ -431,15 +454,146 @@ final class LingxiCodeUITests: XCTestCase {
         app.navigationBars.firstMatch.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
 
-        // Local apps — a full-screen cover reached from the drawer's apps tab.
+        // Local apps — the drawer's create affordance. It does not open the
+        // library cover any more: it creates an app and hands the conversation
+        // over (`RootView.createLocalAppFromDrawer`), so what this leg pins is
+        // the NEW contract — the sidebar is left behind and nothing is
+        // presented over the chat.
         openDrawer()
         app.buttons["drawer.tab.apps"].tap()
         let createApp = app.buttons["drawer.apps.create"]
         XCTAssertTrue(createApp.waitForExistence(timeout: 8), app.debugDescription)
+        // `drawer.apps.create` is deliberately shared by the empty state and the
+        // populated section, so its presence does not say which one is up.
+        // `drawer.apps.view-all` renders ONLY in the populated section, so its
+        // absence is what proves this run is in the empty state and therefore
+        // has no drawer route to the library cover to walk. If this line ever
+        // goes red the row is reachable again without the seed — fold the cover
+        // leg back in here (see `testTheDrawersViewAllMountsTheLocalAppsCover`
+        // for the walk), rather than deleting the line.
+        XCTAssertFalse(app.buttons["drawer.apps.view-all"].exists, app.debugDescription)
         createApp.tap()
-        XCTAssertTrue(app.navigationBars["应用"].waitForExistence(timeout: 15), app.debugDescription)
-        app.buttons["关闭"].tap()
+
+        // Leaves the sidebar behind, exactly like the two routes above: the row
+        // that was just tapped goes away with the sidebar, and the chat returns.
+        XCTAssertTrue(waitUntilGone(createApp, timeout: 10), app.debugDescription)
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
+
+        // …and presents nothing. A bounded wait rather than a bare `exists`:
+        // the regression this guards against is a PRESENTATION, which takes time
+        // to arrive, so the negative has to give it that time to mean anything.
+        // `navigationBars["应用"]` (`local_apps_title`) is the very probe the
+        // old assertion used POSITIVELY against this cover, which is why it is
+        // known to fire when the cover mounts; `local-apps.create` is the
+        // cover's toolbar button and `local-apps.create.empty-state` its
+        // `ContentUnavailableView` action — the one an empty library shows — so
+        // between them no state of that cover goes unnoticed.
+        XCTAssertFalse(
+            app.navigationBars["应用"].waitForExistence(timeout: 5),
+            app.debugDescription
+        )
+        XCTAssertFalse(app.buttons["local-apps.create"].exists, app.debugDescription)
+        XCTAssertFalse(
+            app.buttons["local-apps.create.empty-state"].exists,
+            app.debugDescription
+        )
+    }
+
+    /// The local-apps cover, mounted through the one drawer route that still
+    /// reaches it.
+    ///
+    /// `testEverySidebarRoutePresentsAndLeavesTheSidebar` above pins the
+    /// opposite fact — that on a stock UI-test launch there is NO route to this
+    /// cover — because the drawer's create affordance creates an app instead of
+    /// browsing, and the browse row `drawer.apps.view-all` is rendered by
+    /// `LocalAppsDrawerSection`, which `Drawer.sectionBody` mounts only for a
+    /// non-empty catalog. That catalog cannot fill on its own here: under
+    /// `LINGXI_UI_TESTING=1` the conversation source is `MockConversationSource`,
+    /// whose `submitEngineCommand` is the no-op protocol-extension default, so
+    /// `.listApps` never reaches an engine. Without the launch below,
+    /// `LocalAppsRootView` has zero coverage at this level.
+    ///
+    /// `LINGXI_UI_TEST_LOCAL_APPS=1` is `LocalAppsStore.uiTestSeedEnvironmentKey`;
+    /// `RootView.init` answers it by calling `LocalAppsStore.seedForUITesting()`,
+    /// which plants exactly ONE app. One, not several, so the create row, the
+    /// app row and the browse row all fit in the sidebar without scrolling.
+    ///
+    /// `"ui-test-seeded-app"` below is the literal value of
+    /// `LocalAppsStore.uiTestSeedAppID`. A UI test is a black box and cannot
+    /// import the app module, so the constant is duplicated on purpose — and
+    /// renaming it on the app side makes this test go red at the row probe
+    /// rather than silently stop proving anything.
+    func testTheDrawersViewAllMountsTheLocalAppsCover() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_LOCAL_APPS"] = "1"
+        app.launch()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
+
+        openDrawer()
+        app.buttons["drawer.tab.apps"].tap()
+
+        // The seed reached the UI. `drawer.apps.view-all` exists ONLY inside
+        // `LocalAppsDrawerSection`, so its presence is what says the populated
+        // section is up rather than the empty state — and the row names the
+        // seeded app itself, so a catalog populated by something else would not
+        // satisfy this.
+        let viewAll = app.buttons["drawer.apps.view-all"]
+        XCTAssertTrue(viewAll.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["drawer.apps.row.ui-test-seeded-app"]
+                .waitForExistence(timeout: 5),
+            app.debugDescription
+        )
+
+        viewAll.tap()
+
+        // The cover arrives. `navigationBars["应用"]` is `local_apps_title` —
+        // the same probe this suite used against this cover before the drawer's
+        // create affordance stopped opening it.
+        XCTAssertTrue(
+            app.navigationBars["应用"].waitForExistence(timeout: 15),
+            app.debugDescription
+        )
+        // …and it is the LIST that is on screen, not the ContentUnavailableView:
+        // the seeded row is rendered and the empty state's action is not.
+        XCTAssertTrue(
+            app.descendants(matching: .any)["local-apps.row.ui-test-seeded-app"]
+                .waitForExistence(timeout: 10),
+            app.debugDescription
+        )
+        XCTAssertFalse(
+            app.buttons["local-apps.create.empty-state"].exists,
+            app.debugDescription
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["local-apps.create"].exists,
+            app.debugDescription
+        )
+
+        // The row just tapped is gone. On its own this is weak — a full-screen
+        // cover takes everything under it out of the hierarchy — so it is the
+        // cheap half of the sidebar contract; the load-bearing half is asserted
+        // after the dismissal below.
+        XCTAssertTrue(waitUntilGone(viewAll, timeout: 10), app.debugDescription)
+
+        // Dismissing returns to the chat. "关闭" is `common_close`, the cover's
+        // `.cancellationAction` toolbar item.
+        let close = app.buttons["关闭"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5), app.debugDescription)
+        close.tap()
+        XCTAssertTrue(
+            waitUntilGone(app.navigationBars["应用"], timeout: 10),
+            app.debugDescription
+        )
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
+
+        // The sidebar was LEFT BEHIND, not merely occluded — the same contract
+        // the sheet and the push legs are held to. With the cover down there is
+        // nothing covering the sidebar any more, so if `openLocalApps`'s
+        // `closeSidebar()` had not run the drawer would be back on screen here.
+        // `drawer.tab.chats` is the probe `openDrawer()` itself trusts to mean
+        // "the drawer is open", so it is known to be true whenever it is.
+        XCTAssertFalse(app.buttons["drawer.tab.chats"].exists, app.debugDescription)
     }
 
     func testProviderManagementDoesNotExposeScheduledTasksInDrawer() {

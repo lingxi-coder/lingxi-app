@@ -740,6 +740,85 @@ class LocalAppsViewModelTest {
         }
     }
 
+    /// §D.3: tapping a DRAFT card resumes its pinned init session, not Details.
+    ///
+    /// One assertion alone ("draftSessionLandings fired") cannot tell "the
+    /// `scaffolded` fork was read" from "it always takes this branch" — the
+    /// sibling test below on a FORMED record is the other half that does.
+    @Test
+    fun `opening a draft app resumes its pinned init session instead of details`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            val landings = mutableListOf<LocalAppsViewModel.DraftSessionLanding>()
+            val job = launch { viewModel.draftSessionLandings.collect { landings += it } }
+
+            val draft = appRecord(scaffolded = false)
+            source.emit(ClientEvent.AppsChanged(listOf(draft)))
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.OpenApp(APP_ID))
+            runCurrent()
+
+            val landing = landings.single()
+            assertEquals(APP_ID, landing.appId)
+            assertEquals(
+                "the shell's own pinned init session id must ride along",
+                draft.initSessionId,
+                landing.sessionId,
+            )
+            assertEquals(
+                "a draft card must never open the details screen",
+                LocalAppsDestination.Library,
+                viewModel.uiState.value.destination,
+            )
+            assertTrue(
+                "a draft has no details worth fetching",
+                source.commands.none { it is ClientCommand.GetAppDetails },
+            )
+            job.cancel()
+        } finally {
+            releaseMain()
+        }
+    }
+
+    /// The other half of the §D.3 fork: a FORMED app still opens Details, and
+    /// tapping it raises nothing on the draft-landing channel.
+    @Test
+    fun `opening a formed app still lands on details and emits no draft landing`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            val landings = mutableListOf<LocalAppsViewModel.DraftSessionLanding>()
+            val job = launch { viewModel.draftSessionLandings.collect { landings += it } }
+
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(scaffolded = true))))
+            runCurrent()
+
+            viewModel.onAction(LocalAppsAction.OpenApp(APP_ID))
+            runCurrent()
+
+            assertEquals(
+                LocalAppsDestination.Details(APP_ID, LocalAppDetailsTab.Sessions),
+                viewModel.uiState.value.destination,
+            )
+            assertTrue("a formed app must not resume any draft session", landings.isEmpty())
+            job.cancel()
+        } finally {
+            releaseMain()
+        }
+    }
+
     @Test
     fun `an app sessions reply pins the init row first and keeps the rest modified-descending`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))

@@ -57,6 +57,8 @@ export interface Tokens {
   windowBg: string;
   sidebarBg: string;
   stageBg: string;
+  /** Layered background used only by the conversation transcript. */
+  transcriptBg: string;
   surface: string;
   surfaceHover: string;
   surfaceActive: string;
@@ -92,6 +94,7 @@ export const tokens = (dark: boolean): Tokens =>
         windowBg: 'oklch(14% 0.012 270)',
         sidebarBg: 'oklch(12% 0.012 270)',
         stageBg: 'oklch(15% 0.012 270)',
+        transcriptBg: 'radial-gradient(circle at 50% -12%, oklch(72% 0.18 268 / 0.065), transparent 46%), oklch(15% 0.012 270)',
         surface: 'oklch(18% 0.015 270)',
         surfaceHover: 'oklch(22% 0.020 270)',
         surfaceActive: 'oklch(26% 0.028 270)',
@@ -117,9 +120,10 @@ export const tokens = (dark: boolean): Tokens =>
         dark: false,
         syntax: SYNTAX_LIGHT,
         appBg: '#dcd7e4',
-        windowBg: '#fbf9f5',
-        sidebarBg: '#f4f1ec',
-        stageBg: '#fbf9f5',
+        windowBg: '#ffffff',
+        sidebarBg: '#fcfcfc',
+        stageBg: '#ffffff',
+        transcriptBg: '#ffffff',
         surface: '#ffffff',
         surfaceHover: 'oklch(96% 0.008 270)',
         surfaceActive: 'oklch(92% 0.020 270)',

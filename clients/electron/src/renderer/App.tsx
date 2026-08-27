@@ -8,7 +8,6 @@ import {
   BetaTasks,
   BetaTopBar,
   ErrorBanner,
-  SetupCard,
 } from './components/BetaDesktop';
 import { ComputerAccessPrompt } from './components/ComputerAccessPrompt';
 import { AskUserQuestionPrompt } from './components/AskUserQuestionPrompt';
@@ -31,7 +30,8 @@ export function App() {
     && workspace?.path
     && workspace.trusted
     && providerConfigured
-    && bridge.connected,
+    && bridge.connected
+    && !bridge.sessionLoading,
   );
   useEffect(() => {
     const savedTheme = bridge.bootstrap?.settings.theme;
@@ -42,9 +42,13 @@ export function App() {
     void bridge.setThemePreference(value).catch(() => undefined);
   };
 
-  const emptyMessage = bridge.desktop.activeSessionId
-    ? 'This session has no messages yet. Ask LingXi to inspect the workspace.'
-    : 'Create a session and ask LingXi to inspect, explain, or change this workspace.';
+  const emptyMessage = bridge.sessionLoading
+    ? 'Loading session…'
+    : !workspace?.path
+    ? 'Add a project from the sidebar to start a session.'
+    : bridge.activeSession
+      ? 'This session has no messages yet. Ask LingXi to inspect the project.'
+      : 'Create a session and ask LingXi to inspect, explain, or change this project.';
 
   return (
     <Theme.Provider value={palette}>
@@ -52,13 +56,9 @@ export function App() {
         data-screen-label="LingXi Code Desktop Beta"
         style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.windowBg, color: palette.text }}
       >
-        <div aria-hidden="true" style={{ position: 'absolute', top: 16, left: 17, zIndex: 30, display: 'flex', gap: 8 }}>
-          {['#ff5f57', '#febc2e', '#28c840'].map((color) => <span key={color} style={{ width: 12, height: 12, borderRadius: '50%', background: color, border: '0.5px solid rgba(0,0,0,.12)' }} />)}
-        </div>
-
         <BetaSidebar bridge={bridge} onOpenSettings={() => setSettingsOpen(true)} />
 
-        <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
+        <main style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           <BetaTopBar
             bridge={bridge}
             tasksOpen={tasksOpen}
@@ -69,7 +69,7 @@ export function App() {
           <ErrorBanner bridge={bridge} />
           {bridge.loading ? (
             <div role="status" style={{ flex: 1, display: 'grid', placeItems: 'center', color: palette.text3, fontSize: 13 }}>Loading secure desktop state…</div>
-          ) : ready ? (
+          ) : (
             <>
               {/*
                 Three flex siblings in a column: the Stage takes the remaining
@@ -78,41 +78,39 @@ export function App() {
                 the scroll viewport instead of covering the newest tool output.
               */}
               <Stage
-                liveItems={bridge.conversation.items}
-                running={bridge.running}
+                liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}
+                running={!bridge.sessionLoading && bridge.running}
                 emptyMessage={emptyMessage}
                 // Item ids restart at `i1` in every session; the Stage's
                 // collapse map is scoped by this and dropped when it changes.
                 sessionKey={bridge.conversation.sessionKey}
               />
-              <PlanTasks tasks={bridge.conversation.plan} />
+              <PlanTasks tasks={bridge.sessionLoading ? [] : bridge.conversation.plan} />
               <BetaComposer bridge={bridge} ready={ready} />
             </>
-          ) : (
-            <SetupCard bridge={bridge} />
           )}
+
+          <PermissionPrompt
+            request={bridge.sessionLoading ? null : bridge.pendingPermission}
+            onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}
+            onDeny={(requestId) => { void bridge.deny(requestId).catch(() => undefined); }}
+          />
+
+          <ComputerAccessPrompt
+            request={bridge.sessionLoading ? null : bridge.pendingComputerAccess}
+            onSubmit={(requestId, response) => { void bridge.approveComputerAccess(requestId, response).catch(() => undefined); }}
+            onDeny={(requestId) => { void bridge.denyComputerAccess(requestId).catch(() => undefined); }}
+            onOpenSystemSettings={(pane) => { void bridge.openSystemSettings(pane).catch(() => undefined); }}
+          />
+
+          <AskUserQuestionPrompt
+            request={bridge.sessionLoading ? null : bridge.pendingAskUserQuestion}
+            onSubmit={(requestId, answers) => { void bridge.answerAskUserQuestion(requestId, answers).catch(() => undefined); }}
+            onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
+          />
         </main>
 
-        {tasksOpen && <BetaTasks bridge={bridge} onClose={() => setTasksOpen(false)} />}
-
-        <PermissionPrompt
-          request={bridge.pendingPermission}
-          onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}
-          onDeny={(requestId) => { void bridge.deny(requestId).catch(() => undefined); }}
-        />
-
-        <ComputerAccessPrompt
-          request={bridge.pendingComputerAccess}
-          onSubmit={(requestId, response) => { void bridge.approveComputerAccess(requestId, response).catch(() => undefined); }}
-          onDeny={(requestId) => { void bridge.denyComputerAccess(requestId).catch(() => undefined); }}
-          onOpenSystemSettings={(pane) => { void bridge.openSystemSettings(pane).catch(() => undefined); }}
-        />
-
-        <AskUserQuestionPrompt
-          request={bridge.pendingAskUserQuestion}
-          onSubmit={(requestId, answers) => { void bridge.answerAskUserQuestion(requestId, answers).catch(() => undefined); }}
-          onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
-        />
+        {tasksOpen && !bridge.sessionLoading && <BetaTasks bridge={bridge} onClose={() => setTasksOpen(false)} />}
 
         {settingsOpen && (
           <BetaSettings bridge={bridge} theme={theme} onTheme={changeTheme} onClose={() => setSettingsOpen(false)} />

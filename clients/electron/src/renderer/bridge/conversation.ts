@@ -44,12 +44,13 @@
  *    transcript for no visible gain.
  */
 
-import type { ClientEvent, MessageDto, PlanTaskDto } from '@lingxi/bridge-client';
+import type { ClientEvent, ImageRefDto, MessageDto, MessageImageDto, PlanTaskDto } from '@lingxi/bridge-client';
 // The SUBPATH, not the barrel: `@lingxi/bridge-client` re-exports `lockfile.js`,
 // which imports `node:fs`/`node:os`. A type-only import of the barrel is erased,
 // but a VALUE import of it drags Node builtins into the renderer bundle and the
 // browser build fails outright.
 import { fallbackToolBody, fallbackToolHeader } from '@lingxi/bridge-client/toolview';
+import { isSupportedImageMediaType } from '../../shared/imageInput';
 
 import type { RunItem } from '../model/runItem';
 
@@ -162,13 +163,20 @@ function settleRunningTools(items: RunItem[], status: 'done' | 'error'): boolean
 }
 
 /** A user message immediately echoed when the composer submits (optimistic). */
-export function appendUserPrompt(state: ConversationState, text: string): ConversationState {
+export function appendUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = []): ConversationState {
   const trimmed = text.trim();
   if (!trimmed) return state;
   const items = state.items.slice();
   // A new user turn closes any previously-open streaming lines.
   closeThinking(items, state.openThinkingIndex);
-  items.push({ type: 'narration', id: itemId(state.nextId), text: trimmed, strong: true, role: 'user' });
+  items.push({
+    type: 'narration',
+    id: itemId(state.nextId),
+    text: trimmed,
+    strong: true,
+    role: 'user',
+    ...(images.length ? { images: images.map(messageImageFromRef) } : {}),
+  });
   return {
     ...state,
     items,
@@ -183,8 +191,8 @@ export function appendUserPrompt(state: ConversationState, text: string): Conver
  * asynchronous `turn_started` event arrives. The real terminal event remains
  * the only successful release path.
  */
-export function appendPendingUserPrompt(state: ConversationState, text: string): ConversationState {
-  const next = appendUserPrompt(state, text);
+export function appendPendingUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = []): ConversationState {
+  const next = appendUserPrompt(state, text, images);
   return next === state ? state : { ...next, running: true };
 }
 
@@ -247,7 +255,13 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
       let nextId = state.nextId;
       if (idx < 0 || items[idx]?.type !== 'narration') {
         idx = items.length;
-        items.push({ type: 'narration', id: itemId(nextId), text: event.text, role: 'assistant' });
+        items.push({
+          type: 'narration',
+          id: itemId(nextId),
+          text: event.text,
+          role: 'assistant',
+          streamed: true,
+        });
         nextId += 1;
       } else {
         const prev = items[idx] as Extract<RunItem, { type: 'narration' }>;
@@ -411,12 +425,18 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
 }
 
 /** Rebuild the visible transcript carried by a successful session resume. */
-export function conversationFromMessages(messages: readonly MessageDto[]): ConversationState {
+export function conversationFromMessages(
+  messages: readonly MessageDto[],
+): ConversationState {
   const items: RunItem[] = [];
   const toolIndex = new Map<string, number>();
   let nextId = 1;
 
   for (const message of messages) {
+    const images = message.role === 'user'
+      ? (message.images ?? []).filter(isRenderableMessageImage)
+      : [];
+    let attachedImages = false;
     for (const block of message.blocks) {
       switch (block.type) {
         case 'text':
@@ -427,7 +447,9 @@ export function conversationFromMessages(messages: readonly MessageDto[]): Conve
               text: block.text,
               strong: message.role === 'user',
               role: message.role === 'user' ? 'user' : 'assistant',
+              ...(!attachedImages && images.length ? { images } : {}),
             });
+            attachedImages = true;
           }
           break;
         case 'thinking':
@@ -491,6 +513,16 @@ export function conversationFromMessages(messages: readonly MessageDto[]): Conve
         }
       }
     }
+    if (message.role === 'user' && images.length && !attachedImages) {
+      items.push({
+        type: 'narration',
+        id: itemId(nextId++),
+        text: '',
+        strong: true,
+        role: 'user',
+        images,
+      });
+    }
   }
 
   // Every `tool_use` above was minted `running` and only a matching
@@ -507,6 +539,17 @@ export function conversationFromMessages(messages: readonly MessageDto[]): Conve
     toolIndex: Object.fromEntries(toolIndex),
     nextId,
   };
+}
+
+function messageImageFromRef(image: ImageRefDto): MessageImageDto {
+  return {
+    media_type: image.media_type,
+    url: `data:${image.media_type};base64,${image.base64}`,
+  };
+}
+
+function isRenderableMessageImage(image: MessageImageDto): boolean {
+  return isSupportedImageMediaType(image.media_type) && image.url.trim().length > 0;
 }
 
 /** Fold a whole event sequence (handy for tests + re-hydration). */

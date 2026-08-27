@@ -55,6 +55,7 @@ import com.lingxi.code.components.ModelDetailsDialog
 import com.lingxi.code.components.ModelDetailsInfoButton
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
+import com.lingxi.code.bindings.ImageRefDto
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.ModelOption
@@ -313,6 +314,14 @@ data class ComposerAttachment(
     val thumb: ImageBitmap,
     val width: Int,
     val height: Int,
+    val mediaType: String = "image/jpeg",
+    val base64: String = "",
+)
+
+/** Convert the reviewed attachment into the exact shared SendPrompt DTO. */
+fun ComposerAttachment.toImageRef(): ImageRefDto = ImageRefDto(
+    mediaType = mediaType,
+    base64 = base64,
 )
 
 /** A captured-photo thumbnail chip with a remove (×) affordance. */

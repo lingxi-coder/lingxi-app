@@ -46,6 +46,9 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'branch': return <svg {...p}><circle cx="6" cy="3" r="2" /><circle cx="6" cy="21" r="2" /><circle cx="18" cy="6" r="2" /><path d="M6 5v14M6 13a8 8 0 0 0 8 8M14 7h2a2 2 0 0 1 2 2v3" /></svg>;
     case 'git': return <svg {...p}><circle cx="12" cy="12" r="3" /><path d="M21 12h-6M9 12H3M12 9V3M12 21v-6" /></svg>;
     case 'file': return <svg {...p}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>;
+    case 'copy': return <svg {...p}><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>;
+    case 'pin': return <svg {...p}><path d="m15 4 5 5-3 1-4 4 .5 4.5-1.5 1.5-3.5-5.5L4 11l1.5-1.5L10 10l4-4z" /><path d="m9 15-5 5" /></svg>;
+    case 'image': return <svg {...p}><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m3 16 5-5 4 4 2.5-2.5L21 18" /></svg>;
     case 'folder': return <svg {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>;
     case 'terminal': return <svg {...p}><path d="m4 7 6 5-6 5M12 19h8" /></svg>;
     case 'hand': return <svg {...p}><path d="M6.5 11V7.5a1.5 1.5 0 0 1 3 0V10M9.5 10V5.5a1.5 1.5 0 0 1 3 0V10M12.5 10V6.5a1.5 1.5 0 0 1 3 0v4M15.5 10V8.5a1.5 1.5 0 0 1 3 0V14c0 4.4-2.8 7-7 7-3.2 0-5-1.5-6.4-4L3.3 13.8a1.6 1.6 0 0 1 2.7-1.7l1.5 2" /></svg>;

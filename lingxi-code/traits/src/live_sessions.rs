@@ -10,6 +10,7 @@
 //! directory `agents_registry` writes). Inbox lines live beside them as
 //! `<sessionId>.inbox.jsonl`.
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -30,10 +31,13 @@ pub const CROSS_SESSION_INBOUND_OPTIONS: &[&str] = &["default", "accept", "hold"
 
 /// Wire tag for inbound peer bodies (2.1.232 `ORe`).
 pub const CROSS_SESSION_TAG: &str = "cross-session-message";
+/// `waitingFor` value used by the CLI for an open permission dialog.
+pub const PERMISSION_PROMPT_WAITING_FOR: &str = "permission prompt";
 
 const LIVE_SUBDIR: &str = "sessions";
 const NAME_MAX: usize = 200;
 const SLUG_TRIES: usize = 16;
+const SESSION_CLAIM_SUFFIX: &str = ".writer.lock";
 
 /// Mid-turn suffix (2.1.232 `x2n` + `vsi`).
 const PEER_MID_TURN_SUFFIX: &str = concat!(
@@ -226,6 +230,22 @@ pub struct LiveSessionDir {
     check_liveness: bool,
 }
 
+/// Process-held exclusive writer lease for one stable session UUID.
+///
+/// The operating system releases the lock when the process exits, including a
+/// crash. The small lock file may remain on disk, but an unlocked file never
+/// blocks a historical resume.
+#[derive(Debug)]
+pub struct SessionIdClaim {
+    file: fs::File,
+}
+
+impl Drop for SessionIdClaim {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 impl LiveSessionDir {
     /// Default on-disk location (`<config-home>/sessions`).
     #[must_use]
@@ -264,6 +284,65 @@ impl LiveSessionDir {
             root: root.into(),
             check_liveness: true,
         }
+    }
+
+    /// Claim the right to write a live session identified by `session_id`.
+    ///
+    /// The claim is deliberately based only on live registry records and the
+    /// short-lived writer claim file. A persisted transcript is not an owner:
+    /// historical resume intentionally reuses the UUID from that transcript.
+    pub fn claim_session_id(&self, session_id: &str, pid: u32) -> io::Result<SessionIdClaim> {
+        if !safe_session_id(session_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid session id",
+            ));
+        }
+        self.ensure_root()?;
+        if self.check_liveness {
+            self.sweep_dead()?;
+        }
+
+        let claim_path = self.session_claim_path(session_id);
+        let mut claim = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&claim_path)?;
+        claim.try_lock_exclusive().map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "session id is already claimed by a live writer",
+                )
+            } else {
+                error
+            }
+        })?;
+        claim.set_len(0)?;
+        writeln!(claim, "{pid}")?;
+
+        // The lock closes the check-then-create race between two processes.
+        // Re-read centrally filtered live records after taking it so a legacy
+        // writer that has no claim file still prevents a second writer.
+        let occupied = self
+            .list_live()?
+            .into_iter()
+            .any(|record| record.pid != pid && record.sid() == session_id);
+        if occupied {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "session id is already active",
+            ));
+        }
+        Ok(SessionIdClaim { file: claim })
+    }
+
+    /// Legacy cleanup hook. Writer ownership is released by dropping the
+    /// [`SessionIdClaim`], not by deleting its path.
+    pub fn release_session_id(&self, session_id: &str, pid: u32) -> io::Result<()> {
+        let _ = (session_id, pid);
+        Ok(())
     }
 
     /// Claim `desired` uniquely among live pids and patch this process's
@@ -340,6 +419,7 @@ impl LiveSessionDir {
             .and_then(|v| v.into_iter().find(|r| r.sid() == session_id))
         {
             let _ = fs::remove_file(self.record_path(rec.pid));
+            let _ = self.release_session_id(session_id, rec.pid);
         }
         let _ = fs::remove_file(self.inbox_path(session_id));
         Ok(())
@@ -375,7 +455,7 @@ impl LiveSessionDir {
                 continue;
             };
             rec.pid = pid;
-            if self.check_liveness && !pid_alive(rec.pid) {
+            if !self.record_is_live(&rec) {
                 continue;
             }
             out.push(rec);
@@ -412,6 +492,26 @@ impl LiveSessionDir {
         (hits.len() == 1).then(|| hits.into_iter().next().expect("len==1"))
     }
 
+    /// Find a live session by its stable UUID, excluding the sender when one
+    /// is supplied. Session IDs are the canonical cross-process address; names
+    /// are only a compatibility lookup layered on top of this identity.
+    #[must_use]
+    pub fn find_by_session_id(
+        &self,
+        session_id: &str,
+        self_session_id: Option<&str>,
+    ) -> Option<LiveSessionRecord> {
+        if session_id.trim().is_empty()
+            || self_session_id.is_some_and(|self_id| self_id == session_id)
+        {
+            return None;
+        }
+        self.list_live()
+            .ok()?
+            .into_iter()
+            .find(|record| record.sid() == session_id)
+    }
+
     /// Live record for `pid`, if that process is still registered.
     #[must_use]
     pub fn find_by_pid(&self, pid: u32) -> Option<LiveSessionRecord> {
@@ -443,6 +543,7 @@ impl LiveSessionDir {
     pub fn send_inbox(&self, to_session_id: &str, msg: &PeerMessage) -> io::Result<()> {
         self.ensure_root()?;
         let path = self.inbox_path(to_session_id);
+        let _queue_lock = self.lock_queue(&path)?;
         let mut line = serde_json::to_string(msg).map_err(io::Error::other)?;
         line.push('\n');
         let mut f = fs::OpenOptions::new()
@@ -455,13 +556,21 @@ impl LiveSessionDir {
 
     /// Drain inbox lines for `session_id` (consume-once).
     pub fn drain_inbox(&self, session_id: &str) -> io::Result<Vec<PeerMessage>> {
+        self.ensure_root()?;
         let path = self.inbox_path(session_id);
-        let body = match fs::read_to_string(&path) {
-            Ok(b) => b,
+        let _queue_lock = self.lock_queue(&path)?;
+        let drain_path = path.with_file_name(format!(
+            ".{session_id}.inbox.{}.{}.drain",
+            std::process::id(),
+            now_ms()
+        ));
+        match fs::rename(&path, &drain_path) {
+            Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
-        let _ = fs::remove_file(&path);
+        let body = fs::read_to_string(&drain_path)?;
+        let _ = fs::remove_file(&drain_path);
         let msgs = body
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -478,6 +587,7 @@ impl LiveSessionDir {
     ) -> io::Result<()> {
         self.ensure_root()?;
         let path = self.idle_subscription_path(to_session_id);
+        let _queue_lock = self.lock_queue(&path)?;
         let mut line = serde_json::to_string(req).map_err(io::Error::other)?;
         line.push('\n');
         let mut f = fs::OpenOptions::new()
@@ -493,11 +603,13 @@ impl LiveSessionDir {
         &self,
         session_id: &str,
     ) -> io::Result<Vec<IdleNotificationRequest>> {
+        self.ensure_root()?;
         let path = self.idle_subscription_path(session_id);
-        // Rotate the queue before reading it. A read-then-remove sequence can
-        // lose a subscription appended by another process between those two
-        // syscalls; writers continue appending to the newly-created original
-        // path while this consumer drains its private snapshot.
+        let _queue_lock = self.lock_queue(&path)?;
+        // Rotate the queue while holding the same sidecar lock used by
+        // appenders. Writers therefore cannot open the old inode between
+        // rename/read/remove; after the lock is released they append to the
+        // new queue path.
         let drain_path = path.with_file_name(format!(
             ".{session_id}.idle-notify.{}.{}.drain",
             std::process::id(),
@@ -538,11 +650,19 @@ impl LiveSessionDir {
             let Ok(pid) = stem.parse::<u32>() else {
                 continue;
             };
-            if !pid_alive(pid) {
-                if let Ok(body) = fs::read_to_string(&path) {
-                    if let Ok(rec) = serde_json::from_str::<LiveSessionRecord>(&body) {
-                        let _ = fs::remove_file(self.inbox_path(rec.sid()));
-                    }
+            let record = fs::read_to_string(&path)
+                .ok()
+                .and_then(|body| serde_json::from_str::<LiveSessionRecord>(&body).ok())
+                .map(|mut record| {
+                    record.pid = pid;
+                    record
+                });
+            let stale = record
+                .as_ref()
+                .map_or_else(|| !pid_alive(pid), |record| !self.record_is_live(record));
+            if stale {
+                if let Some(record) = record {
+                    let _ = fs::remove_file(self.inbox_path(record.sid()));
                 }
                 let _ = fs::remove_file(&path);
             }
@@ -572,6 +692,11 @@ impl LiveSessionDir {
         if !session_id.is_empty() {
             map.insert("sessionId".into(), json!(session_id));
         }
+        if !map.contains_key("procStart") {
+            if let Some(identity) = process_start_identity(pid) {
+                map.insert("procStart".into(), json!(identity));
+            }
+        }
         map.insert("name".into(), json!(name));
         map.insert("nameSource".into(), json!(name_source));
         map.insert("nameSince".into(), json!(now_ms()));
@@ -597,12 +722,48 @@ impl LiveSessionDir {
         self.root.join(format!("{pid}.json"))
     }
 
+    fn session_claim_path(&self, session_id: &str) -> PathBuf {
+        self.root
+            .join(format!("{session_id}{SESSION_CLAIM_SUFFIX}"))
+    }
+
     fn inbox_path(&self, session_id: &str) -> PathBuf {
         self.root.join(format!("{session_id}.inbox.jsonl"))
     }
 
+    fn lock_queue(&self, queue_path: &Path) -> io::Result<fs::File> {
+        let file_name = queue_path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "queue path has no file name")
+        })?;
+        let lock_path = self
+            .root
+            .join(format!(".{}.lock", file_name.to_string_lossy()));
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(lock_path)?;
+        lock.lock_exclusive()?;
+        Ok(lock)
+    }
+
     fn idle_subscription_path(&self, session_id: &str) -> PathBuf {
         self.root.join(format!("{session_id}.idle-notify.jsonl"))
+    }
+
+    fn record_is_live(&self, record: &LiveSessionRecord) -> bool {
+        if !self.check_liveness {
+            return true;
+        }
+        if !pid_alive(record.pid) {
+            return false;
+        }
+        let Some(expected) = record.proc_start.as_deref() else {
+            return true;
+        };
+        // A definite start-time mismatch proves PID reuse. If the platform
+        // cannot provide a start identity, preserve the legacy safety check.
+        process_start_identity(record.pid).is_none_or(|actual| actual == expected)
     }
 
     /// Merge-write `messagingSocketPath` (and session id) onto `sessions/<pid>.json`.
@@ -639,6 +800,11 @@ impl LiveSessionDir {
         map.insert("pid".into(), json!(pid));
         if !session_id.is_empty() {
             map.insert("sessionId".into(), json!(session_id));
+        }
+        if !map.contains_key("procStart") {
+            if let Some(identity) = process_start_identity(pid) {
+                map.insert("procStart".into(), json!(identity));
+            }
         }
         if let Some(name) = name.map(str::trim).filter(|s| !s.is_empty()) {
             map.insert("name".into(), json!(name));
@@ -694,9 +860,47 @@ impl LiveSessionDir {
         Ok(())
     }
 
+    /// Merge-write the process status observed by cross-session listings.
+    pub fn set_status(&self, pid: u32, status: &str, waiting_for: Option<&str>) -> io::Result<()> {
+        self.ensure_root()?;
+        let path = self.record_path(pid);
+        if !path.exists() {
+            return Ok(());
+        }
+        let mut obj: Value = match fs::read_to_string(&path) {
+            Ok(body) => serde_json::from_str(&body).unwrap_or_else(|_| json!({})),
+            Err(_) => json!({}),
+        };
+        if !obj.is_object() {
+            obj = json!({});
+        }
+        let map = obj.as_object_mut().expect("object");
+        map.insert("pid".into(), json!(pid));
+        map.insert("status".into(), json!(status));
+        if let Some(waiting_for) = waiting_for.filter(|value| !value.trim().is_empty()) {
+            map.insert("waitingFor".into(), json!(waiting_for));
+        } else {
+            map.remove("waitingFor");
+        }
+        let timestamp = now_ms();
+        map.insert("statusUpdatedAt".into(), json!(timestamp));
+        map.insert("updatedAt".into(), json!(timestamp));
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, serde_json::to_vec(&obj).map_err(io::Error::other)?)?;
+        fs::rename(tmp, path)?;
+        Ok(())
+    }
+
     fn ensure_root(&self) -> io::Result<()> {
         fs::create_dir_all(&self.root)
     }
+}
+
+fn safe_session_id(session_id: &str) -> bool {
+    !session_id.trim().is_empty()
+        && !session_id.contains('/')
+        && !session_id.contains('\\')
+        && !session_id.contains("..")
 }
 
 /// Decide whether `desired` must yield. Pure: no IO.
@@ -979,6 +1183,35 @@ pub fn peer_message_reminder(msg: &PeerMessage, mid_turn: bool) -> String {
     }
 }
 
+/// Build one transport-independent outbound peer message.
+///
+/// UDS and JSONL fallback share the same message id and wrapped body so a
+/// receiver can safely de-duplicate a retry across transports.
+#[must_use]
+pub fn outbound_peer_message(
+    from: &str,
+    from_session_id: &str,
+    content: &str,
+    summary: Option<&str>,
+) -> PeerMessage {
+    let from_mode = process_permission_class();
+    PeerMessage {
+        from: from.to_string(),
+        from_session_id: from_session_id.to_string(),
+        content: wrap_cross_session_message_with_mode(
+            from,
+            from_session_id,
+            Some(from),
+            from_mode.as_deref(),
+            content,
+        ),
+        summary: summary.map(str::to_string),
+        msg_id: Some(uuid::Uuid::new_v4().to_string()),
+        from_addr: crate::uds_inbox::process_uds_address(),
+        from_mode,
+    }
+}
+
 /// `kp` — compare key for session names.
 #[must_use]
 pub fn normalize_name(s: &str) -> String {
@@ -1076,6 +1309,57 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Read the OS process-start identity used by the live-session registry's
+/// PID-reuse guard. This intentionally mirrors the existing registry format
+/// instead of introducing another persisted identity field here.
+#[cfg(unix)]
+fn process_start_identity(pid: u32) -> Option<String> {
+    if pid <= 1 {
+        return None;
+    }
+    let output = std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let identity = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!identity.is_empty()).then_some(identity)
+}
+
+#[cfg(windows)]
+fn process_start_identity(pid: u32) -> Option<String> {
+    if pid <= 1 {
+        return None;
+    }
+    let script = format!(
+        "(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')"
+    );
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let identity = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!identity.is_empty()).then_some(identity)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_start_identity(_pid: u32) -> Option<String> {
+    None
+}
+
 fn hash_seed(s: &str) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325_u64;
     for b in s.as_bytes() {
@@ -1101,8 +1385,23 @@ fn pid_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        true
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output();
+            return output.map_or(true, |result| {
+                result.status.success()
+                    && String::from_utf8_lossy(&result.stdout).contains(&format!("\",\"{pid}\",\""))
+            });
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = pid;
+            true
+        }
     }
 }
 
@@ -1368,10 +1667,18 @@ fn hold_cause_for(policy: InboundPolicy, user_hold: &'static str) -> &'static st
     }
 }
 
-/// Drain accepted UDS inbox messages into reminder strings.
-/// Policy is applied at receive (`uds_inbox`), matching 2.1.232 `K5n`.
+/// Drain accepted UDS and file-fallback inbox messages into reminder strings.
+/// Both transports pass through the same receive-time policy and de-duplication
+/// in `uds_inbox`, matching 2.1.232 `K5n`.
 #[must_use]
 pub fn take_accepted_peer_reminders(mid_turn: bool) -> Vec<String> {
+    if let Some(session_id) = process_session_id() {
+        if let Ok(messages) = process_live_dir().drain_inbox(&session_id) {
+            for message in messages {
+                crate::uds_inbox::enqueue_inbound(message);
+            }
+        }
+    }
     let mut out = crate::uds_inbox::take_accepted_peer_reminders(mid_turn);
     for notice in crate::uds_inbox::take_delivery_notices() {
         out.push(format!("<system-reminder>\n{notice}\n</system-reminder>"));
@@ -1421,6 +1728,17 @@ pub fn set_process_permission_mode(mode: &str, bypass_available: bool) {
     set_process_permission_class(Some(class));
     if let Some(dir) = process_dir() {
         let _ = dir.set_permission_class(std::process::id(), class);
+    }
+}
+
+/// Publish this process's current busy/idle/waiting status to its live record.
+pub fn set_process_status(status: &str, waiting_for: Option<&str>) {
+    let status = match status {
+        "idle" | "busy" | "waiting" | "shell" => status,
+        _ => return,
+    };
+    if let Some(dir) = process_dir() {
+        let _ = dir.set_status(std::process::id(), status, waiting_for);
     }
 }
 
@@ -1512,12 +1830,40 @@ pub fn subagent_steer_is_default() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::thread;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn dir() -> (TempDir, LiveSessionDir) {
         let tmp = TempDir::new().unwrap();
         let d = LiveSessionDir::at(tmp.path());
         (tmp, d)
+    }
+
+    fn operation_waits_for_queue_lock<T, F>(queue_lock: fs::File, operation: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx.send(operation()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(500)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        drop(queue_lock);
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("queue operation should finish after lock release");
+        worker.join().unwrap();
+        result
     }
 
     #[test]
@@ -1732,6 +2078,129 @@ mod tests {
     }
 
     #[test]
+    fn session_id_claim_rejects_one_live_writer_but_allows_resume_transcript() {
+        let (tmp, d) = dir();
+        let session_id = "11111111-2222-4333-8444-555555555555";
+
+        // A historical JSONL file is data, not a live writer. Resuming it with
+        // the same UUID must remain valid.
+        let transcript = tmp
+            .path()
+            .join("projects")
+            .join("-test")
+            .join(format!("{session_id}.jsonl"));
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, "{}\n").unwrap();
+        let historical_claim = d.claim_session_id(session_id, 101).unwrap();
+        drop(historical_claim);
+
+        // The live registry/PID is the writer ownership check. With the test
+        // directory's liveness disabled, this record is intentionally treated
+        // as live without requiring a real PID.
+        d.upsert_identity(101, session_id, Some("resume"), None, None, None)
+            .unwrap();
+        let error = d
+            .claim_session_id(session_id, 202)
+            .expect_err("a second live writer must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn session_id_claim_cleanup_allows_next_writer() {
+        let (_tmp, d) = dir();
+        let session_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+        let first_claim = d.claim_session_id(session_id, 101).unwrap();
+        assert!(d
+            .root()
+            .join(format!("{session_id}{SESSION_CLAIM_SUFFIX}"))
+            .exists());
+        let error = d
+            .claim_session_id(session_id, 202)
+            .expect_err("a held OS lock must reject a second writer");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        drop(first_claim);
+        let second_claim = d
+            .claim_session_id(session_id, 202)
+            .expect("dropping the process-held lease must release the claim");
+        drop(second_claim);
+    }
+
+    #[test]
+    fn stale_reused_pid_record_does_not_block_claim() {
+        let tmp = TempDir::new().unwrap();
+        let d = LiveSessionDir::at_live(tmp.path());
+        let pid = std::process::id();
+        let Some(actual_start) = process_start_identity(pid) else {
+            // Platforms without a process-start probe retain the conservative
+            // legacy behavior and cannot exercise PID-reuse detection here.
+            return;
+        };
+        let session_id = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+        fs::write(
+            d.root().join(format!("{pid}.json")),
+            serde_json::to_vec(&json!({
+                "pid": pid,
+                "sessionId": session_id,
+                "procStart": format!("{actual_start} (stale)")
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            d.list_live().unwrap().is_empty(),
+            "a PID-reused record must not be listed as live"
+        );
+        assert!(
+            d.find_by_session_id(session_id, None).is_none(),
+            "a PID-reused record must not be addressable"
+        );
+
+        let claim = d
+            .claim_session_id(session_id, pid.saturating_add(1))
+            .expect("a PID-reused stale record is not a live writer");
+        drop(claim);
+
+        assert!(
+            d.list_live().unwrap().is_empty(),
+            "the stale record must remain absent after claim"
+        );
+        assert!(
+            d.find_by_session_id(session_id, None).is_none(),
+            "the stale session must remain unaddressable after claim"
+        );
+        assert!(
+            !d.record_path(pid).exists(),
+            "claim reaping must remove the stale registry record"
+        );
+    }
+
+    #[test]
+    fn live_record_without_proc_start_remains_fail_closed() {
+        let tmp = TempDir::new().unwrap();
+        let d = LiveSessionDir::at_live(tmp.path());
+        let pid = std::process::id();
+        let session_id = "88888888-9999-4aaa-8bbb-cccccccccccc";
+        fs::write(
+            d.record_path(pid),
+            serde_json::to_vec(&json!({
+                "pid": pid,
+                "sessionId": session_id
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(d.list_live().unwrap().len(), 1);
+        assert!(d.find_by_session_id(session_id, None).is_some());
+        let error = d
+            .claim_session_id(session_id, pid.saturating_add(1))
+            .expect_err("an unverifiable legacy writer must remain protected");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(d.record_path(pid).exists());
+    }
+
+    #[test]
     fn claim_collision_gets_official_suffix() {
         let (_t, d) = dir();
         d.claim_unique_name("alpha", "s1", 1).unwrap();
@@ -1815,6 +2284,33 @@ mod tests {
     }
 
     #[test]
+    fn inbox_append_and_drain_are_serialized_by_queue_lock() {
+        let (_tmp, d) = dir();
+        let msg = PeerMessage {
+            from: "alpha".into(),
+            from_session_id: "s1".into(),
+            content: "serialized".into(),
+            ..PeerMessage::default()
+        };
+        let queue = d.inbox_path("s2");
+        let queue_lock = d.lock_queue(&queue).unwrap();
+        let writer = d.clone();
+        let writer_msg = msg.clone();
+        let append_result = operation_waits_for_queue_lock(queue_lock, move || {
+            writer.send_inbox("s2", &writer_msg)
+        });
+        assert!(append_result.is_ok());
+        assert_eq!(d.drain_inbox("s2").unwrap(), vec![msg.clone()]);
+
+        d.send_inbox("s2", &msg).unwrap();
+        let queue_lock = d.lock_queue(&queue).unwrap();
+        let drainer = d.clone();
+        let drained =
+            operation_waits_for_queue_lock(queue_lock, move || drainer.drain_inbox("s2")).unwrap();
+        assert_eq!(drained, vec![msg]);
+    }
+
+    #[test]
     fn idle_subscription_round_trip_rotates_queue() {
         let (_t, d) = dir();
         let request = IdleNotificationRequest {
@@ -1834,6 +2330,37 @@ mod tests {
             d.drain_idle_subscriptions("s2").unwrap(),
             vec![IdleNotificationRequest::default()]
         );
+    }
+
+    #[test]
+    fn idle_subscription_append_and_drain_are_serialized_by_queue_lock() {
+        let (_tmp, d) = dir();
+        let request = IdleNotificationRequest {
+            from: "lead".into(),
+            from_session_id: "s1".into(),
+            summary: Some("serialized".into()),
+        };
+        let queue = d.idle_subscription_path("s2");
+        let queue_lock = d.lock_queue(&queue).unwrap();
+        let writer = d.clone();
+        let writer_request = request.clone();
+        let append_result = operation_waits_for_queue_lock(queue_lock, move || {
+            writer.append_idle_subscription("s2", &writer_request)
+        });
+        assert!(append_result.is_ok());
+        assert_eq!(
+            d.drain_idle_subscriptions("s2").unwrap(),
+            vec![request.clone()]
+        );
+
+        d.append_idle_subscription("s2", &request).unwrap();
+        let queue_lock = d.lock_queue(&queue).unwrap();
+        let drainer = d.clone();
+        let drained = operation_waits_for_queue_lock(queue_lock, move || {
+            drainer.drain_idle_subscriptions("s2")
+        })
+        .unwrap();
+        assert_eq!(drained, vec![request]);
     }
 
     #[test]

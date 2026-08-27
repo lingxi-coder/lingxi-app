@@ -759,6 +759,8 @@ pub struct MockOrchestratorHandle {
     permission_mode: StdMutex<Option<String>>,
     /// Live effort value used by `/effort` command tests.
     effort: StdMutex<Option<String>>,
+    /// Session-scoped fast-mode flag used by bridge routing tests.
+    fast_mode: AtomicBool,
     /// Session-owned dynamic-workflow gate exposed through the handle.
     dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate,
     /// Session-owned workflow-size state exposed through the handle.
@@ -825,6 +827,7 @@ impl MockOrchestratorHandle {
             switch_model_error: StdMutex::new(None),
             permission_mode: StdMutex::new(Some("default".to_string())),
             effort: StdMutex::new(None),
+            fast_mode: AtomicBool::new(false),
             dynamic_workflows_gate: traits::session_flags::DynamicWorkflowsGate::new(false, false),
             workflow_size_guideline: traits::session_flags::WorkflowSizeGuidelineState::default(),
             permission_mode_error: StdMutex::new(None),
@@ -914,6 +917,10 @@ impl MockOrchestratorHandle {
     /// The mock's current live permission-mode wire id.
     pub fn current_permission_mode(&self) -> Option<String> {
         self.permission_mode.lock().unwrap().clone()
+    }
+    /// The mock's current session-scoped fast-mode flag.
+    pub fn current_fast_mode(&self) -> bool {
+        self.fast_mode.load(Ordering::SeqCst)
     }
     /// Make the next `set_permission_mode` call return `ActionFailed(reason)`.
     pub fn set_permission_mode_error(&self, reason: String) {
@@ -1101,6 +1108,15 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn current_effort(&self) -> Option<String> {
         self.effort.lock().unwrap().clone()
+    }
+
+    async fn fast_mode(&self) -> bool {
+        self.fast_mode.load(Ordering::SeqCst)
+    }
+
+    async fn set_fast_mode(&self, on: bool) -> Result<(), HandleError> {
+        self.fast_mode.store(on, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn dynamic_workflows_enabled(&self) -> bool {

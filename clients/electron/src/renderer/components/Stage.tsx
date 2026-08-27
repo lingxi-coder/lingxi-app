@@ -1,42 +1,78 @@
 import { memo, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
 import type { RunItem } from '../model/runItem';
+import { narrationDefaultOpen, narrationShouldCollapse } from '../model/runItem';
 import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './collapseStore';
+import { Icon } from './Icon';
 import { Disclosure } from './Disclosure';
 import { MarkdownContent } from './MarkdownContent';
 import { ToolCall } from './ToolCall';
 
 // ─── RUN ITEMS ───────────────────────────────────────────────
-const GutterRule = memo(function GutterRule() {
-  const t = useT();
-  // a small monospace tick column like the screenshot's "—" marks
-  return (
-    <div
-      style={{
-        width: 22, flexShrink: 0, paddingTop: 6,
-        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
-        color: t.text4,
-      }}
-    >
-      <span className="mono" style={{ fontSize: 11, lineHeight: 1 }}>—</span>
-    </div>
-  );
-});
-
-const NarrationLine = memo(function NarrationLine({ item }: { item: Extract<RunItem, { type: 'narration' }> }) {
+const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
+  item: Extract<RunItem, { type: 'narration' }>;
+  open: boolean;
+  onSetOpen(id: string, next: boolean): void;
+}) {
   const t = useT();
   const user = item.role === 'user';
   const color = item.tone === 'muted' ? t.text3 : t.text;
+  const images = item.images?.filter((image) => image.url.trim().length > 0) ?? [];
+  const collapsible = narrationShouldCollapse(item);
+  const expanded = !collapsible || open;
+  const contentId = `narration-content-${item.id}`;
   return (
-    <div style={{
-      maxWidth: user ? 700 : 880,
-      padding: user ? '10px 14px' : 0,
-      borderRadius: user ? '17px 17px 5px 17px' : 0,
-      border: user ? `0.5px solid ${t.accentBorder}` : 0,
-      background: user ? t.accentBg : 'transparent',
+    <div className={user ? 'user-message-bubble' : undefined} style={{
+      maxWidth: user ? images.length ? 430 : 700 : 880,
+      padding: user ? '11px 16px' : 0,
+      borderRadius: user ? 22 : 0,
+      border: 0,
+      background: user ? t.surfaceHover : 'transparent',
       fontSize: 14.5, lineHeight: 1.7, color, fontWeight: item.strong ? 500 : 400,
     }}>
-      <MarkdownContent text={item.text} />
+      {images.length > 0 && (
+        <div role="group" aria-label="Attached images" style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
+          {images.map((image, index) => (
+            <div key={`${image.media_type}-${index}`} style={{ overflow: 'hidden', minWidth: 0, borderRadius: 11, background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 12%, transparent)` }}>
+              <img
+                src={image.url}
+                alt={`Attached image ${index + 1}`}
+                style={{ display: 'block', width: '100%', maxHeight: 260, aspectRatio: images.length > 1 ? '4 / 3' : 'auto', objectFit: 'contain', background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+      <div
+        id={contentId}
+        style={{
+          maxHeight: expanded ? undefined : '13.6em',
+          overflow: expanded ? undefined : 'hidden',
+          WebkitMaskImage: expanded
+            ? undefined
+            : 'linear-gradient(to bottom, #000 0%, #000 78%, transparent 100%)',
+          maskImage: expanded
+            ? undefined
+            : 'linear-gradient(to bottom, #000 0%, #000 78%, transparent 100%)',
+          textWrap: 'pretty',
+        }}
+      >
+        <MarkdownContent text={item.text} />
+      </div>
+      {collapsible && (
+        <button
+          type="button"
+          className="narration-disclosure-trigger"
+          aria-expanded={expanded}
+          aria-controls={contentId}
+          aria-label={expanded ? 'Collapse full message' : 'Show full message'}
+          onClick={() => onSetOpen(item.id, !expanded)}
+          style={{ color: user ? t.accent : t.text3 }}
+        >
+          <span>{expanded ? 'Show less' : 'Show more'}</span>
+          <Icon name={expanded ? 'chevron' : 'chevronR'} size={12} stroke={2} />
+        </button>
+      )}
     </div>
   );
 });
@@ -147,7 +183,7 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
   }, [items.length, running]);
 
   return (
-    <div style={{ flex: 1, overflowY: 'auto', background: t.stageBg, position: 'relative' }}>
+    <div style={{ flex: 1, overflowY: 'auto', background: t.transcriptBg, position: 'relative' }}>
       <div
         style={{
           maxWidth: 920, margin: '0 auto',
@@ -175,8 +211,11 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           if (item.type === 'narration') {
             return (
               <div key={item.id} style={{ display: 'flex', justifyContent: item.role === 'user' ? 'flex-end' : 'flex-start', gap: 10, width: '100%', animation: 'fade-in 0.3s ease' }}>
-                {item.role !== 'user' && <GutterRule />}
-                <NarrationLine item={item} />
+                <NarrationLine
+                  item={item}
+                  open={collapseOpen(visible, sessionKey, item.id) ?? narrationDefaultOpen(item)}
+                  onSetOpen={setOpen}
+                />
               </div>
             );
           }
@@ -196,30 +235,9 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
           if (item.type === 'tool') {
             return (
               <div key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
-                <GutterRule />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <ToolCall item={item} open={collapseOpen(visible, sessionKey, item.id)} onSetOpen={setOpen} />
                 </div>
-              </div>
-            );
-          }
-          if (item.type === 'meta') {
-            return (
-              <div
-                key={item.id}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0 6px',
-                  fontSize: 11.5, color: t.text4, marginTop: 8,
-                }}
-              >
-                <span style={{ width: 8, height: 8, borderRadius: 99, background: `color-mix(in oklab, ${t.warn} 50%, transparent)` }} />
-                <span className="mono">{item.dur}</span>
-                {item.tokens && (
-                  <>
-                    <span>·</span>
-                    <span className="mono">{item.tokens}</span>
-                  </>
-                )}
               </div>
             );
           }

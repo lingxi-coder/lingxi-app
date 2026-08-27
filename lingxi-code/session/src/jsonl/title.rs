@@ -94,6 +94,28 @@ pub fn extract_title(messages: &[JsonlMessage]) -> String {
     }
 }
 
+/// Whether the first-prompt scan encountered an autonomous `<tick>` prompt.
+/// Claude suppresses the raw XML from the picker and uses a meaningful label
+/// when no higher-precedence title or real user prompt exists.
+pub(crate) fn has_autonomous_tick_prompt(messages: &[JsonlMessage]) -> bool {
+    messages.iter().any(|message| {
+        if message.message_type != "user"
+            || extra_flag(message, "isMeta")
+            || extra_flag(message, "isCompactSummary")
+        {
+            return false;
+        }
+        let Some(content) = message.message.get("content") else {
+            return false;
+        };
+        collect_texts(content).is_some_and(|texts| {
+            texts
+                .iter()
+                .any(|text| text.replace('\n', " ").trim().starts_with("<tick>"))
+        })
+    })
+}
+
 /// Derive the default `/branch` fork name from a conversation's messages — a
 /// 1:1 port of the binary's `I2l`/`deriveFirstPrompt` (@217273303): iterate
 /// messages, take the first meaningful USER prompt (skipping `isMeta` and —

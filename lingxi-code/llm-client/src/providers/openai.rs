@@ -242,6 +242,15 @@ impl WireCodec for OpenAiChatCodec {
 
         if request.stream {
             body.insert("stream".to_string(), Value::Bool(true));
+            if self.is_kimi_profile() {
+                // Kimi omits the terminal usage object from SSE unless it is
+                // explicitly requested. Without this, the session transcript,
+                // cost tracker, and every client token counter all receive 0.
+                body.insert(
+                    "stream_options".to_string(),
+                    serde_json::json!({"include_usage": true}),
+                );
+            }
         }
 
         if let Some(max_tokens) = request.max_tokens {
@@ -1123,6 +1132,8 @@ fn normalize_usage(usage: &Value) -> Usage {
         .get("prompt_tokens_details")
         .and_then(|details| details.get("cached_tokens"))
         .and_then(Value::as_u64)
+        // Kimi's documented wire shape reports this bucket directly on usage.
+        .or_else(|| usage.get("cached_tokens").and_then(Value::as_u64))
         .unwrap_or(0);
     let reasoning_tokens = usage
         .get("completion_tokens_details")

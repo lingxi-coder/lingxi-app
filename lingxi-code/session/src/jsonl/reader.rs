@@ -138,6 +138,11 @@ pub struct LoadedTranscript {
     /// `custom-title` entries keyed by `sessionId`
     /// (`customTitles.set(entry.sessionId, entry.customTitle)`).
     pub custom_titles: HashMap<String, String>,
+    /// Session ids whose latest `custom-title` record is the versioned mobile
+    /// empty-session anchor. The value is tracked separately from
+    /// `custom_titles` because an unmarked later rename must revoke the
+    /// anchor, matching last-write-wins metadata semantics.
+    pub mobile_empty_sessions: std::collections::HashSet<String>,
     /// `ai-title` entries keyed by `sessionId` (`saveAiGeneratedTitle` writes
     /// `{type:"ai-title", sessionId, aiTitle}`; readers prefer `custom-title`
     /// over `ai-title`, `sessionStorage.ts:2644-2646`).
@@ -412,6 +417,11 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
                 value.get("customTitle").and_then(Value::as_str),
             ) {
                 out.custom_titles.insert(sid.to_string(), title.to_string());
+                if value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1) {
+                    out.mobile_empty_sessions.insert(sid.to_string());
+                } else {
+                    out.mobile_empty_sessions.remove(sid);
+                }
             }
         } else if ty == "ai-title" {
             // `saveAiGeneratedTitle` writes `{sessionId, aiTitle}`.

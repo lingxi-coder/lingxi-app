@@ -1,6 +1,8 @@
 import type {
   ClientEvent,
   DoctorReportDto,
+  ConversationControlsDto,
+  ModelDetailsDto,
   SlashCommandDto,
   PermissionModeId,
   SessionRowDto,
@@ -18,7 +20,10 @@ export interface DesktopState {
   readonly sessions: SessionRowDto[];
   readonly activeSessionId: string | null;
   readonly models: string[];
+  readonly modelDetails: ModelDetailsDto[];
   readonly currentModel: string | null;
+  readonly conversationControls: ConversationControlsDto | null;
+  readonly fastMode: boolean;
   readonly permissionMode: PermissionModeId;
   readonly slashCommands: SlashCommandDto[];
   readonly tasks: Readonly<Record<string, TaskRowDto>>;
@@ -32,7 +37,10 @@ export function emptyDesktopState(): DesktopState {
     sessions: [],
     activeSessionId: null,
     models: [],
+    modelDetails: [],
     currentModel: null,
+    conversationControls: null,
+    fastMode: false,
     permissionMode: 'default',
     slashCommands: [],
     tasks: {},
@@ -47,20 +55,49 @@ export function beginTaskRefresh(state: DesktopState): DesktopState {
   return { ...state, tasks: {}, taskOutput: {} };
 }
 
+function mergeSessionCatalog(
+  previous: readonly SessionRowDto[],
+  incoming: readonly SessionRowDto[],
+): SessionRowDto[] {
+  const durableIds = new Set(incoming.map((session) => session.uuid));
+  const provisional = previous.filter((session) => session.path === '' && !durableIds.has(session.uuid));
+  return [...provisional, ...incoming];
+}
+
+function startSession(state: DesktopState, sessionId: string): DesktopState {
+  const existing = state.sessions.find((session) => session.uuid === sessionId);
+  const sessions = existing
+    ? state.sessions
+    : [{
+        uuid: sessionId,
+        title: 'New session',
+        modified_rfc3339: new Date().toISOString(),
+        message_count: 0,
+        // Empty path marks a renderer-side row that SessionList replaces once
+        // the first turn creates the durable JSONL transcript.
+        path: '',
+      }, ...state.sessions];
+  return { ...state, sessions, activeSessionId: sessionId };
+}
+
 export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): DesktopState {
   switch (event.type) {
     case 'session_list':
-      return { ...state, sessions: [...event.sessions] };
+      return { ...state, sessions: mergeSessionCatalog(state.sessions, event.sessions) };
     case 'session_started':
-      return { ...state, activeSessionId: event.session_id };
+      return startSession(state, event.session_id);
     case 'session_resumed':
       return { ...state, activeSessionId: event.session_id };
     case 'session_ended':
       return { ...state, activeSessionId: null };
     case 'model_list':
-      return { ...state, models: [...event.models], currentModel: event.current };
+      return { ...state, models: [...event.models], modelDetails: [...(event.details ?? [])], currentModel: event.current };
     case 'model_changed':
       return { ...state, currentModel: event.model };
+    case 'conversation_controls_changed':
+      return { ...state, conversationControls: event.controls };
+    case 'fast_mode_changed':
+      return { ...state, fastMode: event.enabled };
     case 'permission_mode_changed':
       return { ...state, permissionMode: event.mode };
     case 'task_row':

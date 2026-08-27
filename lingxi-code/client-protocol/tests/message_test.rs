@@ -51,6 +51,7 @@ fn message_dto_round_trips() {
                 display: None,
             },
         ],
+        images: Vec::new(),
     };
 
     let json = serde_json::to_value(&msg).expect("serialize MessageDto");

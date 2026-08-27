@@ -61,11 +61,12 @@ use serde::{Deserialize, Serialize};
 pub struct SessionRowDto {
     /// The session UUID (parsed from the filename stem), as a stable string.
     pub uuid: String,
-    /// The session title (≤ 50 chars + ellipsis).
+    /// The shared catalog title (≤ 200 Unicode characters + ellipsis); clients
+    /// may truncate it visually without changing the UUID-backed identity.
     pub title: String,
     /// File mtime as an RFC 3339 timestamp (`SystemTime` lowered, decision §0.4).
     pub modified_rfc3339: String,
-    /// Number of JSONL lines in the file (`usize` lowered to `u32`).
+    /// Number of user/assistant messages visible in the restored conversation.
     pub message_count: u32,
     /// Absolute path to the `.jsonl` file — mapped directly from
     /// `SessionMetadata.path` so a client can request a re-load.
@@ -178,6 +179,9 @@ pub struct ModelDetailsDto {
     pub pricing: Option<ModelPricingDto>,
     pub capabilities: ModelCapabilitiesDto,
     pub reasoning: crate::controls::ReasoningControlSpecDto,
+    /// Whether this model/provider route supports the first-party fast tier.
+    #[serde(default)]
+    pub supports_fast_mode: bool,
 }
 
 // ── MCP ──────────────────────────────────────────────────────────────────────

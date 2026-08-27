@@ -4,8 +4,10 @@ import type {
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
+  ImageRefDto,
   PermissionRequest,
   PermissionResponseDto,
+  SessionRowDto,
 } from '@lingxi/bridge-client';
 
 export type ConnectionState =
@@ -19,16 +21,47 @@ export type ConnectionState =
 
 export type AllowedClientCommand = Extract<ClientCommand, {
   type: 'set_model' | 'list_models' | 'new_session' | 'resume_session' | 'list_sessions' |
-    'task_list' | 'task_output' | 'task_stop' | 'set_permission_mode' | 'run_slash_command';
+    'task_list' | 'task_output' | 'task_stop' | 'set_permission_mode' | 'run_slash_command' |
+    'get_conversation_controls' | 'set_reasoning_selection' | 'set_fast_mode';
 }> | { type: 'refresh_listings'; which: Array<{ type: 'status' | 'doctor' | 'slash_commands' }> };
 export interface PublicSettings {
   version: 1;
   theme?: 'dark' | 'light';
   model?: string;
   apiBaseUrl?: string;
-  lastWorkspace?: string;
-  recentWorkspaces: string[];
+  activeProject?: string;
+  activeSession?: SessionRef;
+  projects: string[];
+  pinnedSessions: PinnedSessionRecord[];
 }
+export interface SessionRef {
+  projectPath: string;
+  sessionId: string;
+}
+export interface RuntimeEventEnvelope<T = unknown> {
+  sessionId: string;
+  event: T;
+}
+export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> { sequence: number }
+export interface SessionRuntimeSummary {
+  projectPath: string;
+  sessionId: string;
+  connection: ConnectionState;
+  turnActive: boolean;
+  pendingInteractions: number;
+  pendingAskUserQuestions: number;
+}
+export interface ProjectSessionCatalogState {
+  sessions: SessionRowDto[];
+  error?: string;
+}
+export interface PinnedSessionRecord {
+  projectPath: string;
+  sessionId: string;
+  title: string;
+  pinnedAt: string;
+}
+export type SessionPinInput = Omit<PinnedSessionRecord, 'pinnedAt'>;
 export interface WorkspaceMetadata {
   path?: string;
   trusted: boolean;
@@ -48,8 +81,12 @@ export interface DiagnosticEntry {
   message: string;
 }
 export interface BootstrapState {
+  revision: number;
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
+  activeSession?: SessionRef;
+  runtimes: SessionRuntimeSummary[];
+  projectCatalogs: Record<string, ProjectSessionCatalogState>;
   providerCredentials?: ProviderCredentialMetadata[];
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
@@ -69,30 +106,35 @@ export interface LingxiApi {
   updateSettings(patch: { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
+  removeProject(path: string): Promise<BootstrapState>;
+  setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
-  setWorkspaceTrusted(trusted: boolean): Promise<WorkspaceMetadata>;
   providerCredentials(): Promise<ProviderCredentialMetadata[]>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
-  restartBridge(): Promise<void>;
+  restartBridge(sessionId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
+  copyText(text: string): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
-  sendPrompt(text: string): Promise<void>;
-  approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
-  deny(requestId: number): Promise<void>;
-  approveComputerAccess(requestId: number, response: ComputerAccessResponseDto): Promise<void>;
-  denyComputerAccess(requestId: number): Promise<void>;
-  answerAskUserQuestion(requestId: number, answers: Record<string, string>): Promise<void>;
-  cancelAskUserQuestion(requestId: number): Promise<void>;
+  listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  newSession(projectPath: string, model?: string): Promise<BootstrapState>;
+  openSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
+  sendPrompt(sessionId: string, text: string, images?: ImageRefDto[]): Promise<void>;
+  approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;
+  deny(sessionId: string, requestId: number): Promise<void>;
+  approveComputerAccess(sessionId: string, requestId: number, response: ComputerAccessResponseDto): Promise<void>;
+  denyComputerAccess(sessionId: string, requestId: number): Promise<void>;
+  answerAskUserQuestion(sessionId: string, requestId: number, answers: Record<string, string>): Promise<void>;
+  cancelAskUserQuestion(sessionId: string, requestId: number): Promise<void>;
   openSystemSettings(pane: SystemSettingsPane): Promise<void>;
-  cancel(turnId?: number): Promise<void>;
-  command(command: AllowedClientCommand): Promise<void>;
-  connectionState(): Promise<ConnectionState>;
-  onEvent(cb: (event: ClientEvent) => void): Unsubscribe;
-  onPermission(cb: (request: PermissionRequest) => void): Unsubscribe;
-  onComputerAccess(cb: (request: ComputerAccessRequestDto) => void): Unsubscribe;
-  onConnectionStateChanged(cb: (state: ConnectionState) => void): Unsubscribe;
+  cancel(sessionId: string, turnId?: number): Promise<void>;
+  command(sessionId: string, command: AllowedClientCommand): Promise<void>;
+  connectionState(sessionId: string): Promise<ConnectionState>;
+  onEvent(cb: (event: SequencedRuntimeEventEnvelope<ClientEvent>) => void): Unsubscribe;
+  onPermission(cb: (request: RuntimeEventEnvelope<PermissionRequest>) => void): Unsubscribe;
+  onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
+  onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
 }
 
 declare global {

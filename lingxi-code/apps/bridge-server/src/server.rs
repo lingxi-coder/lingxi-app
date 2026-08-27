@@ -281,6 +281,11 @@ impl PermissionRequestSink for FramePermissionSink {
         if !forwarded {
             self.tool_names.lock().await.remove(&request_id);
             self.reject(request_id).await;
+        } else {
+            traits::live_sessions::set_process_status(
+                "waiting",
+                Some(traits::live_sessions::PERMISSION_PROMPT_WAITING_FOR),
+            );
         }
     }
 }
@@ -1250,6 +1255,13 @@ impl BridgeConnection {
             .remove(&request_id)
             .unwrap_or_default();
         let resolved = gate.resolve(request_id, response, &tool_name).await;
+        // A stale approval must not resurrect a turn that is already idle or
+        // disconnected. Only the gate's successful removal proves that this
+        // response owned a pending request, and the active-turn check preserves
+        // terminal/disconnected state when cancellation won the race.
+        if resolved && self.active_turn.accepts_interactions() {
+            traits::live_sessions::set_process_status("busy", None);
+        }
         if !resolved {
             tracing::debug!(
                 request_id,
@@ -1456,7 +1468,7 @@ mod tests {
     use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
     use client_protocol::commands::{ClientCommand, ImageRefDto};
     use client_protocol::events::ClientEvent;
-    use client_protocol::permission::PermissionRequest;
+    use client_protocol::permission::{PermissionRequest, PermissionResponseDto};
     use tokio::sync::{Mutex, Notify};
     use tokio_util::sync::CancellationToken;
     use traits::{PermissionDecision, PermissionGate};
@@ -1805,6 +1817,86 @@ mod tests {
 
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
         assert_eq!(gate.pending_count().await, 0);
+        connection.active_turn.finish(generation);
+    }
+
+    #[tokio::test]
+    async fn permission_live_status_uses_cli_reason_and_ignores_stale_resolution() {
+        let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().expect("live-session tempdir");
+        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        let session_id = "11111111-2222-4333-8444-555555555555";
+        let pid = std::process::id();
+        dir.upsert_identity(pid, session_id, Some("bridge"), None, None, None)
+            .unwrap();
+        traits::live_sessions::set_process_dir(dir.clone());
+        traits::live_sessions::set_process_session_id(session_id);
+
+        let connection = BridgeConnection::new();
+        let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+            captured: Arc::new(Mutex::new(None)),
+            notify: Arc::new(Notify::new()),
+        });
+        let connection = connection.bind(gate.clone(), driver);
+        let (generation, _) = connection.active_turn.begin(Some(7));
+
+        let check = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                gate.check("Bash", &serde_json::json!({"command": "echo hi"}))
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while gate.pending_count().await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("permission request is parked");
+
+        let waiting = dir
+            .list_live()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.sid() == session_id)
+            .expect("live record");
+        assert_eq!(waiting.status.as_deref(), Some("waiting"));
+        assert_eq!(
+            waiting.waiting_for.as_deref(),
+            Some(traits::live_sessions::PERMISSION_PROMPT_WAITING_FOR)
+        );
+
+        connection
+            .resolve_permission(1, PermissionResponseDto::AllowOnce)
+            .await;
+        let busy = dir
+            .list_live()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.sid() == session_id)
+            .expect("live record after resolve");
+        assert_eq!(busy.status.as_deref(), Some("busy"));
+        assert_eq!(busy.waiting_for, None);
+        assert!(matches!(check.await.unwrap(), PermissionDecision::Allow));
+
+        // A duplicate/stale approval must not turn an already-idle session
+        // back to busy.
+        dir.set_status(pid, "idle", None).unwrap();
+        connection
+            .resolve_permission(1, PermissionResponseDto::Deny)
+            .await;
+        let idle = dir
+            .list_live()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.sid() == session_id)
+            .expect("live record after stale resolve");
+        assert_eq!(idle.status.as_deref(), Some("idle"));
+        assert_eq!(idle.waiting_for, None);
         connection.active_turn.finish(generation);
     }
 

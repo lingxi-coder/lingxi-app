@@ -1,7 +1,7 @@
 /**
- * One tool call in the transcript — replaces the old `AgentCard`.
+ * One tool call in the transcript.
  *
- * The card renders the engine's PRE-DERIVED view and nothing else. It never
+ * The row renders the engine's PRE-DERIVED view and nothing else. It never
  * looks at `input_json` or `result_json`; `view` (a `ToolHeaderDto`) and
  * `result` (a `ToolResultDisplayDto`) arrived already composed, which is the
  * whole point of the change — four clients each summarising the same payload
@@ -24,21 +24,15 @@
 
 import { memo, type CSSProperties } from 'react';
 
+import { standaloneJsonForDisplay } from '../markdown';
 import type { ToolRunItem } from '../model/runItem';
-import { toolDefaultOpen, toolHasBody, toolTruncationNotice } from '../model/runItem';
+import { toolHasBody, toolTruncationNotice } from '../model/runItem';
 import { useT } from '../theme/ThemeContext';
 import { ltrAnchored } from './bidi';
+import { CodeBlock } from './CodeBlock';
 import { DiffView } from './DiffView';
 import { Disclosure } from './Disclosure';
 import { Icon } from './Icon';
-
-const CARD_STYLE: CSSProperties = Object.freeze({
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 4,
-  maxWidth: 720,
-  position: 'relative',
-});
 
 const TITLE_STYLE: CSSProperties = Object.freeze({
   fontSize: 14,
@@ -82,31 +76,31 @@ export function formatElapsed(ms: number): string {
   return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
 }
 
-function StatusDot({ status }: { status: ToolRunItem['status'] }) {
-  const t = useT();
-  if (status === 'running') {
-    return (
-      <span
-        aria-label="running"
-        style={{
-          width: 10, height: 10, borderRadius: 99, background: t.accent, flexShrink: 0,
-          boxShadow: `0 0 0 4px color-mix(in oklab, ${t.accent} 22%, transparent)`,
-          animation: 'shimmer 1.3s infinite',
-        }}
-      />
-    );
-  }
-  const failed = status === 'error';
+/** Existing icon vocabulary mapped onto the engine's open-ended tool verbs. */
+export function toolIconName(verb: string): string {
+  const value = verb.toLowerCase();
+  if (['search', 'find', 'grep', 'web'].some((part) => value.includes(part))) return 'search';
+  if (['bash', 'shell', 'terminal', 'command', 'exec'].some((part) => value.includes(part))) return 'terminal';
+  // `TodoWrite` is a task tool even though it also contains "write".
+  if (['todo', 'task', 'plan'].some((part) => value.includes(part))) return 'tasks';
+  if (['edit', 'write', 'update', 'create', 'patch'].some((part) => value.includes(part))) return 'code';
+  if (['git', 'commit', 'branch'].some((part) => value.includes(part))) return 'git';
+  if (['read', 'file', 'glob', 'directory', 'list'].some((part) => value.includes(part))) return 'file';
+  return 'box';
+}
+
+function ToolGlyph({ item }: { item: ToolRunItem }) {
   return (
     <span
-      aria-label={failed ? 'failed' : 'done'}
+      className="tool-row-icon"
+      aria-hidden="true"
       style={{
-        width: 14, height: 14, borderRadius: 4, flexShrink: 0,
+        width: 20, height: 20, flexShrink: 0,
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        background: failed ? t.danger : t.ok, color: t.windowBg,
+        color: 'var(--tool-icon-color)',
       }}
     >
-      <Icon name={failed ? 'x' : 'check'} size={10} stroke={3} />
+      <Icon name={toolIconName(item.view.verb)} size={18} color="currentColor" stroke={1.8} />
     </span>
   );
 }
@@ -115,7 +109,7 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
   const t = useT();
   const { view, result } = item;
   const expandable = toolHasBody(item);
-  const isOpen = open ?? toolDefaultOpen(item);
+  const isOpen = open ?? false;
 
   // Compose from the parts so the argument can be truncated on its own; fall
   // back to the pre-composed English `title` when there is no primary.
@@ -133,114 +127,89 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
 
   const headline = result?.headline;
   const body = result?.body ?? item.note;
+  const jsonBody = body === undefined ? undefined : standaloneJsonForDisplay(body);
   const diff = result?.diff;
-  // `body_lines` is the count BEFORE clamping, so the affordance can promise
-  // the right number without measuring anything.
-  const lines = result && result.body_lines > 0 ? result.body_lines : undefined;
 
-  // The clamped body is the ONLY place the promise made by `Show N lines` can
-  // be broken, so the truncation has to be visible in both states: in the
-  // affordance while closed, and under the body once open. Announcing it only
-  // while hidden left the user staring at fewer lines than they were promised
-  // with nothing to explain the difference.
+  // Keep truncation visible in the compact response line and repeat the
+  // detailed notice under the body once it is opened.
   const truncationNotice = toolTruncationNotice(item);
 
+  const response = [headline, truncationNotice ? '(truncated)' : undefined]
+    .filter(Boolean)
+    .join(' ');
+
   const summary = (
-    <span style={{ fontSize: 12, color: t.text3 }}>
-      {isOpen
-        ? 'Hide'
-        : diff
-          ? `Show diff (+${diff.additions} −${diff.removals})`
-          : lines !== undefined
-            ? `Show ${lines} ${lines === 1 ? 'line' : 'lines'}`
-            : 'Show output'}
-      {truncationNotice ? ' (truncated)' : ''}
+    <span className="tool-call-summary">
+      <ToolGlyph item={item} />
+      <span
+        className={item.status === 'running' ? 'tool-row-title running-sweep' : 'tool-row-title'}
+        style={{
+          flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap', fontSize: 14.5, lineHeight: 1.45, fontWeight: 500,
+        }}
+      >
+        {title}
+        {view.sub_line && (
+          <span className="tool-row-inline-detail mono-code">
+            {' · '}{view.sub_line.prefix}{view.sub_line.text}
+          </span>
+        )}
+        {response && <span>{' · '}{response}</span>}
+      </span>
     </span>
   );
 
   return (
-    <div style={CARD_STYLE}>
-      {/* Header line: status, title, elapsed clock. */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-        <StatusDot status={item.status} />
-        <span
-          style={{
-            display: 'flex', minWidth: 0, alignItems: 'baseline',
-            fontSize: 14, fontWeight: 500,
-            color: item.status === 'error' ? t.danger : t.text,
-          }}
+    <div
+      className="transcript-tool-row"
+      data-status={item.status}
+      style={{
+        maxWidth: 760,
+        display: 'flex', flexDirection: 'column', gap: 4,
+        padding: '2px 0', position: 'relative',
+        '--tool-label-color': item.status === 'error' ? t.danger : t.text2,
+        '--tool-hover-color': item.status === 'error' ? t.danger : t.text,
+        '--tool-focus-color': item.status === 'error' ? t.danger : t.accent,
+        '--tool-icon-color': item.status === 'error' ? t.danger : item.status === 'running' ? t.accent : t.text3,
+        '--sweep-base': item.status === 'error' ? t.danger : t.text2,
+        '--sweep-highlight': item.status === 'error' ? t.danger : t.accent,
+      } as CSSProperties}
+    >
+      {/* The call and its response share one Thought-like disclosure row. */}
+      {expandable ? (
+        <Disclosure
+          id={item.id}
+          open={isOpen}
+          onToggle={() => onSetOpen(item.id, !isOpen)}
+          summary={summary}
+          buttonClassName="tool-disclosure-trigger"
+          buttonStyle={{ width: '100%', maxWidth: '100%', minHeight: 40, margin: 0, padding: '2px 0', borderRadius: 7 }}
+          bodyStyle={{ marginLeft: 29 }}
         >
-          {title}
-        </span>
-        {item.status === 'running' && item.elapsedMs !== undefined && (
-          <span className="mono" style={{ fontSize: 11, color: t.text4, flexShrink: 0 }}>
-            {formatElapsed(item.elapsedMs)}
-          </span>
-        )}
-      </div>
-
-      {/* The header's own second line, e.g. `$ cargo test --all`. */}
-      {view.sub_line && (
-        <div
-          className="mono-code"
-          style={{
-            display: 'flex', gap: 6, marginLeft: 22, fontSize: 12, color: t.text2,
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}
-        >
-          <span style={{ color: t.text4, flexShrink: 0 }}>{view.sub_line.prefix}</span>
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{view.sub_line.text}</span>
-        </div>
-      )}
-
-      {/* The result headline — the terminal's `⎿` line. */}
-      {headline && (
-        <div
-          style={{
-            display: 'flex', gap: 6, marginLeft: 22, fontSize: 13,
-            color: item.status === 'error' ? t.danger : t.text2,
-          }}
-        >
-          <span style={{ color: t.text4, flexShrink: 0 }} aria-hidden="true">⎿</span>
-          <span>{headline}</span>
-        </div>
-      )}
-
-      {/*
-        Only a call with real content earns a disclosure — the old card set
-        `expandable: true` unconditionally, so an empty result showed a chevron
-        that opened onto nothing. Both the diff and the body live INSIDE it: a
-        diff can carry up to `MAX_WIRE_DIFF_ROWS` (400) rows, and mounting that
-        for every edit in a non-virtualized transcript is the DOM cost this
-        whole collapse design exists to avoid.
-      */}
-      {expandable && (
-        <div style={{ display: 'flex', flexDirection: 'column', marginLeft: 22 }}>
-          <Disclosure
-            id={item.id}
-            open={isOpen}
-            onToggle={() => onSetOpen(item.id, !isOpen)}
-            summary={summary}
-            buttonStyle={{ marginTop: 4 }}
-          >
             {diff && (
               <div style={{ marginTop: 6 }}>
                 <DiffView diff={diff} />
               </div>
             )}
             {body !== undefined && (
-              <pre
-                className="mono-code"
-                style={{
-                  ...BODY_STYLE,
-                  marginLeft: 0,
-                  background: t.windowBg,
-                  color: item.status === 'error' ? t.danger : t.text2,
-                  border: `0.5px solid ${t.border}`,
-                }}
-              >
-                {body}
-              </pre>
+              jsonBody !== undefined ? (
+                <div style={{ marginTop: 6 }}>
+                  <CodeBlock code={jsonBody} language="json" variant="tool" />
+                </div>
+              ) : (
+                <pre
+                  className="mono-code"
+                  style={{
+                    ...BODY_STYLE,
+                    marginLeft: 0,
+                    background: t.windowBg,
+                    color: item.status === 'error' ? t.danger : t.text2,
+                    border: `0.5px solid ${t.border}`,
+                  }}
+                >
+                  {body}
+                </pre>
+              )
             )}
             {/* The engine clamped the body; say so where the shortfall is
                 actually visible, not only on the collapsed label. */}
@@ -249,7 +218,10 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
                 {truncationNotice}
               </div>
             )}
-          </Disclosure>
+        </Disclosure>
+      ) : (
+        <div className="tool-call-line" style={{ minHeight: 40, padding: '2px 0' }}>
+          {summary}
         </div>
       )}
     </div>

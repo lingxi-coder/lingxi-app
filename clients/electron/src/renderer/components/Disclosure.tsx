@@ -37,6 +37,8 @@ export interface DisclosureProps {
   label?: string;
   /** Extra styles merged onto the trigger button. */
   buttonStyle?: CSSProperties;
+  /** Optional class for interaction styling without adding row-local state. */
+  buttonClassName?: string;
   /** Extra styles merged onto the body wrapper. */
   bodyStyle?: CSSProperties;
 }
@@ -62,14 +64,17 @@ export function Disclosure({
   children,
   label,
   buttonStyle,
+  buttonClassName,
   bodyStyle,
 }: DisclosureProps) {
   const t = useT();
   const bodyId = `disclosure-body-${id}`;
+  const triggerClassName = ['transcript-disclosure-trigger', buttonClassName].filter(Boolean).join(' ');
   return (
     <>
       <button
         type="button"
+        className={triggerClassName}
         onClick={onToggle}
         aria-expanded={open}
         aria-controls={bodyId}
@@ -77,7 +82,9 @@ export function Disclosure({
         style={{ color: t.text3, ...TRIGGER_BASE, ...buttonStyle }}
       >
         {summary}
-        <Icon name={open ? 'chevron' : 'chevronR'} size={13} stroke={2} />
+        <span className="transcript-disclosure-chevron" aria-hidden="true">
+          <Icon name={open ? 'chevron' : 'chevronR'} size={13} stroke={2} />
+        </span>
       </button>
       {open && (
         <div id={bodyId} style={bodyStyle}>

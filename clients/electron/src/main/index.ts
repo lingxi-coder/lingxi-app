@@ -3,10 +3,11 @@ import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { BridgeManager } from './bridge.js';
+import { SessionRuntimeManager, type SessionRef } from './bridge.js';
 import { HostController } from './host.js';
 import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
+import { ProjectSessionCatalog } from './session-catalog.js';
 import { ignoreBrokenPipe } from './process-streams.js';
 import { PROVIDER_IDS } from '../shared/providers.js';
 
@@ -15,7 +16,7 @@ ignoreBrokenPipe(process.stderr);
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const securedSessions = new WeakSet<Session>();
-let bridge: BridgeManager | null = null;
+let bridge: SessionRuntimeManager | null = null;
 let host: HostController | null = null;
 let quitting = false;
 
@@ -103,7 +104,6 @@ function createWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#0c0b10',
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: -100, y: -100 },
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(moduleDirectory, '../preload/index.cjs'),
@@ -118,7 +118,6 @@ function createWindow(): BrowserWindow {
   });
 
   secureSession(mainWindow.webContents.session);
-  bridge?.registerWindow(mainWindow.webContents, target.url);
   host?.registerWindow(mainWindow.webContents, target.url);
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
@@ -149,19 +148,32 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
   diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
   diagnostics.add('info', 'host', 'credential store: shared engine secure storage');
   const settings = new SettingsStore(userData);
-  bridge = new BridgeManager({
+  const sessionCatalog = new ProjectSessionCatalog({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
+  });
+  bridge = new SessionRuntimeManager({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     bridgeRoot: join(app.getPath('userData'), 'bridge-runtime'),
     providerIds: PROVIDER_IDS,
     diagnostics,
-    accessState: () => {
-      const workspace = settings.getWorkspace();
-      return workspace
-        ? { workspace, trusted: settings.getTrust(workspace).trusted }
-        : { trusted: false };
+    accessState: (ref: SessionRef) => {
+      try {
+        // Adding a Project is the Desktop trust decision. Repository edits must
+        // not silently revoke a live session or reintroduce the removed setup
+        // prompt; removal from the Project list revokes access instead.
+        return { workspace: ref.projectPath, trusted: settings.hasProject(ref.projectPath) };
+      } catch {
+        return { workspace: ref.projectPath, trusted: false };
+      }
     },
-    onModelChanged: (model) => { settings.update({ model }); },
+    onModelChanged: (_ref, model) => { settings.update({ model }); },
+    sessionIdAvailable: async (ref) => {
+      const catalog = await sessionCatalog.list(ref.projectPath);
+      return !catalog.sessions.some((session) => session.uuid === ref.sessionId);
+    },
     confirmBypassPermissions: async () => {
       // Shown ONCE per install (persisted), mirroring the oracle's
       // `bypassPermissionsModeAccepted`. Body text is the oracle's Bypass
@@ -189,9 +201,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
       settings.setBypassPermissionsAccepted(true);
       return true;
     },
-    launchConfig: async () => {
-      const workspace = settings.getWorkspace();
-      if (!workspace) throw new Error('select a workspace before starting the bridge');
+    launchConfig: async (ref: SessionRef) => {
+      const workspace = ref.projectPath;
       const configured = settings.getPublic();
       const credentials: Record<string, string> = {};
       for (const providerId of PROVIDER_IDS) {
@@ -202,7 +213,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
       }
       return {
         workspace,
-        trusted: settings.getTrust(workspace).trusted,
+        sessionId: ref.sessionId,
+        trusted: settings.hasProject(workspace),
         apiKey: credentials['anthropic'],
         providerCredentials: Object.fromEntries(
           Object.entries(credentials).filter(([providerId]) => providerId !== 'anthropic'),
@@ -212,12 +224,19 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
       };
     },
   });
-  host = new HostController(settings, bridge, diagnostics);
+  host = new HostController(
+    settings,
+    bridge,
+    diagnostics,
+    sessionCatalog,
+  );
   host.registerIpc();
   createWindow();
 
-  if (settings.getWorkspace()) {
-    void bridge.start().catch((error: unknown) => {
+  const publicSettings = settings.getPublic();
+  const activeProject = publicSettings.activeProject;
+  if (activeProject) {
+    void host.restoreProjectSession(activeProject, publicSettings.activeSession).catch((error: unknown) => {
       diagnostics.add('error', 'host', sanitizeDiagnostic(error));
     });
   }
@@ -225,6 +244,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+
   });
 
   app.on('second-instance', () => {

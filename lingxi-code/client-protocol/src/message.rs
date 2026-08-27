@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
+
 /// A complete conversation message — a role plus an ordered list of content
 /// blocks. Reproduces the assistant message a turn produced (or a resumed
 /// scrollback entry).
@@ -20,6 +21,26 @@ pub struct MessageDto {
     pub role: String,
     /// The ordered content blocks comprising the message.
     pub blocks: Vec<MessageBlockDto>,
+    /// User-attached images in visual order. The source is a stable URL (a
+    /// `data:` URL for inline session bytes, or an existing URL source), so
+    /// clients can render resumed media without matching prompt text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = []))]
+    pub images: Vec<MessageImageDto>,
+}
+
+/// A persisted image projected for transcript renderers.
+///
+/// `SendPrompt` uses [`crate::commands::ImageRefDto`] because it needs raw base64 bytes. A
+/// resumed transcript uses this URL-shaped projection so desktop and mobile
+/// can render the image directly while preserving the same session history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MessageImageDto {
+    /// MIME type recovered from the original image source.
+    pub media_type: String,
+    /// `data:<media_type>;base64,<bytes>` or an existing image URL.
+    pub url: String,
 }
 
 /// One block within a [`MessageDto`].

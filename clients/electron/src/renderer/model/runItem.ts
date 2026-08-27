@@ -17,7 +17,7 @@
  *     `input_json`/`result_json` to rebuild a header.
  */
 
-import type { ToolHeaderDto, ToolResultDisplayDto } from '@lingxi/bridge-client';
+import type { MessageImageDto, ToolHeaderDto, ToolResultDisplayDto } from '@lingxi/bridge-client';
 
 /** Lifecycle of one tool call as the transcript sees it. */
 export type ToolRunStatus = 'running' | 'done' | 'error';
@@ -48,6 +48,14 @@ export interface NarrationRunItem {
   readonly tone?: 'muted';
   readonly strong?: boolean;
   readonly role?: 'user' | 'assistant';
+  /**
+   * True when this assistant message was streamed in the current renderer.
+   * Stable across `message_complete`, so a reply does not collapse and move the
+   * viewport the instant it finishes. Rehydrated history leaves this unset.
+   */
+  readonly streamed?: boolean;
+  /** Durable image projections attached to a user prompt. */
+  readonly images?: readonly MessageImageDto[];
 }
 
 /** The assistant's streamed reasoning. */
@@ -90,6 +98,33 @@ export type RunItem =
   | AudioRunItem
   | ThinkingRunItem;
 
+/** A narration may show at most this many Unicode code points before folding. */
+export const NARRATION_COLLAPSE_MAX_CHARS = 640;
+
+/** A narration may show at most this many normalized hard lines before folding. */
+export const NARRATION_COLLAPSE_MAX_LINES = 8;
+
+/**
+ * Whether a user/assistant narration earns a disclosure affordance.
+ *
+ * Counting Unicode code points avoids treating one emoji as two characters.
+ * The line budget is deliberately based on hard lines; the UI then clamps the
+ * preview to roughly eight rendered body lines without measuring the DOM.
+ */
+export function narrationShouldCollapse(item: NarrationRunItem): boolean {
+  if (item.role !== 'user' && item.role !== 'assistant') return false;
+  const text = item.text.trim();
+  if (!text) return false;
+  const characters = Array.from(text).length;
+  const lines = text.replace(/\r\n?/g, '\n').split('\n').length;
+  return characters > NARRATION_COLLAPSE_MAX_CHARS || lines > NARRATION_COLLAPSE_MAX_LINES;
+}
+
+/** Default disclosure state before the user's session-scoped choice wins. */
+export function narrationDefaultOpen(item: NarrationRunItem): boolean {
+  return !narrationShouldCollapse(item) || item.streamed === true;
+}
+
 /**
  * Whether a tool call has anything to disclose. A call with neither a body nor
  * a diff must render NO chevron — an affordance that opens onto nothing is a
@@ -122,33 +157,4 @@ export function toolTruncationNotice(item: ToolRunItem): string | null {
   return total > shown
     ? `… truncated — showing ${shown} of ${total} lines`
     : '… output truncated';
-}
-
-/**
- * Rows a diff may have and still open inline.
- *
- * A CLIENT budget, not a wire contract: `collapsed` on the wire is derived
- * purely from the BODY's line count (`clamp_body`) and says nothing about the
- * diff, while the wire's own diff cap is `MAX_WIRE_DIFF_ROWS = 400`. Four
- * hundred rows × their segments, unconditionally mounted for every edit in a
- * transcript that is not virtualized, is precisely the DOM blow-up collapsing
- * exists to avoid. A typical `Edit` is well under this, so the common case
- * still shows its diff without a click.
- */
-export const INLINE_DIFF_ROW_BUDGET = 60;
-
-/**
- * The DEFAULT disclosure state for a tool call, before any user choice.
- *
- * A diff is the RESULT of an edit, not a detail about it, so a diff within
- * budget opens on its own. For a body-only result the engine already decided:
- * `collapsed` means it exceeded the inline budget. A result with no `display`
- * at all (older engine) stays collapsed — we have no verdict to trust.
- */
-export function toolDefaultOpen(item: ToolRunItem): boolean {
-  if (!toolHasBody(item)) return false;
-  const display = item.result;
-  if (!display) return false;
-  if (display.diff) return display.diff.rows.length <= INLINE_DIFF_ROW_BUDGET;
-  return display.collapsed !== true;
 }

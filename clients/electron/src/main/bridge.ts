@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -24,6 +25,7 @@ import {
   validateComputerAccessResponse,
   validateOptionalTurnId,
   validatePermissionResponse,
+  validateImageRefs,
   validatePrompt,
   validateRequestId,
 } from './validation.js';
@@ -39,9 +41,12 @@ export const CH_CANCEL = 'lingxi:cancel';
 export const CH_COMMAND = 'lingxi:command';
 export const CH_CONNECTION_STATE = 'lingxi:connectionState';
 export const CH_EVENT = 'lingxi:event';
+export const CH_EVENT_REPLAY = 'lingxi:event:replay';
 export const CH_PERMISSION = 'lingxi:permission';
 export const CH_COMPUTER_ACCESS = 'lingxi:computerAccess';
 export const CH_STATE_CHANGED = 'lingxi:connectionStateChanged';
+
+const SESSION_RUNTIME_DISPOSED_REASON = 'session runtime disposed';
 
 export type ConnectionState =
   | { status: 'idle' }
@@ -54,6 +59,8 @@ export type ConnectionState =
 
 export interface BridgeLaunchConfig {
   workspace: string;
+  /** Stable identity for the engine process and its persisted transcript. */
+  sessionId?: string;
   apiKey?: string;
   providerCredentials?: Record<string, string>;
   trusted: boolean;
@@ -73,6 +80,7 @@ export interface BridgeManagerOptions {
   /** Parent for owner-only, per-launch discovery directories. */
   bridgeRoot?: string;
   lockfileTimeoutMs?: number;
+  sessionResumeTimeoutMs?: number;
   stopTimeoutMs?: number;
   isPackaged?: boolean;
   resourcesPath?: string;
@@ -81,6 +89,14 @@ export interface BridgeManagerOptions {
   providerIds?: readonly string[];
   /** Synchronous trust snapshot used by privileged IPC checks. */
   accessState?: () => { workspace?: string; trusted: boolean };
+  /** Stable session identity owned by the Electron host. */
+  sessionId?: string;
+  /** Project path associated with this runtime. */
+  projectPath?: string;
+  /** Wrap renderer-bound payloads in `{ sessionId, event }`. */
+  envelopeEvents?: boolean;
+  /** Direct unit-test/legacy mode can keep the old runtime IPC registration. */
+  registerIpc?: boolean;
   diagnostics?: DiagnosticBuffer;
   onModelChanged?: (model: string) => void;
   /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
@@ -101,6 +117,14 @@ interface PendingCredentialOperation {
 
 interface PendingAskUserQuestionRequest {
   request: AskUserQuestionRequestDto;
+}
+
+interface PendingSessionResume {
+  sessionId: string;
+  generation: number;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
 }
 
 const SERVER_BIN_NAME = process.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server';
@@ -211,7 +235,74 @@ export function isTurnOwnedEvent(event: ClientEvent): boolean {
   ].includes(event.type);
 }
 
-export class BridgeManager {
+export interface SessionRef {
+  projectPath: string;
+  sessionId: string;
+}
+
+export interface RuntimeEventEnvelope<T = unknown> {
+  sessionId: string;
+  event: T;
+}
+
+export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> {
+  sequence: number;
+}
+
+const TRANSCRIPT_REPLAY_BASE_EVENTS = new Set<ClientEvent['type']>([
+  'session_started',
+  'session_resumed',
+]);
+
+const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
+  'turn_started',
+  'turn_ended',
+  'text_delta',
+  'thinking_delta',
+  'tool_use_started',
+  'tool_heartbeat',
+  'tool_use_result',
+  'plan_updated',
+  'message_complete',
+  'usage_update',
+  'error',
+  'system_notice',
+  'session_ended',
+]);
+
+export interface SessionRuntimeSummary {
+  projectPath: string;
+  sessionId: string;
+  connection: ConnectionState;
+  turnActive: boolean;
+  pendingInteractions: number;
+  pendingAskUserQuestions: number;
+  runtimeVersions?: BridgeRuntimeVersions;
+}
+
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
+  launchConfig: (ref: SessionRef) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
+  accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
+  onModelChanged?: (ref: SessionRef, model: string) => void;
+  sessionIdAvailable?: (ref: SessionRef) => boolean | Promise<boolean>;
+}
+
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isSessionId(value: unknown): value is string {
+  return typeof value === 'string' && SESSION_ID_PATTERN.test(value);
+}
+
+function assertSessionRef(ref: SessionRef): void {
+  if (!isSessionId(ref.sessionId)) throw new Error('invalid session id');
+  if (typeof ref.projectPath !== 'string' || ref.projectPath.length === 0 || ref.projectPath.length > 32_768 || ref.projectPath.includes('\0')) {
+    throw new Error('invalid project path');
+  }
+}
+
+export class SessionRuntime {
+  readonly sessionId: string;
+  readonly projectPath: string;
   private child: ChildProcess | null = null;
   private client: BridgeClient | null = null;
   private state: ConnectionState = { status: 'idle' };
@@ -236,10 +327,17 @@ export class BridgeManager {
   private readonly pendingComputerAccessIds = new Set<number>();
   private readonly pendingAskUserQuestionIds = new Set<number>();
   private readonly pendingAskUserQuestionRequests = new Map<number, PendingAskUserQuestionRequest>();
+  private pendingSessionResume: PendingSessionResume | null = null;
+  private sessionHasHistory = false;
+  private eventSequence = 0;
+  private replayEvents: SequencedRuntimeEventEnvelope<ClientEvent>[] = [];
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly diagnostics: DiagnosticBuffer;
+  private startPromise: Promise<void> | null = null;
 
   constructor(private readonly opts: BridgeManagerOptions) {
+    this.sessionId = opts.sessionId ?? randomUUID();
+    this.projectPath = opts.projectPath ?? '';
     this.diagnostics = opts.diagnostics ?? new DiagnosticBuffer();
   }
 
@@ -271,6 +369,63 @@ export class BridgeManager {
     return [...this.pendingAskUserQuestionRequests.values()].map((entry) => entry.request);
   }
 
+  get pendingInteractions(): number {
+    return this.pendingPermissionIds.size
+      + this.pendingComputerAccessIds.size
+      + this.pendingAskUserQuestionIds.size;
+  }
+
+  get summary(): SessionRuntimeSummary {
+    return {
+      projectPath: this.projectPath || this.activeWorkspace || '',
+      sessionId: this.sessionId,
+      connection: this.connectionState,
+      turnActive: this.activeTurn,
+      pendingInteractions: this.pendingInteractions,
+      pendingAskUserQuestions: this.pendingAskUserQuestionIds.size,
+      ...(this.runtimeVersions ? { runtimeVersions: this.runtimeVersions } : {}),
+    };
+  }
+
+  replaySnapshot(): readonly SequencedRuntimeEventEnvelope<ClientEvent>[] {
+    return Object.freeze(this.replayEvents.map((envelope) => Object.freeze({
+      sessionId: envelope.sessionId,
+      sequence: envelope.sequence,
+      event: structuredClone(envelope.event),
+    })));
+  }
+
+  private eventEnvelope(event: ClientEvent, retain: boolean): SequencedRuntimeEventEnvelope<ClientEvent> {
+    const envelope = Object.freeze({
+      sessionId: this.sessionId,
+      sequence: ++this.eventSequence,
+      event: structuredClone(event),
+    });
+    if (TRANSCRIPT_REPLAY_BASE_EVENTS.has(event.type)) {
+      this.replayEvents = [envelope];
+    } else if (retain && this.replayEvents.length > 0 && TRANSCRIPT_REPLAY_EVENTS.has(event.type)) {
+      this.replayEvents = [...this.replayEvents, envelope];
+    }
+    return envelope;
+  }
+
+  private sendClientEvent(webContents: WebContents, event: ClientEvent, retain: boolean): void {
+    const envelope = this.eventEnvelope(event, retain);
+    webContents.send(CH_EVENT, this.opts.envelopeEvents ? envelope : event);
+  }
+
+  private broadcastClientEvent(event: ClientEvent): void {
+    const envelope = this.eventEnvelope(event, true);
+    if (!this.opts.envelopeEvents) {
+      this.broadcast(CH_EVENT, event);
+      return;
+    }
+    for (const webContents of this.targets.keys()) {
+      if (webContents.isDestroyed()) this.targets.delete(webContents);
+      else webContents.send(CH_EVENT, envelope);
+    }
+  }
+
   registerWindow(webContents: WebContents, rendererUrl: string): void {
     const origin = urlOrigin(rendererUrl);
     if (!origin) throw new Error('invalid renderer URL');
@@ -278,9 +433,12 @@ export class BridgeManager {
     origins.add(origin);
     this.targets.set(webContents, origins);
     for (const pending of this.pendingAskUserQuestionRequests.values()) {
-      webContents.send(CH_EVENT, { type: 'ask_user_question', request: pending.request });
+      this.sendClientEvent(webContents, { type: 'ask_user_question', request: pending.request }, false);
     }
-    webContents.once('destroyed', () => this.targets.delete(webContents));
+  }
+
+  unregisterWindow(webContents: WebContents): void {
+    this.targets.delete(webContents);
   }
 
   private clearPendingAskUserQuestion(requestId: number): void {
@@ -297,22 +455,29 @@ export class BridgeManager {
   }
 
   async start(): Promise<void> {
-    if (this.disposed) throw new Error('BridgeManager is disposed');
-    if (this.child || this.client) throw new Error('BridgeManager already started');
-    this.registerIpc();
-    try {
-      await this.startInternal();
-    } catch (error) {
-      // launchConfig runs before the child lifecycle begins. Surface failures
-      // such as an unreadable Keychain credential through the same renderer
-      // connection state as spawn/protocol failures.
-      if (this.state.status !== 'error') this.fail(error);
-      throw error;
-    }
+    if (this.disposed) throw new Error('SessionRuntime is disposed');
+    if (this.state.status === 'connected') return;
+    if (this.startPromise) return this.startPromise;
+    if (this.child || this.client) return;
+    if (this.opts.registerIpc !== false) this.registerIpc();
+    this.startPromise = (async () => {
+      try {
+        await this.startInternal();
+      } catch (error) {
+        // launchConfig runs before the child lifecycle begins. Surface failures
+        // such as an unreadable Keychain credential through the same renderer
+        // connection state as spawn/protocol failures.
+        if (this.state.status !== 'error') this.fail(error);
+        throw error;
+      } finally {
+        this.startPromise = null;
+      }
+    })();
+    return this.startPromise;
   }
 
   restart(): Promise<void> {
-    this.registerIpc();
+    if (this.opts.registerIpc !== false) this.registerIpc();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) return;
       this.setState({ status: 'restarting' });
@@ -327,9 +492,23 @@ export class BridgeManager {
     return this.restartChain;
   }
 
+  stop(): Promise<void> {
+    if (this.opts.registerIpc !== false) this.registerIpc();
+    this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
+      if (this.disposed) return;
+      await this.stopBridge();
+      this.setState({ status: 'idle' });
+    });
+    return this.restartChain;
+  }
+
   private async startInternal(): Promise<void> {
     const launch = await this.opts.launchConfig();
+    if (this.disposed) throw new Error('SessionRuntime is disposed');
     this.activeWorkspace = launch.workspace;
+    if (launch.sessionId && launch.sessionId !== this.sessionId) {
+      throw new Error('bridge launch session id does not match the runtime');
+    }
     this.activeWorkspaceTrusted = launch.trusted;
     this.runtimeCredentialProviders = new Set([
       ...(launch.apiKey ? ['anthropic'] : []),
@@ -367,12 +546,13 @@ export class BridgeManager {
 
     try {
       const lockfilePath = await this.waitForLockfile(bridgeDir, launch, generation);
+      if (this.disposed) throw new Error('SessionRuntime is disposed');
       this.setState({ status: 'connecting' });
       const client = new BridgeClient({ lockfilePath, clientName: 'lingxi-electron/0.1.0' });
       this.client = client;
       this.wireClient(client, generation);
       const hello = await client.connect();
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.disposed) return;
       this.lastRuntimeVersions = {
         serverName: hello.server_name,
         serverProtocol: hello.protocol_version,
@@ -421,6 +601,7 @@ export class BridgeManager {
     const bin = resolveServerBin(this.opts);
     const args = buildBridgeArguments({
       workspace: launch.workspace,
+      sessionId: this.sessionId,
       bridgeDir,
       model: launch.model,
       hasApiKey: Boolean(launch.apiKey),
@@ -583,6 +764,18 @@ export class BridgeManager {
       if (event.type === 'provider_credential_status') {
         this.handleProviderCredentialStatus(event);
       }
+      if (event.type === 'session_resumed') {
+        if (event.session_id !== this.sessionId) {
+          this.rejectPendingSessionResume(new Error('engine resumed a different session id'));
+          this.fail('engine resumed a different session id');
+          return;
+        }
+        this.sessionHasHistory = true;
+        this.resolvePendingSessionResume();
+      }
+      if (event.type === 'error' && this.pendingSessionResume) {
+        this.rejectPendingSessionResume(new Error(sanitizeDiagnostic(event.message)));
+      }
       if (event.type === 'turn_started') {
         if (!this.activeTurn) this.cancellingTurn = false;
         this.activeTurn = true;
@@ -617,7 +810,7 @@ export class BridgeManager {
       if (event.type === 'ask_user_question_resolved') {
         this.clearPendingAskUserQuestion(event.request_id);
       }
-      this.broadcast(CH_EVENT, event);
+      this.broadcastClientEvent(event);
     });
     client.on('permission', (request: PermissionRequest) => {
       if (generation !== this.generation || !this.activeTurn || this.cancellingTurn) return;
@@ -695,9 +888,11 @@ export class BridgeManager {
     if (!origin || !origins.has(origin)) throw new Error('unauthorized IPC origin');
   }
 
-  private sendPrompt(text: unknown): void {
+  sendPrompt(text: unknown, images: unknown = []): void {
     const prompt = validatePrompt(text);
-    this.requireClient().sendPrompt(prompt);
+    const validatedImages = validateImageRefs(images);
+    this.requireClient().sendPrompt(prompt, { images: validatedImages });
+    this.sessionHasHistory = true;
     // Claim the local slot as soon as the command crossed the authenticated
     // bridge boundary. `turn_started` may arrive on a later event-loop tick;
     // without this pending owner an immediate Cancel (or permission request)
@@ -709,7 +904,7 @@ export class BridgeManager {
     }
   }
 
-  private cancelTurn(turnId: unknown): void {
+  cancelTurn(turnId: unknown): void {
     const id = validateOptionalTurnId(turnId);
     this.requireClient().cancel(id);
     if (this.activeTurn && (id === undefined || id === this.activeTurnId)) {
@@ -718,15 +913,60 @@ export class BridgeManager {
     }
   }
 
+  approvePermission(requestId: number, response?: unknown): void {
+    const id = validateRequestId(requestId);
+    const permissionResponse = validatePermissionResponse(response);
+    if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
+    this.requireClient().approvePermission(id, permissionResponse);
+    this.pendingPermissionIds.delete(id);
+  }
+
+  denyPermission(requestId: number): void {
+    const id = validateRequestId(requestId);
+    if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
+    this.requireClient().denyPermission(id);
+    this.pendingPermissionIds.delete(id);
+  }
+
+  approveComputerAccess(requestId: number, response: unknown): void {
+    const id = validateRequestId(requestId);
+    const computerAccessResponse = validateComputerAccessResponse(response);
+    if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
+    this.requireClient().approveComputerAccess(id, computerAccessResponse);
+    this.pendingComputerAccessIds.delete(id);
+  }
+
+  denyComputerAccess(requestId: number): void {
+    const id = validateRequestId(requestId);
+    if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
+    this.requireClient().denyComputerAccess(id);
+    this.pendingComputerAccessIds.delete(id);
+  }
+
+  answerAskUserQuestion(requestId: number, answers: unknown): void {
+    const id = validateRequestId(requestId);
+    const validatedAnswers = validateAskUserQuestionAnswers(answers);
+    if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
+    this.requireClient().answerAskUserQuestion(id, validatedAnswers);
+    this.clearPendingAskUserQuestion(id);
+  }
+
+  cancelAskUserQuestion(requestId: number): void {
+    const id = validateRequestId(requestId);
+    if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
+    this.requireClient().cancelAskUserQuestion(id);
+    this.clearPendingAskUserQuestion(id);
+  }
+
   private registerIpc(): void {
     if (this.ipcRegistered) return;
     this.ipcRegistered = true;
-    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, text: unknown) => {
+    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, text: unknown, images: unknown) => {
       this.assertSender(event);
       // The engine owns provider credential resolution. The Electron host must
       // not reject a prompt merely because no secret crossed its stdin boundary;
       // CLI/TUI may already have populated the shared secure store.
-      this.sendPrompt(text);
+      this.sendPrompt(text, images);
     });
     ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
       this.assertSender(event);
@@ -819,6 +1059,57 @@ export class BridgeManager {
     this.requireClient().sendCommand(validated);
   }
 
+  /** Resume the one session owned by this runtime and wait for engine proof. */
+  resumeOwnedSession(): Promise<void> {
+    if (this.pendingSessionResume) return Promise.reject(new Error('session resume is already pending'));
+    const client = this.requireClient();
+    const generation = this.generation;
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pendingSessionResume?.generation !== generation) return;
+        this.pendingSessionResume = null;
+        reject(new Error(`timed out resuming session ${this.sessionId}`));
+      }, this.opts.sessionResumeTimeoutMs ?? 15_000);
+      timer.unref();
+      this.pendingSessionResume = {
+        sessionId: this.sessionId,
+        generation,
+        resolve,
+        reject,
+        timer,
+      };
+      try {
+        client.sendCommand({
+          type: 'resume_session',
+          session_id: this.sessionId,
+          cwd: this.projectPath || this.activeWorkspace,
+        });
+      } catch (error) {
+        this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  async restoreOwnedSessionIfNeeded(): Promise<void> {
+    if (this.sessionHasHistory) await this.resumeOwnedSession();
+  }
+
+  private resolvePendingSessionResume(): void {
+    const pending = this.pendingSessionResume;
+    if (!pending || pending.sessionId !== this.sessionId || pending.generation !== this.generation) return;
+    this.pendingSessionResume = null;
+    clearTimeout(pending.timer);
+    pending.resolve();
+  }
+
+  private rejectPendingSessionResume(error: Error): void {
+    const pending = this.pendingSessionResume;
+    if (!pending) return;
+    this.pendingSessionResume = null;
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+
   private requireClient(): BridgeClient {
     this.refreshAccessState();
     if (!this.activeWorkspaceTrusted) throw new Error('workspace trust is required before using the engine');
@@ -847,12 +1138,27 @@ export class BridgeManager {
   private broadcast(channel: string, payload: unknown): void {
     for (const webContents of this.targets.keys()) {
       if (webContents.isDestroyed()) this.targets.delete(webContents);
-      else webContents.send(channel, payload);
+      else this.sendToWindow(webContents, channel, payload);
     }
+  }
+
+  private sendToWindow(webContents: WebContents, channel: string, payload: unknown): void {
+    const value = this.opts.envelopeEvents
+      ? { sessionId: this.sessionId, event: payload }
+      : payload;
+    webContents.send(channel, value);
   }
 
   private setState(next: ConnectionState): void {
     this.state = next;
+    if (
+      this.pendingSessionResume
+      && (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle')
+    ) {
+      this.rejectPendingSessionResume(new Error(
+        next.status === 'error' ? next.message : `bridge became ${next.status} while resuming the session`,
+      ));
+    }
     this.diagnostics.add('info', 'host', connectionDiagnostic(next, this.generation));
     this.broadcast(CH_STATE_CHANGED, next);
   }
@@ -865,6 +1171,7 @@ export class BridgeManager {
 
   private async stopBridge(): Promise<void> {
     ++this.generation;
+    this.rejectPendingSessionResume(new Error('session resume was interrupted'));
     this.clearTurnInteractions();
     for (const pending of this.pendingCredentialOperations.values()) {
       clearTimeout(pending.timer);
@@ -930,8 +1237,327 @@ export class BridgeManager {
     if (this.disposed) return;
     this.disposed = true;
     await this.restartChain.catch(() => undefined);
+    if (this.opts.envelopeEvents) {
+      this.setState({ status: 'disconnected', reason: SESSION_RUNTIME_DISPOSED_REASON });
+    }
     await this.stopBridge();
     this.unregisterIpc();
     this.targets.clear();
+  }
+}
+
+/**
+ * Backwards-compatible name for the old single-runtime test surface. Production
+ * Electron code uses {@link SessionRuntimeManager}; keeping this thin subclass
+ * lets older focused tests exercise one runtime without registering the global
+ * multi-session IPC router.
+ */
+export class BridgeManager extends SessionRuntime {}
+
+/**
+ * Owns all Electron bridge processes. A runtime is keyed by the engine's
+ * stable session UUID, never by a display name or the currently selected
+ * project. Project selection is therefore a renderer/navigation concern and
+ * cannot accidentally restart another session.
+ */
+export class SessionRuntimeManager {
+  private readonly runtimes = new Map<string, SessionRuntime>();
+  private readonly openingSessions = new Map<string, { projectPath: string; promise: Promise<SessionRuntime> }>();
+  private readonly closingProjects = new Set<string>();
+  private readonly targets = new Map<WebContents, Set<string>>();
+  private readonly targetDestroyedHandlers = new Map<WebContents, () => void>();
+  private registered = false;
+
+  constructor(private readonly opts: SessionRuntimeManagerOptions) {}
+
+  get size(): number {
+    return this.runtimes.size;
+  }
+
+  get runtimeSummaries(): SessionRuntimeSummary[] {
+    return [...this.runtimes.values()].map((runtime) => runtime.summary);
+  }
+
+  get replaySnapshots(): readonly SequencedRuntimeEventEnvelope<ClientEvent>[] {
+    return Object.freeze([...this.runtimes.values()].flatMap((runtime) => runtime.replaySnapshot()));
+  }
+
+  get(sessionId: string): SessionRuntime | undefined {
+    return this.runtimes.get(sessionId);
+  }
+
+  require(ref: SessionRef): SessionRuntime {
+    assertSessionRef(ref);
+    const runtime = this.runtimes.get(ref.sessionId);
+    if (!runtime) throw new Error(`session runtime is not open: ${ref.sessionId}`);
+    if (runtime.projectPath !== ref.projectPath) {
+      throw new Error('session id is owned by a different project');
+    }
+    return runtime;
+  }
+
+  registerWindow(webContents: WebContents, rendererUrl: string): void {
+    const allowedOrigin = urlOrigin(rendererUrl);
+    if (!allowedOrigin) throw new Error('invalid renderer URL');
+    const rendererUrls = this.targets.get(webContents) ?? new Set<string>();
+    rendererUrls.add(rendererUrl);
+    this.targets.set(webContents, rendererUrls);
+    if (!this.targetDestroyedHandlers.has(webContents)) {
+      const onDestroyed = (): void => {
+        this.detachWindow(webContents);
+      };
+      this.targetDestroyedHandlers.set(webContents, onDestroyed);
+      webContents.once('destroyed', onDestroyed);
+    }
+    for (const runtime of this.runtimes.values()) runtime.registerWindow(webContents, rendererUrl);
+  }
+
+  /** Create, validate, and optionally start one session-owned runtime. */
+  async ensure(ref: SessionRef, start = true): Promise<SessionRuntime> {
+    assertSessionRef(ref);
+    this.assertProjectNotClosing(ref.projectPath);
+    const existing = this.runtimes.get(ref.sessionId);
+    if (existing) {
+      if (existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+      if (start) await existing.start();
+      return existing;
+    }
+
+    const runtimeOptions = this.runtimeOptions(ref);
+    const runtime = new SessionRuntime(runtimeOptions);
+    this.runtimes.set(ref.sessionId, runtime);
+    for (const [webContents, origins] of this.targets) {
+      if (webContents.isDestroyed()) {
+        this.detachWindow(webContents);
+        continue;
+      }
+      for (const rendererUrl of origins) runtime.registerWindow(webContents, rendererUrl);
+    }
+    try {
+      if (start) await runtime.start();
+      return runtime;
+    } catch (error) {
+      this.runtimes.delete(ref.sessionId);
+      await runtime.dispose().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  openSession(ref: SessionRef, empty = false): Promise<SessionRuntime> {
+    assertSessionRef(ref);
+    this.assertProjectNotClosing(ref.projectPath);
+    const existing = this.runtimes.get(ref.sessionId);
+    if (existing && existing.projectPath !== ref.projectPath) {
+      throw new Error('session id is owned by a different project');
+    }
+    const pending = this.openingSessions.get(ref.sessionId);
+    if (pending) {
+      if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+      return pending.promise;
+    }
+    if (existing?.connectionState.status === 'connected') return Promise.resolve(existing);
+
+    const promise = this.openSessionInternal(ref, existing, empty);
+    const trackedPromise = promise.finally(() => {
+      if (this.openingSessions.get(ref.sessionId)?.promise === trackedPromise) this.openingSessions.delete(ref.sessionId);
+    });
+    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, promise: trackedPromise });
+    return trackedPromise;
+  }
+
+  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean): Promise<SessionRuntime> {
+    let runtime: SessionRuntime | undefined;
+    try {
+      if (existing) {
+        await existing.restart();
+        runtime = existing;
+      } else {
+        runtime = await this.ensure(ref, true);
+      }
+      if (!empty) await runtime.resumeOwnedSession();
+      return runtime;
+    } catch (error) {
+      if (!existing && runtime) {
+        this.runtimes.delete(ref.sessionId);
+        await runtime.dispose().catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  async newSession(projectPath: string, _model?: string): Promise<SessionRef> {
+    if (typeof projectPath !== 'string' || projectPath.length === 0) throw new Error('invalid project path');
+    this.assertProjectNotClosing(projectPath);
+    let ref: SessionRef | undefined;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const candidate = { projectPath, sessionId: randomUUID() } satisfies SessionRef;
+      if (!this.opts.sessionIdAvailable || await this.opts.sessionIdAvailable(candidate)) {
+        ref = candidate;
+        break;
+      }
+    }
+    if (!ref) throw new Error('could not allocate a new session id');
+    await this.ensure(ref, true);
+    // The boot argument is the source of truth for a new session. Sending a
+    // second `new_session` command would create/switch the engine to another
+    // UUID and leave the runtime key pointing at the wrong transcript.
+    return ref;
+  }
+
+  async restart(ref: SessionRef): Promise<void> {
+    const runtime = this.require(ref);
+    await runtime.restart();
+    await runtime.restoreOwnedSessionIfNeeded();
+  }
+
+  async closeSession(ref: SessionRef): Promise<void> {
+    const runtime = this.require(ref);
+    await runtime.dispose();
+    this.runtimes.delete(ref.sessionId);
+  }
+
+  async closeProject(projectPath: string): Promise<void> {
+    this.assertProjectNotClosing(projectPath);
+    if (this.hasActiveWork(projectPath)) throw new Error('cancel active turns and pending interactions before removing a project');
+    this.closingProjects.add(projectPath);
+    const projectRuntimes = [...this.runtimes.values()].filter((runtime) => runtime.projectPath === projectPath);
+    // Remove runtimes from the routable map before the first await. A prompt
+    // arriving while disposal is in progress must fail instead of entering a
+    // runtime whose child is already being torn down.
+    for (const runtime of projectRuntimes) this.runtimes.delete(runtime.sessionId);
+    try {
+      await Promise.all(projectRuntimes.map((runtime) => runtime.dispose()));
+    } finally {
+      this.closingProjects.delete(projectPath);
+    }
+  }
+
+  isProjectClosing(projectPath: string): boolean {
+    return this.closingProjects.has(projectPath);
+  }
+
+  hasActiveWork(projectPath: string): boolean {
+    return [...this.runtimes.values()].some((runtime) => (
+      runtime.projectPath === projectPath
+      && (runtime.turnActive || runtime.pendingInteractions > 0)
+    ));
+  }
+
+  async dispose(): Promise<void> {
+    const runtimes = [...this.runtimes.values()];
+    this.runtimes.clear();
+    this.openingSessions.clear();
+    await Promise.all(runtimes.map((runtime) => runtime.dispose().catch(() => undefined)));
+    this.unregisterIpc();
+    for (const webContents of [...this.targets.keys()]) this.detachWindow(webContents);
+  }
+
+  registerIpc(): void {
+    if (this.registered) return;
+    this.registered = true;
+    ipcMain.handle(CH_EVENT_REPLAY, (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      return this.replaySnapshots;
+    });
+    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown) => {
+      this.assertSender(event);
+      this.requireById(sessionId).sendPrompt(text, images);
+    });
+    ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, sessionId: unknown, requestId: unknown, response: unknown) => {
+      this.assertSender(event);
+      this.requireById(sessionId).approvePermission(validateRequestId(requestId), response);
+    });
+    ipcMain.handle(CH_DENY, (event: IpcMainInvokeEvent, sessionId: unknown, requestId: unknown) => {
+      this.assertSender(event);
+      this.requireById(sessionId).denyPermission(validateRequestId(requestId));
+    });
+    ipcMain.handle(CH_APPROVE_COMPUTER_ACCESS, (event: IpcMainInvokeEvent, sessionId: unknown, requestId: unknown, response: unknown) => {
+      this.assertSender(event);
+      this.requireById(sessionId).approveComputerAccess(validateRequestId(requestId), response);
+    });
+    ipcMain.handle(CH_DENY_COMPUTER_ACCESS, (event: IpcMainInvokeEvent, sessionId: unknown, requestId: unknown) => {
+      this.assertSender(event);
+      this.requireById(sessionId).denyComputerAccess(validateRequestId(requestId));
+    });
+    ipcMain.handle(CH_ANSWER_ASK_USER_QUESTION, (event: IpcMainInvokeEvent, sessionId: unknown, requestId: unknown, answers: unknown) => {
+      this.assertSender(event);
+      this.requireById(sessionId).answerAskUserQuestion(validateRequestId(requestId), answers);
+    });
+    ipcMain.handle(CH_CANCEL_ASK_USER_QUESTION, (event: IpcMainInvokeEvent, sessionId: unknown, requestId: unknown) => {
+      this.assertSender(event);
+      this.requireById(sessionId).cancelAskUserQuestion(validateRequestId(requestId));
+    });
+    ipcMain.handle(CH_CANCEL, (event: IpcMainInvokeEvent, sessionId: unknown, turnId: unknown) => {
+      this.assertSender(event);
+      this.requireById(sessionId).cancelTurn(turnId);
+    });
+    ipcMain.handle(CH_COMMAND, async (event: IpcMainInvokeEvent, sessionId: unknown, command: unknown) => {
+      this.assertSender(event);
+      await this.requireById(sessionId).dispatchCommand(command);
+    });
+    ipcMain.handle(CH_CONNECTION_STATE, (event: IpcMainInvokeEvent, sessionId: unknown) => {
+      this.assertSender(event);
+      return this.requireById(sessionId).connectionState;
+    });
+  }
+
+  private runtimeOptions(ref: SessionRef): BridgeManagerOptions {
+    const {
+      launchConfig,
+      accessState,
+      onModelChanged,
+      ...base
+    } = this.opts;
+    return {
+      ...base,
+      sessionId: ref.sessionId,
+      projectPath: ref.projectPath,
+      envelopeEvents: true,
+      registerIpc: false,
+      launchConfig: () => launchConfig(ref),
+      ...(accessState ? { accessState: () => accessState(ref) } : {}),
+      ...(onModelChanged ? { onModelChanged: (model: string) => onModelChanged(ref, model) } : {}),
+    };
+  }
+
+  private requireById(value: unknown): SessionRuntime {
+    if (!isSessionId(value)) throw new Error('invalid session id');
+    const runtime = this.runtimes.get(value);
+    if (!runtime) throw new Error(`session runtime is not open: ${value}`);
+    return runtime;
+  }
+
+  private assertProjectNotClosing(projectPath: string): void {
+    if (this.closingProjects.has(projectPath)) throw new Error('project is closing');
+  }
+
+  private detachWindow(webContents: WebContents): void {
+    this.targets.delete(webContents);
+    const handler = this.targetDestroyedHandlers.get(webContents);
+    if (handler) {
+      webContents.removeListener('destroyed', handler);
+      this.targetDestroyedHandlers.delete(webContents);
+    }
+    for (const runtime of this.runtimes.values()) runtime.unregisterWindow(webContents);
+  }
+
+  private assertSender(event: IpcMainInvokeEvent): void {
+    const rendererUrls = this.targets.get(event.sender);
+    const senderFrame = event.senderFrame;
+    if (!rendererUrls || !senderFrame || senderFrame !== event.sender.mainFrame) throw new Error('unauthorized IPC sender');
+    const senderOrigin = urlOrigin(senderFrame.url);
+    if (!senderOrigin || ![...rendererUrls].some((rendererUrl) => urlOrigin(rendererUrl) === senderOrigin)) {
+      throw new Error('unauthorized IPC origin');
+    }
+  }
+
+  private unregisterIpc(): void {
+    if (!this.registered) return;
+    for (const channel of [
+      CH_EVENT_REPLAY,
+      CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_APPROVE_COMPUTER_ACCESS, CH_DENY_COMPUTER_ACCESS,
+      CH_ANSWER_ASK_USER_QUESTION, CH_CANCEL_ASK_USER_QUESTION, CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE,
+    ]) ipcMain.removeHandler(channel);
+    this.registered = false;
   }
 }

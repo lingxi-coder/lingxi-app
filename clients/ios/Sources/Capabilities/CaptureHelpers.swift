@@ -38,6 +38,24 @@ struct ComposerAttachment: Identifiable, Equatable {
     #endif
     let width: Int
     let height: Int
+    let mediaType: String
+    let base64: String
+
+    #if canImport(UIKit)
+        init(
+            image: UIImage,
+            width: Int,
+            height: Int,
+            mediaType: String = "image/jpeg",
+            base64: String = ""
+        ) {
+            self.image = image
+            self.width = width
+            self.height = height
+            self.mediaType = mediaType
+            self.base64 = base64
+        }
+    #endif
 
     // `UIImage` isn't `Equatable`, so identity is keyed on the stable `id`
     // (each capture produces a distinct attachment).
@@ -256,7 +274,9 @@ final class CameraCapture {
                 return .captured(ComposerAttachment(
                     image: image,
                     width: Int(ffi.width),
-                    height: Int(ffi.height)))
+                    height: Int(ffi.height),
+                    mediaType: "image/jpeg",
+                    base64: ffi.jpegBytes.base64EncodedString()))
             } catch let error {
                 return mapError(error)
             }

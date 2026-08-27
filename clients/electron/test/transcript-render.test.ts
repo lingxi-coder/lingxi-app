@@ -17,21 +17,34 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import * as React from 'react';
 
 (globalThis as { React?: typeof React }).React = React;
 
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import type { PermissionRequest, StructuredDiffDto } from '@lingxi/bridge-client';
+import type {
+  AskUserQuestionRequestDto,
+  ComputerAccessRequestDto,
+  PermissionRequest,
+  StructuredDiffDto,
+} from '@lingxi/bridge-client';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import { LRM } from '../src/renderer/components/bidi';
+import {
+  CodeBlock,
+  EXPLICIT_HIGHLIGHT_MAX_CHARS,
+} from '../src/renderer/components/CodeBlock';
+import { AskUserQuestionPrompt } from '../src/renderer/components/AskUserQuestionPrompt';
+import { ComputerAccessPrompt } from '../src/renderer/components/ComputerAccessPrompt';
 import { DiffView } from '../src/renderer/components/DiffView';
+import { Disclosure } from '../src/renderer/components/Disclosure';
 import { PermissionPrompt } from '../src/renderer/components/PermissionPrompt';
 import { Stage } from '../src/renderer/components/Stage';
-import { ToolCall } from '../src/renderer/components/ToolCall';
-import type { ToolRunItem } from '../src/renderer/model/runItem';
+import { ToolCall, toolIconName } from '../src/renderer/components/ToolCall';
+import { NARRATION_COLLAPSE_MAX_CHARS, type NarrationRunItem, type ToolRunItem } from '../src/renderer/model/runItem';
 
 function render(node: React.ReactElement): string {
   return renderToStaticMarkup(
@@ -67,18 +80,242 @@ const DIFF: StructuredDiffDto = {
   rows: [{ kind: 'add', line_no: 12, hunk: 0, segments: [{ text: 'let a = 2;', class: 'plain' }] }],
 };
 
+// ── Message collapse defaults and accessible markup ──────────────────────────
+
+const LONG_MESSAGE = 'x'.repeat(NARRATION_COLLAPSE_MAX_CHARS + 1);
+
+function renderStage(item: NarrationRunItem): string {
+  return render(React.createElement(Stage, { liveItems: [item], sessionKey: 'session-a' }));
+}
+
+test('long historical messages render a clamped accessible preview', () => {
+  const html = renderStage({ type: 'narration', id: 'i1', role: 'assistant', text: LONG_MESSAGE });
+  assert.match(html, /Show more/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /aria-controls="narration-content-i1"/);
+  assert.match(html, /max-height:13\.6em/);
+});
+
+test('long live replies stay expanded after their stream seals', () => {
+  const html = renderStage({ type: 'narration', id: 'i1', role: 'assistant', text: LONG_MESSAGE, streamed: true });
+  assert.match(html, /Show less/);
+  assert.match(html, /aria-expanded="true"/);
+  assert.doesNotMatch(html, /max-height:13\.6em/);
+});
+
+test('a long user message keeps its images visible while only its text folds', () => {
+  const html = renderStage({
+    type: 'narration', id: 'i1', role: 'user', text: LONG_MESSAGE,
+    images: [{ media_type: 'image/png', url: 'data:image/png;base64,iVBORw0KGgo=' }],
+  });
+  assert.match(html, /aria-label="Attached images"/);
+  assert.match(html, /<img/);
+  assert.match(html, /Show more/);
+});
+
+test('short messages render no disclosure affordance', () => {
+  const html = renderStage({ type: 'narration', id: 'i1', role: 'assistant', text: 'Short answer.' });
+  assert.doesNotMatch(html, /aria-expanded=/);
+  assert.doesNotMatch(html, /Show more|Show less/);
+});
+
+test('user messages use a neutral rounded Codex-style bubble', () => {
+  const html = renderStage({ type: 'narration', id: 'i1', role: 'user', text: 'A user message.' });
+  assert.match(html, /class="user-message-bubble"/);
+  assert.match(html, /padding:11px 16px/);
+  assert.match(html, /border-radius:22px/);
+  assert.match(html, /border:0/);
+  assert.doesNotMatch(html, /accentBg/);
+});
+
 test('active agent thinking shimmers the text without a leading indicator', () => {
+  const item = { type: 'thinking', id: 'thinking-1', text: 'Working', streamed: true } as const;
   const html = render(React.createElement(Stage, {
-    liveItems: [{ type: 'thinking', id: 'thinking-1', text: 'Working', streamed: true }],
+    liveItems: [item],
     running: true,
     sessionKey: 'session-a',
   }));
 
   assert.match(html, /class="running-sweep"[^>]*>Thinking…</);
   assert.doesNotMatch(html, /width:10px;height:10px|border-radius:99px|box-shadow:0 0 0 4px/);
-  const thinking = html.indexOf('Thinking…');
-  const firstIcon = html.indexOf('<svg');
-  assert.ok(firstIcon === -1 || thinking < firstIcon, 'Thinking text must not have a leading icon');
+  assert.doesNotMatch(html, /cursor-blink[^>]*>Thinking…|<svg[^>]*>[^<]*Thinking…/);
+});
+
+test('code cards highlight known and auto-detected languages with copy semantics', () => {
+  const explicit = render(React.createElement(CodeBlock, {
+    code: 'const answer: string = "yes";',
+    language: 'ts',
+  }));
+  assert.match(explicit, /TypeScript/);
+  assert.match(explicit, /aria-label="Copy code"/);
+  assert.match(explicit, /aria-live="polite">Copy/);
+  assert.match(explicit, /hljs-keyword/);
+
+  const automatic = render(React.createElement(CodeBlock, {
+    code: 'const answer = true;',
+  }));
+  assert.match(automatic, /data-language="[^"]+"/);
+  assert.match(automatic, /class="hljs-[^"]+"/);
+});
+
+test('code cards escape model HTML and fall back safely for unknown, unfinished, and oversized input', () => {
+  const escaped = render(React.createElement(CodeBlock, {
+    code: '<script>alert("x")</script>',
+    language: 'html',
+  }));
+  assert.doesNotMatch(escaped, /<script>/);
+  assert.match(escaped, /&lt;/);
+
+  for (const props of [
+    { code: 'danger <script>', language: 'not-a-language' },
+    { code: 'const streaming = true;', language: 'ts', closed: false },
+    { code: 'x'.repeat(EXPLICIT_HIGHLIGHT_MAX_CHARS + 1), language: 'ts' },
+  ]) {
+    const html = render(React.createElement(CodeBlock, props));
+    assert.doesNotMatch(html, /hljs-/);
+    assert.doesNotMatch(html, /<script>/);
+  }
+});
+
+test('code card styles cap height and preserve code lines without wrapping', () => {
+  const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
+  assert.match(css, /\.code-card-scroll\s*\{[^}]*max-height:\s*520px;[^}]*overflow:\s*auto;/s);
+  assert.match(css, /\.code-card pre\s*\{[^}]*white-space:\s*pre;/s);
+  assert.doesNotMatch(css, /transition(?:-property)?:[^;]*height/);
+});
+
+test('collapsed transcript disclosures put a hover-revealed chevron after the summary', () => {
+  const html = render(React.createElement(
+    Disclosure,
+    { id: 'thought-1', open: false, onToggle: () => {}, summary: 'Thought' },
+    React.createElement('span', null, 'hidden body'),
+  ));
+  assert.ok(html.indexOf('Thought') < html.indexOf('transcript-disclosure-chevron'));
+  assert.match(html, /class="transcript-disclosure-trigger"/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /hidden body/);
+
+  const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
+  assert.match(css, /\[aria-expanded='false'\] \.transcript-disclosure-chevron\s*\{\s*opacity:\s*0;/);
+  assert.match(css, /\[aria-expanded='false'\]:hover \.transcript-disclosure-chevron/);
+  assert.match(css, /\[aria-expanded='false'\]:focus-visible \.transcript-disclosure-chevron/);
+});
+
+test('a standalone JSON message is formatted and rendered as a JSON code card', () => {
+  const html = renderStage({
+    type: 'narration',
+    id: 'json-1',
+    role: 'assistant',
+    text: '{"code":200,"message":"Success"}',
+  });
+  assert.match(html, />JSON</);
+  assert.match(html, /hljs-attr/);
+  assert.match(html, /&quot;code&quot;/);
+  assert.match(html, /hljs-number">200</);
+});
+
+test('Stage omits transcript cost footer and left gutter markers', () => {
+  const html = render(
+    React.createElement(Stage, {
+      liveItems: [
+        { type: 'narration', id: 'n1', role: 'assistant', text: 'Answer' },
+        { type: 'meta', id: 'm1', dur: '0m 5s', tokens: '$0.01' },
+      ],
+      sessionKey: 'session-1',
+    }),
+  );
+
+  assert.doesNotMatch(html, /0m 5s|\$0\.01/);
+  assert.doesNotMatch(html, /—/);
+});
+
+// ── Tool defaults and icon vocabulary ────────────────────────────────────────
+
+test('tool icon mapping covers the built-in tool families and has a fallback', () => {
+  assert.equal(toolIconName('Read'), 'file');
+  assert.equal(toolIconName('WebSearch'), 'search');
+  assert.equal(toolIconName('Bash'), 'terminal');
+  assert.equal(toolIconName('UpdateFile'), 'code');
+  assert.equal(toolIconName('GitCommit'), 'git');
+  assert.equal(toolIconName('TodoWrite'), 'tasks');
+  assert.equal(toolIconName('mcp__unknown__call'), 'box');
+});
+
+test('short tool bodies and diffs stay unmounted until explicitly opened', () => {
+  const bodyItem: ToolRunItem = {
+    ...READ,
+    result: { headline: 'Read 1 line', body: 'body-visible-only-when-open', body_lines: 1 },
+  };
+  const closedBody = render(React.createElement(ToolCall, { item: bodyItem, onSetOpen: () => {} }));
+  assert.match(closedBody, /Read 1 line/);
+  assert.match(closedBody, /class="tool-call-summary"/);
+  assert.doesNotMatch(closedBody, /Show 1 line/);
+  assert.doesNotMatch(closedBody, /body-visible-only-when-open/);
+
+  const diffItem: ToolRunItem = {
+    ...READ,
+    tool: 'Edit',
+    view: { ...READ.view, verb: 'edit', label: 'Edit', title: 'Edit(host.rs)' },
+    result: { headline: 'Added 1 line', diff: DIFF, body_lines: 0 },
+  };
+  const closedDiff = render(React.createElement(ToolCall, { item: diffItem, onSetOpen: () => {} }));
+  assert.match(closedDiff, /Added 1 line/);
+  assert.doesNotMatch(closedDiff, /Show diff/);
+  assert.doesNotMatch(closedDiff, /let a = 2;/);
+
+  const openBody = render(React.createElement(ToolCall, { item: bodyItem, open: true, onSetOpen: () => {} }));
+  assert.match(openBody, /body-visible-only-when-open/);
+  assert.doesNotMatch(openBody, /code-card/);
+});
+
+test('an open JSON tool result uses the shared formatted code card', () => {
+  const item: ToolRunItem = {
+    ...READ,
+    result: {
+      headline: 'Received response',
+      body: '{"code":200,"data":[{"name":"测试"}]}',
+      body_lines: 1,
+    },
+  };
+  const html = render(React.createElement(ToolCall, { item, open: true, onSetOpen: () => {} }));
+  assert.match(html, /code-card-tool/);
+  assert.match(html, />JSON</);
+  assert.match(html, /hljs-attr/);
+  assert.match(html, /&quot;name&quot;/);
+  assert.match(html, /hljs-string">&quot;测试&quot;</);
+});
+
+test('a tool with no body or diff has no disclosure', () => {
+  const html = render(React.createElement(ToolCall, { item: READ, onSetOpen: () => {} }));
+  assert.doesNotMatch(html, /aria-expanded=/);
+  assert.doesNotMatch(html, /Show output|Show diff|Show \d+ lines?/);
+});
+
+test('running tools use direct text rows and the shared left-to-right sweep', () => {
+  const running: ToolRunItem = { ...READ, status: 'running', elapsedMs: 12_000 };
+  const html = render(React.createElement(ToolCall, { item: running, onSetOpen: () => {} }));
+  assert.match(html, /class="transcript-tool-row"/);
+  assert.match(html, /class="tool-row-title running-sweep"/);
+  assert.doesNotMatch(html, /transcript-tool-card/);
+
+  const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
+  assert.match(css, /@keyframes text-sweep/);
+  assert.match(css, /from \{[^}]*background-position:\s*120% 0, 0 0/);
+  assert.match(css, /to \{[^}]*background-position:\s*-120% 0, 0 0/);
+  assert.match(css, /\.running-sweep\s*\{[^}]*background-clip:\s*text;[^}]*animation:\s*text-sweep/s);
+  assert.match(css, /\.transcript-tool-row:focus-within\s*\{[^}]*--tool-focus-color[^}]*--sweep-base/s);
+  assert.match(css, /\.background-task-row:focus-within\s*\{[^}]*--task-focus-color[^}]*--sweep-base/s);
+});
+
+test('tool rows omit status UI and use the error color for failed tools', () => {
+  const completed = render(React.createElement(ToolCall, { item: READ, onSetOpen: () => {} }));
+  assert.doesNotMatch(completed, /aria-label="done"|aria-label="failed"/);
+
+  const failed: ToolRunItem = { ...READ, status: 'error' };
+  const html = render(React.createElement(ToolCall, { item: failed, onSetOpen: () => {} }));
+  assert.match(html, /data-status="error"/);
+  assert.ok(html.includes(tokens(true).danger), 'failed tool rows should expose the danger color to icon and text');
+  assert.doesNotMatch(html, /aria-label="done"|aria-label="failed"/);
 });
 
 // ── Defect 1: `direction: rtl` and the leading slash ─────────────────────────
@@ -140,17 +377,16 @@ const TRUNCATED: ToolRunItem = {
 
 test('an open, clamped body says so — and says how much is missing', () => {
   const open = render(React.createElement(ToolCall, { item: TRUNCATED, open: true, onSetOpen: () => {} }));
-  assert.match(open, /Hide/);
-  // The collapsed affordance promised `Show 400 lines`; the open body holds 3.
-  // Something has to account for the difference where it is visible.
+  // The compact row includes the truncation marker; the open body holds 3.
+  assert.doesNotMatch(open, /Show 400 lines|Hide/);
   assert.match(open, /truncated/, 'the OPEN state must disclose the clamp');
   assert.match(open, /3 of 400 lines/);
 });
 
 test('a closed, clamped body still marks the affordance', () => {
   const closed = render(React.createElement(ToolCall, { item: TRUNCATED, open: false, onSetOpen: () => {} }));
-  assert.match(closed, /Show 400 lines/);
   assert.match(closed, /\(truncated\)/);
+  assert.doesNotMatch(closed, /Show 400 lines/);
 });
 
 test('an untruncated body says nothing about truncation in either state', () => {
@@ -192,6 +428,48 @@ test('the permission dialog renders the FULL command it asks you to approve', ()
   );
   assert.doesNotMatch(redacted, /sk-ant-abcdefghijklmnop/);
   assert.match(redacted, /\[REDACTED\]/);
+});
+
+test('session prompts are non-modal and do not install a global Tab trap', () => {
+  const permission: PermissionRequest = {
+    request_id: 21,
+    kind: { type: 'tool_use_confirm', tool_name: 'Read', tool_input_json: '{"path":"/tmp"}', default_allow: false },
+  };
+  const computer: ComputerAccessRequestDto = {
+    request_id: 22,
+    reason: 'Read the screen',
+    apps: [{ label: 'Preview' }],
+    tier: 'read',
+    clipboard_read: false,
+    clipboard_write: false,
+    system_key_combos: false,
+  };
+  const question: AskUserQuestionRequestDto = {
+    request_id: 23,
+    questions: [{
+      question: 'Continue?',
+      header: 'Confirm',
+      options: [{ label: 'Yes', description: 'Continue the session' }],
+      multi_select: false,
+    }],
+  };
+
+  const rendered = [
+    render(React.createElement(PermissionPrompt, { request: permission, onApprove: () => {}, onDeny: () => {} })),
+    render(React.createElement(ComputerAccessPrompt, { request: computer, onSubmit: () => {}, onDeny: () => {}, onOpenSystemSettings: () => {} })),
+    render(React.createElement(AskUserQuestionPrompt, { request: question, onSubmit: () => {}, onCancel: () => {} })),
+  ];
+  for (const html of rendered) {
+    assert.match(html, /role="dialog"/);
+    assert.doesNotMatch(html, /aria-modal=/);
+  }
+
+  for (const filename of ['PermissionPrompt.tsx', 'ComputerAccessPrompt.tsx', 'AskUserQuestionPrompt.tsx']) {
+    const source = readFileSync(new URL(`../src/renderer/components/${filename}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /document\.addEventListener\(['"]keydown['"]/);
+    assert.doesNotMatch(source, /event\.key !== ['"]Tab['"]/);
+    assert.match(source, /onKeyDown=/);
+  }
 });
 
 // ── Defect 5: one probed key can hide the command being authorized ──────────

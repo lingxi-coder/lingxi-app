@@ -29,7 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -61,6 +61,10 @@ pub struct BridgeArgs {
     /// `chdir`s into this before resolving the rest of the config so the
     /// settings / hook / `.mcp.json` loaders read the same dir.
     pub cwd: Option<PathBuf>,
+    /// `--session-id <uuid>`: stable session identity supplied by the Desktop host.
+    pub session_id: Option<String>,
+    /// `--list-sessions-json`: read the session catalog and exit without building an engine.
+    pub list_sessions_json: bool,
     /// `--model <id>`: the default model id (overrides the desktop default).
     pub model: Option<String>,
     /// Read one bounded credential line from stdin before assembling the engine.
@@ -100,11 +104,20 @@ impl BridgeArgs {
         while let Some(arg) = it.next() {
             match arg.as_ref() {
                 "--help" | "-h" => out.help = true,
+                "--list-sessions-json" => out.list_sessions_json = true,
                 "--cwd" => {
                     let v = it
                         .next()
                         .ok_or_else(|| "--cwd requires a directory argument".to_string())?;
                     out.cwd = Some(PathBuf::from(v.as_ref()));
+                }
+                "--session-id" => {
+                    let value = it
+                        .next()
+                        .ok_or_else(|| "--session-id requires a UUID argument".to_string())?;
+                    let parsed = protocol::SessionId::parse_prefixed(value.as_ref())
+                        .ok_or_else(|| "--session-id must be a valid UUID".to_string())?;
+                    out.session_id = Some(parsed.as_uuid().to_string());
                 }
                 "--model" => {
                     let v = it
@@ -149,6 +162,8 @@ pub fn usage() -> String {
          \n\
          OPTIONS:\n    \
              --cwd <DIR>      Working directory to root the engine at (default: current dir)\n    \
+             --session-id <UUID>\n                              Stable session UUID (generated when omitted)\n    \
+             --list-sessions-json\n                              List persisted sessions for --cwd and exit\n    \
              --model <ID>     Default model id (default: the desktop build default)\n    \
              --api-key-stdin  Read the API key from one line on stdin\n    \
              --credential-stdin\n    \
@@ -439,9 +454,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The bridge has no --system-prompt / --append-system-prompt CLI flags.
         system_prompt_override: None,
         append_system_prompt: None,
-        // The Electron bridge has no --session-id flag (the SDK/bridge path mints
-        // its own ids); always a fresh session id.
-        session_id_override: None,
+        // The Desktop host owns the session UUID so multiple bridge processes can
+        // address one another without relying on generated display names.
+        session_id_override: args.session_id.clone(),
         parent_session_id: None,
         // The Electron bridge has no --disable-slash-commands flag.
         disable_slash_commands: false,
@@ -536,6 +551,188 @@ pub struct BoundServer {
     /// `_` hold-alive intent is expressed without a `pub` dead-field lint.
     #[allow(dead_code)]
     runtime: DesktopRuntime,
+    /// Keeps the cross-session live identity and inbox registered for the
+    /// lifetime of this bridge process.
+    #[allow(dead_code)]
+    live_session: LiveSessionGuard,
+}
+
+/// Process-local live-session registration owned by a bridge runtime.
+///
+/// The registry and inbox are intentionally process-wide in `traits`, just as
+/// they are for the CLI. Holding this guard in `BoundServer` makes the bridge
+/// lifecycle explicit and guarantees graceful cleanup without changing the
+/// engine wire protocol.
+struct LiveSessionGuard {
+    dir: traits::live_sessions::LiveSessionDir,
+    session_id: String,
+    inbox_started: bool,
+    _writer_claim: traits::live_sessions::SessionIdClaim,
+}
+
+impl Drop for LiveSessionGuard {
+    fn drop(&mut self) {
+        if self.inbox_started {
+            traits::uds_inbox::stop_process_inbox();
+        }
+        let _ = self.dir.unregister(&self.session_id);
+    }
+}
+
+fn canonical_session_id(raw: Option<&str>) -> Result<String, String> {
+    raw.map(|value| {
+        protocol::SessionId::parse_prefixed(value)
+            .map(|id| id.as_uuid().to_string())
+            .ok_or_else(|| "bridge session id must be a valid UUID".to_string())
+    })
+    .unwrap_or_else(|| Ok(protocol::SessionId::new().as_uuid().to_string()))
+}
+
+fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, String> {
+    let session_id = canonical_session_id(cfg.session_id_override.as_deref())?;
+    cfg.session_id_override = Some(session_id.clone());
+
+    let dir = traits::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"));
+    let pid = std::process::id();
+    // Only live records/PIDs participate in writer ownership. The persisted
+    // `<session-id>.jsonl` transcript is intentionally ignored here because a
+    // historical resume must reuse that same UUID.
+    let writer_claim =
+        dir.claim_session_id(&session_id, pid)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    "bridge session id is already active".to_string()
+                }
+                _ => "bridge live-session registry is unavailable".to_string(),
+            })?;
+
+    // Keep the claim in a guard from this point onward. If any later live
+    // registration step fails, Drop releases the claim and does not strand a
+    // writer lock for the next historical resume.
+    let mut live_session = LiveSessionGuard {
+        dir: dir.clone(),
+        session_id: session_id.clone(),
+        inbox_started: false,
+        _writer_claim: writer_claim,
+    };
+
+    let display_name = cfg
+        .cwd
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.trim().is_empty());
+    let claim =
+        traits::live_sessions::install_process(dir.clone(), &session_id, display_name.as_deref());
+    if let Some(claim) = claim.as_ref() {
+        if claim.notice.is_some() {
+            tracing::debug!("bridge live-session display name was disambiguated");
+        }
+    }
+    if claim.is_none() {
+        if let Some(name) = display_name.as_deref() {
+            traits::live_sessions::set_process_name(name);
+        }
+    }
+
+    let permission_mode = cfg.permission_mode.wire_str().to_string();
+    traits::live_sessions::set_process_permission_mode(
+        &permission_mode,
+        cfg.allow_dangerously_skip_permissions,
+    );
+
+    let socket = traits::uds_inbox::default_socket_path(pid);
+    let inbox_started = match traits::uds_inbox::start_process_inbox(socket) {
+        Ok(path) => {
+            live_session.inbox_started = true;
+            dir.upsert_identity(
+                pid,
+                &session_id,
+                traits::live_sessions::process_name().as_deref(),
+                None,
+                Some(&path),
+                traits::live_sessions::process_permission_class().as_deref(),
+            )
+            .map_err(|_| "bridge live-session identity is unavailable".to_string())?;
+            true
+        }
+        Err(error) => {
+            // File inbox remains a valid fallback on platforms without UDS.
+            tracing::warn!(%error, "bridge cross-session UDS inbox unavailable; using file inbox fallback");
+            dir.upsert_identity(
+                pid,
+                &session_id,
+                traits::live_sessions::process_name().as_deref(),
+                None,
+                None,
+                traits::live_sessions::process_permission_class().as_deref(),
+            )
+            .map_err(|_| "bridge live-session identity is unavailable".to_string())?;
+            false
+        }
+    };
+    traits::live_sessions::set_process_status("idle", None);
+    debug_assert_eq!(live_session.inbox_started, inbox_started);
+    Ok(live_session)
+}
+
+/// Enumerate the persisted session catalog without constructing an engine.
+///
+/// This path deliberately does not call config resolution, credential loading,
+/// customization loaders, or `engine_desktop::build`; it only reads the JSONL
+/// catalog rooted at `cwd` and returns the stable Desktop envelope.
+pub async fn list_sessions_json(cwd: &Path) -> Result<String, String> {
+    let lingxi_home =
+        lingxi_config_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
+    list_sessions_json_from(cwd, &lingxi_home).await
+}
+
+async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<String, String> {
+    let fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(cwd.to_path_buf()));
+    let catalog = match session::jsonl::list_recent_sessions_with_diagnostics(
+        lingxi_home,
+        &cwd.to_string_lossy(),
+        usize::MAX,
+        fs.clone(),
+    )
+    .await
+    {
+        Ok(catalog) => catalog,
+        Err(session::jsonl::LoaderError::EmptyDirectory) => session::jsonl::SessionCatalog {
+            sessions: Vec::new(),
+            skipped_files: 0,
+        },
+        Err(_) => return Err("session catalog is unavailable".to_string()),
+    };
+    let mut sessions = Vec::with_capacity(catalog.sessions.len());
+    for row in catalog.sessions {
+        let empty_session = if row.message_count == 0 {
+            session::jsonl::JsonlReader::new(row.path.clone(), fs.clone())
+                .read_routed()
+                .await
+                .ok()
+                .is_some_and(|loaded| {
+                    loaded.messages_in_order.is_empty()
+                        && loaded.mobile_empty_sessions.contains(&row.uuid.to_string())
+                })
+        } else {
+            false
+        };
+        let lowered = client_adapter::lowering::lower_session_metadata(&row);
+        let mut value = serde_json::to_value(lowered)
+            .map_err(|_| "failed to encode session catalog".to_string())?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "empty_session".to_string(),
+                serde_json::Value::Bool(empty_session),
+            );
+        }
+        sessions.push(value);
+    }
+    serde_json::to_string(&serde_json::json!({
+        "version": 1,
+        "sessions": sessions,
+    }))
+    .map_err(|_| "failed to encode session catalog".to_string())
 }
 
 /// Assemble a fully-bound [`BridgeConnection`] from a resolved [`DesktopConfig`].
@@ -561,6 +758,7 @@ pub async fn assemble_with_provider_keys(
     mut cfg: DesktopConfig,
     provider_keys: BTreeMap<String, String>,
 ) -> Result<BoundServer, String> {
+    let live_session = initialize_live_session(&mut cfg)?;
     let connection = BridgeConnection::new();
 
     // Preserve only the non-secret parent-source fact before `cfg` moves. The
@@ -722,6 +920,7 @@ pub async fn assemble_with_provider_keys(
     Ok(BoundServer {
         connection,
         runtime,
+        live_session,
     })
 }
 
@@ -803,6 +1002,7 @@ pub fn publish_lockfile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use traits::live_sessions::LiveSessionDir;
 
     #[test]
     fn parse_defaults_when_no_args() {
@@ -817,6 +1017,128 @@ mod tests {
             BridgeArgs::parse(["--cwd", "/tmp/p", "--model", "claude-x"]).expect("flags parse");
         assert_eq!(args.cwd, Some(PathBuf::from("/tmp/p")));
         assert_eq!(args.model.as_deref(), Some("claude-x"));
+    }
+
+    #[test]
+    fn parse_session_id_and_list_mode() {
+        let args = BridgeArgs::parse([
+            "--session-id",
+            "11111111-2222-3333-4444-555555555555",
+            "--list-sessions-json",
+        ])
+        .expect("session catalog flags parse");
+        assert_eq!(
+            args.session_id.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert!(args.list_sessions_json);
+        assert!(BridgeArgs::parse(["--session-id", "not-a-uuid"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn list_mode_is_empty_and_does_not_create_catalog_files() {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let home = tempfile::tempdir().expect("config tempdir");
+        let json = list_sessions_json_from(cwd.path(), home.path())
+            .await
+            .expect("empty catalog succeeds");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid envelope");
+        assert_eq!(value, serde_json::json!({"version": 1, "sessions": []}));
+        assert!(
+            std::fs::read_dir(home.path())
+                .expect("config home remains readable")
+                .next()
+                .is_none(),
+            "catalog-only mode must not create engine/session files"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_mode_marks_only_explicit_mobile_empty_anchors() {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let home = tempfile::tempdir().expect("config tempdir");
+        let historical_id = "11111111-2222-4333-8444-555555555555";
+        let empty_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+        let historical_path =
+            session::jsonl::session_path(home.path(), &cwd.path().to_string_lossy(), historical_id);
+        std::fs::create_dir_all(historical_path.parent().expect("catalog dir"))
+            .expect("create catalog dir");
+        let system_line = serde_json::json!({
+            "type": "system",
+            "uuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "parentUuid": null,
+            "sessionId": historical_id,
+            "timestamp": "2026-08-26T00:00:00.000Z",
+            "cwd": cwd.path().to_string_lossy(),
+            "version": "0.12.0",
+            "isSidechain": false,
+            "message": {"role": "system", "content": "hook result"},
+        });
+        std::fs::write(&historical_path, format!("{system_line}\n")).expect("write historical row");
+        let empty_path =
+            session::jsonl::session_path(home.path(), &cwd.path().to_string_lossy(), empty_id);
+        let empty_line = serde_json::json!({
+            "type": "custom-title",
+            "sessionId": empty_id,
+            "customTitle": "New session",
+            "mobileEmptySession": 1,
+        });
+        std::fs::write(&empty_path, format!("{empty_line}\n")).expect("write empty anchor");
+
+        let json = list_sessions_json_from(cwd.path(), home.path())
+            .await
+            .expect("catalog succeeds");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid envelope");
+        let sessions = value["sessions"].as_array().expect("session rows");
+        let historical = sessions
+            .iter()
+            .find(|row| row["uuid"] == historical_id)
+            .expect("historical row");
+        let empty = sessions
+            .iter()
+            .find(|row| row["uuid"] == empty_id)
+            .expect("empty row");
+
+        assert_eq!(historical["message_count"], 0);
+        assert_eq!(historical["empty_session"], false);
+        assert_eq!(empty["message_count"], 0);
+        assert_eq!(empty["empty_session"], true);
+    }
+
+    #[test]
+    fn live_registration_allows_resume_of_existing_transcript_and_cleans_up() {
+        // `LiveSessionDir` and the UDS inbox are process globals in tests just
+        // as they are in the CLI. Keep the entire guard lifetime serialized so
+        // another test cannot stop this test's inbox or overwrite its globals.
+        let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let home = tempfile::tempdir().expect("config tempdir");
+        let session_id = "11111111-2222-4333-8444-555555555555";
+        let transcript =
+            session::jsonl::session_path(home.path(), &cwd.path().to_string_lossy(), session_id);
+        std::fs::create_dir_all(transcript.parent().expect("transcript parent")).unwrap();
+        std::fs::write(&transcript, "{}\n").unwrap();
+
+        let mut cfg = resolve_desktop_config(&BridgeArgs::default());
+        cfg.cwd = cwd.path().to_path_buf();
+        cfg.lingxi_home = home.path().to_path_buf();
+        cfg.session_id_override = Some(session_id.to_string());
+
+        let guard = initialize_live_session(&mut cfg).expect("transcript is not a live writer");
+        assert_eq!(guard.session_id, session_id);
+        assert!(guard
+            .dir
+            .list_live()
+            .unwrap()
+            .iter()
+            .any(|record| record.sid() == session_id));
+        drop(guard);
+        assert!(LiveSessionDir::at_live(home.path().join("sessions"))
+            .list_live()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

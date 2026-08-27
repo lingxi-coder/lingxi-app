@@ -28,7 +28,9 @@ use crate::jsonl::path::{project_dir_name, session_path};
 use crate::jsonl::re_append::{find_last_typed_field, read_tail};
 use crate::jsonl::reader::{extract_json_string_field, JsonlReader, LoadedTranscript};
 use crate::jsonl::schema::{JsonlMessage, SESSION_KIND_KEY};
-use crate::jsonl::title::{extract_title, truncate_title};
+use crate::jsonl::title::{
+    extract_title, has_autonomous_tick_prompt, truncate_title, EMPTY_TITLE_FALLBACK,
+};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -42,7 +44,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use traits::{FileSystem, FileSystemCacheIdentity};
 use uuid::Uuid;
 
-/// Metadata for one resumable session row (uuid + title + mtime + created + line count).
+/// Metadata for one resumable session row (uuid + title + activity time + visible-message count).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMetadata {
     /// The session UUID parsed from the filename stem.
@@ -63,7 +65,7 @@ pub struct SessionMetadata {
     /// Used as the equal-`modified` tie-break, matching claude-code
     /// `sortLogs`/`loadSameRepoMessageLogs`.
     pub created: SystemTime,
-    /// Number of JSONL lines in the file.
+    /// Number of user/assistant messages visible in the restored conversation.
     pub message_count: usize,
     /// Absolute path to the `.jsonl` file (kept so callers can re-load without re-resolving).
     pub path: PathBuf,
@@ -652,12 +654,15 @@ async fn enrich_candidate_uncached(
         }
     };
 
-    // Preserve crash-tail tolerance: a valid transcript remains resumable
-    // even when its last line was truncated. If no message can be recovered
-    // at all, however, a zero-turn `(session)` row would be a dead resume
-    // target and conceal catalog damage from the desktop client.
-    if loaded.messages_in_order.is_empty() && loaded.malformed_line_count > 0 {
-        *skipped_files += 1;
+    // A metadata-only file is not a resumable session unless its latest
+    // custom-title is the explicit versioned mobile empty-session anchor.
+    // This semantic check belongs in the shared loader; Electron must not
+    // blanket-filter zero-count rows because validated empty sessions are
+    // real UUID-preserving conversation targets on mobile.
+    if loaded.messages_in_order.is_empty() && !loaded.mobile_empty_sessions.contains(&stem) {
+        if loaded.malformed_line_count > 0 {
+            *skipped_files += 1;
+        }
         return Ok(None);
     }
 
@@ -758,8 +763,8 @@ async fn enrich_candidate_uncached(
     // matching TS `summaries.get(leafMessage.uuid)` (`sessionStorage.ts:3009`).
     // The first-three sources are stored verbatim (only normalized via
     // `truncate_title`); the first-message fallback runs the full
-    // `extract_title` transforms. `extract_title`'s `'(session)'` empty
-    // fallback still applies when none of the four yields text.
+    // `extract_title` transforms. Its `'(session)'` sentinel identifies the
+    // empty case; the picker replaces that sentinel with the UUID prefix below.
     let sid = stem.as_str();
     // claude `getLogDisplayTitle` (`gBe`) leads with the session's `agentName`
     // — for an agent-owned session the picker row shows the agent's name above
@@ -769,9 +774,10 @@ async fn enrich_candidate_uncached(
     // `sessionId.slice(0,8)` empty fallback, and the `dln` wrapped-tag-pair
     // strip — is deferred; it is niche to the picker and the firstPrompt
     // sub-logic is intricate. The port keeps `extract_title`'s first-message
-    // path + `(session)` empty marker for those.)
+    // path; an empty first-prompt fallback is replaced below with Claude's
+    // `sessionId.slice(0, 8)` picker label.)
     let tip = find_tip(&loaded, sid);
-    let title = loaded
+    let mut title = loaded
         .agent_names
         .get(sid)
         .or_else(|| loaded.custom_titles.get(sid))
@@ -781,6 +787,13 @@ async fn enrich_candidate_uncached(
             || extract_title(&loaded.messages_in_order),
             |t| truncate_title(t),
         );
+    if title == EMPTY_TITLE_FALLBACK {
+        title = if has_autonomous_tick_prompt(&loaded.messages_in_order) {
+            "Autonomous session".to_string()
+        } else {
+            sid.chars().take(8).collect()
+        };
+    }
     let pr_number = loaded.pr_numbers.get(sid).copied();
     // `OEe`'s match source: `d.customTitle ?? d.aiTitle`. Note this skips
     // `agent_names`, which the DISPLAY title above leads with — an

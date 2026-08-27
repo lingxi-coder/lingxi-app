@@ -723,7 +723,11 @@ struct ChatView: View {
     }
 
     private func send(_ txt: String) {
-        guard let token = source.send(txt) else { return }
+        let images = attachment.map { [ImageRefDto(mediaType: $0.mediaType, base64: $0.base64)] } ?? []
+        guard let token = source.send(txt, images: images) else { return }
+        // The source owns the durable transcript now; remove only after it has
+        // accepted the turn so a failed send leaves the attachment retryable.
+        attachment = nil
         voiceInteraction.registerAutomaticPlaybackCandidate(token)
     }
 

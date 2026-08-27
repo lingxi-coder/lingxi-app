@@ -18,17 +18,19 @@
 //! - [`Address::AgentId`]: a raw UUID / `agent:<uuid>` display form (the
 //!   coordinator's `<task-id>` surface — kept so the existing
 //!   continue-a-worker-by-id flow still works).
-//! - [`Address::Uds`] / [`Address::Bridge`]: the cross-session schemes. The
-//!   entire bridge/UDS subsystem is unported on this build, so these return a
-//!   clear "not supported on this build" error (DEFERRED).
+//! - [`Address::SessionId`]: the canonical local cross-session UUID address.
+//! - [`Address::Uds`] / [`Address::Bridge`]: legacy/cross-machine schemes; direct
+//!   forms remain unsupported while canonical local sessions route through the
+//!   live registry.
 //!
 //! ## Deferred (noted, not attempted)
 //!
 //! - The pending-message queue + stopped-agent auto-resume
 //!   (`SendMessageTool.ts:802-874`) — needs the live teammate task loop.
-//! - The `uds:` / `bridge:` transports + the bridge `ask` permission
-//!   escalation (`checkPermissions`, `SendMessageTool.ts:585-602`) — the bridge
-//!   subsystem is unported.
+//! - User-supplied raw `uds:` / remote `bridge:` addresses and the bridge `ask`
+//!   permission escalation (`checkPermissions`, `SendMessageTool.ts:585-602`).
+//!   Canonical `session:<uuid>` already uses the registered UDS endpoint with a
+//!   JSONL fallback.
 //!
 //! Telemetry is intentionally omitted: coordinator-side tools hold an
 //! `Arc<TeamRegistry>` directly rather than a `BuiltinToolContext`, so there is
@@ -91,6 +93,12 @@ pub enum Address {
     Name(String),
     /// A raw agent id (UUID or `agent:<uuid>`).
     AgentId(AgentId),
+    /// A live local session id (`session:<uuid>`).
+    SessionId(String),
+    /// A malformed canonical session address. Keep this distinct from a
+    /// teammate name so invalid `session:` input can never be silently routed
+    /// through the team mailbox.
+    InvalidSession(String),
     /// `uds:<socket-path>` (or a legacy bare `/`-prefixed path) — cross-session,
     /// unported.
     Uds(String),
@@ -135,6 +143,12 @@ pub fn parse_address(to: &str) -> Address {
     if let Some(rest) = trimmed.strip_prefix("bridge:") {
         return Address::Bridge(rest.to_string());
     }
+    if let Some(rest) = trimmed.strip_prefix("session:") {
+        if let Some(id) = protocol::SessionId::parse_prefixed(rest) {
+            return Address::SessionId(id.as_uuid().to_string());
+        }
+        return Address::InvalidSession(trimmed.to_string());
+    }
     // Legacy: bare socket paths (`/...`) route through the UDS branch
     // (peerAddress.ts:19).
     if trimmed.starts_with('/') {
@@ -168,7 +182,7 @@ fn build_input_schema() -> Value {
         "properties": {
             "to": {
                 "type": "string",
-                "description": "Recipient: teammate name, \"*\" for broadcast, \"uds:<socket-path>\" local peer, \"bridge:<session-id>\" Remote Control peer"
+                "description": "Recipient: teammate name, session:<uuid>, \"*\" for broadcast, \"uds:<socket-path>\" local peer, \"bridge:<session-id>\" Remote Control peer"
             },
             "summary": {
                 "type": "string",
@@ -253,6 +267,53 @@ impl SendMessageTool {
             .map_or_else(|| agent_id.to_string(), |worker| worker.name)
     }
 
+    /// Deliver directly to the live-session registry using the stable session
+    /// UUID. UDS is preferred; the existing JSONL inbox is the fallback.
+    async fn route_live_session(
+        &self,
+        session_id: &str,
+        content: &str,
+        summary: Option<&str>,
+        ctx: &ToolUseContext,
+    ) -> Result<(), ToolError> {
+        if traits::live_sessions::process_session_id().as_deref() == Some(session_id) {
+            return Err(ToolError::InvalidInput(
+                "SendMessage: cannot send a message to the current session".into(),
+            ));
+        }
+        let dir = traits::live_sessions::process_dir()
+            .unwrap_or_else(traits::live_sessions::LiveSessionDir::process_default);
+        let peer = dir
+            .find_by_session_id(
+                session_id,
+                traits::live_sessions::process_session_id().as_deref(),
+            )
+            .ok_or_else(|| ToolError::InvalidInput("SendMessage: no such live session".into()))?;
+        let from_name = self.sender_name(ctx).await;
+        let from_sid = traits::live_sessions::process_session_id().unwrap_or_default();
+        let message =
+            traits::live_sessions::outbound_peer_message(&from_name, &from_sid, content, summary);
+        let socket = peer
+            .messaging_socket_path
+            .as_deref()
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from)
+            .filter(|path| traits::uds_inbox::is_canonical_inbox_sock(path));
+        let uds_error = socket
+            .as_deref()
+            .map(|path| traits::uds_inbox::send_peer_message(path, &message))
+            .and_then(Result::err);
+        if socket.is_none() || uds_error.is_some() {
+            dir.send_inbox(peer.sid(), &message).map_err(|error| {
+                let transport = uds_error
+                    .as_ref()
+                    .map_or_else(String::new, |uds| format!(" (UDS failed first: {uds})"));
+                ToolError::Internal(format!("SendMessage: {error}{transport}"))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Resolve a non-broadcast [`Address`] to a concrete recipient [`AgentId`].
     ///
     /// `Name` → registry lookup; `AgentId` → as-is. `Uds`/`Bridge`/`Broadcast`
@@ -268,7 +329,11 @@ impl SendMessageTool {
                 .ok_or_else(|| {
                     ToolError::InvalidInput(format!("SendMessage: no such teammate: {name}"))
                 }),
-            Address::Broadcast | Address::Uds(_) | Address::Bridge(_) => Err(ToolError::Internal(
+            Address::Broadcast
+            | Address::SessionId(_)
+            | Address::InvalidSession(_)
+            | Address::Uds(_)
+            | Address::Bridge(_) => Err(ToolError::Internal(
                 "SendMessage: resolve_recipient called on a non-single recipient".into(),
             )),
         }
@@ -645,8 +710,8 @@ impl Tool for SendMessageTool {
 
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         // The TS tool only escalates to `ask` for the cross-machine `bridge:`
-        // scheme, which is unported on the coordinator side (those addresses are
-        // rejected up front in `call`). All routable coordinator sends are
+        // scheme; direct bridge addresses are rejected up front in `call`.
+        // Canonical local session sends and teammate sends are
         // allowed. (DEFERRED: the bridge `ask` escalation,
         // `SendMessageTool.ts:585-602`.)
         PermissionResult::Allow {
@@ -698,6 +763,11 @@ impl Tool for SendMessageTool {
             return Err(ToolError::InvalidInput("to must not be empty".into()));
         }
         let addr = parse_address(to);
+        if let Address::InvalidSession(raw) = &addr {
+            return Err(ToolError::InvalidInput(format!(
+                "SendMessage: invalid session address '{raw}'; expected session:<uuid>"
+            )));
+        }
         // address target must not be empty (uds/bridge with empty target).
         match &addr {
             Address::Uds(t) | Address::Bridge(t) if t.trim().is_empty() => {
@@ -714,7 +784,15 @@ impl Tool for SendMessageTool {
                     .into(),
             ));
         }
-        // DEFERRED: the entire bridge/UDS subsystem is unported on this build.
+        if let Address::SessionId(session_id) = &addr {
+            if traits::live_sessions::process_session_id().as_deref() == Some(session_id) {
+                return Err(ToolError::InvalidInput(
+                    "SendMessage: cannot send a message to the current session".into(),
+                ));
+            }
+        }
+        // Raw transport addresses remain private implementation details. Models
+        // address a local peer through canonical `session:<uuid>` instead.
         match &addr {
             Address::Uds(_) => {
                 return Err(ToolError::InvalidInput(
@@ -745,6 +823,14 @@ impl Tool for SendMessageTool {
             let summary = summary.expect("validated above").trim().to_string();
             return match addr {
                 Address::Broadcast => self.handle_broadcast(s.clone(), summary, &ctx).await,
+                Address::SessionId(session_id) => {
+                    self.route_live_session(&session_id, s, Some(&summary), &ctx)
+                        .await?;
+                    Ok(Self::ok(json!({
+                        "success": true,
+                        "message": format!("Message sent to session:{session_id}'s inbox"),
+                    })))
+                }
                 ref a => {
                     let to_id = self.resolve_recipient(a).await?;
                     let msg = TeammateMessage {
@@ -776,6 +862,13 @@ impl Tool for SendMessageTool {
         if addr == Address::Broadcast {
             return Err(ToolError::InvalidInput(
                 "structured messages cannot be broadcast (to: \"*\")".into(),
+            ));
+        }
+
+        if matches!(addr, Address::SessionId(_)) {
+            return Err(ToolError::InvalidInput(
+                "SendMessage: structured protocol messages cannot target session:<uuid>; use a team teammate address"
+                    .into(),
             ));
         }
 
@@ -877,6 +970,8 @@ mod tests {
     use tool_api::context::{ToolUseContext, ToolUseOptions};
     use tool_api::progress::progress_channel;
 
+    static LIVE_SESSION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn fresh_tx() -> ToolProgressSender {
         let (tx, _rx) = progress_channel();
         tx
@@ -965,7 +1060,15 @@ mod tests {
             Address::Uds("/tmp/s.sock".into())
         );
         assert_eq!(parse_address("bridge:abc"), Address::Bridge("abc".into()));
+        assert_eq!(
+            parse_address("session:not-a-uuid"),
+            Address::InvalidSession("session:not-a-uuid".into())
+        );
         assert_eq!(parse_address("scout"), Address::Name("scout".into()));
+        assert_eq!(
+            parse_address("session:11111111-2222-3333-4444-555555555555"),
+            Address::SessionId("11111111-2222-3333-4444-555555555555".into())
+        );
         let id = AgentId::new();
         assert_eq!(
             parse_address(&id.as_uuid().to_string()),
@@ -1132,6 +1235,100 @@ mod tests {
         let body: Value = serde_json::from_str(&drained[0].content).unwrap();
         assert_eq!(body["type"], "shutdown_request");
         assert_eq!(body["requestId"], rid);
+    }
+
+    #[tokio::test]
+    async fn malformed_session_address_is_not_routed_as_a_teammate_name() {
+        let registry = make_registry();
+        registry
+            .spawn_worker("e".into(), "session:not-a-uuid".into(), "t".into())
+            .await
+            .unwrap();
+        let tool = SendMessageTool::new(registry);
+        let err = tool
+            .call(
+                json!({"to": "session:not-a-uuid", "message": "hello", "summary": "hi"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("malformed session address must be invalid input");
+        match err {
+            ToolError::InvalidInput(message) => {
+                assert!(message.contains("invalid session address"), "{message}");
+                assert!(message.contains("expected session:<uuid>"), "{message}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_protocol_message_rejects_session_target() {
+        let session_id = "11111111-2222-4333-8444-555555555555";
+        let tool = SendMessageTool::new(make_registry());
+        let err = tool
+            .call(
+                json!({
+                    "to": format!("session:{session_id}"),
+                    "message": {"type": "shutdown_request", "reason": "done"}
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("team protocol messages must not target a session");
+        match err {
+            ToolError::InvalidInput(message) => assert_eq!(
+                message,
+                "SendMessage: structured protocol messages cannot target session:<uuid>; use a team teammate address"
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_session_send_falls_back_when_the_advertised_socket_is_stale() {
+        let _guard = LIVE_SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        let self_session = "22222222-3333-4444-8555-666666666666";
+        let target_session = "11111111-2222-4333-8444-555555555555";
+        traits::live_sessions::set_process_dir(dir.clone());
+        traits::live_sessions::set_process_session_id(self_session);
+        traits::live_sessions::set_process_name("team-lead");
+        let stale_socket = traits::uds_inbox::default_socket_path(424_242);
+        dir.upsert_identity(
+            424_242,
+            target_session,
+            Some("peer"),
+            None,
+            Some(&stale_socket),
+            Some("prompting"),
+        )
+        .unwrap();
+
+        let tool = SendMessageTool::new(make_registry());
+        tool.call(
+            json!({
+                "to": format!("session:{target_session}"),
+                "summary": "fallback route",
+                "message": "hello after stale UDS"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("file fallback must preserve delivery");
+
+        let messages = dir.drain_inbox(target_session).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            traits::live_sessions::extract_cross_session_inner(&messages[0].content),
+            "hello after stale UDS"
+        );
+        assert!(messages[0].msg_id.is_some());
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ package com.lingxi.code.conversation
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
@@ -42,6 +44,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
+import com.lingxi.code.bindings.ImageRefDto
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.Pill
@@ -85,31 +88,36 @@ fun MessageBubble(
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            if (message.images.isNotEmpty()) {
+                AttachedImages(images = message.images)
+            }
             Row(horizontalArrangement = Arrangement.End) {
                 Spacer(Modifier.weight(1f))
                 val shape = BubbleShape(topRightSharp = true)
-                Text(
-                    text = message.text,
-                    color = t.text,
-                    fontSize = 15.5f.sp,
-                    lineHeight = (15.5f * 1.5f).sp,
-                    // `maxLines`, not the assistant branch's `heightIn`: this
-                    // bubble is one Text clipped to a BubbleShape, so a height
-                    // clip would square off the rounded bottom corners.
-                    // `maxLines` also gives a trailing ellipsis for free.
-                    maxLines = if (isCollapsible && !expanded) {
-                        AssistantMessageCollapsePolicy.COLLAPSED_LINE_LIMIT
-                    } else {
-                        Int.MAX_VALUE
-                    },
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .widthIn(max = 300.dp)
-                        .clip(shape)
-                        .background(t.surface)
-                        .border(0.5.dp, t.border, shape)
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                )
+                if (message.text.isNotBlank()) {
+                    Text(
+                        text = message.text,
+                        color = t.text,
+                        fontSize = 15.5f.sp,
+                        lineHeight = (15.5f * 1.5f).sp,
+                        // `maxLines`, not the assistant branch's `heightIn`: this
+                        // bubble is one Text clipped to a BubbleShape, so a height
+                        // clip would square off the rounded bottom corners.
+                        // `maxLines` also gives a trailing ellipsis for free.
+                        maxLines = if (isCollapsible && !expanded) {
+                            AssistantMessageCollapsePolicy.COLLAPSED_LINE_LIMIT
+                        } else {
+                            Int.MAX_VALUE
+                        },
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .widthIn(max = 300.dp)
+                            .clip(shape)
+                            .background(t.surface)
+                            .border(0.5.dp, t.border, shape)
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                    )
+                }
             }
             if (isCollapsible) {
                 val toggleLabel = stringResource(
@@ -240,6 +248,48 @@ fun MessageBubble(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+/** Render user media before the prompt, matching the CLI's UserImage → UserText order. */
+@Composable
+private fun AttachedImages(images: List<ImageRefDto>) {
+    val t = LingXiTheme.palette
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.Bottom,
+        modifier = Modifier.widthIn(max = 300.dp),
+    ) {
+        images.forEachIndexed { index, image ->
+            val bitmap = remember(image.mediaType, image.base64) {
+                runCatching {
+                    val bytes = android.util.Base64.decode(image.base64, android.util.Base64.DEFAULT)
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                }.getOrNull()
+            }
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = "Attached image ${index + 1}",
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier
+                        .size(116.dp)
+                        .clip(RoundedCornerShape(11.dp))
+                        .background(t.surfaceActive)
+                        .border(0.5.dp, t.border, RoundedCornerShape(11.dp)),
+                )
+            } else {
+                Text(
+                    text = "[Image #${index + 1}]",
+                    color = t.text3,
+                    fontSize = 11.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(11.dp))
+                        .background(t.surfaceActive)
+                        .padding(horizontal = 10.dp, vertical = 12.dp),
+                )
             }
         }
     }

@@ -1,6 +1,7 @@
 package com.lingxi.code
 
 import android.content.pm.PackageManager
+import android.util.Base64
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -47,6 +48,7 @@ import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.ComputerUseSetupStatus
 import com.lingxi.code.conversation.ComposerAttachment
+import com.lingxi.code.conversation.toImageRef
 import com.lingxi.code.conversation.EngineConversationSource
 import com.lingxi.code.conversation.conversationStrings
 import com.lingxi.code.conversation.PermissionPromptDialog
@@ -561,6 +563,8 @@ fun RootScreen(
                     thumb = bmp.asImageBitmap(),
                     width = image.width,
                     height = image.height,
+                    mediaType = "image/jpeg",
+                    base64 = Base64.encodeToString(image.jpegBytes, Base64.NO_WRAP),
                 )
             }
         },
@@ -1223,6 +1227,16 @@ fun RootScreen(
                             runConversationAction {
                                 chatViewModel.send(
                                     text,
+                                    origin = ConversationTurnOrigin.Ordinary,
+                                )
+                            }
+                        },
+                        onSendWithAttachment = { text, attachment ->
+                            voiceSpeechPlayer.stop()
+                            runConversationAction {
+                                chatViewModel.send(
+                                    text,
+                                    images = attachment?.toImageRef()?.let(::listOf).orEmpty(),
                                     origin = ConversationTurnOrigin.Ordinary,
                                 )
                             }

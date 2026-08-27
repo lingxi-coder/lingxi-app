@@ -70,12 +70,14 @@ impl CredentialRequiredTurnDriver {
     }
 
     async fn reject_turn(&self) {
+        traits::live_sessions::set_process_status("busy", None);
         self.event_sink
             .emit(ClientEvent::Error {
                 kind: ErrorKindDto::Server,
                 message: CREDENTIAL_REQUIRED_MESSAGE.to_string(),
             })
             .await;
+        traits::live_sessions::set_process_status("idle", None);
     }
 }
 
@@ -435,6 +437,7 @@ impl OrchestratorTurnDriver {
         sources: Vec<ImageSource>,
         cancel: CancellationToken,
     ) {
+        traits::live_sessions::set_process_status("busy", None);
         if let Some(output) = &self.message_output {
             output.reset_message_buffer().await;
         }
@@ -505,6 +508,7 @@ impl OrchestratorTurnDriver {
                 }
             }
         }
+        traits::live_sessions::set_process_status("idle", None);
     }
 }
 
@@ -542,10 +546,9 @@ impl TurnDriver for OrchestratorTurnDriver {
     }
 }
 
-/// Crate-shared serialization lock for ALL tests that touch the process-global
-/// `tool_cron` loop runtime state (in-flight tick / keepalive counter / reschedule
-/// flag) or the telemetry flag-override map — across both `driver` and `server`
-/// test modules, since they run in the same test binary and share those globals.
+/// Crate-shared serialization lock for tests that touch process-global runtime
+/// state (loop runtime, telemetry overrides, or live-session/UDS registration)
+/// across the `driver`, `server`, and `boot` test modules.
 #[cfg(test)]
 pub(crate) static LOOP_KA_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

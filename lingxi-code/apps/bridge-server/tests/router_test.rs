@@ -284,7 +284,15 @@ impl traits::OrchestratorHandle for ResumingHandle {
         DoctorReport::default()
     }
     async fn get_status_snapshot(&self) -> StatusSnapshot {
-        StatusSnapshot::default()
+        let resumed = self.resumed.lock().await;
+        let Some((_, _, _, _, runtime)) = resumed.as_ref() else {
+            return StatusSnapshot::default();
+        };
+        StatusSnapshot {
+            model: runtime.model.clone(),
+            model_profile: runtime.model_profile.clone(),
+            ..StatusSnapshot::default()
+        }
     }
     async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
         Err(HandleError::Unimplemented("test".into()))
@@ -814,6 +822,23 @@ async fn set_model_routes() {
         ClientEvent::ModelChanged {
             model: "claude-opus-4-8".into()
         }
+    );
+}
+
+#[tokio::test]
+async fn set_fast_mode_routes_and_acknowledges_authoritative_state() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(ClientCommand::SetFastMode { enabled: true }, sink.clone())
+        .await;
+
+    assert!(handle.current_fast_mode());
+    assert_eq!(
+        sink.events().await,
+        vec![ClientEvent::FastModeChanged { enabled: true }]
     );
 }
 
@@ -1672,11 +1697,12 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     let [ClientEvent::SessionResumed {
         session_id: emitted_id,
         messages,
-    }] = events.as_slice()
+    }, ClientEvent::ModelChanged { model }] = events.as_slice()
     else {
-        panic!("expected exactly one SessionResumed, got {events:?}");
+        panic!("expected SessionResumed followed by its model, got {events:?}");
     };
     assert_eq!(emitted_id, &session_id);
+    assert_eq!(model, "claude-opus-4-1");
     assert_eq!(
         messages.len(),
         2,
@@ -1744,7 +1770,10 @@ async fn resume_session_sets_plan_state_before_replay() {
     assert!(handle.current_plan_mode().await);
     assert!(matches!(
         sink.events().await.as_slice(),
-        [ClientEvent::SessionResumed { .. }]
+        [
+            ClientEvent::SessionResumed { .. },
+            ClientEvent::ModelChanged { .. }
+        ]
     ));
 }
 

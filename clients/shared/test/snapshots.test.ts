@@ -823,6 +823,9 @@ function validateCommand(name: string, v: unknown): void {
     case 'set_reasoning_selection':
       validateReasoningSelection(o['selection']);
       break;
+    case 'set_fast_mode':
+      assert.ok(isBool(o['enabled']));
+      break;
     case 'run_slash_command':
       assert.ok(isString(o['raw']));
       if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
@@ -1067,6 +1070,9 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'conversation_controls_changed':
       validateConversationControls(o['controls']);
+      break;
+    case 'fast_mode_changed':
+      assert.ok(isBool(o['enabled']));
       break;
     case 'provider_credential_status':
       assert.ok(
@@ -1328,7 +1334,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 47, `expected 47 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 48, `expected 48 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1366,7 +1372,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 62, `expected 62 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 63, `expected 63 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

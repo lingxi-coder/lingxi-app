@@ -10,8 +10,10 @@ import com.lingxi.code.bindings.McpStatusDto
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.MCPServer
 import com.lingxi.code.bindings.ErrorKindDto
+import com.lingxi.code.bindings.ImageRefDto
 import com.lingxi.code.bindings.MessageBlockDto
 import com.lingxi.code.bindings.MessageDto
+import com.lingxi.code.bindings.MessageImageDto
 import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.PermissionResponseDto
@@ -181,7 +183,10 @@ interface ConversationSource {
      * (plus [ReplyEvent.Thinking] / [ReplyEvent.ToolActivity]) and terminates on
      * [ReplyEvent.End] or [ReplyEvent.Error].
      */
-    fun submit(text: String): Flow<ReplyEvent>
+    fun submit(text: String): Flow<ReplyEvent> = submit(text, emptyList())
+
+    /** Submit a prompt with the same ordered inline images used by the CLI. */
+    fun submit(text: String, images: List<ImageRefDto>): Flow<ReplyEvent> = submit(text)
 
     /**
      * Cancel the in-flight turn (the composer's Stop affordance). Fires the
@@ -494,7 +499,7 @@ fun messageDtoToMessage(
     dto: MessageDto,
     strings: ConversationStrings = DefaultConversationStrings,
 ): Message {
-    val build = MessageBuild(dto.role)
+    val build = MessageBuild(dto.role, messageImages(dto.images))
     val index = mutableMapOf<String, ToolBlockRef>()
     dto.blocks.forEach { block ->
         // One DTO in isolation has no preceding turn to hand an orphan result
@@ -525,7 +530,7 @@ fun transcriptFromDtos(
     val builds = mutableListOf<MessageBuild>()
     val index = mutableMapOf<String, ToolBlockRef>()
     dtos.forEach { dto ->
-        val build = MessageBuild(dto.role)
+        val build = MessageBuild(dto.role, messageImages(dto.images))
         builds.add(build)
         dto.blocks.forEach { block ->
             build.fold(block, strings, index) { orphanHostFor(builds, build) }
@@ -564,6 +569,23 @@ private fun orphanHostFor(builds: MutableList<MessageBuild>, current: MessageBui
     return minted
 }
 
+/**
+ * The engine persists image bytes as a data URL in the resumed message DTO.
+ * Keep the UI model's existing ImageRefDto shape so live and restored user
+ * turns use the same renderer and resend path.
+ */
+private fun messageImages(images: List<MessageImageDto>): List<ImageRefDto> =
+    images.mapNotNull { image ->
+        val marker = ";base64,"
+        val markerIndex = image.url.indexOf(marker)
+        if (!image.url.startsWith("data:") || markerIndex <= "data:".length) return@mapNotNull null
+        val mediaType = image.mediaType.ifBlank {
+            image.url.substring("data:".length, markerIndex)
+        }
+        val base64 = image.url.substring(markerIndex + marker.length)
+        if (mediaType.isBlank() || base64.isBlank()) null else ImageRefDto(mediaType, base64)
+    }
+
 /** The wire `role` a minted assistant build carries. */
 private const val ASSISTANT_WIRE_ROLE = "assistant"
 
@@ -571,7 +593,10 @@ private const val ASSISTANT_WIRE_ROLE = "assistant"
 private class ToolBlockRef(val build: MessageBuild, val blockIndex: Int)
 
 /** Mutable accumulator for one message's prose + ordered content blocks. */
-private class MessageBuild(wireRole: String) {
+private class MessageBuild(
+    wireRole: String,
+    val images: List<ImageRefDto> = emptyList(),
+) {
     val role: Role = if (wireRole.equals("user", ignoreCase = true)) Role.User else Role.Ai
     val textParts = mutableListOf<String>()
     val blocks = mutableListOf<MessageContent>()
@@ -590,11 +615,13 @@ private class MessageBuild(wireRole: String) {
      */
     fun isRenderable(): Boolean =
         textParts.any { it.isNotBlank() } ||
+            (role == Role.User && images.isNotEmpty()) ||
             (role == Role.Ai && blocks.any { it is MessageContent.Tool })
 
     fun toMessage(): Message = Message(
         role = role,
         text = textParts.filter { it.isNotBlank() }.joinToString("\n\n"),
+        images = images,
         blocks = blocks.toList(),
     )
 
@@ -1180,7 +1207,7 @@ class EngineConversationSource private constructor(
         }
     }
 
-    override fun submit(text: String): Flow<ReplyEvent> =
+    override fun submit(text: String, images: List<ImageRefDto>): Flow<ReplyEvent> =
         // Subscribe-before-submit: the returned reply stream maps the shared
         // engine flow through `mapReplyStream`, but the `SendPrompt` is fired
         // from `events.onSubscription { … }` — which runs ONLY AFTER this
@@ -1195,7 +1222,7 @@ class EngineConversationSource private constructor(
                     permissionIngress.beginTurn()
                     handle.submit(
                         ClientCommand.SendPrompt(
-                            text = text, promptMode = null, images = emptyList(), turnId = null,
+                            text = text, promptMode = null, images = images, turnId = null,
                         ),
                     )
                 } catch (t: Throwable) {

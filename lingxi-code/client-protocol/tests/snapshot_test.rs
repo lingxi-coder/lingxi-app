@@ -339,6 +339,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         blocks: vec![MessageBlockDto::Text {
                             text: "Resume me.".to_string(),
                         }],
+                        images: Vec::new(),
                     },
                     canonical_message(),
                 ],
@@ -435,6 +436,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::ConversationControlsChanged {
                 controls: canonical_conversation_controls(),
             },
+        ),
+        (
+            "event/fast_mode_changed.json",
+            ClientEvent::FastModeChanged { enabled: true },
         ),
         (
             "event/provider_credential_status.json",
@@ -908,6 +913,10 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::SetReasoningSelection {
                 selection: ReasoningSelectionDto::TokenBudget { tokens: 2048 },
             },
+        ),
+        (
+            "command/set_fast_mode.json",
+            ClientCommand::SetFastMode { enabled: true },
         ),
         (
             "command/run_slash_command.json",
@@ -1400,6 +1409,7 @@ fn canonical_message() -> MessageDto {
                 display: None,
             },
         ],
+        images: Vec::new(),
     }
 }
 

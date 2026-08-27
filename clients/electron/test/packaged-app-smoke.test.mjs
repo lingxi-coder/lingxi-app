@@ -7,6 +7,7 @@ import { afterEach, test } from 'node:test';
 import {
   APP_USER_DATA_SUBPATH,
   createPackagedSettings,
+  isKeylessProviderCredentialSnapshot,
   runtimePathsForHome,
   sanitizePackagedAppEnvironment,
   workspaceTrustFingerprint,
@@ -63,15 +64,28 @@ test('runtime paths stay inside the isolated HOME tree', () => {
   assert.equal(paths.diagnosticsPath, join(home, APP_USER_DATA_SUBPATH, 'logs', 'desktop.jsonl'));
 });
 
-test('packaged settings preseed a trusted recent workspace without secrets', () => {
+test('keyless packaged bootstrap checks every provider credential', () => {
+  assert.equal(isKeylessProviderCredentialSnapshot([
+    { providerId: 'anthropic', configured: false, encryptionAvailable: true },
+    { providerId: 'openai', configured: false, encryptionAvailable: true },
+  ]), true);
+  assert.equal(isKeylessProviderCredentialSnapshot([
+    { providerId: 'anthropic', configured: false, encryptionAvailable: true },
+    { providerId: 'openai', configured: true, encryptionAvailable: true },
+  ]), false);
+  assert.equal(isKeylessProviderCredentialSnapshot(undefined), false);
+});
+
+test('packaged settings preseed a trusted active project without secrets', () => {
   const workspace = temporaryDirectory();
   const settings = createPackagedSettings({ workspace, theme: 'dark', now: new Date('2026-07-21T00:00:00Z') });
   const canonical = realpathSync.native(workspace);
 
   assert.equal(settings.version, 1);
   assert.equal(settings.theme, 'dark');
-  assert.equal(settings.lastWorkspace, canonical);
-  assert.deepEqual(settings.recentWorkspaces, [canonical]);
+  assert.equal(settings.activeProject, canonical);
+  assert.deepEqual(settings.projects, [canonical]);
+  assert.deepEqual(settings.pinnedSessions, []);
   assert.deepEqual(Object.keys(settings.trustedWorkspaces), [canonical]);
   assert.equal(settings.trustedWorkspaces[canonical]?.fingerprint, workspaceTrustFingerprint(workspace));
   assert.equal(settings.apiBaseUrl, undefined);

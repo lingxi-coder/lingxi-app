@@ -465,17 +465,31 @@ enum ModelDisplay {
 
 enum Role { case user, ai }
 
+struct MessageImage: Identifiable, Equatable {
+    let id: UUID
+    let mediaType: String
+    let url: String
+
+    init(id: UUID = UUID(), mediaType: String, url: String) {
+        self.id = id
+        self.mediaType = mediaType
+        self.url = url
+    }
+}
+
 struct Message: Identifiable, Equatable {
     let id: UUID
     let role: Role
     var tag: String? = nil
     let text: String
+    let images: [MessageImage]
 
-    init(id: UUID = UUID(), role: Role, tag: String? = nil, text: String) {
+    init(id: UUID = UUID(), role: Role, tag: String? = nil, text: String, images: [MessageImage] = []) {
         self.id = id
         self.role = role
         self.tag = tag
         self.text = text
+        self.images = images
     }
 }
 
@@ -498,9 +512,10 @@ struct SessionRef: Identifiable, Equatable {
 struct EngineSession: Identifiable, Equatable {
     /// The session UUID — `SessionRowDto.uuid`; the `ResumeSession` target id.
     let id: String
-    /// The session title (≤ 50 chars), already truncated by the engine.
+    /// The shared catalog title (≤ 200 Unicode characters); the drawer may
+    /// truncate it visually without changing the UUID-backed identity.
     let title: String
-    /// Number of JSONL lines in the session file (`SessionRowDto.message_count`).
+    /// Number of visible user/assistant messages (`SessionRowDto.message_count`).
     let messageCount: Int
     /// A short, relative "time ago" string derived from `modified_rfc3339`.
     let relativeTime: String

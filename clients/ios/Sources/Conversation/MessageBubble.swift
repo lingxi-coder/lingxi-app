@@ -1,4 +1,67 @@
 import SwiftUI
+import UIKit
+
+private struct MessageImages: View {
+    @Environment(\.theme) private var t
+    let images: [MessageImage]
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 7) {
+            ForEach(images) { image in
+                imageView(image)
+            }
+        }
+        .frame(maxWidth: 320, alignment: .trailing)
+    }
+
+    @ViewBuilder
+    private func imageView(_ image: MessageImage) -> some View {
+        if let decoded = decodedImage(image.url) {
+            Image(uiImage: decoded)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 116, height: 116)
+                .clipped()
+                .background(t.surfaceActive)
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
+                .accessibilityLabel("Attached image")
+        } else if let url = URL(string: image.url) {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case let .success(content):
+                    content.resizable().scaledToFill()
+                default:
+                    placeholder
+                }
+            }
+            .frame(width: 116, height: 116)
+            .clipped()
+            .background(t.surfaceActive)
+            .clipShape(RoundedRectangle(cornerRadius: 11))
+            .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
+            .accessibilityLabel("Attached image")
+        } else {
+            placeholder
+        }
+    }
+
+    private var placeholder: some View {
+        Text("Image")
+            .font(.caption)
+            .foregroundStyle(t.text3)
+            .frame(width: 116, height: 116)
+            .background(t.surfaceActive)
+            .clipShape(RoundedRectangle(cornerRadius: 11))
+    }
+
+    private func decodedImage(_ url: String) -> UIImage? {
+        guard url.hasPrefix("data:"), let comma = url.firstIndex(of: ",") else { return nil }
+        let encoded = String(url[url.index(after: comma)...])
+        guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters) else { return nil }
+        return UIImage(data: data)
+    }
+}
 
 // MARK: - Message bubble (user right-aligned, AI left)
 struct MessageBubble: View, Equatable {
@@ -32,9 +95,13 @@ struct MessageBubble: View, Equatable {
     var body: some View {
         if message.role == .user {
             VStack(alignment: .trailing, spacing: 4) {
+                if !message.images.isEmpty {
+                    MessageImages(images: message.images)
+                }
                 HStack(alignment: .top, spacing: 0) {
                     Spacer(minLength: 0)
-                    Text(message.text)
+                    if !message.text.isEmpty {
+                        Text(message.text)
                         // Dynamic Type: scale the body relative to .body so the
                         // transcript honors the user's text-size setting while
                         // keeping the design's 15.5pt baseline.
@@ -54,7 +121,8 @@ struct MessageBubble: View, Equatable {
                         .clipShape(BubbleShape(topRightSharp: true))
                         .overlay(BubbleShape(topRightSharp: true).stroke(t.border, lineWidth: 0.5))
                         .frame(maxWidth: 320, alignment: .trailing)
-                        .fixedSize(horizontal: false, vertical: true)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 // A subagent's prompt arrives as the first USER bubble of its
                 // child transcript, and those run to thousands of characters —

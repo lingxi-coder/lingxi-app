@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import {
   DiagnosticBuffer,
   MAX_DIAGNOSTICS,
+  MAX_PINNED_SESSIONS,
+  MAX_PROJECTS,
   buildBridgeArguments,
   buildBridgeEnvironment,
   buildCredentialEnvelope,
@@ -15,7 +17,10 @@ import {
   parseSettings,
   sanitizeDiagnostic,
   setWorkspaceTrust,
-  withRecentWorkspace,
+  withActiveProject,
+  withAddedProject,
+  withoutProject,
+  withSessionPinned,
   workspaceFingerprint,
   workspaceTrust,
 } from '../src/main/host-utils';
@@ -31,10 +36,26 @@ afterEach(() => {
   for (const path of temporaryDirectories.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-test('settings parser fails closed to the current version and bounds recent workspaces', () => {
+test('settings parser fails closed and migrates legacy workspaces into bounded projects', () => {
   assert.deepEqual(parseSettings({ version: 999, lastWorkspace: '/unsafe' }), defaultSettings());
-  const parsed = parseSettings({ version: 1, recentWorkspaces: Array.from({ length: 20 }, (_, i) => `/p/${i}`) });
-  assert.equal(parsed.recentWorkspaces.length, 10);
+  const parsed = parseSettings({
+    version: 1,
+    lastWorkspace: '/p/active',
+    recentWorkspaces: ['/p/0', '/p/active', ...Array.from({ length: 80 }, (_, i) => `/p/${i + 1}`)],
+  });
+  assert.equal(parsed.projects.length, MAX_PROJECTS);
+  assert.equal(parsed.activeProject, '/p/active');
+  assert.deepEqual(parsed.projects.slice(0, 2), ['/p/active', '/p/0']);
+  assert.deepEqual(parsed.pinnedSessions, []);
+
+  const explicitlyEmpty = parseSettings({
+    version: 1,
+    projects: [],
+    lastWorkspace: '/legacy/should-not-return',
+    recentWorkspaces: ['/legacy/should-not-return'],
+  });
+  assert.deepEqual(explicitlyEmpty.projects, []);
+  assert.equal(explicitlyEmpty.activeProject, undefined);
 });
 
 test('bypassPermissionsModeAccepted round-trips only for a strict true', () => {
@@ -54,13 +75,65 @@ test('bypassPermissionsModeAccepted round-trips only for a strict true', () => {
   }
 });
 
-test('workspace paths are canonical and recents are unique most-recent-first', () => {
-  const workspace = temporaryDirectory();
-  const canonical = canonicalWorkspace(join(workspace, '.'));
-  let settings = withRecentWorkspace(defaultSettings(), canonical);
-  settings = withRecentWorkspace(settings, canonical);
-  assert.equal(settings.lastWorkspace, canonical);
-  assert.deepEqual(settings.recentWorkspaces, [canonical]);
+test('projects are canonical, stable across activation, and new projects are prepended once', () => {
+  const first = canonicalWorkspace(join(temporaryDirectory(), '.'));
+  const second = canonicalWorkspace(join(temporaryDirectory(), '.'));
+  let settings = withAddedProject(defaultSettings(), first);
+  settings = withAddedProject(settings, second);
+  settings = withActiveProject(settings, first);
+  settings = withAddedProject(settings, first);
+  assert.equal(settings.activeProject, first);
+  assert.deepEqual(settings.projects, [second, first]);
+});
+
+test('pin records dedupe by project and session and project removal clears pins and trust', () => {
+  const first = temporaryDirectory();
+  const second = temporaryDirectory();
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  let settings = withAddedProject(defaultSettings(), first);
+  settings = withAddedProject(settings, second);
+  settings = setWorkspaceTrust(settings, first, true, new Date('2026-01-01T00:00:00Z'));
+  settings = withSessionPinned(settings, {
+    projectPath: first,
+    sessionId,
+    title: 'First title',
+    pinnedAt: '2026-01-01T00:00:00Z',
+  }, true);
+  settings = withSessionPinned(settings, {
+    projectPath: first,
+    sessionId,
+    title: 'Updated title',
+    pinnedAt: '2026-01-02T00:00:00Z',
+  }, true);
+  assert.deepEqual(settings.pinnedSessions.map((session) => session.title), ['Updated title']);
+
+  settings = withoutProject(settings, first);
+  assert.deepEqual(settings.projects, [second]);
+  assert.equal(settings.pinnedSessions.length, 0);
+  assert.equal(settings.trustedWorkspaces[first], undefined);
+  assert.equal(settings.activeProject, second);
+});
+
+test('project and pin limits reject additions instead of silently evicting records', () => {
+  let settings = defaultSettings();
+  for (let index = 0; index < MAX_PROJECTS; index += 1) {
+    settings = withAddedProject(settings, `/project/${index}`);
+  }
+  assert.throws(() => withAddedProject(settings, '/project/overflow'), /Project limit reached/);
+
+  const projectPath = settings.activeProject!;
+  settings.pinnedSessions = Array.from({ length: MAX_PINNED_SESSIONS }, (_, index) => ({
+    projectPath,
+    sessionId: `${index.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`,
+    title: `Session ${index}`,
+    pinnedAt: new Date(index).toISOString(),
+  }));
+  assert.throws(() => withSessionPinned(settings, {
+    projectPath,
+    sessionId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+    title: 'Overflow',
+    pinnedAt: new Date().toISOString(),
+  }, true), /Pinned session limit reached/);
 });
 
 test('trust is revoked when project config, agents, plugins, or memory content changes', () => {
@@ -182,7 +255,7 @@ test('sanitized diagnostics persist across host restarts without secret plaintex
   assert.match(second.snapshot()[0]?.message ?? '', /REDACTED/);
 });
 
-test('settings reject secret-bearing API URLs and only reopen recorded workspaces', () => {
+test('settings reject secret-bearing API URLs and only activate recorded projects', () => {
   const userData = temporaryDirectory();
   writeFileSync(join(userData, 'settings.v1.json'), JSON.stringify({
     version: 1,
@@ -199,7 +272,38 @@ test('settings reject secret-bearing API URLs and only reopen recorded workspace
 
   const workspace = temporaryDirectory();
   const canonical = canonicalWorkspace(workspace);
-  assert.equal(store.isRecentWorkspace(canonical), false);
-  store.setWorkspace(canonical);
-  assert.equal(store.isRecentWorkspace(canonical), true);
+  assert.equal(store.hasProject(canonical), false);
+  store.addProject(canonical);
+  assert.equal(store.hasProject(canonical), true);
+  assert.equal(store.getPublic().activeProject, canonical);
+  store.activateProject(canonical);
+  assert.deepEqual(new SettingsStore(userData).getPublic().projects, [canonical]);
+});
+
+test('settings store persists project activation, pins, and recoverable removal', () => {
+  const userData = temporaryDirectory();
+  const first = canonicalWorkspace(temporaryDirectory());
+  const second = canonicalWorkspace(temporaryDirectory());
+  const store = new SettingsStore(userData);
+  store.addProject(first);
+  store.addProject(second);
+  store.activateProject(first);
+  store.setTrust(second, true);
+  store.setSessionPinned({
+    projectPath: second,
+    sessionId: '22222222-2222-4222-8222-222222222222',
+    title: 'Pinned session',
+    pinnedAt: '2026-08-26T00:00:00Z',
+  }, true);
+
+  let restored = new SettingsStore(userData);
+  assert.equal(restored.getWorkspace(), first);
+  assert.deepEqual(restored.getPublic().projects, [second, first]);
+  assert.equal(restored.getPublic().pinnedSessions[0]?.title, 'Pinned session');
+
+  restored.removeProject(second);
+  restored = new SettingsStore(userData);
+  assert.deepEqual(restored.getPublic().projects, [first]);
+  assert.deepEqual(restored.getPublic().pinnedSessions, []);
+  assert.equal(restored.getTrust(second).trusted, false);
 });

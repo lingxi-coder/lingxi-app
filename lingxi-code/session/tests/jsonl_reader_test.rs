@@ -183,6 +183,25 @@ fn route_lines_keeps_only_transcript_messages_and_skips_malformed() {
 }
 
 #[test]
+fn route_lines_tracks_mobile_empty_anchor_with_last_write_wins() {
+    let routed = route_lines(concat!(
+        r#"{"type":"custom-title","sessionId":"sid-1","customTitle":"Empty","mobileEmptySession":1}"#,
+        "\n",
+        r#"{"type":"custom-title","sessionId":"sid-2","customTitle":"Empty 2","mobileEmptySession":1}"#,
+        "\n",
+        r#"{"type":"custom-title","sessionId":"sid-1","customTitle":"Renamed"}"#,
+        "\n",
+    ));
+
+    assert!(!routed.mobile_empty_sessions.contains("sid-1"));
+    assert!(routed.mobile_empty_sessions.contains("sid-2"));
+    assert_eq!(
+        routed.custom_titles.get("sid-1"),
+        Some(&"Renamed".to_string())
+    );
+}
+
+#[test]
 fn route_lines_projects_pr_link_metadata() {
     let routed = route_lines(
         r#"{"type":"pr-link","sessionId":"sid-1","prNumber":"42","prUrl":"https://github.com/acme/repo/pull/42","prRepository":"acme/repo"}"#,

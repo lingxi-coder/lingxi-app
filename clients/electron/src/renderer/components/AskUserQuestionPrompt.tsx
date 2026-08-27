@@ -43,8 +43,7 @@ export function AskUserQuestionPrompt({
 }: AskUserQuestionPromptProps) {
   const t = useT();
   const dialogRef = useRef<HTMLDivElement>(null);
-  const onCancelRef = useRef(onCancel);
-  onCancelRef.current = onCancel;
+  const promptHasFocus = useRef(false);
   const [current, setCurrent] = useState(0);
   const [answers, setAnswers] = useState<QuestionAnswer[]>(() => emptyAnswers(request));
   const [error, setError] = useState<string | null>(null);
@@ -59,16 +58,8 @@ export function AskUserQuestionPrompt({
     if (!request) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialogRef.current?.focus();
-    const keyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onCancelRef.current(request.request_id);
-      }
-    };
-    document.addEventListener('keydown', keyDown);
     return () => {
-      document.removeEventListener('keydown', keyDown);
-      previous?.focus();
+      if (promptHasFocus.current) previous?.focus();
     };
   }, [request]);
 
@@ -131,8 +122,14 @@ export function AskUserQuestionPrompt({
   return (
     <div
       role="dialog"
-      aria-modal="true"
       aria-labelledby="lingxi-ask-title"
+      onFocusCapture={() => { promptHasFocus.current = true; }}
+      onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        onCancel(request.request_id);
+      }}
       style={{
         position: 'absolute', inset: 0, zIndex: 70,
         display: 'flex', alignItems: 'center', justifyContent: 'center',

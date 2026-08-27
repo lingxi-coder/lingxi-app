@@ -175,6 +175,16 @@ fn custom_title_line(sid: Uuid, custom_title: &str) -> String {
     .unwrap()
 }
 
+fn mobile_empty_title_line(sid: Uuid, custom_title: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "type": "custom-title",
+        "sessionId": sid.to_string(),
+        "customTitle": custom_title,
+        "mobileEmptySession": 1,
+    }))
+    .unwrap()
+}
+
 fn ai_title_line(sid: Uuid, ai_title: &str) -> String {
     serde_json::to_string(&serde_json::json!({
         "type": "ai-title",
@@ -202,6 +212,45 @@ async fn summary_for_tip_leaf_becomes_picker_title() {
         .expect("list");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].title, "Refactor the JSONL parser");
+}
+
+#[tokio::test]
+async fn metadata_only_title_file_is_not_a_session() {
+    let sid = Uuid::new_v4();
+    let (temp, lingxi_home, cwd) =
+        setup_one(&[custom_title_line(sid, "Control Rename")], sid).await;
+    assert!(matches!(
+        list_recent_sessions(&lingxi_home, &cwd, 5, make_fs(temp.path())).await,
+        Err(LoaderError::EmptyDirectory)
+    ));
+}
+
+#[tokio::test]
+async fn mobile_empty_anchor_is_listed_with_zero_messages_and_title() {
+    let sid = Uuid::new_v4();
+    let (temp, lingxi_home, cwd) =
+        setup_one(&[mobile_empty_title_line(sid, "New mobile session")], sid).await;
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, make_fs(temp.path()))
+        .await
+        .expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].uuid, sid);
+    assert_eq!(rows[0].title, "New mobile session");
+    assert_eq!(rows[0].message_count, 0);
+}
+
+#[tokio::test]
+async fn later_unmarked_title_revokes_mobile_empty_anchor() {
+    let sid = Uuid::new_v4();
+    let lines = vec![
+        mobile_empty_title_line(sid, "New mobile session"),
+        custom_title_line(sid, "Renamed session"),
+    ];
+    let (temp, lingxi_home, cwd) = setup_one(&lines, sid).await;
+    assert!(matches!(
+        list_recent_sessions(&lingxi_home, &cwd, 5, make_fs(temp.path())).await,
+        Err(LoaderError::EmptyDirectory)
+    ));
 }
 
 #[tokio::test]
@@ -262,6 +311,42 @@ async fn plain_session_falls_back_to_first_user_message() {
         .expect("list");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].title, "what does this function do?");
+}
+
+#[tokio::test]
+async fn session_without_a_title_uses_uuid_prefix_fallback() {
+    let sid = Uuid::new_v4();
+    let line = serde_json::to_string(&serde_json::json!({
+        "type": "system",
+        "uuid": Uuid::new_v4().to_string(),
+        "parentUuid": null,
+        "sessionId": sid.to_string(),
+        "timestamp": "2026-05-25T12:00:00.000Z",
+        "cwd": "/cwd",
+        "version": "0.12.0",
+        "isSidechain": false,
+        "message": {"role": "system", "content": "hook result"},
+    }))
+    .unwrap();
+    let (temp, lingxi_home, cwd) = setup_one(&[line], sid).await;
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, make_fs(temp.path()))
+        .await
+        .expect("list");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title, sid.to_string()[..8]);
+    assert_eq!(rows[0].message_count, 0);
+}
+
+#[tokio::test]
+async fn autonomous_tick_session_uses_claude_display_label() {
+    let sid = Uuid::new_v4();
+    let lines = vec![user_line(sid, sid, "/cwd", "<tick>12:30 PM</tick>")];
+    let (temp, lingxi_home, cwd) = setup_one(&lines, sid).await;
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, make_fs(temp.path()))
+        .await
+        .expect("list");
+    assert_eq!(rows[0].title, "Autonomous session");
 }
 
 #[tokio::test]

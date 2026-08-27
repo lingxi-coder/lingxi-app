@@ -715,6 +715,48 @@ fun RootScreen(
             }
         }
     }
+
+    // Tapping a DRAFT card in the library resumes that shell's pinned init
+    // conversation instead of opening a details/preview page it has nothing to
+    // show on (design §D.3, and what iOS's `open(_:)` already does). A user who
+    // leaves the interview half-finished and taps back in must land in the SAME
+    // conversation.
+    //
+    // NOT the created-app landing above: no kickoff is sent here. That prompt
+    // opens the interview exactly once; re-sending it on every re-entry would
+    // restart an interview already in progress.
+    //
+    // `resumeEmpty = true` rather than a guessed message count. The library row
+    // carries no transcript length, and the engine's `resume_empty_session`
+    // replays a real transcript normally while ALSO bootstrapping the
+    // zero-message case that a plain `resume_session` rejects outright — so it
+    // is correct for a shell whose kickoff landed and for one whose did not.
+    LaunchedEffect(localAppsViewModel, chatViewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            localAppsViewModel.draftSessionLandings.collect { landing ->
+                showingApps = false
+                val target = landing.sessionId?.let { SessionRef(it, "") }
+                if (chatViewModel.sourceScope.value == ConversationScope.LocalApp(landing.appId)) {
+                    // Already inside this app: an in-place session switch, so
+                    // the engine source is not needlessly rebound.
+                    if (target == null) {
+                        chatViewModel.startNewSession()
+                    } else {
+                        drawerUi.selectSession(target.id)
+                        chatViewModel.openSession(target, empty = true)
+                    }
+                } else {
+                    switchEngineScope(
+                        engineScope = ConversationScope.LocalApp(landing.appId),
+                        project = null,
+                        target = target,
+                        newSession = target == null,
+                        resumeEmpty = true,
+                    )
+                }
+            }
+        }
+    }
     // Recover the last active Project after process start. The Activity-scoped
     // ChatViewModel survives rotation, so sourceProjectId prevents a needless
     // rebuild on configuration changes. A process-restored global Resume is

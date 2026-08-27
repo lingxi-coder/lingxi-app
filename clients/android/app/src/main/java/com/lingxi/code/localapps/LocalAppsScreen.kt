@@ -306,8 +306,9 @@ private fun EmptyApps(onCreate: () -> Unit) {
  * instead of its stored identity — [localAppCardText] is the single predicate,
  * shared with every other render point, and it is what keeps the engine's
  * non-localized `"untitled"` placeholder and the empty brief off this screen.
- * Tapping still opens the app (its pinned conversation is exactly where the
- * user needs to be) and deleting still works.
+ * Tapping stays a plain [LocalAppsAction.OpenApp]; the view model is what
+ * splits a draft (resume its pinned conversation) from a formed app (open its
+ * Details), so the predicate lives in exactly one place. Deleting still works.
  */
 @Composable
 private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit) {

@@ -132,6 +132,29 @@ class LocalAppsViewModel(
      */
     private var landingAwaitingPin: CreatedAppLanding? = null
 
+    /**
+     * Where tapping a DRAFT card in the library lands: the shell's own pinned
+     * init conversation — the interview that is going to define it.
+     *
+     * [sessionId] is null when the engine's best-effort init-session mint
+     * failed; a fresh conversation in the app's scope is still correct, for the
+     * same reason as [CreatedAppLanding] — the SCOPE roots the agent in the
+     * workspace, not the session.
+     *
+     * Deliberately a SEPARATE channel from [createdAppLandings]: that one's
+     * consumer sends the kickoff prompt, and re-sending it every time the user
+     * walks back into a half-finished interview would restart the interview.
+     */
+    data class DraftSessionLanding(
+        val appId: String,
+        val sessionId: String?,
+    )
+
+    private val draftSessionLandingChannel = Channel<DraftSessionLanding>(Channel.BUFFERED)
+
+    /** Where to take the user when a draft card is tapped; see [DraftSessionLanding]. */
+    val draftSessionLandings = draftSessionLandingChannel.receiveAsFlow()
+
     private val pendingCapabilityKinds = mutableMapOf<String, AppCapabilityKindDto>()
     private val queuedAuthorizations = ArrayDeque<LocalAppAuthorizationRequest>()
     private val uiControlGrants = mutableMapOf<String, LocalAppAuthorizationDecision>()
@@ -208,7 +231,7 @@ class LocalAppsViewModel(
             LocalAppsAction.Create -> createShellApp()
             is LocalAppsAction.Search -> _uiState.update { it.copy(query = action.query) }
             is LocalAppsAction.RequestWidget -> requestWidgetPin(action.appId)
-            is LocalAppsAction.OpenApp -> openApp(action.appId)
+            is LocalAppsAction.OpenApp -> openAppFromLibrary(action.appId)
             is LocalAppsAction.LoadAppSessions -> requestSessions(action.appId, action.offset)
             is LocalAppsAction.StartRuntime -> startRuntimeIfNeeded(action.appId)
             is LocalAppsAction.StopRuntime -> {
@@ -380,10 +403,42 @@ class LocalAppsViewModel(
     }
 
     /**
-     * Every app opens onto its Details screen with the Sessions tab selected:
-     * an app is a conversation scope, so its session catalog is the primary
-     * surface for `draft` and `ready` alike. The details snapshot and the
-     * first catalog page are requested together.
+     * Tapping a card in the library.
+     *
+     * A SHELL has no detail page worth showing — no brief, no surface, no
+     * runtime — and the one thing the user wants from it is the conversation
+     * that is going to define it. So a draft card RESUMES the app's pinned init
+     * session (§D.3 「点击进 pin 会话而非预览」), which is what makes leaving an
+     * interview half-finished and tapping back in land in the SAME
+     * conversation. A formed app opens its Details as before.
+     *
+     * Deliberately NOT folded into [openApp]: the `AppCreated` handler calls
+     * that directly while the record is still a shell whose pin has not been
+     * minted yet, so routing it through here would start a FRESH session
+     * without the kickoff and orphan the session the engine is about to pin —
+     * the same race iOS's `openCreatedAppIfNeeded` documents.
+     */
+    private fun openAppFromLibrary(appId: String) {
+        val app = _uiState.value.apps.firstOrNull { it.id == appId } ?: return
+        if (app.scaffolded) {
+            openApp(appId)
+            return
+        }
+        draftSessionLandingChannel.trySend(
+            DraftSessionLanding(appId = appId, sessionId = app.initSessionId),
+        )
+    }
+
+    /**
+     * Every FORMED app opens onto its Details screen with the Sessions tab
+     * selected: an app is a conversation scope, so its session catalog is the
+     * primary surface. The details snapshot and the first catalog page are
+     * requested together.
+     *
+     * Still reachable for a shell, but only from the create path
+     * ([openAppFromLibrary] routes a user's tap elsewhere): the freshly created
+     * record needs a screen behind the hand-off in case the scope switch is
+     * refused.
      */
     private fun openApp(appId: String) {
         if (_uiState.value.apps.none { it.id == appId }) return

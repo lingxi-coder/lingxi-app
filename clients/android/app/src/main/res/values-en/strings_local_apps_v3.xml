@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- English for values/strings_local_apps_v3.xml (see that file's header). -->
 <resources>
-    <string name="local_apps_create_brief_label">Describe the app you want in one line</string>
-    <string name="local_apps_create_brief_hint">The model will turn this into a short questionnaire to nail down the details.</string>
     <string name="local_apps_webview_upgrade_required">This Android System WebView cannot provide the secure local-app bridge. Update System WebView first.</string>
     <string name="local_apps_webview_untrusted_origin">Local apps can only open from a trusted loopback origin.</string>
     <string name="local_apps_webview_storage_cleanup_waiting">Safely clearing old browser data for this app address…</string>
@@ -26,5 +24,4 @@
     <string name="chat_task_status_cancelled">Background task %1$s cancelled</string>
     <string name="drawer_app_scope_label">App · %1$s</string>
     <string name="drawer_app_sessions_empty">This app has no sessions yet.</string>
-    <string name="local_apps_kickoff">I want to build a new local app.</string>
 </resources>

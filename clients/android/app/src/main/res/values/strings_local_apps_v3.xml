@@ -15,11 +15,13 @@
   toggle, all seven runtime capability prompts, and three session-catalog keys.
   Per the rule above they were DELETED here (generated output wins), which is
   also why the "runtime capability prompts" group no longer exists.
+
+  2026-08-24: the conversational create flow deleted the create dialog, so the
+  restored create-brief label/hint went with it, and the shell kickoff string
+  moved into clients/translations/*.json as local_apps_kickoff — it is now
+  generated into all five values*/strings.xml and no longer lives here.
 -->
 <resources>
-    <!-- Restored: create dialog (still live). -->
-    <string name="local_apps_create_brief_label">用一句话描述你想要的应用</string>
-    <string name="local_apps_create_brief_hint">AI 会据此生成一份问卷，帮助细化需求。</string>
     <!-- Restored: WebView bridge guardrails (still live). -->
     <string name="local_apps_webview_upgrade_required">当前 Android System WebView 不支持安全的本地应用 Bridge，请先更新 System WebView。</string>
     <string name="local_apps_webview_untrusted_origin">本地应用只能从受信任的回环地址打开。</string>
@@ -48,19 +50,4 @@
     <!-- New: drawer app-scope section. -->
     <string name="drawer_app_scope_label">应用 · %1$s</string>
     <string name="drawer_app_sessions_empty">这个应用还没有会话。</string>
-    <!--
-      Kickoff sent into a brand-new shell app's pinned conversation.
-
-      TEMPORARY HOME. Plan task 15b adds this key to clients/translations/*.json
-      and regenerates values*/strings.xml for all five locales; when it does, it
-      MUST delete this entry (and the values-en/ twin) or the resource merger
-      will fail on the duplicate — that duplicate is this file's documented
-      tripwire, not a surprise. It lives here today only so the Android module
-      keeps compiling between task 14 and task 15b.
-
-      Placeholder-free on purpose: a shell has no brief to interpolate, and the
-      retired local_apps_init_kickoff told the agent the shape and the name were
-      already fixed — which is exactly what this conversation exists to decide.
-    -->
-    <string name="local_apps_kickoff">我想做一个新的本地应用。</string>
 </resources>

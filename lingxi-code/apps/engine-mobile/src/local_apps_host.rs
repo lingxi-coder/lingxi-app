@@ -3886,7 +3886,17 @@ fn formal_workspace_contract(
 /// - "只有 `LocalAppScaffold` 对你有意义", because every other local-app tool
 ///   is gated off for an unformed app and will refuse;
 /// - the surface vocabulary, because the surface is IMMUTABLE once scaffolded,
-///   so it is the one decision the user has to make before anything is written.
+///   so it is the one decision the user has to make before anything is written;
+/// - "这一轮**不要用 `AskUserQuestion`**" on step 1, because `AskUserQuestion`
+///   renders a native picker and the opening turn has nothing to put in it.
+///   The model knows only that an app is wanted, so any option list it writes
+///   is a set of guesses at the user's idea, and the picker then collects a
+///   choice among those guesses INSTEAD of the free-text description every
+///   later step reads. The generic rule elsewhere ("问需求用
+///   `AskUserQuestion`") is right for a decision between namable options and
+///   wrong for the one turn that has none — which is why step 1 states the
+///   exception in the same breath as the tool, rather than leaving a reader to
+///   reconcile the two.
 fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
     format!(
         "# Local App（新建，尚未定形态）\n\n\
@@ -3896,14 +3906,19 @@ fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
          你现在的任务是引导用户，不是写代码。**你现在写下的任何源文件都会在脚手架落地时被删除**，\
          写了也是白写。\n\n\
          本地应用工具里，此刻只有 `LocalAppScaffold` 对你有意义；构建、安装依赖、运行时、\
-         界面检查那一类都会拒绝你并告诉你原因。问需求用 `AskUserQuestion`。\n\n\
+         界面检查那一类都会拒绝你并告诉你原因。\n\n\
          步骤：\n\
-         1. 先问用户想做什么。\n\
-         2. 据回答推断意图，用 `AskUserQuestion` 把提议的**名称**与**形态**交给用户确认或修改：\n\
+         1. **用普通对话文本**问用户想做什么，一句开放式的话，然后等他回答。\
+         这一轮**不要用 `AskUserQuestion`**：它弹的是选择器，而此刻你对这个应用一无所知，\
+         能填进选项里的只有你对用户想法的猜测——把猜测做成菜单，恰好挤掉了你真正需要的那段描述。\n\
+         2. 读他的描述，能自己定的就自己定，别把他已经说过的再问一遍。\
+         只有当某一点仍然悬着、**会改变最终做出来的东西**、而且是可以列出选项的选择时，\
+         才用 `AskUserQuestion` 问一轮（1-3 个聚焦问题）。描述已经说清楚的，直接进第 3 步。\n\
+         3. 用 `AskUserQuestion` 把提议的**名称**与**形态**交给用户确认或修改：\n\
          \u{20}  - `dom` —— 多屏界面（表单、列表、页面导航）\n\
          \u{20}  - `canvas` —— 单一绘制面（游戏、3D、可视化）\n\
-         3. 用户确认后调 `LocalAppScaffold`（`app_id` 用 `{id}`）。\n\
-         4. 重读本文件，按新合约继续。\n\n\
+         4. 用户确认后调 `LocalAppScaffold`（`app_id` 用 `{id}`）。\n\
+         5. 重读本文件，按新合约继续。\n\n\
          形态一旦落地不可更改，所以必须让用户确认，不要自作主张。\n",
         id = record.id,
     )
@@ -6638,6 +6653,54 @@ mod tests {
     fn repair_the_final_landing_step(root: &TempDir, app_id: &str) {
         let contract = workspace_of(root, app_id).join("LINGXI.md");
         fs::remove_dir_all(&contract).expect("free the contract path");
+    }
+
+    /// The opening turn of the interview must ask for a DESCRIPTION in ordinary
+    /// text, not present a picker.
+    ///
+    /// `AskUserQuestion` renders a native option sheet. On the opening turn the
+    /// model knows only that the user wants an app, so every option it could
+    /// offer is a guess at the user's own idea — and the sheet then collects a
+    /// choice among those guesses INSTEAD of the free-text description that
+    /// steps 2 and 3 both read. The user reported exactly this: the flow opened
+    /// by making them choose.
+    ///
+    /// Nothing else in this file would catch a regression. Step 1 reverting to
+    /// "用 `AskUserQuestion` 问用户想做什么" compiles, keeps `尚未定形态`, and
+    /// leaves every other contract test green, because they assert on the
+    /// header and on the formal contract that REPLACES this text. So this test
+    /// pins the two halves that carry the behaviour: that step 1 names ordinary
+    /// text, and that it names the tool only to forbid it there.
+    #[tokio::test]
+    async fn the_interview_opens_with_a_description_prompt_not_a_picker() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let guided = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+            .expect("read the guided contract");
+
+        assert!(
+            guided.contains("**用普通对话文本**问用户想做什么"),
+            "step 1 must ask for a description in ordinary text: {guided}"
+        );
+        assert!(
+            guided.contains("这一轮**不要用 `AskUserQuestion`**"),
+            "step 1 must forbid the picker on the opening turn: {guided}"
+        );
+        // The generic "问需求用 `AskUserQuestion`" line used to sit above the
+        // step list and contradicted step 1 outright. A model reading both
+        // resolves the contradiction back to the picker, so the unqualified
+        // form must not reappear.
+        assert!(
+            !guided.contains("问需求用 `AskUserQuestion`"),
+            "the unqualified rule contradicts step 1 and must stay removed: {guided}"
+        );
+        // The tool is still the right instrument once there are options to pick
+        // between — the name/surface confirmation. Forbidding it everywhere
+        // would be the opposite mistake.
+        assert!(
+            guided.contains("用 `AskUserQuestion` 把提议的**名称**与**形态**交给用户确认或修改"),
+            "the name/surface confirmation still belongs in a picker: {guided}"
+        );
     }
 
     /// The whole point of the flow: what the user confirmed in the interview

@@ -23,20 +23,34 @@ surface, an empty workspace, and an app-scoped conversation — and hands that
 conversation to you. Its `LINGXI.md` names the app id and says the app has no
 shape yet. Settling what the app IS is your work in that conversation:
 
-1. Ask the user what they want to build. Ask with `AskUserQuestion`, never as
-   unresolved questions in ordinary assistant text.
-2. From their answer, propose a display **name**, a one-line **brief**, and a
-   **surface** (`dom` or `canvas`, chosen by the rules below), and put all three
-   in ONE `AskUserQuestion` round for the user to confirm or edit. The surface
-   is immutable once committed, so it is the user's call to confirm, never an
+1. Open in ORDINARY ASSISTANT TEXT: ask what they want to build, in one short
+   open question, and wait for their answer. Do NOT use `AskUserQuestion` here.
+   That tool renders a picker, and on this turn you know nothing about the app,
+   so every option you could put in it is a guess at the user's own idea —
+   handing them a menu of your guesses replaces the description you actually
+   need. Their words in their own phrasing are the input to everything below,
+   and no option list can collect them. This one opening turn is the single
+   deliberate exception to the rule further down about unresolved questions in
+   ordinary text; from step 2 onward that rule holds without exception.
+2. Read what they wrote and settle whatever it already settles. Infer every
+   point the description and the host device context determine, state the
+   inference, and move on — do not ask back something they have already told
+   you. Ask ONE `AskUserQuestion` round, of one to three focused questions,
+   only for a point that is still open, would change what gets built, and is a
+   choice between options you can name. A description that already answers
+   everything material earns no clarifying round at all: go straight to step 3.
+3. Propose a display **name**, a one-line **brief**, and a **surface** (`dom` or
+   `canvas`, chosen by the rules below), and put all three in ONE
+   `AskUserQuestion` round for the user to confirm or edit. The surface is
+   immutable once committed, so it is the user's call to confirm, never an
    assumption you commit on their behalf.
-3. Only after the user confirms, call `LocalAppScaffold`:
+4. Only after the user confirms, call `LocalAppScaffold`:
 
 ```json
 {"app_id":"<the id LINGXI.md names>","name":"<confirmed display name>","brief":"<confirmed one-line brief>","surface":"dom"}
 ```
 
-4. Re-read `LINGXI.md`. `LocalAppScaffold` overwrites the guided text with the
+5. Re-read `LINGXI.md`. `LocalAppScaffold` overwrites the guided text with the
    app's formal workspace contract — editable roots, host-managed files, the
    entry points that now exist, and which build workflow this surface takes —
    and that contract, not this step list, governs everything after it.
@@ -81,6 +95,10 @@ it. Inside an app that already has a shape, read `LINGXI.md` and sharpen the
 brief it carries. In a global chat, gather the product, screens, data,
 capabilities, and visual intent before creating the app. When a material decision is unresolved, call `AskUserQuestion`
 with one short round of one to three focused questions. Never ask unresolved questions in ordinary assistant text.
+The one exception is the opening turn of a shell conversation (step 1 above),
+where you have no options to offer and need the user's own description; that
+exception covers that turn only, and does not extend to any later question in
+the same conversation.
 If the brief and host device context already determine the answer, infer it,
 state the inference, and continue instead of blocking. Then show one confirmable
 specification containing:

@@ -118,6 +118,7 @@ mod tests {
     use crate::catalog::models_dev::ProviderSlice;
 
     const DEEPSEEK: &str = include_str!("../../data/models-dev/deepseek.json");
+    const ZAI: &str = include_str!("../../data/models-dev/zai.json");
 
     fn deepseek() -> ProviderSlice {
         serde_json::from_str(DEEPSEEK).unwrap()
@@ -151,6 +152,23 @@ mod tests {
             .get("deepseek-v4-flash")
             .expect("current DeepSeek text model");
         assert!(!to_capabilities(text_only).vision);
+    }
+
+    #[test]
+    fn zai_glm_53_flash_is_native_multimodal() {
+        let slice: ProviderSlice = serde_json::from_str(ZAI).unwrap();
+        let model = slice
+            .models
+            .get("glm-5.3-flash")
+            .expect("current Z.AI multimodal model");
+        let profile = to_model_profile(model);
+
+        assert!(profile.capabilities.vision);
+        assert!(profile.capabilities.documents);
+        assert!(profile.capabilities.supports_multimodal());
+        assert!(profile.capabilities.structured_output);
+        assert_eq!(profile.metadata.context_window_tokens, Some(1_000_000));
+        assert_eq!(profile.metadata.max_output_tokens, Some(131_072));
     }
 
     #[test]

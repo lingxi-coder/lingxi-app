@@ -55,6 +55,7 @@ kimi	kimi-k3
 kimi-code	k3
 zhipuai-coding-plan	glm-5.3
 zai	glm-5.3
+zai	glm-5.3-flash
 openai	gpt-5.6-sol
 openai	gpt-5.6-terra
 openai	gpt-5.6-luna

@@ -1415,7 +1415,7 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
                 | "gpt-5.6-terra"
                 | "gpt-5.6-luna"
         ),
-        "zai" => request_model == "glm-5.3",
+        "zai" => matches!(request_model, "glm-5.3" | "glm-5.3-flash"),
         // The profile name is "glm-coding" (catalog presets); "zhipuai-coding-plan"
         // is only the vendored slice's filename.
         "glm-coding" => request_model == "glm-5.3",

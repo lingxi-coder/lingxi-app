@@ -555,6 +555,7 @@ mod provider_boot_default_tests {
         assert!(!is_curated_model("anthropic", "claude-opus-4-8"));
         assert!(is_curated_model("glm-coding", "glm-5.3"));
         assert!(is_curated_model("zai", "glm-5.3"));
+        assert!(is_curated_model("zai", "glm-5.3-flash"));
         assert!(is_curated_model("kimi", "kimi-k3"));
         assert!(is_curated_model("kimi-code", "k3"));
     }

@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(count("kimi"), 10);
         assert_eq!(count("kimi-code"), 4);
         assert_eq!(count("glm-coding"), 9);
-        assert_eq!(count("zai"), 15);
+        assert_eq!(count("zai"), 16);
         // OpenAI API and ChatGPT OAuth profiles intentionally share the latest
         // GPT-5.6 ids; callers qualify the profile when choosing a route.
         assert_eq!(count("openai"), 55);

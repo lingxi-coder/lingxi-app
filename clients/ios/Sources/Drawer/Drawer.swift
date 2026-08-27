@@ -155,8 +155,11 @@ struct Drawer: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
+                    // `displayName`, never `name`: an unscaffolded shell's
+                    // stored name is the engine's "untitled" placeholder, and
+                    // this caption is the largest place it would surface.
                     Text(activeScope.isLocalApp
-                        ? (activeApp?.name ?? activeScope.appID ?? "")
+                        ? (activeApp?.displayName ?? activeScope.appID ?? "")
                         : (projectStore.activeProject?.record.name ?? String(localized: "drawer_global_session")))
                         .font(.system(size: 16, weight: .bold, design: .rounded))
                         .foregroundStyle(t.text)
@@ -336,8 +339,12 @@ struct Drawer: View {
         }
     }
 
+    /// Search over the SAME text the drawer renders — `displayName`, matching
+    /// `LocalAppsStore.filteredApps`. Filtering on the raw `name` would let a
+    /// query match a shell's engine placeholder and return a row whose visible
+    /// title contains nothing the user typed.
     private var localApps: [LocalAppSummary] {
-        localAppsStore.apps.filter { matches($0.name, $0.workflow.label) }
+        localAppsStore.apps.filter { matches($0.displayName, $0.workflow.label) }
     }
 
     private var appsSection: some View {
@@ -370,7 +377,9 @@ struct Drawer: View {
                 Image(systemName: localAppIconSystemName)
                     .font(.system(size: 12))
                     .foregroundColor(t.accent)
-                Text(activeApp?.name ?? appID)
+                // `displayName` for the same reason as `activeScopeCaption`:
+                // a shell must never show its placeholder name.
+                Text(activeApp?.displayName ?? appID)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(t.text3)
                     .lineLimit(1)

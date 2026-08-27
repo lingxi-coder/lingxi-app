@@ -398,24 +398,26 @@ final class LocalAppsStore {
     /// name and the surface inside the app's own conversation and
     /// `LocalAppScaffold` lands the scaffolding only after the user confirms.
     ///
-    /// `conversationID` is the conversation the user pressed "+" from. The
-    /// engine forks its history into the new workspace, so the interview
-    /// starts with whatever the user was already talking about; a fork that
-    /// has nothing to copy degrades to an empty anchor engine-side.
+    /// Sends NO conversation binding, deliberately. The wire field exists, but
+    /// a library-origin create provably discards it: `handle_create_app`
+    /// (`host.rs`) derives the record's binding from
+    /// `AppCreateOrigin::conversation_binding`, whose `Library` arm returns
+    /// `None` for ANY input, and `mint_app_init_session` forks a source chat
+    /// only when `record.conversation_id` is `Some`. So the "+" button's app
+    /// always starts from an empty anchor session; forwarding the active
+    /// conversation here would be a value the engine throws away. Android's
+    /// `createShellApp` sends `conversationId = null` for the same reason.
     ///
     /// Returns whether the command reached the engine — NOT whether the app
     /// was created. The outcome arrives out of band on `AppCreated` /
     /// `AppOperationFailed`, correlated by `request_id`.
-    func createShellApp(conversationID: String? = nil) async -> Bool {
+    func createShellApp() async -> Bool {
         guard pendingCreateRequestID == nil else {
             errorMessage = String(localized: "local_apps_error_create_in_progress")
             return false
         }
         #if canImport(engine_mobileFFI)
             let requestID = UUID().uuidString
-            let trimmedConversation = conversationID?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let conversation = trimmedConversation.flatMap { $0.isEmpty ? nil : $0 }
             // Armed BEFORE the command goes out: `send` awaits the engine, and
             // the engine can emit `AppCreated` from inside that call. Arming
             // afterwards drops the event this whole mechanism exists to catch.
@@ -432,7 +434,9 @@ final class LocalAppsStore {
                     brief: "",
                     gitEnabled: true,
                     workflowModel: nil,
-                    conversationId: conversation,
+                    // See the doc comment: a `.library` origin binds no
+                    // conversation, whatever is sent here.
+                    conversationId: nil,
                     // The shape is decided when the scaffold lands, not now.
                     surface: nil,
                     mode: .shell,

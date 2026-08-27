@@ -12,12 +12,20 @@ func dataField(id: String) -> LocalAppDataField {
 }
 
 #if canImport(engine_mobileFFI)
+    /// A wire record for the general-purpose tests: a FORMED app.
+    ///
+    /// `scaffolded` defaults to `true` because that is what every caller of
+    /// this fixture means — an app with a real name and a real brief. The
+    /// draft-shell tests do NOT use this default: they build their records
+    /// through `LocalAppsStoreTests.shellRecord`, which states `scaffolded`
+    /// explicitly, so no shell assertion can pass by inheriting a default.
     func appRecord(
         id: String,
         name: String,
         brief: String = "简介",
         workflowState: AppWorkflowStateDto = .ready,
-        initSessionId: String? = nil
+        initSessionId: String? = nil,
+        scaffolded: Bool = true
     ) -> AppRecordDto {
         AppRecordDto(
             id: id,
@@ -29,7 +37,8 @@ func dataField(id: String) -> LocalAppDataField {
             workflowState: workflowState,
             conversationId: nil,
             initSessionId: initSessionId,
-            workspaceRel: "apps/\(id)/workspace"
+            workspaceRel: "apps/\(id)/workspace",
+            scaffolded: scaffolded
         )
     }
 

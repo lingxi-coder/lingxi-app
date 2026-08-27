@@ -8,8 +8,8 @@ final class LocalAppsStoreTests: XCTestCase {
         let store = LocalAppsStore()
         #if canImport(engine_mobileFFI)
             store.handle(event: .appsChanged(apps: [
-                app(id: "tracker", name: "订单跟踪", brief: "跟踪订单状态"),
-                app(id: "metrics", name: "Metrics", brief: "查看运营指标"),
+                appRecord(id: "tracker", name: "订单跟踪", brief: "跟踪订单状态"),
+                appRecord(id: "metrics", name: "Metrics", brief: "查看运营指标"),
             ]))
         #endif
 
@@ -547,13 +547,13 @@ final class LocalAppsStoreTests: XCTestCase {
             let store = LocalAppsStore(websiteDataStoreRegistry: registry)
             var pendingAtSubmission: [LocalAppWebsiteDataStoreRegistry.PendingCleanup] = []
             store.configure { _ in pendingAtSubmission = registry.pendingCleanups }
-            store.handle(event: .appsChanged(apps: [app(id: "tracker", name: "Tracker")]))
+            store.handle(event: .appsChanged(apps: [appRecord(id: "tracker", name: "Tracker")]))
 
             let submitted = await store.delete(appID: "tracker")
             XCTAssertTrue(submitted)
             XCTAssertEqual(pendingAtSubmission.count, 1, "the cleanup journal must precede the delete command")
 
-            store.handle(event: .appsChanged(apps: [app(id: "tracker", name: "Tracker")]))
+            store.handle(event: .appsChanged(apps: [appRecord(id: "tracker", name: "Tracker")]))
             try await Task.sleep(for: .milliseconds(20))
             XCTAssertTrue(removedIdentifiers.isEmpty)
 
@@ -1014,7 +1014,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
             store.handle(event: .appsChanged(apps: [
-                app(id: "tracker", name: "Tracker", brief: "跟踪任务"),
+                appRecord(id: "tracker", name: "Tracker", brief: "跟踪任务"),
             ]))
             store.handle(event: .appRuntimeChanged(
                 appId: "tracker",
@@ -1396,7 +1396,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
             store.handle(event: .appsChanged(apps: [
-                app(id: "tracker", name: "Tracker", brief: "跟踪任务"),
+                appRecord(id: "tracker", name: "Tracker", brief: "跟踪任务"),
             ]))
             store.handle(event: .appRuntimeChanged(
                 appId: "tracker",
@@ -1887,7 +1887,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            let started = await store.createShellApp(conversationID: "conv-77")
+            let started = await store.createShellApp()
 
             XCTAssertTrue(started)
             XCTAssertEqual(submitted.count, 1)
@@ -1900,33 +1900,17 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(brief, "", "a shell has no brief — that is what the interview is for")
             XCTAssertTrue(gitEnabled, "the default, not a form toggle")
             XCTAssertNil(workflowModel, "the model picker went with the form")
-            XCTAssertEqual(
-                conversationId, "conv-77",
-                "the conversation the user pressed + from, so the engine can fork its history")
+            XCTAssertNil(
+                conversationId,
+                "a .library-origin create binds no conversation: "
+                    + "AppCreateOrigin::conversation_binding returns None for Library "
+                    + "whatever is sent, so a non-nil value would be discarded")
             XCTAssertNil(
                 surface, "the shape is decided when the scaffold lands, not now")
             XCTAssertEqual(mode, .shell, "no scaffold may be laid down by this command")
             let key = try XCTUnwrap(requestId, "without a correlation key nothing can be claimed")
             XCTAssertNotNil(
                 UUID(uuidString: key), "the key must be a client-generated UUID, got \(key)")
-        }
-
-        /// A blank conversation id is sent as `nil`, not as `""`.
-        ///
-        /// The engine parses `conversation_id` as a uuid to fork from; an
-        /// empty string is not "no conversation", it is a parse failure that
-        /// happens to degrade the same way. Say `nil` and mean it.
-        func testAShellCreateWithNoActiveConversationSendsNilNotEmptyString() async throws {
-            let store = LocalAppsStore()
-            var submitted: [ClientCommand] = []
-            store.configure { command in submitted.append(command) }
-
-            _ = await store.createShellApp(conversationID: "   ")
-
-            guard case let .createApp(_, _, _, _, _, conversationId, _, _, _) =
-                try XCTUnwrap(submitted.first)
-            else { return XCTFail("expected CreateApp, got \(submitted)") }
-            XCTAssertNil(conversationId)
         }
 
         /// Only the `AppCreated` carrying OUR request id is claimed.
@@ -1942,7 +1926,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp(conversationID: "conv-1")
+            _ = await store.createShellApp()
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
 
             let theirs = shellRecord(id: "theirs", name: "untitled")
@@ -1970,7 +1954,7 @@ final class LocalAppsStoreTests: XCTestCase {
             let store = LocalAppsStore()
             store.configure { _ in }
 
-            _ = await store.createShellApp(conversationID: nil)
+            _ = await store.createShellApp()
             let agents = shellRecord(id: "agents", name: "untitled")
             store.handle(event: .appEvent(event: .appCreated(record: agents, requestId: nil)))
             store.handle(event: .appEvent(event: .appRecordChanged(record: agents)))
@@ -1992,7 +1976,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp(conversationID: "conv-1")
+            _ = await store.createShellApp()
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
             let created = shellRecord(id: "notes", name: "untitled")
             store.handle(event: .appEvent(event: .appCreated(record: created, requestId: key)))
@@ -2021,7 +2005,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp(conversationID: nil)
+            _ = await store.createShellApp()
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
             let created = shellRecord(id: "notes", name: "untitled")
             store.handle(event: .appEvent(event: .appCreated(record: created, requestId: key)))
@@ -2060,7 +2044,7 @@ final class LocalAppsStoreTests: XCTestCase {
             store.createResultTimeout = .milliseconds(30)
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp(conversationID: nil)
+            _ = await store.createShellApp()
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
             try await Task.sleep(for: .milliseconds(300))
 
@@ -2079,7 +2063,7 @@ final class LocalAppsStoreTests: XCTestCase {
                 "a create that already timed out must not hijack the user later")
 
             // …and the store is usable again rather than latched shut.
-            let again = await store.createShellApp(conversationID: nil)
+            let again = await store.createShellApp()
             XCTAssertTrue(again, "the timeout is a stop-loss, not a permanent latch")
         }
 
@@ -2093,7 +2077,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp(conversationID: nil)
+            _ = await store.createShellApp()
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
 
             await store.refreshAfterEngineRebind()
@@ -2121,7 +2105,7 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            _ = await store.createShellApp(conversationID: nil)
+            _ = await store.createShellApp()
             let key = try XCTUnwrap(sentCreateRequestID(submitted))
 
             store.handle(event: .appOperationFailed(
@@ -2136,7 +2120,7 @@ final class LocalAppsStoreTests: XCTestCase {
             _ = store.consumeCreatedAppLanding()
 
             submitted.removeAll()
-            _ = await store.createShellApp(conversationID: nil)
+            _ = await store.createShellApp()
             let second = try XCTUnwrap(sentCreateRequestID(submitted))
             store.handle(event: .appOperationFailed(
                 appId: nil, code: .io, message: "创建失败", requestId: second))
@@ -2156,8 +2140,8 @@ final class LocalAppsStoreTests: XCTestCase {
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            let first = await store.createShellApp(conversationID: nil)
-            let second = await store.createShellApp(conversationID: nil)
+            let first = await store.createShellApp()
+            let second = await store.createShellApp()
 
             XCTAssertTrue(first)
             XCTAssertFalse(second, "only one create may be in flight at a time")
@@ -2166,6 +2150,32 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(
                 store.errorMessage,
                 String(localized: "local_apps_error_create_in_progress"))
+        }
+
+        /// The kickoff message resolves to real copy, in every locale the
+        /// catalog carries.
+        ///
+        /// This is the ONLY thing that can catch a mistyped localization key:
+        /// `String(localized:)` returns the key itself when it is absent, so a
+        /// wrong key compiles, runs, and sends `local_apps_kickoff_message` to
+        /// the model as the user's opening line — which is exactly what this
+        /// branch did until the key was corrected. Asserted on
+        /// `LocalAppKickoff.message`, the same value `RootView`'s
+        /// `openCreatedAppSession` sends.
+        func testTheKickoffMessageResolvesToRealCopy() {
+            let message = LocalAppKickoff.message
+            XCTAssertFalse(message.isEmpty)
+            // Compared against the key IN USE, not a hardcoded spelling: an
+            // assertion against a literal `"local_apps_kickoff"` passes for
+            // any OTHER mistyped key, which is precisely the defect being
+            // guarded. Verified by breaking the key on purpose and watching
+            // this line fail.
+            XCTAssertNotEqual(
+                message, LocalAppKickoff.key,
+                "the key fell through as itself — it is missing from the catalog")
+            XCTAssertFalse(
+                message.contains("%@"),
+                "a shell has no brief to interpolate: the copy must be placeholder-free")
         }
 
         // ── Draft-state rendering ─────────────────────────────────────────

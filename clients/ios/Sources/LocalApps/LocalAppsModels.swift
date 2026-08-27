@@ -22,6 +22,38 @@ enum LocalAppsDistributionMode: String, Sendable {
 /// category taxonomy to key an icon off of.
 let localAppIconSystemName = "app.badge"
 
+/// The first message the conversational create flow sends on the user's behalf,
+/// once the new shell's init session is live.
+///
+/// Named here rather than written as a literal at the call site so a test can
+/// assert the exact string that gets SENT. Nothing in Swift fails to compile
+/// over a missing localization key — this branch shipped a call site reading
+/// `local_apps_kickoff_message`, a key in no catalog, which would have sent the
+/// raw key as the user's first message — so the only way this can be checked at
+/// all is for the value to be reachable from a test.
+enum LocalAppKickoff {
+    /// The catalog key. Shared with Android (`R.string.local_apps_kickoff`), so
+    /// the copy is one sentence maintained once for both clients.
+    ///
+    /// A plain `String` rather than a `String.LocalizationValue` literal so the
+    /// test can compare the RESOLVED copy against the key that produced it. A
+    /// test comparing against a hardcoded `"local_apps_kickoff"` passes for a
+    /// mistyped key — it was written that way first, and a run with the key
+    /// deliberately broken passed.
+    static let key = "local_apps_kickoff"
+
+    /// The resolved copy. Placeholder-free on purpose: a shell has no brief to
+    /// interpolate — finding out what the user wants is the whole job of the
+    /// conversation this message opens.
+    ///
+    /// `String(localized:)` returns the KEY when the key is absent, so an
+    /// unresolved key is silent at build time and at run time. The only guard
+    /// is `testTheKickoffMessageResolvesToRealCopy`.
+    static var message: String {
+        String(localized: String.LocalizationValue(stringLiteral: key))
+    }
+}
+
 struct LocalAppSummary: Identifiable, Hashable, Sendable {
     let id: String
     var name: String

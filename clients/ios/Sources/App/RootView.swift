@@ -533,7 +533,6 @@ struct RootView: View {
             LocalAppsRootView(
                 store: localAppsStore,
                 initialAppID: appID,
-                currentConversationID: activeConversationIDForAppCreate,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
                 onNewAppSession: startNewAppSession
@@ -570,7 +569,6 @@ struct RootView: View {
             LocalAppsRootView(
                 store: localAppsStore,
                 initialAppID: appID,
-                currentConversationID: activeConversationIDForAppCreate,
                 onDismiss: { navigation.closePresentedRoute() },
                 onOpenAppSession: openAppSession,
                 onNewAppSession: startNewAppSession
@@ -624,14 +622,6 @@ struct RootView: View {
         )
     }
 
-    /// The conversation a "+" create forks its history from — the one the user
-    /// is looking at. `nil` when there is no session id yet, in which case the
-    /// engine anchors an empty conversation in the new app's workspace.
-    private var activeConversationIDForAppCreate: String? {
-        let trimmed = activeSession.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
     /// The create-flow landing: same as `openAppSession`, plus the queued
     /// kickoff message that starts the create-local-app flow once the empty
     /// init session is live.
@@ -640,10 +630,16 @@ struct RootView: View {
         sessionID: String?
     ) {
         navigation.closePresentedRoute()
-        // Placeholder-free and identical on both platforms: a shell has no
-        // brief to interpolate — finding out what the user wants is the whole
-        // job of the conversation this message opens.
-        let kickoff = String(localized: "local_apps_kickoff_message")
+        // The key is `local_apps_kickoff`, the ONE key both clients read
+        // (Android: `R.string.local_apps_kickoff`, `RootScreen.kt`), so the
+        // copy cannot drift per platform. Held in `LocalAppKickoff` rather
+        // than spelled here so `testTheKickoffMessageResolvesToRealCopy` can
+        // assert the string this line actually sends: nothing in Swift fails
+        // to compile over a missing localization key, and this call site spent
+        // this branch reading `local_apps_kickoff_message` — a key in no
+        // catalog, which would have sent the raw key as the user's first
+        // message.
+        let kickoff = LocalAppKickoff.message
         // The library consumed its one-shot signal to call this, so a refused
         // switch would lose the created app with nothing left to re-arm it.
         // `switchScope` refuses only while another switch is in flight, so

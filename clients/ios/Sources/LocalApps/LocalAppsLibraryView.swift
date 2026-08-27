@@ -8,13 +8,6 @@ enum LocalAppsRoute: Hashable {
 struct LocalAppsRootView: View {
     @Bindable var store: LocalAppsStore
     let initialAppID: String?
-    /// The conversation the user is in right now, forwarded to `CreateApp` so
-    /// the engine forks its history into the new app's workspace. `nil` when
-    /// there is nothing to fork.
-    ///
-    /// The model-picker parameters this replaced existed ONLY to feed the
-    /// deleted create form.
-    let currentConversationID: String?
     let onDismiss: () -> Void
     /// Called with `(appID, sessionUUID)` when the user taps a row of the
     /// app's session catalog. RootView dismisses this cover and switches the
@@ -31,7 +24,6 @@ struct LocalAppsRootView: View {
             LocalAppsLibraryScreen(
                 store: store,
                 path: $path,
-                currentConversationID: currentConversationID,
                 onDismiss: onDismiss,
                 onOpenAppSession: onOpenAppSession,
                 onNewAppSession: onNewAppSession
@@ -194,7 +186,6 @@ private struct LocalAppsLibraryScreen: View {
     @Environment(\.theme) private var theme
     @Bindable var store: LocalAppsStore
     @Binding var path: [LocalAppsRoute]
-    let currentConversationID: String?
     let onDismiss: () -> Void
     let onOpenAppSession: (String, String) -> Void
     let onNewAppSession: (String) -> Void
@@ -329,7 +320,7 @@ private struct LocalAppsLibraryScreen: View {
     private func createShellApp() async {
         guard !creating else { return }
         creating = true
-        _ = await store.createShellApp(conversationID: currentConversationID)
+        _ = await store.createShellApp()
         creating = false
     }
 

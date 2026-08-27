@@ -594,11 +594,30 @@ pub(crate) fn scaffold_workspace_initialized(
 /// The workspace entries a first scaffold KEEPS. Everything else at the
 /// workspace top level is removed.
 ///
-/// Not a taste judgement: this is exactly the set of top-level names that
-/// `permission::workspace_lease::host_owned_relative` refuses to let an app's
-/// `Edit(./**)` grant reach. Every OTHER top-level entry is agent-writable, so
-/// on a first scaffold it can only be code written before the user confirmed
-/// anything — which is precisely what must not reach the real app.
+/// What makes wiping everything else SAFE is not a property of the preserved
+/// set, it is a property of when a first scaffold runs. A shell's workspace is
+/// created by `write_guided_contract_value`, which "lays down no source, stamps
+/// no surface, and touches nothing but `workspace/LINGXI.md`". So at landing
+/// time every top-level entry other than `.lingxi/` and `LINGXI.md` was
+/// necessarily written AFTER creation and BEFORE the user confirmed anything —
+/// which is precisely what must not reach the real app. (`node_modules` is the
+/// third: it is written by the host's own background install, not by the
+/// agent.)
+///
+/// ⛔ Do NOT restate this as "the preserved set is the host-owned set". The
+/// invariant runs in ONE direction only:
+///
+///   every PRESERVED name is host-owned AND holds state the seed cannot
+///   reproduce
+///
+/// and NOT the converse. `permission::workspace_lease::host_owned_relative`
+/// also returns `true` for `package.json`, `index.html`, `.gitignore`,
+/// `jsconfig.json`, `pnpm-lock.yaml`, every `vite.config.*` spelling,
+/// `lib/lingxi-provider.jsx` and `styles/foundation.css` — none of which are
+/// preserved, and none of which need to be: `VITE_LOCKED_FILES` re-seeds them
+/// byte-for-byte on the very next lines of
+/// [`scaffold_workspace_initialized`]. Deleting and re-seeding them is the
+/// point; the three names below are the ones that CANNOT be re-seeded.
 ///
 /// `.git` is deliberately absent. It is not host-owned, so a checkpoint taken
 /// during the interview would carry those same pre-confirmation bytes and

@@ -931,8 +931,20 @@ impl AppService {
     }
 
     /// Create a new app record in the given [`CreateMode`], with no Git/model
-    /// overrides and no pre-commit initializer — the shortest wrapper, and
-    /// the one [`CreateMode::Shell`] callers (the "+" button) use.
+    /// overrides and no pre-commit initializer — the shortest wrapper.
+    ///
+    /// ⛔ TEST-ONLY CONVENIENCE. Every call site is inside a `#[cfg(test)]`
+    /// module, and production must not adopt it: the initializer is hardcoded
+    /// to a no-op, so a `CreateMode::Shell` create through here lands an app
+    /// whose workspace has NO `LINGXI.md`. That file is the only channel that
+    /// reaches the model on every turn, so without it the interview never
+    /// starts and the agent writes source that `LocalAppScaffold` then wipes.
+    ///
+    /// The "+" button goes through `handle_create_app` (engine-mobile
+    /// `host.rs`) → [`Self::create_app_with_git_and_workflow_model_and_initializer`]
+    /// with a real initializer that calls `write_guided_contract_value`.
+    /// Tests use this wrapper because they assert on the RECORD, and a shell
+    /// record is identical either way.
     pub async fn create_app_with_mode(
         &self,
         name: Option<&str>,

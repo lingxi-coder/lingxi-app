@@ -492,15 +492,36 @@ pub(crate) struct SessionCatalog {
 }
 
 /// The latest effective `custom-title` for `session_id` in a transcript: the
-/// title it resolves to, and whether that record still carries mobile's own
-/// `mobileEmptySession` marker.
+/// title it resolves to, and whether that title is still one MOBILE wrote —
+/// i.e. whether the user has never renamed this session themselves.
 ///
 /// "Latest effective" mirrors [`session::jsonl::reader`] exactly: it folds
 /// every `custom-title` line whose `sessionId` matches into one map slot, so
 /// the LAST one on disk wins, and a record whose `customTitle` is not a string
 /// is skipped (the reader's `and_then(Value::as_str)` drops it too).
+///
+/// ⚠️ The second half deliberately does NOT read the marker off the last
+/// record. It cannot: the transcript writer's own 32 KiB metadata backstop
+/// re-emits the CURRENT title as a PLAIN, unmarked `custom-title`
+/// (`session::jsonl::re_append::plan_re_append` rebuilds the record from
+/// `{type, customTitle, sessionId}` and has no marker to carry), so in any
+/// interview long enough to trip it the last record is unmarked even though
+/// nobody renamed anything. Reading the marker off the last record alone made
+/// [`reconcile_app_init_session_title`] unreachable in production — see that
+/// function and [`latest_custom_title_is_mobile_placeholder`].
+///
+/// So the scan tracks the ANCHOR — the title on the most recent marked record
+/// — and treats an unmarked record as a user rename only when its text
+/// DIFFERS from the anchor. A backstop echo copies the anchor's text verbatim;
+/// a `/rename` writes something else.
 fn latest_custom_title(transcript: &str, session_id: &str) -> Option<(String, bool)> {
-    let mut latest = None;
+    let mut latest: Option<String> = None;
+    // The title on the most recent record that carried the mobile marker.
+    // `None` until one is seen — an unmarked record BEFORE any anchor
+    // (a `session::branch` fork's title, say) is superseded by the anchor and
+    // must not poison it.
+    let mut anchor: Option<String> = None;
+    let mut user_renamed = false;
     for line in transcript.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -514,10 +535,18 @@ fn latest_custom_title(transcript: &str, session_id: &str) -> Option<(String, bo
         let Some(title) = value.get("customTitle").and_then(Value::as_str) else {
             continue;
         };
-        let mobile_marker = value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1);
-        latest = Some((title.to_string(), mobile_marker));
+        if value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1) {
+            // Mobile is the only writer that marks, and it only marks a title
+            // it was entitled to write, so its own record re-establishes the
+            // baseline.
+            anchor = Some(title.to_string());
+            user_renamed = false;
+        } else if anchor.as_deref().is_some_and(|anchored| anchored != title) {
+            user_renamed = true;
+        }
+        latest = Some(title.to_string());
     }
-    latest
+    latest.map(|title| (title, anchor.is_some() && !user_renamed))
 }
 
 /// Whether this session's title is still one MOBILE wrote, i.e. the user has
@@ -529,17 +558,40 @@ fn latest_custom_title(transcript: &str, session_id: &str) -> Option<(String, bo
 /// channel with the same shape; the only discriminator is the extra
 /// `"mobileEmptySession":1` field that
 /// [`session::jsonl::writer::JsonlWriter::append_mobile_empty_session`] adds.
-/// Last record wins, so one ordinary `custom-title` anywhere after the anchor
-/// turns this `false` and keeps it `false` forever — which is the point.
+/// An ordinary `custom-title` carrying text mobile never wrote, anywhere after
+/// the anchor, turns this `false` and keeps it `false` — which is the point.
+///
+/// ⛔ It is NOT enough to look at the marker on the LAST record, and that
+/// mistake made this whole path dead code in production. `JsonlWriter`'s
+/// metadata backstop fires once
+/// [`session::jsonl::re_append::METADATA_REAPPEND_BACKSTOP_BYTES`] (32 KiB)
+/// have been appended, re-emitting the current title as a PLAIN `custom-title`
+/// — [`session::jsonl::re_append::plan_re_append`] rebuilds the record from
+/// `{type, customTitle, sessionId}` and has no marker to carry. Worse, mobile
+/// keeps ONE writer across sessions and `JsonlWriter::retarget` does not reset
+/// that counter, so a user who chatted before pressing "+" can trip the
+/// backstop on the interview's very FIRST append. An interview therefore
+/// strips the marker as a matter of course, and a last-record test would make
+/// every app created through this flow keep `untitled` forever.
+///
+/// So [`latest_custom_title`] anchors on the most recent MARKED record and
+/// only counts a LATER unmarked record as a user rename when its text differs
+/// from that anchor. A backstop echo copies the anchor verbatim; a `/rename`
+/// does not.
+///
+/// The one case this cannot separate is a user who runs `/rename` and types
+/// the placeholder string EXACTLY: `append_custom_title` then emits a record
+/// byte-identical (modulo timestamp) to a backstop echo, so no reader can tell
+/// them apart. Clause 3 of [`reconcile_app_init_session_title`] still declines
+/// whenever the title already equals `record.name`, so the residue is a user
+/// who deliberately renamed their session to `untitled` and then confirmed a
+/// different app name.
 ///
 /// Known cases where this declines for a session the user never touched. The
 /// bias is deliberate and one-directional: a false negative costs a stale
 /// title, a false positive overwrites something a user typed.
 /// - a transcript with no `custom-title` at all — nothing this host anchored,
 ///   so nothing for it to reconcile;
-/// - a transcript long enough to have tripped the writer's 32 KiB metadata
-///   re-append backstop, which re-emits the adopted title as a PLAIN
-///   `custom-title` without the marker;
 /// - a CHAT-ORIGIN app, whose init session is forked by
 ///   `session::branch::create_branch_to_cwd`. That fork writes its own
 ///   unmarked `custom-title` (from `record.name`, i.e. the placeholder), so a
@@ -564,9 +616,12 @@ pub(crate) fn latest_custom_title_is_mobile_placeholder(
 /// 1. `record.scaffolded` — an app still in its interview is SUPPOSED to read
 ///    `untitled`; renaming it early would put a real name in the library on a
 ///    record that still opens the interview.
-/// 2. the latest `custom-title` still carries `mobileEmptySession: 1`
-///    ([`latest_custom_title_is_mobile_placeholder`]) — the user has not
-///    renamed this session.
+/// 2. the session's effective title is still one MOBILE wrote — the user has
+///    not renamed it. Anchored on the most recent `mobileEmptySession: 1`
+///    record, NOT on the marker of the last record: the transcript writer's
+///    32 KiB metadata backstop re-emits the title unmarked, which is exactly
+///    what an interview does. See [`latest_custom_title`] and
+///    [`latest_custom_title_is_mobile_placeholder`].
 /// 3. that title differs from `record.name` — otherwise there is nothing to do,
 ///    and this is also what makes the boot sweep idempotent.
 ///
@@ -607,10 +662,11 @@ pub(crate) async fn reconcile_app_init_session_title(
     let Ok(file) = fs.read_file(path_str, None, None).await else {
         return Ok(false);
     };
-    let Some((title, mobile_marker)) = latest_custom_title(&file.content, init_id) else {
+    let Some((title, still_mobile_placeholder)) = latest_custom_title(&file.content, init_id)
+    else {
         return Ok(false);
     };
-    if !mobile_marker || title == record.name {
+    if !still_mobile_placeholder || title == record.name {
         return Ok(false);
     }
     session::jsonl::writer::JsonlWriter::new(path, fs)
@@ -6663,6 +6719,81 @@ mod tests {
             .is_file());
     }
 
+    /// The branch's central guarantee, pinned at its PRODUCTION call site:
+    /// not one byte written before the user confirmed reaches the real app.
+    ///
+    /// `land_scaffold` passes `first_scaffold = true` to
+    /// `scaffold_workspace_initialized`. Everything else that covers the wipe
+    /// calls that function DIRECTLY with `true`, which proves the mechanism
+    /// works and proves nothing about the caller: flipping the production
+    /// argument to `false` left the whole suite green while pre-confirmation
+    /// source survived into the formed app. This test goes through
+    /// `scaffold_shell_app_value`, so the argument itself is what it pins —
+    /// verified by mutation (flip it to `false` and this test names
+    /// `app/app.js`).
+    #[tokio::test]
+    async fn the_production_landing_wipes_what_the_interview_wrote() {
+        // What an agent that ignored the guided contract leaves behind while
+        // the interview is still running. `app/app.js` is the one that MATTERS
+        // and the reason a per-path overwrite is not enough: Vite resolves
+        // `.js` ahead of `.jsx`, so it out-resolves the seeded `app/app.jsx`
+        // and the seed ships as dead code.
+        const PRE_CONFIRMATION: &[&str] = &[
+            "app/app.js",
+            "app/screens/guessed-screen.jsx",
+            "src/stores/premature-store.js",
+            "notes.md",
+        ];
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workspace = workspace_of(&root, &shell.id);
+
+        for relative in PRE_CONFIRMATION {
+            let path = workspace.join(relative);
+            fs::create_dir_all(path.parent().expect("a parent")).expect("create parent");
+            fs::write(&path, b"written before the user confirmed anything").expect("write");
+        }
+        // Host-owned state on the SAME tree, so a wipe that took too much
+        // would be caught here rather than by a build minutes later.
+        let installed = workspace.join("node_modules/.installed-marker");
+        fs::create_dir_all(installed.parent().expect("a parent")).expect("create node_modules");
+        fs::write(&installed, b"installed").expect("write");
+
+        broker
+            .scaffold_shell_app_value(scaffold_input(
+                &shell.id,
+                "打飞机",
+                "一个竖版射击小游戏",
+                "dom",
+            ))
+            .await
+            .expect("scaffold");
+
+        for relative in PRE_CONFIRMATION {
+            assert!(
+                !workspace.join(relative).exists(),
+                "{relative} was written before the user confirmed anything and must not \
+                 survive the landing"
+            );
+        }
+        assert!(
+            workspace.join("app/app.jsx").is_file(),
+            "the seed must be what is on disk after the wipe"
+        );
+        assert!(
+            installed.is_file(),
+            "node_modules is host-owned and costs minutes on device; the wipe must keep it"
+        );
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        assert_eq!(
+            load_manifest(&layout)
+                .expect("the manifest must survive the wipe")
+                .name,
+            "打飞机",
+            "`.lingxi/` holds the manifest the landing had already stamped"
+        );
+    }
+
     /// `workflow_model` is OPTIONAL, and omitting it must PRESERVE whatever
     /// the create carried rather than clearing it — a shell create can already
     /// name a model, and a scaffold that simply did not mention one must not
@@ -9027,6 +9158,64 @@ mod tests {
                 .expect("user rename");
         }
 
+        /// Run the transcript past `JsonlWriter`'s REAL 32 KiB metadata
+        /// backstop, which is what an interview of any length does to this
+        /// transcript.
+        ///
+        /// Deliberately NOT a hand-written unmarked `custom-title` line: the
+        /// record has to come out of `plan_re_append` itself, so the test
+        /// keeps pinning the production behaviour if that rebuild ever changes
+        /// shape. `append_file_history_snapshot` accounts its bytes against
+        /// the backstop counter without polling it; the next side-record
+        /// append is what fires the poll. Both are ordinary public writer
+        /// calls — no test-only hook.
+        async fn trip_the_metadata_backstop(&self) {
+            let writer =
+                session::jsonl::writer::JsonlWriter::new(self.transcript(), self.fs.clone());
+            writer
+                .append_file_history_snapshot(&json!({
+                    "type": "file-history-snapshot",
+                    "sessionId": self.init_session_id,
+                    "messageId": "interview",
+                    "snapshot": "x".repeat(
+                        session::jsonl::re_append::METADATA_REAPPEND_BACKSTOP_BYTES,
+                    ),
+                }))
+                .await
+                .expect("bulk interview transcript");
+            writer
+                .append_permission_mode("default")
+                .await
+                .expect("the append that polls the backstop");
+            assert!(
+                !self.latest_title_record_carries_the_marker(),
+                "the backstop must really have re-emitted the title UNMARKED — without \
+                 that this test proves nothing"
+            );
+        }
+
+        /// Whether the LAST `custom-title` on disk still carries
+        /// `mobileEmptySession`. Only a probe: nothing in production may
+        /// decide anything from the last record alone.
+        fn latest_title_record_carries_the_marker(&self) -> bool {
+            let transcript =
+                fs::read_to_string(self.transcript()).expect("read the pinned transcript");
+            let mut marked = false;
+            for line in transcript.lines() {
+                let Ok(value) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if value.get("type").and_then(Value::as_str) != Some("custom-title")
+                    || value.get("sessionId").and_then(Value::as_str)
+                        != Some(self.init_session_id.as_str())
+                {
+                    continue;
+                }
+                marked = value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1);
+            }
+            marked
+        }
+
         async fn scaffold(&self, name: &str) -> Result<Value, String> {
             self.broker
                 .scaffold_shell_app_value(json!({
@@ -9166,6 +9355,52 @@ mod tests {
         );
     }
 
+    /// The real flow, not the shortest one: an interview long enough to trip
+    /// the transcript writer's 32 KiB metadata backstop still gets its title.
+    ///
+    /// This is the test whose absence made the whole reconciliation invisible.
+    /// The backstop re-emits the title as a PLAIN `custom-title`, so a
+    /// predicate that read the marker off the LAST record declined for every
+    /// app created through this flow and they all kept `untitled` forever —
+    /// with `scaffold_renames_the_pinned_session_when_the_user_never_renamed_it`
+    /// (a transcript of two lines) staying green throughout.
+    #[tokio::test]
+    async fn the_rename_survives_the_metadata_backstop_a_real_interview_trips() {
+        let shell = pinned_shell().await;
+        shell.trip_the_metadata_backstop().await;
+
+        shell.scaffold("打飞机").await.expect("scaffold");
+
+        assert_eq!(
+            shell.title(),
+            "打飞机",
+            "an interview longer than 32 KiB must not cost the app its name"
+        );
+    }
+
+    /// The other half, and the one that must never regress: tolerating the
+    /// backstop's unmarked echo must not make a real `/rename` overwritable.
+    ///
+    /// After `/rename`, the backstop echoes the USER'S title unmarked — text
+    /// the anchor never carried — so the predicate declines, immediately and
+    /// on every later boot sweep.
+    #[tokio::test]
+    async fn a_user_rename_still_wins_after_the_backstop_echoes_it() {
+        let shell = pinned_shell().await;
+        shell.user_rename("我的宝贝项目").await;
+        shell.trip_the_metadata_backstop().await;
+        assert_eq!(
+            shell.title(),
+            "我的宝贝项目",
+            "the backstop echoes the user's title, so that is what the scaffold sees"
+        );
+
+        shell.scaffold("打飞机").await.expect("scaffold");
+        shell.run_boot_backfill_sweep().await;
+
+        assert_eq!(shell.title(), "我的宝贝项目");
+    }
+
     #[tokio::test]
     async fn an_immediate_rename_never_clobbers_a_user_rename() {
         let shell = pinned_shell().await;
@@ -9226,32 +9461,53 @@ mod tests {
         assert_eq!(shell.title(), "打飞机");
     }
 
-    /// The discriminator, stated as a unit: three writers share the
-    /// `custom-title` channel and only one of them marks its records.
+    /// The discriminator, stated as a unit. Three writers share the
+    /// `custom-title` channel, only one of them marks its records, and a
+    /// fourth — the writer's own 32 KiB metadata backstop — re-emits whatever
+    /// the title currently is, UNMARKED. So the question is never "is the last
+    /// record marked" but "did anyone write text mobile did not".
     #[test]
-    fn only_the_mobile_marker_distinguishes_a_placeholder_from_a_user_rename() {
+    fn a_placeholder_is_told_from_a_user_rename_by_text_against_the_anchor() {
         let session = "11111111-2222-3333-4444-555555555555";
         let anchor = format!(
             r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}","mobileEmptySession":1}}"#
         );
-        let renamed = format!(
+        // What `plan_re_append` writes when the backstop fires: the anchor's
+        // own text, rebuilt without the marker.
+        let backstop_echo = format!(
             r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}"}}"#
+        );
+        let user_rename = format!(
+            r#"{{"type":"custom-title","customTitle":"我的宝贝项目","sessionId":"{session}"}}"#
         );
         let other_session = r#"{"type":"custom-title","customTitle":"elsewhere","sessionId":"99999999-2222-3333-4444-555555555555"}"#;
 
         assert!(latest_custom_title_is_mobile_placeholder(&anchor, session));
-        // Same TITLE TEXT, no marker — a user who renamed the session to the
-        // placeholder string is still a user rename.
-        assert!(!latest_custom_title_is_mobile_placeholder(
-            &renamed, session
+        // An unmarked record echoing the anchor's text is the backstop, not a
+        // user. Reading the marker off the last record here is what made
+        // `reconcile_app_init_session_title` unreachable in production.
+        assert!(latest_custom_title_is_mobile_placeholder(
+            &format!("{anchor}\n{backstop_echo}"),
+            session
         ));
-        // Last effective record wins, in both directions.
+        // Text mobile never wrote, after the anchor: a user rename, and it
+        // stays one however many times the backstop echoes it afterwards.
         assert!(!latest_custom_title_is_mobile_placeholder(
-            &format!("{anchor}\n{renamed}"),
+            &format!("{anchor}\n{user_rename}"),
+            session
+        ));
+        assert!(!latest_custom_title_is_mobile_placeholder(
+            &format!("{anchor}\n{user_rename}\n{user_rename}"),
+            session
+        ));
+        // An unmarked record with no anchor before it — a `session::branch`
+        // fork's title — is superseded by an anchor that follows it.
+        assert!(!latest_custom_title_is_mobile_placeholder(
+            &user_rename,
             session
         ));
         assert!(latest_custom_title_is_mobile_placeholder(
-            &format!("{renamed}\n{anchor}"),
+            &format!("{user_rename}\n{anchor}"),
             session
         ));
         // A record for another session never decides this one.
@@ -9261,5 +9517,12 @@ mod tests {
         ));
         // Nothing this host anchored: leave it alone.
         assert!(!latest_custom_title_is_mobile_placeholder("", session));
+        // The effective title is still the LAST record's, marked or not.
+        assert_eq!(
+            latest_custom_title(&format!("{anchor}\n{user_rename}"), session)
+                .expect("a title")
+                .0,
+            "我的宝贝项目"
+        );
     }
 }

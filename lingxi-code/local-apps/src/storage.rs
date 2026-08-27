@@ -505,6 +505,22 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
                  请删除 apps/ 目录后重新创建应用 / no longer supports template-era app records"
                     .into(),
             )
+        } else if error.to_string().contains("missing field `scaffolded`") {
+            // 规格 §A.2：`AppRecord.scaffolded` 故意没有 `#[serde(default)]`，
+            // 缺字段必须加载失败——静默变成 `false` 就是一个 shell，而 shell 是
+            // `LocalAppScaffold` 会清空的状态，等于销毁用户真实的源码。失败保住了
+            // 数据，但裸的 serde `missing field` 不会告诉读到它的人该做什么：能看到
+            // 这条消息的只有手里还留着本分支之前的 store 的开发者，正确动作是清除
+            // 该应用的开发数据。所以这里和模版时代那一支一样，把解析失败翻译成可执行
+            // 的指引，而不是泄漏 serde 路径。
+            AppError::StorageCorrupt(
+                "apps/index.json 的 app 记录缺少 scaffolded 字段：这个 store 早于\
+                 对话式创建（conversational-create）改动，此版本不再支持；\
+                 请清除本应用的开发数据（删除 apps/ 目录）后重新创建应用 / \
+                 record without `scaffolded` predates the conversational-create \
+                 change: clear the app's dev data (delete apps/) and create again"
+                    .into(),
+            )
         } else {
             AppError::StorageCorrupt(format!("apps/index.json: {error}"))
         }
@@ -1202,6 +1218,47 @@ mod tests {
         assert!(
             message.contains("不再支持") || message.contains("no longer supports"),
             "the error explains WHY rather than leaking a serde path: {message}"
+        );
+    }
+
+    /// 规格 §A.2：缺 `scaffolded` 的记录必须加载失败**并且**告诉开发者清除开发
+    /// 数据。失败那一半由 `AppRecord` 没有 `#[serde(default)]` 保证（见
+    /// `tests/serde_compat.rs`）；这里钉的是另一半——消息本身可执行。
+    ///
+    /// 断言故意不止 `contains("scaffolded")`：裸的 serde `missing field
+    /// `scaffolded`` 也含这个词，那样的断言在没有本指引时照样绿。所以断言落在
+    /// 指引文本上，并反向断言消息里不再出现 serde 的 `missing field` 路径。
+    #[test]
+    fn a_record_without_scaffolded_tells_the_developer_to_clear_dev_data() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("apps")).unwrap();
+        // Every other required field is present under its real wire spelling,
+        // so `scaffolded` is the only one serde can report missing. No
+        // `"template"` byte anywhere, so the template-era arm cannot claim it.
+        std::fs::write(
+            dir.path().join("apps/index.json"),
+            br#"{"schemaVersion":1,"apps":[{"id":"aaaa1111","name":"Legacy","brief":"b","createdAtMs":1,"updatedAtMs":1,"workflowState":"draft","workspaceRel":"apps/aaaa1111/workspace"}]}"#,
+        )
+        .unwrap();
+
+        let error = load_all(dir.path()).expect_err("a record without `scaffolded` must not load");
+        assert_eq!(error.code(), AppErrorCode::StorageCorrupt);
+        let message = error.to_string();
+        assert!(
+            message.contains("scaffolded"),
+            "the message names the field: {message}"
+        );
+        assert!(
+            message.contains("conversational-create") && message.contains("对话式创建"),
+            "the message says the store predates the conversational-create change: {message}"
+        );
+        assert!(
+            message.contains("清除") && message.contains("delete apps/"),
+            "the message tells the developer to clear the dev data: {message}"
+        );
+        assert!(
+            !message.contains("missing field"),
+            "the raw serde path is replaced by the guidance, not appended to it: {message}"
         );
     }
 

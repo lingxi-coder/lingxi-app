@@ -101,3 +101,15 @@ test('a bad argument reports itself instead of silently doing nothing', async ()
 test('bare /fast toggles from the live state', async () => {
   assert.deepEqual(await run('/fast'), ['setFastMode:true']);
 });
+
+test('/effort off disables reasoning outright, distinct from automatic', async () => {
+  assert.deepEqual(await run('/effort off'), ['setReasoningDisabled']);
+});
+
+test('/fast off turns fast mode off explicitly, not just toggling it', async () => {
+  assert.deepEqual(await run('/fast off'), ['setFastMode:false']);
+});
+
+test('/theme with an unrecognized argument reports itself instead of silently doing nothing', async () => {
+  assert.deepEqual(await run('/theme sepia'), ['emit:error:/theme takes dark or light, not: sepia']);
+});

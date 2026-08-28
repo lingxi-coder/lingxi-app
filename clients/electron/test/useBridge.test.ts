@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import {
   beginProjectCatalogRequest,
@@ -228,4 +230,76 @@ test('a slash command that expanded into a turn does NOT release it', () => {
 
 test('a result for a session that never dispatched a slash command releases nothing', () => {
   assert.equal(shouldReleaseSlashTurn(new Map(), 's1'), false);
+});
+
+/**
+ * Slice the source text between two markers, and refuse to pass silently if
+ * either marker can't be found or the slice is suspiciously small. There is
+ * no React test harness in this repo (established earlier in this plan), so
+ * a hook body like `beginLocalCommand`'s can't be exercised directly — the
+ * source text is the only thing this gate can read. A gate whose extraction
+ * silently matches nothing would pass forever and protect nothing.
+ */
+function sliceBetweenMarkers(source: string, startMarker: string, endMarker: string, label: string): string {
+  const start = source.indexOf(startMarker);
+  const end = start >= 0 ? source.indexOf(endMarker, start) : -1;
+  assert.ok(
+    start >= 0 && end > start,
+    `could not locate ${label} in useBridge.ts via '${startMarker}' .. '${endMarker}'. `
+      + 'If this function was renamed or reordered (not a regression), update the markers this test looks for.',
+  );
+  const body = source.slice(start, end);
+  assert.ok(
+    body.trim().length > 40,
+    `${label} extraction in useBridge.ts produced a suspiciously short body ("${body}"). `
+      + 'This gate cannot protect anything until the markers actually bracket the real function.',
+  );
+  return body;
+}
+
+test('beginLocalCommand calls the non-claiming echo, never the engine-claiming one', () => {
+  // Regression under test: bridge.beginLocalCommand must call
+  // beginLocalSlashCommand, which makes no `running` claim, because a
+  // locally-handled command (bare /model, /permissions, /effort, /theme,
+  // /config) never receives the slash_command_result/error/turn_ended that
+  // would release a claim made by beginSlashCommand. Calling beginSlashCommand
+  // here instead — the exact mistake this test exists to catch — would leave
+  // the composer permanently read-only after any of those commands.
+  const source = readFileSync(join(process.cwd(), 'src/renderer/bridge/useBridge.ts'), 'utf8');
+
+  const runSlashCommandBody = sliceBetweenMarkers(
+    source,
+    'const runSlashCommand = useCallback',
+    'const beginLocalCommand = useCallback',
+    'runSlashCommand',
+  );
+  const beginLocalCommandBody = sliceBetweenMarkers(
+    source,
+    'const beginLocalCommand = useCallback',
+    'const emitCommandOutput = useCallback',
+    'beginLocalCommand',
+  );
+
+  // The converse, so the gate also catches the opposite mistake: the
+  // engine-forwarded path must keep pre-claiming the composer.
+  assert.match(
+    runSlashCommandBody,
+    /\bbeginSlashCommand\b/,
+    'runSlashCommand no longer calls beginSlashCommand. If this function was renamed or restructured '
+      + '(not a regression), update this test; otherwise the engine-forwarded path lost its running-claim.',
+  );
+
+  assert.match(
+    beginLocalCommandBody,
+    /\bbeginLocalSlashCommand\b/,
+    'beginLocalCommand no longer calls beginLocalSlashCommand. If this function was renamed (not a '
+      + 'regression), update this test; otherwise a locally-handled command no longer echoes its typed line.',
+  );
+  assert.doesNotMatch(
+    beginLocalCommandBody,
+    /\bbeginSlashCommand\b/,
+    'beginLocalCommand calls beginSlashCommand — this is the composer-bricking regression: a locally '
+      + 'handled command would pre-claim `running` and never receive an event that releases it, '
+      + 'permanently locking the composer after a bare /model.',
+  );
 });

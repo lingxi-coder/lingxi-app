@@ -28,19 +28,37 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound, .list]
+        conversationAction(from: notification.request.content.userInfo) == nil
+            ? [.banner, .sound, .list]
+            : []
     }
 
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
+        let userInfo = response.notification.request.content.userInfo
+        if let action = conversationAction(from: userInfo) {
+            await LingxiAppActionStore.shared.enqueue(action)
+            return
+        }
         await MainActor.run {
             NotificationCenter.default.post(
                 name: .lingxiCronNotificationOpened,
                 object: nil,
-                userInfo: response.notification.request.content.userInfo
+                userInfo: userInfo
             )
         }
+    }
+
+    private func conversationAction(from userInfo: [AnyHashable: Any]) -> LingxiAppAction? {
+        guard (userInfo["lingxi.route"] as? String) == "conversation" else { return nil }
+        guard
+            let sessionID = (userInfo["lingxi.conversation.session_id"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !sessionID.isEmpty
+        else { return nil }
+        let turnID = (userInfo["lingxi.conversation.turn_id"] as? String).flatMap(UInt64.init)
+        return .openConversation(sessionID: sessionID, turnID: turnID)
     }
 }

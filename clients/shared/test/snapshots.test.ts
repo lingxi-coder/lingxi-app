@@ -851,6 +851,16 @@ function validateCommand(name: string, v: unknown): void {
     case 'cancel':
       if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
       break;
+    case 'attach_turn':
+      assert.ok(isNumber(o['turn_id']));
+      if ('after_sequence' in o) assert.ok(isNumber(o['after_sequence']));
+      break;
+    case 'resume_turn':
+      assert.ok(isNumber(o['turn_id']));
+      break;
+    case 'pause_turn':
+      assert.ok(isNumber(o['turn_id']) && isString(o['reason']));
+      break;
     case 'approve_permission':
       assert.ok(isNumber(o['request_id']));
       validatePermissionResponse(o['response']);
@@ -1088,6 +1098,26 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'turn_started':
       if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
+      break;
+    case 'turn_recovery_state': {
+      const snapshot = rec(o['snapshot']);
+      assert.ok(
+        isString(snapshot['session_id']) &&
+          isNumber(snapshot['turn_id']) &&
+          isNumber(snapshot['first_sequence']) &&
+          isNumber(snapshot['last_sequence']) &&
+          isBool(snapshot['safe_to_resume']),
+      );
+      if ('reason' in snapshot) assert.ok(isString(snapshot['reason']));
+      break;
+    }
+    case 'turn_event_replay':
+      assert.ok(
+        isString(o['session_id']) &&
+          isNumber(o['turn_id']) &&
+          isNumber(o['sequence']) &&
+          isString(o['event_json']),
+      );
       break;
     case 'turn_ended':
       assert.ok(['end_turn', 'max_turns', 'cancelled'].includes(rec(o['outcome'])['type'] as string));
@@ -1431,7 +1461,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 50, `expected 50 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 53, `expected 53 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1469,7 +1499,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 65, `expected 65 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 67, `expected 67 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

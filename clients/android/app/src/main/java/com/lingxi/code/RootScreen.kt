@@ -49,6 +49,7 @@ import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ConversationTurnOrigin
 import com.lingxi.code.conversation.ConversationTurnOutcome
 import com.lingxi.code.conversation.ChatViewModel
+import com.lingxi.code.conversation.ConversationLaunchRequest
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.ComputerUseSetupStatus
 import com.lingxi.code.conversation.ComposerAttachment
@@ -116,6 +117,7 @@ import com.lingxi.code.localapps.widget.LocalAppWidgetPinRequester
 import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.voice.FlowModeOverlay
 import com.lingxi.code.voice.VoiceFlowOverlay
+import com.lingxi.code.voice.cancelActiveHeldVoiceSession
 import com.lingxi.code.voice.rememberOrbVoiceListen
 import com.lingxi.code.voice.rememberVoiceCapture
 import com.lingxi.code.voice.audio.VoiceSpeechPlayer
@@ -184,6 +186,8 @@ fun RootScreen(
     settingsStore: SettingsStore? = null,
     onConversationSourceChanged: (ConversationSource) -> Unit = {},
     viewModel: ChatViewModel? = null,
+    requestedConversationLaunch: ConversationLaunchRequest? = null,
+    onConversationLaunchHandled: () -> Unit = {},
     requestedLocalAppLaunch: LocalAppLaunchRequest? = null,
     onLocalAppLaunchHandled: () -> Unit = {},
     openLocalAppsRequest: Boolean = false,
@@ -336,6 +340,12 @@ fun RootScreen(
         localAppsViewModel.openLibrary()
         onOpenLocalAppsHandled()
     }
+    LaunchedEffect(requestedConversationLaunch) {
+        val request = requestedConversationLaunch ?: return@LaunchedEffect
+        showingApps = false
+        chatViewModel.openSession(SessionRef(request.sessionId, ""))
+        onConversationLaunchHandled()
+    }
     LaunchedEffect(requestedLocalAppLaunch, localAppsState.loading) {
         val request = requestedLocalAppLaunch ?: return@LaunchedEffect
         if (localAppsState.loading) return@LaunchedEffect
@@ -472,6 +482,9 @@ fun RootScreen(
     // flips it on (the long-press STT path still drives `voiceActive`). The
     // overlay renders above the drawer + conversation + voice-flow overlay.
     var flowActive by remember { mutableStateOf(false) }
+    var appInForeground by remember {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
 
     // FlowMode orb voice driver: a one-shot tap-to-talk listener, plus the live
     // assistant reply text derived from the same conversation state ChatScreen
@@ -479,6 +492,26 @@ fun RootScreen(
     val orbListen = rememberOrbVoiceListen()
     val orbAssistantText = (state.streamingMessage ?: state.messages.lastOrNull())
         ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
+    DisposableEffect(lifecycleOwner, orbListen, voiceSpeechPlayer) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> appInForeground = true
+                Lifecycle.Event.ON_STOP -> {
+                    appInForeground = false
+                    voiceSpeechPlayer.stop()
+                    cancelActiveHeldVoiceSession()
+                    orbListen.cancel()
+                    // Keep Flow Mode open but paused. Returning to the app shows
+                    // the latest assistant result; another explicit tap is
+                    // required before either microphone starts again.
+                    voiceActive = false
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // Mirror the engine's REAL MCP listing into the activity-scoped SettingsStore
     // (the same instance SettingsHost renders). RefreshListings runs again after
@@ -488,10 +521,12 @@ fun RootScreen(
     val settingsState by resolvedSettingsStore.state.collectAsState()
     val currentAutoPlayReplies = rememberUpdatedState(settingsState.voice.autoPlayReplies)
     val currentFlowActive = rememberUpdatedState(flowActive)
+    val currentAppInForeground = rememberUpdatedState(appInForeground)
     LaunchedEffect(chatViewModel, voiceSpeechPlayer) {
         chatViewModel.turnCompletions.collect { completion ->
             if (completion.origin != ConversationTurnOrigin.Ordinary) return@collect
             if (completion.outcome != ConversationTurnOutcome.Completed) return@collect
+            if (!currentAppInForeground.value) return@collect
             if (!currentAutoPlayReplies.value || currentFlowActive.value) return@collect
             val text = completion.finalAssistantText.trim()
             if (text.isEmpty()) return@collect
@@ -652,10 +687,11 @@ fun RootScreen(
                             appId = engineScope.appId,
                             workspaceRel = localAppsViewModel.uiState.value.apps
                                 .firstOrNull { it.id == engineScope.appId }
-                                ?.workspaceRel,
+                            ?.workspaceRel,
                         )
                     },
                     linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
+                    reuseProcessSource = true,
                 )
             },
             persistSelection = {
@@ -1398,6 +1434,7 @@ fun RootScreen(
                         onRemoveAttachment = { attachment = null },
                         onShare = onShare,
                         onStop = chatViewModel::cancel,
+                        onDiscardRecoveredTurn = chatViewModel::discardRecoveredTurn,
                         onDismissError = chatViewModel::dismissError,
                         showOfflineBanner = shouldShowOfflineBanner(isOnline, dismissedWhileOffline),
                         onDismissOffline = { dismissedWhileOffline = true },

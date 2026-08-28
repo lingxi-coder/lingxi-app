@@ -292,6 +292,18 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::TurnEnded.stop_reason", "Option<String>");
     put("ClientEvent::TurnEnded.cost", "CostDto");
 
+    put("ClientEvent::TurnRecoveryState", "turn_recovery_state");
+    put(
+        "ClientEvent::TurnRecoveryState.snapshot",
+        "TurnRecoverySnapshotDto",
+    );
+
+    put("ClientEvent::TurnEventReplay", "turn_event_replay");
+    put("ClientEvent::TurnEventReplay.session_id", "String");
+    put("ClientEvent::TurnEventReplay.turn_id", "u64");
+    put("ClientEvent::TurnEventReplay.sequence", "u64");
+    put("ClientEvent::TurnEventReplay.event_json", "String");
+
     put("ClientEvent::CostUpdate", "cost_update");
     put("ClientEvent::CostUpdate.total_usd", "f64");
     put("ClientEvent::CostUpdate.input_tokens", "u64");
@@ -540,6 +552,24 @@ fn current_contract_index() -> ContractIndex {
     put("TurnOutcomeDto::MaxTurns", "max_turns");
     put("TurnOutcomeDto::Cancelled", "cancelled");
 
+    // ── TurnRecoveryStateDto / TurnRecoverySnapshotDto (events.rs) ───────
+    put("TurnRecoveryStateDto::Running", "running");
+    put("TurnRecoveryStateDto::WaitingForUser", "waiting_for_user");
+    put(
+        "TurnRecoveryStateDto::PausedRecoverable",
+        "paused_recoverable",
+    );
+    put("TurnRecoveryStateDto::Completed", "completed");
+    put("TurnRecoveryStateDto::Failed", "failed");
+    put("TurnRecoveryStateDto::Cancelled", "cancelled");
+    put("TurnRecoverySnapshotDto.session_id", "String");
+    put("TurnRecoverySnapshotDto.turn_id", "u64");
+    put("TurnRecoverySnapshotDto.state", "TurnRecoveryStateDto");
+    put("TurnRecoverySnapshotDto.first_sequence", "u64");
+    put("TurnRecoverySnapshotDto.last_sequence", "u64");
+    put("TurnRecoverySnapshotDto.safe_to_resume", "bool");
+    put("TurnRecoverySnapshotDto.reason", "Option<String>");
+
     // ── CostDto (events.rs) ───────────────────────────────────────────────
     put("CostDto.total_usd", "f64");
     put("CostDto.input_tokens", "u64");
@@ -560,6 +590,17 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::Cancel", "cancel");
     put("ClientCommand::Cancel.turn_id", "Option<u64>");
+
+    put("ClientCommand::AttachTurn", "attach_turn");
+    put("ClientCommand::AttachTurn.turn_id", "u64");
+    put("ClientCommand::AttachTurn.after_sequence", "Option<u64>");
+
+    put("ClientCommand::ResumeTurn", "resume_turn");
+    put("ClientCommand::ResumeTurn.turn_id", "u64");
+
+    put("ClientCommand::PauseTurn", "pause_turn");
+    put("ClientCommand::PauseTurn.turn_id", "u64");
+    put("ClientCommand::PauseTurn.reason", "String");
 
     put("ClientCommand::ApprovePermission", "approve_permission");
     put("ClientCommand::ApprovePermission.request_id", "u64");
@@ -2040,7 +2081,10 @@ fn contract_index_covers_every_dto() {
         ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
     };
     use client_protocol::error::ClientError;
-    use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
+    use client_protocol::events::{
+        ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
+        TurnRecoveryStateDto,
+    };
     use client_protocol::listings::{
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
@@ -2125,6 +2169,23 @@ fn contract_index_covers_every_dto() {
             },
         },
         ClientEvent::SessionEnded,
+        ClientEvent::TurnRecoveryState {
+            snapshot: TurnRecoverySnapshotDto {
+                session_id: String::new(),
+                turn_id: 0,
+                state: TurnRecoveryStateDto::Running,
+                first_sequence: 0,
+                last_sequence: 0,
+                safe_to_resume: true,
+                reason: None,
+            },
+        },
+        ClientEvent::TurnEventReplay {
+            session_id: String::new(),
+            turn_id: 0,
+            sequence: 0,
+            event_json: String::new(),
+        },
     ];
     let _outcome = TurnOutcomeDto::EndTurn;
 
@@ -2223,7 +2284,21 @@ fn contract_index_covers_every_dto() {
             response: ComputerAccessResponseDto::default(),
         },
         ClientCommand::DenyComputerAccess { request_id: 0 },
+        ClientCommand::AttachTurn {
+            turn_id: 0,
+            after_sequence: None,
+        },
+        ClientCommand::ResumeTurn { turn_id: 0 },
+        ClientCommand::PauseTurn {
+            turn_id: 0,
+            reason: String::new(),
+        },
+        ClientCommand::ResolveAppDependencyChangeConfirmation {
+            request_id: String::new(),
+            approved: false,
+        },
     ];
+    let _recovery_state = TurnRecoveryStateDto::PausedRecoverable;
     let _mode = PromptModeDto::Normal;
     let _img = ImageRefDto {
         media_type: String::new(),

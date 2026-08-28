@@ -53,7 +53,10 @@ use client_protocol::controls::{
     ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
 };
 use client_protocol::error::ClientError;
-use client_protocol::events::{AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
+use client_protocol::events::{
+    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
+    TurnRecoveryStateDto,
+};
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
@@ -300,6 +303,29 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 outcome: TurnOutcomeDto::EndTurn,
                 stop_reason: Some("end_turn".to_string()),
                 cost: canonical_cost(),
+            },
+        ),
+        (
+            "event/turn_recovery_state.json",
+            ClientEvent::TurnRecoveryState {
+                snapshot: TurnRecoverySnapshotDto {
+                    session_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                    turn_id: 1,
+                    state: TurnRecoveryStateDto::PausedRecoverable,
+                    first_sequence: 1,
+                    last_sequence: 7,
+                    safe_to_resume: true,
+                    reason: Some("background lease expired".to_string()),
+                },
+            },
+        ),
+        (
+            "event/turn_event_replay.json",
+            ClientEvent::TurnEventReplay {
+                session_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: 1,
+                sequence: 7,
+                event_json: r#"{"type":"text_delta","text":"done"}"#.to_string(),
             },
         ),
         (
@@ -919,6 +945,24 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/cancel.json",
             ClientCommand::Cancel { turn_id: Some(1) },
+        ),
+        (
+            "command/attach_turn.json",
+            ClientCommand::AttachTurn {
+                turn_id: 1,
+                after_sequence: Some(4),
+            },
+        ),
+        (
+            "command/resume_turn.json",
+            ClientCommand::ResumeTurn { turn_id: 1 },
+        ),
+        (
+            "command/pause_turn.json",
+            ClientCommand::PauseTurn {
+                turn_id: 1,
+                reason: "background_time_expired".to_string(),
+            },
         ),
         (
             "command/approve_permission.json",

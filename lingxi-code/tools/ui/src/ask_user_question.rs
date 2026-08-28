@@ -815,7 +815,20 @@ impl Tool for AskUserQuestionTool {
         // Resolve the per-question answers (UI substitute). The resolver keys
         // its auto-continue policy off the session's interactivity.
         let non_interactive = ctx.options.is_non_interactive_session;
-        let answers_map = match self.resolver.resolve(&questions, non_interactive).await {
+        // Dropping the resolver future drops its response receiver. The
+        // broker can then remove exactly this request by observing a closed
+        // sender, while unrelated workflow questions remain parked.
+        let resolve = self.resolver.resolve(&questions, non_interactive);
+        let answers_map = match if let Some(cancel) = ctx.cancel {
+            tokio::select! {
+                result = resolve => result,
+                _ = cancel.cancelled() => Err(ToolError::Internal(
+                    "AskUserQuestion interactive prompt cancelled".to_string(),
+                )),
+            }
+        } else {
+            resolve.await
+        } {
             Ok(m) => m,
             Err(e) => {
                 emit_failed(&bus, "resolver_error", started.elapsed().as_millis() as u64).await;

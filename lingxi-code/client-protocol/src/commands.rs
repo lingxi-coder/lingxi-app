@@ -149,6 +149,34 @@ pub enum ClientCommand {
         turn_id: Option<u64>,
     },
 
+    /// Reattach a mobile client to a durable turn on the connection's active
+    /// session. The engine first emits the current recovery snapshot and then
+    /// replays events whose sequence is greater than `after_sequence`.
+    AttachTurn {
+        /// Stable client turn id originally supplied to [`Self::SendPrompt`].
+        turn_id: u64,
+        /// Last event sequence the client durably observed. `None` requests the
+        /// full retained event window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_sequence: Option<u64>,
+    },
+
+    /// Resume a checkpointed durable turn when its recovery policy allows it.
+    /// Unsafe or permission-bound checkpoints remain `waiting_for_user` rather
+    /// than silently replaying external side effects.
+    ResumeTurn {
+        /// Stable client turn id to resume on the active session.
+        turn_id: u64,
+    },
+
+    /// Persist a platform-lease expiration without converting it to cancel.
+    PauseTurn {
+        /// Stable client turn id to pause on the active session.
+        turn_id: u64,
+        /// Machine-readable platform reason such as `background_time_expired`.
+        reason: String,
+    },
+
     // ── Permission resolution ─────────────────────────────────────────────
     /// Approve a parked permission request, correlated by `request_id`
     /// (the id-keyed gate, F1-14). The `response` distinguishes once / always.

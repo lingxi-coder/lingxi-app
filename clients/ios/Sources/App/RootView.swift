@@ -6,19 +6,32 @@ import UIKit
 /// never manufacture a user cancellation or corrupt the engine's turn state.
 @MainActor
 final class ConversationBackgroundExecutionController {
-    typealias ExpirationHandler = @MainActor @Sendable () -> Void
+    typealias BackgroundTaskExpirationHandler = @MainActor @Sendable () -> Void
     typealias TaskIdentifier = UIBackgroundTaskIdentifier
-    typealias BeginTask = (@escaping ExpirationHandler) -> TaskIdentifier
+    typealias BeginTask = (@escaping BackgroundTaskExpirationHandler) -> TaskIdentifier
     typealias EndTask = (TaskIdentifier) -> Void
+    typealias ShouldUseFiniteAssertion = () -> Bool
 
     private let beginTask: BeginTask
     private let endTask: EndTask
+    private let shouldUseFiniteAssertion: ShouldUseFiniteAssertion
     private var taskIdentifier: TaskIdentifier?
     private var generation = 0
+    private var expirationObserver: BackgroundTaskExpirationHandler?
+    private var turnActive = false
+    private var activeTurnID: UInt64?
+    private var continuedProcessingLeaseAttached = false
 
-    init(beginTask: @escaping BeginTask, endTask: @escaping EndTask) {
+    init(
+        beginTask: @escaping BeginTask,
+        endTask: @escaping EndTask,
+        shouldUseFiniteAssertion: @escaping ShouldUseFiniteAssertion = {
+            ConversationBackgroundLeasePolicy.usesFiniteAssertion()
+        }
+    ) {
         self.beginTask = beginTask
         self.endTask = endTask
+        self.shouldUseFiniteAssertion = shouldUseFiniteAssertion
     }
 
     static func live() -> ConversationBackgroundExecutionController {
@@ -36,33 +49,64 @@ final class ConversationBackgroundExecutionController {
         )
     }
 
-    func setTurnActive(_ active: Bool) {
-        if active {
-            guard taskIdentifier == nil else { return }
-            generation &+= 1
-            let currentGeneration = generation
-            let identifier = beginTask { [weak self] in
-                self?.expire(generation: currentGeneration)
-            }
-            // UIKit can refuse a finite assertion and return `.invalid`. Never
-            // latch that sentinel: keeping the slot empty lets a later state or
-            // foreground transition retry the acquisition.
-            guard identifier != .invalid else { return }
-            // Be defensive about a test adapter (or future UIKit behaviour)
-            // invoking expiration synchronously during acquisition.
-            guard generation == currentGeneration else {
-                endTask(identifier)
-                return
-            }
-            taskIdentifier = identifier
-        } else {
-            endCurrentTask()
+    func setTurnActive(_ active: Bool, turnID: UInt64? = nil) {
+        turnActive = active
+        activeTurnID = active ? turnID : nil
+        if !active {
+            // A subsequent turn must not inherit attachment state from a prior
+            // continued-processing request. Its new request will re-establish
+            // the state through the lease-change callback.
+            continuedProcessingLeaseAttached = false
         }
+        guard active,
+              !continuedProcessingLeaseAttached,
+              shouldUseFiniteAssertion()
+        else {
+            endCurrentTask()
+            return
+        }
+        guard taskIdentifier == nil else { return }
+        generation &+= 1
+        let currentGeneration = generation
+        let identifier = beginTask { [weak self] in
+            self?.expire(generation: currentGeneration)
+        }
+        // UIKit can refuse a finite assertion and return `.invalid`. Never
+        // latch that sentinel: keeping the slot empty lets a later state or
+        // foreground transition retry the acquisition.
+        guard identifier != .invalid else { return }
+        // Be defensive about a test adapter (or future UIKit behaviour)
+        // invoking expiration synchronously during acquisition.
+        guard generation == currentGeneration else {
+            endTask(identifier)
+            return
+        }
+        taskIdentifier = identifier
+    }
+
+    /// Supply the actual continued-processing lease state. API availability or
+    /// request submission is not enough: only an attached task can replace the
+    /// finite UIKit assertion.
+    func setContinuedProcessingLeaseAttached(_ attached: Bool, turnID: UInt64? = nil) {
+        guard !attached || !turnActive || turnID == nil || activeTurnID == nil || turnID == activeTurnID else {
+            return
+        }
+        continuedProcessingLeaseAttached = attached
+        if attached {
+            endCurrentTask()
+        } else if turnActive {
+            setTurnActive(true, turnID: activeTurnID)
+        }
+    }
+
+    func setExpirationObserver(_ observer: BackgroundTaskExpirationHandler?) {
+        expirationObserver = observer
     }
 
     private func expire(generation expiredGeneration: Int) {
         guard expiredGeneration == generation else { return }
         endCurrentTask()
+        expirationObserver?()
     }
 
     private func endCurrentTask() {
@@ -106,6 +150,8 @@ struct RootView: View {
     @State private var voiceInteraction: VoiceInteractionController
     @State private var conversationBackgroundExecution =
         ConversationBackgroundExecutionController.live()
+    @State private var conversationBackgroundAlerts =
+        ConversationBackgroundAlertController.live()
     @State private var projectSwitching = false
 
     private let appSandboxRoot: String
@@ -291,12 +337,70 @@ struct RootView: View {
     }
 
     private func withLifecycleObservers(_ content: some View) -> some View {
-        content
+        let backgroundLifecycle = content
             .environment(\.locale, localization.effectiveLocale())
             .onChange(of: scenePhase, handleScenePhase)
             .onReceive(source.model.backgroundExecutionActivity) { active in
-                conversationBackgroundExecution.setTurnActive(active)
+                conversationBackgroundExecution.setTurnActive(
+                    active,
+                    turnID: source.model.activeTurnToken?.clientTurnId
+                )
+                syncConversationBackgroundSurfaces()
             }
+            .onChange(of: source.model.turnCompletion) { _, _ in
+                syncConversationBackgroundSurfaces()
+            }
+            .onChange(of: source.model.pendingQuestions) { _, _ in
+                syncConversationBackgroundSurfaces()
+            }
+            .onChange(of: source.model.backgroundTasks) { _, _ in
+                syncConversationBackgroundSurfaces()
+            }
+            .onChange(of: source.model.activeTurnToken) { _, token in
+                conversationBackgroundExecution.setTurnActive(
+                    source.model.requiresBackgroundExecution,
+                    turnID: token?.clientTurnId
+                )
+                syncConversationBackgroundSurfaces()
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: .lingxiConversationContinuedProcessingLeaseChanged
+                )
+            ) { notification in
+                let attached = notification.userInfo?["attached"] as? Bool ?? false
+                let turnID = (notification.userInfo?[ConversationContinuedProcessingExpiration.turnIDKey] as? String)
+                    .flatMap(UInt64.init)
+                conversationBackgroundExecution.setContinuedProcessingLeaseAttached(
+                    attached,
+                    turnID: turnID
+                )
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: .lingxiConversationContinuedProcessingExpired
+                )
+            ) { notification in
+                let expiration = ConversationContinuedProcessingExpiration(
+                    userInfo: notification.userInfo
+                )
+                conversationBackgroundExecution.setContinuedProcessingLeaseAttached(
+                    false,
+                    turnID: expiration?.turnID
+                )
+                let turnToken = source.model.activeTurnToken
+                if let expiredTurnID = expiration?.turnID,
+                   expiredTurnID != turnToken?.clientTurnId
+                {
+                    return
+                }
+                requestRecoverablePause(
+                    sessionID: source.model.activeSessionId,
+                    turnToken: turnToken
+                )
+                syncConversationBackgroundSurfaces()
+            }
+        let stateLifecycle = backgroundLifecycle
             .onChange(of: draft) { _, value in
                 scopedPreferences.setDraft(value, scope: activeScope)
             }
@@ -313,6 +417,7 @@ struct RootView: View {
             .onReceive(source.model.$streaming) { isStreaming in
                 landCreatedAppIfReady(streaming: isStreaming)
             }
+        let presentationLifecycle = stateLifecycle
             .onChange(of: localAppsStore.createdAppLanding) { _, _ in
                 landCreatedAppIfReady()
             }
@@ -324,6 +429,7 @@ struct RootView: View {
                 navigation.openLocalApps(appID: requestedAppID)
                 _ = localAppsStore.consumeRequestedPresentationAppID()
             }
+        let notificationLifecycle = presentationLifecycle
             .onReceive(NotificationCenter.default.publisher(for: .lingxiCronNotificationOpened)) { note in
                 cronRepository.handleNotificationUserInfo(note.userInfo ?? [:])
                 if let runID = note.userInfo?["lingxi.cron.run_id"] as? String {
@@ -337,6 +443,7 @@ struct RootView: View {
                 Task { await localAppsStore.handleMemoryWarning() }
             }
             .onOpenURL(perform: handleIncomingURL)
+        let bootstrapLifecycle = notificationLifecycle
             .task(id: sourceGeneration) {
                 let generation = sourceGeneration
                 let sessionToRestore = pendingSessionRestoreID ?? activeSession
@@ -375,11 +482,12 @@ struct RootView: View {
                     current.warmUp()
                 }
             }
-            .task {
-                await cronRepository.handleLaunch()
-            }
+        let launchLifecycle = bootstrapLifecycle
+            .task { await cronRepository.handleLaunch() }
+        return launchLifecycle
             .task {
                 await consumePendingAppActions()
+                syncConversationBackgroundSurfaces()
             }
     }
 
@@ -1010,7 +1118,13 @@ struct RootView: View {
         startNew: Bool = false,
         initialPrompt: String? = nil
     ) -> Bool {
-        guard !projectSwitching else { return false }
+        guard !projectSwitching,
+              ConversationSessionMutationPolicy.allowsCallerMutation(
+                  hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
+                  hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
+                  isCancelling: source.model.isCancelling
+              )
+        else { return false }
         voiceInteraction.handleContextChange()
         if let initialPrompt, resumeSessionID != nil || startNew {
             pendingInitKickoff = PendingInitKickoff(
@@ -1181,6 +1295,11 @@ struct RootView: View {
         scope: ConversationScope,
         using conversation: any ConversationSource
     ) {
+        guard ConversationSessionMutationPolicy.allowsCallerMutation(
+            hasInactiveDurableRecovery: conversation.model.hasInactiveDurableRecovery,
+            hasUnresolvedTurnRecovery: conversation.model.hasUnresolvedTurnRecovery,
+            isCancelling: conversation.model.isCancelling
+        ) else { return }
         let emptyTitle: String?
         if let live = conversation.model.engineSessions.first(where: { $0.id == sessionID }) {
             emptyTitle = live.messageCount == 0 ? live.title : nil
@@ -1204,27 +1323,39 @@ struct RootView: View {
     }
 
     private func persistConversationScope() {
+        guard ConversationSessionMutationPolicy.allowsCallerMutation(
+            hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
+            hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
+            isCancelling: source.model.isCancelling
+        ) else { return }
         scopedPreferences.setDraft(draft, scope: activeScope)
         scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope)
     }
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
+        conversationBackgroundAlerts.setScenePhase(phase)
         switch phase {
         case .background:
             persistConversationScope()
             localAppsStore.sceneDidEnterBackground()
             voiceInteraction.handleBackground()
             conversationBackgroundExecution.setTurnActive(
-                source.model.requiresBackgroundExecution)
+                source.model.requiresBackgroundExecution,
+                turnID: source.model.activeTurnToken?.clientTurnId
+            )
             source.handleBackground()
+            syncConversationBackgroundSurfaces()
             Task {
                 await VoicePreviewPlayback.shared.stop()
                 await VoiceAudioSessionCoordinator.shared.suspendForBackground()
             }
         case .active:
             conversationBackgroundExecution.setTurnActive(
-                source.model.requiresBackgroundExecution)
+                source.model.requiresBackgroundExecution,
+                turnID: source.model.activeTurnToken?.clientTurnId
+            )
             source.handleForeground()
+            syncConversationBackgroundSurfaces()
             Task { await localAppsStore.sceneWillEnterForeground() }
             Task { await VoiceAudioSessionCoordinator.shared.resumeAfterForeground() }
             Task { await cronRepository.handleSceneBecameActive() }
@@ -1255,6 +1386,15 @@ struct RootView: View {
         case let .ask(question):
             let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
             beginAppIntegratedConversation(draftText: trimmed)
+        case let .openConversation(sessionID, _):
+            guard ConversationSessionMutationPolicy.allowsCallerMutation(
+                hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
+                hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
+                isCancelling: source.model.isCancelling
+            ) else { return }
+            pendingSessionRestoreID = sessionID
+            activeSession = sessionID
+            requestSessionResume(sessionID, scope: activeScope, using: source)
         case let .openTerminal(sessionID, initialCommand):
             navigation.openTerminal(
                 sessionID: sessionID,
@@ -1286,6 +1426,11 @@ struct RootView: View {
     }
 
     private func beginAppIntegratedConversation(draftText: String) {
+        guard ConversationSessionMutationPolicy.allowsCallerMutation(
+            hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
+            hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
+            isCancelling: source.model.isCancelling
+        ) else { return }
         voiceInteraction.handleContextChange()
         pendingSessionRestoreID = nil
         activeSession = ""
@@ -1313,6 +1458,56 @@ struct RootView: View {
         guard app.workflow == .ready, autostart else { return }
         await localAppsStore.start(appID: appID)
     }
+
+    private func syncConversationBackgroundSurfaces() {
+        let sessionID = source.model.activeSessionId.isEmpty
+            ? confirmedSession
+            : source.model.activeSessionId
+        let turnToken = source.model.activeTurnToken
+        conversationBackgroundExecution.setExpirationObserver {
+            self.requestRecoverablePause(
+                sessionID: sessionID,
+                turnToken: turnToken
+            )
+        }
+        conversationBackgroundAlerts.sync(ConversationBackgroundSnapshot(
+            sessionID: sessionID,
+            turnToken: turnToken,
+            turnCompletion: source.model.turnCompletion,
+            pendingQuestions: source.model.pendingQuestions,
+            backgroundTasks: source.model.backgroundTasks,
+            requiresExecutionLease: source.model.requiresBackgroundExecution
+        ))
+    }
+
+    /// A lease expiration is only a platform signal. Keep the turn owned and
+    /// non-sendable until the engine confirms `PausedRecoverable`; a rejected
+    /// pause remains visible as a host error and never becomes a fake cancel.
+    private func requestRecoverablePause(
+        sessionID: String,
+        turnToken: ConversationTurnToken?
+    ) {
+        guard let turnToken else { return }
+        Task { @MainActor in
+            do {
+                try await source.markActiveTurnPausedRecoverable(turnToken)
+                guard source.model.activeTurnToken == turnToken,
+                      !source.model.streaming,
+                      source.model.statusLine == String(localized: "chat_background_paused_text")
+                else { return }
+                conversationBackgroundAlerts.markRecoverablePause(
+                    sessionID: sessionID,
+                    turnToken: turnToken
+                )
+                syncConversationBackgroundSurfaces()
+            } catch {
+                // The source retains ownership and publishes the host error;
+                // syncing here keeps activity/notification state from claiming
+                // that the turn paused when the command was rejected.
+                syncConversationBackgroundSurfaces()
+            }
+        }
+    }
 }
 
 enum ConversationSessionIndexPolicy {
@@ -1329,6 +1524,20 @@ enum ConversationSessionIndexPolicy {
         let activeSessionMayNotBeListed = !activeSessionID.isEmpty
             && !listedSessionIDs.contains(activeSessionID)
         return !activeSessionMayNotBeListed
+    }
+}
+
+/// Caller-side gate for actions that optimistically mutate the selected
+/// session. The source remains the authority for accepting New/Resume, but
+/// RootView must not change active/confirmed/persisted selection while a
+/// correlated durable turn still owns the engine slot.
+enum ConversationSessionMutationPolicy {
+    static func allowsCallerMutation(
+        hasInactiveDurableRecovery: Bool,
+        hasUnresolvedTurnRecovery: Bool,
+        isCancelling: Bool
+    ) -> Bool {
+        !hasInactiveDurableRecovery && !hasUnresolvedTurnRecovery && !isCancelling
     }
 }
 

@@ -1,5 +1,6 @@
 package com.lingxi.code.conversation
 
+import com.lingxi.code.bindings.TurnRecoveryStateDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -45,8 +46,135 @@ class ConversationBackgroundExecutionTest {
 
     @Test
     fun successfulPromotionWithoutLiveLeaseMustStopService() {
-        assertTrue(shouldStopConversationService(promoted = true, promotionAcknowledged = false))
-        assertFalse(shouldStopConversationService(promoted = true, promotionAcknowledged = true))
-        assertTrue(shouldStopConversationService(promoted = false, promotionAcknowledged = true))
+        assertTrue(
+            shouldStopConversationService(
+                action = ConversationTurnService.ACTION_START,
+                promoted = true,
+                promotionAcknowledged = false,
+                snapshot = null,
+            ),
+        )
+        assertFalse(
+            shouldStopConversationService(
+                action = ConversationTurnService.ACTION_START,
+                promoted = true,
+                promotionAcknowledged = true,
+                snapshot = null,
+            ),
+        )
+        assertTrue(
+            shouldStopConversationService(
+                action = ConversationTurnService.ACTION_START,
+                promoted = false,
+                promotionAcknowledged = true,
+                snapshot = null,
+            ),
+        )
+    }
+
+    @Test
+    fun redeliveredSnapshotDoesNotStopPromotedServiceWithoutHandshake() {
+        val snapshot = ConversationBackgroundSnapshot(
+            sessionId = "session-a",
+            turnId = 7L,
+            statusText = "Working",
+        )
+
+        assertFalse(
+            shouldStopConversationService(
+                action = ConversationTurnService.ACTION_START,
+                promoted = true,
+                promotionAcknowledged = false,
+                snapshot = snapshot,
+            ),
+        )
+        assertFalse(
+            shouldStopConversationService(
+                action = ConversationTurnService.ACTION_UPDATE,
+                promoted = true,
+                promotionAcknowledged = false,
+                snapshot = snapshot,
+            ),
+        )
+        assertTrue(
+            shouldStopConversationService(
+                action = ConversationTurnService.ACTION_UPDATE,
+                promoted = true,
+                promotionAcknowledged = false,
+                snapshot = null,
+            ),
+        )
+    }
+
+    @Test
+    fun coldWaitingOrAttachRunningDoesNotClaimHeadlessExecutorBeforeResume() {
+        assertFalse(
+            shouldMarkHeadlessExecutorActive(
+                resumeSession = true,
+                recoveryState = TurnRecoveryStateDto.WAITING_FOR_USER,
+                stateIndex = 2L,
+                minimumActionStateIndex = 2L,
+            ),
+        )
+        assertFalse(
+            shouldMarkHeadlessExecutorActive(
+                resumeSession = true,
+                recoveryState = TurnRecoveryStateDto.RUNNING,
+                stateIndex = 1L,
+                minimumActionStateIndex = 2L,
+            ),
+        )
+        assertTrue(
+            shouldMarkHeadlessExecutorActive(
+                resumeSession = true,
+                recoveryState = TurnRecoveryStateDto.RUNNING,
+                stateIndex = 2L,
+                minimumActionStateIndex = 2L,
+            ),
+        )
+    }
+
+    @Test
+    fun recoveryWaitingRetainsOnlyAnExecutorProvenToBeRunning() {
+        var retained = false
+        retained = headlessExecutorActiveAfterRecoveryState(
+            currentActive = retained,
+            recoveryState = TurnRecoveryStateDto.RUNNING,
+            resumeSession = true,
+            stateIndex = 1L,
+            minimumActionStateIndex = 2L,
+        )
+        retained = headlessExecutorActiveAfterRecoveryState(
+            currentActive = retained,
+            recoveryState = TurnRecoveryStateDto.RUNNING,
+            resumeSession = true,
+            stateIndex = 2L,
+            minimumActionStateIndex = 2L,
+        )
+        retained = headlessExecutorActiveAfterRecoveryState(
+            currentActive = retained,
+            recoveryState = TurnRecoveryStateDto.WAITING_FOR_USER,
+            resumeSession = true,
+            stateIndex = 3L,
+            minimumActionStateIndex = 2L,
+        )
+        assertTrue(retained)
+
+        var coldWaiting = false
+        coldWaiting = headlessExecutorActiveAfterRecoveryState(
+            currentActive = coldWaiting,
+            recoveryState = TurnRecoveryStateDto.RUNNING,
+            resumeSession = true,
+            stateIndex = 1L,
+            minimumActionStateIndex = 2L,
+        )
+        coldWaiting = headlessExecutorActiveAfterRecoveryState(
+            currentActive = coldWaiting,
+            recoveryState = TurnRecoveryStateDto.WAITING_FOR_USER,
+            resumeSession = true,
+            stateIndex = 2L,
+            minimumActionStateIndex = 2L,
+        )
+        assertFalse(coldWaiting)
     }
 }

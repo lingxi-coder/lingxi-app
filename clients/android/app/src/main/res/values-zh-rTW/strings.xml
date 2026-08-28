@@ -1067,6 +1067,16 @@
     <string name="chat_background_service_channel_description">讓進行中的對話在背景繼續執行</string>
     <string name="chat_background_service_title">靈犀正在處理</string>
     <string name="chat_background_service_text">對話正在背景繼續</string>
+    <string name="chat_background_result_channel">對話結果</string>
+    <string name="chat_background_result_channel_description">對話完成或需要處理時提醒</string>
+    <string name="chat_background_completed_title">靈犀已完成</string>
+    <string name="chat_background_completed_text">背景對話已完成，點按查看結果</string>
+    <string name="chat_background_failed_title">對話處理失敗</string>
+    <string name="chat_background_failed_text">點按返回對話查看並重試</string>
+    <string name="chat_background_waiting_title">靈犀正在等待你</string>
+    <string name="chat_background_waiting_text">背景對話需要你的輸入才能繼續</string>
+    <string name="chat_background_paused_title">對話已安全暫停</string>
+    <string name="chat_background_paused_text">背景時間已結束，開啟對話即可安全恢復</string>
     <string name="chat_run_accessibility_label">Agent 執行過程，%1$s</string>
     <string name="chat_run_active_collaborators">%1$d 個協作者</string>
     <string name="chat_run_tool_executing">工具執行中</string>

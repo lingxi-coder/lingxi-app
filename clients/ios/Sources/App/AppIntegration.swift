@@ -5,6 +5,7 @@ enum LingxiAppAction: Codable, Equatable, Sendable {
     case openApp
     case newConversation
     case ask(String)
+    case openConversation(sessionID: String, turnID: UInt64?)
     case openTerminal(sessionID: String, initialCommand: String?)
     case openLocalApp(appID: String, destination: String, autostart: Bool, source: String?)
 }
@@ -28,6 +29,13 @@ enum LingxiDeepLink {
         )
 
         switch host {
+        case "open_conversation":
+            let sessionID = values["sessionId"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(256)
+            guard let sessionID, !sessionID.isEmpty else { return nil }
+            let turnID = values["turnId"].flatMap { UInt64($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            return .openConversation(sessionID: String(sessionID), turnID: turnID)
         case "open_terminal":
             let sessionID = values["sessionId"]?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -61,10 +69,16 @@ enum LingxiDeepLink {
             return nil
         }
     }
+
+    static func conversationURL(sessionID: String, turnID: UInt64?) -> URL? {
+        ConversationDeepLink.makeURL(sessionID: sessionID, turnID: turnID)
+    }
 }
 
 extension Notification.Name {
     static let lingxiAppActionPending = Notification.Name("LingxiAppActionPending")
+    static let lingxiConversationNotificationOpened =
+        Notification.Name("LingxiConversationNotificationOpened")
 }
 
 /// Durable hand-off between an App Intent and the SwiftUI scene. App Intents may

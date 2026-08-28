@@ -122,6 +122,25 @@ pub enum ClientEvent {
         cost: CostDto,
     },
 
+    /// Authoritative durable state for one mobile turn. Emitted on attach,
+    /// resume, recovery gating, and every terminal transition.
+    TurnRecoveryState {
+        snapshot: TurnRecoverySnapshotDto,
+    },
+
+    /// Sequenced retained copy of a turn event. It is emitted beside live
+    /// delivery and replayed after
+    /// [`ClientCommand::AttachTurn`](crate::commands::ClientCommand::AttachTurn).
+    /// `event_json` is the original serialized `ClientEvent`; keeping it a
+    /// string avoids a recursive UniFFI enum while preserving the exact wire
+    /// payload for future SSE/WebSocket transports.
+    TurnEventReplay {
+        session_id: String,
+        turn_id: u64,
+        sequence: u64,
+        event_json: String,
+    },
+
     CostUpdate {
         total_usd: f64,
         input_tokens: u64,
@@ -449,6 +468,58 @@ pub enum TurnOutcomeDto {
     MaxTurns,
     /// The cancel token fired mid-turn; the orchestrator returned early.
     Cancelled,
+}
+
+/// Durable execution state for a mobile turn. Backgrounding itself never
+/// changes this state; only execution, a recovery gate, or an explicit cancel
+/// does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TurnRecoveryStateDto {
+    /// The turn is currently executing or attached to a live executor.
+    Running,
+    /// Execution is parked until the user supplies permission or input.
+    WaitingForUser,
+    /// The platform lease expired, but the checkpoint may be resumed safely.
+    PausedRecoverable,
+    /// The turn produced its normal final outcome.
+    Completed,
+    /// The turn ended with an execution failure.
+    Failed,
+    /// The user explicitly cancelled the turn; it must never be resumed.
+    Cancelled,
+}
+
+impl TurnRecoveryStateDto {
+    /// Terminal durable states must never be resurrected by attach/resume.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// Snapshot clients use to decide whether a durable turn can be reattached or
+/// needs explicit user intervention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TurnRecoverySnapshotDto {
+    /// Stable session owning the turn.
+    pub session_id: String,
+    /// Stable client-provided turn identity.
+    pub turn_id: u64,
+    /// Current durable lifecycle state.
+    pub state: TurnRecoveryStateDto,
+    /// First event sequence still retained for replay.
+    pub first_sequence: u64,
+    /// Last committed event sequence, or zero when no events were committed.
+    pub last_sequence: u64,
+    /// Whether replaying from the persisted boundary is known to be safe.
+    pub safe_to_resume: bool,
+    /// Optional machine-readable explanation for a paused or terminal state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Cumulative cost snapshot — the lowered analog of `traits::CostSnapshot`

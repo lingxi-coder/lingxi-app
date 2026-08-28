@@ -86,7 +86,12 @@ export function App() {
                 sessionKey={bridge.conversation.sessionKey}
               />
               <PlanTasks tasks={bridge.sessionLoading ? [] : bridge.conversation.plan} />
-              <BetaComposer bridge={bridge} ready={ready} />
+              <BetaComposer
+                bridge={bridge}
+                ready={ready}
+                onOpenSettings={() => setSettingsOpen(true)}
+                onSetTheme={changeTheme}
+              />
             </>
           )}
 

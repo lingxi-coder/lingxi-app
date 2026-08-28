@@ -28,6 +28,8 @@ import {
 import { groupModelReferences, modelReference } from '../bridge/modelCatalog';
 import { persistProviderCredentialInput } from '../bridge/providerCredentials';
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
+import { DESKTOP_COMMANDS } from '../bridge/desktopCommands';
+import { resolveDesktopCommand, type DesktopCommandContext } from '../bridge/slashDispatch';
 import { Icon } from './Icon';
 import { PROVIDERS, providerById } from '../../shared/providers';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
@@ -627,7 +629,12 @@ function createFileMention(path: string, color: string): HTMLElement {
   return token;
 }
 
-export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: boolean }) {
+export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
+  bridge: UseBridge;
+  ready: boolean;
+  onOpenSettings(): void;
+  onSetTheme(theme: 'dark' | 'light'): void;
+}) {
   const t = useT();
   const [text, setText] = useState('');
   const [modelOpen, setModelOpen] = useState(false);
@@ -689,6 +696,23 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   const reasoningOptions = reasoningControls?.spec.options ?? [];
   const selectedReasoning = reasoningControls?.effective ?? reasoningControls?.requested;
   const providerCredentials = bridge.bootstrap?.providerCredentials;
+
+  const commandContext: DesktopCommandContext = useMemo(() => ({
+    setModel: (model) => bridge.setModel(model),
+    knownModel: (model) => bridge.desktop.models.includes(model),
+    setPermissionMode: (mode) => bridge.setPermissionMode(mode),
+    setReasoningLevel: (id) => bridge.setReasoningSelection({ type: 'level', id }),
+    setReasoningAutomatic: () => bridge.setReasoningSelection({ type: 'automatic' }),
+    setReasoningDisabled: () => bridge.setReasoningSelection({ type: 'disabled' }),
+    setFastMode: (enabled) => bridge.setFastMode(enabled),
+    fastMode: () => bridge.desktop.fastMode,
+    setTheme: (theme) => onSetTheme(theme),
+    openModelPicker: (section) => { setModelOpen(true); setModelSubmenu(section); },
+    openPermissionPicker: () => setPermissionOpen(true),
+    openSettings: onOpenSettings,
+    emit: (output, isError) => bridge.emitCommandOutput(output, isError === true),
+  }), [bridge, onOpenSettings, onSetTheme]);
+
   const slashMenuOpen = slashQuery !== null && ready && !bridge.running;
 
   const fileMenuOpen = Boolean(filePicker && ready && !bridge.running);
@@ -1068,6 +1092,12 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
     if (voiceState === 'listening') stopVoice();
     if (isSlashCommand) {
       clearComposer();
+      const resolved = resolveDesktopCommand(slashCommand, DESKTOP_COMMANDS);
+      if (resolved) {
+        bridge.beginLocalCommand(slashCommand);
+        void Promise.resolve(resolved.command.run(resolved.args, commandContext)).catch(() => undefined);
+        return;
+      }
       invoke(() => bridge.runSlashCommand(slashCommand));
       return;
     }

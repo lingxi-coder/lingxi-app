@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { beginSlashCommand, emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
+import { beginLocalSlashCommand, beginSlashCommand, emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
 import { commandShouldCollapse } from '../src/renderer/model/runItem';
 
 test('a slash command result becomes its own transcript row, not an assistant line', () => {
@@ -102,6 +102,25 @@ test('an error during an ordinary turn does not release the composer early', () 
   s = reduceEvent(s, { type: 'error', message: 'a tool call failed' });
 
   assert.equal(s.running, true);
+});
+
+test('a locally-handled command never claims running, unlike an engine-forwarded one', () => {
+  // beginSlashCommand (engine path) pre-claims the composer, released only by
+  // a slash_command_result/error/turn_ended that a LOCAL command never gets.
+  const forwarded = beginSlashCommand(emptyConversation(), '/security-review');
+  assert.equal(forwarded.running, true);
+
+  // beginLocalSlashCommand (desktop path) must not make that claim at all --
+  // there is no engine event coming to release it, so claiming it here would
+  // brick the composer after a bare /model, /permissions, /effort, /theme, or
+  // /config.
+  const local = beginLocalSlashCommand(emptyConversation(), '/model');
+  assert.equal(local.running, false);
+
+  // A local command never receives a slash_command_result, error, or
+  // turn_started/turn_ended -- so `running` simply stays false; nothing ever
+  // arrives to change it, and there is no claim left to release.
+  assert.equal(local.running, false);
 });
 
 test('command output folds only once it is genuinely long', () => {

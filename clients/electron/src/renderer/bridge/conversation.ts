@@ -214,6 +214,22 @@ export function beginSlashCommand(state: ConversationState, raw: string): Conver
 }
 
 /**
+ * Echo a slash command the DESKTOP is handling itself.
+ *
+ * Same as {@link beginSlashCommand} except it makes no `running` claim: a
+ * local command runs synchronously and never starts a turn, so there is no
+ * engine event coming to release the composer. Claiming it here would leave
+ * the composer permanently read-only after a bare `/model`.
+ */
+export function beginLocalSlashCommand(state: ConversationState, raw: string): ConversationState {
+  const trimmed = raw.trim();
+  if (!trimmed) return state;
+  const next = appendUserPrompt(state, trimmed);
+  const name = trimmed.split(/\s/, 1)[0] ?? '';
+  return { ...next, pendingSlashName: name };
+}
+
+/**
  * Echo a submitted user prompt and reserve the renderer's turn slot before the
  * asynchronous `turn_started` event arrives. The real terminal event remains
  * the only successful release path.

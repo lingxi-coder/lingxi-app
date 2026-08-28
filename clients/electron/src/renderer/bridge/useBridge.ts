@@ -13,6 +13,7 @@ import type {
 
 import {
   appendPendingUserPrompt,
+  beginLocalSlashCommand,
   beginSlashCommand,
   emptyConversation,
   reduceEvent,
@@ -60,6 +61,10 @@ export interface UseBridge {
   clearError(): void;
   sendPrompt(text: string, images?: ImageRefDto[]): Promise<void>;
   runSlashCommand(raw: string): Promise<void>;
+  /** Echo a slash line the desktop is handling locally; makes no `running` claim. */
+  beginLocalCommand(raw: string): void;
+  /** Push a locally-produced command's own output into the transcript. */
+  emitCommandOutput(output: string, isError: boolean): void;
   cancel(turnId?: number): Promise<void>;
   approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(requestId: number): Promise<void>;
@@ -770,6 +775,21 @@ export function useBridge(): UseBridge {
     }
   }, [capture, host, updateRuntime]);
 
+  const beginLocalCommand = useCallback((raw: string) => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    updateRuntime(sessionId, (state) => ({ ...state, conversation: beginLocalSlashCommand(state.conversation, raw) }));
+  }, [updateRuntime]);
+
+  const emitCommandOutput = useCallback((output: string, isError: boolean) => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    updateRuntime(sessionId, (state) => ({
+      ...state,
+      conversation: reduceEvent(state.conversation, { type: 'slash_command_result', display: output, is_error: isError }),
+    }));
+  }, [updateRuntime]);
+
   const cancel = useCallback((turnId?: number): Promise<void> => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId || !turnActiveRefs.current.get(sessionId)) return Promise.resolve();
@@ -1078,6 +1098,8 @@ export function useBridge(): UseBridge {
     clearError: () => setError(null),
     sendPrompt,
     runSlashCommand,
+    beginLocalCommand,
+    emitCommandOutput,
     cancel,
     approve,
     deny,

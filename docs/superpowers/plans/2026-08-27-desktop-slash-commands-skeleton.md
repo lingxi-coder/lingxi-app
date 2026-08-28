@@ -696,7 +696,7 @@ git commit -m "Add the desktop slash dispatch layer"
 
 **Interfaces:**
 - Consumes: `DesktopCommand`, `DesktopCommandContext`, `resolveDesktopCommand` (Task 5); `beginSlashCommand` (Task 1).
-- Produces: `DESKTOP_COMMANDS: readonly DesktopCommand[]`, and `BetaComposer` gains the prop `onOpenSettings(): void`.
+- Produces: `DESKTOP_COMMANDS: readonly DesktopCommand[]`; `BetaComposer` gains the props `onOpenSettings(): void` and `onSetTheme(theme: 'dark' | 'light'): void`; `UseBridge` gains `emitCommandOutput(output: string, isError: boolean): void` and `beginLocalCommand(raw: string): void`.
 
 - [ ] **Step 1: Write the failing tests**
 

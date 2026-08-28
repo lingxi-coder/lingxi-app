@@ -277,14 +277,18 @@ pub enum ClientEvent {
         effective_json: String,
         /// `{key: layer}` — which layer each effective value came from.
         provenance_json: String,
-        /// `[{layer, path, exists, writable, parse_error?}]` — the on-disk
+        /// `[{layer, path, exists, parsed, parse_error?}]` — the on-disk
         /// state of every settings file layer, so the UI can show which file
-        /// backs a layer and whether it parsed.
+        /// backs a layer and whether it parsed. `parsed` reports JSON
+        /// validity only; it says nothing about OS write permission.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         files_json: Option<String>,
-        /// `{key: value}` — the values the running session actually loaded at
-        /// startup, which can differ from `effective_json` after an on-disk
-        /// edit that has not been picked up yet.
+        /// `{key: value}` — the FILE-LAYER values as read at session start.
+        /// NOT the session's live configuration: no `cli` / `managed` / `env`
+        /// overlay is applied, so this is strictly "what the settings files
+        /// said at boot" and can differ from `effective_json` both because of
+        /// an on-disk edit not yet picked up AND because `effective_json`
+        /// carries the managed overlay that this field does not.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_json: Option<String>,
         /// Keys an administrator pinned through the managed-settings layer;

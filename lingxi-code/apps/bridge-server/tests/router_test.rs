@@ -2155,13 +2155,18 @@ async fn the_settings_listing_emits_a_snapshot_instead_of_nothing() {
     )
     .unwrap();
 
+    let mut managed = std::collections::BTreeMap::new();
+    managed.insert(
+        "telemetryEnabled".to_string(),
+        serde_json::Value::from(false),
+    );
     let router = router_with_settings(SettingsContext {
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project.clone(),
         },
         active: std::collections::BTreeMap::new(),
-        locked: vec!["telemetryEnabled".to_string()],
+        managed,
     });
     let sink = CapturingSink::arc();
 
@@ -2207,7 +2212,7 @@ async fn the_settings_listing_emits_a_snapshot_instead_of_nothing() {
     assert_eq!(
         locked.as_deref(),
         Some(&["telemetryEnabled".to_string()][..]),
-        "locked must carry through from the settings context, not be dropped"
+        "locked must carry through from the settings context's managed overlay, not be dropped"
     );
 
     // The per-file layer states ride along so the UI can show which files back
@@ -2265,6 +2270,15 @@ async fn the_settings_listing_reports_a_missing_context_instead_of_staying_silen
     assert!(
         message.contains("settings context"),
         "the error must name what is missing, got: {message}"
+    );
+    // Reporting the gap must REPLACE the snapshot, not accompany it: an empty
+    // `SettingsSnapshot` alongside the error would tell a client that the user
+    // has no settings at all.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "no SettingsSnapshot may be emitted without a settings context, got {events:?}"
     );
 }
 

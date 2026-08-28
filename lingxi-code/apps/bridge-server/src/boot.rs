@@ -781,21 +781,25 @@ pub async fn assemble_with_provider_keys(
     // loads its own settings from, again before `cfg` moves into the desktop
     // composition root.
     //
-    // `active` is snapshotted ONCE, here: it is "what this session loaded at
-    // startup", which is exactly what a later on-disk edit must be shown as
-    // diverging from. Re-reading it per listing would make it track the files
-    // and say nothing. `locked` comes from the desktop composition root's
-    // managed (policy) tiers — bridge-server does not discover those itself.
+    // `active` is snapshotted ONCE, here, and is deliberately the FILE LAYERS
+    // ONLY as read at this moment — no cli/managed/env overlay. It answers
+    // "what did this session load from the files at boot", which is the
+    // baseline a later on-disk edit is shown as diverging from; re-reading it
+    // per listing would make it track the files and say nothing. That is why
+    // the managed overlay below is NOT folded into it, even though the same
+    // overlay does win in the snapshot's `effective`.
     let settings_context = {
         let paths = SettingsPaths {
             lingxi_home: cfg.lingxi_home.clone(),
             project_dir: cfg.cwd.clone(),
         };
-        let active = build_snapshot(&paths, BTreeMap::new(), Vec::new()).effective;
+        let active = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new()).effective;
         SettingsContext {
             paths,
             active,
-            locked: engine_desktop::managed_locked_setting_keys().await,
+            // Managed (policy) discovery is the desktop composition root's job;
+            // bridge-server does not locate those tiers itself.
+            managed: engine_desktop::managed_settings_overlay().await,
         }
     };
 

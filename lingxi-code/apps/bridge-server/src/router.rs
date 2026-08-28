@@ -247,9 +247,9 @@ impl EngineCommandRouter {
     }
 
     /// Attach the layered-settings context the `Settings` listing reads. The
-    /// composition root supplies the settings roots, the session's actually
-    /// loaded values, and the administrator-locked key set; this router only
-    /// reads and lowers them.
+    /// composition root supplies the settings roots, the file-layer values read
+    /// at session start, and the administrator's managed overlay; this router
+    /// only reads and lowers them.
     #[must_use]
     pub fn with_settings_context(mut self, settings: SettingsContext) -> Self {
         self.settings = Some(settings);
@@ -332,7 +332,7 @@ impl EngineCommandRouter {
         let snapshot = build_snapshot(
             &context.paths,
             context.active.clone(),
-            context.locked.clone(),
+            context.managed.clone(),
         );
         let lowered = lower_snapshot(&snapshot);
         sink.emit(ClientEvent::SettingsSnapshot {

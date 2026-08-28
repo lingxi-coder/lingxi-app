@@ -4533,26 +4533,40 @@ fn load_merged_disable_all_hooks(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The settings keys an administrator has pinned through the managed (policy)
-/// layer, read from the SAME file-based tiers the merge above consumes
-/// (`managed_settings_raw_tiers`). A key present in any managed tier is locked:
-/// no lower layer can override it, so a UI must not offer to edit it.
+/// The settings an administrator pinned through the managed (policy) layer:
+/// key → value, read from the SAME file-based tiers the merge above consumes
+/// (`managed_settings_raw_tiers`).
+///
+/// Returns the VALUES, not just the key names, because a consumer that only
+/// knew the keys would have to report some lower layer's value for exactly the
+/// keys the lower layer cannot win — managed outranks every file layer in the
+/// engine's precedence (`env → managed → cli → local → project → user →
+/// defaults`). A settings UI given only the keys renders the wrong current
+/// value and puts a padlock next to it.
+///
+/// Tier precedence is preserved from `managed_settings_raw_tiers`, which
+/// returns tiers in ASCENDING priority: a later tier's key overwrites an
+/// earlier one's, so `managed-settings.d` drop-ins win over the base
+/// `managed-settings.json`.
 ///
 /// Lives here, not in `bridge-server`, because managed-layer discovery is the
 /// composition root's job — the platform-specific managed directory and its
-/// `managed-settings.d` drop-in ordering are resolved once, in one place.
-/// Returns the raw JSON key names (the wire spelling), deduplicated and
-/// sorted, so they line up with the keys a settings snapshot reports.
+/// drop-in ordering are resolved once, in one place. Keys are the raw JSON
+/// names (the wire spelling), so they line up with the keys a settings
+/// snapshot reports.
 #[must_use]
-pub async fn managed_locked_setting_keys() -> Vec<String> {
-    let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+pub async fn managed_settings_overlay() -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut overlay: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
     for raw in crate::settings_watch::managed_settings_raw_tiers().await {
         if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
         {
-            keys.extend(map.keys().cloned());
+            for (key, value) in map {
+                overlay.insert(key, value);
+            }
         }
     }
-    keys.into_iter().collect()
+    overlay
 }
 
 /// Resolve `askUserQuestionTimeout` from its allowed sources only: user,

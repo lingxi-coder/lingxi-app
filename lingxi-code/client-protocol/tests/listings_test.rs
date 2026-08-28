@@ -536,6 +536,9 @@ fn settings_snapshot_round_trips() {
     let ev = ClientEvent::SettingsSnapshot {
         effective_json: r#"{"model":"claude-opus-4-7","theme":"dark"}"#.to_string(),
         provenance_json: r#"{"model":"project","theme":"user"}"#.to_string(),
+        files_json: None,
+        active_json: None,
+        locked: None,
     };
     let json = serde_json::to_value(&ev).expect("serialize SettingsSnapshot");
     assert_eq!(json["type"], "settings_snapshot");
@@ -548,8 +551,63 @@ fn settings_snapshot_round_trips() {
         json["provenance_json"].is_string(),
         "provenance_json must be a String"
     );
+    // The three ADDED optional fields stay OFF the wire when unset, which is
+    // what makes the addition additive: a client that predates them decodes
+    // the identical two-field payload.
+    let json = serde_json::to_value(&ev).expect("serialize SettingsSnapshot");
+    assert!(json.get("files_json").is_none());
+    assert!(json.get("active_json").is_none());
+    assert!(json.get("locked").is_none());
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize SettingsSnapshot");
     assert_eq!(back, ev);
+}
+
+/// The added fields carry the per-file layer states, the session's actually
+/// loaded values, and the administrator-locked keys. `files_json`/`active_json`
+/// are JSON **Strings** for the same §0.4 reason as the two required payloads;
+/// `locked` is a plain string list, which IS UniFFI-representable.
+#[test]
+fn settings_snapshot_optional_fields_round_trip() {
+    let ev = ClientEvent::SettingsSnapshot {
+        effective_json: r#"{"model":"claude-opus-4-7"}"#.to_string(),
+        provenance_json: r#"{"model":"project"}"#.to_string(),
+        files_json: Some(
+            r#"[{"layer":"project","path":"/repo/.lingxi/settings.json","exists":true,"writable":true}]"#
+                .to_string(),
+        ),
+        active_json: Some(r#"{"model":"claude-opus-4-7"}"#.to_string()),
+        locked: Some(vec!["telemetryEnabled".to_string()]),
+    };
+    let json = serde_json::to_value(&ev).expect("serialize SettingsSnapshot");
+    assert!(
+        json["files_json"].is_string() && json["active_json"].is_string(),
+        "the added structured payloads must be JSON Strings, not nested objects"
+    );
+    assert!(json["locked"].is_array());
+    let back: ClientEvent = serde_json::from_value(json).expect("deserialize SettingsSnapshot");
+    assert_eq!(back, ev);
+}
+
+/// A payload written by a client that predates the three added fields must
+/// still decode — that is what "additive" means for this variant.
+#[test]
+fn settings_snapshot_decodes_a_payload_without_the_added_fields() {
+    let json = serde_json::json!({
+        "type": "settings_snapshot",
+        "effective_json": "{}",
+        "provenance_json": "{}",
+    });
+    let back: ClientEvent = serde_json::from_value(json).expect("legacy payload must decode");
+    assert_eq!(
+        back,
+        ClientEvent::SettingsSnapshot {
+            effective_json: "{}".to_string(),
+            provenance_json: "{}".to_string(),
+            files_json: None,
+            active_json: None,
+            locked: None,
+        }
+    );
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────

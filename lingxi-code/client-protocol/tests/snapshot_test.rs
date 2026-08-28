@@ -565,6 +565,12 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::SettingsSnapshot {
                 effective_json: r#"{"model":"claude-opus-4-7"}"#.to_string(),
                 provenance_json: r#"{"model":"user-settings"}"#.to_string(),
+                // Left `None` deliberately: the golden proves the ADDED
+                // optional fields stay off the wire when unset, so a client
+                // that predates them sees the byte-identical payload.
+                files_json: None,
+                active_json: None,
+                locked: None,
             },
         ),
         (

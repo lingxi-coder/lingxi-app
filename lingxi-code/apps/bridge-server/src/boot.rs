@@ -43,6 +43,7 @@ use traits::{OrchestratorHandle, OutputStream, SlashCommandDispatcher};
 use crate::driver::{CredentialRequiredTurnDriver, OrchestratorTurnDriver};
 use crate::router::{EngineCommandRouter, SessionStoreContext};
 use crate::server::{BridgeConnection, TurnDriver};
+use crate::settings_bridge::{build_snapshot, SettingsContext, SettingsPaths};
 
 /// Env override for the API base URL (mirrors `apps/cli`'s `resolve_api_base`).
 pub const API_BASE_ENV: &str = "LINGXI_API_BASE_URL";
@@ -776,6 +777,28 @@ pub async fn assemble_with_provider_keys(
         Arc::new(PosixFileSystem::new(cfg.cwd.clone())),
     );
 
+    // The layered-settings read path, captured from the SAME roots the engine
+    // loads its own settings from, again before `cfg` moves into the desktop
+    // composition root.
+    //
+    // `active` is snapshotted ONCE, here: it is "what this session loaded at
+    // startup", which is exactly what a later on-disk edit must be shown as
+    // diverging from. Re-reading it per listing would make it track the files
+    // and say nothing. `locked` comes from the desktop composition root's
+    // managed (policy) tiers — bridge-server does not discover those itself.
+    let settings_context = {
+        let paths = SettingsPaths {
+            lingxi_home: cfg.lingxi_home.clone(),
+            project_dir: cfg.cwd.clone(),
+        };
+        let active = build_snapshot(&paths, BTreeMap::new(), Vec::new()).effective;
+        SettingsContext {
+            paths,
+            active,
+            locked: engine_desktop::managed_locked_setting_keys().await,
+        }
+    };
+
     // The orchestrator's output stream + the gate's request sink BOTH ride the
     // same connection-scoped outbound channel (the F2-06 contract).
     let event_sink = connection.event_sink();
@@ -909,7 +932,8 @@ pub async fn assemble_with_provider_keys(
             Some(runtime.shared_command_registry.clone()),
         )
         .with_credentials(runtime.credentials.clone())
-        .with_session_store(session_store),
+        .with_session_store(session_store)
+        .with_settings_context(settings_context),
     );
 
     let connection = connection

@@ -4533,6 +4533,28 @@ fn load_merged_disable_all_hooks(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The settings keys an administrator has pinned through the managed (policy)
+/// layer, read from the SAME file-based tiers the merge above consumes
+/// (`managed_settings_raw_tiers`). A key present in any managed tier is locked:
+/// no lower layer can override it, so a UI must not offer to edit it.
+///
+/// Lives here, not in `bridge-server`, because managed-layer discovery is the
+/// composition root's job — the platform-specific managed directory and its
+/// `managed-settings.d` drop-in ordering are resolved once, in one place.
+/// Returns the raw JSON key names (the wire spelling), deduplicated and
+/// sorted, so they line up with the keys a settings snapshot reports.
+#[must_use]
+pub async fn managed_locked_setting_keys() -> Vec<String> {
+    let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for raw in crate::settings_watch::managed_settings_raw_tiers().await {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
+        {
+            keys.extend(map.keys().cloned());
+        }
+    }
+    keys.into_iter().collect()
+}
+
 /// Resolve `askUserQuestionTimeout` from its allowed sources only: user,
 /// `--settings`, and managed policy. Project/local files are intentionally
 /// excluded because an untrusted checkout must not control interaction timing.

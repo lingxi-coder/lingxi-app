@@ -42,6 +42,7 @@
 //! | `ListSessions` / `RefreshListings{Sessions}` | persisted JSONL catalog | `SessionList` |
 //! | `NewSession` | `clear_session` + optional `switch_model` | `SessionStarted` / `Error` |
 //! | `ResumeSession` | JSONL replay + `resume_session` | `SessionResumed` / `Error` |
+//! | `RefreshListings{Settings}` | `settings_bridge::build_snapshot` | `SettingsSnapshot` |
 //! | `RequestExit` | `request_exit` | — |
 //!
 //! ## Mid-turn semantics
@@ -56,8 +57,10 @@
 //! Per governing decisions §0.7/§0.9, the router NEVER live-sources the reserved
 //! DTOs (`ThinkingDelta`, `UsageUpdate`, `CoordinatorStatus`); the corresponding
 //! engine sources do not exist in the foundation, so no command maps to them.
-//! Listing kinds with no engine handle or host store in the foundation
-//! (`Memory`, `Settings`) remain unrouted here.
+//! The listing kind with no engine handle or host store in the foundation
+//! (`Memory`) remains unrouted here. `Settings` IS routed: it reads the layered
+//! settings files through [`crate::settings_bridge`] using the
+//! [`crate::settings_bridge::SettingsContext`] the composition root supplies.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,6 +88,8 @@ use traits::auth::{AuthHandle, LoginInfo};
 use traits::orchestrator::OrchestratorHandle;
 use traits::task_registry::{TaskListFilter, TaskRegistryHandle};
 use traits::SlashCommandDispatcher;
+
+use crate::settings_bridge::{build_snapshot, lower_snapshot, SettingsContext};
 
 /// Default number of recent sessions returned when `ListSessions` omits its
 /// explicit limit. This matches the CLI `/resume` picker and the mobile host.
@@ -184,6 +189,11 @@ pub struct EngineCommandRouter {
     /// Shared provider credential manager. Production bridge boot wires the
     /// exact manager used by the runtime; tests/embedded clients may omit it.
     credentials: Option<Arc<secret::CredentialManager>>,
+    /// Optional layered-settings context backing the `Settings` listing.
+    /// Production boot wires it from the desktop composition root; lightweight
+    /// users of the routing seam may omit it, in which case the listing
+    /// reports the missing context rather than emitting nothing.
+    settings: Option<SettingsContext>,
     /// Set while a turn is in flight — `ClearSession` is rejected in this window
     /// (plan §2 mid-turn semantics).
     turn_active: AtomicBool,
@@ -216,6 +226,7 @@ impl EngineCommandRouter {
             slash_registry,
             session_store: None,
             credentials: None,
+            settings: None,
             turn_active: AtomicBool::new(false),
         }
     }
@@ -232,6 +243,16 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_session_store(mut self, session_store: SessionStoreContext) -> Self {
         self.session_store = Some(session_store);
+        self
+    }
+
+    /// Attach the layered-settings context the `Settings` listing reads. The
+    /// composition root supplies the settings roots, the session's actually
+    /// loaded values, and the administrator-locked key set; this router only
+    /// reads and lowers them.
+    #[must_use]
+    pub fn with_settings_context(mut self, settings: SettingsContext) -> Self {
+        self.settings = Some(settings);
         self
     }
 
@@ -287,6 +308,41 @@ impl EngineCommandRouter {
 
         sink.emit(ClientEvent::FastModeChanged { enabled: fast_mode })
             .await;
+    }
+
+    /// Read, merge and emit the layered settings. This listing was defined in
+    /// the protocol from the start and, until now, matched the same do-nothing
+    /// arm as `Memory`: it logged a debug line and emitted nothing at all.
+    ///
+    /// Without a settings context there is nothing to read, so it says so
+    /// rather than reverting to silence — silence is precisely the defect this
+    /// path exists to remove.
+    async fn emit_settings_snapshot(&self, sink: &dyn ClientEventSink) {
+        let Some(context) = self.settings.as_ref() else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "settings listing unavailable: this connection was built without a \
+                          settings context"
+                    .to_string(),
+            })
+            .await;
+            return;
+        };
+
+        let snapshot = build_snapshot(
+            &context.paths,
+            context.active.clone(),
+            context.locked.clone(),
+        );
+        let lowered = lower_snapshot(&snapshot);
+        sink.emit(ClientEvent::SettingsSnapshot {
+            effective_json: lowered.effective_json,
+            provenance_json: lowered.provenance_json,
+            files_json: Some(lowered.files_json),
+            active_json: Some(lowered.active_json),
+            locked: Some(lowered.locked),
+        })
+        .await;
     }
 
     async fn emit_provider_credential_status(
@@ -623,7 +679,10 @@ impl EngineCommandRouter {
                 self.emit_session_list(DEFAULT_SESSION_LIST_LIMIT, sink)
                     .await;
             }
-            ListingKindDto::Memory | ListingKindDto::Settings => {
+            ListingKindDto::Settings => {
+                self.emit_settings_snapshot(sink).await;
+            }
+            ListingKindDto::Memory => {
                 tracing::debug!(
                     ?kind,
                     "bridge-server: listing kind has no engine handle in the foundation"

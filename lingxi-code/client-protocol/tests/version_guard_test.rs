@@ -438,6 +438,16 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::SettingsSnapshot", "settings_snapshot");
     put("ClientEvent::SettingsSnapshot.effective_json", "String");
     put("ClientEvent::SettingsSnapshot.provenance_json", "String");
+    // ADDED (additive — new optional fields need no major bump, §0.10).
+    put("ClientEvent::SettingsSnapshot.files_json", "Option<String>");
+    put(
+        "ClientEvent::SettingsSnapshot.active_json",
+        "Option<String>",
+    );
+    put(
+        "ClientEvent::SettingsSnapshot.locked",
+        "Option<Vec<String>>",
+    );
 
     put("ClientEvent::AuthState", "auth_state");
     put("ClientEvent::AuthState.state", "AuthStateDto");

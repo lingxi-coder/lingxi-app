@@ -259,9 +259,38 @@ pub enum ClientEvent {
         snapshot: StatusSnapshotDto,
     },
 
+    /// The layered settings read path (`RefreshListings{Settings}`).
+    ///
+    /// Every structured payload here is a JSON **String**, not a nested
+    /// object: `serde_json::Value` must never enter this crate (decision
+    /// §0.4 — `Value` is not UniFFI-representable), so the bridge lowers
+    /// each map to a string exactly the way `ToolUseStarted.input_json`
+    /// does.
+    ///
+    /// `effective_json` is `{key: value}` after the merge; `provenance_json`
+    /// is `{key: layer}` naming which layer each merged value came from.
+    /// The three optional fields were ADDED to this variant (additive under
+    /// decision §0.10 — no major bump): a client that predates them keeps
+    /// reading the two required payloads unchanged.
     SettingsSnapshot {
+        /// `{key: value}` — the merged effective settings.
         effective_json: String,
+        /// `{key: layer}` — which layer each effective value came from.
         provenance_json: String,
+        /// `[{layer, path, exists, writable, parse_error?}]` — the on-disk
+        /// state of every settings file layer, so the UI can show which file
+        /// backs a layer and whether it parsed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files_json: Option<String>,
+        /// `{key: value}` — the values the running session actually loaded at
+        /// startup, which can differ from `effective_json` after an on-disk
+        /// edit that has not been picked up yet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_json: Option<String>,
+        /// Keys an administrator pinned through the managed-settings layer;
+        /// the UI must not offer to edit these.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<Vec<String>>,
     },
 
     AuthState {

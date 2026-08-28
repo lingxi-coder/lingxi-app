@@ -149,6 +149,112 @@ pub fn writable_path(paths: &SettingsPaths, layer: SettingsLayer) -> Result<Path
     Ok(settings_path(source, &paths.lingxi_home, &paths.project_dir))
 }
 
+impl SettingsLayer {
+    /// The layer's name as it appears in the wire payloads
+    /// (`provenance_json`'s values and `files_json`'s `layer` field).
+    /// Spelled out rather than derived from `Debug` so a rename of the Rust
+    /// variant cannot silently change the wire contract.
+    #[must_use]
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            SettingsLayer::Defaults => "defaults",
+            SettingsLayer::User => "user",
+            SettingsLayer::Project => "project",
+            SettingsLayer::Local => "local",
+            SettingsLayer::Cli => "cli",
+            SettingsLayer::Managed => "managed",
+            SettingsLayer::Env => "env",
+        }
+    }
+}
+
+/// Everything the router needs to answer the `Settings` listing, supplied once
+/// by the composition root.
+///
+/// `active` and `locked` are inputs rather than something this crate computes:
+/// `active` is what the running session actually loaded at startup, and
+/// `locked` comes from the managed-settings layers the desktop composition root
+/// already loads (`engine_desktop::managed_locked_setting_keys`). bridge-server
+/// deliberately does not re-implement managed-layer loading.
+pub struct SettingsContext {
+    /// The two roots every file layer's path is resolved from.
+    pub paths: SettingsPaths,
+    /// The values the running session loaded at startup.
+    pub active: BTreeMap<String, Value>,
+    /// Keys an administrator pinned through the managed layer.
+    pub locked: Vec<String>,
+}
+
+/// A [`SettingsSnapshot`] lowered to the wire's payloads.
+///
+/// Every structured field is a JSON **String**: `serde_json::Value` must not
+/// enter `client-protocol` (decision §0.4 — it is not UniFFI-representable),
+/// so structured payloads travel as strings exactly the way
+/// `ToolUseStarted.input_json` does. `locked` stays a plain string list, which
+/// IS representable.
+pub struct LoweredSettings {
+    /// `{key: value}` — the merged effective settings.
+    pub effective_json: String,
+    /// `{key: layer}` — which layer each effective value came from.
+    pub provenance_json: String,
+    /// `[{layer, path, exists, writable, parse_error?}]` — one entry per file
+    /// layer, in the module's lowest-priority-first order.
+    pub files_json: String,
+    /// `{key: value}` — the session's actually loaded values.
+    pub active_json: String,
+    /// Administrator-locked keys, passed through unchanged.
+    pub locked: Vec<String>,
+}
+
+/// Lower a snapshot to the wire payloads. A pure function called by the
+/// router, matching how the router lowers every other reply through the pure
+/// `client_adapter::lowering` fns rather than lowering inside the builder.
+///
+/// Serialization of a `BTreeMap<String, Value>` and of the file list cannot
+/// fail (both are plain JSON objects/arrays with string keys), but a panic at
+/// the routing seam is never acceptable, so a failure degrades to an empty
+/// JSON document rather than unwrapping.
+#[must_use]
+pub fn lower_snapshot(snapshot: &SettingsSnapshot) -> LoweredSettings {
+    let provenance: BTreeMap<&str, &str> = snapshot
+        .provenance
+        .iter()
+        .map(|(key, layer)| (key.as_str(), layer.wire_name()))
+        .collect();
+    let files: Vec<Value> = snapshot
+        .files
+        .iter()
+        .map(|file| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("layer".to_string(), Value::from(file.layer.wire_name()));
+            entry.insert(
+                "path".to_string(),
+                Value::from(file.path.to_string_lossy().into_owned()),
+            );
+            entry.insert("exists".to_string(), Value::from(file.exists));
+            entry.insert("writable".to_string(), Value::from(file.writable));
+            if let Some(error) = &file.parse_error {
+                entry.insert("parse_error".to_string(), Value::from(error.clone()));
+            }
+            Value::Object(entry)
+        })
+        .collect();
+
+    LoweredSettings {
+        effective_json: to_json_or_empty_object(&snapshot.effective),
+        provenance_json: to_json_or_empty_object(&provenance),
+        files_json: serde_json::to_string(&files).unwrap_or_else(|_| "[]".to_string()),
+        active_json: to_json_or_empty_object(&snapshot.active),
+        locked: snapshot.locked.clone(),
+    }
+}
+
+/// Serialize a map, degrading to `{}` rather than panicking at the routing
+/// seam. (Unreachable in practice: these maps are string-keyed JSON values.)
+fn to_json_or_empty_object<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +353,61 @@ mod tests {
         assert_eq!(
             writable_path(&paths, SettingsLayer::Local).unwrap(),
             project.join(branding::DOT_DIR).join("settings.local.json")
+        );
+    }
+
+    /// The lowering must keep `active` DISTINCT from `effective` — that
+    /// distinction is the whole point of the field: an on-disk edit that the
+    /// running session has not adopted shows up as the two disagreeing. It
+    /// must also name each layer with its wire spelling and carry a parse
+    /// error through to the file entry.
+    #[test]
+    fn lowering_keeps_active_distinct_from_effective_and_names_each_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+        std::fs::write(home.join("settings.json"), r#"{"model":"on-disk"}"#).unwrap();
+        std::fs::write(
+            project.join(branding::DOT_DIR).join("settings.local.json"),
+            "{ not json",
+        )
+        .unwrap();
+
+        let paths = SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        };
+        let mut active = BTreeMap::new();
+        active.insert("model".to_string(), Value::from("loaded-at-startup"));
+        let lowered = lower_snapshot(&build_snapshot(&paths, active, Vec::new()));
+
+        let effective: Value = serde_json::from_str(&lowered.effective_json).unwrap();
+        let active: Value = serde_json::from_str(&lowered.active_json).unwrap();
+        assert_eq!(effective["model"], "on-disk");
+        assert_eq!(
+            active["model"], "loaded-at-startup",
+            "active must report what the session loaded, not re-report the files"
+        );
+
+        let provenance: Value = serde_json::from_str(&lowered.provenance_json).unwrap();
+        assert_eq!(
+            provenance["model"], "user",
+            "the wire spelling of the layer, lowercase, not the Rust Debug name"
+        );
+
+        let files: Value = serde_json::from_str(&lowered.files_json).unwrap();
+        let broken = files
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["layer"] == "local")
+            .expect("the local layer must be reported even when it fails to parse");
+        assert_eq!(broken["writable"], false);
+        assert!(
+            broken["parse_error"].is_string(),
+            "the parse error must reach the wire, got {broken}"
         );
     }
 

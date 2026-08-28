@@ -35,6 +35,7 @@ use bridge::wire::Frame;
 use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::router::{CommandRouter, EngineCommandRouter, SessionStoreContext};
 use bridge_server::server::BridgeConnection;
+use bridge_server::settings_bridge::{SettingsContext, SettingsPaths};
 use client_adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
 use client_protocol::commands::{ClientCommand, ListingKindDto, ProviderCredentialSecretDto};
 use client_protocol::events::{ClientEvent, ErrorKindDto};
@@ -2118,4 +2119,176 @@ async fn force_compact_completion_routes_over_ws_without_an_active_turn() {
     }
 
     endpoint.shutdown().await;
+}
+
+// ── Settings listing ─────────────────────────────────────────────────────────
+
+/// Build a router carrying a settings context, over the same mock engine
+/// handles every other routing test uses.
+fn router_with_settings(settings: SettingsContext) -> EngineCommandRouter {
+    router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    )
+    .with_settings_context(settings)
+}
+
+/// `RefreshListings{Settings}` was defined in the protocol from the start and
+/// never routed — `router.rs` matched it alongside `Memory` and emitted a
+/// `tracing::debug!` line and nothing else. This pins that it must emit a real
+/// snapshot.
+///
+/// The provenance assertion is not a restatement of a constant: the user layer
+/// also defines `outputStyle`, so `"project"` is only correct because the merge
+/// actually ranked project above user. Reverse the precedence and it fails.
+#[tokio::test]
+async fn the_settings_listing_emits_a_snapshot_instead_of_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+    std::fs::write(home.join("settings.json"), r#"{"outputStyle":"from-user"}"#).unwrap();
+    std::fs::write(
+        project.join(branding::DOT_DIR).join("settings.json"),
+        r#"{"outputStyle":"from-project"}"#,
+    )
+    .unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project.clone(),
+        },
+        active: std::collections::BTreeMap::new(),
+        locked: vec!["telemetryEnabled".to_string()],
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::RefreshListings {
+                which: vec![ListingKindDto::Settings],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let (effective_json, provenance_json, files_json, locked) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::SettingsSnapshot {
+                effective_json,
+                provenance_json,
+                files_json,
+                locked,
+                ..
+            } => Some((
+                effective_json.clone(),
+                provenance_json.clone(),
+                files_json.clone(),
+                locked.clone(),
+            )),
+            _ => None,
+        })
+        .expect("the settings listing must emit a SettingsSnapshot, not just a debug log");
+
+    let effective: serde_json::Value = serde_json::from_str(&effective_json).unwrap();
+    assert_eq!(
+        effective["outputStyle"], "from-project",
+        "project must beat user in the merged effective settings"
+    );
+    let provenance: serde_json::Value = serde_json::from_str(&provenance_json).unwrap();
+    assert_eq!(
+        provenance["outputStyle"], "project",
+        "provenance must name the layer the winning value came from"
+    );
+    assert_eq!(
+        locked.as_deref(),
+        Some(&["telemetryEnabled".to_string()][..]),
+        "locked must carry through from the settings context, not be dropped"
+    );
+
+    // The per-file layer states ride along so the UI can show which files back
+    // each layer and which of them exist.
+    let files: serde_json::Value =
+        serde_json::from_str(&files_json.expect("files_json must be populated")).unwrap();
+    let project_file = files
+        .as_array()
+        .expect("files_json is an array")
+        .iter()
+        .find(|f| f["layer"] == "project")
+        .expect("the project layer must be reported");
+    assert_eq!(project_file["exists"], true);
+    assert_eq!(
+        project_file["path"],
+        serde_json::Value::String(
+            project
+                .join(branding::DOT_DIR)
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned()
+        ),
+        "each file layer must report its real on-disk path"
+    );
+}
+
+/// Without a settings context the listing must say so. Silently emitting
+/// nothing is what this whole task exists to remove; falling back to silence in
+/// the un-wired case would reintroduce it.
+#[tokio::test]
+async fn the_settings_listing_reports_a_missing_context_instead_of_staying_silent() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::RefreshListings {
+                which: vec![ListingKindDto::Settings],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let message = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a missing settings context must be reported, not swallowed");
+    assert!(
+        message.contains("settings context"),
+        "the error must name what is missing, got: {message}"
+    );
+}
+
+/// `Memory` shared the do-nothing arm with `Settings`. Splitting `Settings` out
+/// must not start emitting anything for `Memory`.
+#[tokio::test]
+async fn the_memory_listing_stays_unrouted() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::RefreshListings {
+                which: vec![ListingKindDto::Memory],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert!(
+        sink.events().await.is_empty(),
+        "Memory has no engine handle in the foundation and must stay silent"
+    );
 }

@@ -13,7 +13,7 @@ import type {
 
 import {
   appendPendingUserPrompt,
-  appendUserPrompt,
+  beginSlashCommand,
   emptyConversation,
   reduceEvent,
   type ConversationState,
@@ -700,7 +700,7 @@ export function useBridge(): UseBridge {
     const command = raw.trim();
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId || !command.startsWith('/')) return;
-    updateRuntime(sessionId, (state) => ({ ...state, conversation: appendUserPrompt(state.conversation, command) }));
+    updateRuntime(sessionId, (state) => ({ ...state, conversation: beginSlashCommand(state.conversation, command) }));
     try {
       await host.command(sessionId, { type: 'run_slash_command', raw: command });
       await host.command(sessionId, { type: 'refresh_listings', which: [{ type: 'slash_commands' }] });

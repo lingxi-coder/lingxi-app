@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
-import type { RunItem } from '../model/runItem';
-import { narrationDefaultOpen, narrationShouldCollapse } from '../model/runItem';
+import type { CommandRunItem, RunItem } from '../model/runItem';
+import { commandShouldCollapse, narrationDefaultOpen, narrationShouldCollapse } from '../model/runItem';
 import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './collapseStore';
 import { Icon } from './Icon';
 import { Disclosure } from './Disclosure';
@@ -126,6 +126,37 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
   );
 });
 
+const CommandOutput = memo(function CommandOutput({ item, open, onSetOpen }: {
+  item: CommandRunItem;
+  open: boolean;
+  onSetOpen: (id: string, next: boolean) => void;
+}) {
+  const t = useT();
+  // Deliberately NOT MarkdownContent: /help and /status are column-aligned
+  // plain text and a markdown pass destroys the alignment.
+  const body = (
+    <pre
+      className="mono"
+      style={{
+        margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        fontSize: 12, lineHeight: 1.55,
+        color: item.isError ? t.danger : t.text2,
+      }}
+    >{item.output}</pre>
+  );
+  if (!commandShouldCollapse(item)) return body;
+  return (
+    <Disclosure
+      id={item.id}
+      open={open}
+      onToggle={() => onSetOpen(item.id, !open)}
+      summary={item.name || 'Command output'}
+    >
+      {body}
+    </Disclosure>
+  );
+});
+
 /** Whether a thinking block starts open, before any user choice. */
 function thinkingDefaultOpen(item: Extract<RunItem, { type: 'thinking' }>): boolean {
   return item.streamed === true;
@@ -237,6 +268,19 @@ export function Stage({ liveItems = [], running = false, emptyMessage = 'Start a
               <div key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <ToolCall item={item} open={collapseOpen(visible, sessionKey, item.id)} onSetOpen={setOpen} />
+                </div>
+              </div>
+            );
+          }
+          if (item.type === 'command') {
+            return (
+              <div key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <CommandOutput
+                    item={item}
+                    open={collapseOpen(visible, sessionKey, item.id) ?? false}
+                    onSetOpen={setOpen}
+                  />
                 </div>
               </div>
             );

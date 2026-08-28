@@ -31,7 +31,7 @@ use tokio::process::Command;
 use traits::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome,
     HandleError, HookInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, RecapOutcome,
-    StatusSnapshot,
+    SkillInfo, StatusSnapshot,
 };
 
 /// Keep the session's provider-local wire model separate from the
@@ -867,6 +867,30 @@ impl OrchestratorHandle for ConversationOrchestrator {
             return Vec::new();
         };
         reg.snapshot().await
+    }
+
+    async fn list_skills(&self) -> Vec<SkillInfo> {
+        // Desktop Skills settings view (Task 7): re-scan the same project +
+        // user `skills/` directories `/skills` and `/reload-skills` already
+        // read (`skill_api::load_file_skill_sections_with_roots`), rather than
+        // a Rust-side `SkillRegistry` — the composition root's registry is a
+        // residual empty instance with no turn-loop consumer, so it would
+        // report zero skills unconditionally. Falls back to `vec![]` when no
+        // config home is wired, mirroring `list_mcp_servers`'s "no registry"
+        // default.
+        let Some(config_home) = self.config_home.as_ref() else {
+            return Vec::new();
+        };
+        skill_api::load_file_skill_sections_with_roots(&self.cwd, config_home, None, &[])
+            .into_iter()
+            .flat_map(|section| {
+                section.rows.into_iter().map(|row| SkillInfo {
+                    name: row.name,
+                    source_dir: row.source_dir,
+                    plugin: None,
+                })
+            })
+            .collect()
     }
 
     async fn reconnect_mcp_servers(

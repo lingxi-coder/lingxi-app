@@ -413,6 +413,9 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::McpServers", "mcp_servers");
     put("ClientEvent::McpServers.servers", "Vec<McpServerDto>");
 
+    put("ClientEvent::Skills", "skills");
+    put("ClientEvent::Skills.skills", "Vec<SkillDto>");
+
     put("ClientEvent::Hooks", "hooks");
     put("ClientEvent::Hooks.hooks", "Vec<HookDto>");
 
@@ -940,6 +943,7 @@ fn current_contract_index() -> ContractIndex {
     put("ListingKindDto::Sessions", "sessions");
     put("ListingKindDto::Models", "models");
     put("ListingKindDto::Mcp", "mcp");
+    put("ListingKindDto::Skills", "skills");
     put("ListingKindDto::Hooks", "hooks");
     put("ListingKindDto::Agents", "agents");
     put("ListingKindDto::SlashCommands", "slash_commands");
@@ -1318,6 +1322,10 @@ fn current_contract_index() -> ContractIndex {
     put("McpServerDto.name", "String");
     put("McpServerDto.status", "McpStatusDto");
     put("McpServerDto.transport", "String");
+
+    put("SkillDto.name", "String");
+    put("SkillDto.source_dir", "String");
+    put("SkillDto.plugin", "Option<String>");
 
     put("McpStatusDto::Connected", "connected");
     put("McpStatusDto::Disconnected", "disconnected");
@@ -2172,8 +2180,8 @@ fn contract_index_covers_every_dto() {
     use client_protocol::listings::{
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
-        MemoryTierDto, SessionAgentSummaryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto,
-        TaskRowDto, TaskStatusDto,
+        MemoryTierDto, SessionAgentSummaryDto, SessionRowDto, SkillDto, SlashCommandDto,
+        StatusSnapshotDto, TaskRowDto, TaskStatusDto,
     };
     use client_protocol::local_apps::{
         AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
@@ -2475,6 +2483,11 @@ fn contract_index_covers_every_dto() {
             name: String::new(),
             status: McpStatusDto::Connected,
             transport: String::new(),
+        },
+        SkillDto {
+            name: String::new(),
+            source_dir: String::new(),
+            plugin: None,
         },
         HookDto {
             name: String::new(),

@@ -340,6 +340,7 @@ fn listing_kind_variants_round_trip() {
         (ListingKindDto::Sessions, "sessions"),
         (ListingKindDto::Models, "models"),
         (ListingKindDto::Mcp, "mcp"),
+        (ListingKindDto::Skills, "skills"),
         (ListingKindDto::Hooks, "hooks"),
         (ListingKindDto::Agents, "agents"),
         (ListingKindDto::SlashCommands, "slash_commands"),

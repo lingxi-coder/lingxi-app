@@ -575,6 +575,25 @@ pub struct McpServerInfo {
     pub transport: String,
 }
 
+/// One skill entry returned by [`OrchestratorHandle::list_skills`].
+///
+/// Skills are discovered from `skills/` directories, not configured
+/// key-by-key — this is a VIEW of what the loader found on disk, not an
+/// editable settings row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillInfo {
+    /// Skill display name (matches its directory name, not frontmatter).
+    pub name: String,
+    /// The skill's own directory on disk (e.g. `<root>/skills/<name>`).
+    pub source_dir: std::path::PathBuf,
+    /// Owning plugin name, when the skill was loaded via a plugin rather
+    /// than a directory scan. Always `None` on the current file-based
+    /// discovery path (`skill_api::load_file_skill_sections_with_roots`),
+    /// which carries no plugin provenance — this field exists so a future
+    /// plugin-sourced skill can report one without a wire change.
+    pub plugin: Option<String>,
+}
+
 /// Connection status for an MCP server in [`McpServerInfo`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpStatus {
@@ -1974,6 +1993,15 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Used by `/mcp` and `/status`. Returns an empty vector when no MCP
     /// servers are configured.
     async fn list_mcp_servers(&self) -> Vec<McpServerInfo>;
+
+    /// Enumerate skills discovered from `skills/` directories (project and
+    /// user tiers). Used by the desktop Skills settings view, which is a
+    /// view over what the loader found — not an editor — plus a reload
+    /// action (`/reload-skills`, routed as an ordinary slash command; no
+    /// dedicated command exists for reloading). Returns an empty vector when
+    /// no config home is wired, mirroring `list_mcp_servers`'s "no registry"
+    /// default.
+    async fn list_skills(&self) -> Vec<SkillInfo>;
 
     /// Reconnect MCP servers (`/mcp reconnect [<server>|all]`). `name = None`
     /// (or `"all"`) reconnects every registered server; otherwise just the

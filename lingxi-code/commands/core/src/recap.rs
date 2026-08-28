@@ -267,6 +267,9 @@ mod tests {
         async fn list_mcp_servers(&self) -> Vec<traits::McpServerInfo> {
             Vec::new()
         }
+        async fn list_skills(&self) -> Vec<traits::SkillInfo> {
+            Vec::new()
+        }
         async fn list_hooks(&self) -> Vec<traits::HookInfo> {
             Vec::new()
         }

@@ -60,8 +60,8 @@ use client_protocol::events::{
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
-    SessionAgentSummaryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto,
-    TaskStatusDto,
+    SessionAgentSummaryDto, SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto,
+    TaskRowDto, TaskStatusDto,
 };
 use client_protocol::local_apps::{
     AppAgentProfileProposalDto, AppAuthorizationDecisionDto, AppBridgeOperationDto,
@@ -495,6 +495,23 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                             reason: "handshake timeout".to_string(),
                         },
                         transport: "http".to_string(),
+                    },
+                ],
+            },
+        ),
+        (
+            "event/skills.json",
+            ClientEvent::Skills {
+                skills: vec![
+                    SkillDto {
+                        name: "greet".to_string(),
+                        source_dir: "/home/user/.lingxi/skills/greet".to_string(),
+                        plugin: None,
+                    },
+                    SkillDto {
+                        name: "pr-review".to_string(),
+                        source_dir: "/repo/.lingxi/skills/pr-review".to_string(),
+                        plugin: Some("code-review-toolkit".to_string()),
                     },
                 ],
             },

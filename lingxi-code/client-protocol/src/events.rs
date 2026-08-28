@@ -19,8 +19,8 @@ use crate::ask_user_question::AskUserQuestionRequestDto;
 use crate::controls::ConversationControlsDto;
 use crate::listings::{
     AgentDto, AuthStateDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
-    MemoryEntryDto, ModelDetailsDto, SessionAgentSummaryDto, SessionRowDto, SlashCommandDto,
-    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    MemoryEntryDto, ModelDetailsDto, SessionAgentSummaryDto, SessionRowDto, SkillDto,
+    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use crate::local_apps::{
     AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
@@ -229,6 +229,10 @@ pub enum ClientEvent {
 
     McpServers {
         servers: Vec<McpServerDto>,
+    },
+
+    Skills {
+        skills: Vec<SkillDto>,
     },
 
     Hooks {

@@ -846,6 +846,8 @@ pub enum ListingKindDto {
     Models,
     /// MCP server listing → `McpServers`.
     Mcp,
+    /// Discovered-skill listing → `Skills`.
+    Skills,
     /// Hook listing → `Hooks`.
     Hooks,
     /// Subagent listing → `Agents`.

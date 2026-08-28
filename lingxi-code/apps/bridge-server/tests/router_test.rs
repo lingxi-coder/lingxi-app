@@ -53,7 +53,7 @@ use tokio_tungstenite::tungstenite::Message;
 use traits::auth::{AuthError, AuthHandle, LoginInfo};
 use traits::orchestrator::{
     AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
-    McpStatus, MemoryEditorOutcome, StatusSnapshot,
+    McpStatus, MemoryEditorOutcome, SkillInfo, StatusSnapshot,
 };
 use traits::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
@@ -277,6 +277,9 @@ impl traits::OrchestratorHandle for ResumingHandle {
         Err(HandleError::Unimplemented("test".into()))
     }
     async fn list_mcp_servers(&self) -> Vec<McpServerInfo> {
+        Vec::new()
+    }
+    async fn list_skills(&self) -> Vec<SkillInfo> {
         Vec::new()
     }
     async fn list_hooks(&self) -> Vec<HookInfo> {
@@ -1090,6 +1093,46 @@ async fn list_mcp_routes() {
             assert_eq!(servers[0].transport, "stdio");
         }
         other => panic!("expected McpServers, got {other:?}"),
+    }
+}
+
+/// Router-level plumbing for the Skills listing: proves `ListingKindDto::Skills`
+/// dispatches through `OrchestratorHandle::list_skills`, the `SkillInfo` →
+/// `SkillDto` lowering runs (a `PathBuf` becomes a display string), and the
+/// result reaches the wire as `ClientEvent::Skills`. Real discovery-from-disk
+/// coverage lives in `orchestrator/tests/list_skills_real.rs`; this test
+/// instead proves the router ARM itself is wired — an unwired/forgotten arm
+/// (the `_ => debug!(...)` catch-all) would leave `events` empty here.
+#[tokio::test]
+async fn list_skills_routes() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    handle.set_skills(vec![SkillInfo {
+        name: "greet".into(),
+        source_dir: std::path::PathBuf::from("/home/user/.lingxi/skills/greet"),
+        plugin: None,
+    }]);
+    let router = router_with(handle, Arc::new(MockTaskRegistry { rows: vec![] }));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::RefreshListings {
+                which: vec![ListingKindDto::Skills],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ClientEvent::Skills { skills } => {
+            assert_eq!(skills.len(), 1);
+            assert_eq!(skills[0].name, "greet");
+            assert_eq!(skills[0].source_dir, "/home/user/.lingxi/skills/greet");
+            assert_eq!(skills[0].plugin, None);
+        }
+        other => panic!("expected Skills, got {other:?}"),
     }
 }
 

@@ -224,6 +224,27 @@ pub enum McpStatusDto {
     },
 }
 
+// ── Skills ───────────────────────────────────────────────────────────────────
+
+/// One discovered skill — the lowered `SkillInfo`
+/// (`traits/src/orchestrator.rs`). Carried by
+/// [`crate::events::ClientEvent::Skills`].
+///
+/// Skills are directory-discovered, not configured key-by-key: there is no
+/// per-skill enable/disable wire shape, only this listing plus the
+/// `reload-skills` slash command to re-scan disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SkillDto {
+    /// Skill display name (matches its directory name, not frontmatter).
+    pub name: String,
+    /// The skill's own directory on disk, as a display string.
+    pub source_dir: String,
+    /// Owning plugin name, when known. Skipped from the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+}
+
 // ── Hooks ────────────────────────────────────────────────────────────────────
 
 /// One hook entry — the lowered `HookInfo` (`traits/src/orchestrator.rs:144`).

@@ -73,7 +73,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use client_adapter::lowering::{
     lower_agent_info, lower_doctor_report, lower_hook_info, lower_mcp_server_info,
-    lower_status_snapshot, lower_task_output_chunk, lower_task_record,
+    lower_skill_info, lower_status_snapshot, lower_task_output_chunk, lower_task_record,
 };
 use client_adapter::ClientEventSink;
 use client_protocol::commands::{
@@ -1002,6 +1002,16 @@ impl EngineCommandRouter {
                     .map(lower_mcp_server_info)
                     .collect();
                 sink.emit(ClientEvent::McpServers { servers }).await;
+            }
+            ListingKindDto::Skills => {
+                let skills = self
+                    .handle
+                    .list_skills()
+                    .await
+                    .iter()
+                    .map(lower_skill_info)
+                    .collect();
+                sink.emit(ClientEvent::Skills { skills }).await;
             }
             ListingKindDto::Hooks => {
                 let hooks = self

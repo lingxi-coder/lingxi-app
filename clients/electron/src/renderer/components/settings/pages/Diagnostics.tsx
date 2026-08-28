@@ -3,19 +3,12 @@ import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import { restartDisabledReason, type PageContentProps } from '../SettingsScreen';
 import type { DiagnosticEntry } from '../../../bridge/lingxi';
+import { ghostButtonStyle } from './ghostButton';
 
 function levelColor(t: ReturnType<typeof useT>, level: DiagnosticEntry['level']): string {
   if (level === 'error') return t.danger;
   if (level === 'warn') return t.warn;
   return t.text4;
-}
-
-function ghostButtonStyle(t: ReturnType<typeof useT>, disabled = false) {
-  return {
-    padding: '6px 12px', borderRadius: 7, border: `0.5px solid ${t.border}`, fontFamily: 'inherit',
-    background: disabled ? t.surfaceActive : t.surface, color: disabled ? t.text4 : t.text2,
-    fontSize: 12, fontWeight: 500, cursor: disabled ? 'not-allowed' : 'pointer',
-  } as const;
 }
 
 /**

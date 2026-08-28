@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { appearanceOptions } from '../src/renderer/components/settings/pages/Appearance';
-import { projectRows } from '../src/renderer/components/settings/pages/Projects';
+import { pinnedSessionRows, projectRows } from '../src/renderer/components/settings/pages/Projects';
 
 test('appearance offers exactly dark, light and system, in that order', () => {
   const options = appearanceOptions();
@@ -30,4 +30,35 @@ test('projects with no active project marks none active', () => {
 test('projects is empty when there is nothing persisted, not a throw', () => {
   assert.deepEqual(projectRows(undefined), []);
   assert.deepEqual(projectRows({ projects: [] } as never), []);
+});
+
+test('pinned sessions reflects the persisted list, in order', () => {
+  const rows = pinnedSessionRows({
+    pinnedSessions: [
+      { projectPath: '/a', sessionId: 's1', title: 'Alpha', pinnedAt: '2026-01-01T00:00:00Z' },
+      { projectPath: '/b', sessionId: 's2', title: 'Beta', pinnedAt: '2026-01-02T00:00:00Z' },
+    ],
+  } as never);
+  assert.deepEqual(rows.map((r) => r.sessionId), ['s1', 's2']);
+  assert.deepEqual(rows.map((r) => r.projectPath), ['/a', '/b']);
+  assert.deepEqual(rows.map((r) => r.title), ['Alpha', 'Beta']);
+});
+
+test('unpinning a session removes it from the rows', () => {
+  const pinnedSessions = [
+    { projectPath: '/a', sessionId: 's1', title: 'Alpha', pinnedAt: '2026-01-01T00:00:00Z' },
+    { projectPath: '/b', sessionId: 's2', title: 'Beta', pinnedAt: '2026-01-02T00:00:00Z' },
+  ];
+  const before = pinnedSessionRows({ pinnedSessions } as never);
+  assert.equal(before.length, 2);
+
+  // What the settings look like immediately after `setSessionPinned(s1, false)`
+  // resolves — the same shape `PublicSettings.pinnedSessions` takes on.
+  const after = pinnedSessionRows({ pinnedSessions: pinnedSessions.filter((p) => p.sessionId !== 's1') } as never);
+  assert.deepEqual(after.map((r) => r.sessionId), ['s2']);
+});
+
+test('pinned sessions is empty when nothing is persisted, not a throw', () => {
+  assert.deepEqual(pinnedSessionRows(undefined), []);
+  assert.deepEqual(pinnedSessionRows({ pinnedSessions: [] } as never), []);
 });

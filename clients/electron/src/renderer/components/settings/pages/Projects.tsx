@@ -3,6 +3,9 @@ import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import { Icon } from '../../Icon';
 import type { PageContentProps } from '../SettingsScreen';
+import type { PinnedSessionRecord } from '../../../bridge/lingxi';
+import { formatSessionMetadata } from '../../../bridge/sessionPresentation';
+import { ghostButtonStyle } from './ghostButton';
 
 export interface ProjectRow {
   path: string;
@@ -24,18 +27,30 @@ export function projectRows(settings: { projects: string[]; activeProject?: stri
   return projects.map((path) => ({ path, active: path === settings?.activeProject }));
 }
 
+export interface PinnedSessionRow {
+  projectPath: string;
+  sessionId: string;
+  title: string;
+}
+
+/**
+ * Which sessions are pinned, in persisted order. Pure so it can be tested
+ * without mounting anything — same shape as `projectRows` above. Lifted
+ * from `BetaSidebar`'s "Pinned" section (`BetaDesktop.tsx`, ~lines 239-301):
+ * this is the third deliverable the brief named for this page (置顶会话)
+ * alongside the project list and trust handling, dropped in the first pass.
+ */
+export function pinnedSessionRows(settings: { pinnedSessions: PinnedSessionRecord[] } | undefined): PinnedSessionRow[] {
+  return (settings?.pinnedSessions ?? []).map((pinned) => ({
+    projectPath: pinned.projectPath,
+    sessionId: pinned.sessionId,
+    title: pinned.title,
+  }));
+}
+
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? path;
-}
-
-function ghostButtonStyle(t: ReturnType<typeof useT>, disabled = false, danger = false) {
-  return {
-    padding: '5px 11px', borderRadius: 7, border: `0.5px solid ${t.border}`, fontFamily: 'inherit',
-    background: t.surface, cursor: disabled ? 'not-allowed' : 'pointer',
-    color: disabled ? t.text4 : danger ? t.danger : t.text2,
-    fontSize: 11.5, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 5,
-  } as const;
 }
 
 export function Projects({ bridge }: PageContentProps) {
@@ -50,6 +65,7 @@ export function Projects({ bridge }: PageContentProps) {
   // itself stays simple and pure, taking a single resolved path.
   const activePath = bridge.activeSession?.projectPath ?? settings?.activeProject ?? bridge.bootstrap?.workspace?.path;
   const rows = projectRows({ projects: settings?.projects ?? [], activeProject: activePath });
+  const pinnedRows = pinnedSessionRows({ pinnedSessions: settings?.pinnedSessions ?? [] });
   const workspace = bridge.bootstrap?.workspace;
 
   const hasActiveWork = (path: string) =>
@@ -58,6 +74,19 @@ export function Projects({ bridge }: PageContentProps) {
       const status = bridge.sessionRuntimeStatus(runtime.sessionId);
       return Boolean(status?.turnActive || status?.pendingInteractions);
     });
+
+  // Same title/metadata fallback `BetaSidebar` uses for a pinned row: the
+  // catalog for that project may not have loaded yet ("加载中…"), may have
+  // loaded without that session in it ("不可用" — e.g. it was deleted from
+  // disk), or may confirm it, in which case the catalog's title wins over
+  // the pinned record's stale one.
+  const pinnedSessionMeta = (row: PinnedSessionRow) => {
+    const catalog = bridge.bootstrap?.projectCatalogs?.[row.projectPath];
+    const current = catalog?.sessions.find((session) => session.uuid === row.sessionId);
+    const title = current?.title || row.title || '未命名会话';
+    const metadata = !catalog ? '加载中…' : current ? formatSessionMetadata(current.modified_rfc3339, current.message_count) : '不可用';
+    return { title, metadata };
+  };
 
   const handleAdd = () => {
     setError(null);
@@ -76,6 +105,11 @@ export function Projects({ bridge }: PageContentProps) {
     void bridge.removeProject(path)
       .catch((cause) => setError(cause instanceof Error ? cause.message : '无法移除项目。'))
       .finally(() => setBusyPath((current) => (current === path ? null : current)));
+  };
+  const handleUnpin = (row: PinnedSessionRow, title: string) => {
+    setError(null);
+    void bridge.setSessionPinned({ projectPath: row.projectPath, sessionId: row.sessionId, title }, false)
+      .catch((cause) => setError(cause instanceof Error ? cause.message : '无法取消置顶。'));
   };
 
   return (
@@ -137,6 +171,29 @@ export function Projects({ bridge }: PageContentProps) {
           {error}
         </div>
       )}
+
+      <Card title="置顶会话">
+        {pinnedRows.length === 0 && (
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>
+            还没有置顶的会话。
+          </div>
+        )}
+        {pinnedRows.map((row) => {
+          const { title, metadata } = pinnedSessionMeta(row);
+          return (
+            <Row
+              key={`${row.projectPath}\0${row.sessionId}`}
+              align="center"
+              title={title}
+              desc={`${basename(row.projectPath)} · ${metadata}`}
+            >
+              <button type="button" onClick={() => handleUnpin(row, title)} style={ghostButtonStyle(t)}>
+                <Icon name="pin" size={12} stroke={2} /> 取消置顶
+              </button>
+            </Row>
+          );
+        })}
+      </Card>
 
       {/* Trust and its fingerprint are only known for the CURRENTLY ACTIVE
           workspace (`bridge.bootstrap.workspace`) — there is no bridge call

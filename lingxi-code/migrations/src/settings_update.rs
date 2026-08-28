@@ -18,6 +18,8 @@ use serde_json::{Map, Value};
 pub enum SettingsSource {
     /// `userSettings` → `<claude-config-home>/settings.json`.
     User,
+    /// `projectSettings` → `<project>/.lingxi/settings.json`.
+    Project,
     /// `localSettings` → `<project>/.lingxi/settings.local.json`.
     Local,
 }
@@ -27,6 +29,9 @@ pub enum SettingsSource {
 pub fn settings_path(source: SettingsSource, lingxi_home: &Path, project_dir: &Path) -> PathBuf {
     match source {
         SettingsSource::User => lingxi_home.join("settings.json"),
+        SettingsSource::Project => project_dir
+            .join(branding::DOT_DIR)
+            .join("settings.json"),
         SettingsSource::Local => project_dir
             .join(branding::DOT_DIR)
             .join("settings.local.json"),
@@ -157,5 +162,18 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "   \n").unwrap();
         assert!(read_settings_map(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_source_resolves_to_project_settings_json() {
+        let home = std::path::Path::new("/home/u/.lingxi");
+        let project = std::path::Path::new("/work/repo");
+        let path = settings_path(SettingsSource::Project, home, project);
+        assert_eq!(
+            path,
+            std::path::Path::new("/work/repo").join(branding::DOT_DIR).join("settings.json"),
+            "Project source must resolve to <project>/<DOT_DIR>/settings.json, got {}",
+            path.display()
+        );
     }
 }

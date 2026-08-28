@@ -205,7 +205,12 @@ export function beginSlashCommand(state: ConversationState, raw: string): Conver
   if (!trimmed) return state;
   const next = appendUserPrompt(state, trimmed);
   const name = trimmed.split(/\s/, 1)[0] ?? '';
-  return { ...next, pendingSlashName: name };
+  // Pre-claim the composer exactly as `appendPendingUserPrompt` does for an
+  // ordinary prompt: most slash commands are display-only and release this
+  // in `slash_command_result` below, but a command that expands into a real
+  // turn hands ownership of `running` to `turn_started` instead (which also
+  // clears `pendingSlashName` so the claim isn't double-released).
+  return { ...next, pendingSlashName: name, running: true };
 }
 
 /**
@@ -238,8 +243,11 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
       return { ...conversationFromMessages(event.messages), sessionKey: event.session_id };
 
     case 'turn_started':
-      // Opening a turn starts fresh streaming lines.
-      return { ...state, running: true, openAssistantIndex: -1, openThinkingIndex: -1 };
+      // Opening a turn starts fresh streaming lines. Clear any outstanding
+      // slash pre-claim: the command expanded into a real turn, which now
+      // owns `running` (released by the ordinary `turn_ended` below), and a
+      // stale `pendingSlashName` must not label a later, unrelated result.
+      return { ...state, running: true, pendingSlashName: null, openAssistantIndex: -1, openThinkingIndex: -1 };
 
     case 'turn_ended': {
       const items = state.items.slice();
@@ -439,6 +447,12 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
         ...state,
         items,
         ...(event.is_error === true ? { lastError: event.display } : {}),
+        // Release the pre-claim only if it is still outstanding: a command
+        // that already reached `turn_started` cleared `pendingSlashName` and
+        // handed `running` to the ordinary turn lifecycle, so
+        // `bridge-server/src/router.rs:938`'s display-only fallback arm for
+        // an already-started turn must not unlock the composer mid-turn.
+        ...(state.pendingSlashName !== null ? { running: false } : {}),
         pendingSlashName: null,
         openAssistantIndex: -1,
         openThinkingIndex: -1,

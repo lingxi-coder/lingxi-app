@@ -736,14 +736,26 @@ export function useBridge(): UseBridge {
     updateRuntime(sessionId, (state) => ({ ...state, conversation: beginSlashCommand(state.conversation, command) }));
     try {
       await host.command(sessionId, { type: 'run_slash_command', raw: command });
-      await host.command(sessionId, { type: 'refresh_listings', which: [{ type: 'slash_commands' }] });
     } catch (cause) {
+      // A genuine dispatch failure: the command never ran, so release both
+      // claims and surface the error exactly as before.
       turnActiveRefs.current.set(sessionId, false);
       clearSlashTurnClaim(slashPendingRefs.current, sessionId);
       updateRuntime(sessionId, (state) => ({
         ...state,
         conversation: reduceEvent(state.conversation, { type: 'error', kind: { type: 'transport' }, message: 'Failed to run the slash command.' }),
       }));
+      capture(cause);
+      return;
+    }
+    try {
+      // Best-effort refresh of the slash-command listing (a command can
+      // register/deregister others). It runs after dispatch already
+      // succeeded — possibly starting a real turn — so its own failure must
+      // not mislabel that success as a dispatch failure, nor release a claim
+      // or turn that may still be live.
+      await host.command(sessionId, { type: 'refresh_listings', which: [{ type: 'slash_commands' }] });
+    } catch (cause) {
       capture(cause);
     }
   }, [capture, host, updateRuntime]);

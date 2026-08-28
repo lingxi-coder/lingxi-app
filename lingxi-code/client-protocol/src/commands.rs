@@ -689,18 +689,33 @@ pub enum ClientCommand {
     /// `{"url": ..., "type": ...}`); `serde_json::Value` must not enter this
     /// crate (decision §0.4), so the config travels as a string exactly the
     /// way [`Self::UpdateSettings::patch_json`] does — the receiving end
-    /// (`bridge-server::mcp_bridge`) parses and validates it.
+    /// (`bridge-server::mcp_bridge`) parses and validates it. `name` must be
+    /// non-empty (after trimming whitespace); an empty name is rejected
+    /// rather than silently written, since `mcp::json_config` would turn a
+    /// `""` map key into a nameless server entry.
+    ///
+    /// **Acknowledged by silence.** A successful upsert emits NO event — only
+    /// a failure emits [`crate::events::ClientEvent::Error`]. There is no
+    /// success event to wait for: the only re-emittable MCP listing
+    /// (`ClientEvent::McpServers`, via `RefreshListings{Mcp}`) is sourced
+    /// from the engine's in-memory `McpRegistry` snapshot, which a bare file
+    /// write does not touch — re-emitting it here would hand the caller a
+    /// stale list still missing the server just added, which reads as a
+    /// failure. Re-pulling that listing (on whatever cadence the caller
+    /// wants) is how a client observes the change.
     UpsertMcpServer {
         /// Which writable MCP scope to edit.
         scope: McpScopeDto,
-        /// Server name (the `mcpServers` map key).
+        /// Server name (the `mcpServers` map key). Must be non-empty.
         name: String,
         /// A JSON object holding the server's transport config.
         config_json: String,
     },
 
     /// Remove one MCP server definition from one writable scope. Idempotent:
-    /// removing an already-absent name is not an error.
+    /// removing an already-absent name is not an error. Same
+    /// acknowledged-by-silence contract as [`Self::UpsertMcpServer`] — see its
+    /// doc comment for why.
     RemoveMcpServer {
         /// Which writable MCP scope to edit.
         scope: McpScopeDto,

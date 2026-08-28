@@ -138,6 +138,63 @@ fn ensure_project_file_is_wrapped_or_empty(map: &Map<String, Value>) -> Result<(
     )
 }
 
+/// Post-write check for `User`/`Local` scope: confirm `name` actually landed
+/// in `map`'s `mcpServers` with exactly `config`.
+///
+/// This exists because the shared writers ([`save_map`] /
+/// [`save_project_config`]) can report a successful write that changed
+/// NOTHING relevant, in two ways this module cannot prevent up front without
+/// re-introducing a check-then-write race:
+/// - a concurrent edit (another process) replaces `mcpServers` with a
+///   non-object BETWEEN this call's own read and the mutator's locked
+///   re-read; [`upsert_into`]'s `if let Value::Object` then silently no-ops,
+///   and the mutator's output is byte-identical to its input, so the shared
+///   writer sees "nothing changed" and returns `Ok(false)` — indistinguishable
+///   from "these exact bytes were already there".
+/// - [`migrations::global_config::save_project_config`] has its own documented
+///   behaviour when the global config's `projects` key exists but is not an
+///   object: the top-level merge-back silently fails to insert, yet the
+///   function still returns `Ok(true)`. This module cannot change that shared
+///   writer, so it detects the condition here instead.
+///
+/// Reading the ACTUAL post-write state back and checking it is the only way
+/// to tell the caller the truth in either case.
+fn verify_server_present(map: &Map<String, Value>, name: &str, config: &Value) -> Result<(), String> {
+    match map.get("mcpServers").and_then(Value::as_object).and_then(|s| s.get(name)) {
+        Some(actual) if actual == config => Ok(()),
+        _ => Err(format!(
+            "the write appeared to succeed but `mcpServers.{name}` was not found afterward \
+             with the expected config (a concurrent edit, or a malformed `mcpServers`/\
+             `projects` value, likely made the write silently no-op); refusing to report \
+             success"
+        )),
+    }
+}
+
+/// The removal counterpart of [`verify_server_present`]: confirm `name` is
+/// actually absent from `map`'s `mcpServers` afterward. A missing
+/// `mcpServers` key, or an object without `name`, is success — that is the
+/// wanted post-condition. `mcpServers` still containing `name` means the
+/// removal silently no-op'd (the race case above). `mcpServers` present but
+/// NOT an object means the post-write state cannot be confirmed either way,
+/// so this refuses to claim success over a shape it cannot read.
+fn verify_server_absent(map: &Map<String, Value>, name: &str) -> Result<(), String> {
+    match map.get("mcpServers") {
+        None => Ok(()),
+        Some(Value::Object(obj)) if !obj.contains_key(name) => Ok(()),
+        Some(Value::Object(_)) => Err(format!(
+            "the removal appeared to succeed but `mcpServers.{name}` is still present \
+             afterward (a concurrent edit likely made the removal silently no-op); refusing \
+             to report success"
+        )),
+        Some(_) => Err(
+            "`mcpServers` is not a JSON object after the removal attempt; refusing to \
+             report success"
+                .to_string(),
+        ),
+    }
+}
+
 /// Insert/replace `name` in `map`'s `mcpServers` object. Callers must have
 /// already confirmed (via [`ensure_servers_key_is_object_or_absent`]) that an
 /// existing `mcpServers` value is an object, so the `entry`/`if let` below
@@ -172,7 +229,9 @@ fn remove_from(map: &mut Map<String, Value>, name: &str) {
 /// The destination file exists but fails to parse as a JSON object (never
 /// overwritten), an existing `mcpServers` value is not an object (never
 /// coerced), a `Project`-scope file is a legacy bare-map `.mcp.json` (never
-/// silently double-shaped), or the underlying write fails.
+/// silently double-shaped), the underlying write fails, or — `User`/`Local`
+/// only — a post-write read-back shows `name` did not actually land (see
+/// [`verify_server_present`]).
 pub fn upsert_server(
     paths: &McpPaths,
     scope: McpScopeDto,
@@ -182,33 +241,48 @@ pub fn upsert_server(
     match scope {
         McpScopeDto::Project => {
             let path = project_mcp_path(&paths.project_dir);
-            let mut root = read_json_object(&path)?;
+            let root = read_json_object(&path)?;
             ensure_project_file_is_wrapped_or_empty(&root)?;
             ensure_servers_key_is_object_or_absent(&root)?;
-            upsert_into(&mut root, name, config);
-            write_json_object(&path, root)
+            let mut next = root.clone();
+            upsert_into(&mut next, name, config);
+            if next == root {
+                // Nothing actually changed (e.g. re-upserting byte-identical
+                // config) — skip the write, mirroring `save_map` /
+                // `save_project_config`'s own unchanged-skip, rather than
+                // rewriting the file for no reason.
+                return Ok(());
+            }
+            write_json_object(&path, next)
         }
         McpScopeDto::User => {
-            let current = read_global_map(&paths.global_config_path).map_err(|e| e.to_string())?;
-            ensure_servers_key_is_object_or_absent(&current)?;
-            save_map(&paths.global_config_path, |mut map| {
+            // The domain-specific `mcpServers`-is-an-object check does NOT run
+            // as a pre-check here (a pre-check race that `save_map`'s own
+            // locked re-read can invalidate is exactly the Minor-2 bug this
+            // shape closes) — it is enforced by verifying the ACTUAL
+            // post-write state below, which catches both a pre-existing
+            // malformed value and one introduced concurrently between any
+            // two reads.
+            let expected = config.clone();
+            save_map(&paths.global_config_path, move |mut map| {
                 upsert_into(&mut map, name, config);
                 map
             })
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+            let after = read_global_map(&paths.global_config_path).map_err(|e| e.to_string())?;
+            verify_server_present(&after, name, &expected)
         }
         McpScopeDto::Local => {
             let key = project_path_for_config(&paths.project_dir);
-            let current_proj = get_project_config(&paths.global_config_path, &key)
-                .map_err(|e| e.to_string())?;
-            ensure_servers_key_is_object_or_absent(&current_proj)?;
-            save_project_config(&paths.global_config_path, &key, |mut proj| {
+            let expected = config.clone();
+            save_project_config(&paths.global_config_path, &key, move |mut proj| {
                 upsert_into(&mut proj, name, config);
                 proj
             })
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+            let after_proj = get_project_config(&paths.global_config_path, &key)
+                .map_err(|e| e.to_string())?;
+            verify_server_present(&after_proj, name, &expected)
         }
     }
 }
@@ -219,38 +293,46 @@ pub fn upsert_server(
 /// # Errors
 /// Same file-safety conditions as [`upsert_server`] (never overwrites a
 /// broken file, never coerces a non-object `mcpServers`, never touches a
-/// legacy bare-map `Project` file), plus the underlying write failing.
+/// legacy bare-map `Project` file), plus the underlying write failing, or —
+/// `User`/`Local` only — a post-write read-back shows `name` is still
+/// present (see [`verify_server_absent`]).
 pub fn remove_server(paths: &McpPaths, scope: McpScopeDto, name: &str) -> Result<(), String> {
     match scope {
         McpScopeDto::Project => {
             let path = project_mcp_path(&paths.project_dir);
-            let mut root = read_json_object(&path)?;
+            let root = read_json_object(&path)?;
             ensure_project_file_is_wrapped_or_empty(&root)?;
             ensure_servers_key_is_object_or_absent(&root)?;
-            remove_from(&mut root, name);
-            write_json_object(&path, root)
+            let mut next = root.clone();
+            remove_from(&mut next, name);
+            if next == root {
+                // Nothing to remove (already absent, or no `mcpServers` key
+                // at all) — skip the write. Without this, removing a name
+                // from a project that has no `.mcp.json` yet would create one
+                // containing `{}` as the side effect of a pure no-op.
+                return Ok(());
+            }
+            write_json_object(&path, next)
         }
         McpScopeDto::User => {
-            let current = read_global_map(&paths.global_config_path).map_err(|e| e.to_string())?;
-            ensure_servers_key_is_object_or_absent(&current)?;
-            save_map(&paths.global_config_path, |mut map| {
+            save_map(&paths.global_config_path, move |mut map| {
                 remove_from(&mut map, name);
                 map
             })
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+            let after = read_global_map(&paths.global_config_path).map_err(|e| e.to_string())?;
+            verify_server_absent(&after, name)
         }
         McpScopeDto::Local => {
             let key = project_path_for_config(&paths.project_dir);
-            let current_proj = get_project_config(&paths.global_config_path, &key)
-                .map_err(|e| e.to_string())?;
-            ensure_servers_key_is_object_or_absent(&current_proj)?;
-            save_project_config(&paths.global_config_path, &key, |mut proj| {
+            save_project_config(&paths.global_config_path, &key, move |mut proj| {
                 remove_from(&mut proj, name);
                 proj
             })
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+            let after_proj = get_project_config(&paths.global_config_path, &key)
+                .map_err(|e| e.to_string())?;
+            verify_server_absent(&after_proj, name)
         }
     }
 }
@@ -469,14 +551,113 @@ mod tests {
     }
 
     /// Removing a name that was never present is a successful no-op, not an
-    /// error — matching the brief's idempotent-removal contract.
+    /// error — matching the brief's idempotent-removal contract. Critically,
+    /// "no-op" must mean NO FILE IS CREATED: a naive implementation that
+    /// unconditionally writes back the (unchanged) in-memory map after a
+    /// no-op removal would materialize `<project>/.mcp.json` — or
+    /// `~/.lingxi.json` — purely as a side effect of doing nothing, which is
+    /// exactly the Minor-1 regression this test now pins.
     #[test]
-    fn removing_an_absent_server_is_not_an_error() {
+    fn removing_an_absent_server_is_not_an_error_and_creates_no_file() {
         let dir = tempdir().unwrap();
         let p = paths(dir.path());
         remove_server(&p, McpScopeDto::Project, "never-existed").unwrap();
         remove_server(&p, McpScopeDto::User, "never-existed").unwrap();
         remove_server(&p, McpScopeDto::Local, "never-existed").unwrap();
+
+        assert!(
+            !project_mcp_path(dir.path()).exists(),
+            "a no-op Project removal must not create .mcp.json"
+        );
+        assert!(
+            !p.global_config_path.exists(),
+            "a no-op User/Local removal must not create ~/.lingxi.json"
+        );
+    }
+
+    /// The removal counterpart: removing a name that IS present, from a file
+    /// that already existed with unrelated content, must still write (the
+    /// no-write skip above must not swallow a REAL removal too).
+    #[test]
+    fn removing_a_present_server_still_writes() {
+        let dir = tempdir().unwrap();
+        let p = paths(dir.path());
+        upsert_server(&p, McpScopeDto::Project, "linear", json!({ "command": "npx" })).unwrap();
+        remove_server(&p, McpScopeDto::Project, "linear").unwrap();
+        let raw = std::fs::read_to_string(project_mcp_path(dir.path())).unwrap();
+        let parsed: Value = serde_json::from_str(&raw).unwrap();
+        assert!(parsed["mcpServers"].get("linear").is_none());
+    }
+
+    /// Minor-2 (race proxy): if `mcpServers` is a non-object at write time —
+    /// whether it was already malformed, or a concurrent writer replaced it
+    /// between two reads — the shared `save_map` writer's mutator silently
+    /// no-ops and reports `Ok(false)` (indistinguishable from "already had
+    /// these bytes"). The post-write verification must turn that into an
+    /// Err rather than letting the caller believe the server was added, AND
+    /// the malformed value must survive untouched (never coerced).
+    #[test]
+    fn user_scope_non_object_mcp_servers_value_is_never_reported_as_success() {
+        let dir = tempdir().unwrap();
+        let p = paths(dir.path());
+        std::fs::write(&p.global_config_path, r#"{"mcpServers":"oops"}"#).unwrap();
+
+        let err = upsert_server(&p, McpScopeDto::User, "new", json!({ "command": "n" }))
+            .unwrap_err();
+        assert!(
+            err.contains("mcpServers") && err.contains("new"),
+            "expected a refusal naming the key and server, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p.global_config_path).unwrap(),
+            r#"{"mcpServers":"oops"}"#,
+            "the malformed value must never be coerced or overwritten"
+        );
+    }
+
+    /// Minor-2b: `migrations::global_config::save_project_config` silently
+    /// fails to insert (and still returns `Ok(true)`) when the global
+    /// config's `projects` key exists but is not an object — this module
+    /// cannot change that shared writer, so it must detect the condition
+    /// itself via post-write verification and report failure rather than
+    /// passing the shared writer's `Ok(true)` straight through.
+    #[test]
+    fn local_scope_reports_failure_when_projects_key_is_not_an_object() {
+        let dir = tempdir().unwrap();
+        let p = paths(dir.path());
+        std::fs::write(&p.global_config_path, r#"{"projects":"oops"}"#).unwrap();
+
+        let err = upsert_server(&p, McpScopeDto::Local, "new", json!({ "command": "n" }))
+            .unwrap_err();
+        assert!(
+            err.contains("new") || err.contains("mcpServers"),
+            "expected a refusal naming what could not be confirmed, got: {err}"
+        );
+    }
+
+    /// Same Minor-2 race-proxy as the `User`-scope test above, but for
+    /// `Local` scope's `projects[<key>].mcpServers`.
+    #[test]
+    fn local_scope_non_object_mcp_servers_value_is_never_reported_as_success() {
+        let dir = tempdir().unwrap();
+        let p = paths(dir.path());
+        let key = project_path_for_config(dir.path());
+        let mut projects = Map::new();
+        projects.insert(key, json!({ "mcpServers": "oops" }));
+        let mut global = Map::new();
+        global.insert("projects".to_string(), Value::Object(projects));
+        std::fs::write(
+            &p.global_config_path,
+            serde_json::to_string(&Value::Object(global)).unwrap(),
+        )
+        .unwrap();
+
+        let err = upsert_server(&p, McpScopeDto::Local, "new", json!({ "command": "n" }))
+            .unwrap_err();
+        assert!(
+            err.contains("mcpServers") && err.contains("new"),
+            "expected a refusal naming the key and server, got: {err}"
+        );
     }
 
     /// A legacy bare-map `.mcp.json` (no `mcpServers` wrapper) must be

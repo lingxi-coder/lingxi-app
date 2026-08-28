@@ -3063,3 +3063,49 @@ async fn mcp_commands_report_a_missing_context_instead_of_staying_silent() {
         );
     }
 }
+
+/// Fix round 1 / Minor 3: an empty or whitespace-only name must be rejected
+/// at the wire boundary with a Protocol error, never written — the storage
+/// layer (`mcp_bridge`) has no name validation of its own, so this is the
+/// only place that stops `mcp::json_config::build_servers_from_map` from
+/// ever seeing a `""` map key.
+#[tokio::test]
+async fn upsert_mcp_server_rejects_an_empty_name_with_protocol_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let router = router_with_mcp(McpPaths {
+        project_dir: dir.path().to_path_buf(),
+        global_config_path: dir.path().join(".lingxi.json"),
+    });
+
+    for empty_name in ["", "   "] {
+        let sink = CapturingSink::arc();
+        router
+            .route(
+                ClientCommand::UpsertMcpServer {
+                    scope: McpScopeDto::Project,
+                    name: empty_name.to_string(),
+                    config_json: r#"{"command":"npx"}"#.to_string(),
+                },
+                sink.clone(),
+            )
+            .await;
+
+        let events = sink.events().await;
+        let (kind, message) = events
+            .iter()
+            .find_map(|e| match e {
+                ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("an empty name ({empty_name:?}) must be reported"));
+        assert_eq!(kind, ErrorKindDto::Protocol);
+        assert!(
+            message.to_lowercase().contains("name"),
+            "the message must say what's wrong, got: {message}"
+        );
+    }
+    assert!(
+        !dir.path().join(".mcp.json").exists(),
+        "a rejected empty name must never create the target file"
+    );
+}

@@ -660,6 +660,22 @@ impl EngineCommandRouter {
             return;
         };
 
+        if name.trim().is_empty() {
+            // `mcp::json_config::build_servers_from_map` would turn a `""`
+            // map key into a nameless server entry — reject at the wire
+            // boundary rather than writing it. (Reserved-name collisions,
+            // e.g. `computer-use` per `mcp/src/server_gate.rs`, are
+            // deliberately NOT blocked here: a hardcoded name blocklist in
+            // the writer would be a second source of truth that drifts from
+            // `server_gate`'s own allowlist.)
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Protocol,
+                message: "MCP server name must not be empty".to_string(),
+            })
+            .await;
+            return;
+        }
+
         let config = match parse_mcp_config_json(config_json) {
             Ok(config) => config,
             Err(message) => {

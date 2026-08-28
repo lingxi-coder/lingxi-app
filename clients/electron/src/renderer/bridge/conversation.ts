@@ -111,6 +111,13 @@ export interface ConversationState {
   readonly sessionKey: string;
   /** Monotonic counter backing stable, never-reused item ids. */
   readonly nextId: number;
+  /**
+   * The name of the slash command whose typed line was just echoed, awaiting
+   * its `slash_command_result`. `reduceEvent` is pure over `ClientEvent` and
+   * cannot see the raw typed line, so `beginSlashCommand` stashes it here for
+   * the result event to pick up. Cleared the moment a result consumes it.
+   */
+  readonly pendingSlashName: string | null;
 }
 
 /** A fresh, empty conversation (no items, not running). */
@@ -126,6 +133,7 @@ export function emptyConversation(): ConversationState {
     plan: [],
     sessionKey: '',
     nextId: 1,
+    pendingSlashName: null,
   };
 }
 
@@ -184,6 +192,20 @@ export function appendUserPrompt(state: ConversationState, text: string, images:
     openThinkingIndex: -1,
     nextId: state.nextId + 1,
   };
+}
+
+/**
+ * Record the user's slash line and remember which command it was, so the
+ * result event that follows can label its own output. `reduceEvent` is pure
+ * over `ClientEvent` and cannot see the raw line, so the pairing is carried
+ * here.
+ */
+export function beginSlashCommand(state: ConversationState, raw: string): ConversationState {
+  const trimmed = raw.trim();
+  if (!trimmed) return state;
+  const next = appendUserPrompt(state, trimmed);
+  const name = trimmed.split(/\s/, 1)[0] ?? '';
+  return { ...next, pendingSlashName: name };
 }
 
 /**
@@ -402,6 +424,27 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
     case 'system_notice':
       if (event.is_error) return pushError(state, event.message);
       return pushNotice(state, event.message);
+
+    case 'slash_command_result': {
+      const items = state.items.slice();
+      closeThinking(items, state.openThinkingIndex);
+      items.push({
+        type: 'command',
+        id: itemId(state.nextId),
+        name: state.pendingSlashName ?? '',
+        output: event.display,
+        isError: event.is_error === true,
+      });
+      return {
+        ...state,
+        items,
+        ...(event.is_error === true ? { lastError: event.display } : {}),
+        pendingSlashName: null,
+        openAssistantIndex: -1,
+        openThinkingIndex: -1,
+        nextId: state.nextId + 1,
+      };
+    }
 
     case 'error': {
       // Error is shared by turn failures and unrelated commands/listings. A

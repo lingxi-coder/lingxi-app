@@ -82,6 +82,16 @@ export interface MetaRunItem {
   readonly tokens: string;
 }
 
+/** Output from a slash command — the engine's text, or a local command's own reply. */
+export interface CommandRunItem {
+  readonly type: 'command';
+  readonly id: string;
+  /** The command as typed, e.g. `/status`. Empty when the result had no pending line. */
+  readonly name: string;
+  readonly output: string;
+  readonly isError: boolean;
+}
+
 /** A recorded voice message (composer prototype). */
 export interface AudioRunItem {
   readonly type: 'audio';
@@ -96,7 +106,8 @@ export type RunItem =
   | ToolRunItem
   | MetaRunItem
   | AudioRunItem
-  | ThinkingRunItem;
+  | ThinkingRunItem
+  | CommandRunItem;
 
 /** A narration may show at most this many Unicode code points before folding. */
 export const NARRATION_COLLAPSE_MAX_CHARS = 640;
@@ -123,6 +134,19 @@ export function narrationShouldCollapse(item: NarrationRunItem): boolean {
 /** Default disclosure state before the user's session-scoped choice wins. */
 export function narrationDefaultOpen(item: NarrationRunItem): boolean {
   return !narrationShouldCollapse(item) || item.streamed === true;
+}
+
+/**
+ * Whether command output earns a disclosure affordance. It reuses the
+ * narration budget deliberately: two folding policies on one transcript read
+ * as a bug to the user, not as two policies.
+ */
+export function commandShouldCollapse(item: CommandRunItem): boolean {
+  const text = item.output.trim();
+  if (!text) return false;
+  const characters = Array.from(text).length;
+  const lines = text.replace(/\r\n?/g, '\n').split('\n').length;
+  return characters > NARRATION_COLLAPSE_MAX_CHARS || lines > NARRATION_COLLAPSE_MAX_LINES;
 }
 
 /**

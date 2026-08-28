@@ -12,7 +12,9 @@ What already works: the catalog is pulled (`refresh_listings → slash_commands`
 What is broken, verified in the tree:
 
 1. **The result is dropped on the floor.** The engine dispatches the command for real (`bridge-server/src/boot.rs:901` wires a live `SlashCommandDispatcher`; `router.rs:943` emits `ClientEvent::SlashCommandResult { turn_id, display, is_error }`). No client in this repository handles that event — a grep for `slash_command_result` across `clients/electron`, `clients/ios/Sources`, and `clients/android/app/src` returns zero hits. Typing `/status` shows the user's own echo and nothing else, forever.
-2. **A prompt-expanding command does not claim the turn.** `sendPrompt` marks the session's turn active the instant the command crosses the bridge (`useBridge.ts:681`), deliberately: `turn_started` may arrive a tick later, and `bridge.ts:900` carries the same pre-claim with a comment naming the gap it closes. `runSlashCommand` omits it. So between dispatching `/security-review` and the engine's `turn_started`, the composer stays unlocked and `cancel()` is a no-op, because `useBridge.ts:718` gates on `turnActive`.
+2. **A prompt-expanding command does not claim the turn.** `sendPrompt` claims the turn the instant the command crosses the bridge, in TWO places, deliberately: `appendPendingUserPrompt` sets `conversation.running` (`conversation.ts:218`) and `useBridge.ts:681` sets `turnActiveRefs`. `bridge.ts:900` carries the same pre-claim in the main process with a comment naming the gap it closes — `turn_started` may arrive a tick later. `runSlashCommand` does neither. So between dispatching `/security-review` and the engine's `turn_started`, the composer stays editable and shows Send instead of Stop.
+
+   The two claims are not redundant, and this is the detail that decides the fix. `conversation.running` — surfaced as `bridge.running` (`useBridge.ts:1050`) — is what gates the composer: `contentEditable={ready && !bridge.running}` (`BetaDesktop.tsx:1358`), the submit guard (`:1056`), and the `{bridge.running ? <Stop/> : <Send/>}` switch (`:1722`). `turnActiveRefs` gates something else: `cancel()` early-returns without it (`useBridge.ts:718`), and it drives the sidebar's per-session running badge. So the Stop button only RENDERS when `conversation.running` is true, and only WORKS when `turnActiveRefs` is true. A fix that sets one and not the other is invisible or inert.
 3. **~19 commands answer with a dead end.** `commands/core/src/register.rs:419` registers `InteractiveOnlyHandler` for `add-dir, background, branch, cd, color, copy, diff, focus, plan, plugin, privacy-settings, rename, rewind, tasks, terminal-setup, theme, tui, usage, usage-credits`, each replying `"/x is available in interactive TUI mode only."` The desktop *is* an interactive client and already owns UI for several of them, but nothing routes a slash command into that UI.
 4. **The completion popup ignores half of its own DTO.** `SlashCommandDto` carries `aliases`, `argument_hint`, `menu_description`, and `hidden` (`client-protocol/src/listings.rs:358`). `filterSlashCommands` matches only `name`/`description`/`source`, and the row renders only name/description/source (`BetaDesktop.tsx:1410-1415`). In particular `hidden` is not filtered, contradicting the DTO's stated contract that hidden commands stay resolvable by exact input but must not appear in a bare `/` menu.
 
@@ -63,13 +65,25 @@ The command name for the header comes from the raw line the client sent. `SlashC
 
 This client does not allocate turn ids and must not start: `sendPrompt` sends none, and the id arrives from the engine on `turn_started`. Inventing a client-side counter would collide with the engine's id space. `RunSlashCommand.turn_id` therefore stays unset, and the fix is about turn *ownership*, not correlation.
 
-`runSlashCommand` pre-claims the turn exactly as `sendPrompt` does. The complication is that most slash commands are display-only and never start a turn — an unconditional pre-claim would lock the composer forever on `/status`, trading one defect for a worse one.
+`runSlashCommand` pre-claims the turn exactly as `sendPrompt` does — on BOTH the pieces named above. The complication is that most slash commands are display-only and never start a turn: an unconditional pre-claim would lock the composer forever on `/status`, trading one defect for a worse one.
 
-The release signal is `slash_command_result` itself. The engine emits it only on the display-only path; a command that expands into a turn is intercepted earlier in the connection (`bridge-server/src/server.rs:1053`) and runs as an ordinary turn. So:
+The release signal is `slash_command_result` itself. The engine emits it only on the display-only path; a command that expands into a turn is intercepted earlier in the connection (`bridge-server/src/server.rs:1053`) and runs as an ordinary turn.
 
-- `runSlashCommand` sets `turnActiveRefs` true and records the session in a new `slashPendingRefs: Map<string, boolean>`.
-- `turn_started` clears that session's `slashPendingRefs` entry — the command did expand into a turn, and the normal `turn_ended` path owns the release from here.
-- `slash_command_result` releases `turnActiveRefs` **only if** `slashPendingRefs` still holds the session. The guard matters because `router.rs:938` has a fallback arm that emits `SlashCommandResult` for a prompt command that reached the display-only path; without the guard that fallback would unlock the composer mid-turn.
+**In the reducer** (this is what the composer reads, and it is purely unit-testable). `pendingSlashName` — already set by `beginSlashCommand` and cleared by `slash_command_result` — doubles as the claim flag, so no new field is needed:
+
+- `beginSlashCommand` sets `running: true` alongside the name it already records.
+- `turn_started` clears `pendingSlashName`: the command expanded into a turn, which now owns `running`, and the ordinary `turn_ended` releases it. Clearing here also stops a stale name from labelling a later result.
+- `slash_command_result` sets `running: false` **only if** `pendingSlashName` was still set, then clears it.
+
+**In the hook** (this is what `cancel()` reads), the same shape over refs:
+
+- `runSlashCommand` sets `turnActiveRefs` true and records the session in `slashPendingRefs: Map<string, boolean>`.
+- `turn_started` clears that session's `slashPendingRefs` entry.
+- `slash_command_result` releases `turnActiveRefs` **only if** `slashPendingRefs` still holds the session.
+
+Both guards exist for the same reason: `router.rs:938` has a fallback arm that emits `SlashCommandResult` for a prompt command that reached the display-only path, and an unguarded release would unlock the composer, or disarm Cancel, in the middle of a live turn.
+
+The error a first pass made here is worth recording: it built only the refs half, citing the `cancel()` guard as "what locks the composer". It does not. The composer never changed behaviour, every test passed, and the one step that would have caught it was a GUI check a subagent could not run.
 
 No main-process change: with `turn_id` unset, `validation.ts:210`'s `exactKeys(input, ['type', 'raw'])` stays exactly as it is.
 

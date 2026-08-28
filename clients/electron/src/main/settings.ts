@@ -93,9 +93,11 @@ export class SettingsStore {
     return this.getPublic();
   }
 
-  update(patch: { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null }): PublicSettings {
+  update(patch: { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null }): PublicSettings {
     if ('theme' in patch) {
-      if (patch.theme !== 'dark' && patch.theme !== 'light') throw new Error('invalid theme');
+      if (patch.theme !== 'dark' && patch.theme !== 'light' && patch.theme !== 'system') {
+        throw new Error('invalid theme');
+      }
       this.settings.theme = patch.theme;
     }
     if ('model' in patch) {

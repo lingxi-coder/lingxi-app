@@ -58,6 +58,15 @@ test('settings parser fails closed and migrates legacy workspaces into bounded p
   assert.equal(explicitlyEmpty.activeProject, undefined);
 });
 
+test("parseSettings keeps 'system' and still rejects garbage", () => {
+  assert.equal(parseSettings({ version: 1, theme: 'system', projects: [] }).theme, 'system');
+  assert.equal(parseSettings({ version: 1, theme: 'dark', projects: [] }).theme, 'dark');
+  assert.equal(
+    parseSettings({ version: 1, theme: 'chartreuse', projects: [] }).theme, undefined,
+    'an unknown theme must still be dropped, not passed through',
+  );
+});
+
 test('bypassPermissionsModeAccepted round-trips only for a strict true', () => {
   // Persisted acceptance survives a parse.
   assert.equal(

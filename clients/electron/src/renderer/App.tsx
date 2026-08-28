@@ -15,7 +15,7 @@ import { PermissionPrompt } from './components/PermissionPrompt';
 import { PlanTasks } from './components/PlanTasks';
 import { Stage } from './components/Stage';
 import { Theme } from './theme/ThemeContext';
-import { tokens, type ThemeMode } from './theme/tokens';
+import { tokens, watchThemePreference, type ThemeMode } from './theme/tokens';
 
 export function App() {
   const [theme, setTheme] = useState<ThemeMode>('dark');
@@ -34,8 +34,11 @@ export function App() {
     && !bridge.sessionLoading,
   );
   useEffect(() => {
-    const savedTheme = bridge.bootstrap?.settings.theme;
-    if (savedTheme) setTheme(savedTheme);
+    // `'system'` isn't a third palette (see `ThemeMode`) — it's a preference
+    // that resolves to one of the two, and keeps following the OS via the
+    // media query's `change` event for as long as this effect is mounted.
+    const preference = bridge.bootstrap?.settings.theme;
+    return watchThemePreference(preference, window.matchMedia('(prefers-color-scheme: dark)'), setTheme);
   }, [bridge.bootstrap?.settings.theme]);
   const changeTheme = (value: ThemeMode) => {
     setTheme(value);

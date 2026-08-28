@@ -56,7 +56,7 @@ export interface SessionRef {
 
 export interface PersistedSettings {
   version: typeof SETTINGS_VERSION;
-  theme?: 'dark' | 'light';
+  theme?: 'dark' | 'light' | 'system';
   model?: string;
   apiBaseUrl?: string;
   activeProject?: string;
@@ -72,7 +72,7 @@ export interface PersistedSettings {
 
 export interface PublicSettings {
   version: typeof SETTINGS_VERSION;
-  theme?: 'dark' | 'light';
+  theme?: 'dark' | 'light' | 'system';
   model?: string;
   apiBaseUrl?: string;
   activeProject?: string;
@@ -129,7 +129,10 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
 
   const settings = defaultSettings();
-  settings.theme = value['theme'] === 'dark' || value['theme'] === 'light' ? value['theme'] : undefined;
+  settings.theme =
+    value['theme'] === 'dark' || value['theme'] === 'light' || value['theme'] === 'system'
+      ? value['theme']
+      : undefined;
   settings.model = boundedString(value['model'], 256);
   settings.apiBaseUrl = boundedString(value['apiBaseUrl'], 2_048);
   if (value['bypassPermissionsModeAccepted'] === true) {

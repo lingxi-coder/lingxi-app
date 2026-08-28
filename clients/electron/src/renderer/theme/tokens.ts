@@ -147,3 +147,51 @@ export const tokens = (dark: boolean): Tokens =>
       };
 
 export type ThemeMode = 'dark' | 'light';
+
+/**
+ * The persisted preference, which is one entry wider than `ThemeMode`:
+ * `'system'` is not a third palette (there are only two — see `tokens`
+ * above) but a request to resolve to whichever of the two matches the OS at
+ * render time, and to keep following the OS while mounted.
+ */
+export type ThemePreference = ThemeMode | 'system';
+
+/** Resolves a preference to an actual palette, given the OS's current pick. */
+export function resolveThemeMode(preference: ThemePreference | undefined, prefersDark: boolean): ThemeMode {
+  if (preference === 'dark' || preference === 'light') return preference;
+  return prefersDark ? 'dark' : 'light';
+}
+
+/**
+ * The slice of `MediaQueryList` `watchThemePreference` needs — narrow enough
+ * to fake in a unit test without a real DOM.
+ */
+export interface SystemColorSchemeQuery {
+  readonly matches: boolean;
+  addEventListener(type: 'change', listener: () => void): void;
+  removeEventListener(type: 'change', listener: () => void): void;
+}
+
+/**
+ * Resolves `preference` to a `ThemeMode` and reports it via `onChange`. For
+ * `'system'` this also subscribes to the OS query's `change` event, so a
+ * user flipping their OS appearance while the app is open is followed live
+ * — resolving once at mount and never again would pass a cursory look but
+ * silently stop tracking the OS. Returns a cleanup function that removes any
+ * listener it attached (a no-op when `preference` wasn't `'system'`).
+ */
+export function watchThemePreference(
+  preference: ThemePreference | undefined,
+  query: SystemColorSchemeQuery,
+  onChange: (mode: ThemeMode) => void,
+): () => void {
+  if (preference === undefined) return () => {};
+  if (preference !== 'system') {
+    onChange(preference);
+    return () => {};
+  }
+  const applySystemTheme = () => onChange(resolveThemeMode(preference, query.matches));
+  applySystemTheme();
+  query.addEventListener('change', applySystemTheme);
+  return () => query.removeEventListener('change', applySystemTheme);
+}

@@ -68,9 +68,12 @@ async function runPendingBannerScenario(webContents) {
 async function runPlaceholderScenario(webContents) {
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("voice")');
   const voice = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("diagnostics")');
-  const diagnostics = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  return { voice, diagnostics };
+  // `diagnostics` used to be the "implemented but not wired" example here,
+  // but Task 16 registers it — `permissions` (implemented:true, registered
+  // only in a later task) is the still-honest example now.
+  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("permissions")');
+  const notWired = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
+  return { voice, notWired };
 }
 
 async function runMalformedSnapshotScenario(webContents) {

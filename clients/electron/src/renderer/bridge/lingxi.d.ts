@@ -23,7 +23,7 @@ export type ConnectionState =
 
 export interface PublicSettings {
   version: 1;
-  theme?: 'dark' | 'light';
+  theme?: 'dark' | 'light' | 'system';
   model?: string;
   apiBaseUrl?: string;
   activeProject?: string;
@@ -88,6 +88,8 @@ export interface BootstrapState {
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
+  /** The three numbers the About page shows. `engine` is absent until a bridge runtime has connected at least once. */
+  versions: { app: string; electron: string; engine?: { serverName: string; serverProtocol: string; clientProtocol: string } };
 }
 export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean }
 export type Unsubscribe = () => void;
@@ -100,7 +102,7 @@ export interface LingxiApi {
   isElectron: true;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
-  updateSettings(patch: { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null }): Promise<PublicSettings>;
+  updateSettings(patch: { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   removeProject(path: string): Promise<BootstrapState>;

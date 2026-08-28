@@ -87,7 +87,7 @@ export interface UseBridge {
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
-  setThemePreference(theme: 'dark' | 'light'): Promise<void>;
+  setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
   restartBridge(sessionId?: string): Promise<void>;
   refreshDiagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
@@ -1030,7 +1030,7 @@ export function useBridge(): UseBridge {
     } catch (cause) { return capture(cause); }
   }, [bootstrap?.providerCredentials, capture, host, patchBootstrap]);
 
-  const setThemePreference = useCallback(async (theme: 'dark' | 'light') => {
+  const setThemePreference = useCallback(async (theme: 'dark' | 'light' | 'system') => {
     if (!host) return;
     try { patchBootstrap({ settings: await host.updateSettings({ theme }) }); } catch (cause) { capture(cause); }
   }, [capture, host, patchBootstrap]);

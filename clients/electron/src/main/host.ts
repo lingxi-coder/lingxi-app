@@ -4,6 +4,7 @@ import { writeFileSync } from 'node:fs';
 
 import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-client';
 import type {
+  BridgeRuntimeVersions,
   ConnectionState,
   RuntimeEventEnvelope,
   SessionRef,
@@ -91,6 +92,13 @@ export interface BootstrapState {
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
+  /**
+   * The three numbers the About page needs. `engine` is only known once a
+   * bridge runtime has connected at least once (same source as
+   * `diagnosticReport`'s `bridgeRuntime` field below) — absent, not a fake
+   * value, before that.
+   */
+  versions: { app: string; electron: string; engine?: BridgeRuntimeVersions };
 }
 
 export interface ProjectSessionCatalogState {
@@ -173,7 +181,7 @@ export class HostController {
       if (keys.some((key) => key !== 'theme' && key !== 'model' && key !== 'apiBaseUrl')) throw new Error('unsupported setting');
       const restartsBridge = 'model' in patch || 'apiBaseUrl' in patch;
       if (restartsBridge) this.assertNoActiveTurn();
-      const result = this.settings.update(patch as { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null });
+      const result = this.settings.update(patch as { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null });
       if (restartsBridge) await this.restartIfConfigured();
       return result;
     });
@@ -366,6 +374,12 @@ export class HostController {
       connectionState?: ConnectionState;
     };
     const pendingAskUserQuestions = activeRuntime?.pendingAskUserQuestions ?? legacy.pendingAskUserQuestions ?? [];
+    // Same source `diagnosticReport` below already reads for its
+    // `bridgeRuntime` field — reused here rather than recomputed, so the
+    // About page's engine version and the exported diagnostic report can
+    // never disagree.
+    const engineVersions = activeRuntime?.runtimeVersions
+      ?? (this.bridge as unknown as { runtimeVersions?: BridgeRuntimeVersions }).runtimeVersions;
     return {
       revision,
       settings: this.settings.getPublic(),
@@ -379,6 +393,11 @@ export class HostController {
       providerCredentials: this.providerCredentialSnapshot(),
       ...(pendingAskUserQuestions.length > 0 ? { pendingAskUserQuestions: [...pendingAskUserQuestions] } : {}),
       connection: activeRuntime?.connectionState ?? legacy.connectionState ?? { status: 'idle' },
+      versions: {
+        app: app?.getVersion?.() ?? 'unknown',
+        electron: process.versions.electron,
+        ...(engineVersions ? { engine: engineVersions } : {}),
+      },
       diagnostics: this.diagnostics.snapshot(),
     };
   }

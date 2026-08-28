@@ -150,9 +150,12 @@ test('the settings-focus trap moves focus in on mount, wraps Tab both directions
 });
 
 test('an unimplemented page renders an explicit placeholder, not a blank panel — implemented pages without content yet get a different, honest message', async () => {
-  const { voice, diagnostics } = await runScenario('placeholder');
+  const { voice, notWired } = await runScenario('placeholder');
   assert.equal(voice.placeholderKind, 'not-implemented', 'voice is implemented:false and must say so plainly');
-  assert.equal(diagnostics.placeholderKind, 'not-wired', 'diagnostics is implemented:true but has no page component registered yet');
+  // `permissions`, not `diagnostics`: Task 16 registers the five
+  // client-owned pages (including diagnostics), so `permissions` — engine-owned,
+  // registered only in a later task — is the still-honest "not wired yet" example now.
+  assert.equal(notWired.placeholderKind, 'not-wired', 'permissions is implemented:true but has no page component registered yet');
 });
 
 test('a malformed settings snapshot surfaces as an error banner instead of throwing through the render', async () => {

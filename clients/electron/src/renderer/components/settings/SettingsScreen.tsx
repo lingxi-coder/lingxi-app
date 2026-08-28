@@ -5,6 +5,11 @@ import { useT } from '../../theme/ThemeContext';
 import type { ThemeMode } from '../../theme/tokens';
 import { Icon } from '../Icon';
 import { SETTINGS_NAV, searchNav, type NavPage } from './nav';
+import { About } from './pages/About';
+import { Appearance } from './pages/Appearance';
+import { Diagnostics } from './pages/Diagnostics';
+import { General } from './pages/General';
+import { Projects } from './pages/Projects';
 import { provenanceLabel, type Provenance } from './rows';
 import { pendingKeys, type SettingsSnapshot } from './useEngineSettings';
 
@@ -129,13 +134,21 @@ function messageFrom(cause: unknown): string {
 }
 
 /**
- * Where a page's real content will live once a later task builds it. Empty
- * today — Task 15 only assembles the shell; Tasks 16-19 register each
- * page's component here as they land. A page id absent from this map
- * (every id, right now) falls back to `PagePlaceholder`'s "not wired yet"
- * message instead of a blank panel.
+ * Where a page's real content lives once its task builds it. Task 15 left
+ * this empty — every page fell back to the "not wired yet" placeholder.
+ * Task 16 registers the five pages whose values live in the Electron store
+ * rather than any engine settings layer (they need no engine, which is why
+ * `nav.ts` marks all five `needsEngine: false`); Tasks 17-19 register the
+ * rest as they land. A page id still absent from this map falls back to
+ * `PagePlaceholder`'s "not wired yet" message instead of a blank panel.
  */
-const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {};
+const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
+  general: General,
+  appearance: Appearance,
+  projects: Projects,
+  diagnostics: Diagnostics,
+  about: About,
+};
 
 export interface PageContentProps {
   bridge: UseBridge;
@@ -143,6 +156,8 @@ export interface PageContentProps {
   editingLayer: EditableLayer;
   theme: ThemeMode;
   onTheme(value: ThemeMode): void;
+  /** Jumps the shell to another nav page by id — how `General`'s cross-page entries actually navigate, rather than just naming a destination they can't reach. */
+  onNavigate(pageId: string): void;
   initialProviderId?: string;
   pendingModelReference?: string;
 }
@@ -418,6 +433,7 @@ export function SettingsScreen({
           editingLayer={editingLayer}
           theme={theme}
           onTheme={onTheme}
+          onNavigate={setPage}
           initialProviderId={initialProviderId}
           pendingModelReference={pendingModelReference}
         />

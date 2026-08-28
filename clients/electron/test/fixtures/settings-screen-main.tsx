@@ -6,6 +6,14 @@ import type { SettingsSnapshotEvent } from '../../src/renderer/bridge/useBridge'
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 
+// Module-scope (not `useCallback`) so these are referentially stable across
+// Fixture re-renders with zero effort — none of them close over any
+// component state, they only exist so the Task 16 pages have something
+// callable instead of `undefined`.
+async function noopAsyncVoid(): Promise<void> {}
+async function noopAsyncNull(): Promise<null> { return null; }
+async function noopAsyncArray(): Promise<never[]> { return []; }
+
 function Fixture() {
   const [open, setOpen] = useState(true);
   const [hasProject, setHasProject] = useState(false);
@@ -38,7 +46,16 @@ function Fixture() {
   const bridge = {
     activeSession: { projectPath: '/test/project', sessionId: 'session-a' },
     bootstrap: {
+      // `settings`/`diagnostics`/`runtimes`/`versions` below only matter to
+      // the Task 16 pages (General/Projects/Diagnostics/About), which the
+      // "general" (default) and "diagnostics" page ids in these scenarios
+      // now render for real instead of a placeholder — a bootstrap this
+      // thin would otherwise throw reading `.settings.theme` etc.
+      settings: { version: 1 as const, projects: [] as string[], pinnedSessions: [] as never[] },
       workspace: hasProject ? { path: '/test/project', trusted: true } : { trusted: false },
+      runtimes: [] as never[],
+      diagnostics: [] as never[],
+      versions: { app: 'test-app', electron: 'test-electron' },
     },
     connected: connected && !sessionLoading,
     sessionLoading,
@@ -46,6 +63,14 @@ function Fixture() {
     settingsSnapshotEvent,
     restartBridge,
     refreshSettingsSnapshot,
+    refreshDiagnostics: noopAsyncArray,
+    copyDiagnostics: noopAsyncVoid,
+    exportDiagnostics: noopAsyncNull,
+    addProject: noopAsyncNull,
+    removeProject: noopAsyncVoid,
+    activateProject: noopAsyncNull,
+    setThemePreference: noopAsyncVoid,
+    sessionRuntimeStatus: () => undefined,
   };
 
   useEffect(() => {

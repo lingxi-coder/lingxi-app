@@ -345,15 +345,15 @@ impl EngineCommandRouter {
         .await;
     }
 
-    /// Parse `patch_json` as a flat `{key: value|null}` object and apply it to
+    /// Decode `patch_json` via [`parse_settings_patch`] and apply it to
     /// `destination` through [`crate::settings_bridge::apply_patch`]. On
     /// success, resends the settings snapshot so the caller sees the write it
     /// just made reflected back (rather than requiring a separate
     /// `RefreshListings{Settings}` round-trip). On any failure — no settings
-    /// context, invalid JSON, a non-object patch, or `apply_patch`'s own
-    /// errors (reserved key, broken destination file, write failure) — emits
-    /// the SAME [`ClientEvent::Error`] path the rest of this router uses,
-    /// rather than a dedicated failure event.
+    /// context, a patch that fails to parse (see [`parse_settings_patch`]), or
+    /// `apply_patch`'s own errors (reserved key, broken destination file,
+    /// write failure) — emits the SAME [`ClientEvent::Error`] path the rest of
+    /// this router uses, rather than a dedicated failure event.
     async fn apply_settings_patch(
         &self,
         destination: SettingsDestinationDto,
@@ -371,31 +371,12 @@ impl EngineCommandRouter {
             return;
         };
 
-        let patch = match serde_json::from_str::<serde_json::Value>(patch_json) {
-            Ok(serde_json::Value::Object(map)) => map
-                .into_iter()
-                // A JSON `null` value deletes the key (documented on
-                // `ClientCommand::UpdateSettings.patch_json`); anything else
-                // sets it.
-                .map(|(k, v)| {
-                    let v = if v.is_null() { None } else { Some(v) };
-                    (k, v)
-                })
-                .collect::<Vec<_>>(),
-            Ok(other) => {
+        let patch = match parse_settings_patch(patch_json) {
+            Ok(patch) => patch,
+            Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
-                    message: format!(
-                        "settings patch must be a JSON object, got: {other}"
-                    ),
-                })
-                .await;
-                return;
-            }
-            Err(e) => {
-                sink.emit(ClientEvent::Error {
-                    kind: ErrorKindDto::Protocol,
-                    message: format!("settings patch is not valid JSON: {e}"),
+                    message,
                 })
                 .await;
                 return;
@@ -1503,4 +1484,89 @@ fn task_status_wire(status: TaskStatusDto) -> String {
         _ => "pending",
     }
     .to_string()
+}
+
+/// Decode a `ClientCommand::UpdateSettings.patch_json` wire string into the
+/// shallow `(key, Option<value>)` patch [`crate::settings_bridge::apply_patch`]
+/// expects. A JSON `null` value means "delete this key" (documented on the
+/// wire field); any other value means "set this key". Pulled out as a pure
+/// function — rather than left inline in [`EngineCommandRouter::apply_settings_patch`]
+/// — so the untrusted-input decoding step has its own unit tests independent
+/// of a router/sink/settings-context fixture.
+///
+/// # Errors
+/// `patch_json` is not valid JSON, or it parses to something other than a
+/// JSON object (a bare array/string/number/bool/null patch is rejected, not
+/// silently coerced).
+fn parse_settings_patch(patch_json: &str) -> Result<Vec<(String, Option<serde_json::Value>)>, String> {
+    match serde_json::from_str::<serde_json::Value>(patch_json) {
+        Ok(serde_json::Value::Object(map)) => Ok(map
+            .into_iter()
+            .map(|(k, v)| {
+                let v = if v.is_null() { None } else { Some(v) };
+                (k, v)
+            })
+            .collect()),
+        Ok(other) => Err(format!(
+            "settings patch must be a JSON object, got: {other}"
+        )),
+        Err(e) => Err(format!("settings patch is not valid JSON: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod settings_patch_parsing_tests {
+    use super::parse_settings_patch;
+    use serde_json::json;
+
+    /// A `null` value in the wire patch means "delete this key" — it must be
+    /// decoded to `None`, never to a stored `Some(Value::Null)`. A regression
+    /// that kept the literal `Value::Null` would still satisfy "the key has
+    /// an entry" but would be silently wrong once applied (it would WRITE a
+    /// JSON `null`, not delete the key), so this asserts the exact `None`
+    /// shape, not just success.
+    #[test]
+    fn null_value_decodes_to_a_delete_not_a_stored_null() {
+        let patch = parse_settings_patch(r#"{"outputStyle": null}"#).unwrap();
+        assert_eq!(
+            patch,
+            vec![("outputStyle".to_string(), None)],
+            "a JSON null must decode to None (delete), not Some(Value::Null)"
+        );
+    }
+
+    /// A non-null value decodes to `Some(value)` (a set, not a delete) —
+    /// the companion case to the null test above, so the `is_null` branch is
+    /// exercised on both sides.
+    #[test]
+    fn non_null_value_decodes_to_a_set() {
+        let patch = parse_settings_patch(r#"{"outputStyle": "terse"}"#).unwrap();
+        assert_eq!(
+            patch,
+            vec![("outputStyle".to_string(), Some(json!("terse")))]
+        );
+    }
+
+    /// A JSON array is syntactically valid JSON but not an acceptable patch
+    /// shape (there are no keys to patch). It must be rejected, not coerced
+    /// or silently accepted as an empty/no-op patch.
+    #[test]
+    fn a_json_array_patch_is_rejected() {
+        let err = parse_settings_patch(r#"["outputStyle"]"#).unwrap_err();
+        assert!(
+            err.contains("object"),
+            "error must say the patch needs to be an object, got: {err}"
+        );
+    }
+
+    /// Syntactically broken JSON must be rejected with a message a client
+    /// can act on, not panic or silently produce an empty patch.
+    #[test]
+    fn invalid_json_is_rejected() {
+        let err = parse_settings_patch("{ not json").unwrap_err();
+        assert!(
+            err.contains("JSON"),
+            "error must say the patch is not valid JSON, got: {err}"
+        );
+    }
 }

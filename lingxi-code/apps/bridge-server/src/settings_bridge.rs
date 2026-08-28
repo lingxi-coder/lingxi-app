@@ -200,6 +200,15 @@ fn destination_layer(destination: SettingsDestinationDto) -> SettingsLayer {
 /// verbatim (`read_settings_map`'s semantics — this reads the file, edits the
 /// map in memory, and rewrites the whole thing).
 ///
+/// SIBLING IMPLEMENTATION — this reimplements the read/merge/serialize/write
+/// shape of `migrations::settings_update::update_settings` rather than
+/// calling it, because the [`permission::mark_internal_write`] call below must
+/// land at a precise point (immediately before the single write) and
+/// `migrations` cannot depend on `permission`. In particular this inherits
+/// that function's DOCUMENTED non-atomic-write divergence from TS (in-place
+/// `std::fs::write`, not tmp+rename) — if that gets fixed there, check
+/// whether this needs the same fix.
+///
 /// # Errors
 /// The destination resolves to a non-writable layer (unreachable given
 /// [`SettingsDestinationDto`]'s three variants, but `writable_path` is the
@@ -707,6 +716,51 @@ mod tests {
             !permission::consume_internal_write(&path, std::time::Duration::from_secs(5)),
             "an unmarked write must NOT be consumable; if this passes, the gate in \
              a_write_leaves_an_internal_write_mark proves nothing"
+        );
+    }
+
+    /// A patch touching one key must leave every OTHER key in the destination
+    /// file exactly as it was. The other three `apply_patch` tests all write
+    /// into a brand-new empty tempdir, so none of them can observe this: they
+    /// would pass identically if `apply_patch` silently dropped unrelated
+    /// keys. This seeds the file with unrelated content first.
+    #[test]
+    fn a_patch_leaves_unrelated_keys_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: dir.path().join("home"),
+            project_dir: dir.path().join("repo"),
+        };
+        let path = writable_path(&paths, SettingsLayer::User).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"model":"opus","unknownVendorKey":"x"}"#,
+        )
+        .unwrap();
+
+        apply_patch(
+            &paths,
+            SettingsDestinationDto::User,
+            vec![("outputStyle".to_string(), Some(serde_json::json!("terse")))],
+        )
+        .unwrap();
+
+        let map = read_settings_map(&path).unwrap();
+        assert_eq!(
+            map.get("model"),
+            Some(&serde_json::json!("opus")),
+            "a key untouched by the patch must survive with its original value"
+        );
+        assert_eq!(
+            map.get("unknownVendorKey"),
+            Some(&serde_json::json!("x")),
+            "a key this crate does not even know the meaning of must still survive verbatim"
+        );
+        assert_eq!(
+            map.get("outputStyle"),
+            Some(&serde_json::json!("terse")),
+            "the patched key must also be applied alongside the untouched ones"
         );
     }
 }

@@ -37,7 +37,9 @@ use bridge_server::router::{CommandRouter, EngineCommandRouter, SessionStoreCont
 use bridge_server::server::BridgeConnection;
 use bridge_server::settings_bridge::{SettingsContext, SettingsPaths};
 use client_adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
-use client_protocol::commands::{ClientCommand, ListingKindDto, ProviderCredentialSecretDto};
+use client_protocol::commands::{
+    ClientCommand, ListingKindDto, ProviderCredentialSecretDto, SettingsDestinationDto,
+};
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::permission::PermissionRequest;
 use futures_util::{SinkExt, StreamExt};
@@ -2279,6 +2281,159 @@ async fn the_settings_listing_reports_a_missing_context_instead_of_staying_silen
             .iter()
             .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
         "no SettingsSnapshot may be emitted without a settings context, got {events:?}"
+    );
+}
+
+/// `UpdateSettings` decodes `patch_json` (`bridge_server::router::parse_settings_patch`
+/// is unit-tested directly for the decode step in isolation), but only an
+/// end-to-end route through a real settings context proves the wire-level
+/// `null` actually reaches disk as a DELETE rather than a stored JSON `null` —
+/// asserting on the file's parsed content, not on the intermediate `Vec` shape.
+#[tokio::test]
+async fn update_settings_with_a_null_value_deletes_the_key_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    let user_settings_path = home.join("settings.json");
+    std::fs::write(
+        &user_settings_path,
+        r#"{"outputStyle":"terse","model":"opus"}"#,
+    )
+    .unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdateSettings {
+                destination: SettingsDestinationDto::User,
+                patch_json: r#"{"outputStyle": null}"#.to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&user_settings_path).unwrap()).unwrap();
+    assert!(
+        !on_disk.as_object().unwrap().contains_key("outputStyle"),
+        "a null patch value must DELETE the key from the file, not write it as \
+         JSON null; got {on_disk}"
+    );
+    assert_eq!(
+        on_disk["model"], "opus",
+        "an untouched key must survive the patch"
+    );
+
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a successful update must resend the settings snapshot (I3), got {events:?}"
+    );
+}
+
+/// A patch that parses as JSON but is not an OBJECT (here, an array) must be
+/// rejected with a `Protocol`-kind error naming the shape problem, not
+/// silently coerced or treated as an internal write failure.
+#[tokio::test]
+async fn update_settings_rejects_a_non_object_patch_with_protocol_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdateSettings {
+                destination: SettingsDestinationDto::User,
+                patch_json: r#"["outputStyle"]"#.to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let (kind, message) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("a non-object patch must be reported, not swallowed");
+    assert_eq!(
+        kind,
+        ErrorKindDto::Protocol,
+        "a malformed wire patch is a protocol violation, not an internal failure"
+    );
+    assert!(
+        message.contains("object"),
+        "the message must say what shape was expected, got: {message}"
+    );
+}
+
+/// Syntactically invalid JSON in `patch_json` must be rejected the same way —
+/// `Protocol`-kind, with an actionable message — never a panic and never
+/// silently treated as an empty patch.
+#[tokio::test]
+async fn update_settings_rejects_invalid_json_with_protocol_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdateSettings {
+                destination: SettingsDestinationDto::User,
+                patch_json: "{ not json".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let (kind, message) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("invalid JSON must be reported, not swallowed");
+    assert_eq!(kind, ErrorKindDto::Protocol);
+    assert!(
+        message.contains("JSON"),
+        "the message must say the patch is not valid JSON, got: {message}"
     );
 }
 

@@ -73,6 +73,13 @@ pub fn read_settings_map(path: &Path) -> Result<Map<String, Value>, String> {
 /// here refuses to overwrite. Consolidating onto a shared atomic settings
 /// writer is a noted follow-up.
 ///
+/// SIBLING IMPLEMENTATION — `bridge_server::settings_bridge::apply_patch`
+/// reimplements this exact read/merge/serialize/write shape rather than
+/// calling this function, because it must call `permission::mark_internal_write`
+/// immediately before the write and `migrations` cannot depend on
+/// `permission`. If you fix the non-atomic-write divergence noted above here,
+/// check whether that sibling needs the same fix.
+///
 /// Error contract: the TS original NEVER throws — every failure path returns
 /// `{error: Error}` (settings.ts:416-523), and every migration discards that
 /// return. So in the migration ports `Err` from this function maps to

@@ -11,16 +11,24 @@ test('the nav declares all fifteen pages across four groups', () => {
   );
 });
 
-test('only the coding group is layered, and MCP opts out', () => {
+test('layered is a data property, not a group property — three pages break the correspondence', () => {
+  // layered means "this page's values live in the four settings layers and need
+  // the layer switcher to pick a target". Group is a navigation concept and
+  // does not determine this. Named here explicitly so a future edit that
+  // "fixes" one of these back to match its group is caught, not shipped:
+  //   - mcp: inside 编码, but NOT layered (its own three-scope storage, no layers).
+  //   - custom-providers: outside 编码, but layered (writes settings.providers/routing).
+  //   - raw-json: outside 编码, but layered (its whole job is editing the current layer's file).
+  const layeredIds = new Set([
+    'permissions', 'tools-agent', 'skills', 'hooks', 'plugins',
+    'custom-providers', 'raw-json',
+  ]);
   for (const page of SETTINGS_NAV) {
-    if (page.group !== '编码') {
-      assert.equal(page.layered, false, `${page.id} is outside 编码 and must not be layered`);
-    }
+    assert.equal(
+      page.layered, layeredIds.has(page.id),
+      `${page.id}.layered must be ${layeredIds.has(page.id)}`,
+    );
   }
-  assert.equal(
-    SETTINGS_NAV.find((p) => p.id === 'mcp')?.layered, false,
-    'MCP has its own three-scope storage and must not reuse the settings layer switcher',
-  );
 });
 
 test('client-owned pages do not need the engine', () => {

@@ -54,6 +54,105 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   );
 });
 
+test('the settings, permission, workspace, and MCP commands pass the runtime allowlist', () => {
+  assert.deepEqual(
+    validateClientCommand({ type: 'update_settings', destination: 'user', patch_json: '{"outputStyle":"terse"}' }),
+    { type: 'update_settings', destination: 'user', patch_json: '{"outputStyle":"terse"}' },
+  );
+  assert.deepEqual(
+    validateClientCommand({
+      type: 'update_permission_rules',
+      destination: 'project',
+      behavior: 'allow',
+      add: ['Bash(git status)'],
+      remove: [],
+    }),
+    {
+      type: 'update_permission_rules',
+      destination: 'project',
+      behavior: 'allow',
+      add: ['Bash(git status)'],
+      remove: [],
+    },
+  );
+  assert.deepEqual(
+    validateClientCommand({ type: 'set_default_permission_mode', destination: 'user', mode: 'acceptEdits' }),
+    { type: 'set_default_permission_mode', destination: 'user', mode: 'acceptEdits' },
+  );
+  assert.deepEqual(
+    validateClientCommand({
+      type: 'update_workspace_directories',
+      destination: 'local',
+      add: ['/workspace/extra'],
+      remove: [],
+    }),
+    {
+      type: 'update_workspace_directories',
+      destination: 'local',
+      add: ['/workspace/extra'],
+      remove: [],
+    },
+  );
+  assert.deepEqual(
+    validateClientCommand({
+      type: 'upsert_mcp_server',
+      scope: 'user',
+      name: 'filesystem',
+      config_json: '{"command":"npx","args":["-y","mcp-fs"]}',
+    }),
+    {
+      type: 'upsert_mcp_server',
+      scope: 'user',
+      name: 'filesystem',
+      config_json: '{"command":"npx","args":["-y","mcp-fs"]}',
+    },
+  );
+  assert.deepEqual(
+    validateClientCommand({ type: 'remove_mcp_server', scope: 'user', name: 'filesystem' }),
+    { type: 'remove_mcp_server', scope: 'user', name: 'filesystem' },
+  );
+  assert.deepEqual(
+    validateClientCommand({ type: 'refresh_listings', which: [{ type: 'settings' }, { type: 'mcp' }, { type: 'skills' }] }),
+    { type: 'refresh_listings', which: [{ type: 'settings' }, { type: 'mcp' }, { type: 'skills' }] },
+  );
+  assert.throws(
+    () => validateClientCommand({ type: 'update_settings', destination: 'user', patch_json: 'not json' }),
+    /invalid settings patch/,
+  );
+  assert.throws(
+    () => validateClientCommand({ type: 'update_settings', destination: 'user', patch_json: '[1,2]' }),
+    /invalid settings patch/,
+  );
+  assert.throws(
+    () => validateClientCommand({ type: 'update_settings', destination: 'nope', patch_json: '{}' }),
+    /invalid settings destination/,
+  );
+  assert.throws(
+    () => validateClientCommand({ type: 'upsert_mcp_server', scope: 'user', name: '', config_json: '{}' }),
+    /invalid mcp server name/,
+  );
+  assert.throws(
+    () => validateClientCommand({
+      type: 'update_permission_rules',
+      destination: 'user',
+      behavior: 'maybe',
+      add: [],
+      remove: [],
+    }),
+    /invalid permission behavior/,
+  );
+  assert.throws(
+    () => validateClientCommand({ type: 'remove_mcp_server', scope: 'nowhere', name: 'x' }),
+    /invalid mcp scope/,
+  );
+});
+
+test('an unlisted command that genuinely exists in the protocol is still rejected', () => {
+  // `login` is a real ClientCommand variant (auth is CLI/TUI-only on desktop);
+  // it must never be reachable through the desktop's bounded IPC surface.
+  assert.throws(() => validateClientCommand({ type: 'login' }), /command is not allowed/);
+});
+
 test('AskUserQuestion answers are bounded non-empty string maps', () => {
   assert.deepEqual(
     validateAskUserQuestionAnswers({ 'Choose a mode': 'Safe, Fast' }),

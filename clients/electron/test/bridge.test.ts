@@ -934,3 +934,23 @@ test('non-bypass permission modes are not gated by the acceptance dialog', async
   assert.equal(commands.length, 1);
   assert.equal(commands[0]!['mode'], 'acceptEdits');
 });
+
+// ── Settings/permission/MCP command surface reaches the engine ─────────────
+
+test('the settings and MCP commands reach the engine through dispatchCommand', async () => {
+  const { manager, commands } = trustedManager();
+  await (manager as any).dispatchCommand({ type: 'update_settings', destination: 'user', patch_json: '{"outputStyle":"terse"}' });
+  await (manager as any).dispatchCommand({
+    type: 'upsert_mcp_server',
+    scope: 'user',
+    name: 'filesystem',
+    config_json: '{"command":"npx"}',
+  });
+  assert.deepEqual(commands.map((command) => command['type']), ['update_settings', 'upsert_mcp_server']);
+});
+
+test('a real protocol command outside the desktop surface never reaches the engine', async () => {
+  const { manager, commands } = trustedManager();
+  await assert.rejects((manager as any).dispatchCommand({ type: 'login' }), /command is not allowed/);
+  assert.equal(commands.length, 0, 'a rejected command must never be forwarded');
+});

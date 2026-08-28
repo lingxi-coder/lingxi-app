@@ -9,6 +9,22 @@ import { detectImageMediaType, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS,
 
 const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
+const MAX_JSON_PAYLOAD_LENGTH = 64 * 1024;
+const MAX_LIST_ITEMS = 128;
+const MAX_RULE_LENGTH = 4096;
+const MAX_PATH_LENGTH = 4096;
+const SETTINGS_DESTINATIONS = ['user', 'project', 'local'] as const;
+const PERMISSION_BEHAVIORS = ['allow', 'deny', 'ask'] as const;
+const MCP_SCOPES = ['user', 'local', 'project'] as const;
+
+/**
+ * The runtime mirror of `../shared/clientCommands.ts`'s `AllowedClientCommand`
+ * type. That file exports a compile-time-only type (erased at runtime), so it
+ * cannot itself supply this Set or the `switch` below — this list and every
+ * `case` in `validateClientCommand` must be kept byte-for-byte in sync with
+ * it by hand. Changing one without the other means the desktop typechecks a
+ * command it cannot actually send (or worse, cannot send one it can type).
+ */
 const ALLOWED_COMMANDS = new Set([
   'set_model',
   'set_permission_mode',
@@ -22,6 +38,12 @@ const ALLOWED_COMMANDS = new Set([
   'task_output',
   'task_stop',
   'refresh_listings',
+  'update_settings',
+  'update_permission_rules',
+  'set_default_permission_mode',
+  'update_workspace_directories',
+  'upsert_mcp_server',
+  'remove_mcp_server',
 ]);
 
 function object(value: unknown): Record<string, unknown> {
@@ -45,6 +67,41 @@ function integer(value: unknown, name: string, min = 0, max = Number.MAX_SAFE_IN
     throw new Error(`invalid ${name}`);
   }
   return value as number;
+}
+
+/** A bounded string restricted to a fixed set of wire values. */
+function enumValue<T extends string>(value: unknown, name: string, allowed: readonly T[]): T {
+  const raw = string(value, name, 64);
+  if (!allowed.includes(raw as T)) throw new Error(`invalid ${name}`);
+  return raw as T;
+}
+
+/** A bounded array of bounded strings, e.g. permission rules or directory paths. */
+function stringArray(value: unknown, name: string, maxItems: number, maxItemLength: number): string[] {
+  if (!Array.isArray(value) || value.length > maxItems) throw new Error(`invalid ${name} list`);
+  return value.map((item) => string(item, name, maxItemLength));
+}
+
+/**
+ * A bounded string that must itself decode to a JSON object (never an array,
+ * primitive, or `null`) — matching what the engine's own decoders
+ * (`parse_settings_patch` / the `UpsertMcpServer.config_json` decoder in
+ * `bridge-server::router`) require of `patch_json` / `config_json`. Rejecting
+ * the wrong shape here gives the renderer an immediate, local error instead
+ * of a round trip to learn the same thing.
+ */
+function jsonObjectString(value: unknown, name: string, max: number): string {
+  const text = string(value, name, max);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`invalid ${name}`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`invalid ${name}`);
+  }
+  return text;
 }
 
 export function validatePrompt(value: unknown): string {
@@ -245,11 +302,60 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
           listing['type'] !== 'status'
           && listing['type'] !== 'doctor'
           && listing['type'] !== 'slash_commands'
+          && listing['type'] !== 'settings'
+          && listing['type'] !== 'mcp'
+          && listing['type'] !== 'skills'
         ) throw new Error('listing is not allowed');
         return { type: listing['type'] } as const;
       });
       return { type, which };
     }
+    case 'update_settings':
+      exactKeys(input, ['type', 'destination', 'patch_json']);
+      return {
+        type,
+        destination: enumValue(input['destination'], 'settings destination', SETTINGS_DESTINATIONS),
+        patch_json: jsonObjectString(input['patch_json'], 'settings patch', MAX_JSON_PAYLOAD_LENGTH),
+      };
+    case 'update_permission_rules':
+      exactKeys(input, ['type', 'destination', 'behavior', 'add', 'remove']);
+      return {
+        type,
+        destination: enumValue(input['destination'], 'settings destination', SETTINGS_DESTINATIONS),
+        behavior: enumValue(input['behavior'], 'permission behavior', PERMISSION_BEHAVIORS),
+        add: stringArray(input['add'], 'permission rule', MAX_LIST_ITEMS, MAX_RULE_LENGTH),
+        remove: stringArray(input['remove'], 'permission rule', MAX_LIST_ITEMS, MAX_RULE_LENGTH),
+      };
+    case 'set_default_permission_mode':
+      exactKeys(input, ['type', 'destination', 'mode']);
+      return {
+        type,
+        destination: enumValue(input['destination'], 'settings destination', SETTINGS_DESTINATIONS),
+        mode: string(input['mode'], 'default permission mode', 64),
+      };
+    case 'update_workspace_directories':
+      exactKeys(input, ['type', 'destination', 'add', 'remove']);
+      return {
+        type,
+        destination: enumValue(input['destination'], 'settings destination', SETTINGS_DESTINATIONS),
+        add: stringArray(input['add'], 'workspace directory', MAX_LIST_ITEMS, MAX_PATH_LENGTH),
+        remove: stringArray(input['remove'], 'workspace directory', MAX_LIST_ITEMS, MAX_PATH_LENGTH),
+      };
+    case 'upsert_mcp_server':
+      exactKeys(input, ['type', 'scope', 'name', 'config_json']);
+      return {
+        type,
+        scope: enumValue(input['scope'], 'mcp scope', MCP_SCOPES),
+        name: string(input['name'], 'mcp server name', 256),
+        config_json: jsonObjectString(input['config_json'], 'mcp server config', MAX_JSON_PAYLOAD_LENGTH),
+      };
+    case 'remove_mcp_server':
+      exactKeys(input, ['type', 'scope', 'name']);
+      return {
+        type,
+        scope: enumValue(input['scope'], 'mcp scope', MCP_SCOPES),
+        name: string(input['name'], 'mcp server name', 256),
+      };
     default:
       throw new Error('command is not allowed');
   }

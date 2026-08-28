@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { HostController } from '../src/main/host';
+import { CH_BRIDGE_RESTART, HostController } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
 
@@ -17,6 +17,86 @@ function deferred<T = void>(): { promise: Promise<T>; resolve(value?: T): void; 
   });
   return { promise, resolve: (value?: T) => resolvePromise(value as T), reject: rejectPromise };
 }
+
+test('bridge restart IPC re-checks session ownership and active work at execution time', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'lingxi-restart-ipc-settings-'));
+  const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-restart-ipc-project-'));
+  const project = realpathSync.native(projectDirectory);
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const otherSessionId = '22222222-3333-4444-8555-666666666666';
+  const settings = new SettingsStore(userData);
+  settings.addProject(project);
+  settings.activateProject(project);
+  settings.setActiveSession({ projectPath: project, sessionId });
+
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const ipc = {
+    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
+    removeHandler: (channel: string) => { handlers.delete(channel); },
+  };
+  const runtime = {
+    projectPath: project,
+    connectionState: { status: 'connected' as const },
+    turnActive: false,
+    pendingInteractions: 0,
+  };
+  let runtimeOpen = true;
+  let restartCalls = 0;
+  const bridge = {
+    registerIpc: () => undefined,
+    registerWindow: () => undefined,
+    get: (requestedSessionId: string) => runtimeOpen && requestedSessionId === sessionId ? runtime : undefined,
+    hasActiveWork: () => runtime.turnActive || runtime.pendingInteractions > 0,
+    restart: async (_ref: unknown, beforeRestart?: () => void) => {
+      // Simulate work arriving after the handler's first check but before the
+      // manager's queued restart starts.
+      runtime.turnActive = true;
+      beforeRestart?.();
+      restartCalls += 1;
+    },
+  };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = {
+    mainFrame: frame,
+    isDestroyed: () => false,
+    once: () => undefined,
+    removeListener: () => undefined,
+  };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+  const restart = handlers.get(CH_BRIDGE_RESTART);
+  assert.ok(restart);
+  const event = { sender, senderFrame: frame };
+
+  try {
+    await assert.rejects(
+      () => Promise.resolve(restart!(event, sessionId)),
+      /cancel active turns and pending interactions/,
+    );
+    assert.equal(restartCalls, 0);
+
+    runtime.turnActive = false;
+    settings.setActiveSession({ projectPath: project, sessionId: otherSessionId });
+    await assert.rejects(
+      () => Promise.resolve(restart!(event, sessionId)),
+      /no longer active/,
+    );
+    assert.equal(restartCalls, 0);
+
+    settings.setActiveSession({ projectPath: project, sessionId });
+    runtimeOpen = false;
+    await assert.rejects(
+      () => Promise.resolve(restart!(event, sessionId)),
+      /session runtime is not open/,
+    );
+    assert.equal(restartCalls, 0);
+  } finally {
+    host.dispose();
+    rmSync(userData, { recursive: true, force: true });
+    rmSync(projectDirectory, { recursive: true, force: true });
+  }
+});
 
 test('adding the first project uses the real settings store, trusts it, and starts one session without restarting', async () => {
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-auto-trust-settings-'));
@@ -472,6 +552,17 @@ test('bootstrap reports CLI/TUI credentials discovered by the shared engine stor
     configured: true,
     encryptionAvailable: true,
   });
+});
+
+test('default model mirror failure is recoverable after credential persistence', () => {
+  const diagnostics = new DiagnosticBuffer();
+  const settings = {
+    update: () => { throw new Error('settings mirror failed'); },
+  };
+  const host = new HostController(settings as any, {} as any, diagnostics);
+
+  (host as any).updateProviderDefaultModel('deepseek/deepseek-v4-flash');
+  assert.match(diagnostics.snapshot()[0]?.message ?? '', /default model update failed/);
 });
 
 test('bootstrap replays pending AskUserQuestion requests after a renderer reload', () => {

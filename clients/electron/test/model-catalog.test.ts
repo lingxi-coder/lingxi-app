@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import {
   groupModelReferences,
   modelReference,
+  modelSelectionConfirmed,
+  resolveModelSelection,
+  waitForModelSelection,
 } from '../src/renderer/bridge/modelCatalog';
 import { providerById } from '../src/shared/providers';
 
@@ -78,4 +81,47 @@ test('keeps Kimi Code separate from the pay-as-you-go Kimi provider', () => {
 
 test('defaults Kimi Code to the model available on every membership tier', () => {
   assert.equal(providerById('kimi-code')?.defaultModel, 'kimi-code/k3');
+});
+
+test('routes an unconfigured known provider to its settings while preserving the model', () => {
+  assert.deepEqual(
+    resolveModelSelection('deepseek/deepseek-v4-flash', [{ providerId: 'deepseek', configured: false }]),
+    { kind: 'connect', providerId: 'deepseek', reference: 'deepseek/deepseek-v4-flash' },
+  );
+});
+
+test('maps built-in models to Anthropic and waits for credential status', () => {
+  assert.deepEqual(resolveModelSelection('builtin/claude-sonnet-5'), {
+    kind: 'loading', providerId: 'anthropic', reference: 'builtin/claude-sonnet-5',
+  });
+  assert.deepEqual(resolveModelSelection('builtin/claude-sonnet-5', [{ providerId: 'anthropic', configured: true }]), {
+    kind: 'select', reference: 'builtin/claude-sonnet-5',
+  });
+});
+
+test('keeps unknown and unqualified engine models directly selectable', () => {
+  assert.deepEqual(resolveModelSelection('community/custom-model', []), { kind: 'select', reference: 'community/custom-model' });
+  assert.deepEqual(resolveModelSelection('custom-model'), { kind: 'select', reference: 'custom-model' });
+});
+
+test('model confirmation requires the authoritative model_changed value', () => {
+  assert.equal(modelSelectionConfirmed('openai/gpt-5.6-sol', 'deepseek/deepseek-v4-flash'), false);
+  assert.equal(modelSelectionConfirmed('deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-flash'), true);
+});
+
+test('waits for authoritative model confirmation and times out deterministically', async () => {
+  let current: string | null = 'anthropic/claude-sonnet-5';
+  setTimeout(() => { current = 'deepseek/deepseek-v4-flash'; }, 5);
+  await waitForModelSelection('deepseek/deepseek-v4-flash', () => current, { timeoutMs: 100, pollMs: 1 });
+  await assert.rejects(
+    waitForModelSelection('never/confirmed', () => current, { timeoutMs: 5, pollMs: 1 }),
+    /did not confirm model/,
+  );
+});
+
+test('aborting an authoritative wait clears its polling path', async () => {
+  const controller = new AbortController();
+  const pending = waitForModelSelection('never/confirmed', () => null, { timeoutMs: 100, pollMs: 1, signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, /wait aborted/);
 });

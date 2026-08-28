@@ -14,7 +14,11 @@ import {
   reconcilePendingCount,
   recoverLatestNavigationFailure,
   removeRuntimeFromMaps,
+  dialogFocusTarget,
   resetBridgeRuntimeState,
+  restartBridgePreconditionError,
+  restartBridgeSingleFlight,
+  restartBridgeWithTimeout,
   shouldApplyBootstrapSnapshot,
   shouldClearPendingPermissions,
   shouldResetBridgeRuntime,
@@ -202,4 +206,66 @@ test('interaction response patches win over an old pending summary until it catc
   assert.equal(reconcilePendingCount(0, 1), 0);
   assert.equal(reconcilePendingCount(0, 0), undefined);
   assert.equal(reconcilePendingCount(1, 0), undefined);
+});
+
+test('restart helper rejects a hung IPC call within its caller-provided bound', async () => {
+  let invoked = false;
+  await assert.rejects(
+    restartBridgeWithTimeout(async () => {
+      invoked = true;
+      await new Promise<void>(() => undefined);
+    }, 5),
+    /Timed out waiting for the engine to restart/,
+  );
+  assert.equal(invoked, true);
+});
+
+test('restart preconditions turn loading, missing host, and missing session into failures', () => {
+  assert.match(restartBridgePreconditionError(true, true, 'session')?.message ?? '', /session is loading/);
+  assert.match(restartBridgePreconditionError(false, false, 'session')?.message ?? '', /host unavailable/);
+  assert.match(restartBridgePreconditionError(false, true, null)?.message ?? '', /Open a session/);
+  assert.equal(restartBridgePreconditionError(false, true, 'session'), null);
+});
+
+test('restart helper preserves successful and failed IPC results', async () => {
+  await assert.doesNotReject(() => restartBridgeWithTimeout(async () => undefined, 25));
+  await assert.rejects(
+    restartBridgeWithTimeout(async () => { throw new Error('restart failed'); }, 25),
+    /restart failed/,
+  );
+});
+
+test('restart single-flight reuses a pending session operation, then allows a later restart', async () => {
+  const inFlight = new Map<string, Promise<void>>();
+  const first = deferred<void>();
+  let hostCalls = 0;
+  const restart = () => restartBridgeSingleFlight(inFlight, 'session-1', async () => {
+    hostCalls += 1;
+    await first.promise;
+  });
+
+  // The first renderer caller times out, but that only ends its wait. The
+  // underlying session restart remains in-flight for the retry to join.
+  const initial = restartBridgeWithTimeout(restart, 5);
+  await assert.rejects(initial, /Timed out waiting for the engine to restart/);
+  assert.equal(hostCalls, 1);
+  const retry = restartBridgeWithTimeout(restart, 50);
+  await Promise.resolve();
+  assert.equal(hostCalls, 1);
+  first.resolve(undefined);
+  await retry;
+  assert.equal(inFlight.has('session-1'), false);
+
+  await restartBridgeWithTimeout(restart, 50);
+  assert.equal(hostCalls, 2);
+});
+
+test('dialog focus helper wraps both directions and captures focus that escaped', () => {
+  const focusable = ['first', 'middle', 'last'] as const;
+  assert.equal(dialogFocusTarget(focusable, 'last', false), 'first');
+  assert.equal(dialogFocusTarget(focusable, 'first', true), 'last');
+  assert.equal(dialogFocusTarget(focusable, 'outside', false), 'first');
+  assert.equal(dialogFocusTarget(focusable, 'outside', true), 'last');
+  assert.equal(dialogFocusTarget(focusable, 'middle', false), undefined);
+  assert.equal(dialogFocusTarget([], null, false), undefined);
 });

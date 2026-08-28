@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { persistProviderCredentialInput } from '../src/renderer/bridge/providerCredentials';
+import {
+  isCurrentCredentialTransaction,
+  persistProviderCredentialAndApplyModel,
+  persistProviderCredentialInput,
+} from '../src/renderer/bridge/providerCredentials';
 
 test('provider credential input is cleared only after persistence succeeds', async () => {
   const writes: Array<[string, string]> = [];
@@ -29,4 +33,69 @@ test('provider credential input remains available when persistence fails', async
   );
 
   assert.equal(saved, false);
+});
+
+test('closing Settings invalidates late credential transaction updates without cancelling host work', () => {
+  let mounted = true;
+  let generation = 4;
+  assert.equal(isCurrentCredentialTransaction(mounted, generation, generation), true);
+
+  // Close/Escape marks the component stale and advances its generation. A
+  // persistence or restart result that arrives afterwards must not update or
+  // apply anything in the unmounted Settings instance.
+  mounted = false;
+  generation += 1;
+  assert.equal(isCurrentCredentialTransaction(mounted, 4, generation), false);
+  assert.equal(isCurrentCredentialTransaction(true, 4, generation), false);
+});
+
+test('credential persistence clears the secret before applying a deferred model', async () => {
+  const events: string[] = [];
+  await persistProviderCredentialAndApplyModel(
+    'deepseek',
+    'sk-test-secret',
+    async () => { events.push('persist'); },
+    () => { events.push('clear'); },
+    async (sessionId) => { events.push(`restart:${sessionId}`); },
+    'session-1',
+    'deepseek/deepseek-v4-flash',
+    async (reference) => { events.push(`apply:${reference}`); },
+  );
+  assert.deepEqual(events, ['persist', 'clear', 'restart:session-1', 'apply:deepseek/deepseek-v4-flash']);
+});
+
+test('credential persistence does not clear or apply when the host rejects the write', async () => {
+  const events: string[] = [];
+  await assert.rejects(
+    persistProviderCredentialAndApplyModel(
+      'deepseek',
+      'sk-test-secret',
+      async () => { events.push('persist'); throw new Error('host unavailable'); },
+      () => { events.push('clear'); },
+      async () => { events.push('restart'); },
+      'session-1',
+      'deepseek/deepseek-v4-flash',
+      async () => { events.push('apply'); },
+    ),
+    /host unavailable/,
+  );
+  assert.deepEqual(events, ['persist']);
+});
+
+test('restart failure happens after the secret is cleared and before model application', async () => {
+  const events: string[] = [];
+  await assert.rejects(
+    persistProviderCredentialAndApplyModel(
+      'deepseek',
+      'sk-test-secret',
+      async () => { events.push('persist'); },
+      () => { events.push('clear'); },
+      async () => { events.push('restart'); throw new Error('engine restart failed'); },
+      'session-1',
+      'deepseek/deepseek-v4-flash',
+      async () => { events.push('apply'); },
+    ),
+    /engine restart failed/,
+  );
+  assert.deepEqual(events, ['persist', 'clear', 'restart']);
 });

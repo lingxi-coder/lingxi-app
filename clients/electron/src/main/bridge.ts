@@ -476,10 +476,14 @@ export class SessionRuntime {
     return this.startPromise;
   }
 
-  restart(): Promise<void> {
+  restart(beforeRestart?: () => void): Promise<void> {
     if (this.opts.registerIpc !== false) this.registerIpc();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
-      if (this.disposed) return;
+      if (this.disposed) throw new Error('session runtime is no longer open');
+      // This runs after any earlier queued lifecycle work and immediately
+      // before stopping the child. Callers can re-check ownership/work here
+      // to close the queueing race between IPC validation and restart.
+      beforeRestart?.();
       this.setState({ status: 'restarting' });
       try {
         await this.stopBridge();
@@ -1404,16 +1408,21 @@ export class SessionRuntimeManager {
     return ref;
   }
 
-  async restart(ref: SessionRef): Promise<void> {
+  async restart(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
     const runtime = this.require(ref);
-    await runtime.restart();
+    await runtime.restart(beforeRestart);
     await runtime.restoreOwnedSessionIfNeeded();
   }
 
   async closeSession(ref: SessionRef): Promise<void> {
     const runtime = this.require(ref);
-    await runtime.dispose();
+    // Remove from the routable map BEFORE the first await, for the same reason
+    // `closeProject` does: while `dispose()` is in flight `get()` would still
+    // hand this runtime out, and `restart()` now rejects on a disposed runtime
+    // instead of resolving silently — surfacing a failure for a settings or
+    // credential write that actually succeeded.
     this.runtimes.delete(ref.sessionId);
+    await runtime.dispose();
   }
 
   async closeProject(projectPath: string): Promise<void> {

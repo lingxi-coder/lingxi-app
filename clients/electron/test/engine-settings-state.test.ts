@@ -14,7 +14,7 @@ const files: SettingsFile[] = [
 // fails to compile instead of silently missing every `.find`.
 function snap(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
   return {
-    files: [...files], effective: {}, active: {}, provenance: {}, locked: [], ...over,
+    files: [...files], effective: {}, active: {}, provenance: {}, locked: [], layers: {}, ...over,
   };
 }
 

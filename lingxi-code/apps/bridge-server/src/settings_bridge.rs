@@ -183,7 +183,20 @@ pub fn writable_path(paths: &SettingsPaths, layer: SettingsLayer) -> Result<Path
 /// et al. — see the `permission_*` functions below); allowing the generic
 /// path to also touch `permissions` would give the key two write paths, which
 /// is exactly the defect this list exists to prevent.
-const RESERVED_KEYS: [(&str, &str); 1] = [("permissions", "update_permission_rules")];
+///
+/// The hint names all three replacement commands rather than one: the patch
+/// is a SHALLOW, top-level replace of the whole `permissions` object, so at
+/// this point there is no way to tell whether the caller actually meant
+/// `permissions.allow/deny/ask` (→ `UpdatePermissionRules`),
+/// `permissions.defaultMode` (→ `SetDefaultPermissionMode`), or
+/// `permissions.additionalDirectories` (→ `UpdateWorkspaceDirectories`).
+/// Naming only one would point a caller of the other two at the wrong
+/// command.
+const RESERVED_KEYS: [(&str, &str); 1] = [(
+    "permissions",
+    "update_permission_rules, set_default_permission_mode, or update_workspace_directories \
+     (depending on what you're changing)",
+)];
 
 /// Map a wire-writable destination to its file layer. Narrower than
 /// [`SettingsLayer`]'s full set by construction (`SettingsDestinationDto` has
@@ -320,7 +333,7 @@ pub fn apply_patch(
         {
             return Err(format!(
                 "the `{reserved}` key has a dedicated writer and is refused here; \
-                 use the `{replacement}` command instead"
+                 use {replacement} instead"
             ));
         }
     }
@@ -750,9 +763,13 @@ mod tests {
         );
     }
 
-    /// I1: the generic patch must not write `permissions`. The error must
-    /// name both the reserved key and the replacement command, so a caller
-    /// hitting this is told what to do instead of just what failed.
+    /// I1: the generic patch must not write `permissions`. The patch is a
+    /// SHALLOW, top-level replace of the whole object, so at this point there
+    /// is no way to tell which nested field the caller actually meant
+    /// (`allow`/`deny`/`ask`, `defaultMode`, or `additionalDirectories`) — the
+    /// error must therefore name the reserved key AND ALL THREE replacement
+    /// commands, not just one, or a caller who meant `defaultMode` /
+    /// `additionalDirectories` would be pointed at the wrong command.
     #[test]
     fn generic_patch_refuses_the_permissions_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -769,7 +786,15 @@ mod tests {
         assert!(err.contains("permissions"), "error must name the key, got: {err}");
         assert!(
             err.contains("update_permission_rules"),
-            "error must name the replacement command, got: {err}"
+            "error must name the rule-set replacement command, got: {err}"
+        );
+        assert!(
+            err.contains("set_default_permission_mode"),
+            "error must name the default-mode replacement command, got: {err}"
+        );
+        assert!(
+            err.contains("update_workspace_directories"),
+            "error must name the workspace-directories replacement command, got: {err}"
         );
     }
 

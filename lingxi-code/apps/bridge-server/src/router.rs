@@ -470,6 +470,16 @@ impl EngineCommandRouter {
                         message: format!("failed to persist permission rules: {error}"),
                     })
                     .await;
+                    // `add` and `remove` are two SEPARATE transactions. If the
+                    // `add` half already landed durably before this half
+                    // errored, the file has genuinely changed — telling the
+                    // caller only "it failed" would leave its view of
+                    // settings stale and silently wrong. The error still says
+                    // the operation did not complete; the snapshot says what
+                    // is actually on disk now. Both are true.
+                    if changed {
+                        self.emit_settings_snapshot(sink).await;
+                    }
                     return;
                 }
             }
@@ -573,6 +583,14 @@ impl EngineCommandRouter {
                         message: format!("failed to persist workspace directories: {error}"),
                     })
                     .await;
+                    // Same honesty property as `apply_permission_rule_update`:
+                    // `add` and `remove` are two SEPARATE transactions, so an
+                    // `add` that already landed before `remove` errored is a
+                    // real, durable change. Report it alongside the error
+                    // rather than leaving the caller's view stale.
+                    if changed {
+                        self.emit_settings_snapshot(sink).await;
+                    }
                     return;
                 }
             }

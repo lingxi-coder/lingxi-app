@@ -2578,6 +2578,58 @@ async fn update_permission_rules_reports_when_nothing_was_requested() {
     );
 }
 
+/// Complements the "partial write" fix below: when NOTHING had changed yet
+/// at the point a persist call errors (here, `add` is empty so only `remove`
+/// runs, against a file with broken JSON), the router must report ONLY the
+/// error — no snapshot. This pins the `if changed { snapshot }` branch's
+/// FALSE side, so the fix for partial writes cannot regress into always
+/// emitting a snapshot on top of an error regardless of whether anything
+/// actually landed.
+#[tokio::test]
+async fn update_permission_rules_reports_only_the_error_when_nothing_changed_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("settings.json"), "{ not json").unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdatePermissionRules {
+                destination: SettingsDestinationDto::User,
+                behavior: PermissionBehaviorDto::Allow,
+                add: vec![],
+                remove: vec!["Bash".to_string()],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::Error { kind: ErrorKindDto::Internal, .. })),
+        "a broken destination file must be reported as an internal failure, got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "nothing changed before the error, so no snapshot may be emitted, got {events:?}"
+    );
+}
+
 /// The default mode must land in the user layer's `defaultMode`, and an
 /// unrelated key in that file must survive.
 #[tokio::test]
@@ -2762,6 +2814,76 @@ async fn update_permission_rules_reports_a_missing_context_instead_of_staying_si
                 destination: SettingsDestinationDto::User,
                 behavior: PermissionBehaviorDto::Allow,
                 add: vec!["Bash".to_string()],
+                remove: vec![],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let message = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a missing settings context must be reported, not swallowed");
+    assert!(
+        message.contains("settings context"),
+        "the error must name what is missing, got: {message}"
+    );
+}
+
+/// Same contract as above, for `SetDefaultPermissionMode` — the shared
+/// `require_permission_paths` preflight is exercised by all three handlers,
+/// but only pinning it through one caller would miss a mis-wiring of this
+/// one to a different (or missing) guard.
+#[tokio::test]
+async fn set_default_permission_mode_reports_a_missing_context_instead_of_staying_silent() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetDefaultPermissionMode {
+                destination: SettingsDestinationDto::User,
+                mode: "acceptEdits".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let message = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a missing settings context must be reported, not swallowed");
+    assert!(
+        message.contains("settings context"),
+        "the error must name what is missing, got: {message}"
+    );
+}
+
+/// Same contract as above, for `UpdateWorkspaceDirectories`.
+#[tokio::test]
+async fn update_workspace_directories_reports_a_missing_context_instead_of_staying_silent() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdateWorkspaceDirectories {
+                destination: SettingsDestinationDto::User,
+                add: vec!["/tmp/extra".to_string()],
                 remove: vec![],
             },
             sink.clone(),

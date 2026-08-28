@@ -462,17 +462,31 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
 
     case 'error': {
       // Error is shared by turn failures and unrelated commands/listings. A
-      // hard turn failure is followed by an explicit turn_ended from the bridge
-      // server, so only that lifecycle event may release the composer.
+      // hard turn failure is followed by an explicit turn_ended from the
+      // bridge server, so only that lifecycle event may release the
+      // composer -- EXCEPT a slash command's own outstanding pre-claim,
+      // which has no turn_ended coming: a transport failure never reaches
+      // the engine at all, and `bridge-server/src/router.rs:953` emits this
+      // very `error` event instead of a `slash_command_result` when no
+      // dispatcher is wired. In both cases this IS the command's only
+      // terminal event, so it must release the claim itself. Gated on
+      // `pendingSlashName` still being set: `turn_started` already clears it
+      // for a command that expanded into a real turn, so an ordinary turn's
+      // error handling is unchanged.
+      const releaseSlashClaim = state.pendingSlashName !== null;
       const next = pushError(state, event.message);
       // In-flight tool cards do settle here, because `turn_ended` is exactly
       // what a died engine fails to send. Gated on a turn actually being in
       // flight so an unrelated listing failure between turns cannot fail a
       // card; within a turn the worst case self-heals, since a `tool_use_result`
       // that still arrives re-settles the card to its real status.
-      if (!state.running) return next;
-      const items = next.items.slice();
-      return settleRunningTools(items, 'error') ? { ...next, items } : next;
+      const settled = state.running
+        ? (() => {
+            const items = next.items.slice();
+            return settleRunningTools(items, 'error') ? { ...next, items } : next;
+          })()
+        : next;
+      return releaseSlashClaim ? { ...settled, running: false, pendingSlashName: null } : settled;
     }
 
     default:

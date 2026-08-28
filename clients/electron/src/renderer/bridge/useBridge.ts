@@ -526,6 +526,16 @@ export function useBridge(): UseBridge {
         clearSlashTurnClaim(slashPendingRefs.current, sessionId);
         turnActiveRefs.current.set(sessionId, false);
       }
+      // A dispatch that never reaches the engine, or an engine with no
+      // dispatcher wired (`bridge-server/src/router.rs:953` emits `error`
+      // instead of `slash_command_result`), is this claim's only terminal
+      // event -- no `turn_started`/`turn_ended` will ever arrive to release
+      // it otherwise. Same guard as above: only while the claim is still
+      // outstanding, so an ordinary turn's error is untouched.
+      if (event.type === 'error' && shouldReleaseSlashTurn(slashPendingRefs.current, sessionId)) {
+        clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+        turnActiveRefs.current.set(sessionId, false);
+      }
       updateRuntime(sessionId, (state) => {
         let next = { ...state, conversation: reduceEvent(state.conversation, event), desktop: reduceDesktopEvent(state.desktop, event) };
         if (event.type === 'turn_started') next = { ...next, error: undefined };

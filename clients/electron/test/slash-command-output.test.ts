@@ -80,6 +80,30 @@ test('turn_ended still releases the composer for a command that became a turn', 
   assert.equal(ended.running, false);
 });
 
+test('a slash command that never gets a slash_command_result releases the composer on error', () => {
+  const started = beginSlashCommand(emptyConversation(), '/security-review');
+  assert.equal(started.running, true);
+
+  // A transport failure, or the engine's own no-dispatcher fallback
+  // (bridge-server/src/router.rs:953), never sends slash_command_result or
+  // turn_started/turn_ended -- this `error` is the claim's only terminal
+  // event, so it must release the composer itself.
+  const state = reduceEvent(started, { type: 'error', message: 'boom' });
+  assert.equal(state.running, false);
+  assert.equal(state.pendingSlashName, null);
+});
+
+test('an error during an ordinary turn does not release the composer early', () => {
+  // No slash claim outstanding: turn_started already cleared pendingSlashName
+  // (or this is a plain prompt turn that never set it). turn_ended remains
+  // the only lifecycle event allowed to release the composer here.
+  let s = reduceEvent(emptyConversation(), { type: 'turn_started' });
+  assert.equal(s.pendingSlashName, null);
+  s = reduceEvent(s, { type: 'error', message: 'a tool call failed' });
+
+  assert.equal(s.running, true);
+});
+
 test('command output folds only once it is genuinely long', () => {
   const short = { type: 'command', id: 'i1', name: '/status', output: 'one line', isError: false } as const;
   const tall = { ...short, output: Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n') };

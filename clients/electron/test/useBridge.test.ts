@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   beginProjectCatalogRequest,
+  claimSlashTurn,
   clearCancellationRuntime,
+  clearSlashTurnClaim,
   displayedSession,
   isLatestOperation,
   isLatestProjectCatalogRequest,
@@ -17,6 +19,7 @@ import {
   resetBridgeRuntimeState,
   shouldApplyBootstrapSnapshot,
   shouldClearPendingPermissions,
+  shouldReleaseSlashTurn,
   shouldResetBridgeRuntime,
 } from '../src/renderer/bridge/useBridge';
 import { emptyConversation } from '../src/renderer/bridge/conversation';
@@ -202,4 +205,27 @@ test('interaction response patches win over an old pending summary until it catc
   assert.equal(reconcilePendingCount(0, 1), 0);
   assert.equal(reconcilePendingCount(0, 0), undefined);
   assert.equal(reconcilePendingCount(1, 0), undefined);
+});
+
+test('a display-only slash command releases the turn it pre-claimed', () => {
+  const pending = new Map<string, boolean>();
+  claimSlashTurn(pending, 's1');
+
+  // /status never starts a turn; its result must hand the composer back.
+  assert.equal(shouldReleaseSlashTurn(pending, 's1'), true);
+});
+
+test('a slash command that expanded into a turn does NOT release it', () => {
+  const pending = new Map<string, boolean>();
+  claimSlashTurn(pending, 's1');
+  // turn_started proves the command became a real turn.
+  clearSlashTurnClaim(pending, 's1');
+
+  // router.rs:938 can still emit a display-only result as a fallback; if that
+  // released the turn, the composer would unlock mid-turn.
+  assert.equal(shouldReleaseSlashTurn(pending, 's1'), false);
+});
+
+test('a result for a session that never dispatched a slash command releases nothing', () => {
+  assert.equal(shouldReleaseSlashTurn(new Map(), 's1'), false);
 });

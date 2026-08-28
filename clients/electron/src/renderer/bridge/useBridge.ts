@@ -166,6 +166,31 @@ export function removeRuntimeFromMaps(sessionId: string, ...maps: SessionRuntime
   for (const map of maps) map.delete(sessionId);
 }
 
+/**
+ * Turn ownership for slash dispatch.
+ *
+ * `sendPrompt` claims the turn the instant the command crosses the bridge
+ * (`turn_started` may land a tick later; `bridge.ts:900` carries the same
+ * pre-claim). Slash dispatch needs the same claim — but most slash commands
+ * are display-only and never start a turn, so an unconditional claim would
+ * lock the composer forever on `/status`. The claim is therefore released by
+ * `slash_command_result`, and only while it is still outstanding: the engine
+ * has a fallback arm that emits a display-only result for a prompt command
+ * (`bridge-server/src/router.rs:938`), and releasing on that would unlock the
+ * composer in the middle of a live turn.
+ */
+export function claimSlashTurn(pending: Map<string, boolean>, sessionId: string): void {
+  pending.set(sessionId, true);
+}
+
+export function clearSlashTurnClaim(pending: Map<string, boolean>, sessionId: string): void {
+  pending.delete(sessionId);
+}
+
+export function shouldReleaseSlashTurn(pending: Map<string, boolean>, sessionId: string): boolean {
+  return pending.get(sessionId) === true;
+}
+
 export function shouldApplyBootstrapSnapshot(
   latestRevision: number | null,
   snapshotRevision: number,
@@ -285,6 +310,7 @@ export function useBridge(): UseBridge {
   const [runtimeStates, setRuntimeStates] = useState<Map<string, RuntimeState>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const turnActiveRefs = useRef(new Map<string, boolean>());
+  const slashPendingRefs = useRef(new Map<string, boolean>());
   const cancellingRefs = useRef(new Map<string, { current: boolean }>());
   const cancellationTasks = useRef(new Map<string, { current: Promise<void> | null }>());
   const removedRuntimeIds = useRef(new Set<string>());
@@ -383,7 +409,7 @@ export function useBridge(): UseBridge {
       // The snapshot is authoritative, so disposal markers have been
       // reconciled once it arrives and must not accumulate across sessions.
       removedRuntimeIds.current.clear();
-      pruneRuntimeMaps(runtimeIds, next, turnActiveRefs.current, cancellingRefs.current, cancellationTasks.current);
+      pruneRuntimeMaps(runtimeIds, next, turnActiveRefs.current, slashPendingRefs.current, cancellingRefs.current, cancellationTasks.current);
       for (const summary of summaries) {
         const current = next.get(summary.sessionId) ?? emptyRuntimeState(summary.connection);
         const nextState: RuntimeState = {
@@ -495,6 +521,11 @@ export function useBridge(): UseBridge {
       const event = envelope.event;
       if (event.type === 'turn_started') turnActiveRefs.current.set(sessionId, true);
       if (event.type === 'turn_ended' || event.type === 'session_ended') turnActiveRefs.current.set(sessionId, false);
+      if (event.type === 'turn_started') clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+      if (event.type === 'slash_command_result' && shouldReleaseSlashTurn(slashPendingRefs.current, sessionId)) {
+        clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+        turnActiveRefs.current.set(sessionId, false);
+      }
       updateRuntime(sessionId, (state) => {
         let next = { ...state, conversation: reduceEvent(state.conversation, event), desktop: reduceDesktopEvent(state.desktop, event) };
         if (event.type === 'turn_started') next = { ...next, error: undefined };
@@ -582,7 +613,7 @@ export function useBridge(): UseBridge {
           removeRuntimeFromMaps(sessionId, next);
           return next.size === previous.size ? previous : next;
         });
-        removeRuntimeFromMaps(sessionId, turnActiveRefs.current, cancellingRefs.current, cancellationTasks.current);
+        removeRuntimeFromMaps(sessionId, turnActiveRefs.current, slashPendingRefs.current, cancellingRefs.current, cancellationTasks.current);
         return;
       }
       if (removedRuntimeIds.current.has(sessionId)) return;
@@ -700,11 +731,15 @@ export function useBridge(): UseBridge {
     const command = raw.trim();
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId || !command.startsWith('/')) return;
+    turnActiveRefs.current.set(sessionId, true);
+    claimSlashTurn(slashPendingRefs.current, sessionId);
     updateRuntime(sessionId, (state) => ({ ...state, conversation: beginSlashCommand(state.conversation, command) }));
     try {
       await host.command(sessionId, { type: 'run_slash_command', raw: command });
       await host.command(sessionId, { type: 'refresh_listings', which: [{ type: 'slash_commands' }] });
     } catch (cause) {
+      turnActiveRefs.current.set(sessionId, false);
+      clearSlashTurnClaim(slashPendingRefs.current, sessionId);
       updateRuntime(sessionId, (state) => ({
         ...state,
         conversation: reduceEvent(state.conversation, { type: 'error', kind: { type: 'transport' }, message: 'Failed to run the slash command.' }),

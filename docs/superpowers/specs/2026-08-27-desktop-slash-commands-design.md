@@ -7,14 +7,14 @@
 
 The desktop client advertises slash commands it cannot deliver.
 
-What already works: the catalog is pulled (`refresh_listings → slash_commands`), refreshed on `commands_changed`, stored in `DesktopState.slashCommands` (`desktopState.ts:129`), and rendered as a `/` completion popup with fuzzy filtering and keyboard navigation (`slashCommands.ts`, `BetaDesktop.tsx:1405`). Submitting a line matching `/^\/[^\s/]+(?:\s|$)/` sends `run_slash_command` (`BetaDesktop.tsx:1067` → `useBridge.ts:779`).
+What already works: the catalog is pulled (`refresh_listings → slash_commands`), refreshed on `commands_changed`, stored in `DesktopState.slashCommands` (`desktopState.ts:129`), and rendered as a `/` completion popup with fuzzy filtering and keyboard navigation (`slashCommands.ts`, `BetaDesktop.tsx:1400`). Submitting a line matching `/^\/[^\s/]+(?:\s|$)/` sends `run_slash_command` (`BetaDesktop.tsx:1062` → `useBridge.ts:699`).
 
 What is broken, verified in the tree:
 
 1. **The result is dropped on the floor.** The engine dispatches the command for real (`bridge-server/src/boot.rs:901` wires a live `SlashCommandDispatcher`; `router.rs:943` emits `ClientEvent::SlashCommandResult { turn_id, display, is_error }`). No client in this repository handles that event — a grep for `slash_command_result` across `clients/electron`, `clients/ios/Sources`, and `clients/android/app/src` returns zero hits. Typing `/status` shows the user's own echo and nothing else, forever.
-2. **A prompt-expanding command does not claim the turn.** `sendPrompt` marks the session's turn active the instant the command crosses the bridge (`useBridge.ts:761`), deliberately: `turn_started` may arrive a tick later, and `bridge.ts:904` carries the same pre-claim with a comment naming the gap it closes. `runSlashCommand` omits it. So between dispatching `/security-review` and the engine's `turn_started`, the composer stays unlocked and `cancel()` is a no-op, because `useBridge.ts:798` gates on `turnActive`.
-3. **~19 commands answer with a dead end.** `commands/core/src/register.rs:423` registers `InteractiveOnlyHandler` for `add-dir, background, branch, cd, color, copy, diff, focus, plan, plugin, privacy-settings, rename, rewind, tasks, terminal-setup, theme, tui, usage, usage-credits`, each replying `"/x is available in interactive TUI mode only."` The desktop *is* an interactive client and already owns UI for several of them, but nothing routes a slash command into that UI.
-4. **The completion popup ignores half of its own DTO.** `SlashCommandDto` carries `aliases`, `argument_hint`, `menu_description`, and `hidden` (`client-protocol/src/listings.rs:358`). `filterSlashCommands` matches only `name`/`description`/`source`, and the row renders only name/description/source (`BetaDesktop.tsx:1415-1420`). In particular `hidden` is not filtered, contradicting the DTO's stated contract that hidden commands stay resolvable by exact input but must not appear in a bare `/` menu.
+2. **A prompt-expanding command does not claim the turn.** `sendPrompt` marks the session's turn active the instant the command crosses the bridge (`useBridge.ts:681`), deliberately: `turn_started` may arrive a tick later, and `bridge.ts:900` carries the same pre-claim with a comment naming the gap it closes. `runSlashCommand` omits it. So between dispatching `/security-review` and the engine's `turn_started`, the composer stays unlocked and `cancel()` is a no-op, because `useBridge.ts:718` gates on `turnActive`.
+3. **~19 commands answer with a dead end.** `commands/core/src/register.rs:419` registers `InteractiveOnlyHandler` for `add-dir, background, branch, cd, color, copy, diff, focus, plan, plugin, privacy-settings, rename, rewind, tasks, terminal-setup, theme, tui, usage, usage-credits`, each replying `"/x is available in interactive TUI mode only."` The desktop *is* an interactive client and already owns UI for several of them, but nothing routes a slash command into that UI.
+4. **The completion popup ignores half of its own DTO.** `SlashCommandDto` carries `aliases`, `argument_hint`, `menu_description`, and `hidden` (`client-protocol/src/listings.rs:358`). `filterSlashCommands` matches only `name`/`description`/`source`, and the row renders only name/description/source (`BetaDesktop.tsx:1410-1415`). In particular `hidden` is not filtered, contradicting the DTO's stated contract that hidden commands stay resolvable by exact input but must not appear in a bare `/` menu.
 
 ## Decisions taken during brainstorming
 
@@ -55,7 +55,7 @@ Added to the `RunItem` union (`runItem.ts:94`). Rendering rules:
 - Long output folds behind the existing `Disclosure`, using a `commandShouldCollapse` threshold that mirrors `narrationShouldCollapse` (`runItem.ts:118`) rather than inventing a second policy.
 - `isError: true` renders in the error color, matching how `pushError` output reads today.
 
-Reducer: `conversation.ts` gains `case 'slash_command_result'` that pushes a `CommandRunItem`. The user's typed line keeps arriving through `appendUserPrompt` in `runSlashCommand` (`useBridge.ts:783`), so the transcript reads *user line → command output*, the same order the CLI prints.
+Reducer: `conversation.ts` gains `case 'slash_command_result'` that pushes a `CommandRunItem`. The user's typed line keeps arriving through `appendUserPrompt` in `runSlashCommand` (`useBridge.ts:703`), so the transcript reads *user line → command output*, the same order the CLI prints.
 
 The command name for the header comes from the raw line the client sent. `SlashCommandResult` carries no name, so `runSlashCommand` records the pending raw line and the reducer pairs it; when a result arrives with no pending line (a command the engine originated), the header falls back to the empty string and only the output renders.
 
@@ -69,7 +69,7 @@ The release signal is `slash_command_result` itself. The engine emits it only on
 
 - `runSlashCommand` sets `turnActiveRefs` true and records the session in a new `slashPendingRefs: Map<string, boolean>`.
 - `turn_started` clears that session's `slashPendingRefs` entry — the command did expand into a turn, and the normal `turn_ended` path owns the release from here.
-- `slash_command_result` releases `turnActiveRefs` **only if** `slashPendingRefs` still holds the session. The guard matters because `router.rs:939` has a fallback arm that emits `SlashCommandResult` for a prompt command that reached the display-only path; without the guard that fallback would unlock the composer mid-turn.
+- `slash_command_result` releases `turnActiveRefs` **only if** `slashPendingRefs` still holds the session. The guard matters because `router.rs:938` has a fallback arm that emits `SlashCommandResult` for a prompt command that reached the display-only path; without the guard that fallback would unlock the composer mid-turn.
 
 No main-process change: with `turn_id` unset, `validation.ts:210`'s `exactKeys(input, ['type', 'raw'])` stays exactly as it is.
 
@@ -96,22 +96,22 @@ export function resolveDesktopCommand(
 
 `DesktopCommandContext` is the seam between the table and the UI: it exposes the bridge methods the commands need plus a small set of UI openers (`openModelPicker`, `openPermissionPicker`, `openSettings(pane)`) and an `emit(output, isError?)` that pushes a `CommandRunItem` for local commands' own confirmations. `BetaDesktop` builds the context; the table never touches React.
 
-Submit path in `BetaDesktop.submit` becomes: parse → `resolveDesktopCommand` → if resolved, run locally; otherwise `bridge.runSlashCommand(raw)` unchanged. A `required`-args command invoked bare falls through to the engine rather than erroring, matching `ArgSpec::Required` in `tui/src/command.rs:30`.
+Submit path in `BetaDesktop.submit` becomes: parse → `resolveDesktopCommand` → if resolved, run locally; otherwise `bridge.runSlashCommand(raw)` unchanged. A `required`-args command invoked bare falls through to the engine rather than erroring, matching `ArgSpec::Required` in `tui/src/command.rs:31`.
 
 ### 4. Group B command table
 
-**`pickers.tsx` and `Composer.tsx` are dead code** — nothing imports `Composer`, and `pickers` is imported only by `Composer`. The live shell is `App.tsx:90` → `BetaComposer` (`BetaDesktop.tsx:629`), and the live settings surface is `BetaSettings` (`BetaDesktop.tsx:1852`); `settings/SettingsPage.tsx` has no importers either. Every opener below names the state that actually renders.
+**`pickers.tsx` and `Composer.tsx` are dead code** — nothing imports `Composer`, and `pickers` is imported only by `Composer`. The live shell is `App.tsx:89` → `BetaComposer` (`BetaDesktop.tsx:629`), and the live settings surface is `BetaSettings` (`BetaDesktop.tsx:1826`); `settings/SettingsPage.tsx` has no importers either. Every opener below names the state that actually renders.
 
 | Command | Bare | With args |
 |---|---|---|
-| `/model` | `setModelOpen(true)` + `setModelSubmenu('model')` (`BetaDesktop.tsx:636-637`) | `bridge.setModel(arg)`; a model id absent from `bridge.desktop.models` → local error line |
-| `/permissions` | `setPermissionOpen(true)` (`BetaDesktop.tsx:638`) | `bridge.setPermissionMode(arg)` for an id in `PERM_MODES` (`data/index.ts:216` — `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`); anything else → local error line naming the six |
+| `/model` | `setModelOpen(true)` + `setModelSubmenu('model')` (`BetaDesktop.tsx:632-633`) | `bridge.setModel(arg)`; a model id absent from `bridge.desktop.models` → local error line |
+| `/permissions` | `setPermissionOpen(true)` (`BetaDesktop.tsx:634`) | `bridge.setPermissionMode(arg)` for an id in `PERM_MODES` (`data/index.ts:216` — `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`); anything else → local error line naming the six |
 | `/effort` | `setModelOpen(true)` + `setModelSubmenu('effort')` | `bridge.setReasoningSelection({ type: 'level', id: arg })`, or `{ type: 'automatic' }` for `auto`, `{ type: 'disabled' }` for `off` |
 | `/fast` | toggle: `bridge.setFastMode(!bridge.desktop.fastMode)` | `on` / `off`; any other argument → local error line |
-| `/theme` | open settings (the Appearance section lives there, `BetaDesktop.tsx:2069`) | `dark` / `light` via the shell's `onTheme`; anything else → local error line |
+| `/theme` | open settings (the Appearance section lives there, `BetaDesktop.tsx:1869`) | `dark` / `light` via the shell's `onTheme`; anything else → local error line |
 | `/config` | open settings | takes no argument; one supplied → local error line saying so |
 
-`/theme` and `/config` need an opener the composer does not have today: `BetaComposer` gains an `onOpenSettings(): void` prop, wired in `App.tsx` to `setSettingsRoute({})` (`App.tsx:23`, rendered at `App.tsx:121`). `bridge.openSystemSettings` is **not** it — that opens macOS system panes (`'accessibility' | 'screen_recording'`, `lingxi.d.ts:99`) for the computer-access flow, and has nothing to do with app configuration.
+`/theme` and `/config` need an opener the composer does not have today: `BetaComposer` gains an `onOpenSettings(): void` prop, wired in `App.tsx` to `setSettingsOpen(true)` — the boolean at `App.tsx:23`, whose surface renders at `App.tsx:116`. `bridge.openSystemSettings` is **not** it — that opens macOS system panes (`'accessibility' | 'screen_recording'`, `lingxi.d.ts:99`) for the computer-access flow, and has nothing to do with app configuration.
 
 `/agents` is deliberately **not** in this table. The engine has a real handler (`commands/core/src/agents.rs`), so it forwards and its text renders in the new transcript item; the agent panel is sub-project 3.
 

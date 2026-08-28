@@ -16,7 +16,7 @@
 - **The renderer never invents commands.** The catalog is the engine's; the desktop table only *intercepts* names the engine already knows.
 - **This client does not allocate turn ids.** `sendPrompt` sends none and the engine assigns them, arriving on `turn_started`. Never add a client-side turn-id counter. `RunSlashCommand.turn_id` stays unset, so `main/validation.ts:210`'s `exactKeys(input, ['type', 'raw'])` is unchanged by this plan.
 - **Command output is never rendered through `MarkdownContent`.** `/help` and `/status` are column-aligned plain text; a markdown pass destroys the alignment.
-- **`pickers.tsx`, `Composer.tsx`, and `settings/SettingsPage.tsx` are dead code** — nothing imports them. The live shell is `App.tsx:90` → `BetaComposer` (`BetaDesktop.tsx:629`), the live settings surface is `BetaSettings` (`BetaDesktop.tsx:1852`). Never wire anything into the dead trio.
+- **`pickers.tsx`, `Composer.tsx`, and `settings/SettingsPage.tsx` are dead code** — nothing imports them. The live shell is `App.tsx:89` → `BetaComposer` (`BetaDesktop.tsx:629`), the live settings surface is `BetaSettings` (`BetaDesktop.tsx:1826`). Never wire anything into the dead trio.
 - **Run the full suite, not one file, before every commit:** `cd clients/electron && npm test`. Capture the full output; never grep a run for `FAILED` alone — that drops the block naming the failing test.
 - **Typecheck before every commit:** `cd clients/electron && npm run typecheck`. Note it covers `src/renderer/**` only (`tsconfig.web.json:27`) — test files are executed through the tsx loader without type checking, so a type error in a test surfaces as a runtime failure, not a typecheck failure.
 
@@ -34,7 +34,7 @@
 | `src/renderer/bridge/slashDispatch.ts` (create) | Pure parse + resolve + the `DesktopCommand` contract |
 | `src/renderer/bridge/desktopCommands.ts` (create) | The group B table and its context contract |
 | `src/renderer/components/BetaDesktop.tsx` (modify) | Build the dispatch context; popup row rendering; `onOpenSettings` prop |
-| `src/renderer/App.tsx` (modify) | Wire `onOpenSettings` to `setSettingsRoute({})` |
+| `src/renderer/App.tsx` (modify) | Wire `onOpenSettings` to `setSettingsOpen(true)`, `onSetTheme` to `changeTheme` |
 | `test/slash-command-output.test.ts` (create) | Reducer + collapse policy |
 | `test/slash-dispatch.test.ts` (create) | Parse/resolve + the group B table |
 | `test/slash-registry-reconciliation.test.ts` (create) | The drift gate |
@@ -213,7 +213,7 @@ git commit -m "Give slash command output a transcript row of its own"
 
 **Files:**
 - Modify: `clients/electron/src/renderer/components/Stage.tsx:1-9` (imports), `:235-244` (the render chain)
-- Modify: `clients/electron/src/renderer/bridge/useBridge.ts:779-793`
+- Modify: `clients/electron/src/renderer/bridge/useBridge.ts:699-713`
 
 **Interfaces:**
 - Consumes: `CommandRunItem`, `commandShouldCollapse`, `beginSlashCommand` (Task 1).
@@ -278,7 +278,7 @@ Add the branch before the trailing `return null;` in the `items.map` chain:
 
 - [ ] **Step 2: Feed the pending name from the bridge**
 
-In `useBridge.ts:783`, replace `appendUserPrompt(state.conversation, command)` with `beginSlashCommand(state.conversation, command)`, and add `beginSlashCommand` to the import from `./conversation`.
+In `useBridge.ts:703`, replace `appendUserPrompt(state.conversation, command)` with `beginSlashCommand(state.conversation, command)`, and add `beginSlashCommand` to the import from `./conversation`.
 
 - [ ] **Step 3: Run the suite and typecheck**
 
@@ -289,7 +289,7 @@ Expected: green.
 
 Run the app (`npm run dev` from `clients/electron`, or the repo's `run` skill), open a project, type `/status`, press Enter.
 Expected: your `/status` line, then a monospace block of engine output below it. Before this task, that block did not exist for any command.
-If nothing appears, the event is being dropped upstream of the reducer — check that `reduceEvent` is reached for `slash_command_result` in `useBridge`'s event fan-out (`useBridge.ts:576` is where per-event session bookkeeping happens).
+If nothing appears, the event is being dropped upstream of the reducer — check that `reduceEvent` is reached for `slash_command_result` in `useBridge`'s event fan-out (`useBridge.ts:496` is where per-event session bookkeeping happens).
 
 - [ ] **Step 5: Commit**
 
@@ -304,7 +304,7 @@ git commit -m "Render command output in the transcript"
 ### Task 3: Turn ownership for prompt-expanding commands
 
 **Files:**
-- Modify: `clients/electron/src/renderer/bridge/useBridge.ts:366` (refs), `:576-577` (event bookkeeping), `:779-793` (dispatch)
+- Modify: `clients/electron/src/renderer/bridge/useBridge.ts:287` (refs), `:496-497` (event bookkeeping), `:699-713` (dispatch)
 - Test: `clients/electron/test/useBridge.test.ts` (modify)
 
 **Interfaces:**
@@ -330,7 +330,7 @@ test('a slash command that expanded into a turn does NOT release it', () => {
   // turn_started proves the command became a real turn.
   clearSlashTurnClaim(pending, 's1');
 
-  // router.rs:939 can still emit a display-only result as a fallback; if that
+  // router.rs:938 can still emit a display-only result as a fallback; if that
   // released the turn, the composer would unlock mid-turn.
   assert.equal(shouldReleaseSlashTurn(pending, 's1'), false);
 });
@@ -354,13 +354,13 @@ In `useBridge.ts`, beside the other exported pure helpers:
  * Turn ownership for slash dispatch.
  *
  * `sendPrompt` claims the turn the instant the command crosses the bridge
- * (`turn_started` may land a tick later; `bridge.ts:904` carries the same
+ * (`turn_started` may land a tick later; `bridge.ts:900` carries the same
  * pre-claim). Slash dispatch needs the same claim — but most slash commands
  * are display-only and never start a turn, so an unconditional claim would
  * lock the composer forever on `/status`. The claim is therefore released by
  * `slash_command_result`, and only while it is still outstanding: the engine
  * has a fallback arm that emits a display-only result for a prompt command
- * (`bridge-server/src/router.rs:939`), and releasing on that would unlock the
+ * (`bridge-server/src/router.rs:938`), and releasing on that would unlock the
  * composer in the middle of a live turn.
  */
 export function claimSlashTurn(pending: Map<string, boolean>, sessionId: string): void {
@@ -378,10 +378,10 @@ export function shouldReleaseSlashTurn(pending: Map<string, boolean>, sessionId:
 
 - [ ] **Step 4: Wire them**
 
-- Add `const slashPendingRefs = useRef(new Map<string, boolean>());` beside `turnActiveRefs` (`useBridge.ts:366`).
+- Add `const slashPendingRefs = useRef(new Map<string, boolean>());` beside `turnActiveRefs` (`useBridge.ts:287`).
 - In `runSlashCommand`, after the guard clause and before `updateRuntime`: `turnActiveRefs.current.set(sessionId, true); claimSlashTurn(slashPendingRefs.current, sessionId);`
 - In the `catch` of `runSlashCommand`, release both: `turnActiveRefs.current.set(sessionId, false); clearSlashTurnClaim(slashPendingRefs.current, sessionId);`
-- In the per-event bookkeeping beside `useBridge.ts:576-577`:
+- In the per-event bookkeeping beside `useBridge.ts:496-497`:
 
 ```ts
       if (event.type === 'turn_started') clearSlashTurnClaim(slashPendingRefs.current, sessionId);
@@ -391,8 +391,8 @@ export function shouldReleaseSlashTurn(pending: Map<string, boolean>, sessionId:
       }
 ```
 
-Order matters: the `turn_started` line must run before the existing `turnActiveRefs.current.set(sessionId, true)` on the same event, or after it — either is fine, but both must run. Read `useBridge.ts:570-580` and place them so no existing line is displaced.
-- Add `slashPendingRefs.current` to the map cleanup calls at `:466` (`pruneRuntimeMaps`) and `:665` (`removeRuntimeFromMaps`) if their signatures accept a variadic map list; if they do not, delete the session's entry inline at both sites.
+Order matters: the `turn_started` line must run before the existing `turnActiveRefs.current.set(sessionId, true)` on the same event, or after it — either is fine, but both must run. Read `useBridge.ts:490-500` and place them so no existing line is displaced.
+- Add `slashPendingRefs.current` to the map cleanup calls at `:386` (`pruneRuntimeMaps`) and `:585` (`removeRuntimeFromMaps`) if their signatures accept a variadic map list; if they do not, delete the session's entry inline at both sites.
 
 - [ ] **Step 5: Run the suite and typecheck**
 
@@ -417,7 +417,7 @@ git commit -m "Claim and release the turn a slash command may start"
 
 **Files:**
 - Modify: `clients/electron/src/renderer/bridge/slashCommands.ts:21-59`
-- Modify: `clients/electron/src/renderer/components/BetaDesktop.tsx:1415-1420`
+- Modify: `clients/electron/src/renderer/components/BetaDesktop.tsx:1410-1415`
 - Test: `clients/electron/test/slash-commands.test.ts` (modify)
 
 **Interfaces:**
@@ -470,7 +470,7 @@ function commandScore(command: SlashCommandDto, query: string): number | undefin
   const normalized = query.toLocaleLowerCase();
   const aliases = (command.aliases ?? []).map((alias) => alias.toLocaleLowerCase());
   // A hidden command is resolvable by its EXACT name and nothing else — the
-  // DTO's stated contract (client-protocol/src/listings.rs:375).
+  // DTO's stated contract (client-protocol/src/listings.rs:377).
   if (command.hidden) {
     return normalized && (name === normalized || aliases.includes(normalized)) ? 0 : undefined;
   }
@@ -492,7 +492,7 @@ export function slashMenuLabel(command: SlashCommandDto): string {
 
 - [ ] **Step 4: Render the extra fields**
 
-In `BetaDesktop.tsx:1419`, replace `{entry.description}` with `{slashMenuLabel(entry)}`, import `slashMenuLabel`, and render the argument hint after the name at `:1418`:
+In `BetaDesktop.tsx:1414`, replace `{entry.description}` with `{slashMenuLabel(entry)}`, import `slashMenuLabel`, and render the argument hint after the name at `:1410-1413`:
 
 ```tsx
                   <span className="mono" style={{ color: t.accent, fontWeight: 650, borderRadius: 6, padding: '2px 0', fontSize: 11.5 }}>
@@ -572,7 +572,7 @@ test('an alias resolves to its command', () => {
 });
 
 test('a required-argument command invoked bare falls through to the engine', () => {
-  // ArgSpec::Required in tui/src/command.rs:30 — an empty tail is NOT a local
+  // ArgSpec::Required in tui/src/command.rs:31 — an empty tail is NOT a local
   // dispatch, so the engine gets its own say.
   assert.equal(resolveDesktopCommand('/rename', table), null);
   assert.equal(resolveDesktopCommand('/rename new title', table)?.command.name, 'rename');
@@ -603,7 +603,7 @@ Create `clients/electron/src/renderer/bridge/slashDispatch.ts`:
  * The engine owns the catalog; this module owns the short list of commands the
  * desktop answers better than the engine's headless fallback (which replies
  * "/x is available in interactive TUI mode only" — see
- * `commands/core/src/register.rs:423`). It mirrors the TUI's `BUILTIN` table
+ * `commands/core/src/register.rs:419`). It mirrors the TUI's `BUILTIN` table
  * (`tui/src/command.rs:88`) and is deliberately free of React and `window`, so
  * the whole resolution path is unit-testable.
  */
@@ -650,7 +650,7 @@ export interface DesktopCommand {
 /**
  * Find the desktop command for a raw line, or `null` to forward it to the
  * engine. A `required` command invoked bare forwards on purpose, matching
- * `ArgSpec::Required` (`tui/src/command.rs:30`).
+ * `ArgSpec::Required` (`tui/src/command.rs:31`).
  */
 export function resolveDesktopCommand(
   raw: string,
@@ -690,8 +690,8 @@ git commit -m "Add the desktop slash dispatch layer"
 
 **Files:**
 - Create: `clients/electron/src/renderer/bridge/desktopCommands.ts`
-- Modify: `clients/electron/src/renderer/components/BetaDesktop.tsx:629-633` (props), `:1058-1085` (submit)
-- Modify: `clients/electron/src/renderer/App.tsx:90-94`
+- Modify: `clients/electron/src/renderer/components/BetaDesktop.tsx:629` (props), `:1053-1080` (submit)
+- Modify: `clients/electron/src/renderer/App.tsx:89`
 - Test: `clients/electron/test/slash-dispatch.test.ts` (extend)
 
 **Interfaces:**
@@ -858,7 +858,7 @@ Expected: the six new tests pass. If `/model nope` produced no `emit`, `knownMod
 - [ ] **Step 5: Build the context and dispatch from the composer**
 
 In `BetaDesktop.tsx`:
-- Add `onOpenSettings(): void;` and `onSetTheme(theme: 'dark' | 'light'): void;` to the `BetaComposer` prop type (`:629-633`) and destructure both.
+- Add `onOpenSettings(): void;` and `onSetTheme(theme: 'dark' | 'light'): void;` to the `BetaComposer` prop type and destructure both. On this branch the props are an INLINE type literal all on line 629 — `export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: boolean })` — not a multi-line block.
 
   `onSetTheme` must be the shell's `changeTheme` (`App.tsx:40`), NOT `bridge.setThemePreference` on its own. `changeTheme` does two things — `setTheme(value)` on the React state that actually repaints, and the persistence call. Wiring only the bridge method would persist the preference while leaving the running app's colours unchanged.
 - Add a `useMemo` context near the other composer state:
@@ -896,7 +896,7 @@ In `BetaDesktop.tsx`:
   }, [updateRuntime]);
 ```
 
-- In `submit` (`:1073-1077`), replace the unconditional forward:
+- In `submit`, replace the unconditional forward at `:1068-1072`:
 
 ```tsx
     if (isSlashCommand) {
@@ -914,7 +914,7 @@ In `BetaDesktop.tsx`:
 
 `beginLocalCommand` is a thin bridge method that calls `beginSlashCommand` so the user's typed line is echoed for a locally-handled command exactly as it is for a forwarded one; add it beside `emitCommandOutput` and to the `UseBridge` interface.
 
-In `App.tsx:90-94`, pass `onOpenSettings={() => setSettingsRoute({})}` and `onSetTheme={changeTheme}` (`App.tsx:40`).
+In `App.tsx:89`, whose current call is the bare `<BetaComposer bridge={bridge} ready={ready} />`, add `onOpenSettings={() => setSettingsOpen(true)}` and `onSetTheme={changeTheme}` (`App.tsx:40`). The settings surface is opened by the boolean `settingsOpen` (`App.tsx:23`), rendered at `App.tsx:116` — there is no route object on this branch.
 
 - [ ] **Step 6: Run the suite, typecheck, and drive the app**
 

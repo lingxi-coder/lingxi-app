@@ -49,7 +49,14 @@
 
 ## Global Constraints
 
-- `CLIENT_PROTOCOL_VERSION` 保持 `"8.0.0"`。本计划的协议改动全部是新增变体 / 新增可选字段，属 F1-09 guard 的 additive，**不得 bump，不得 re-bless `snapshots/blessed_major.txt`**。
+- **`CLIENT_PROTOCOL_VERSION` 不得由本计划改动。** ⚠️ 不要拿字面值比对：规划时它是
+  `"8.0.0"`，此后被本仓库的并发写入者在 `391d89fff` bump 到 `"9.0.0"`。判据是
+  「你的 diff 有没有碰 `version.rs`」，不是「它等不等于某个数」。
+  本计划的协议改动全部是新增变体 / 新增可选字段，属 F1-09 guard 的 additive。
+  **`snapshots/blessed_major.txt` 不得变化**（sha256 必须一致）。
+  `snapshots/contract_index.json` 则**可以且应当**随新增字段 re-bless ——
+  guard 自己在 Compatible 变更时就会提示「No major bump is required; re-bless」；
+  判据是该文件**只增不删**（`git diff` 的 `-` 行数为 0）。
 - **I1**：`UpdateSettings` 必须拒绝 `permissions` 顶层键。权限只经 `permission/src/persist.rs`。唯一例外是原始 JSON 逃生口（Task 19）。
 - **I2**：任何设置文件写入前必须调用 `permission::mark_internal_write(path)`。`settings_watch.rs:343` 以 5 秒窗口消费该标记。
 - **I3**：UI 不做乐观更新。写入成功后引擎重读并发新的 `SettingsSnapshot`，界面只渲染该快照。

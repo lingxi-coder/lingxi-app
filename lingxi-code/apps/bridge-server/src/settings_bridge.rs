@@ -64,11 +64,20 @@ pub struct SettingsSnapshot {
     /// The merged values: for each key, the value from its highest-priority
     /// contributing layer.
     pub effective: BTreeMap<String, Value>,
-    /// The file-layer values as read at session start, as supplied by the
-    /// caller. NOT the session's fully merged runtime configuration: no
-    /// `cli` / `managed` / `env` overlay is applied to it, so it answers
-    /// "what did this session load from the files at boot" — the baseline a
-    /// pending-changes diff is taken against.
+    /// The values this session actually had loaded at session start: the
+    /// three file layers PLUS the managed (policy) overlay — but NOT `cli`
+    /// or `env`. Supplied by the caller, not computed here (see
+    /// `active_settings_baseline` for the intended way to build it).
+    ///
+    /// Managed is included on purpose: the running engine loads managed
+    /// settings at startup exactly as much as it loads the three files, so a
+    /// value here that left managed out would make a policy-pinned key
+    /// differ from `effective` (which always re-applies the SAME overlay on
+    /// every later listing) forever — reporting it as eternally "pending a
+    /// restart" when no restart could ever apply it, since the user never
+    /// wrote it and no restart changes it. This field answers "what did this
+    /// session load at boot" — the baseline a pending-changes diff is taken
+    /// against — and managed settings are part of that answer.
     pub active: BTreeMap<String, Value>,
     /// For each key in `effective`, which layer it came from.
     pub provenance: BTreeMap<String, SettingsLayer>,
@@ -413,15 +422,19 @@ impl SettingsLayer {
 /// by the composition root.
 ///
 /// `active` and `managed` are inputs rather than something this crate computes:
-/// `active` is the file-layer state captured at session start, and `managed`
-/// comes from the managed-settings layers the desktop composition root already
-/// loads (`engine_desktop::managed_settings_overlay`). bridge-server
-/// deliberately does not re-implement managed-layer loading.
+/// `active` is the file layers PLUS the managed overlay, as loaded at session
+/// start (see [`SettingsSnapshot::active`] for why managed is folded in), and
+/// `managed` comes from the managed-settings layers the desktop composition
+/// root already loads (`engine_desktop::managed_settings_overlay`).
+/// bridge-server deliberately does not re-implement managed-layer loading.
 pub struct SettingsContext {
     /// The two roots every file layer's path is resolved from.
     pub paths: SettingsPaths,
-    /// The file-layer values as read at session start — no `cli` / `managed` /
-    /// `env` overlay. See [`SettingsSnapshot::active`].
+    /// The values this session had loaded at session start — the three file
+    /// layers PLUS the managed overlay, but NOT `cli` or `env`. See
+    /// [`SettingsSnapshot::active`] for why managed is included: the engine
+    /// loads it at startup too, so leaving it out would make a policy-pinned
+    /// key look eternally "pending a restart" that no restart could apply.
     pub active: BTreeMap<String, Value>,
     /// The administrator's managed (policy) overlay, key → value. Its values
     /// win over every file layer, and its keys ARE the locked set reported on

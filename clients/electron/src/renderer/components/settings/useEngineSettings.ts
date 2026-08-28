@@ -11,16 +11,17 @@ const LAYER_RANK: Record<string, number> = {
 };
 
 /**
- * 单个设置文件层在磁盘上的状态。字段名 `writable` 是历史命名，语义其实是
- * 「这一层的文件解析成功」（对应 wire 上的 `parsed`）—— 一个 chmod 444 的
- * 文件依然会解析成功，这个字段与 OS 写权限无关。保留这个名字是因为它是
- * 本地类型的既定契约，不是因为它准确。
+ * 单个设置文件层在磁盘上的状态。字段名与 wire 上的 `files_json` 条目一致
+ * （`client-protocol/src/events.rs` 里 `[{layer, path, exists, parsed,
+ * parse_error?}]`），这样桥接层解析 JSON 之后可以直接做类型断言，而不需要
+ * 有人记得改字段名。`parsed` 只报告 JSON 是否解析成功，与 OS 写权限无关 ——
+ * 一个 chmod 444 的文件依然会解析成功。
  */
 export interface SettingsFile {
-  destination: string;
+  layer: string;
   path: string;
   exists: boolean;
-  writable: boolean;
+  parsed: boolean;
   parse_error?: string;
 }
 
@@ -57,7 +58,7 @@ export type RowState =
 export function rowState(
   snapshot: SettingsSnapshot, key: string, editingLayer: Provenance,
 ): RowState {
-  const file = snapshot.files.find((f) => f.destination === editingLayer);
+  const file = snapshot.files.find((f) => f.layer === editingLayer);
   if (file?.parse_error) return { kind: 'layer-broken', error: file.parse_error };
   if (snapshot.locked.includes(key)) return { kind: 'locked' };
 

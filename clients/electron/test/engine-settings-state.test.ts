@@ -1,17 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rowState, pendingKeys } from '../src/renderer/components/settings/useEngineSettings';
+import type { SettingsFile, SettingsSnapshot } from '../src/renderer/components/settings/useEngineSettings';
 
-const files = [
-  { destination: 'user', path: '/u', exists: true, writable: true },
-  { destination: 'project', path: '/p', exists: true, writable: true },
-  { destination: 'local', path: '/l', exists: true, writable: true },
-] as const;
+const files: SettingsFile[] = [
+  { layer: 'user', path: '/u', exists: true, parsed: true },
+  { layer: 'project', path: '/p', exists: true, parsed: true },
+  { layer: 'local', path: '/l', exists: true, parsed: true },
+];
 
-function snap(over: Record<string, unknown> = {}) {
+// Typed against SettingsSnapshot (not cast away) so a fixture whose shape
+// drifts from the wire's field names — as `destination`/`writable` once did —
+// fails to compile instead of silently missing every `.find`.
+function snap(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
   return {
     files: [...files], effective: {}, active: {}, provenance: {}, locked: [], ...over,
-  } as never;
+  };
 }
 
 test('unset when no layer defines the key', () => {
@@ -43,7 +47,7 @@ test('locked when the managed layer pins the key', () => {
 
 test('layer-broken when the editing layer failed to parse', () => {
   const s = snap({
-    files: [{ destination: 'user', path: '/u', exists: true, writable: false, parse_error: 'bad json' },
+    files: [{ layer: 'user', path: '/u', exists: true, parsed: false, parse_error: 'bad json' },
             files[1], files[2]],
   });
   assert.deepEqual(rowState(s, 'outputStyle', 'user'), { kind: 'layer-broken', error: 'bad json' });

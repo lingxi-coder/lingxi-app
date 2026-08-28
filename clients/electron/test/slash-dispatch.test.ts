@@ -36,3 +36,9 @@ test('a command outside the table is not intercepted', () => {
 test('resolution is case-insensitive on the name only', () => {
   assert.equal(resolveDesktopCommand('/MODEL Opus', table)?.args, 'Opus');
 });
+
+test('a no-argument command with supplied arguments still resolves, so its run can report the misuse', () => {
+  const result = resolveDesktopCommand('/usage extra', table);
+  assert.equal(result?.command.name, 'usage');
+  assert.equal(result?.args, 'extra');
+});

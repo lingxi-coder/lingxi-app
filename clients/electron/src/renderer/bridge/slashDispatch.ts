@@ -65,6 +65,7 @@ export function resolveDesktopCommand(
   ));
   if (!command) return null;
   if (command.args === 'required' && !parsed.args) return null;
-  if (command.args === 'none' && parsed.args) return { command, args: parsed.args };
+  // A `none`-args command still resolves when arguments were supplied, deliberately,
+  // so its `run` can tell the user about the misuse.
   return { command, args: parsed.args };
 }

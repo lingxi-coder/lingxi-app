@@ -1,0 +1,309 @@
+import { useState } from 'react';
+import { Card, OverriddenNotice, Row } from '../rows';
+import { useT } from '../../../theme/ThemeContext';
+import type { PageContentProps } from '../SettingsScreen';
+import { rowState, type SettingsSnapshot } from '../useEngineSettings';
+import { ghostButtonStyle } from './ghostButton';
+
+/**
+ * The nine provider `type` values `settings.providers` accepts. Read from
+ * `lingxi-code/llm-client/src/provider_settings.rs`'s
+ * `SUPPORTED_PROVIDER_TYPES` constant per this task's instruction — NOT
+ * retyped from memory — and kept in the engine's own declaration order.
+ * `lingxi-code/` itself is never edited from this side.
+ */
+export const SUPPORTED_PROVIDER_TYPES = [
+  'openai', 'openai-responses', 'anthropic', 'gemini', 'azure-openai',
+  'bedrock-claude', 'vertex-claude', 'vertex-gemini', 'foundry-claude',
+] as const;
+
+export type SupportedProviderType = (typeof SUPPORTED_PROVIDER_TYPES)[number];
+
+export interface CustomProviderModelDraft {
+  id: string;
+  aliases?: string[];
+}
+
+export interface CustomProviderDraft {
+  type: string;
+  baseUrl?: string;
+  apiKeyEnv?: string;
+  models: CustomProviderModelDraft[];
+}
+
+/**
+ * The write-time gate this task exists for. `settings.providers`' own schema
+ * documentation says `models` is required per entry and that an absent or
+ * empty list is an error at ENGINE STARTUP, not at save time — so without
+ * this check, saving a provider with no models looks like it succeeded and
+ * only breaks the next time the engine launches. Returns `null` when the
+ * draft may be written.
+ */
+export function validateCustomProvider(draft: CustomProviderDraft): string | null {
+  if (!SUPPORTED_PROVIDER_TYPES.includes(draft.type as SupportedProviderType)) {
+    return `unsupported provider type \`${draft.type}\`; supported types are ${SUPPORTED_PROVIDER_TYPES.join(', ')}`;
+  }
+  if (!draft.models || draft.models.length === 0) {
+    return 'this provider needs at least one entry in `models`; an empty list makes the engine fail to start';
+  }
+  if (draft.models.some((m) => !m.id.trim())) {
+    return 'every entry in `models` needs a non-empty `id`';
+  }
+  return null;
+}
+
+/** `settings.providers` as parsed from the snapshot's effective view — the best available read for a layered map-valued key (see this page's module doc for why edits start from `effective`, not a per-layer raw value the shell doesn't have). */
+export function providersFromSnapshot(snapshot: SettingsSnapshot | null): Record<string, CustomProviderDraft> {
+  const value = snapshot?.effective?.['providers'];
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, CustomProviderDraft>)
+    : {};
+}
+
+export interface RoutingRetryDraft {
+  maxAttempts?: number;
+  backoffMs?: number;
+}
+
+export interface RoutingDraft {
+  aliases?: Record<string, string>;
+  fallback?: Record<string, string[]>;
+  retry?: RoutingRetryDraft;
+}
+
+export function routingFromSnapshot(snapshot: SettingsSnapshot | null): RoutingDraft {
+  const value = snapshot?.effective?.['routing'];
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as RoutingDraft) : {};
+}
+
+/** `"gpt-x, gpt-y"` / one-per-line → `[{id:'gpt-x'},{id:'gpt-y'}]`, blank entries dropped. Pure so the parsing itself is testable independent of any form state. */
+export function parseModelsInput(text: string): CustomProviderModelDraft[] {
+  return text
+    .split(/[,\n]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((id) => ({ id }));
+}
+
+const inputStyle = (t: ReturnType<typeof useT>) => ({
+  padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`,
+  background: t.surface, color: t.text, fontSize: 12.5, fontFamily: 'inherit',
+} as const);
+
+/**
+ * Edits `settings.providers` and `settings.routing`. Both are new UI —
+ * `BetaSettings` has no equivalent, there is nothing to lift here. Writes go
+ * through `bridge.updateEngineSettings(editingLayer, patch)`, this task's
+ * addition wrapping the engine's generic `update_settings` wire command
+ * (`clients/electron/src/renderer/bridge/useBridge.ts`); no per-key command
+ * exists for either settings key, unlike `permissions` or workspace
+ * directories.
+ *
+ * This is a genuinely `layered` page outside the 编码 group — see `nav.ts`'s
+ * own comment on why that's not a contradiction. `rowState`/`OverriddenNotice`
+ * (Task 13/Task 12) surface whether a write to the CURRENTLY selected layer
+ * would actually take effect, the same way any other layered page would.
+ */
+export function CustomProviders({ bridge, snapshot, editingLayer }: PageContentProps) {
+  const t = useT();
+  const providers = providersFromSnapshot(snapshot);
+  const routing = routingFromSnapshot(snapshot);
+
+  const [profileName, setProfileName] = useState('');
+  const [type, setType] = useState<string>(SUPPORTED_PROVIDER_TYPES[0]);
+  const [baseUrl, setBaseUrl] = useState('');
+  const [apiKeyEnv, setApiKeyEnv] = useState('');
+  const [modelsText, setModelsText] = useState('');
+  const [formError, setFormError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const [aliasName, setAliasName] = useState('');
+  const [aliasTarget, setAliasTarget] = useState('');
+  const [maxAttempts, setMaxAttempts] = useState(routing.retry?.maxAttempts?.toString() ?? '');
+  const [backoffMs, setBackoffMs] = useState(routing.retry?.backoffMs?.toString() ?? '');
+  const [routingError, setRoutingError] = useState<string | null>(null);
+  const [routingSaving, setRoutingSaving] = useState(false);
+
+  const providersRowState = snapshot ? rowState(snapshot, 'providers', editingLayer) : null;
+  const routingRowState = snapshot ? rowState(snapshot, 'routing', editingLayer) : null;
+
+  const resetForm = () => {
+    setProfileName('');
+    setType(SUPPORTED_PROVIDER_TYPES[0]);
+    setBaseUrl('');
+    setApiKeyEnv('');
+    setModelsText('');
+    setFormError(null);
+  };
+
+  const loadForEdit = (name: string, draft: CustomProviderDraft) => {
+    setProfileName(name);
+    setType(draft.type);
+    setBaseUrl(draft.baseUrl ?? '');
+    setApiKeyEnv(draft.apiKeyEnv ?? '');
+    setModelsText(draft.models.map((m) => m.id).join(', '));
+    setFormError(null);
+  };
+
+  const writeProviders = (next: Record<string, CustomProviderDraft>) => {
+    setSaving(true);
+    setSaveError(null);
+    void bridge.updateEngineSettings(editingLayer, { providers: next })
+      .then(() => resetForm())
+      .catch((cause) => setSaveError(cause instanceof Error ? cause.message : '无法保存 Provider 设置。'))
+      .finally(() => setSaving(false));
+  };
+
+  const handleSaveProvider = () => {
+    const name = profileName.trim();
+    if (!name) { setFormError('需要一个 Profile 名称。'); return; }
+    const draft: CustomProviderDraft = {
+      type,
+      baseUrl: baseUrl.trim() || undefined,
+      apiKeyEnv: apiKeyEnv.trim() || undefined,
+      models: parseModelsInput(modelsText),
+    };
+    const error = validateCustomProvider(draft);
+    if (error) { setFormError(error); return; }
+    setFormError(null);
+    writeProviders({ ...providers, [name]: draft });
+  };
+
+  const handleRemoveProvider = (name: string) => {
+    const next = { ...providers };
+    delete next[name];
+    writeProviders(next);
+  };
+
+  const writeRouting = (next: RoutingDraft) => {
+    setRoutingSaving(true);
+    setRoutingError(null);
+    void bridge.updateEngineSettings(editingLayer, { routing: next })
+      .catch((cause) => setRoutingError(cause instanceof Error ? cause.message : '无法保存路由设置。'))
+      .finally(() => setRoutingSaving(false));
+  };
+
+  const handleAddAlias = () => {
+    const alias = aliasName.trim();
+    const target = aliasTarget.trim();
+    if (!alias || !target) { setRoutingError('别名和目标都不能为空。'); return; }
+    setRoutingError(null);
+    const nextAliases = { ...(routing.aliases ?? {}), [alias]: target };
+    writeRouting({ ...routing, aliases: nextAliases });
+    setAliasName('');
+    setAliasTarget('');
+  };
+
+  const handleRemoveAlias = (alias: string) => {
+    const nextAliases = { ...(routing.aliases ?? {}) };
+    delete nextAliases[alias];
+    writeRouting({ ...routing, aliases: nextAliases });
+  };
+
+  const handleSaveRetry = () => {
+    const parsedMaxAttempts = maxAttempts.trim() ? Number(maxAttempts) : undefined;
+    const parsedBackoffMs = backoffMs.trim() ? Number(backoffMs) : undefined;
+    if (maxAttempts.trim() && (!Number.isFinite(parsedMaxAttempts) || (parsedMaxAttempts as number) <= 0)) {
+      setRoutingError('retry.maxAttempts 必须是正整数。');
+      return;
+    }
+    if (backoffMs.trim() && (!Number.isFinite(parsedBackoffMs) || (parsedBackoffMs as number) < 0)) {
+      setRoutingError('retry.backoffMs 必须是非负整数。');
+      return;
+    }
+    setRoutingError(null);
+    writeRouting({
+      ...routing,
+      retry: (parsedMaxAttempts === undefined && parsedBackoffMs === undefined)
+        ? undefined
+        : { maxAttempts: parsedMaxAttempts, backoffMs: parsedBackoffMs },
+    });
+  };
+
+  const providerNames = Object.keys(providers).sort();
+  const aliasNames = Object.keys(routing.aliases ?? {}).sort();
+
+  return (
+    <>
+      <Card title="自定义 Provider">
+        {providersRowState?.kind === 'overridden' && (
+          <Row title="生效层" align="center">
+            <OverriddenNotice editingLayer={editingLayer} effectiveLayer={providersRowState.by} onJump={() => undefined} />
+          </Row>
+        )}
+        {providerNames.length === 0 && (
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有自定义 Provider。</div>
+        )}
+        {providerNames.map((name) => {
+          const draft = providers[name];
+          return (
+            <Row
+              key={name}
+              align="center"
+              title={<span className="mono" style={{ fontSize: 13 }}>{name}</span>}
+              desc={`${draft.type} · ${draft.models?.length ?? 0} 个模型${draft.baseUrl ? ` · ${draft.baseUrl}` : ''}`}
+            >
+              <div style={{ display: 'flex', gap: 7 }}>
+                <button type="button" onClick={() => loadForEdit(name, draft)} style={ghostButtonStyle(t)}>编辑</button>
+                <button type="button" onClick={() => handleRemoveProvider(name)} style={ghostButtonStyle(t, false, true)}>移除</button>
+              </div>
+            </Row>
+          );
+        })}
+
+        <Row title={profileName && providers[profileName] ? `编辑 ${profileName}` : '新增 Provider'} desc="Profile 名称、类型、baseUrl、apiKeyEnv 与至少一个模型 id。" align="start">
+          <div style={{ display: 'grid', gap: 7 }}>
+            <input value={profileName} onChange={(e) => setProfileName(e.target.value)} placeholder="Profile 名称" aria-label="Profile 名称" style={inputStyle(t)} />
+            <select value={type} onChange={(e) => setType(e.target.value)} aria-label="Provider 类型" style={inputStyle(t)}>
+              {SUPPORTED_PROVIDER_TYPES.map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+            <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="baseUrl（可选）" aria-label="baseUrl" style={inputStyle(t)} />
+            <input value={apiKeyEnv} onChange={(e) => setApiKeyEnv(e.target.value)} placeholder="apiKeyEnv（可选）" aria-label="apiKeyEnv" style={inputStyle(t)} />
+            <input value={modelsText} onChange={(e) => setModelsText(e.target.value)} placeholder="模型 id，用逗号分隔" aria-label="模型列表" style={inputStyle(t)} />
+            {formError && <span role="alert" style={{ color: t.danger, fontSize: 12 }}>{formError}</span>}
+            <div style={{ display: 'flex', gap: 7 }}>
+              <button type="button" disabled={saving} onClick={handleSaveProvider} style={ghostButtonStyle(t, saving)}>{saving ? '保存中…' : '保存'}</button>
+              <button type="button" disabled={saving} onClick={resetForm} style={ghostButtonStyle(t, saving)}>清空</button>
+            </div>
+            {saveError && <span role="alert" style={{ color: t.danger, fontSize: 12 }}>{saveError}</span>}
+          </div>
+        </Row>
+      </Card>
+
+      <Card title="路由 (routing)">
+        {routingRowState?.kind === 'overridden' && (
+          <Row title="生效层" align="center">
+            <OverriddenNotice editingLayer={editingLayer} effectiveLayer={routingRowState.by} onJump={() => undefined} />
+          </Row>
+        )}
+        <Row title="别名 (aliases)" desc="alias → profile/model" align="start">
+          <div style={{ display: 'grid', gap: 7 }}>
+            {aliasNames.length === 0 && <span style={{ color: t.text4, fontSize: 12.5 }}>还没有别名。</span>}
+            {aliasNames.map((alias) => (
+              <div key={alias} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="mono" style={{ fontSize: 12 }}>{alias} → {routing.aliases?.[alias]}</span>
+                <button type="button" onClick={() => handleRemoveAlias(alias)} style={ghostButtonStyle(t, false, true)}>移除</button>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 7 }}>
+              <input value={aliasName} onChange={(e) => setAliasName(e.target.value)} placeholder="alias" aria-label="alias 名称" style={inputStyle(t)} />
+              <input value={aliasTarget} onChange={(e) => setAliasTarget(e.target.value)} placeholder="profile/model" aria-label="alias 目标" style={inputStyle(t)} />
+              <button type="button" disabled={routingSaving} onClick={handleAddAlias} style={ghostButtonStyle(t, routingSaving)}>添加</button>
+            </div>
+          </div>
+        </Row>
+        <Row title="重试 (retry)" desc="retry.maxAttempts / retry.backoffMs" align="center">
+          <div style={{ display: 'flex', gap: 7 }}>
+            <input value={maxAttempts} onChange={(e) => setMaxAttempts(e.target.value)} placeholder="maxAttempts" aria-label="maxAttempts" style={{ ...inputStyle(t), width: 110 }} />
+            <input value={backoffMs} onChange={(e) => setBackoffMs(e.target.value)} placeholder="backoffMs" aria-label="backoffMs" style={{ ...inputStyle(t), width: 110 }} />
+            <button type="button" disabled={routingSaving} onClick={handleSaveRetry} style={ghostButtonStyle(t, routingSaving)}>{routingSaving ? '保存中…' : '保存'}</button>
+          </div>
+        </Row>
+        {routingError && (
+          <Row title="错误" align="center"><span role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{routingError}</span></Row>
+        )}
+      </Card>
+    </>
+  );
+}

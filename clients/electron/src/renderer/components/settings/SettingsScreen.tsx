@@ -7,9 +7,11 @@ import { Icon } from '../Icon';
 import { SETTINGS_NAV, searchNav, type NavPage } from './nav';
 import { About } from './pages/About';
 import { Appearance } from './pages/Appearance';
+import { CustomProviders } from './pages/CustomProviders';
 import { Diagnostics } from './pages/Diagnostics';
 import { General } from './pages/General';
 import { Projects } from './pages/Projects';
+import { ProviderCredentials } from './pages/ProviderCredentials';
 import { provenanceLabel, type Provenance } from './rows';
 import { pendingKeys, type SettingsSnapshot } from './useEngineSettings';
 
@@ -141,6 +143,12 @@ function messageFrom(cause: unknown): string {
  * `nav.ts` marks all five `needsEngine: false`); Tasks 17-19 register the
  * rest as they land. A page id still absent from this map falls back to
  * `PagePlaceholder`'s "not wired yet" message instead of a blank panel.
+ *
+ * Task 17 adds the two provider pages: `provider-credentials` (secure
+ * credential storage — NOT layered, `nav.ts` marks it `layered: false`) and
+ * `custom-providers` (edits `settings.providers` / `settings.routing`,
+ * genuinely layered despite sitting outside the 编码 group — see `nav.ts`'s
+ * own exception comment).
  */
 const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
   general: General,
@@ -148,6 +156,8 @@ const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
   projects: Projects,
   diagnostics: Diagnostics,
   about: About,
+  'provider-credentials': ProviderCredentials,
+  'custom-providers': CustomProviders,
 };
 
 export interface PageContentProps {
@@ -160,6 +170,15 @@ export interface PageContentProps {
   onNavigate(pageId: string): void;
   initialProviderId?: string;
   pendingModelReference?: string;
+  /**
+   * Closes the WHOLE settings surface, not just this page. `ProviderCredentials`
+   * needs this to reproduce `BetaSettings`' deep-link behaviour: once a
+   * blocking model's provider connects and the pending model applies, the
+   * original dialog closed itself and returned focus to the composer rather
+   * than leaving the person parked on a settings page they didn't navigate to
+   * on purpose.
+   */
+  onClose(): void;
 }
 
 function PagePlaceholder({ page, kind }: { page: NavPage; kind: 'not-implemented' | 'not-wired' }) {
@@ -436,6 +455,7 @@ export function SettingsScreen({
           onNavigate={setPage}
           initialProviderId={initialProviderId}
           pendingModelReference={pendingModelReference}
+          onClose={onClose}
         />
       )
       : <PagePlaceholder page={activePage} kind="not-wired" />;

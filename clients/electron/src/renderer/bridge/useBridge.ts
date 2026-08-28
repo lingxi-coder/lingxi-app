@@ -88,6 +88,19 @@ export interface UseBridge {
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
   clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
   setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
+  /** The device-level (Electron store) custom API base URL override — `null` clears it. Distinct from `updateEngineSettings` below, which writes to an engine settings FILE layer. */
+  setApiBaseUrl(apiBaseUrl: string | null): Promise<void>;
+  /**
+   * Writes a JSON-object patch into one engine settings file layer via the
+   * `update_settings` wire command (`patch_json`; a `null` value in the patch
+   * deletes that key at this layer). This is the ONLY write path a `layered`
+   * settings page (`nav.ts`'s `layered: true`) has — there is no per-key
+   * command for `settings.providers` / `settings.routing`, unlike
+   * `permissions`/`workspace directories`, which get their own typed
+   * commands. Refetches the snapshot afterward so the page's own `snapshot`
+   * prop reflects the write without a separate caller-side refresh call.
+   */
+  updateEngineSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
   restartBridge(sessionId?: string): Promise<void>;
   refreshDiagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
@@ -1035,6 +1048,11 @@ export function useBridge(): UseBridge {
     try { patchBootstrap({ settings: await host.updateSettings({ theme }) }); } catch (cause) { capture(cause); }
   }, [capture, host, patchBootstrap]);
 
+  const setApiBaseUrl = useCallback(async (apiBaseUrl: string | null) => {
+    if (!host) return;
+    try { patchBootstrap({ settings: await host.updateSettings({ apiBaseUrl }) }); } catch (cause) { capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
   const restartBridge = useCallback(async (requestedSessionId?: string) => {
     const sessionId = requestedSessionId ?? activeSessionIdRef.current;
     const preconditionError = restartBridgePreconditionError(sessionLoadingRef.current, Boolean(host), sessionId);
@@ -1119,6 +1137,13 @@ export function useBridge(): UseBridge {
     () => command({ type: 'refresh_listings', which: [{ type: 'settings' }] }),
     [command],
   );
+  const updateEngineSettings = useCallback(
+    async (destination: 'user' | 'project' | 'local', patch: Record<string, unknown>) => {
+      await command({ type: 'update_settings', destination, patch_json: JSON.stringify(patch) });
+      await refreshSettingsSnapshot();
+    },
+    [command, refreshSettingsSnapshot],
+  );
 
   return {
     hosted,
@@ -1160,6 +1185,8 @@ export function useBridge(): UseBridge {
     setProviderCredential,
     clearProviderCredential,
     setThemePreference,
+    setApiBaseUrl,
+    updateEngineSettings,
     restartBridge,
     refreshDiagnostics,
     copyDiagnostics,

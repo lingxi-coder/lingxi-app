@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use client_protocol::commands::{
     AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto, PromptModeDto,
-    ProviderCredentialSecretDto,
+    ProviderCredentialSecretDto, SettingsDestinationDto,
 };
 use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -1260,6 +1260,13 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::CancelAskUserQuestion { request_id: 9 },
         ),
         ("command/request_exit.json", ClientCommand::RequestExit),
+        (
+            "command/update_settings.json",
+            ClientCommand::UpdateSettings {
+                destination: SettingsDestinationDto::User,
+                patch_json: r#"{"outputStyle":"terse"}"#.to_string(),
+            },
+        ),
     ]
 }
 

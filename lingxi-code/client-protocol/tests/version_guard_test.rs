@@ -859,6 +859,13 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::RequestExit", "request_exit");
 
+    put("ClientCommand::UpdateSettings", "update_settings");
+    put(
+        "ClientCommand::UpdateSettings.destination",
+        "SettingsDestinationDto",
+    );
+    put("ClientCommand::UpdateSettings.patch_json", "String");
+
     // ── PromptModeDto (commands.rs) ───────────────────────────────────────
     put("PromptModeDto::Normal", "normal");
     put("PromptModeDto::Bash", "bash");
@@ -887,6 +894,11 @@ fn current_contract_index() -> ContractIndex {
     put("ListingKindDto::Doctor", "doctor");
     put("ListingKindDto::Tasks", "tasks");
     put("ListingKindDto::Coordinator", "coordinator");
+
+    // ── SettingsDestinationDto (commands.rs) ──────────────────────────────
+    put("SettingsDestinationDto::User", "user");
+    put("SettingsDestinationDto::Project", "project");
+    put("SettingsDestinationDto::Local", "local");
 
     // ── MessageDto / MessageBlockDto (message.rs) ─────────────────────────
     put("MessageDto.role", "String");
@@ -2079,7 +2091,7 @@ fn current_contract_matches_index_or_version_bumped() {
 fn contract_index_covers_every_dto() {
     use client_protocol::commands::{
         AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto,
-        PromptModeDto, ProviderCredentialSecretDto,
+        PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
     };
     use client_protocol::computer_access::{
         AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -2307,7 +2319,12 @@ fn contract_index_covers_every_dto() {
             request_id: String::new(),
             approved: false,
         },
+        ClientCommand::UpdateSettings {
+            destination: SettingsDestinationDto::User,
+            patch_json: String::new(),
+        },
     ];
+    let _settings_destination = SettingsDestinationDto::User;
     let _recovery_state = TurnRecoveryStateDto::PausedRecoverable;
     let _mode = PromptModeDto::Normal;
     let _img = ImageRefDto {

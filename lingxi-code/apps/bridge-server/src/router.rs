@@ -73,7 +73,7 @@ use client_adapter::lowering::{
     lower_status_snapshot, lower_task_output_chunk, lower_task_record,
 };
 use client_adapter::ClientEventSink;
-use client_protocol::commands::{ClientCommand, ListingKindDto};
+use client_protocol::commands::{ClientCommand, ListingKindDto, SettingsDestinationDto};
 use client_protocol::controls::{
     ConversationControlsDto, ReasoningControlStateDto, ReasoningSelectionDto,
 };
@@ -89,7 +89,7 @@ use traits::orchestrator::OrchestratorHandle;
 use traits::task_registry::{TaskListFilter, TaskRegistryHandle};
 use traits::SlashCommandDispatcher;
 
-use crate::settings_bridge::{build_snapshot, lower_snapshot, SettingsContext};
+use crate::settings_bridge::{apply_patch, build_snapshot, lower_snapshot, SettingsContext};
 
 /// Default number of recent sessions returned when `ListSessions` omits its
 /// explicit limit. This matches the CLI `/resume` picker and the mobile host.
@@ -343,6 +343,77 @@ impl EngineCommandRouter {
             locked: Some(lowered.locked),
         })
         .await;
+    }
+
+    /// Parse `patch_json` as a flat `{key: value|null}` object and apply it to
+    /// `destination` through [`crate::settings_bridge::apply_patch`]. On
+    /// success, resends the settings snapshot so the caller sees the write it
+    /// just made reflected back (rather than requiring a separate
+    /// `RefreshListings{Settings}` round-trip). On any failure — no settings
+    /// context, invalid JSON, a non-object patch, or `apply_patch`'s own
+    /// errors (reserved key, broken destination file, write failure) — emits
+    /// the SAME [`ClientEvent::Error`] path the rest of this router uses,
+    /// rather than a dedicated failure event.
+    async fn apply_settings_patch(
+        &self,
+        destination: SettingsDestinationDto,
+        patch_json: &str,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(context) = self.settings.as_ref() else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "settings update unavailable: this connection was built without a \
+                          settings context"
+                    .to_string(),
+            })
+            .await;
+            return;
+        };
+
+        let patch = match serde_json::from_str::<serde_json::Value>(patch_json) {
+            Ok(serde_json::Value::Object(map)) => map
+                .into_iter()
+                // A JSON `null` value deletes the key (documented on
+                // `ClientCommand::UpdateSettings.patch_json`); anything else
+                // sets it.
+                .map(|(k, v)| {
+                    let v = if v.is_null() { None } else { Some(v) };
+                    (k, v)
+                })
+                .collect::<Vec<_>>(),
+            Ok(other) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Protocol,
+                    message: format!(
+                        "settings patch must be a JSON object, got: {other}"
+                    ),
+                })
+                .await;
+                return;
+            }
+            Err(e) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Protocol,
+                    message: format!("settings patch is not valid JSON: {e}"),
+                })
+                .await;
+                return;
+            }
+        };
+
+        match apply_patch(&context.paths, destination, patch) {
+            Ok(()) => {
+                self.emit_settings_snapshot(sink).await;
+            }
+            Err(message) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message,
+                })
+                .await;
+            }
+        }
     }
 
     async fn emit_provider_credential_status(
@@ -1022,6 +1093,15 @@ impl CommandRouter for EngineCommandRouter {
                 for kind in which {
                     self.emit_listing(kind, &*sink).await;
                 }
+            }
+
+            // ── Settings ─────────────────────────────────────────────────────
+            ClientCommand::UpdateSettings {
+                destination,
+                patch_json,
+            } => {
+                self.apply_settings_patch(destination, &patch_json, &*sink)
+                    .await;
             }
 
             // ── Auth ───────────────────────────────────────────────────────

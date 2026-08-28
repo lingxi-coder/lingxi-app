@@ -3,16 +3,19 @@
 //! Lives in `bridge-server` rather than `engine::settings` because the
 //! `engine` crate's dependencies are deliberately minimal (no `traits`, no
 //! `permission`), while `bridge-server` already depends on client-protocol,
-//! permission, migrations, traits and engine. A later task adds a writer here
-//! needing `permission::mark_internal_write`.
+//! permission, migrations, traits and engine — `permission::mark_internal_write`
+//! is needed by [`apply_patch`], the writer below.
 //!
-//! This module only reads and merges the layered settings files into one
-//! snapshot: the effective (merged) values, plus which layer each value
-//! actually came from. It does not write — that is a later task.
+//! This module reads and merges the layered settings files into one snapshot
+//! (the effective/merged values, plus which layer each value actually came
+//! from) and writes shallow top-level patches back to one writable layer via
+//! [`apply_patch`], marked so the desktop's own save is not mistaken for an
+//! external edit.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use client_protocol::commands::SettingsDestinationDto;
 use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
 use serde_json::Value;
 
@@ -172,6 +175,83 @@ pub fn writable_path(paths: &SettingsPaths, layer: SettingsLayer) -> Result<Path
         }
     };
     Ok(settings_path(source, &paths.lingxi_home, &paths.project_dir))
+}
+
+/// Top-level keys with a dedicated writer, and therefore refused on the
+/// generic patch path (I1). Permissions have their own writer
+/// (`permission::persist`, wired by a later task); allowing the generic path
+/// to also touch `permissions` would give the key two write paths, which is
+/// exactly the defect this list exists to prevent.
+const RESERVED_KEYS: [(&str, &str); 1] = [("permissions", "update_permission_rules")];
+
+/// Map a wire-writable destination to its file layer. Narrower than
+/// [`SettingsLayer`]'s full set by construction (`SettingsDestinationDto` has
+/// no `Defaults` / `Cli` / `Managed` / `Env` variant), so this is infallible.
+fn destination_layer(destination: SettingsDestinationDto) -> SettingsLayer {
+    match destination {
+        SettingsDestinationDto::User => SettingsLayer::User,
+        SettingsDestinationDto::Project => SettingsLayer::Project,
+        SettingsDestinationDto::Local => SettingsLayer::Local,
+    }
+}
+
+/// Apply a batch of shallow, top-level patches to one writable settings
+/// layer. `None` deletes the key; unknown keys already in the file survive
+/// verbatim (`read_settings_map`'s semantics — this reads the file, edits the
+/// map in memory, and rewrites the whole thing).
+///
+/// # Errors
+/// The destination resolves to a non-writable layer (unreachable given
+/// [`SettingsDestinationDto`]'s three variants, but `writable_path` is the
+/// single source of truth so its `Result` is still propagated rather than
+/// unwrapped), the patch touches a [`RESERVED_KEYS`] key, the destination file
+/// exists but is not valid JSON, or the write to disk fails. A broken
+/// destination file is never overwritten: `read_settings_map` returns `Err`
+/// before this function reaches the write.
+pub fn apply_patch(
+    paths: &SettingsPaths,
+    destination: SettingsDestinationDto,
+    patch: Vec<(String, Option<Value>)>,
+) -> Result<(), String> {
+    for (key, _) in &patch {
+        if let Some((reserved, replacement)) =
+            RESERVED_KEYS.iter().find(|(reserved, _)| reserved == key)
+        {
+            return Err(format!(
+                "the `{reserved}` key has a dedicated writer and is refused here; \
+                 use the `{replacement}` command instead"
+            ));
+        }
+    }
+
+    let path = writable_path(paths, destination_layer(destination))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    }
+    // A destination file that exists but fails to parse is refused here
+    // (before anything is marked or written), so a broken file is never
+    // silently overwritten.
+    let mut map = read_settings_map(&path)?;
+    for (key, value) in patch {
+        match value {
+            Some(v) => {
+                map.insert(key, v);
+            }
+            None => {
+                map.remove(&key);
+            }
+        }
+    }
+    let serialized = serde_json::to_string_pretty(&Value::Object(map))
+        .map_err(|e| format!("failed to serialize settings for {}: {e}", path.display()))?;
+
+    // I2: mark BEFORE writing. `settings_watch.rs` consumes this mark within a
+    // 5-second window; skipping it makes the desktop's own save look like an
+    // external edit and fires an unwanted ConfigChange hook round.
+    permission::mark_internal_write(&path);
+    std::fs::write(&path, serialized + "\n")
+        .map_err(|e| format!("failed to write settings to {}: {e}", path.display()))
 }
 
 impl SettingsLayer {
@@ -566,6 +646,67 @@ mod tests {
         assert_eq!(
             snap.effective.get("model").and_then(|v| v.as_str()),
             Some("opus")
+        );
+    }
+
+    /// I1: the generic patch must not write `permissions`. The error must
+    /// name both the reserved key and the replacement command, so a caller
+    /// hitting this is told what to do instead of just what failed.
+    #[test]
+    fn generic_patch_refuses_the_permissions_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: dir.path().join("home"),
+            project_dir: dir.path().join("repo"),
+        };
+        let err = apply_patch(
+            &paths,
+            SettingsDestinationDto::User,
+            vec![("permissions".to_string(), Some(serde_json::json!({})))],
+        )
+        .unwrap_err();
+        assert!(err.contains("permissions"), "error must name the key, got: {err}");
+        assert!(
+            err.contains("update_permission_rules"),
+            "error must name the replacement command, got: {err}"
+        );
+    }
+
+    /// I2: a write must leave an internal-write mark, or the desktop's own
+    /// save gets misread by the watcher as an external edit.
+    #[test]
+    fn a_write_leaves_an_internal_write_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: dir.path().join("home"),
+            project_dir: dir.path().join("repo"),
+        };
+        apply_patch(
+            &paths,
+            SettingsDestinationDto::User,
+            vec![("outputStyle".to_string(), Some(serde_json::json!("terse")))],
+        )
+        .unwrap();
+        let path = writable_path(&paths, SettingsLayer::User).unwrap();
+        assert!(
+            permission::consume_internal_write(&path, std::time::Duration::from_secs(5)),
+            "apply_patch must call mark_internal_write before writing {}",
+            path.display()
+        );
+    }
+
+    /// I2's negative control: proves the assertion above can actually fail.
+    /// An unmarked write must make `consume_internal_write` return `false` —
+    /// otherwise that gate would be permanently green while proving nothing.
+    #[test]
+    fn the_internal_write_assertion_can_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unmarked.json");
+        std::fs::write(&path, "{}\n").unwrap();
+        assert!(
+            !permission::consume_internal_write(&path, std::time::Duration::from_secs(5)),
+            "an unmarked write must NOT be consumable; if this passes, the gate in \
+             a_write_leaves_an_internal_write_mark proves nothing"
         );
     }
 }

@@ -603,6 +603,45 @@ pub enum ClientCommand {
         /// Whether the user approved the exact package diff shown by native UI.
         approved: bool,
     },
+
+    // ── Settings ─────────────────────────────────────────────────────────
+    /// Apply a batch of shallow, top-level settings edits to one writable
+    /// layer. `patch_json` is a JSON **object**; a `null` value for a key
+    /// deletes it, any other value sets it. `serde_json::Value` must not enter
+    /// this crate (decision §0.4), so the patch travels as a string exactly
+    /// the way [`crate::events::ClientEvent::ToolUseStarted`]'s `input_json`
+    /// does — the receiving end (`bridge-server::settings_bridge`) parses it.
+    ///
+    /// The `permissions` top-level key is refused here: it has a dedicated
+    /// writer. Only `User` / `Project` / `Local` are valid destinations — the
+    /// engine's full settings-layer enum also has non-writable layers
+    /// (`defaults` / `cli` / `managed` / `env`); [`SettingsDestinationDto`]
+    /// omits them so a write to one is unrepresentable on the wire, rather
+    /// than a runtime rejection.
+    UpdateSettings {
+        /// Which writable layer's file to edit.
+        destination: SettingsDestinationDto,
+        /// A JSON object of top-level key → new value (or `null` to delete).
+        patch_json: String,
+    },
+}
+
+/// A writable settings layer, as named on the wire. Deliberately narrower
+/// than the engine's full `SettingsLayer` (which also has `Defaults`, `Cli`,
+/// `Managed`, `Env`): those layers cannot be user-written, so this enum omits
+/// them rather than accepting them and rejecting at runtime.
+///
+/// A bare wire STRING (`"user"` / `"project"` / `"local"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsDestinationDto {
+    /// `<lingxi_home>/settings.json`.
+    User,
+    /// `<project_dir>/<DOT_DIR>/settings.json`.
+    Project,
+    /// `<project_dir>/<DOT_DIR>/settings.local.json`.
+    Local,
 }
 
 /// Prompt-input mode for [`ClientCommand::SendPrompt`]. Internally tagged on

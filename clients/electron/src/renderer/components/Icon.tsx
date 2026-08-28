@@ -65,6 +65,18 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'goal': return <svg {...p}><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /></svg>;
     case 'pencil': return <svg {...p}><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" /></svg>;
     case 'sliders': return <svg {...p}><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></svg>;
+    // The settings nav (`nav.ts`) references these ten by name; added here so
+    // every page gets a real glyph instead of silently rendering nothing.
+    case 'key': return <svg {...p}><circle cx="8" cy="15" r="4" /><path d="m10.5 12.5 8-8M16 5l3 3M13 8l3 3" /></svg>;
+    case 'plug': return <svg {...p}><path d="M9 2v6M15 2v6M7 8h10l-1 5a5 5 0 0 1-5 4 5 5 0 0 1-5-4z" /><path d="M12 19v3" /></svg>;
+    case 'shield': return <svg {...p}><path d="M12 3 20 6v5c0 5.2-3.4 8.4-8 10-4.6-1.6-8-4.8-8-10V6l8-3Z" /></svg>;
+    case 'sparkle': return <svg {...p}><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18" /></svg>;
+    case 'server': return <svg {...p}><rect x="3" y="4" width="18" height="7" rx="1.5" /><rect x="3" y="13" width="18" height="7" rx="1.5" /><path d="M7 7.5h.01M7 16.5h.01" /></svg>;
+    case 'anchor': return <svg {...p}><circle cx="12" cy="5" r="2.5" /><path d="M12 7.5V21M6 12H3a9 9 0 0 0 9 9 9 9 0 0 0 9-9h-3" /></svg>;
+    case 'puzzle': return <svg {...p}><path d="M9 3h4a1 1 0 0 1 1 1v2.2a1.8 1.8 0 1 0 0 3.6V12a1 1 0 0 1-1 1h-2.2a1.8 1.8 0 1 0-3.6 0H5a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1h2.2a1.8 1.8 0 1 0 0-3.6V4a1 1 0 0 1 1-1z" /></svg>;
+    case 'braces': return <svg {...p}><path d="M8 3C6 3 6 5 6 7s0 3-2 4c2 1 2 2 2 4s0 4 2 4M16 3c2 0 2 2 2 4s0 3 2 4c-2 1-2 2-2 4s0 4-2 4" /></svg>;
+    case 'activity': return <svg {...p}><path d="M22 12h-4l-3 8-6-16-3 8H2" /></svg>;
+    case 'info': return <svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7.5v.01" /></svg>;
     default: return null;
   }
 }

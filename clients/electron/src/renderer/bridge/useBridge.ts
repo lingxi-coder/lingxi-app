@@ -40,10 +40,19 @@ import type {
   WorkspaceMetadata,
 } from './lingxi';
 
+/**
+ * The wire shape of `ClientEvent::SettingsSnapshot`, unparsed. The settings
+ * shell (not this hook) turns its JSON-string fields into structured data —
+ * this hook's job stops at "the latest one the engine sent", the same way
+ * `bootstrap` stops at the raw `BootstrapState` DTO without interpreting it.
+ */
+export type SettingsSnapshotEvent = Extract<ClientEvent, { type: 'settings_snapshot' }>;
+
 export interface UseBridge {
   readonly hosted: boolean;
   readonly loading: boolean;
   readonly bootstrap: BootstrapState | null;
+  readonly settingsSnapshotEvent: SettingsSnapshotEvent | null;
   readonly activeSession: SessionRef | undefined;
   readonly sessionLoading: boolean;
   readonly connection: ConnectionState;
@@ -93,6 +102,7 @@ export interface UseBridge {
   refreshTasks(): Promise<void>;
   taskOutput(taskId: string): Promise<void>;
   stopTask(taskId: string): Promise<void>;
+  refreshSettingsSnapshot(): Promise<void>;
 }
 
 export interface SessionRuntimeStatus {
@@ -363,6 +373,9 @@ export function useBridge(): UseBridge {
   const [pendingSession, setPendingSession] = useState<SessionRef | null>(null);
   const [runtimeStates, setRuntimeStates] = useState<Map<string, RuntimeState>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  // Settings are file-layer state, not per-conversation state, so this is
+  // one value for the whole app rather than something keyed into `runtimeStates`.
+  const [settingsSnapshotEvent, setSettingsSnapshotEvent] = useState<SettingsSnapshotEvent | null>(null);
   const turnActiveRefs = useRef(new Map<string, boolean>());
   const cancellingRefs = useRef(new Map<string, { current: boolean }>());
   const cancellationTasks = useRef(new Map<string, { current: Promise<void> | null }>());
@@ -633,6 +646,7 @@ export function useBridge(): UseBridge {
         return next;
       });
       if (event.type === 'session_started' || event.type === 'turn_ended') scheduleProjectCatalogRefresh(sessionId);
+      if (event.type === 'settings_snapshot') setSettingsSnapshotEvent(event);
       if (event.type === 'error') {
         updateRuntime(sessionId, (state) => ({ ...state, error: event.message }));
         if (activeSessionIdRef.current === sessionId) setError(event.message);
@@ -1092,11 +1106,16 @@ export function useBridge(): UseBridge {
   const refreshTasks = useCallback(() => requestTaskList(), [requestTaskList]);
   const taskOutput = useCallback((taskId: string) => command({ type: 'task_output', task_id: taskId, offset: 0 }), [command]);
   const stopTask = useCallback((taskId: string) => command({ type: 'task_stop', task_id: taskId }), [command]);
+  const refreshSettingsSnapshot = useCallback(
+    () => command({ type: 'refresh_listings', which: [{ type: 'settings' }] }),
+    [command],
+  );
 
   return {
     hosted,
     loading,
     bootstrap,
+    settingsSnapshotEvent,
     activeSession,
     sessionLoading,
     connection,
@@ -1146,5 +1165,6 @@ export function useBridge(): UseBridge {
     refreshTasks,
     taskOutput,
     stopTask,
+    refreshSettingsSnapshot,
   };
 }
